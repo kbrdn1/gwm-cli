@@ -1,0 +1,32 @@
+# gwm — worktree bootstrap for gwm-cli (Rust)
+#
+# Placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+# Docs: https://github.com/kbrdn1/gwm-cli
+
+[worktree]
+base           = "{home}/cc-worktree/{repo}"
+path_pattern   = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+
+# -- target/ isolation -------------------------------------------------------
+# cargo writes incremental build artefacts under `target/`. If two worktrees
+# share the same `target/` (symlinked from main), `cargo build` from one
+# clobbers the other's build graph and triggers spurious recompilations.
+# Force each worktree to keep its own local `target/`.
+[[bootstrap.no_symlink]]
+path = "target"
+
+# -- direnv activation -------------------------------------------------------
+# If the repo ever grows a Nix flake / `.envrc`, allow it on bootstrap.
+[[bootstrap.command]]
+name = "direnv allow"
+run  = "direnv allow ."
+when = "file_exists:.envrc"
+
+# -- cargo fetch -------------------------------------------------------------
+# Warm the dependency cache so the first `cargo build` inside the worktree
+# doesn't re-download crates. Cheap, network-only, idempotent.
+[[bootstrap.command]]
+name = "cargo fetch"
+run  = "cargo fetch"
+when = "file_exists:Cargo.toml"
