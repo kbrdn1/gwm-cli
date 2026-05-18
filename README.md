@@ -18,6 +18,7 @@ Born as a rewrite of a project-specific `tools/worktree-manager.sh` script — t
 - **Safety guards**: deny-list regexes on copied files (e.g. refuse to inherit a `.env` pointing at AWS RDS). Pluggable actions: `abort` or `seed-from-example`.
 - **Bootstrap hooks**: shell commands gated by `file_exists:` predicates and arbitrary `env` injection.
 - **Fuzzy lookup**: `gwm remove auth` matches `feat-123-user-authentication` if unambiguous.
+- **Branch status column**: dirty / clean / `↑N ↓M` vs upstream, color-coded in TUI and CLI output.
 
 ## install
 
@@ -53,6 +54,7 @@ Key bindings:
 | `n`       | new worktree (form: type → issue → description)  |
 | `d`       | delete selected (confirm `y`)                    |
 | `b`       | re-run bootstrap on the selected worktree        |
+| `o`       | open the worktree dir in the OS file manager (`open` / `xdg-open` / `explorer`) |
 | `r`       | refresh                                          |
 | `p`       | toggle "delete branch on remove"                 |
 | `Enter`   | show selected path in status bar                 |

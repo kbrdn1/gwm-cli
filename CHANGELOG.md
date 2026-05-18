@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- TUI keybinding `o` reveals the selected worktree's directory in the OS file manager (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows).
+- `WorktreeInfo.status` (`BranchStatus`): dirty / clean / upstream-tracked / ahead / behind, computed via libgit2.
+- `STATUS` column in both the TUI table and `gwm list` CLI output, with colour-coding (`green` clean / synced, `yellow` dirty or behind, `cyan` ahead, `red` prunable, `magenta` locked, `dark_gray` unknown).
+
+### Changed
+
+- TUI worktree view: ratatui `List` → `Table` with dynamic column widths derived from data (name/branch capped to [18, 38], status fixed 16, path takes the rest). No more `…`-truncated names for typical branch lengths.
+- `gwm list` CLI output uses the same dynamic column widths.
+
 ## [0.1.0] - 2026-05-18
 
 ### Added

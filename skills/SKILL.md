@@ -73,6 +73,23 @@ gwm remove <pattern> --delete-branch      # also drop the local branch
 gwm prune                                 # clean stale .git/worktrees entries
 ```
 
+## Status column
+
+The TUI table and `gwm list` both expose a `STATUS` column:
+
+| label              | meaning                                                         | colour       |
+|:-------------------|:----------------------------------------------------------------|:-------------|
+| `clean`            | no upstream, no changes                                          | green        |
+| `✓ synced`         | upstream set, no ahead/behind, no local changes                  | green        |
+| `● dirty`          | uncommitted changes (working tree or index)                      | yellow       |
+| `↑N`               | N commits ahead of upstream                                      | cyan         |
+| `↓M`               | M commits behind upstream                                        | yellow       |
+| `↑N ↓M`            | both                                                             | yellow       |
+| `● dirty ↑N`       | combined indicators                                              | yellow       |
+| `locked`           | linked worktree is locked (git2 reports it)                      | magenta      |
+| `prunable`         | working tree dir is missing — run `gwm prune`                    | red          |
+| `unknown`          | status couldn't be computed (detached HEAD, IO error, etc.)      | dark gray    |
+
 ## TUI key map
 
 | Key       | Action                                          |
@@ -82,6 +99,7 @@ gwm prune                                 # clean stale .git/worktrees entries
 | `n`       | new worktree form (type ↑/↓, Tab between fields, Enter on desc submits) |
 | `d`       | delete (confirm `y`)                             |
 | `b`       | re-run bootstrap on selected                     |
+| `o`       | open worktree dir in OS file manager (`open` / `xdg-open` / `explorer`) |
 | `r`       | refresh                                          |
 | `p`       | toggle "delete branch on remove"                 |
 | `Enter`   | show path in status bar                          |
