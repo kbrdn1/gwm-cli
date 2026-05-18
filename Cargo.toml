@@ -1,0 +1,36 @@
+[package]
+name = "gwm"
+version = "0.1.0"
+edition = "2021"
+description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+authors = ["Kylian Bardini"]
+license = "MIT"
+repository = "https://github.com/kbrdn1/gwm-cli"
+readme = "README.md"
+keywords = ["git", "worktree", "tui", "cli", "ratatui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "gwm"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive", "color"] }
+ratatui = "0.28"
+crossterm = "0.28"
+git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+anyhow = "1"
+thiserror = "1"
+dirs = "5"
+regex = "1"
+shellexpand = "3"
+chrono = { version = "0.4", features = ["serde"] }
+which = "6"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
