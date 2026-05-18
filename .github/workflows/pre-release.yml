@@ -114,7 +114,7 @@ jobs:
           Set-Content -Path "dist/$STAGE.zip.sha256" -Encoding ascii -Value "$hash  $STAGE.zip"
 
       - name: upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: gwm-${{ matrix.target }}
           path: |
