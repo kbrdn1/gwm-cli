@@ -144,7 +144,7 @@ jobs:
           ref: ${{ steps.tag.outputs.name }}
 
       - name: download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
