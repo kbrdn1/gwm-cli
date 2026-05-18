@@ -31,7 +31,7 @@ dirs = "5"
 regex = "1"
 shellexpand = "3"
 chrono = { version = "0.4", features = ["serde"] }
-which = "6"
+which = "8"
 
 [dev-dependencies]
 tempfile = "3"
