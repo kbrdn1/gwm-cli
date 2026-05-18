@@ -20,15 +20,18 @@ pub fn discover_repo(start: Option<&Path>) -> Result<Repository> {
     None => std::env::current_dir()?,
   };
   let repo = Repository::discover(&from).map_err(|_| GwmError::NotInGitRepo)?;
-  // If we're inside a linked worktree, walk back to the common dir's parent.
-  // git2 returns the common dir via `commondir()`; the actual main repo working
-  // directory is its parent (when commondir = <main>/.git).
+  // If we're inside a linked worktree, walk back to the main repo working dir.
+  // `repo.path()` for a linked worktree returns `<main>/.git/worktrees/<name>/`.
+  // Two parents up = `<main>/.git`, three up = `<main>` (the main workdir).
   if repo.is_worktree() {
-    let common = repo.commondir().to_path_buf();
-    // common dir is `<main>/.git`. Strip it to get the main workdir.
-    let main_workdir = common.parent().unwrap_or(&common).to_path_buf();
-    let main = Repository::open(main_workdir).map_err(|_| GwmError::NotInGitRepo)?;
-    return Ok(main);
+    let wt_admin = repo.path().to_path_buf();
+    if let Some(git_dir) = wt_admin.parent().and_then(|p| p.parent()) {
+      if let Some(main_workdir) = git_dir.parent() {
+        if let Ok(main) = Repository::open(main_workdir) {
+          return Ok(main);
+        }
+      }
+    }
   }
   Ok(repo)
 }
@@ -71,7 +74,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       Err(_) => continue,
     };
     let path = wt.path().to_path_buf();
-    let is_locked = wt.is_locked().map(|s| s.is_some()).unwrap_or(false);
+    let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
     let is_prunable = matches!(wt.is_prunable(None), Ok(p) if p);
 
     // Open the worktree as a repo to read its HEAD branch.
