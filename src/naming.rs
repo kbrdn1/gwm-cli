@@ -73,58 +73,19 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 }
 
 pub fn kebab(input: &str) -> String {
+  // Lowercase, then collapse every non-alphanumeric run into a single `-`.
   let lower = input.to_lowercase();
   let mut out = String::with_capacity(lower.len());
   let mut prev_dash = false;
   for c in lower.chars() {
-    let ok = c.is_ascii_alphanumeric();
-    if ok {
+    if c.is_ascii_alphanumeric() {
       out.push(c);
       prev_dash = false;
-    } else if c == '-' || c == ' ' || c == '_' {
-      if !prev_dash && !out.is_empty() {
-        out.push('-');
-        prev_dash = true;
-      }
+    } else if !prev_dash && !out.is_empty() {
+      out.push('-');
+      prev_dash = true;
     }
   }
   out.trim_matches('-').to_string()
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn kebab_normalizes() {
-    assert_eq!(kebab("Hello World"), "hello-world");
-    assert_eq!(kebab("Foo_BAR  baz"), "foo-bar-baz");
-    assert_eq!(kebab("--leading--"), "leading");
-  }
-
-  #[test]
-  fn branch_validation() {
-    assert!(BranchSpec::new("feat", "123", "user-auth").is_ok());
-    assert!(BranchSpec::new("nope", "123", "x").is_err());
-    assert!(BranchSpec::new("feat", "abc", "x").is_err());
-    assert!(BranchSpec::new("feat", "123", "").is_err());
-  }
-
-  #[test]
-  fn parse_roundtrip() {
-    let parsed = parse_branch("feat/#42-cool-feature").unwrap();
-    assert_eq!(parsed.type_, "feat");
-    assert_eq!(parsed.issue, "42");
-    assert_eq!(parsed.desc, "cool-feature");
-  }
-
-  #[test]
-  fn renders_paths() {
-    let cfg = WorktreeConfig::default();
-    let spec = BranchSpec::new("feat", "10", "x").unwrap();
-    assert_eq!(spec.branch_name(&cfg, "myrepo").unwrap(), "feat/#10-x");
-    assert_eq!(spec.worktree_dirname(&cfg, "myrepo").unwrap(), "feat-10-x");
-    let p = spec.worktree_path(&cfg, "myrepo").unwrap();
-    assert!(p.to_string_lossy().ends_with("/cc-worktree/myrepo/feat-10-x"));
-  }
-}

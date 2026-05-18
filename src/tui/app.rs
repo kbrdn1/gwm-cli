@@ -5,7 +5,7 @@ use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
 use ratatui::widgets::ListState;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
@@ -46,7 +46,11 @@ pub struct App {
 
 impl App {
   pub fn new() -> Result<Self> {
-    let repo = worktree::discover_repo(None)?;
+    Self::new_at(None)
+  }
+
+  pub fn new_at(start: Option<&Path>) -> Result<Self> {
+    let repo = worktree::discover_repo(start)?;
     let workdir = repo.workdir().ok_or_else(|| GwmError::NotInGitRepo)?.to_path_buf();
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_for_repo(&workdir)?;
@@ -249,3 +253,4 @@ impl App {
     }
   }
 }
+
