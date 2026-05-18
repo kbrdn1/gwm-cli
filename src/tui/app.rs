@@ -4,7 +4,7 @@ use crate::error::{GwmError, Result};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
-use ratatui::widgets::TableState;
+use ratatui::{text::Line, widgets::TableState};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -47,6 +47,14 @@ pub struct App {
   pub sidebar_open: bool,
   pub sidebar_focused: bool,
   pub sidebar_scroll: u16,
+  /// Cache of rendered sidebar lines, keyed by the selected worktree path.
+  /// Prevents re-shelling `git log` / `git status` on every TUI redraw — they
+  /// only run when the selection actually changes (or on explicit refresh).
+  pub sidebar_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+  /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
+  /// Keeps scrolling clamped to the rendered content height so the user can't
+  /// scroll the panel entirely off-screen.
+  pub sidebar_max_scroll: u16,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   pub pending_g: bool,
@@ -85,6 +93,8 @@ impl App {
       sidebar_open: true,
       sidebar_focused: false,
       sidebar_scroll: 0,
+      sidebar_cache: None,
+      sidebar_max_scroll: 0,
       pending_g: false,
     })
   }
@@ -100,8 +110,15 @@ impl App {
         self.list_state.select(Some(self.worktrees.len() - 1));
       }
     }
+    self.invalidate_sidebar_cache();
     self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
     Ok(())
+  }
+
+  /// Drop the cached sidebar content. Call on any change that may have altered
+  /// what the sidebar shows: worktree list refresh, selection change, etc.
+  pub fn invalidate_sidebar_cache(&mut self) {
+    self.sidebar_cache = None;
   }
 
   pub fn next(&mut self) {
@@ -119,6 +136,7 @@ impl App {
     };
     self.list_state.select(Some(i));
     self.sidebar_scroll = 0;
+    self.invalidate_sidebar_cache();
   }
 
   pub fn prev(&mut self) {
@@ -135,6 +153,7 @@ impl App {
     };
     self.list_state.select(Some(i));
     self.sidebar_scroll = 0;
+    self.invalidate_sidebar_cache();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------
@@ -143,6 +162,7 @@ impl App {
     if !self.worktrees.is_empty() {
       self.list_state.select(Some(0));
       self.sidebar_scroll = 0;
+      self.invalidate_sidebar_cache();
     }
   }
 
@@ -150,6 +170,7 @@ impl App {
     if !self.worktrees.is_empty() {
       self.list_state.select(Some(self.worktrees.len() - 1));
       self.sidebar_scroll = 0;
+      self.invalidate_sidebar_cache();
     }
   }
 
@@ -190,7 +211,10 @@ impl App {
   }
 
   pub fn sidebar_scroll_down(&mut self) {
-    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1);
+    // Clamp to the last-known content max so scrolling stops at the bottom
+    // instead of running off-screen. The renderer keeps `sidebar_max_scroll`
+    // up to date with the visible content height.
+    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1).min(self.sidebar_max_scroll);
   }
 
   pub fn sidebar_scroll_up(&mut self) {

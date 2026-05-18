@@ -46,6 +46,8 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     draw_list(f, split[0], app);
     draw_sidebar(f, split[1], app);
   } else {
+    // Sidebar not rendered → no scrollable surface → no max scroll to track.
+    app.sidebar_max_scroll = 0;
     draw_list(f, area, app);
   }
 }
@@ -114,20 +116,44 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Details panel for the selected worktree — structured info, recent commits,
 /// working-tree status, and a commands cheat-sheet (lazyssh-style layout).
-fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
+///
+/// Content is cached on `App` keyed by the selected worktree's path so the
+/// underlying `git log` / `git status` only run when the selection changes
+/// or `refresh()` invalidates the cache.
+fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let border_color = if app.sidebar_focused {
     Color::Cyan
   } else {
     Color::DarkGray
   };
-  let (title, lines) = match app.selected() {
-    Some(w) => (" Details ".to_string(), sidebar_lines(w)),
-    None => (" Details ".into(), vec![Line::from("(nothing selected)")]),
+
+  // Resolve (or populate) the cached content for the currently selected worktree.
+  let lines: Vec<Line<'static>> = match app.selected().cloned() {
+    Some(w) => {
+      let needs_refresh = match &app.sidebar_cache {
+        Some((p, _)) => *p != w.path,
+        None => true,
+      };
+      if needs_refresh {
+        app.sidebar_cache = Some((w.path.clone(), sidebar_lines(&w)));
+      }
+      app.sidebar_cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+    }
+    None => vec![Line::from("(nothing selected)")],
   };
+
+  // Track the maximum scrollable offset so `sidebar_scroll_down` can clamp.
+  // `area.height - 2` accounts for the top + bottom border lines.
+  let content_len = lines.len() as u16;
+  let visible = area.height.saturating_sub(2);
+  app.sidebar_max_scroll = content_len.saturating_sub(visible);
+  if app.sidebar_scroll > app.sidebar_max_scroll {
+    app.sidebar_scroll = app.sidebar_max_scroll;
+  }
 
   let block = Block::default()
     .borders(Borders::ALL)
-    .title(title)
+    .title(" Details ")
     .border_style(Style::default().fg(border_color));
 
   let paragraph = Paragraph::new(lines)

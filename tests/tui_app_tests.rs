@@ -202,10 +202,27 @@ fn sidebar_scroll_clamps_to_zero() {
   assert_eq!(app.sidebar_scroll, 0);
   app.sidebar_scroll_up();
   assert_eq!(app.sidebar_scroll, 0, "scrolling up from 0 stays at 0");
+
+  // The renderer normally publishes a max bound; simulate enough room for scroll.
+  app.sidebar_max_scroll = 5;
   app.sidebar_scroll_down();
   assert_eq!(app.sidebar_scroll, 1);
   app.sidebar_scroll_up();
   assert_eq!(app.sidebar_scroll, 0);
+}
+
+#[test]
+fn sidebar_scroll_clamps_at_max() {
+  // The renderer sets `sidebar_max_scroll`. Scrolling past it must stop there
+  // so the user can't push the panel content entirely off-screen.
+  let (_dir, mut app) = make_app();
+  app.sidebar_max_scroll = 3;
+  app.sidebar_scroll_down();
+  app.sidebar_scroll_down();
+  app.sidebar_scroll_down();
+  assert_eq!(app.sidebar_scroll, 3);
+  app.sidebar_scroll_down();
+  assert_eq!(app.sidebar_scroll, 3, "scrolling beyond max must clamp");
 }
 
 #[test]
@@ -215,6 +232,7 @@ fn focus_routes_navigation_to_sidebar() {
   app.list_state.select(Some(0));
   app.sidebar_open = true;
   app.sidebar_focused = true;
+  app.sidebar_max_scroll = 5; // pretend the renderer has populated this
 
   app.next();
   assert_eq!(
@@ -230,4 +248,26 @@ fn focus_routes_navigation_to_sidebar() {
   app.prev();
   assert_eq!(app.list_state.selected(), Some(0));
   assert_eq!(app.sidebar_scroll, 0, "prev() scrolled back up");
+}
+
+#[test]
+fn next_prev_invalidate_sidebar_cache() {
+  // Moving selection must drop any cached sidebar content so the new
+  // worktree's preview is recomputed on the next frame.
+  let (_dir, mut app) = make_app();
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.next();
+  assert!(app.sidebar_cache.is_none(), "next() must invalidate the sidebar cache");
+
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.prev();
+  assert!(app.sidebar_cache.is_none(), "prev() must invalidate the sidebar cache");
+}
+
+#[test]
+fn refresh_invalidates_sidebar_cache() {
+  let (_dir, mut app) = make_app();
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.refresh().unwrap();
+  assert!(app.sidebar_cache.is_none());
 }
