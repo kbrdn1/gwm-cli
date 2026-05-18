@@ -134,3 +134,65 @@ fn discover_from_inside_linked_worktree_walks_back_to_main() {
   let main_again = worktree::discover_repo(Some(&target)).unwrap();
   assert!(paths_equal(main_again.workdir().unwrap(), dir.path()));
 }
+
+// ---- git_log_oneline / git_status_short -------------------------------------
+
+#[test]
+fn git_log_oneline_returns_seed_commit() {
+  let (dir, _) = init_repo();
+  let out = worktree::git_log_oneline(dir.path(), 10).unwrap();
+  let lines: Vec<&str> = out.lines().collect();
+  assert_eq!(lines.len(), 1, "init_repo seeds one commit, got: {:?}", lines);
+  assert!(
+    lines[0].contains("init"),
+    "expected seed commit message 'init', got: {}",
+    lines[0]
+  );
+}
+
+#[test]
+fn git_log_oneline_respects_limit() {
+  use git2::Signature;
+  let (dir, repo) = init_repo();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+  // Add two extra commits on top of the seed → 3 total.
+  for i in 0..2 {
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    let tree = repo.find_tree(repo.index().unwrap().write_tree().unwrap()).unwrap();
+    repo
+      .commit(Some("HEAD"), &sig, &sig, &format!("c{}", i), &tree, &[&parent])
+      .unwrap();
+  }
+  let out = worktree::git_log_oneline(dir.path(), 2).unwrap();
+  assert_eq!(out.lines().count(), 2);
+}
+
+#[test]
+fn git_status_short_empty_on_clean_repo() {
+  let (dir, _) = init_repo();
+  let out = worktree::git_status_short(dir.path()).unwrap();
+  assert!(
+    out.trim().is_empty(),
+    "clean repo should produce empty status, got: {:?}",
+    out
+  );
+}
+
+#[test]
+fn git_status_short_lists_untracked_file() {
+  let (dir, _) = init_repo();
+  std::fs::write(dir.path().join("new.txt"), "hello").unwrap();
+  let out = worktree::git_status_short(dir.path()).unwrap();
+  assert!(
+    out.contains("new.txt"),
+    "expected untracked new.txt in status, got: {:?}",
+    out
+  );
+}
+
+#[test]
+fn git_log_oneline_errors_outside_repo() {
+  let empty = TempDir::new().unwrap();
+  let err = worktree::git_log_oneline(empty.path(), 5);
+  assert!(err.is_err(), "expected error outside a git repo, got: {:?}", err);
+}
