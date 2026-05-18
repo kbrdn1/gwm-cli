@@ -4,7 +4,7 @@ use crate::error::{GwmError, Result};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
-use ratatui::widgets::ListState;
+use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -29,7 +29,7 @@ pub struct App {
   pub workdir: PathBuf,
   pub config: Config,
   pub worktrees: Vec<WorktreeInfo>,
-  pub list_state: ListState,
+  pub list_state: TableState,
   pub view: View,
   pub status: String,
   pub delete_branch_on_remove: bool,
@@ -55,7 +55,7 @@ impl App {
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_for_repo(&workdir)?;
     let worktrees = worktree::list(&repo)?;
-    let mut state = ListState::default();
+    let mut state = TableState::default();
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
@@ -121,6 +121,29 @@ impl App {
   pub fn copy_path_to_status(&mut self) {
     if let Some(w) = self.selected() {
       self.status = format!("path: {}", w.path.display());
+    }
+  }
+
+  /// Reveal the selected worktree's directory in the OS file manager.
+  /// macOS: `open`, Linux: `xdg-open`, Windows: `explorer`.
+  pub fn open_selected_in_finder(&mut self) {
+    let path = match self.selected() {
+      Some(w) => w.path.clone(),
+      None => {
+        self.status = "nothing selected".into();
+        return;
+      }
+    };
+    let opener = if cfg!(target_os = "macos") {
+      "open"
+    } else if cfg!(target_os = "windows") {
+      "explorer"
+    } else {
+      "xdg-open"
+    };
+    match std::process::Command::new(opener).arg(&path).spawn() {
+      Ok(_) => self.status = format!("opened {} in {}", path.display(), opener),
+      Err(e) => self.status = format!("failed to open {}: {}", path.display(), e),
     }
   }
 

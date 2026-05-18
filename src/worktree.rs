@@ -1,5 +1,5 @@
 use crate::error::{GwmError, Result};
-use git2::{Repository, WorktreeAddOptions, WorktreePruneOptions};
+use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -11,6 +11,63 @@ pub struct WorktreeInfo {
   pub is_main: bool,
   pub is_locked: bool,
   pub is_prunable: bool,
+  pub status: BranchStatus,
+}
+
+/// Cheap snapshot of "where are we vs. clean / upstream".
+#[derive(Debug, Clone, Default)]
+pub struct BranchStatus {
+  /// At least one tracked / untracked change in the work tree or index.
+  pub is_dirty: bool,
+  /// Upstream is configured for the current branch.
+  pub has_upstream: bool,
+  /// Commits on local not on upstream.
+  pub ahead: usize,
+  /// Commits on upstream not on local.
+  pub behind: usize,
+  /// Status couldn't be computed (e.g. detached HEAD, unborn branch).
+  pub unknown: bool,
+}
+
+impl BranchStatus {
+  pub fn synced(&self) -> bool {
+    self.has_upstream && self.ahead == 0 && self.behind == 0
+  }
+}
+
+/// Compute the working-tree + upstream status of a single repo / linked worktree.
+fn compute_status(repo: &Repository) -> BranchStatus {
+  let mut out = BranchStatus::default();
+
+  // Dirty check
+  let mut opts = StatusOptions::new();
+  opts
+    .include_untracked(true)
+    .include_ignored(false)
+    .recurse_untracked_dirs(true);
+  match repo.statuses(Some(&mut opts)) {
+    Ok(s) => out.is_dirty = !s.is_empty(),
+    Err(_) => out.unknown = true,
+  }
+
+  // Ahead / behind vs upstream
+  if let Ok(head_ref) = repo.head() {
+    if let Some(shorthand) = head_ref.shorthand() {
+      if let Ok(local_branch) = repo.find_branch(shorthand, BranchType::Local) {
+        if let Ok(upstream) = local_branch.upstream() {
+          if let (Some(local_oid), Some(up_oid)) = (head_ref.target(), upstream.into_reference().target()) {
+            out.has_upstream = true;
+            if let Ok((ahead, behind)) = repo.graph_ahead_behind(local_oid, up_oid) {
+              out.ahead = ahead;
+              out.behind = behind;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  out
 }
 
 /// Find the main repository starting from CWD, walking upwards.
@@ -64,6 +121,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_main: true,
       is_locked: false,
       is_prunable: false,
+      status: compute_status(repo),
     });
   }
 
@@ -77,15 +135,23 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
     let is_prunable = matches!(wt.is_prunable(None), Ok(p) if p);
 
-    // Open the worktree as a repo to read its HEAD branch.
-    let (branch, head) = match Repository::open(&path) {
+    // Open the worktree as a repo to read its HEAD + status.
+    let (branch, head, status) = match Repository::open(&path) {
       Ok(sub) => {
         let head_ref = sub.head().ok();
         let b = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
         let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
-        (b, h)
+        let s = compute_status(&sub);
+        (b, h, s)
       }
-      Err(_) => (None, None),
+      Err(_) => (
+        None,
+        None,
+        BranchStatus {
+          unknown: true,
+          ..Default::default()
+        },
+      ),
     };
 
     out.push(WorktreeInfo {
@@ -96,6 +162,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_main: false,
       is_locked,
       is_prunable,
+      status,
     });
   }
 

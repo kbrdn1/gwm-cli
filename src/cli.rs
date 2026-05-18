@@ -88,23 +88,74 @@ fn cmd_init() -> Result<()> {
 fn cmd_list() -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
-  println!("{:<32} {:<40} PATH", "NAME", "BRANCH");
+
+  // Dynamic widths based on observed content.
+  let name_w = trees.iter().map(|w| w.name.len()).max().unwrap_or(4).clamp(4, 40);
+  let branch_w = trees
+    .iter()
+    .map(|w| w.branch.as_deref().unwrap_or("-").len())
+    .max()
+    .unwrap_or(6)
+    .clamp(6, 40);
+  let status_w = 14;
+
+  println!(
+    "  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+    "NAME",
+    "BRANCH",
+    "STATUS",
+    nw = name_w,
+    bw = branch_w,
+    sw = status_w,
+  );
   for w in trees {
     let mark = if w.is_main { "*" } else { " " };
     let branch = w.branch.clone().unwrap_or_else(|| "-".into());
-    let locked = if w.is_locked { " [locked]" } else { "" };
-    let prunable = if w.is_prunable { " [prunable]" } else { "" };
+    let status = format_status_text(&w);
     println!(
-      "{}{:<31} {:<40} {}{}{}",
+      "{} {:<nw$}  {:<bw$}  {:<sw$}  {}",
       mark,
       w.name,
       branch,
+      status,
       w.path.display(),
-      locked,
-      prunable
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
     );
   }
   Ok(())
+}
+
+fn format_status_text(w: &worktree::WorktreeInfo) -> String {
+  if w.is_prunable {
+    return "prunable".into();
+  }
+  if w.is_locked {
+    return "locked".into();
+  }
+  let s = &w.status;
+  if s.unknown {
+    return "unknown".into();
+  }
+  let mut parts: Vec<String> = Vec::new();
+  if s.is_dirty {
+    parts.push("● dirty".into());
+  }
+  if s.has_upstream {
+    if s.ahead > 0 {
+      parts.push(format!("↑{}", s.ahead));
+    }
+    if s.behind > 0 {
+      parts.push(format!("↓{}", s.behind));
+    }
+    if !s.is_dirty && s.synced() {
+      parts.push("✓ synced".into());
+    }
+  } else if !s.is_dirty {
+    parts.push("clean".into());
+  }
+  parts.join(" ")
 }
 
 fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bool) -> Result<()> {

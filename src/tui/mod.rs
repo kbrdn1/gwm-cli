@@ -58,6 +58,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
         KeyCode::Char('d') => app.enter_confirm_delete(),
         KeyCode::Char('b') => app.bootstrap_selected(),
         KeyCode::Char('p') => app.toggle_delete_branch(),
+        KeyCode::Char('o') => app.open_selected_in_finder(),
         KeyCode::Enter => app.copy_path_to_status(),
         _ => {}
       },

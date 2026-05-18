@@ -1,11 +1,12 @@
 use super::app::{App, Field, View};
 use crate::bootstrap::StepStatus;
 use crate::naming::BRANCH_TYPES;
+use crate::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{
   layout::{Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
+  widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
   Frame,
 };
 
@@ -43,37 +44,38 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
-  let items: Vec<ListItem> = app
+  // Dynamic column widths: derive from current data, capped to keep room for the path column.
+  // The path column is always last and takes whatever remains.
+  let name_w = column_width(app.worktrees.iter().map(|w| w.name.as_str()), 18, 38);
+  let branch_w = column_width(app.worktrees.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
+  let status_w: u16 = 16;
+
+  let header = Row::new(vec![
+    Cell::from(""),
+    Cell::from("NAME"),
+    Cell::from("BRANCH"),
+    Cell::from("STATUS"),
+    Cell::from("PATH"),
+  ])
+  .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
+
+  let rows: Vec<Row> = app
     .worktrees
     .iter()
-    .map(|w| {
-      let marker = if w.is_main { "★" } else { " " };
-      let branch = w.branch.clone().unwrap_or_else(|| "-".into());
-      let mut tags = String::new();
-      if w.is_locked {
-        tags.push_str(" [locked]");
-      }
-      if w.is_prunable {
-        tags.push_str(" [prunable]");
-      }
-      let line = Line::from(vec![
-        Span::styled(format!("{} ", marker), Style::default().fg(Color::Yellow)),
-        Span::styled(
-          format!("{:<28}", trunc(&w.name, 28)),
-          Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-          format!(" {:<32}", trunc(&branch, 32)),
-          Style::default().fg(Color::Green),
-        ),
-        Span::raw(format!(" {}", w.path.display())),
-        Span::styled(tags, Style::default().fg(Color::Magenta)),
-      ]);
-      ListItem::new(line)
-    })
+    .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
 
-  let list = List::new(items)
+  let widths = [
+    Constraint::Length(2),
+    Constraint::Length(name_w),
+    Constraint::Length(branch_w),
+    Constraint::Length(status_w),
+    Constraint::Min(20),
+  ];
+
+  let table = Table::new(rows, widths)
+    .header(header)
+    .column_spacing(1)
     .block(
       Block::default()
         .borders(Borders::ALL)
@@ -83,11 +85,91 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
-  f.render_stateful_widget(list, area, &mut app.list_state);
+  f.render_stateful_widget(table, area, &mut app.list_state);
+}
+
+/// Constraint-friendly column width based on observed content, clamped to [min, max].
+fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) -> u16 {
+  let observed = items.map(|s| s.chars().count() as u16).max().unwrap_or(min);
+  observed.clamp(min, max)
+}
+
+fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row<'static> {
+  let marker = if w.is_main { "★" } else { " " };
+  let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
+
+  let name_cell =
+    Cell::from(trunc(&w.name, name_w as usize)).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+
+  let branch_cell = Cell::from(trunc(&branch_text, branch_w as usize)).style(Style::default().fg(Color::Green));
+
+  let status_cell = build_status_cell(w, status_w as usize);
+
+  let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
+
+  Row::new(vec![
+    Cell::from(marker).style(Style::default().fg(Color::Yellow)),
+    name_cell,
+    branch_cell,
+    status_cell,
+    path_cell,
+  ])
+}
+
+fn build_status_cell(w: &WorktreeInfo, width: usize) -> Cell<'static> {
+  // Priority: prunable > locked > dirty/sync info.
+  if w.is_prunable {
+    return Cell::from("prunable").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+  }
+  if w.is_locked {
+    return Cell::from("locked").style(Style::default().fg(Color::Magenta));
+  }
+
+  let s = &w.status;
+  let (label, color) = format_status(s, width);
+  Cell::from(label).style(Style::default().fg(color))
+}
+
+/// Pick a compact label + accent colour for a `BranchStatus`.
+fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
+  if s.unknown {
+    return ("unknown".into(), Color::DarkGray);
+  }
+
+  let mut parts: Vec<String> = Vec::new();
+  if s.is_dirty {
+    parts.push("● dirty".into());
+  }
+  if s.has_upstream {
+    if s.ahead > 0 {
+      parts.push(format!("↑{}", s.ahead));
+    }
+    if s.behind > 0 {
+      parts.push(format!("↓{}", s.behind));
+    }
+    if !s.is_dirty && s.synced() {
+      parts.push("✓ synced".into());
+    }
+  } else if !s.is_dirty {
+    parts.push("clean".into());
+  }
+
+  let joined = parts.join(" ");
+  let label = trunc(&joined, width.max(4));
+
+  // Worst-status colour: dirty/behind = yellow, ahead-only = cyan, synced/clean = green.
+  let color = if s.is_dirty || s.behind > 0 {
+    Color::Yellow
+  } else if s.ahead > 0 {
+    Color::Cyan
+  } else {
+    Color::Green
+  };
+  (label, color)
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  let help = "n:new  d:del  b:bootstrap  r:refresh  p:tog-branch  enter:path  ?:help  q:quit";
+  let help = "n:new  d:del  b:bootstrap  o:open  r:refresh  p:tog-branch  enter:path  ?:help  q:quit";
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
     Span::raw("  "),
@@ -114,6 +196,7 @@ fn draw_help(f: &mut Frame) {
     Line::from("  n             new worktree"),
     Line::from("  d             delete selected"),
     Line::from("  b             bootstrap selected"),
+    Line::from("  o             open dir in OS file manager (open / xdg-open / explorer)"),
     Line::from("  r             refresh"),
     Line::from("  p             toggle 'delete branch on remove'"),
     Line::from("  enter         show path in status bar"),
