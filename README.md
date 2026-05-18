@@ -1,138 +1,200 @@
 # gwm — git worktree manager
 
-CLI rust avec TUI ratatui pour gérer des worktrees git multi-repo. Remplace les scripts bash type `worktree-manager.sh` par un binaire portable, avec bootstrap configurable par projet via `.gwm.toml`.
+[![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
+[![rust](https://img.shields.io/badge/rust-1.80%2B-orange?logo=rust)](https://www.rust-lang.org/)
+
+Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2` (no `gwq` / `git` CLI dependency), per-repo configurable bootstrap (file copies, regex guards, shell hooks), single binary, portable.
+
+Born as a rewrite of a project-specific `tools/worktree-manager.sh` script — the bash version was tied to Laravel/PHP and one repo's incident history. `gwm` keeps the lessons, makes them configurable, and works the same way in every repo.
 
 ## features
 
-- gestion worktree native via `libgit2` (pas de dépendance externe à `gwq` ou `git` CLI)
-- convention de branche par défaut `<type>/#<issue>-<description>` (surchargeable)
-- bootstrap hybride : config TOML (copie de fichiers, gardes regex) + hooks shell (composer, npm, etc.)
-- TUI ratatui (liste, créer, supprimer, bootstrap) et sous-commandes CLI complètes (scripting friendly)
-- gardes de sécurité configurables (ex : refuser de copier un `.env` qui pointe vers AWS RDS)
+- **Native worktree ops** via `libgit2` (vendored). `git worktree add/list/remove/prune` without shelling out.
+- **CLI + TUI**: `gwm <subcommand>` for scripts and hooks, `gwm` alone opens a ratatui interface.
+- **Per-repo config** in `.gwm.toml`: branch / path conventions, file copies, regex guards, shell hooks, no-symlink invariants.
+- **Branch convention**: `<type>/#<issue>-<description>` by default (`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`). Overridable per repo.
+- **Safety guards**: deny-list regexes on copied files (e.g. refuse to inherit a `.env` pointing at AWS RDS). Pluggable actions: `abort` or `seed-from-example`.
+- **Bootstrap hooks**: shell commands gated by `file_exists:` predicates and arbitrary `env` injection.
+- **Fuzzy lookup**: `gwm remove auth` matches `feat-123-user-authentication` if unambiguous.
 
 ## install
 
+### from source
+
 ```bash
-cd ~/Projects/Perso/gwm-cli
+git clone https://github.com/kbrdn1/gwm-cli.git
+cd gwm-cli
 cargo install --path .
 ```
 
-le binaire `gwm` est installé dans `~/.cargo/bin`.
+The binary lands in `~/.cargo/bin/gwm`.
+
+### prebuilt binaries
+
+Releases at <https://github.com/kbrdn1/gwm-cli/releases> ship Linux (x86_64 + aarch64), macOS (Intel + Apple Silicon), and Windows binaries with `.sha256` sidecars.
 
 ## usage
 
-### TUI (interactif)
+### TUI (interactive)
 
 ```bash
-cd <un-repo-git>
-gwm           # ouvre la TUI sur le repo courant
+cd <a-git-repo>
+gwm                # opens the TUI on the current repo
 ```
 
-raccourcis :
+Key bindings:
 
-- `↑/↓` ou `j/k` : naviguer
-- `n` : nouveau worktree (formulaire)
-- `d` : supprimer le worktree sélectionné
-- `b` : bootstrap (rejoue les étapes du `.gwm.toml`)
-- `r` : refresh
-- `?` : aide
-- `q` ou `Esc` : quitter
+| Key       | Action                                          |
+|:----------|:------------------------------------------------|
+| `↑` / `k` | previous worktree                                |
+| `↓` / `j` | next worktree                                    |
+| `n`       | new worktree (form: type → issue → description)  |
+| `d`       | delete selected (confirm `y`)                    |
+| `b`       | re-run bootstrap on the selected worktree        |
+| `r`       | refresh                                          |
+| `p`       | toggle "delete branch on remove"                 |
+| `Enter`   | show selected path in status bar                 |
+| `?`       | help overlay                                     |
+| `q` / `Esc` | quit                                           |
 
 ### CLI
 
 ```bash
-gwm init                                    # crée .gwm.toml dans le repo courant
-gwm create feat 123 "user-authentication"   # crée la worktree feat/#123-user-authentication
-gwm list                                    # liste les worktrees du repo
-gwm remove feat-123                         # supprime par pattern (fuzzy)
-gwm bootstrap <path>                        # rejoue le bootstrap sur une worktree existante
-gwm path feat-123                           # imprime le chemin résolu (utile pour cd $(gwm path …))
-gwm prune                                   # nettoie les références mortes
+gwm init                                    # write .gwm.toml in the current repo
+gwm types                                   # list valid branch types
+gwm create feat 123 "user-authentication"   # → feat/#123-user-authentication
+gwm create feat 123 foo --no-bootstrap      # skip the .gwm.toml bootstrap stages
+gwm list                                    # list all worktrees of the current repo
+gwm path auth                               # print the resolved path (use $(gwm path ...))
+gwm bootstrap                               # re-run bootstrap on the CWD worktree
+gwm bootstrap auth                          # ...or on a named one
+gwm remove auth                             # remove (fuzzy match) — keeps the branch
+gwm remove auth --delete-branch             # remove + drop the branch
+gwm prune                                   # clean stale .git/worktrees entries
 ```
 
-## config par repo (`.gwm.toml`)
+## configuration
 
-placez `.gwm.toml` à la racine du repo. exemple complet dans `examples/gwm.toml.example`.
+`.gwm.toml` at the repo root, see `examples/gwm.toml.example` for the annotated full version.
 
 ```toml
 [worktree]
-# base du chemin worktree. placeholders: {repo}, {home}
-base = "{home}/cc-worktree/{repo}"
-# nom du dossier worktree
+base         = "{home}/cc-worktree/{repo}"
 path_pattern = "{type}-{issue}-{desc}"
-# nom de la branche
 branch_pattern = "{type}/#{issue}-{desc}"
 
-# copies de fichiers depuis le repo principal vers la nouvelle worktree
+# file copies main → worktree
 [[bootstrap.copy]]
 from = ".env.testing"
-to = ".env.testing"
+to   = ".env.testing"
 required = true
-fallback = "inline"   # si manquant, écrire le contenu de [bootstrap.fallback.env_testing]
+fallback = "inline"
 
 [[bootstrap.copy]]
 from = ".env"
-to = ".env"
+to   = ".env"
 required = false
 guards = ["no-aws-rds"]
 
-# gardes regex : si une copie matche, on bloque
+# regex guards on copied files
 [[bootstrap.guard]]
 name = "no-aws-rds"
 deny_patterns = ["amazonaws\\.com", "\\.rds\\."]
-on_match = "seed-from-example"  # ou "abort"
-example_file = ".env.example"
+on_match      = "seed-from-example"
+example_file  = ".env.example"
 
-# fallback inline pour .env.testing manquant
+# inline fallback when a required source is missing
 [bootstrap.fallback.env_testing]
+target  = ".env.testing"
 content = """
 APP_ENV=testing
 DB_CONNECTION=sqlite
 DB_DATABASE=:memory:
 """
 
-# commandes à exécuter dans la worktree après les copies
-[[bootstrap.command]]
-name = "composer install"
-run = "composer install --no-interaction --prefer-dist"
-when = "file_exists:composer.json"
-
-[[bootstrap.command]]
-name = "direnv allow"
-run = "direnv allow"
-when = "file_exists:.envrc"
-
-# vérifications : symlinks à refuser (vendor/, node_modules/ qui pointeraient ailleurs)
+# refuse to inherit symlinks (vendor/, node_modules/)
 [[bootstrap.no_symlink]]
 path = "vendor"
 
-[[bootstrap.no_symlink]]
-path = "node_modules"
+# post-copy commands
+[[bootstrap.command]]
+name = "composer install"
+run  = "composer install --no-interaction --prefer-dist"
+when = "file_exists:composer.json"
+env  = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
 ```
 
-## defaults sans `.gwm.toml`
+Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde (`~/...`) is also expanded.
 
-si aucun `.gwm.toml` n'est trouvé, gwm utilise :
+### defaults without `.gwm.toml`
 
-- branch pattern : `{type}/#{issue}-{desc}`
-- path pattern : `{type}-{issue}-{desc}`
-- base : `~/cc-worktree/{repo}`
-- aucun bootstrap (just `git worktree add`)
+| Setting          | Default                          |
+|:-----------------|:---------------------------------|
+| `base`           | `{home}/cc-worktree/{repo}`      |
+| `path_pattern`   | `{type}-{issue}-{desc}`          |
+| `branch_pattern` | `{type}/#{issue}-{desc}`         |
+| bootstrap        | none — just `git worktree add`   |
 
-## types de branche reconnus
+### supported branch types
 
-`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`
+`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`.
 
-## différences avec le script bash d'origine
+## differences vs. the original bash script
 
-| feature                             | bash + gwq            | gwm                            |
-| ----------------------------------- | --------------------- | ------------------------------ |
-| moteur worktree                     | `gwq` (CLI externe)   | `libgit2` natif                |
-| bootstrap                           | hardcodé dans le shell | déclaratif via `.gwm.toml`     |
-| portabilité multi-repo              | manuelle par projet   | un seul binaire                |
-| TUI                                 | menu bash linéaire    | ratatui plein écran            |
-| garde anti-RDS                      | hardcodée             | regex configurables            |
+| Capability                          | bash + gwq           | gwm                              |
+|:------------------------------------|:---------------------|:---------------------------------|
+| worktree engine                     | `gwq` (CLI external) | `libgit2` (vendored)             |
+| bootstrap                           | hardcoded in bash    | declarative in `.gwm.toml`       |
+| multi-repo portability              | per-project script   | one binary, per-repo config      |
+| TUI                                 | linear bash menu     | full ratatui screen              |
+| anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
+| tests                               | none                 | 56 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+
+## development
+
+```bash
+cargo build              # debug build
+cargo test               # 56 tests
+cargo fmt && cargo clippy -- -D warnings
+cargo run                # opens TUI in the current repo
+cargo install --path .   # install locally
+```
+
+All tests live under `tests/`:
+
+```
+tests/
+├── common/                       # shared helpers (init_repo, paths_equal)
+├── config_tests.rs               # .gwm.toml parsing + write_default
+├── naming_tests.rs               # kebab, branch validation, parse roundtrip
+├── bootstrap_tests.rs            # copies / guards / no-symlink / commands
+├── worktree_integration.rs       # git2 add/list/remove/prune
+├── tui_app_tests.rs              # state transitions (ratatui-free)
+└── cli_binary.rs                 # assert_cmd end-to-end
+```
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / commit / PR conventions.
+
+## roadmap
+
+- `--watch` mode (gwq parity)
+- TUI fuzzy filter on the worktree list
+- Pluggable `when` predicates beyond `file_exists:`
+- Optional per-worktree env file (`.gwm.env`) sourced before commands
+- Per-OS path overrides in `.gwm.toml`
+
+Contributions welcome — open a [feature request issue](.github/ISSUE_TEMPLATE/feature_request.yml).
 
 ## license
 
-MIT
+MIT — see [LICENSE.md](LICENSE.md).
+
+## related docs
+
+- [`CHANGELOG.md`](CHANGELOG.md)
+- [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
+- [`.github/LABELS.md`](.github/LABELS.md)
+- [`examples/gwm.toml.example`](examples/gwm.toml.example)
