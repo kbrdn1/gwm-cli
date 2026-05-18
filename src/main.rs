@@ -1,12 +1,5 @@
-mod bootstrap;
-mod cli;
-mod config;
-mod error;
-mod naming;
-mod tui;
-mod worktree;
-
 use clap::Parser;
+use gwm::cli;
 
 fn main() {
   let args = cli::Cli::parse();
