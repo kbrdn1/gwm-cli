@@ -74,6 +74,9 @@ jobs:
       - name: package (windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
+        # Set-Content -Encoding ascii ensures the sidecar is plain ASCII (no
+        # UTF-16 BOM that PowerShell's `Out-File` would add by default) so the
+        # checksum file is verifiable by `sha256sum -c` on other platforms.
         run: |
           $BIN_NAME = "gwm.exe"
           $STAGE = "gwm-${{ github.ref_name }}-${{ matrix.target }}"
@@ -81,7 +84,8 @@ jobs:
           Copy-Item "target/${{ matrix.target }}/release/$BIN_NAME" "dist/$STAGE/"
           Copy-Item README.md, LICENSE.md, CHANGELOG.md "dist/$STAGE/"
           Compress-Archive -Path "dist/$STAGE" -DestinationPath "dist/$STAGE.zip"
-          (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash | Out-File "dist/$STAGE.zip.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash.ToLower()
+          Set-Content -Path "dist/$STAGE.zip.sha256" -Encoding ascii -Value "$hash  $STAGE.zip"
 
       - name: upload artifacts
         uses: actions/upload-artifact@v4

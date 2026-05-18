@@ -3,9 +3,12 @@ name: pre-release
 on:
   push:
     tags:
-      - "v*.*.*-rc*"
-      - "v*.*.*-alpha*"
-      - "v*.*.*-beta*"
+      # Pre-release SemVer identifiers must follow `-rc.N`, `-alpha.N`, `-beta.N`.
+      # Tighter than `*-rc*` so we don't fire on tags like `v0.2.0-rc` or
+      # `v0.2.0-rc-anything`.
+      - "v*.*.*-rc.*"
+      - "v*.*.*-alpha.*"
+      - "v*.*.*-beta.*"
   workflow_dispatch:
     inputs:
       tag:
@@ -47,7 +50,24 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: zip
     steps:
+      - name: resolve tag
+        id: tag
+        shell: bash
+        # For workflow_dispatch, prefer the input over github.ref_name (which is
+        # the dispatching branch). For tag-driven runs, github.ref_name is the
+        # tag itself. The resolved value drives BOTH the checkout ref (so the
+        # build matches the tagged commit) and the archive STAGE naming.
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -70,7 +90,7 @@ jobs:
         shell: bash
         run: |
           BIN_NAME="gwm"
-          STAGE="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
+          STAGE="${BIN_NAME}-${{ steps.tag.outputs.name }}-${{ matrix.target }}"
           mkdir -p "dist/${STAGE}"
           cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${STAGE}/"
           cp README.md LICENSE.md CHANGELOG.md "dist/${STAGE}/"
@@ -80,14 +100,18 @@ jobs:
       - name: package (windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
+        # Set-Content -Encoding ascii ensures the sidecar is plain ASCII (no
+        # UTF-16 BOM that PowerShell's `Out-File` would add by default) so the
+        # checksum file is verifiable by `sha256sum -c` on other platforms.
         run: |
           $BIN_NAME = "gwm.exe"
-          $STAGE = "gwm-${{ github.ref_name }}-${{ matrix.target }}"
+          $STAGE = "gwm-${{ steps.tag.outputs.name }}-${{ matrix.target }}"
           New-Item -ItemType Directory -Force -Path "dist/$STAGE" | Out-Null
           Copy-Item "target/${{ matrix.target }}/release/$BIN_NAME" "dist/$STAGE/"
           Copy-Item README.md, LICENSE.md, CHANGELOG.md "dist/$STAGE/"
           Compress-Archive -Path "dist/$STAGE" -DestinationPath "dist/$STAGE.zip"
-          (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash | Out-File "dist/$STAGE.zip.sha256"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash.ToLower()
+          Set-Content -Path "dist/$STAGE.zip.sha256" -Encoding ascii -Value "$hash  $STAGE.zip"
 
       - name: upload artifacts
         uses: actions/upload-artifact@v4
@@ -105,14 +129,6 @@ jobs:
     needs: [build]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
       - name: resolve tag
         id: tag
         shell: bash
@@ -122,6 +138,16 @@ jobs:
           else
             echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - name: publish pre-release
         uses: softprops/action-gh-release@v2
