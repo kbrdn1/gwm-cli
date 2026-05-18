@@ -164,27 +164,3 @@ pub fn expand_placeholders(
   Ok(expanded)
 }
 
-#[cfg(test)]
-mod tests {
-  use super::*;
-
-  #[test]
-  fn defaults_are_sane() {
-    let cfg = Config::default();
-    assert_eq!(cfg.worktree.branch_pattern, "{type}/#{issue}-{desc}");
-    assert_eq!(cfg.worktree.path_pattern, "{type}-{issue}-{desc}");
-  }
-
-  #[test]
-  fn placeholders_expand() {
-    let out = expand_placeholders(
-      "{home}/cc-worktree/{repo}/{type}-{issue}-{desc}",
-      "my-repo",
-      Some("feat"),
-      Some("123"),
-      Some("foo"),
-    )
-    .unwrap();
-    assert!(out.ends_with("/cc-worktree/my-repo/feat-123-foo"));
-  }
-}

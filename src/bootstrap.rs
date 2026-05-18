@@ -301,3 +301,4 @@ fn trailing_lines(s: &str, n: usize) -> String {
   let start = lines.len().saturating_sub(n);
   lines[start..].join("\n")
 }
+
