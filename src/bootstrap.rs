@@ -60,8 +60,16 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
       match resolve_missing(step, bs, &dst) {
         Some(res) => report.steps.push(StepResult { label, ..res }),
         None => {
-          let status = if step.required { StepStatus::Failed } else { StepStatus::Skipped };
-          let detail = if step.required { "required source missing".into() } else { "optional source missing".into() };
+          let status = if step.required {
+            StepStatus::Failed
+          } else {
+            StepStatus::Skipped
+          };
+          let detail = if step.required {
+            "required source missing".into()
+          } else {
+            "optional source missing".into()
+          };
           report.steps.push(StepResult { label, status, detail });
         }
       }
@@ -120,7 +128,7 @@ fn resolve_missing(step: &CopyStep, bs: &BootstrapConfig, dst: &Path) -> Option<
 
 fn key_from_to(to: &str) -> String {
   // ".env.testing" → "env_testing"
-  to.trim_start_matches('.').replace('.', "_").replace('-', "_")
+  to.trim_start_matches('.').replace(['.', '-'], "_")
 }
 
 fn guard_match(step: &CopyStep, bs: &BootstrapConfig, src: &Path) -> Option<Guard> {
@@ -176,7 +184,11 @@ fn handle_guard_match(
         report.steps.push(StepResult {
           label: label.into(),
           status: StepStatus::Failed,
-          detail: format!("guard '{}' tripped and no example_file {} available", guard.name, example_src.display()),
+          detail: format!(
+            "guard '{}' tripped and no example_file {} available",
+            guard.name,
+            example_src.display()
+          ),
         });
       }
     }
@@ -235,7 +247,7 @@ fn handle_no_symlink(label: &str, target: &Path, report: &mut BootstrapReport) {
     report.steps.push(StepResult {
       label: label.into(),
       status: StepStatus::Ok,
-      detail: format!("real directory, ok"),
+      detail: "real directory, ok".to_string(),
     });
   }
 }
@@ -282,7 +294,9 @@ fn exec_shell(step: &CommandStep, cwd: &Path) -> Result<String> {
   for (k, v) in &step.env {
     cmd.env(k, v);
   }
-  let out = cmd.output().map_err(|e| GwmError::CommandFailed(format!("{}: {}", step.name, e)))?;
+  let out = cmd
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("{}: {}", step.name, e)))?;
   let stdout = String::from_utf8_lossy(&out.stdout).to_string();
   let stderr = String::from_utf8_lossy(&out.stderr).to_string();
   if !out.status.success() {
@@ -301,4 +315,3 @@ fn trailing_lines(s: &str, n: usize) -> String {
   let start = lines.len().saturating_sub(n);
   lines[start..].join("\n")
 }
-

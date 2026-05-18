@@ -131,7 +131,9 @@ pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str)
 
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
 pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> {
-  let wt = repo.find_worktree(name).map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  let wt = repo
+    .find_worktree(name)
+    .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
   let path = wt.path().to_path_buf();
 
   // Capture the branch (if any) so we can drop it after pruning.
@@ -190,7 +192,10 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
     return Ok(exact.clone());
   }
   let pat = pattern.to_lowercase();
-  let mut matches: Vec<&WorktreeInfo> = all.iter().filter(|w| !w.is_main && w.name.to_lowercase().contains(&pat)).collect();
+  let mut matches: Vec<&WorktreeInfo> = all
+    .iter()
+    .filter(|w| !w.is_main && w.name.to_lowercase().contains(&pat))
+    .collect();
   match matches.len() {
     0 => Err(GwmError::WorktreeNotFound(pattern.into())),
     1 => Ok(matches.remove(0).clone()),

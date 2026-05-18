@@ -51,7 +51,7 @@ impl App {
 
   pub fn new_at(start: Option<&Path>) -> Result<Self> {
     let repo = worktree::discover_repo(start)?;
-    let workdir = repo.workdir().ok_or_else(|| GwmError::NotInGitRepo)?.to_path_buf();
+    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_for_repo(&workdir)?;
     let worktrees = worktree::list(&repo)?;
@@ -197,7 +197,11 @@ impl App {
 
     let created = worktree::add(&self.repo, &dirname, &target, &branch)?;
 
-    let ctx = BootstrapCtx { main_repo: &self.workdir, worktree: &created, config: &self.config };
+    let ctx = BootstrapCtx {
+      main_repo: &self.workdir,
+      worktree: &created,
+      config: &self.config,
+    };
     let report = bootstrap::run(&ctx)?;
     self.report = Some(report);
     self.view = View::Report;
@@ -241,16 +245,23 @@ impl App {
         return;
       }
     };
-    let ctx = BootstrapCtx { main_repo: &self.workdir, worktree: &path, config: &self.config };
+    let ctx = BootstrapCtx {
+      main_repo: &self.workdir,
+      worktree: &path,
+      config: &self.config,
+    };
     match bootstrap::run(&ctx) {
       Ok(r) => {
         let any_failed = r.steps.iter().any(|s| s.status == StepStatus::Failed);
         self.report = Some(r);
         self.view = View::Report;
-        self.status = if any_failed { "bootstrap had failures".into() } else { "bootstrap ok".into() };
+        self.status = if any_failed {
+          "bootstrap had failures".into()
+        } else {
+          "bootstrap ok".into()
+        };
       }
       Err(e) => self.status = format!("bootstrap error: {}", e),
     }
   }
 }
-

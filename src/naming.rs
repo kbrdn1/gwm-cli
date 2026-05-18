@@ -47,11 +47,23 @@ impl BranchSpec {
   }
 
   pub fn branch_name(&self, cfg: &WorktreeConfig, repo: &str) -> Result<String> {
-    expand_placeholders(&cfg.branch_pattern, repo, Some(&self.type_), Some(&self.issue), Some(&self.desc))
+    expand_placeholders(
+      &cfg.branch_pattern,
+      repo,
+      Some(&self.type_),
+      Some(&self.issue),
+      Some(&self.desc),
+    )
   }
 
   pub fn worktree_dirname(&self, cfg: &WorktreeConfig, repo: &str) -> Result<String> {
-    expand_placeholders(&cfg.path_pattern, repo, Some(&self.type_), Some(&self.issue), Some(&self.desc))
+    expand_placeholders(
+      &cfg.path_pattern,
+      repo,
+      Some(&self.type_),
+      Some(&self.issue),
+      Some(&self.desc),
+    )
   }
 
   pub fn worktree_path(&self, cfg: &WorktreeConfig, repo: &str) -> Result<std::path::PathBuf> {
@@ -88,4 +100,3 @@ pub fn kebab(input: &str) -> String {
   }
   out.trim_matches('-').to_string()
 }
-

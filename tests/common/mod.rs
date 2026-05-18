@@ -26,6 +26,7 @@ pub fn init_repo() -> (TempDir, Repository) {
 
 /// Canonicalize two paths and compare them. On macOS `/var/...` and
 /// `/private/var/...` denote the same inode but compare unequal as strings.
+#[allow(dead_code)] // used only by worktree_integration; cargo compiles common per-test crate.
 pub fn paths_equal(a: &Path, b: &Path) -> bool {
   let a = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
   let b = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());

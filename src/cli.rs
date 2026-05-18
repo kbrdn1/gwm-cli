@@ -42,9 +42,7 @@ pub enum Command {
     delete_branch: bool,
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
-  Path {
-    pattern: String,
-  },
+  Path { pattern: String },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
@@ -65,7 +63,12 @@ pub fn run(cli: Cli) -> Result<()> {
   match cmd {
     Command::Init => cmd_init(),
     Command::List => cmd_list(),
-    Command::Create { branch_type, issue, desc, no_bootstrap } => cmd_create(branch_type, issue, desc, no_bootstrap),
+    Command::Create {
+      branch_type,
+      issue,
+      desc,
+      no_bootstrap,
+    } => cmd_create(branch_type, issue, desc, no_bootstrap),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target),
@@ -76,7 +79,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
 fn cmd_init() -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or_else(|| GwmError::NotInGitRepo)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
   let path = Config::write_default(workdir)?;
   println!("wrote {}", path.display());
   Ok(())
@@ -85,20 +88,28 @@ fn cmd_init() -> Result<()> {
 fn cmd_list() -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
-  println!("{:<32} {:<40} {}", "NAME", "BRANCH", "PATH");
+  println!("{:<32} {:<40} PATH", "NAME", "BRANCH");
   for w in trees {
     let mark = if w.is_main { "*" } else { " " };
     let branch = w.branch.clone().unwrap_or_else(|| "-".into());
     let locked = if w.is_locked { " [locked]" } else { "" };
     let prunable = if w.is_prunable { " [prunable]" } else { "" };
-    println!("{}{:<31} {:<40} {}{}{}", mark, w.name, branch, w.path.display(), locked, prunable);
+    println!(
+      "{}{:<31} {:<40} {}{}{}",
+      mark,
+      w.name,
+      branch,
+      w.path.display(),
+      locked,
+      prunable
+    );
   }
   Ok(())
 }
 
 fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or_else(|| GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let repo_name = worktree::repo_name(&repo);
 
   let config = Config::load_for_repo(&workdir)?;
@@ -120,7 +131,11 @@ fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bo
     return Ok(());
   }
 
-  let ctx = BootstrapCtx { main_repo: &workdir, worktree: &created, config: &config };
+  let ctx = BootstrapCtx {
+    main_repo: &workdir,
+    worktree: &created,
+    config: &config,
+  };
   let report = bootstrap::run(&ctx)?;
   print_report(&report);
   Ok(())
@@ -148,7 +163,7 @@ fn cmd_path(pattern: String) -> Result<()> {
 
 fn cmd_bootstrap(target: Option<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or_else(|| GwmError::NotInGitRepo)?.to_path_buf();
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let config = Config::load_for_repo(&workdir)?;
 
   let worktree_path: PathBuf = match target {
@@ -163,7 +178,11 @@ fn cmd_bootstrap(target: Option<String>) -> Result<()> {
     None => std::env::current_dir()?,
   };
 
-  let ctx = BootstrapCtx { main_repo: &workdir, worktree: &worktree_path, config: &config };
+  let ctx = BootstrapCtx {
+    main_repo: &workdir,
+    worktree: &worktree_path,
+    config: &config,
+  };
   let report = bootstrap::run(&ctx)?;
   print_report(&report);
   Ok(())

@@ -8,7 +8,8 @@ use predicates::prelude::*;
 fn help_prints_subcommands() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.arg("--help");
-  cmd.assert()
+  cmd
+    .assert()
     .success()
     .stdout(predicate::str::contains("init"))
     .stdout(predicate::str::contains("list"))
@@ -28,7 +29,8 @@ fn version_flag() {
 fn types_lists_branch_types() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.arg("types");
-  cmd.assert()
+  cmd
+    .assert()
     .success()
     .stdout(predicate::str::contains("feat"))
     .stdout(predicate::str::contains("fix"))
@@ -41,5 +43,8 @@ fn create_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.current_dir(dir.path()).arg("list");
-  cmd.assert().failure().stderr(predicate::str::contains("not inside a git repository"));
+  cmd
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
 }

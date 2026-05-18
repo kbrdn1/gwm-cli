@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = ".gwm.toml";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
   #[serde(default)]
   pub worktree: WorktreeConfig,
@@ -26,15 +26,6 @@ impl Default for WorktreeConfig {
       base: "{home}/cc-worktree/{repo}".into(),
       path_pattern: "{type}-{issue}-{desc}".into(),
       branch_pattern: "{type}/#{issue}-{desc}".into(),
-    }
-  }
-}
-
-impl Default for Config {
-  fn default() -> Self {
-    Self {
-      worktree: WorktreeConfig::default(),
-      bootstrap: BootstrapConfig::default(),
     }
   }
 }
@@ -147,9 +138,7 @@ pub fn expand_placeholders(
     .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
     .to_string_lossy()
     .to_string();
-  let mut out = template
-    .replace("{home}", &home)
-    .replace("{repo}", repo);
+  let mut out = template.replace("{home}", &home).replace("{repo}", repo);
   if let Some(t) = type_ {
     out = out.replace("{type}", t);
   }
@@ -163,4 +152,3 @@ pub fn expand_placeholders(
   let expanded = shellexpand::tilde(&out).to_string();
   Ok(expanded)
 }
-
