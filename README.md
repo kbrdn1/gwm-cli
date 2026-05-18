@@ -47,19 +47,39 @@ gwm                # opens the TUI on the current repo
 
 Key bindings:
 
-| Key       | Action                                          |
-|:----------|:------------------------------------------------|
-| `↑` / `k` | previous worktree                                |
-| `↓` / `j` | next worktree                                    |
-| `n`       | new worktree (form: type → issue → description)  |
-| `d`       | delete selected (confirm `y`)                    |
-| `b`       | re-run bootstrap on the selected worktree        |
-| `o`       | open the worktree dir in the OS file manager (`open` / `xdg-open` / `explorer`) |
-| `r`       | refresh                                          |
-| `p`       | toggle "delete branch on remove"                 |
-| `Enter`   | show selected path in status bar                 |
-| `?`       | help overlay                                     |
-| `q` / `Esc` | quit                                           |
+| Key         | Action                                                                          |
+|:------------|:--------------------------------------------------------------------------------|
+| `↑` / `k`   | previous worktree (scrolls the sidebar when it has focus)                       |
+| `↓` / `j`   | next worktree (scrolls the sidebar when it has focus)                           |
+| `gg`        | jump to the first worktree                                                      |
+| `G`         | jump to the last worktree                                                       |
+| `n`         | new worktree (form: type → issue → description)                                 |
+| `d`         | delete selected (confirm `y`)                                                   |
+| `b`         | re-run bootstrap on the selected worktree                                       |
+| `o`         | open the worktree dir in the OS file manager (`open` / `xdg-open` / `explorer`) |
+| `l`         | launch `lazygit -p <selected-worktree>` fullscreen; resume the TUI on exit      |
+| `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)     |
+| `Tab`       | swap focus between the worktree list and the sidebar                            |
+| `r`         | refresh                                                                         |
+| `p`         | toggle "delete branch on remove"                                                |
+| `Enter`     | show selected path in status bar                                                |
+| `?`         | help overlay                                                                    |
+| `q` / `Esc` | quit                                                                            |
+
+### details sidebar
+
+When the terminal is at least **120 columns wide** and the sidebar is enabled (default ON, toggle with `v`), the right pane shows a lazyssh-style details panel for the currently selected worktree:
+
+- **Basic Settings** — branch, path, head (short OID), main / locked / prunable flags, branch status.
+- **Recent commits** — `git log --oneline -n 10`.
+- **Working tree** — `git status --short` (`✓ clean` when empty).
+- **Commands** — keybindings cheat-sheet.
+
+Press `Tab` to focus the sidebar; `j` / `k` (or arrow keys) then scroll it instead of moving the worktree selection. The focused panel's border turns cyan.
+
+### lazygit integration
+
+Press `l` on any worktree to suspend the TUI and open [`lazygit`](https://github.com/jesseduffield/lazygit) fullscreen on that worktree (`lazygit -p <path>`). When you quit lazygit, the gwm TUI is restored exactly where you left it. If `lazygit` is not on `$PATH`, the status bar reports it without crashing.
 
 ### CLI
 
@@ -152,13 +172,13 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 56 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 71 tests (config / naming / bootstrap / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 56 tests
+cargo test               # 71 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally

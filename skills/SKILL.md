@@ -92,20 +92,40 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 
 ## TUI key map
 
-| Key       | Action                                          |
-|:----------|:------------------------------------------------|
-| `↑` / `k` | previous worktree                                |
-| `↓` / `j` | next worktree                                    |
-| `n`       | new worktree form (type ↑/↓, Tab between fields, Enter on desc submits) |
-| `d`       | delete (confirm `y`)                             |
-| `b`       | re-run bootstrap on selected                     |
-| `o`       | open worktree dir in OS file manager (`open` / `xdg-open` / `explorer`) |
-| `r`       | refresh                                          |
-| `p`       | toggle "delete branch on remove"                 |
-| `Enter`   | show path in status bar                          |
-| `?`       | help overlay                                     |
-| `q` / `Esc` | quit                                           |
-| `Ctrl-C`  | force quit                                       |
+| Key         | Action                                                                          |
+|:------------|:--------------------------------------------------------------------------------|
+| `↑` / `k`   | previous worktree (scrolls the sidebar when it has focus)                       |
+| `↓` / `j`   | next worktree (scrolls the sidebar when it has focus)                           |
+| `gg`        | jump to the first worktree                                                      |
+| `G`         | jump to the last worktree                                                       |
+| `n`         | new worktree form (type ↑/↓, Tab between fields, Enter on desc submits)         |
+| `d`         | delete (confirm `y`)                                                            |
+| `b`         | re-run bootstrap on selected                                                    |
+| `o`         | open worktree dir in OS file manager (`open` / `xdg-open` / `explorer`)         |
+| `l`         | launch `lazygit -p <selected-worktree>` fullscreen; gwm resumes on lazygit exit |
+| `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)    |
+| `Tab`       | swap focus between the worktree list and the sidebar                            |
+| `r`         | refresh                                                                         |
+| `p`         | toggle "delete branch on remove"                                                |
+| `Enter`     | show path in status bar                                                         |
+| `?`         | help overlay                                                                    |
+| `q` / `Esc` | quit                                                                            |
+| `Ctrl-C`    | force quit                                                                      |
+
+## Details sidebar
+
+When the terminal width is ≥ 120 columns and the sidebar is open (default ON, toggle with `v`), the right pane shows a lazyssh-style details panel for the selected worktree:
+
+- **Basic Settings**: branch, path, head (short OID), main / locked / prunable flags, branch status.
+- **Recent commits**: `git log --oneline -n 10` (shells out to `git`).
+- **Working tree**: `git status --short` (`✓ clean` when empty).
+- **Commands**: keybindings cheat-sheet inside the panel.
+
+`Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the focused panel. The focused panel's border turns cyan.
+
+## Lazygit integration
+
+Press `l` to suspend the gwm TUI and open [`lazygit`](https://github.com/jesseduffield/lazygit) fullscreen on the selected worktree (`lazygit -p <path>`). Quitting lazygit restores the gwm TUI exactly where you left it. If `lazygit` is not on `$PATH`, the status bar reports it and the TUI keeps running.
 
 ## `.gwm.toml` schema
 
@@ -297,7 +317,7 @@ Tests under `tests/` mirror this layout. TDD bar: any new behaviour ships with a
 | portability across repos    | per-project script    | one binary + per-repo config   |
 | TUI                         | linear bash menu      | full ratatui screen            |
 | anti-RDS guard              | hardcoded `grep`      | configurable regex deny-list   |
-| tests                       | 0                     | 56 (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                       | 0                     | 71 (config / naming / bootstrap / worktree / TUI / CLI) |
 | install                     | `chmod +x` per repo   | `cargo install --path .`       |
 
 ## Troubleshooting

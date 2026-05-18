@@ -1,6 +1,7 @@
 use crate::error::{GwmError, Result};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
@@ -250,6 +251,45 @@ pub fn prune(repo: &Repository) -> Result<usize> {
     }
   }
   Ok(pruned)
+}
+
+/// Shell out to `git log --oneline -n <n>` inside `path` and return raw stdout.
+/// Used by the TUI sidebar to preview recent commits of the selected worktree.
+pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["log", "--oneline", "-n"])
+    .arg(n.to_string())
+    .output()
+    .map_err(|e| GwmError::Other(format!("git log failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::Other(format!(
+      "git log exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Shell out to `git status --short` inside `path` and return raw stdout.
+/// Used by the TUI sidebar to preview the working-tree state.
+pub fn git_status_short(path: &Path) -> Result<String> {
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["status", "--short"])
+    .output()
+    .map_err(|e| GwmError::Other(format!("git status failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::Other(format!(
+      "git status exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Resolve a worktree by exact name first, then by substring (case-insensitive) within the dir name.
