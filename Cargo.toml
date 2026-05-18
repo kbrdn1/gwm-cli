@@ -26,7 +26,7 @@ git2 = { version = "0.20", default-features = false, features = ["vendored-libgi
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 dirs = "5"
 regex = "1"
 shellexpand = "3"
