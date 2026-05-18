@@ -108,7 +108,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
         .title(format!(" worktrees ({}) ", app.worktrees.len()))
         .border_style(Style::default().fg(border_color)),
     )
-    .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
   f.render_stateful_widget(table, area, &mut app.list_state);
