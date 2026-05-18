@@ -1,7 +1,7 @@
 use super::app::{App, Field, View};
 use crate::bootstrap::StepStatus;
 use crate::naming::BRANCH_TYPES;
-use crate::worktree::{BranchStatus, WorktreeInfo};
+use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
   layout::{Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
@@ -10,6 +10,10 @@ use ratatui::{
   Frame,
 };
 
+/// Minimum total terminal width required to render the sidebar alongside the
+/// worktree table without compressing the table beyond readability.
+pub const SIDEBAR_MIN_WIDTH: u16 = 120;
+
 pub fn draw(f: &mut Frame, app: &mut App) {
   let chunks = Layout::default()
     .direction(Direction::Vertical)
@@ -17,7 +21,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     .split(f.area());
 
   draw_header(f, chunks[0], app);
-  draw_list(f, chunks[1], app);
+  draw_body(f, chunks[1], app);
   draw_footer(f, chunks[2], app);
 
   match app.view {
@@ -26,6 +30,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::Confirm => draw_confirm(f, app),
     View::Report => draw_report(f, app),
     View::List => {}
+  }
+}
+
+/// Decide whether to split horizontally for a sidebar, based on terminal width
+/// and user preference. Sidebar is hidden on narrow terminals to keep the
+/// worktree table readable.
+fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
+  let show_sidebar = app.sidebar_open && area.width >= SIDEBAR_MIN_WIDTH;
+  if show_sidebar {
+    let split = Layout::default()
+      .direction(Direction::Horizontal)
+      .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+      .split(area);
+    draw_list(f, split[0], app);
+    draw_sidebar(f, split[1], app);
+  } else {
+    draw_list(f, area, app);
   }
 }
 
@@ -73,6 +94,9 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Min(20),
   ];
 
+  let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
+  let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
+
   let table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
@@ -80,12 +104,190 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
       Block::default()
         .borders(Borders::ALL)
         .title(format!(" worktrees ({}) ", app.worktrees.len()))
-        .border_style(Style::default().fg(Color::DarkGray)),
+        .border_style(Style::default().fg(border_color)),
     )
     .highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
   f.render_stateful_widget(table, area, &mut app.list_state);
+}
+
+/// Details panel for the selected worktree — structured info, recent commits,
+/// working-tree status, and a commands cheat-sheet (lazyssh-style layout).
+fn draw_sidebar(f: &mut Frame, area: Rect, app: &App) {
+  let border_color = if app.sidebar_focused {
+    Color::Cyan
+  } else {
+    Color::DarkGray
+  };
+  let (title, lines) = match app.selected() {
+    Some(w) => (" Details ".to_string(), sidebar_lines(w)),
+    None => (" Details ".into(), vec![Line::from("(nothing selected)")]),
+  };
+
+  let block = Block::default()
+    .borders(Borders::ALL)
+    .title(title)
+    .border_style(Style::default().fg(border_color));
+
+  let paragraph = Paragraph::new(lines)
+    .block(block)
+    .wrap(Wrap { trim: false })
+    .scroll((app.sidebar_scroll, 0));
+
+  f.render_widget(paragraph, area);
+}
+
+fn sidebar_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
+  let mut out: Vec<Line> = vec![
+    // Header — worktree name in bold.
+    Line::from(Span::styled(
+      w.name.clone(),
+      Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    )),
+    Line::from(""),
+    // Basic Settings block.
+    section_header("Basic Settings:"),
+    kv("Branch", w.branch.clone().unwrap_or_else(|| "-".into()), Color::Green),
+    kv("Path", w.path.display().to_string(), Color::Gray),
+    kv(
+      "Head",
+      w.head.as_deref().map(short_oid).unwrap_or_else(|| "-".into()),
+      Color::Yellow,
+    ),
+    kv("Main", yes_no(w.is_main), Color::Yellow),
+    kv("Locked", yes_no(w.is_locked), Color::Magenta),
+    kv("Prunable", yes_no(w.is_prunable), Color::Red),
+    kv("Status", branch_status_label(&w.status), branch_status_color(&w.status)),
+    Line::from(""),
+  ];
+
+  // Recent commits block.
+  out.push(section_header("Recent commits:"));
+  match worktree::git_log_oneline(&w.path, 10) {
+    Ok(s) if !s.trim().is_empty() => {
+      for line in s.lines() {
+        out.push(Line::from(format!("  {}", line)));
+      }
+    }
+    Ok(_) => out.push(Line::from(Span::styled(
+      "  (no commits)",
+      Style::default().fg(Color::DarkGray),
+    ))),
+    Err(e) => out.push(Line::from(Span::styled(
+      format!("  ! {}", e),
+      Style::default().fg(Color::Red),
+    ))),
+  }
+  out.push(Line::from(""));
+
+  // Working tree block.
+  out.push(section_header("Working tree:"));
+  match worktree::git_status_short(&w.path) {
+    Ok(s) if s.trim().is_empty() => out.push(Line::from(Span::styled("  ✓ clean", Style::default().fg(Color::Green)))),
+    Ok(s) => {
+      for line in s.lines() {
+        out.push(Line::from(format!("  {}", line)));
+      }
+    }
+    Err(e) => out.push(Line::from(Span::styled(
+      format!("  ! {}", e),
+      Style::default().fg(Color::Red),
+    ))),
+  }
+  out.push(Line::from(""));
+
+  // Commands cheat-sheet (lazyssh style).
+  out.push(section_header("Commands:"));
+  for (key, label) in [
+    ("Enter", "Copy path to status"),
+    ("    l", "Launch lazygit fullscreen"),
+    ("    o", "Open dir in OS file manager"),
+    ("    b", "Bootstrap worktree"),
+    ("    n", "New worktree"),
+    ("    d", "Delete worktree"),
+    ("    p", "Toggle delete-branch-on-remove"),
+    ("    r", "Refresh"),
+    ("    v", "Toggle this sidebar"),
+    ("  Tab", "Swap focus list ↔ sidebar"),
+    ("   gg", "Jump to first worktree"),
+    ("    G", "Jump to last worktree"),
+    ("  j/k", "Next / Prev (or scroll sidebar)"),
+    ("    ?", "Help"),
+    ("    q", "Quit"),
+  ] {
+    out.push(Line::from(vec![
+      Span::styled(format!("  {}: ", key), Style::default().fg(Color::Cyan)),
+      Span::raw(label),
+    ]));
+  }
+  out
+}
+
+fn section_header(text: &str) -> Line<'static> {
+  Line::from(Span::styled(
+    text.to_string(),
+    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+  ))
+}
+
+fn kv(key: &str, value: String, value_color: Color) -> Line<'static> {
+  Line::from(vec![
+    Span::styled(format!("  {}: ", key), Style::default().fg(Color::DarkGray)),
+    Span::styled(value, Style::default().fg(value_color)),
+  ])
+}
+
+fn yes_no(b: bool) -> String {
+  if b {
+    "true".into()
+  } else {
+    "false".into()
+  }
+}
+
+fn short_oid(oid: &str) -> String {
+  oid.chars().take(7).collect()
+}
+
+fn branch_status_label(s: &BranchStatus) -> String {
+  if s.unknown {
+    return "unknown".into();
+  }
+  let mut parts: Vec<String> = Vec::new();
+  if s.is_dirty {
+    parts.push("dirty".into());
+  }
+  if s.has_upstream {
+    if s.ahead > 0 {
+      parts.push(format!("↑{}", s.ahead));
+    }
+    if s.behind > 0 {
+      parts.push(format!("↓{}", s.behind));
+    }
+    if !s.is_dirty && s.synced() {
+      parts.push("synced".into());
+    }
+  } else if !s.is_dirty {
+    parts.push("clean".into());
+  }
+  if parts.is_empty() {
+    "clean".into()
+  } else {
+    parts.join(" ")
+  }
+}
+
+fn branch_status_color(s: &BranchStatus) -> Color {
+  if s.unknown {
+    Color::DarkGray
+  } else if s.is_dirty || s.behind > 0 {
+    Color::Yellow
+  } else if s.ahead > 0 {
+    Color::Cyan
+  } else {
+    Color::Green
+  }
 }
 
 /// Constraint-friendly column width based on observed content, clamped to [min, max].
@@ -169,7 +371,7 @@ fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  let help = "n:new  d:del  b:bootstrap  o:open  r:refresh  p:tog-branch  enter:path  ?:help  q:quit";
+  let help = "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus gg/G:top/bot j/k:nav r:refresh ?:help q:quit";
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
     Span::raw("  "),
@@ -191,12 +393,17 @@ fn draw_help(f: &mut Frame) {
     Line::from("  Ctrl-C        force quit"),
     Line::from(""),
     Line::from("list view"),
-    Line::from("  j / ↓         next"),
-    Line::from("  k / ↑         prev"),
+    Line::from("  j / ↓         next (scrolls sidebar when focused)"),
+    Line::from("  k / ↑         prev (scrolls sidebar when focused)"),
+    Line::from("  gg            jump to first worktree"),
+    Line::from("  G             jump to last worktree"),
     Line::from("  n             new worktree"),
     Line::from("  d             delete selected"),
     Line::from("  b             bootstrap selected"),
     Line::from("  o             open dir in OS file manager (open / xdg-open / explorer)"),
+    Line::from("  l             launch lazygit fullscreen on selected worktree"),
+    Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
+    Line::from("  Tab           swap focus between worktree list and sidebar"),
     Line::from("  r             refresh"),
     Line::from("  p             toggle 'delete branch on remove'"),
     Line::from("  enter         show path in status bar"),

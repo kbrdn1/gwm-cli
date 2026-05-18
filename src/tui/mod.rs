@@ -48,20 +48,35 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
     }
 
     match app.view {
-      View::List => match key.code {
-        KeyCode::Char('q') | KeyCode::Esc => break,
-        KeyCode::Char('?') => app.view = View::Help,
-        KeyCode::Char('j') | KeyCode::Down => app.next(),
-        KeyCode::Char('k') | KeyCode::Up => app.prev(),
-        KeyCode::Char('r') => app.refresh()?,
-        KeyCode::Char('n') => app.enter_create(),
-        KeyCode::Char('d') => app.enter_confirm_delete(),
-        KeyCode::Char('b') => app.bootstrap_selected(),
-        KeyCode::Char('p') => app.toggle_delete_branch(),
-        KeyCode::Char('o') => app.open_selected_in_finder(),
-        KeyCode::Enter => app.copy_path_to_status(),
-        _ => {}
-      },
+      View::List => {
+        // Two-keystroke vim motion `gg`: any non-'g' keypress disarms it.
+        if !matches!(key.code, KeyCode::Char('g')) {
+          app.cancel_pending_motion();
+        }
+        match key.code {
+          KeyCode::Char('q') | KeyCode::Esc => break,
+          KeyCode::Char('?') => app.view = View::Help,
+          KeyCode::Char('j') | KeyCode::Down => app.next(),
+          KeyCode::Char('k') | KeyCode::Up => app.prev(),
+          KeyCode::Char('g') => app.handle_g(),
+          KeyCode::Char('G') => app.last(),
+          KeyCode::Char('v') => app.toggle_sidebar(),
+          KeyCode::Tab => app.toggle_focus(),
+          KeyCode::Char('l') => {
+            if let Some(path) = app.launch_lazygit() {
+              run_lazygit(terminal, &path, &mut app)?;
+            }
+          }
+          KeyCode::Char('r') => app.refresh()?,
+          KeyCode::Char('n') => app.enter_create(),
+          KeyCode::Char('d') => app.enter_confirm_delete(),
+          KeyCode::Char('b') => app.bootstrap_selected(),
+          KeyCode::Char('p') => app.toggle_delete_branch(),
+          KeyCode::Char('o') => app.open_selected_in_finder(),
+          KeyCode::Enter => app.copy_path_to_status(),
+          _ => {}
+        }
+      }
       View::Help => match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.view = View::List,
         _ => {}
@@ -101,6 +116,33 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
         _ => {}
       },
     }
+  }
+  Ok(())
+}
+
+/// Suspend the TUI, run `lazygit -p <path>` inheriting the terminal, then restore.
+/// Errors from lazygit itself are surfaced via the status bar, never propagated up.
+fn run_lazygit(
+  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  path: &std::path::Path,
+  app: &mut App,
+) -> Result<()> {
+  // Release the terminal so lazygit can take over.
+  disable_raw_mode()?;
+  execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+  terminal.show_cursor()?;
+
+  let spawn = std::process::Command::new("lazygit").arg("-p").arg(path).status();
+
+  // Always restore the TUI, even if lazygit failed.
+  enable_raw_mode()?;
+  execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+  terminal.clear()?;
+
+  match spawn {
+    Ok(s) if s.success() => app.status = format!("lazygit exited ok ({})", path.display()),
+    Ok(s) => app.status = format!("lazygit exited with code {:?}", s.code()),
+    Err(e) => app.status = format!("failed to launch lazygit: {}", e),
   }
   Ok(())
 }

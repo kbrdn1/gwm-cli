@@ -42,6 +42,14 @@ pub struct App {
 
   // Bootstrap report
   pub report: Option<BootstrapReport>,
+
+  // Sidebar (git preview) state
+  pub sidebar_open: bool,
+  pub sidebar_focused: bool,
+  pub sidebar_scroll: u16,
+
+  // Vim motion buffer: armed by first `g`, completed by the second.
+  pub pending_g: bool,
 }
 
 impl App {
@@ -74,6 +82,10 @@ impl App {
       create_issue: String::new(),
       create_desc: String::new(),
       report: None,
+      sidebar_open: true,
+      sidebar_focused: false,
+      sidebar_scroll: 0,
+      pending_g: false,
     })
   }
 
@@ -93,6 +105,11 @@ impl App {
   }
 
   pub fn next(&mut self) {
+    // Route navigation to the sidebar when it's focused; otherwise move the list.
+    if self.sidebar_open && self.sidebar_focused {
+      self.sidebar_scroll_down();
+      return;
+    }
     if self.worktrees.is_empty() {
       return;
     }
@@ -101,9 +118,14 @@ impl App {
       None => 0,
     };
     self.list_state.select(Some(i));
+    self.sidebar_scroll = 0;
   }
 
   pub fn prev(&mut self) {
+    if self.sidebar_open && self.sidebar_focused {
+      self.sidebar_scroll_up();
+      return;
+    }
     if self.worktrees.is_empty() {
       return;
     }
@@ -112,6 +134,78 @@ impl App {
       Some(i) => i - 1,
     };
     self.list_state.select(Some(i));
+    self.sidebar_scroll = 0;
+  }
+
+  // ---- Vim-style motions / list jumps -------------------------------------
+
+  pub fn first(&mut self) {
+    if !self.worktrees.is_empty() {
+      self.list_state.select(Some(0));
+      self.sidebar_scroll = 0;
+    }
+  }
+
+  pub fn last(&mut self) {
+    if !self.worktrees.is_empty() {
+      self.list_state.select(Some(self.worktrees.len() - 1));
+      self.sidebar_scroll = 0;
+    }
+  }
+
+  /// Drive the two-keystroke `gg` motion. First press arms it, second jumps to top.
+  pub fn handle_g(&mut self) {
+    if self.pending_g {
+      self.pending_g = false;
+      self.first();
+    } else {
+      self.pending_g = true;
+    }
+  }
+
+  pub fn cancel_pending_motion(&mut self) {
+    self.pending_g = false;
+  }
+
+  // ---- Sidebar ------------------------------------------------------------
+
+  pub fn toggle_sidebar(&mut self) {
+    self.sidebar_open = !self.sidebar_open;
+    if !self.sidebar_open {
+      // Hidden sidebar can't be focused.
+      self.sidebar_focused = false;
+    }
+    self.status = if self.sidebar_open {
+      "sidebar shown".into()
+    } else {
+      "sidebar hidden".into()
+    };
+  }
+
+  pub fn toggle_focus(&mut self) {
+    if !self.sidebar_open {
+      return;
+    }
+    self.sidebar_focused = !self.sidebar_focused;
+  }
+
+  pub fn sidebar_scroll_down(&mut self) {
+    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1);
+  }
+
+  pub fn sidebar_scroll_up(&mut self) {
+    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+  }
+
+  /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
+  /// The caller drives the actual TUI suspension/restoration around the spawn.
+  pub fn launch_lazygit(&mut self) -> Option<PathBuf> {
+    let path = self.selected()?.path.clone();
+    if which::which("lazygit").is_err() {
+      self.status = "lazygit not found in PATH".into();
+      return None;
+    }
+    Some(path)
   }
 
   pub fn selected(&self) -> Option<&WorktreeInfo> {
