@@ -24,7 +24,7 @@ ratatui = "0.28"
 crossterm = "0.28"
 git2 = { version = "0.19", default-features = false, features = ["vendored-libgit2"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.8"
+toml = "1.1"
 anyhow = "1"
 thiserror = "1"
 dirs = "5"
