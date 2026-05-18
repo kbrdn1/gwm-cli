@@ -1,0 +1,47 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "Europe/Paris"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "chore"
+    commit-message:
+      prefix: "⬆️ chore(deps)"
+      include: "scope"
+    groups:
+      ratatui:
+        patterns:
+          - "ratatui*"
+          - "crossterm*"
+      git-stack:
+        patterns:
+          - "git2*"
+      serde-stack:
+        patterns:
+          - "serde*"
+          - "toml*"
+      clap-stack:
+        patterns:
+          - "clap*"
+      test-stack:
+        patterns:
+          - "tempfile*"
+          - "assert_cmd*"
+          - "predicates*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    labels:
+      - "ci"
+      - "dependencies"
+    commit-message:
+      prefix: "⬆️ ci(actions)"
+      include: "scope"

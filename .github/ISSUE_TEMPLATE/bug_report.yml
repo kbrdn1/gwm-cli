@@ -1,0 +1,126 @@
+name: "🐛 Bug Report"
+description: "Report a bug or unexpected behaviour"
+title: "[Bug]: "
+labels: ["fix"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Bug report
+        Thanks for taking the time to file a bug. Please fill the form as completely as you can — it's much easier to fix a bug we can reproduce.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the issue.
+      placeholder: "When I run `gwm create ...`, ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal sequence of commands that triggers the bug.
+      placeholder: |
+        1. `cd ~/some-repo`
+        2. `gwm create feat 1 foo`
+        3. observe error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - 🔴 Critical (data loss, broken worktree, can't recover)
+        - 🟠 Major (feature unusable, workaround painful)
+        - 🟡 Minor (annoying but can be worked around)
+        - 🟢 Cosmetic (visual only)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which part of `gwm` is affected?
+      options:
+        - cli (subcommands)
+        - tui (ratatui interface)
+        - config (.gwm.toml parsing)
+        - worktree (libgit2 ops)
+        - bootstrap (copies / guards / shell hooks)
+        - install / build
+        - other
+    validations:
+      required: true
+
+  - type: input
+    id: gwm_version
+    attributes:
+      label: gwm version
+      description: Output of `gwm --version`.
+      placeholder: "gwm 0.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: rust_version
+    attributes:
+      label: Rust version
+      description: Output of `rustc --version`.
+      placeholder: "rustc 1.89.0 (...)"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / shell
+      placeholder: "macOS 15.5 / zsh 5.9"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stack trace
+      description: Set `RUST_BACKTRACE=1` and re-run the failing command.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant `.gwm.toml` (if any)
+      description: Redact any sensitive values before pasting.
+      render: toml
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+    validations:
+      required: false

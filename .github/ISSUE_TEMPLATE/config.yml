@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: README & docs
+    url: https://github.com/kbrdn1/gwm-cli#readme
+    about: Project documentation, install instructions, config reference.
+  - name: Discussions
+    url: https://github.com/kbrdn1/gwm-cli/discussions
+    about: Questions, ideas, general feedback (not bug reports).

@@ -1,0 +1,81 @@
+name: "✨ Feature Request"
+description: "Suggest a new feature or enhancement"
+title: "[Feature]: "
+labels: ["feature"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Feature request
+        Describe the feature, why it's useful, and how you'd use it. The more concrete the use case, the better.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What pain point are you trying to solve?
+      placeholder: "Currently `gwm` doesn't let me ..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should `gwm` behave instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other approaches you thought about and why they're worse.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - cli (new / changed subcommand)
+        - tui (new view, keybinding, behaviour)
+        - config (.gwm.toml schema)
+        - worktree (libgit2 ops)
+        - bootstrap (new step type, guard kind)
+        - docs / examples
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: breaking
+    attributes:
+      label: Backward compatibility
+      options:
+        - No breaking change
+        - Breaking change (config schema, CLI flag, default behaviour)
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: example
+    attributes:
+      label: Example usage
+      description: Show what the feature would look like in practice.
+      render: bash
+      placeholder: |
+        gwm create feat 123 my-feature --from-template laravel
+    validations:
+      required: false
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Additional context
+    validations:
+      required: false

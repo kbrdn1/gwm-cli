@@ -1,0 +1,55 @@
+name: "📋 Task"
+description: "Internal maintenance, refactor, docs, or chore"
+title: "[Task]: "
+labels: ["chore"]
+assignees: []
+
+body:
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What needs to be done?
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this worth doing now?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - refactor (no behaviour change)
+        - test (add or fix tests)
+        - docs (README, CHANGELOG, examples)
+        - chore (deps, scripts, config)
+        - ci (workflows, releases)
+        - perf (measured improvement)
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: How will we know it's done?
+      placeholder: |
+        - [ ] cargo test passes
+        - [ ] cargo clippy -- -D warnings passes
+        - [ ] CHANGELOG updated
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes / links
+    validations:
+      required: false
