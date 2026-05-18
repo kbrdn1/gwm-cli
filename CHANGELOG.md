@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI keybinding `o` reveals the selected worktree's directory in the OS file manager (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows).
 - `WorktreeInfo.status` (`BranchStatus`): dirty / clean / upstream-tracked / ahead / behind, computed via libgit2.
 - `STATUS` column in both the TUI table and `gwm list` CLI output, with colour-coding (`green` clean / synced, `yellow` dirty or behind, `cyan` ahead, `red` prunable, `magenta` locked, `dark_gray` unknown).
+- CI on the `dev` integration branch: `fmt`, `clippy`, multi-OS test, and `cargo audit` now run on every push to `dev` and on every PR targeting `dev` (same matrix as `main`).
+- `.github/workflows/pre-release.yml`: builds the 5 release targets (Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64) and publishes a GitHub Release with `prerelease: true` whenever a SemVer-rc / -alpha / -beta tag is pushed (e.g. `v0.2.0-rc.1`). Also supports `workflow_dispatch` for manual reruns.
 
 ### Changed
 

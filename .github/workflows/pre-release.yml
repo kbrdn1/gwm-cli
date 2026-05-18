@@ -1,0 +1,138 @@
+name: pre-release
+
+on:
+  push:
+    tags:
+      - "v*.*.*-rc*"
+      - "v*.*.*-alpha*"
+      - "v*.*.*-beta*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "rc/alpha/beta tag to (re)build (e.g. v0.2.0-rc.1)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: pre-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            archive: tar.gz
+            cross: true
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: install cross (linux aarch64)
+        if: matrix.cross == true
+        run: cargo install cross --locked
+
+      - name: build (cargo)
+        if: matrix.cross != true
+        run: cargo build --release --target ${{ matrix.target }} --locked
+
+      - name: build (cross)
+        if: matrix.cross == true
+        run: cross build --release --target ${{ matrix.target }} --locked
+
+      - name: package (unix)
+        if: matrix.os != 'windows-latest'
+        shell: bash
+        run: |
+          BIN_NAME="gwm"
+          STAGE="${BIN_NAME}-${{ github.ref_name }}-${{ matrix.target }}"
+          mkdir -p "dist/${STAGE}"
+          cp "target/${{ matrix.target }}/release/${BIN_NAME}" "dist/${STAGE}/"
+          cp README.md LICENSE.md CHANGELOG.md "dist/${STAGE}/"
+          tar -C dist -czf "dist/${STAGE}.tar.gz" "${STAGE}"
+          shasum -a 256 "dist/${STAGE}.tar.gz" > "dist/${STAGE}.tar.gz.sha256"
+
+      - name: package (windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $BIN_NAME = "gwm.exe"
+          $STAGE = "gwm-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$STAGE" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/$BIN_NAME" "dist/$STAGE/"
+          Copy-Item README.md, LICENSE.md, CHANGELOG.md "dist/$STAGE/"
+          Compress-Archive -Path "dist/$STAGE" -DestinationPath "dist/$STAGE.zip"
+          (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash | Out-File "dist/$STAGE.zip.sha256"
+
+      - name: upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gwm-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: github pre-release
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: publish pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          body_path: CHANGELOG.md
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+            dist/*.zip
+            dist/*.zip.sha256
+          draft: false
+          prerelease: true
