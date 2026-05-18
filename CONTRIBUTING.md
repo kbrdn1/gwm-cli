@@ -208,18 +208,40 @@ gh pr merge <num> --merge   # NOT --squash, NOT --delete-branch
 
 ## Releases
 
-Versioning is SemVer (`MAJOR.MINOR.PATCH`):
+Versioning is SemVer (`MAJOR.MINOR.PATCH`), with `-rc.N` / `-alpha.N` / `-beta.N` suffixes for pre-releases cut from `dev`.
 
 - `MAJOR` → breaking change
 - `MINOR` → new feature
 - `PATCH` → bug fix
+- `-rc.N` / `-alpha.N` / `-beta.N` → release candidate / alpha / beta cut from `dev` before promotion to `main`
 
-Cut a release by:
+### Pre-release (from `dev`)
+
+When `dev` is ready to be exercised by early adopters before promotion:
+
+1. Stay on `dev` (do not merge to `main` yet).
+2. Tag: `git tag -a v0.x.y-rc.1 -m "v0.x.y-rc.1" && git push --tags`.
+3. GitHub Actions (`pre-release.yml`) builds binaries and publishes a **prerelease** (5 targets — Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64).
+4. Iterate: subsequent candidates are `v0.x.y-rc.2`, `v0.x.y-rc.3`, …
+
+### Stable release (from `main`)
+
+Once the rc is validated and promoted to `main`:
 
 1. Update `Cargo.toml` `version`.
 2. Move `## [Unreleased]` entries into a dated section in `CHANGELOG.md`.
-3. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
-4. GitHub Actions (`release.yml`) builds binaries and publishes the release.
+3. Merge `dev` → `main` (regular merge, never squash; see [Merge strategy](#merge-strategy)).
+4. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
+5. GitHub Actions (`release.yml`) builds binaries and publishes the stable release.
+
+Triggering matrix:
+
+| Tag pattern              | Workflow         | `prerelease` flag |
+|:-------------------------|:-----------------|:------------------|
+| `v0.x.y`                 | `release.yml`    | `false`           |
+| `v0.x.y-rc.N`            | `pre-release.yml`| `true`            |
+| `v0.x.y-alpha.N`         | `pre-release.yml`| `true`            |
+| `v0.x.y-beta.N`          | `pre-release.yml`| `true`            |
 
 ---
 

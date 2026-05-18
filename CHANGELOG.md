@@ -7,16 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-18
+
+Validated via `v0.2.0-rc.1` (pre-release published on 2026-05-18).
+
 ### Added
 
 - TUI keybinding `o` reveals the selected worktree's directory in the OS file manager (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows).
 - `WorktreeInfo.status` (`BranchStatus`): dirty / clean / upstream-tracked / ahead / behind, computed via libgit2.
 - `STATUS` column in both the TUI table and `gwm list` CLI output, with colour-coding (`green` clean / synced, `yellow` dirty or behind, `cyan` ahead, `red` prunable, `magenta` locked, `dark_gray` unknown).
+- CI on the `dev` integration branch: `fmt`, `clippy`, multi-OS test, and `cargo audit` now run on every push to `dev` and on every PR targeting `dev` (same matrix as `main`).
+- `.github/workflows/pre-release.yml`: builds the 5 release targets (Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64) and publishes a GitHub Release with `prerelease: true` whenever a SemVer-rc / -alpha / -beta tag is pushed (e.g. `v0.2.0-rc.1`). Also supports `workflow_dispatch` for manual reruns.
+- **TUI details sidebar** (auto-shown when terminal width ≥ 120 cols, toggle with `v`): lazyssh-style panel listing the selected worktree's branch, path, head, locked / prunable / main flags, status, plus `git log --oneline -n 10`, `git status --short`, and a commands cheat-sheet.
+- **TUI keybinding `l`**: suspend the TUI and launch `lazygit -p <selected-worktree-path>` fullscreen; resume the TUI when lazygit exits. Surfaces a clear error in the status bar if `lazygit` is not on `$PATH`.
+- **TUI focus toggle (`Tab`)**: swap focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the focused panel; the focused panel's border turns cyan.
+- **TUI vim motions**: `gg` jumps to the first worktree, `G` to the last.
+- `worktree::git_log_oneline(path, n)` and `worktree::git_status_short(path)` — thin `Command::new("git")` wrappers used by the sidebar (and exposed for tests).
+- `.gwm.toml` config for this repo (Rust-flavoured): `target/` no_symlink + `cargo fetch` bootstrap step + `direnv allow` when an `.envrc` exists.
+- `dependabot.yml`: `target-branch: dev` on both ecosystems so new automated PRs land on the integration branch instead of `main`.
 
 ### Changed
 
 - TUI worktree view: ratatui `List` → `Table` with dynamic column widths derived from data (name/branch capped to [18, 38], status fixed 16, path takes the rest). No more `…`-truncated names for typical branch lengths.
 - `gwm list` CLI output uses the same dynamic column widths.
+- TUI list `j` / `k`: now reset the sidebar scroll offset when navigating worktrees, and scroll the sidebar instead of moving selection when the sidebar has focus.
+- Sidebar content is now cached on the `App` (keyed by selected worktree's path); `git log` / `git status` only run when the selection actually changes. Sidebar scrolling clamps to the rendered content height.
+- Windows `.sha256` sidecars (release + pre-release workflows) now use `Set-Content -Encoding ascii` and the conventional `<hash>  <file>` format so they verify cleanly with `sha256sum -c` across platforms.
+
+### Dependencies
+
+- `ratatui` `0.28` → `0.30` (and `crossterm` `0.28` → `0.29`). Renamed `Table::highlight_style` → `row_highlight_style` to track the deprecation.
+- `git2` `0.19` → `0.20`.
+- `toml` `0.8` → `1.1`.
+- `thiserror` `1` → `2`.
+- `which` `6` → `8`.
+- `actions/checkout` `4` → `6`, `actions/upload-artifact` `4` → `7`, `actions/download-artifact` `4` → `8`, `softprops/action-gh-release` `2` → `3`.
 
 ## [0.1.0] - 2026-05-18
 
