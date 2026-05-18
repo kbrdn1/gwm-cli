@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **Pre-release in flight**: `v0.2.0-rc.1` cut from `dev` on 2026-05-18.
-> Binaries are built and shipped by `pre-release.yml`. The entries below
-> become the body of the final `v0.2.0` stable release once promoted.
+## [0.2.0] - 2026-05-18
+
+Validated via `v0.2.0-rc.1` (pre-release published on 2026-05-18).
 
 ### Added
 
