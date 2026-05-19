@@ -609,3 +609,90 @@ fn exit_filter_cancel_restores_full_list_selection() {
   // full list (index 0). The clamp logic doesn't move it forward, only back.
   assert_eq!(app.list_state.selected(), Some(0));
 }
+
+// ---- picker mode (issue #22) --------------------------------------------
+
+#[test]
+fn picker_mode_defaults_to_false() {
+  // The regular `gwm` TUI entry point must not behave like a picker. The
+  // create / delete / bootstrap actions stay reachable, and `picker_result`
+  // is unset until an explicit picker session asks for it.
+  let (_dir, app) = make_app();
+  assert!(!app.picker_mode, "default App must not be in picker mode");
+  assert!(
+    app.picker_result.is_none(),
+    "no path is selected until the user confirms"
+  );
+}
+
+#[test]
+fn new_picker_at_enables_picker_mode() {
+  // `gwm switch` enters the TUI through this constructor; the picker flag
+  // is what drives the event loop into "Enter confirms, n/d/b are inert".
+  let (dir, _) = init_repo();
+  let app = App::new_picker_at(Some(dir.path())).unwrap();
+  assert!(app.picker_mode, "new_picker_at must set picker_mode=true");
+}
+
+#[test]
+fn new_picker_at_opens_filter_bar() {
+  // Per issue #22: "switch could open the filter bar immediately on
+  // startup". A user invoking `gwm switch` already knows they want to
+  // narrow the list; opening the bar saves one keystroke.
+  let (dir, _) = init_repo();
+  let app = App::new_picker_at(Some(dir.path())).unwrap();
+  assert!(app.filter_active, "picker mode must open with the filter bar active");
+}
+
+#[test]
+fn picker_confirm_records_selected_path() {
+  // Enter in picker mode commits the highlighted worktree path so the
+  // event loop can return it to the caller (which prints it to stdout
+  // for the `cd "$(gwm switch)"` flow).
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.list_state.select(Some(0));
+  let expected = app.selected().expect("test fixture must have a worktree").path.clone();
+
+  app.picker_confirm();
+  assert_eq!(
+    app.picker_result,
+    Some(expected),
+    "picker_confirm must record the selected worktree's path"
+  );
+}
+
+#[test]
+fn picker_confirm_with_no_selection_keeps_result_none() {
+  // If the filter wipes the list down to zero matches, hitting Enter must
+  // not crash and must not record a bogus path. The event loop is then
+  // free to keep the TUI open (or break with None, which is the caller's
+  // call).
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.picker_confirm();
+  assert!(
+    app.picker_result.is_none(),
+    "picker_confirm with no selection must leave picker_result unset"
+  );
+}
+
+#[test]
+fn picker_confirm_outside_picker_mode_is_inert() {
+  // Defensive: `picker_confirm` shouldn't poison the regular TUI flow if
+  // it's ever wired into the wrong event branch. Only picker mode reacts
+  // to Enter by recording a path; the normal `Enter = copy path to status
+  // bar` behaviour is left to its own handler.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  assert!(!app.picker_mode);
+
+  app.picker_confirm();
+  assert!(
+    app.picker_result.is_none(),
+    "picker_confirm outside picker mode must not record a path"
+  );
+}

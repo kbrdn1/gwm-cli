@@ -26,7 +26,46 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  completions "))
     .stdout(predicate::str::contains("  cd "))
     .stdout(predicate::str::contains("  shell-init "))
+    .stdout(predicate::str::contains("  switch "))
     .stdout(predicate::str::contains("  doctor "));
+}
+
+#[test]
+fn switch_alias_s_resolves_to_switch() {
+  // Issue #22: `gwm s` is the daily-driver alias for `gwm switch`. Resolving
+  // `gwm s --help` to the switch help text proves the alias is wired in.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["s", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Open an interactive picker"));
+}
+
+#[test]
+fn top_level_help_advertises_switch_alias() {
+  // The visible alias must show up in the top-level help summary so users
+  // discover `gwm s` without reading the subcommand-specific page.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.arg("--help");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("switch").and(predicate::str::contains("[aliases: s]")));
+}
+
+#[test]
+fn switch_outside_git_repo_fails() {
+  // Same contract as the other repo-bound subcommands: bail out with a
+  // clear error rather than dropping the user into an empty TUI.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("switch")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
 }
 
 #[test]
@@ -293,6 +332,44 @@ fn shell_init_powershell_emits_function_block() {
     .stdout(predicate::str::contains("function gcd"))
     .stdout(predicate::str::contains("gwm cd"))
     .stdout(predicate::str::contains("Set-Location"));
+}
+
+// Issue #22: with no argument, `gcd` should drop into `gwm switch` (the
+// interactive picker) rather than print a usage error. The wrapper must
+// still bail before cd'ing if the picker is cancelled (non-zero exit).
+#[test]
+fn shell_init_posix_no_arg_invokes_switch() {
+  for shell in ["bash", "zsh"] {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd.args(["shell-init", shell]);
+    cmd
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("gwm switch"))
+      .stdout(predicate::str::contains("\"$#\" -eq 0"));
+  }
+}
+
+#[test]
+fn shell_init_fish_no_arg_invokes_switch() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "fish"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gwm switch"))
+    .stdout(predicate::str::contains("count $argv) -eq 0"));
+}
+
+#[test]
+fn shell_init_powershell_no_arg_invokes_switch() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "powershell"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gwm switch"))
+    .stdout(predicate::str::contains("IsNullOrEmpty"));
 }
 
 #[test]
