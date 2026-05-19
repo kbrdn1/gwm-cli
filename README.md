@@ -128,15 +128,26 @@ $ gwm doctor
 ✓ guard references resolve
     2 guard reference(s) resolve
 ✓ `when` predicates supported
+    1 predicate(s) recognised
 ✓ external binaries on PATH
     3/3 binaries found
+✓ no prunable worktrees
+    5 worktree(s) tracked, none prunable
+✓ no orphan gwm branches
+    7 merged gwm-style branch(es) preserved per CONTRIBUTING, no unmerged orphans
+✓ base directory writable
+    /home/you/cc-worktree/myrepo is writable
+```
+
+If a real orphan (unmerged feature branch with no worktree) or a prunable entry exists, the doctor surfaces them as Warning with a remediation hint:
+
+```bash
 ! no prunable worktrees
     1 prunable entry: feat-12-old
     → run `gwm prune` to clear them
 ! no orphan gwm branches
-    1 orphan branch(es): feat/#23-stale
-    → git branch -d feat/#23-stale
-✓ base directory writable
+    1 unmerged orphan branch(es): feat/#99-wip-experiment
+    → git branch -d feat/#99-wip-experiment
 ```
 
 Checks performed:
@@ -278,13 +289,13 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 81 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 140 tests (config / naming / bootstrap / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 81 tests
+cargo test               # 140 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
