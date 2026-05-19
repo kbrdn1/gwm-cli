@@ -23,6 +23,14 @@ pub enum ListFormat {
   Names,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InitShell {
+  Bash,
+  Zsh,
+  Fish,
+  Powershell,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
   /// Write a default .gwm.toml to the current repo.
@@ -81,6 +89,17 @@ pub enum Command {
     #[arg(value_enum)]
     shell: Shell,
   },
+  /// Print a shell wrapper exposing `gcd <pattern>` (one-line cd into a worktree).
+  ///
+  /// Install (zsh):        `echo 'eval "$(gwm shell-init zsh)"' >> ~/.zshrc`
+  /// Install (bash):       `echo 'eval "$(gwm shell-init bash)"' >> ~/.bashrc`
+  /// Install (fish):       `gwm shell-init fish | source` (also add to config.fish)
+  /// Install (powershell): `Invoke-Expression (& gwm shell-init powershell | Out-String)`
+  ShellInit {
+    /// Target shell.
+    #[arg(value_enum)]
+    shell: InitShell,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -105,6 +124,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Prune => cmd_prune(),
     Command::Types => cmd_types(),
     Command::Completions { shell } => cmd_completions(shell),
+    Command::ShellInit { shell } => cmd_shell_init(shell),
   }
 }
 
@@ -300,6 +320,55 @@ fn cmd_completions(shell: Shell) -> Result<()> {
   generate(shell, &mut cmd, name, &mut io::stdout());
   Ok(())
 }
+
+fn cmd_shell_init(shell: InitShell) -> Result<()> {
+  print!("{}", shell_init_script(shell));
+  Ok(())
+}
+
+pub fn shell_init_script(shell: InitShell) -> &'static str {
+  match shell {
+    InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
+    InitShell::Fish => FISH_SHELL_INIT,
+    InitShell::Powershell => POWERSHELL_SHELL_INIT,
+  }
+}
+
+const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: eval "$(gwm shell-init bash)"   # or zsh
+gcd() {
+  if [ "$#" -eq 0 ]; then
+    echo "usage: gcd <pattern>" >&2
+    return 2
+  fi
+  local target
+  target="$(command gwm cd "$@")" || return $?
+  cd "$target" || return $?
+}
+"#;
+
+const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
+function gcd --description 'cd into a gwm worktree by fuzzy pattern'
+  if test (count $argv) -eq 0
+    echo "usage: gcd <pattern>" >&2
+    return 2
+  end
+  set -l target (command gwm cd $argv)
+  or return $status
+  cd $target
+end
+"#;
+
+const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
+function gcd {
+  param([Parameter(Mandatory = $true)][string]$Pattern)
+  $target = & gwm cd $Pattern
+  if ($LASTEXITCODE -ne 0) { return }
+  Set-Location $target
+}
+"#;
 
 fn print_report(report: &bootstrap::BootstrapReport) {
   println!();
