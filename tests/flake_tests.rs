@@ -15,21 +15,37 @@ fn read_flake() -> String {
   })
 }
 
-#[test]
-fn flake_exists_at_repo_root() {
-  assert!(
-    flake_path().exists(),
-    "flake.nix must exist at the repo root"
-  );
+// True iff a line of `s` starts with exactly `indent` spaces, the field
+// `name`, and an `=`. Used to pin top-level flake fields without false-
+// matching on nested `meta.description = ...` (6+ space indent) or on the
+// `description` substring inside comments.
+fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
+  let prefix = format!("{}{} = ", " ".repeat(indent), name);
+  s.lines().any(|line| line.starts_with(&prefix))
 }
 
 #[test]
-fn flake_declares_inputs_outputs_and_description() {
+fn flake_exists_at_repo_root() {
+  assert!(flake_path().exists(), "flake.nix must exist at the repo root");
+}
+
+#[test]
+fn flake_declares_top_level_description_inputs_outputs() {
   let s = read_flake();
-  assert!(s.contains("description"), "flake must declare a `description`");
-  assert!(s.contains("inputs"), "flake must declare `inputs` (nixpkgs at minimum)");
-  assert!(s.contains("outputs"), "flake must declare `outputs`");
-  assert!(s.contains("nixpkgs"), "flake must reference the `nixpkgs` input");
+  assert!(
+    has_field_at_indent(&s, "description", 2),
+    "flake must declare a top-level `description = ...` (2-space indent — \
+     distinct from the derivation's nested `meta.description`)"
+  );
+  assert!(
+    has_field_at_indent(&s, "inputs", 2),
+    "flake must declare top-level `inputs = {{ ... }}`"
+  );
+  assert!(
+    has_field_at_indent(&s, "outputs", 2),
+    "flake must declare top-level `outputs = ...`"
+  );
+  assert!(s.contains("nixpkgs.url"), "flake must wire a `nixpkgs.url = ...` input");
 }
 
 #[test]
@@ -40,16 +56,17 @@ fn flake_exposes_gwm_package_via_build_rust_package() {
     "flake must build gwm via `rustPlatform.buildRustPackage` (vendored-libgit2 makes this straightforward)"
   );
   assert!(
-    s.contains("packages") && s.contains("gwm"),
-    "flake must expose `packages.<system>.gwm`"
+    s.contains("pname = \"gwm\""),
+    "the derivation must set `pname = \"gwm\";`"
   );
   assert!(
     s.contains("cargoLock") || s.contains("cargoHash") || s.contains("cargoSha256"),
     "flake must pin the Cargo lockfile (`cargoLock = {{ lockFile = ./Cargo.lock; }}`)"
   );
   assert!(
-    s.contains("default"),
-    "flake must alias `packages.<system>.default` to gwm"
+    s.contains("default = gwm;"),
+    "flake must alias `packages.<system>.default = gwm;` — \
+     a specific pattern that does not collide with `apps.default` / `devShells.default`"
   );
 }
 
@@ -57,8 +74,9 @@ fn flake_exposes_gwm_package_via_build_rust_package() {
 fn flake_exposes_runnable_app() {
   let s = read_flake();
   assert!(
-    s.contains("apps"),
-    "flake must expose `apps.<system>.gwm` so `nix run github:kbrdn1/gwm-cli` works"
+    s.contains("${gwm}/bin/gwm"),
+    "the gwm app must wire `program = \"${{gwm}}/bin/gwm\";` so \
+     `nix run github:kbrdn1/gwm-cli` resolves to the built binary"
   );
 }
 
@@ -66,8 +84,8 @@ fn flake_exposes_runnable_app() {
 fn flake_exposes_dev_shell_with_rust_toolchain() {
   let s = read_flake();
   assert!(
-    s.contains("devShells"),
-    "flake must expose `devShells.<system>.default` so contributors get `nix develop`"
+    s.contains("devShells.default = pkgs.mkShell"),
+    "flake must expose `devShells.<system>.default = pkgs.mkShell {{ ... }}`"
   );
   assert!(
     s.contains("rust-analyzer"),
