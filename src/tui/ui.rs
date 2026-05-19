@@ -46,7 +46,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   }
 
   match app.view {
-    View::Help => draw_help(f),
+    View::Help => draw_help(f, app),
     View::Create => draw_create(f, app),
     View::Confirm => draw_confirm(f, app),
     View::Report => draw_report(f, app),
@@ -98,11 +98,17 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   let title = format!(" gwm — {} ({}) ", app.repo_name, app.workdir.display());
-  let p = Paragraph::new(Line::from(vec![Span::styled(
-    title,
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-  )]))
-  .block(
+  let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
+  let mut spans = vec![Span::styled(title, title_style)];
+  // Picker mode flags the header so the user can never confuse a `gwm switch`
+  // session with the full TUI — the action keybindings are different.
+  if app.picker_mode {
+    spans.push(Span::styled(
+      "[picker] ",
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ));
+  }
+  let p = Paragraph::new(Line::from(spans)).block(
     Block::default()
       .borders(Borders::ALL)
       .border_style(Style::default().fg(Color::DarkGray)),
@@ -453,8 +459,13 @@ fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  let help =
-    "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit";
+  // Picker mode hides the mutating actions (n/d/b/p) — they're inert in the
+  // event loop, so advertising them would be a lie.
+  let help = if app.picker_mode {
+    "enter:select esc:cancel o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+  } else {
+    "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+  };
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
     Span::raw("  "),
@@ -463,11 +474,16 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
 }
 
-fn draw_help(f: &mut Frame) {
+fn draw_help(f: &mut Frame, app: &App) {
   let area = centered(60, 60, f.area());
-  let lines = vec![
+  let title_text = if app.picker_mode {
+    "gwm switch — keys"
+  } else {
+    "gwm — keys"
+  };
+  let mut lines = vec![
     Line::from(Span::styled(
-      "gwm — keys",
+      title_text,
       Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )),
     Line::from(""),
@@ -480,29 +496,43 @@ fn draw_help(f: &mut Frame) {
     Line::from("  k / ↑         prev (scrolls sidebar when focused)"),
     Line::from("  gg            jump to first worktree"),
     Line::from("  G             jump to last worktree"),
-    Line::from("  n             new worktree"),
-    Line::from("  d             delete selected"),
-    Line::from("  b             bootstrap selected"),
+  ];
+  if app.picker_mode {
+    lines.push(Line::from(
+      "  enter         select highlighted worktree (prints path on exit)",
+    ));
+  } else {
+    lines.push(Line::from("  n             new worktree"));
+    lines.push(Line::from("  d             delete selected"));
+    lines.push(Line::from("  b             bootstrap selected"));
+  }
+  lines.extend([
     Line::from("  o             open dir in OS file manager (open / xdg-open / explorer)"),
     Line::from("  l             launch lazygit fullscreen on selected worktree"),
     Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
     Line::from("  Tab           swap focus between worktree list and sidebar"),
     Line::from("  /             open fuzzy filter bar (enter: sticky, esc: clear)"),
     Line::from("  r             refresh"),
-    Line::from("  p             toggle 'delete branch on remove'"),
-    Line::from("  enter         show path in status bar"),
-    Line::from("  ?             this help"),
-    Line::from(""),
-    Line::from("create form"),
-    Line::from("  ↑/↓           change branch type"),
-    Line::from("  Tab/Shift-Tab next/prev field"),
-    Line::from("  Enter (desc)  submit"),
-    Line::from("  Esc           cancel"),
-    Line::from(""),
-    Line::from("confirm delete"),
-    Line::from("  y / Enter     confirm"),
-    Line::from("  n / Esc       cancel"),
-  ];
+  ]);
+  if !app.picker_mode {
+    lines.push(Line::from("  p             toggle 'delete branch on remove'"));
+    lines.push(Line::from("  enter         show path in status bar"));
+  }
+  lines.push(Line::from("  ?             this help"));
+  if !app.picker_mode {
+    lines.extend([
+      Line::from(""),
+      Line::from("create form"),
+      Line::from("  ↑/↓           change branch type"),
+      Line::from("  Tab/Shift-Tab next/prev field"),
+      Line::from("  Enter (desc)  submit"),
+      Line::from("  Esc           cancel"),
+      Line::from(""),
+      Line::from("confirm delete"),
+      Line::from("  y / Enter     confirm"),
+      Line::from("  n / Esc       cancel"),
+    ]);
+  }
   let block = Block::default()
     .borders(Borders::ALL)
     .title(" help ")

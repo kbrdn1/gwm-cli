@@ -70,6 +70,20 @@ pub struct App {
   // query, Enter confirms (sticky filter, focus returns to the list).
   pub filter_active: bool,
   pub filter_query: String,
+
+  // Picker mode (issue #22): `gwm switch` runs the TUI as a stripped-down
+  // picker. Create / delete / bootstrap keys are inert; Enter records the
+  // highlighted worktree path into `picker_result` and the event loop quits
+  // so the CLI caller can print the path on stdout for `cd "$(gwm switch)"`.
+  pub picker_mode: bool,
+  pub picker_result: Option<PathBuf>,
+  /// Event-loop exit signal for picker mode. Driven by `picker_confirm`
+  /// (only when a worktree is actually selected) and `picker_cancel` (Esc
+  /// from inside the filter bar, where a blanket `break` would clash with
+  /// the regular TUI's clear-filter behaviour). Keeps the loop running on
+  /// Enter-with-no-match so the user can back-space and refine the filter
+  /// instead of being kicked out with exit code 1.
+  pub picker_should_exit: bool,
 }
 
 impl App {
@@ -110,7 +124,23 @@ impl App {
       pending_g: false,
       filter_active: false,
       filter_query: String::new(),
+      picker_mode: false,
+      picker_result: None,
+      picker_should_exit: false,
     })
+  }
+
+  /// Constructor for `gwm switch`: same App, but picker mode is on and the
+  /// fuzzy filter bar is open from the first frame so the user can start
+  /// narrowing right away. Everything else (worktree list, sidebar, vim
+  /// motions) behaves identically; only the event-loop interpretation of
+  /// Enter / n / d / b changes.
+  pub fn new_picker_at(start: Option<&Path>) -> Result<Self> {
+    let mut app = Self::new_at(start)?;
+    app.picker_mode = true;
+    app.filter_active = true;
+    app.status = "switch picker — type to filter · enter selects · esc cancels".into();
+    Ok(app)
   }
 
   pub fn refresh(&mut self) -> Result<()> {
@@ -489,6 +519,45 @@ impl App {
   }
 
   // ---- Bootstrap flow ------------------------------------------------------
+
+  // ---- Picker mode (issue #22) --------------------------------------------
+
+  /// Commit the highlighted worktree as the picker's result. The event loop
+  /// breaks once `picker_should_exit` flips so `run_picker` can surface the
+  /// path to the CLI caller, which prints it on stdout for `cd "$(gwm
+  /// switch)"`.
+  ///
+  /// Outside picker mode the call is inert. When picker mode is on but
+  /// nothing is selected (e.g. the filter narrowed the list to zero
+  /// matches), the loop stays open and a status hint asks the user to
+  /// refine — addresses Copilot's PR #53 review: Enter on an empty match
+  /// set used to break with `None`, which read as "cancel" instead of
+  /// "nothing to pick".
+  pub fn picker_confirm(&mut self) {
+    if !self.picker_mode {
+      return;
+    }
+    match self.selected() {
+      Some(w) => {
+        self.picker_result = Some(w.path.clone());
+        self.picker_should_exit = true;
+      }
+      None => {
+        self.status = "no worktree selected — adjust the filter and try again".into();
+      }
+    }
+  }
+
+  /// Esc-equivalent for picker mode: leave without recording a path. The
+  /// regular TUI uses Esc to clear an active filter, which conflicts with
+  /// the picker footer's `esc:cancel` contract; this method exists so the
+  /// event loop can route Esc-during-filter to a clean picker cancel.
+  pub fn picker_cancel(&mut self) {
+    if !self.picker_mode {
+      return;
+    }
+    self.picker_should_exit = true;
+  }
 
   pub fn bootstrap_selected(&mut self) {
     let path = match self.selected() {
