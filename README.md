@@ -107,6 +107,8 @@ gwm list                                    # list all worktrees of the current 
 gwm list --format=names                     # one worktree name per line (for shell completion)
 gwm path auth                               # print the resolved path (use $(gwm path ...))
 gwm cd auth                                 # same — primitive for the `gcd` wrapper
+gwm switch                                  # interactive picker — prints chosen path on stdout
+gwm s                                       # short alias for `switch`
 gwm bootstrap                               # re-run bootstrap on the CWD worktree
 gwm bootstrap auth                          # ...or on a named one
 gwm remove auth                             # remove (fuzzy match) — keeps the branch
@@ -170,9 +172,21 @@ Then:
 
 ```bash
 gcd auth   # → cd $(gwm cd auth) → e.g. ~/cc-worktree/myrepo/feat-99-user-authentication
+gcd        # no arg → opens `gwm switch` and cd's into the picked worktree
 ```
 
-`gcd` propagates the exit code from `gwm cd` and never attempts the `cd` if the lookup failed (no match, ambiguous pattern, not in a git repo).
+`gcd` propagates the exit code from `gwm cd` (or `gwm switch`, when called without args) and never attempts the `cd` if the lookup / pick failed (no match, ambiguous pattern, cancelled picker, not in a git repo).
+
+### interactive picker (`gwm switch`)
+
+When you can't remember the exact pattern, `gwm switch` opens the worktree TUI in picker mode — same table, fuzzy filter bar pre-open, create / delete / bootstrap disabled. `Enter` confirms the highlighted row and prints its path on stdout; `Esc` / `q` / `Ctrl-C` cancels with exit code `1`.
+
+```bash
+cd "$(gwm switch)"   # open picker, type to narrow, Enter to commit
+gwm s                # same, via the alias
+```
+
+The shell wrapper installed by `gwm shell-init` makes this even quicker: bare `gcd` (no argument) invokes `gwm switch` and cd's into the chosen worktree in one keystroke.
 
 ### shell completions
 
