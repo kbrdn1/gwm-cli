@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet — next entries land here once a new feature / fix / chore is merged into `dev`._
+### Docs
+
+- `CLAUDE.md` + `CONTRIBUTING.md` §Releases — new "Step 0: reconcile open PRs" rule. Before any RC or stable cut, run `gh pr list --state open` and reconcile every open PR (in the changeset, intentionally deferred, or closed as stale). Codifies the lesson from the v0.3.0 cut, which shipped without three queued feature PRs (#51, #52, #53) and required an immediate v0.4.0 promotion 38 minutes later. Step 0 sits explicitly at the top of both the pre-release and stable-release procedures.
 
 ## Past releases
 
