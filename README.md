@@ -182,7 +182,14 @@ Checks performed:
 
 ### one-line cd into a worktree
 
-The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that wraps `gwm cd` — `eval` it in your rc file and use `gcd <pattern>` as a one-liner:
+The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that bridges two flows in one wrapper:
+
+- **`gcd <pattern>`** → `gwm cd <pattern>` (fuzzy resolve, exits `0` on a hit, `1` on miss / ambiguous / not in a repo).
+- **`gcd`** (no argument) → `gwm switch` (interactive picker — `Enter` to commit, `Esc` / `Ctrl-C` / `q` to cancel with exit code `1`).
+
+In both cases the wrapper only performs the `cd` after a successful exit code, so a cancelled picker or a missed pattern never strands you in `$HOME`.
+
+`eval` the wrapper in your rc file:
 
 ```bash
 # zsh
@@ -201,21 +208,19 @@ Then:
 
 ```bash
 gcd auth   # → cd $(gwm cd auth) → e.g. ~/cc-worktree/myrepo/feat-99-user-authentication
-gcd        # no arg → opens `gwm switch` and cd's into the picked worktree
+gcd        # → cd $(gwm switch)  → opens the picker, cd's into the chosen worktree
 ```
-
-`gcd` propagates the exit code from `gwm cd` (or `gwm switch`, when called without args) and never attempts the `cd` if the lookup / pick failed (no match, ambiguous pattern, cancelled picker, not in a git repo).
 
 ### interactive picker (`gwm switch`)
 
 When you can't remember the exact pattern, `gwm switch` opens the worktree TUI in picker mode — same table, fuzzy filter bar pre-open, create / delete / bootstrap disabled. `Enter` confirms the highlighted row and prints its path on stdout; `Esc` / `q` / `Ctrl-C` cancels with exit code `1`.
 
+The recommended invocation is via the `gcd` wrapper from [one-line cd into a worktree](#one-line-cd-into-a-worktree) — bare `gcd` (no argument) routes to `gwm switch` and cd's into the chosen worktree in one keystroke. If you haven't installed the wrapper, the raw form is:
+
 ```bash
 cd "$(gwm switch)"   # open picker, type to narrow, Enter to commit
 gwm s                # same, via the alias
 ```
-
-The shell wrapper installed by `gwm shell-init` makes this even quicker: bare `gcd` (no argument) invokes `gwm switch` and cd's into the chosen worktree in one keystroke.
 
 ### shell completions
 
@@ -350,13 +355,13 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 140 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 190 tests (config / naming / bootstrap / doctor / flake / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 140 tests
+cargo test               # 190 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
@@ -376,10 +381,18 @@ tests/
 ├── config_tests.rs               # .gwm.toml parsing + write_default
 ├── naming_tests.rs               # kebab, branch validation, parse roundtrip
 ├── bootstrap_tests.rs            # copies / guards / no-symlink / commands
+├── bootstrap_when_tests.rs       # `when:` predicate grammar (file/cmd/env/glob + boolean ops)
+├── doctor_tests.rs               # `gwm doctor` checks + severity arithmetic
+├── flake_tests.rs                # Nix flake structure (build, devShell, app)
 ├── worktree_integration.rs       # git2 add/list/remove/prune
 ├── tui_app_tests.rs              # state transitions (ratatui-free)
 └── cli_binary.rs                 # assert_cmd end-to-end
 ```
+
+Sentinel tests (pinned to catch a specific regression) are prefixed with a
+`// regression: <one-line>` tag inside the test body so the target incident
+is discoverable without `git blame`. Suite hygiene was last audited in
+[`claudedocs/test-audit-0.4.0.md`](claudedocs/test-audit-0.4.0.md).
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / commit / PR conventions.
 
