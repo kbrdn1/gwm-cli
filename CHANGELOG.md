@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gwm shell-init <bash|zsh|fish|powershell>` — prints a shell wrapper defining `gcd <pattern>` (the function does the actual `cd`, since the binary can't change the parent shell's directory). One-liner install: `eval "$(gwm shell-init zsh)"` in your rc file → `gcd auth` jumps to the matching worktree. The bash/zsh and PowerShell variants `unalias gcd` first so the function takes effect even if the shell already had a `gcd` alias (e.g. oh-my-zsh's `gcd=git checkout`). Closes #19.
 - `gwm doctor` — diagnose the gwm setup. Aggregates 7 cheap checks (`.gwm.toml` parses, guard references resolve, `when` predicates supported, external binaries on PATH, no prunable worktrees, no orphan gwm branches, base directory writable) and reports each with `✓ / ! / ✗`. Exit code `0` (all green), `1` (any warning), `2` (any failure) — wirable into CI / pre-commit. New `src/doctor.rs` module exposing `DoctorReport` / `Check` / `Severity` / `DoctorCtx` for library users. Closes #20.
 
+### Changed
+
+- `gwm doctor` no longer flags gwm-style branches as orphan when they're already fully merged into one of the trunk branches (`dev`, `main`). CONTRIBUTING.md mandates preserving the source branch post-merge, so the previous behaviour produced N false-positives on every successful release. The Ok detail now reads e.g. `7 merged gwm-style branch(es) preserved per CONTRIBUTING, no unmerged orphans`. Genuine WIP branches (no worktree, no merge into a trunk) still surface as Warning. Closes #47.
+
 ### Docs
 
 - `CLAUDE.md` (new, repo root) — house rules for AI-assisted contributions. Promotes **TDD as the primordial contribution rule** (red → green → refactor, mandatory failing test before production code).
