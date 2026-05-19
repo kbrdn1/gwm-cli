@@ -256,7 +256,7 @@ fn run_commands(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Boots
   for step in &bs.command {
     let label = format!("run {}", step.name);
     if let Some(ref guard) = step.when {
-      if !check_when(guard, ctx.worktree) {
+      if !evaluate_when(guard, ctx.worktree) {
         report.steps.push(StepResult {
           label,
           status: StepStatus::Skipped,
@@ -280,11 +280,13 @@ fn run_commands(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Boots
   }
 }
 
-fn check_when(expr: &str, cwd: &Path) -> bool {
+/// Evaluate a `[[bootstrap.command]].when` expression against the given
+/// worktree. Unknown predicates default to `true` so configs we don't
+/// understand still run (the doctor surfaces them as a warning).
+pub fn evaluate_when(expr: &str, cwd: &Path) -> bool {
   if let Some(rest) = expr.strip_prefix("file_exists:") {
     return cwd.join(rest.trim()).exists();
   }
-  // Unknown predicates default to true (so configs that we don't understand still run).
   true
 }
 
