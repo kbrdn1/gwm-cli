@@ -15,16 +15,20 @@ fn help_prints_subcommands() {
   // names with two leading spaces and at least two trailing spaces before
   // the description. A loose `contains("cd")` would also match prose like
   // "to cd into it" in another subcommand's description.
+  // `cd` is now a visible alias of `path` (clap renders it as
+  // `path  ...  [aliases: cd]`), so we assert the alias marker
+  // rather than a separate `  cd ` row.
   cmd
     .assert()
     .success()
     .stdout(predicate::str::contains("  init "))
     .stdout(predicate::str::contains("  list "))
     .stdout(predicate::str::contains("  create "))
+    .stdout(predicate::str::contains("  path "))
+    .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
     .stdout(predicate::str::contains("  prune "))
     .stdout(predicate::str::contains("  completions "))
-    .stdout(predicate::str::contains("  cd "))
     .stdout(predicate::str::contains("  shell-init "))
     .stdout(predicate::str::contains("  doctor "));
 }
