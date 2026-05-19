@@ -253,7 +253,7 @@ When `dev` is ready to be exercised by early adopters before promotion:
 Once the rc is validated and promoted to `main`:
 
 1. Update `Cargo.toml` `version`.
-2. Move `## [Unreleased]` entries into a dated section in `CHANGELOG.md`.
+2. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
 3. Merge `dev` → `main` (regular merge, never squash; see [Merge strategy](#merge-strategy)).
 4. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
 5. GitHub Actions (`release.yml`) builds binaries and publishes the stable release.
