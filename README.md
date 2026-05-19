@@ -16,7 +16,7 @@ Born as a rewrite of a project-specific `tools/worktree-manager.sh` script — t
 - **Per-repo config** in `.gwm.toml`: branch / path conventions, file copies, regex guards, shell hooks, no-symlink invariants.
 - **Branch convention**: `<type>/#<issue>-<description>` by default (`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`). Overridable per repo.
 - **Safety guards**: deny-list regexes on copied files (e.g. refuse to inherit a `.env` pointing at AWS RDS). Pluggable actions: `abort` or `seed-from-example`.
-- **Bootstrap hooks**: shell commands gated by `file_exists:` predicates and arbitrary `env` injection.
+- **Bootstrap hooks**: shell commands gated by composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`, with `!`, `&&`, `||`) and arbitrary `env` injection.
 - **Fuzzy lookup**: `gwm remove auth` matches `feat-123-user-authentication` if unambiguous.
 - **Branch status column**: dirty / clean / `↑N ↓M` vs upstream, color-coded in TUI and CLI output.
 
@@ -143,7 +143,7 @@ Checks performed:
 
 1. **`.gwm.toml` parses** — Ok if it parses (or absent, defaults assumed); Failed if the TOML is broken.
 2. **guard references resolve** — every `[[bootstrap.copy]].guards = [...]` points at an existing `[[bootstrap.guard]]`.
-3. **`when` predicates supported** — every `[[bootstrap.command]].when` uses a known keyword prefix (currently only `file_exists:`).
+3. **`when` predicates supported** — every `[[bootstrap.command]].when` uses one of the known keyword prefixes (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`). Boolean composition via `!`, `&&`, `||` (precedence `!` > `&&` > `||`) is allowed inside the expression.
 4. **external binaries on PATH** — `lazygit` (TUI `l` keybinding), `direnv` (only if `.envrc` exists), and the first executable token of every `[[bootstrap.command]].run`.
 5. **no prunable worktrees** — `.git/worktrees/` entries whose working dir was removed manually.
 6. **no orphan gwm branches** — local branches matching `<type>/#<issue>-<desc>` (created by `gwm create`) with no worktree. User-managed branches (`main`, `release-*`, `dependabot/...`) are ignored.
@@ -252,7 +252,36 @@ name = "composer install"
 run  = "composer install --no-interaction --prefer-dist"
 when = "file_exists:composer.json"
 env  = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
+
+# composable when predicates: pick `bun install` if bun is on PATH,
+# fall back to `npm ci` otherwise, and skip the noisy step in CI.
+[[bootstrap.command]]
+name = "install (bun)"
+run  = "bun install"
+when = "file_exists:package.json && cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "install (npm fallback)"
+run  = "npm ci"
+when = "file_exists:package.json && !cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "build docs"
+run  = "./scripts/full-build.sh"
+when = "glob_exists:docs/**/*.md && !env_set:CI"
 ```
+
+`when` predicates recognised by the evaluator:
+
+| Predicate                    | True when …                                                  |
+|:-----------------------------|:-------------------------------------------------------------|
+| `file_exists:<path>`         | `<worktree>/<path>` resolves on disk                          |
+| `cmd_exists:<binary>`        | `<binary>` resolves on `$PATH` (`which` lookup)              |
+| `env_set:<NAME>`             | `std::env::var(NAME)` returns `Ok`                            |
+| `env_eq:<NAME>=<value>`      | `NAME` is set and its value matches `<value>` exactly         |
+| `glob_exists:<pattern>`      | at least one path under the worktree matches `<pattern>` (supports `**`) |
+
+Combine atoms with `!` (NOT), `&&` (AND), `||` (OR), conventional precedence `!` > `&&` > `||`. Whitespace around operators is tolerated. Unknown keywords default to `true` so old configs keep running while `gwm doctor` surfaces them.
 
 Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde (`~/...`) is also expanded.
 
