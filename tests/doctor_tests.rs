@@ -408,9 +408,14 @@ fn merged_gwm_branch_is_not_flagged_as_orphan() {
   // So a branch fully merged into a trunk (`dev` or `main`) is preserved
   // on purpose — flagging it would be noise on every doctor run. The
   // doctor must filter it out.
+  //
+  // This test exercises the *equality* short-circuit: the branch tip is
+  // the same commit as main's tip. See
+  // `merged_via_merge_commit_gwm_branch_is_not_flagged_as_orphan` for the
+  // descendant-of case, which is what every real "merge commit" flow
+  // produces.
   let (dir, repo) = init_repo();
   let head = repo.head().unwrap().peel_to_commit().unwrap();
-  // Branch points at the same commit as main — fully merged by definition.
   repo.branch("feat/#99-already-merged", &head, false).unwrap();
 
   let config = Config::default();
@@ -420,6 +425,53 @@ fn merged_gwm_branch_is_not_flagged_as_orphan() {
   assert!(
     !c.detail.contains("feat/#99-already-merged"),
     "merged branch must not appear in the orphan list, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn merged_via_merge_commit_gwm_branch_is_not_flagged_as_orphan() {
+  // The realistic case: a feature branch had its own commit, then a
+  // merge commit on `main` joined it back. After that, `main`'s tip is
+  // a descendant of the feature tip, but they're NOT equal. The
+  // equality short-circuit alone would miss this; the descendant check
+  // (`graph_descendant_of`) is what catches it.
+  let (dir, repo) = init_repo();
+  let main_initial = repo.head().unwrap().peel_to_commit().unwrap();
+  let sig = git2::Signature::now("test", "test@test").unwrap();
+  let tree = main_initial.tree().unwrap();
+
+  // Feature branch with its own commit, not on main yet.
+  let feature_oid = repo
+    .commit(None, &sig, &sig, "feature work", &tree, &[&main_initial])
+    .unwrap();
+  let feature_commit = repo.find_commit(feature_oid).unwrap();
+  repo
+    .branch("feat/#88-merged-via-merge", &feature_commit, false)
+    .unwrap();
+
+  // Merge commit on main combining the initial commit and the feature.
+  // Main now points at a commit that has the feature tip as one of its
+  // parents — `graph_descendant_of(main_tip, feature_tip) == true`,
+  // but `main_tip != feature_tip`.
+  repo
+    .commit(
+      Some("refs/heads/main"),
+      &sig,
+      &sig,
+      "merge feat/#88",
+      &tree,
+      &[&main_initial, &feature_commit],
+    )
+    .unwrap();
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    !c.detail.contains("feat/#88-merged-via-merge"),
+    "branch merged via a merge commit must not appear in the orphan list, got: {}",
     c.detail
   );
 }

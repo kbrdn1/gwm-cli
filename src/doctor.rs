@@ -397,9 +397,25 @@ fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
     let Some(branch_oid) = branch.get().target() else {
       continue;
     };
-    if is_merged_into_any(ctx.repo, branch_oid, &trunk_oids) {
-      merged_count += 1;
-      continue; // preserved on purpose per CONTRIBUTING — not flagged
+    match is_merged_into_any(ctx.repo, branch_oid, &trunk_oids) {
+      Ok(true) => {
+        merged_count += 1;
+        continue; // preserved on purpose per CONTRIBUTING — not flagged
+      }
+      Ok(false) => {
+        // Real orphan — fall through.
+      }
+      Err(e) => {
+        // libgit2 couldn't walk the graph (missing objects, shallow
+        // clone, repo corruption). Surface this loudly: silently
+        // assuming "not merged" and recommending `git branch -d` would
+        // be actively dangerous.
+        return Check::failed(
+          name,
+          format!("could not determine merge status for {}: {}", branch_name, e),
+        )
+        .with_hint("check the repository integrity (`git fsck`) or re-fetch missing objects");
+      }
     }
     orphans.push(branch_name.to_string());
   }
@@ -424,14 +440,28 @@ fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
   .with_hint(suggestions.join(" && "))
 }
 
-/// Returns `true` iff `branch_oid` is fully reachable from at least one
-/// of `trunks` — i.e. the branch is merged into one of the trunks (or
-/// is equal to it). Implemented via libgit2's descendant check: trunk is
-/// a descendant of the branch iff the branch is reachable from trunk.
-fn is_merged_into_any(repo: &git2::Repository, branch_oid: git2::Oid, trunks: &[git2::Oid]) -> bool {
-  trunks
-    .iter()
-    .any(|trunk_oid| *trunk_oid == branch_oid || repo.graph_descendant_of(*trunk_oid, branch_oid).unwrap_or(false))
+/// Returns `Ok(true)` iff `branch_oid` is fully reachable from at least
+/// one of `trunks` — i.e. the branch is merged into one of the trunks
+/// (or is equal to it). Implemented via libgit2's descendant check:
+/// trunk is a descendant of the branch iff the branch is reachable
+/// from trunk. Propagates `git2::Error` so callers can distinguish
+/// "definitively unmerged" from "could not tell" — silently swallowing
+/// the error would let a misclassification lead to a destructive
+/// `git branch -d` suggestion.
+fn is_merged_into_any(
+  repo: &git2::Repository,
+  branch_oid: git2::Oid,
+  trunks: &[git2::Oid],
+) -> std::result::Result<bool, git2::Error> {
+  for trunk_oid in trunks {
+    if *trunk_oid == branch_oid {
+      return Ok(true);
+    }
+    if repo.graph_descendant_of(*trunk_oid, branch_oid)? {
+      return Ok(true);
+    }
+  }
+  Ok(false)
 }
 
 /// Probe a directory for write access by creating and deleting a sentinel
