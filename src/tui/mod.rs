@@ -48,13 +48,33 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
     }
 
     match app.view {
+      // When the inline filter bar is open, capture every key as filter input
+      // so the user can type a query containing `q`, `?`, `/`, etc. The only
+      // ways out are Enter (sticky filter) or Esc (clear filter).
+      View::List if app.filter_active => match key.code {
+        KeyCode::Esc => app.exit_filter_cancel(),
+        KeyCode::Enter => app.exit_filter_keep(),
+        KeyCode::Backspace => app.filter_pop_char(),
+        KeyCode::Char(c) => app.filter_push_char(c),
+        _ => {}
+      },
       View::List => {
         // Two-keystroke vim motion `gg`: any non-'g' keypress disarms it.
         if !matches!(key.code, KeyCode::Char('g')) {
           app.cancel_pending_motion();
         }
         match key.code {
-          KeyCode::Char('q') | KeyCode::Esc => break,
+          KeyCode::Char('q') => break,
+          // Esc on the list clears a sticky filter first, then quits if the
+          // list is already in its plain state. Avoids the trap where a user
+          // hits Esc expecting to clear /-filter and accidentally exits.
+          KeyCode::Esc => {
+            if !app.filter_query.is_empty() {
+              app.exit_filter_cancel();
+            } else {
+              break;
+            }
+          }
           KeyCode::Char('?') => app.view = View::Help,
           KeyCode::Char('j') | KeyCode::Down => app.next(),
           KeyCode::Char('k') | KeyCode::Up => app.prev(),
@@ -62,6 +82,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
           KeyCode::Char('G') => app.last(),
           KeyCode::Char('v') => app.toggle_sidebar(),
           KeyCode::Tab => app.toggle_focus(),
+          KeyCode::Char('/') => app.enter_filter(),
           KeyCode::Char('l') => {
             if let Some(path) = app.launch_lazygit() {
               run_lazygit(terminal, &path, &mut app)?;

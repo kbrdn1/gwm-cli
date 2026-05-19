@@ -3,6 +3,24 @@ mod common;
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
 use gwm::tui::{App, Field, View};
+use gwm::worktree::{BranchStatus, WorktreeInfo};
+use std::path::PathBuf;
+
+/// Build a synthetic worktree row for state-machine tests that need a known
+/// list shape (fuzzy filter ranking, multi-row navigation). Lets the test
+/// drive the filter without going through real `git2::worktree_add` calls.
+fn worktree_fixture(name: &str) -> WorktreeInfo {
+  WorktreeInfo {
+    name: name.into(),
+    path: PathBuf::from(format!("/tmp/gwm-test/{}", name)),
+    branch: Some(format!("feat/#0-{}", name)),
+    head: None,
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: BranchStatus::default(),
+  }
+}
 
 fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
@@ -270,4 +288,324 @@ fn refresh_invalidates_sidebar_cache() {
   app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
   app.refresh().unwrap();
   assert!(app.sidebar_cache.is_none());
+}
+
+// ---- fuzzy filter (issue #21) -------------------------------------------
+
+#[test]
+fn filter_state_defaults_to_inactive_and_empty() {
+  let (_dir, app) = make_app();
+  assert!(!app.filter_active, "filter must default to inactive");
+  assert!(app.filter_query.is_empty(), "filter query must default to empty");
+}
+
+#[test]
+fn enter_filter_activates_capture_and_disarms_gg() {
+  let (_dir, mut app) = make_app();
+  app.handle_g(); // arm `gg`
+  assert!(app.pending_g);
+
+  app.enter_filter();
+  assert!(app.filter_active);
+  assert!(
+    !app.pending_g,
+    "opening the filter bar must drop any half-typed gg motion"
+  );
+}
+
+#[test]
+fn enter_filter_drops_sidebar_focus() {
+  // Regression for the Copilot review on PR #44: if the sidebar held focus
+  // when the user hit `/`, after `exit_filter_keep` (Enter) the focus would
+  // still be on the sidebar, so `j` / `k` would scroll it instead of walking
+  // the filtered worktrees — contradicting the documented "navigation
+  // returns to the table" contract. Opening the filter bar must therefore
+  // pre-emptively pull focus back to the list.
+  let (_dir, mut app) = make_app();
+  app.sidebar_open = true;
+  app.sidebar_focused = true;
+
+  app.enter_filter();
+  assert!(
+    !app.sidebar_focused,
+    "opening the filter bar must hand focus back to the list"
+  );
+}
+
+#[test]
+fn enter_filter_preserves_existing_query() {
+  // Hitting `/` on a sticky filter re-opens the bar so the user can refine
+  // it; only Esc clears.
+  let (_dir, mut app) = make_app();
+  app.filter_query = "auth".into();
+  app.enter_filter();
+  assert_eq!(app.filter_query, "auth");
+  assert!(app.filter_active);
+}
+
+#[test]
+fn filter_push_char_appends_to_query() {
+  let (_dir, mut app) = make_app();
+  app.enter_filter();
+  for c in "tui".chars() {
+    app.filter_push_char(c);
+  }
+  assert_eq!(app.filter_query, "tui");
+}
+
+#[test]
+fn filter_pop_char_removes_last_char() {
+  let (_dir, mut app) = make_app();
+  app.enter_filter();
+  app.filter_query = "tuix".into();
+  app.filter_pop_char();
+  assert_eq!(app.filter_query, "tui");
+}
+
+#[test]
+fn filter_pop_char_on_empty_is_noop() {
+  let (_dir, mut app) = make_app();
+  app.enter_filter();
+  app.filter_pop_char();
+  assert_eq!(app.filter_query, "");
+  assert!(app.filter_active, "popping an empty query must not exit filter mode");
+}
+
+#[test]
+fn exit_filter_keep_disables_capture_keeps_query() {
+  // Enter behaviour: filter sticks, navigation returns to the list.
+  let (_dir, mut app) = make_app();
+  app.enter_filter();
+  app.filter_query = "auth".into();
+  app.exit_filter_keep();
+  assert!(!app.filter_active);
+  assert_eq!(app.filter_query, "auth", "Enter must not wipe the query");
+}
+
+#[test]
+fn exit_filter_cancel_clears_query() {
+  // Esc behaviour: full list back, query gone.
+  let (_dir, mut app) = make_app();
+  app.enter_filter();
+  app.filter_query = "auth".into();
+  app.exit_filter_cancel();
+  assert!(!app.filter_active);
+  assert!(app.filter_query.is_empty(), "Esc must clear the query");
+}
+
+#[test]
+fn filtered_indices_returns_all_when_query_empty() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),
+    worktree_fixture("beta"),
+    worktree_fixture("gamma"),
+  ];
+  let idx = app.filtered_indices();
+  assert_eq!(idx, vec![0, 1, 2], "empty query is the identity over worktrees");
+}
+
+#[test]
+fn filtered_indices_keeps_only_matching_worktrees() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("feat-1-tui-search"),
+    worktree_fixture("feat-2-cli-completions"),
+    worktree_fixture("fix-3-locked-worktree"),
+  ];
+  app.filter_query = "tui".into();
+
+  let idx = app.filtered_indices();
+  let names: Vec<&str> = idx.iter().map(|&i| app.worktrees[i].name.as_str()).collect();
+  assert_eq!(
+    names,
+    vec!["feat-1-tui-search"],
+    "only the worktree whose name contains 'tui' should match"
+  );
+}
+
+#[test]
+fn filtered_indices_supports_subsequence_match() {
+  // The candidate must NOT contain the query as a contiguous substring —
+  // otherwise a regression that downgrades the fuzzy matcher to plain
+  // substring matching would still pass. Spread the query characters across
+  // the haystack so only the subsequence path can score it.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    // 'a'-'u'-'t'-'h' appear in order but separated by other characters;
+    // there is no literal `auth` substring anywhere in this name.
+    worktree_fixture("a-foo-u-bar-t-baz-h-qux"),
+    worktree_fixture("chore-1-bump-deps"),
+  ];
+  app.filter_query = "auth".into();
+  // Sanity-guard the precondition: if a future refactor introduces an `auth`
+  // substring into the fixture, the test would silently degrade to a
+  // substring check again.
+  assert!(
+    !app.worktrees[0].name.contains("auth"),
+    "fixture must not contain 'auth' as a substring or the test stops covering subsequence"
+  );
+
+  let idx = app.filtered_indices();
+  assert_eq!(idx.len(), 1);
+  assert_eq!(app.worktrees[idx[0]].name, "a-foo-u-bar-t-baz-h-qux");
+}
+
+#[test]
+fn filtered_indices_ranks_substring_above_subsequence() {
+  // Issue #21 contract: "exact substring match > prefix match > sub-sequence
+  // match". Verify by feeding a candidate that contains the literal needle
+  // and another that only matches via gaps; the contiguous one must rank
+  // first in the returned index list.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    // subsequence: a-u-t-h spread out across the name
+    worktree_fixture("a-zzz-u-yyy-t-xxx-h"),
+    // direct substring of "auth"
+    worktree_fixture("auth-service"),
+  ];
+  app.filter_query = "auth".into();
+
+  let idx = app.filtered_indices();
+  assert!(!idx.is_empty(), "at least the substring candidate must match");
+  assert_eq!(
+    app.worktrees[idx[0]].name, "auth-service",
+    "contiguous substring must outrank a spread subsequence"
+  );
+}
+
+#[test]
+fn filtered_indices_skips_when_no_match() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
+  app.filter_query = "zzzz".into();
+  assert!(app.filtered_indices().is_empty());
+}
+
+#[test]
+fn selected_returns_filtered_worktree() {
+  // `selected()` must resolve the table state's index through the filter map
+  // back to the underlying worktree, not blindly index into `worktrees`.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),
+    worktree_fixture("authentication"),
+    worktree_fixture("beta"),
+  ];
+  app.filter_query = "auth".into();
+  app.list_state.select(Some(0));
+
+  let sel = app.selected().expect("filtered selection must resolve");
+  assert_eq!(sel.name, "authentication");
+}
+
+#[test]
+fn selected_returns_none_when_filter_matches_nothing() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
+  app.filter_query = "zzzz".into();
+  app.list_state.select(Some(0));
+  assert!(app.selected().is_none());
+}
+
+#[test]
+fn next_navigates_within_filtered_subset_and_wraps() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),
+    worktree_fixture("foo-a"),
+    worktree_fixture("foo-b"),
+  ];
+  app.filter_query = "foo".into();
+  app.list_state.select(Some(0));
+
+  app.next();
+  assert_eq!(app.list_state.selected(), Some(1));
+  app.next();
+  assert_eq!(
+    app.list_state.selected(),
+    Some(0),
+    "wrap-around to start of filtered subset"
+  );
+}
+
+#[test]
+fn prev_navigates_within_filtered_subset_and_wraps() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),
+    worktree_fixture("foo-a"),
+    worktree_fixture("foo-b"),
+  ];
+  app.filter_query = "foo".into();
+  app.list_state.select(Some(0));
+
+  app.prev();
+  assert_eq!(app.list_state.selected(), Some(1), "wrap-around backwards");
+}
+
+#[test]
+fn first_and_last_jump_inside_filtered_subset() {
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),
+    worktree_fixture("foo-1"),
+    worktree_fixture("beta"),
+    worktree_fixture("foo-2"),
+    worktree_fixture("gamma"),
+  ];
+  app.filter_query = "foo".into();
+  app.list_state.select(Some(1));
+
+  app.first();
+  assert_eq!(app.list_state.selected(), Some(0));
+  app.last();
+  assert_eq!(
+    app.list_state.selected(),
+    Some(1),
+    "last must use the filtered length (2 matches → index 1)"
+  );
+}
+
+#[test]
+fn filter_push_clamps_selection_when_subset_shrinks() {
+  // User starts on the second match, then types more so only the first stays;
+  // selection must clamp instead of dangling past the new end.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("foo-bar"), worktree_fixture("foo-baz-xx")];
+  app.filter_query = "foo".into();
+  app.list_state.select(Some(1));
+
+  // Typing more reduces the match set to just "foo-bar".
+  for c in "-bar".chars() {
+    app.filter_push_char(c);
+  }
+  let filtered = app.filtered_indices();
+  assert_eq!(filtered.len(), 1, "only foo-bar should still match foo-bar");
+  assert_eq!(
+    app.list_state.selected(),
+    Some(0),
+    "selection must clamp to inside the new filtered subset"
+  );
+}
+
+#[test]
+fn exit_filter_cancel_restores_full_list_selection() {
+  // After clearing the filter, the original full list comes back and a
+  // selection past the filtered len must remain valid for the larger set.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),
+    worktree_fixture("foo"),
+    worktree_fixture("beta"),
+  ];
+  app.filter_query = "foo".into();
+  app.list_state.select(Some(0));
+
+  app.exit_filter_cancel();
+  assert!(app.filter_query.is_empty());
+  assert_eq!(app.filtered_indices(), vec![0, 1, 2]);
+  // Selection from the filtered view (index 0) remains a valid index in the
+  // full list (index 0). The clamp logic doesn't move it forward, only back.
+  assert_eq!(app.list_state.selected(), Some(0));
 }
