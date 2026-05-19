@@ -3,7 +3,9 @@ use crate::config::Config;
 use crate::error::{GwmError, Result};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{generate, Shell};
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -13,12 +15,24 @@ pub struct Cli {
   pub command: Option<Command>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ListFormat {
+  /// Human-readable table (default).
+  Table,
+  /// One worktree name per line — suitable for shell completion.
+  Names,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
   /// Write a default .gwm.toml to the current repo.
   Init,
   /// List worktrees in the current repo.
-  List,
+  List {
+    /// Output format. `names` prints one worktree name per line (for shell completion).
+    #[arg(long, value_enum, default_value_t = ListFormat::Table)]
+    format: ListFormat,
+  },
   /// Create a new worktree (and matching branch).
   Create {
     /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
@@ -52,6 +66,16 @@ pub enum Command {
   Prune,
   /// List the supported branch types.
   Types,
+  /// Generate a shell completion script on stdout.
+  ///
+  /// Install (zsh):  `gwm completions zsh > $fpath[1]/_gwm`
+  /// Install (bash): `gwm completions bash > /etc/bash_completion.d/gwm`
+  /// Install (fish): `gwm completions fish > ~/.config/fish/completions/gwm.fish`
+  Completions {
+    /// Target shell.
+    #[arg(value_enum)]
+    shell: Shell,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -62,7 +86,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
   match cmd {
     Command::Init => cmd_init(),
-    Command::List => cmd_list(),
+    Command::List { format } => cmd_list(format),
     Command::Create {
       branch_type,
       issue,
@@ -74,6 +98,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Bootstrap { target } => cmd_bootstrap(target),
     Command::Prune => cmd_prune(),
     Command::Types => cmd_types(),
+    Command::Completions { shell } => cmd_completions(shell),
   }
 }
 
@@ -85,9 +110,16 @@ fn cmd_init() -> Result<()> {
   Ok(())
 }
 
-fn cmd_list() -> Result<()> {
+fn cmd_list(format: ListFormat) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
+
+  if format == ListFormat::Names {
+    for w in &trees {
+      println!("{}", w.name);
+    }
+    return Ok(());
+  }
 
   // Dynamic widths based on observed content.
   let name_w = trees.iter().map(|w| w.name.len()).max().unwrap_or(4).clamp(4, 40);
@@ -250,6 +282,13 @@ fn cmd_types() -> Result<()> {
   for (t, d) in BRANCH_TYPES {
     println!("  {:<10} {}", t, d);
   }
+  Ok(())
+}
+
+fn cmd_completions(shell: Shell) -> Result<()> {
+  let mut cmd = Cli::command();
+  let name = cmd.get_name().to_string();
+  generate(shell, &mut cmd, name, &mut io::stdout());
   Ok(())
 }
 
