@@ -157,7 +157,10 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
   for copy in &bs.copy {
     for guard_name in &copy.guards {
       if ctx.config.guard_by_name(guard_name).is_none() {
-        dangling.push(format!("{} (referenced from copy {} -> {})", guard_name, copy.from, copy.to));
+        dangling.push(format!(
+          "{} (referenced from copy {} -> {})",
+          guard_name, copy.from, copy.to
+        ));
       }
     }
   }
@@ -191,7 +194,10 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   }
 
   if unknown.is_empty() {
-    return Check::ok(name, format!("{} predicate(s) recognised", SUPPORTED_WHEN_PREFIXES.len().max(1)));
+    return Check::ok(
+      name,
+      format!("{} predicate(s) recognised", SUPPORTED_WHEN_PREFIXES.len().max(1)),
+    );
   }
 
   Check::failed(name, format!("unknown `when` predicate(s): {}", unknown.join("; ")))
@@ -203,12 +209,7 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
 /// and returns the first token that isn't `KEY=VAL`. Returns `None` for
 /// empty strings.
 fn extract_binary(run: &str) -> Option<&str> {
-  for token in run.split_whitespace() {
-    if !token.contains('=') {
-      return Some(token);
-    }
-  }
-  None
+  run.split_whitespace().find(|t| !t.contains('='))
 }
 
 /// Check #4: every binary referenced by the bootstrap commands resolves on
@@ -278,19 +279,31 @@ fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
   // Base doesn't exist yet — gwm will create it. Check the parent instead.
   let parent = match base.parent() {
     Some(p) if !p.as_os_str().is_empty() => p,
-    _ => return Check::ok(name, format!("{} will be created on first `gwm create`", base.display())),
+    _ => {
+      return Check::ok(
+        name,
+        format!("{} will be created on first `gwm create`", base.display()),
+      )
+    }
   };
   if !parent.exists() {
     return Check::warning(
       name,
-      format!("neither {} nor its parent {} exists yet", base.display(), parent.display()),
+      format!(
+        "neither {} nor its parent {} exists yet",
+        base.display(),
+        parent.display()
+      ),
     )
     .with_hint("create the parent directory, or pick a different `[worktree].base`");
   }
   if is_writable_dir(parent) {
     Check::ok(
       name,
-      format!("{} will be created on first `gwm create` (parent writable)", base.display()),
+      format!(
+        "{} will be created on first `gwm create` (parent writable)",
+        base.display()
+      ),
     )
   } else {
     Check::failed(name, format!("parent {} is not writable", parent.display()))
@@ -314,8 +327,11 @@ fn check_prunable_worktrees(ctx: &DoctorCtx<'_>) -> Check {
     return Check::ok(name, format!("{} worktree(s) tracked, none prunable", trees.len()));
   }
 
-  Check::warning(name, format!("{} prunable entrie(s): {}", prunable.len(), prunable.join(", ")))
-    .with_hint("run `gwm prune` to clear them")
+  Check::warning(
+    name,
+    format!("{} prunable entrie(s): {}", prunable.len(), prunable.join(", ")),
+  )
+  .with_hint("run `gwm prune` to clear them")
 }
 
 /// Check #6: every local branch matching the `<type>/#<issue>-<desc>`
@@ -353,8 +369,11 @@ fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
   }
 
   let suggestions: Vec<String> = orphans.iter().map(|b| format!("git branch -d {}", b)).collect();
-  Check::warning(name, format!("{} orphan branch(es): {}", orphans.len(), orphans.join(", ")))
-    .with_hint(suggestions.join(" && "))
+  Check::warning(
+    name,
+    format!("{} orphan branch(es): {}", orphans.len(), orphans.join(", ")),
+  )
+  .with_hint(suggestions.join(" && "))
 }
 
 /// Probe a directory for write access by creating and deleting a sentinel

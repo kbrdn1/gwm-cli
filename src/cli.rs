@@ -319,7 +319,11 @@ fn cmd_doctor() -> Result<()> {
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let config = Config::load_for_repo(&workdir).unwrap_or_default();
 
-  let ctx = DoctorCtx { repo_workdir: &workdir, repo: &repo, config: &config };
+  let ctx = DoctorCtx {
+    repo_workdir: &workdir,
+    repo: &repo,
+    config: &config,
+  };
   let report = doctor::run(&ctx)?;
   print_doctor_report(&report);
 

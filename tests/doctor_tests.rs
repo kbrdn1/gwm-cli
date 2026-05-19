@@ -7,7 +7,11 @@ use gwm::config::Config;
 use gwm::doctor::{self, CheckStatus, DoctorCtx, Severity};
 
 fn ctx_for<'a>(repo: &'a git2::Repository, workdir: &'a std::path::Path, config: &'a Config) -> DoctorCtx<'a> {
-  DoctorCtx { repo_workdir: workdir, repo, config }
+  DoctorCtx {
+    repo_workdir: workdir,
+    repo,
+    config,
+  }
 }
 
 #[test]
