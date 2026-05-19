@@ -525,6 +525,39 @@ fn zellij_outside_git_repo_fails() {
     .stderr(predicate::str::contains("not inside a git repository"));
 }
 
+// regression: PR #65 Copilot review — the not-running error carried a
+// literal backslash before the env var name (`\$TMUX` instead of
+// `$TMUX`). The `\\` came from a shell-escape habit; this is stderr,
+// not shell source, so the dollar must render bare.
+#[test]
+fn tmux_outside_tmux_error_does_not_escape_dollar() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("TMUX")
+    .args(["tmux", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("\\$").not())
+    // And `$TMUX` itself must still appear so the hint is actionable.
+    .stderr(predicate::str::contains("$TMUX"));
+}
+
+#[test]
+fn zellij_outside_zellij_error_does_not_escape_dollar() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("ZELLIJ")
+    .args(["zellij", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("\\$").not())
+    .stderr(predicate::str::contains("$ZELLIJ"));
+}
+
 #[test]
 fn tmux_help_mentions_split_flag() {
   // The `-p` flag (split-pane instead of new-window) is the one knob users

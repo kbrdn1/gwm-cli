@@ -460,8 +460,11 @@ fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()>
     Multiplexer::Zellij => detect_zellij(env_value),
   };
   if !running {
+    // `${env_name}` renders bare in stderr (not shell source, so no
+    // backslash escaping). Pre-fix this read `\\${env_name}` and
+    // surfaced `\$TMUX` to the user — caught at PR #65 review.
     return Err(GwmError::Other(format!(
-      "{0} session not running (\\${1} unset) — run `gwm {0} <pattern>` from inside a {0} session",
+      "{0} session not running (${1} unset) — run `gwm {0} <pattern>` from inside a {0} session",
       mux.binary(),
       env_name,
     )));
