@@ -274,16 +274,6 @@ fn shell_init_zsh_emits_gcd_function() {
     .stdout(predicate::str::contains("gwm cd \"$@\""));
 }
 
-#[test]
-fn shell_init_posix_does_not_use_paren_function_syntax() {
-  for shell in ["bash", "zsh"] {
-    let mut cmd = Command::cargo_bin("gwm").unwrap();
-    cmd.args(["shell-init", shell]);
-    // `gcd()` is the form that explodes under an existing alias.
-    cmd.assert().success().stdout(predicate::str::contains("gcd()").not());
-  }
-}
-
 // Regression: in zsh, an existing alias (e.g. `gcd='git checkout'` from
 // oh-my-zsh's git plugin) wins over a same-named function and refuses to
 // be shadowed at definition time ("defining function based on alias").

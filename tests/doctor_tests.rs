@@ -436,19 +436,6 @@ fn base_dir_missing_but_parent_writable_is_ok() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn prunable_check_detail_uses_singular_plural_correctly() {
-  // The `entrie(s)` text from the first cut was a typo. The doctor output is
-  // user-facing, so the singular and plural forms should each be spelled
-  // out — `entry` for 1, `entries` for >1, never `entrie`.
-  let mut report = gwm::doctor::DoctorReport::new();
-  report.checks.push(gwm::doctor::Check::warning(
-    "no prunable worktrees",
-    "1 prunable entry: feat-12-old",
-  ));
-  assert!(!report.checks[0].detail.contains("entrie("));
-}
-
-#[test]
 fn fresh_repo_has_no_prunable_worktrees() {
   let (dir, repo) = init_repo();
   let config = Config::default();

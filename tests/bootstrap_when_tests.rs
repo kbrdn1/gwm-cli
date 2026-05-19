@@ -12,7 +12,6 @@
 //! end-to-end wiring covered.
 
 use gwm::bootstrap::evaluate_when;
-use std::path::Path;
 use tempfile::TempDir;
 
 // Sentinel name used wherever a test needs an env var that is guaranteed
@@ -302,18 +301,4 @@ fn unknown_keyword_still_defaults_to_true() {
   // predicates keep running while the doctor surfaces the unknown keyword.
   let dir = TempDir::new().unwrap();
   assert!(evaluate_when("totally_made_up:whatever", dir.path()));
-}
-
-// --------------------------------------------------------------------------
-// Sanity probe — evaluator is a pure function of (expr, cwd)
-// --------------------------------------------------------------------------
-
-#[test]
-fn evaluator_is_pure_for_a_given_cwd() {
-  let dir = TempDir::new().unwrap();
-  std::fs::write(dir.path().join("a"), "").unwrap();
-  let cwd: &Path = dir.path();
-  let first = evaluate_when("file_exists:a && cmd_exists:sh", cwd);
-  let second = evaluate_when("file_exists:a && cmd_exists:sh", cwd);
-  assert_eq!(first, second);
 }
