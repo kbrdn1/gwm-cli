@@ -9,6 +9,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 pub use app::{App, Field, View};
@@ -20,7 +21,29 @@ pub fn run() -> Result<()> {
   let backend = CrosstermBackend::new(stdout);
   let mut terminal = Terminal::new(backend)?;
 
-  let result = run_app(&mut terminal);
+  let result = run_app(&mut terminal, App::new()?);
+
+  disable_raw_mode()?;
+  execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+  terminal.show_cursor()?;
+
+  result.map(|_| ())
+}
+
+/// `gwm switch` entry point: open the same TUI in picker mode and return
+/// the user's pick (Some(path) on Enter, None on Esc / Ctrl-C / q).
+///
+/// Drives the terminal setup separately from `run` so the alternate screen
+/// is always torn down before the caller prints the chosen path on stdout.
+pub fn run_picker() -> Result<Option<PathBuf>> {
+  enable_raw_mode()?;
+  let mut stdout = io::stdout();
+  execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+  let backend = CrosstermBackend::new(stdout);
+  let mut terminal = Terminal::new(backend)?;
+
+  let app = App::new_picker_at(None)?;
+  let result = run_app(&mut terminal, app);
 
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -29,8 +52,7 @@ pub fn run() -> Result<()> {
   result
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
-  let mut app = App::new()?;
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -53,7 +75,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
       // ways out are Enter (sticky filter) or Esc (clear filter).
       View::List if app.filter_active => match key.code {
         KeyCode::Esc => app.exit_filter_cancel(),
-        KeyCode::Enter => app.exit_filter_keep(),
+        KeyCode::Enter => {
+          // In picker mode (`gwm switch`), Enter doubles as "stop typing the
+          // filter AND commit the highlighted pick". Exiting the filter bar
+          // first lets `selected()` resolve against the narrowed set.
+          app.exit_filter_keep();
+          if app.picker_mode {
+            app.picker_confirm();
+            break;
+          }
+        }
         KeyCode::Backspace => app.filter_pop_char(),
         KeyCode::Char(c) => app.filter_push_char(c),
         _ => {}
@@ -89,12 +120,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
             }
           }
           KeyCode::Char('r') => app.refresh()?,
-          KeyCode::Char('n') => app.enter_create(),
-          KeyCode::Char('d') => app.enter_confirm_delete(),
-          KeyCode::Char('b') => app.bootstrap_selected(),
-          KeyCode::Char('p') => app.toggle_delete_branch(),
+          // Mutating actions are inert in picker mode — the issue explicitly
+          // calls for a stripped-down picker that only navigates and selects.
+          KeyCode::Char('n') if !app.picker_mode => app.enter_create(),
+          KeyCode::Char('d') if !app.picker_mode => app.enter_confirm_delete(),
+          KeyCode::Char('b') if !app.picker_mode => app.bootstrap_selected(),
+          KeyCode::Char('p') if !app.picker_mode => app.toggle_delete_branch(),
           KeyCode::Char('o') => app.open_selected_in_finder(),
-          KeyCode::Enter => app.copy_path_to_status(),
+          KeyCode::Enter => {
+            if app.picker_mode {
+              app.picker_confirm();
+              break;
+            }
+            app.copy_path_to_status();
+          }
           _ => {}
         }
       }
@@ -138,7 +177,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> 
       },
     }
   }
-  Ok(())
+  Ok(app.picker_result)
 }
 
 /// Suspend the TUI, run `lazygit -p <path>` inheriting the terminal, then restore.

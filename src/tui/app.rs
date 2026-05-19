@@ -70,6 +70,13 @@ pub struct App {
   // query, Enter confirms (sticky filter, focus returns to the list).
   pub filter_active: bool,
   pub filter_query: String,
+
+  // Picker mode (issue #22): `gwm switch` runs the TUI as a stripped-down
+  // picker. Create / delete / bootstrap keys are inert; Enter records the
+  // highlighted worktree path into `picker_result` and the event loop quits
+  // so the CLI caller can print the path on stdout for `cd "$(gwm switch)"`.
+  pub picker_mode: bool,
+  pub picker_result: Option<PathBuf>,
 }
 
 impl App {
@@ -110,7 +117,22 @@ impl App {
       pending_g: false,
       filter_active: false,
       filter_query: String::new(),
+      picker_mode: false,
+      picker_result: None,
     })
+  }
+
+  /// Constructor for `gwm switch`: same App, but picker mode is on and the
+  /// fuzzy filter bar is open from the first frame so the user can start
+  /// narrowing right away. Everything else (worktree list, sidebar, vim
+  /// motions) behaves identically; only the event-loop interpretation of
+  /// Enter / n / d / b changes.
+  pub fn new_picker_at(start: Option<&Path>) -> Result<Self> {
+    let mut app = Self::new_at(start)?;
+    app.picker_mode = true;
+    app.filter_active = true;
+    app.status = "switch picker — type to filter · enter selects · esc cancels".into();
+    Ok(app)
   }
 
   pub fn refresh(&mut self) -> Result<()> {
@@ -489,6 +511,25 @@ impl App {
   }
 
   // ---- Bootstrap flow ------------------------------------------------------
+
+  // ---- Picker mode (issue #22) --------------------------------------------
+
+  /// Commit the highlighted worktree as the picker's result. The event loop
+  /// reads `picker_result` after `Enter` and breaks out; `run_picker`
+  /// surfaces the path to the CLI caller, which prints it on stdout for
+  /// `cd "$(gwm switch)"`.
+  ///
+  /// No-ops outside picker mode and when nothing is selected (e.g. the
+  /// filter wiped the list down to zero matches). The caller decides
+  /// whether to keep the TUI open in that case.
+  pub fn picker_confirm(&mut self) {
+    if !self.picker_mode {
+      return;
+    }
+    if let Some(w) = self.selected() {
+      self.picker_result = Some(w.path.clone());
+    }
+  }
 
   pub fn bootstrap_selected(&mut self) {
     let path = match self.selected() {
