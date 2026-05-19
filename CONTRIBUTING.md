@@ -86,6 +86,44 @@ cargo install --path .   # install gwm into ~/.cargo/bin
 - **Linter**: `cargo clippy -- -D warnings`.
 - Run `cargo fmt && cargo clippy` before opening a PR.
 
+### Local hooks (recommended, opt-in)
+
+A POSIX `pre-commit` script lives under [`.githooks/`](.githooks/). It is **not installed automatically** — opt in with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Once enabled, two gates run on every `git commit`:
+
+1. **Env-dependent test pre-validation.** If staged `tests/*.rs` hunks reference ambient state (`assert_cmd`, `std::env::var`, `which::which`, `dirs::`, `Command::cargo_bin`), the hook re-runs the suite under a stripped PATH:
+
+   ```bash
+   PATH="$(dirname "$(command -v cargo)"):/usr/bin:/bin" cargo test
+   ```
+
+   This catches tests that pass in your rich dev shell but fail on a minimal CI runner — the lesson from PR #43 (three CI round-trips before the suite went green).
+
+2. **Local `gwm doctor`.** If staged paths touch `.gwm.toml`, `src/bootstrap.rs`, `src/doctor.rs`, `examples/gwm.toml.example`, or `tests/{bootstrap,doctor}*`, the hook runs `gwm doctor`. Exit codes follow the doctor contract:
+
+   | Exit | Meaning  | Commit behaviour          |
+   |:-----|:---------|:--------------------------|
+   | `0`  | Clean    | proceeds silently         |
+   | `1`  | Warnings | proceeds with advisory    |
+   | `2`  | Errors   | **blocked** until resolved |
+
+   If `gwm` is not on `PATH`, the gate prints a skip notice and the commit proceeds — the CI `doctor` job is the safety net.
+
+Both gates short-circuit in O(1) when no staged paths match — contributors who never touch tests or config pay nothing per commit.
+
+**Bypass** for a single commit you know is safe:
+
+```bash
+git commit --no-verify
+```
+
+CI runs `shellcheck` against the hook and a smoke test on every PR — see the `hook-smoke` job in [`ci.yml`](.github/workflows/ci.yml) — so a broken hook is caught before it reaches you.
+
 ## Testing
 
 ```bash

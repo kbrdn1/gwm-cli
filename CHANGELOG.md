@@ -10,8 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `.githooks/pre-commit` — opt-in POSIX shell hook that gates commits on two checks contributors used to enforce by hand (#56). Gate 1 re-runs the test suite under a stripped PATH when staged `tests/*.rs` hunks touch ambient state (`assert_cmd`, `std::env::var`, `which::which`, `dirs::`, `Command::cargo_bin`) — catches CI-only failures locally. Gate 2 runs `gwm doctor` when staged paths touch `.gwm.toml`, `src/{bootstrap,doctor}.rs`, `examples/gwm.toml.example`, or `tests/{bootstrap,doctor}*`, blocking on doctor exit 2 and advising on exit 1. Install with `git config core.hooksPath .githooks`; bypass with `git commit --no-verify`.
+
+### CI
+
+- New `hook-smoke` job in `.github/workflows/ci.yml` (#56). Cheap parallel job (~30s, no Rust toolchain) that `shellcheck`s the hook, asserts it is executable, verifies the empty-index short-circuit, and exercises gate 2's "gwm not in PATH" skip path. Guards against hook bit-rot without doubling CI time.
+
 ### Docs
 
+- `CONTRIBUTING.md` — new "Local hooks (recommended, opt-in)" subsection under Development describing the install one-liner, both gates, the doctor exit-code contract, the `--no-verify` bypass, and the CI smoke-test safety net (#56).
 - `CLAUDE.md` + `CONTRIBUTING.md` §Releases — new "Step 0: reconcile open PRs" rule. Before any RC or stable cut, run `gh pr list --state open` and reconcile every open PR (in the changeset, intentionally deferred, or closed as stale). Codifies the lesson from the v0.3.0 cut, which shipped without three queued feature PRs (#51, #52, #53) and required an immediate v0.4.0 promotion 38 minutes later. Step 0 sits explicitly at the top of both the pre-release and stable-release procedures.
 
 ## Past releases
