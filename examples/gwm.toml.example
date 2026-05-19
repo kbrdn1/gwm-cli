@@ -75,3 +75,22 @@ when = "file_exists:.envrc"
 name = "npm install"
 run = "npm install"
 when = "file_exists:package.json"
+
+# --- composable when predicates --------------------------------------------
+# Atoms: file_exists / cmd_exists / env_set / env_eq / glob_exists
+# Operators: ! (NOT), && (AND), || (OR) — precedence: ! > && > ||
+
+[[bootstrap.command]]
+name = "install (bun if available)"
+run = "bun install"
+when = "file_exists:package.json && cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "install (npm fallback)"
+run = "npm ci"
+when = "file_exists:package.json && !cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "full local build"
+run = "./scripts/full-build.sh"
+when = "glob_exists:src/**/*.rs && !env_set:CI"

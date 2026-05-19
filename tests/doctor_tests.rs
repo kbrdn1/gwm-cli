@@ -173,7 +173,7 @@ fn unsupported_when_predicate_is_failed() {
   config.bootstrap.command.push(gwm::config::CommandStep {
     name: "noop".into(),
     run: "true".into(),
-    when: Some("env_set:FOO".into()),
+    when: Some("bogus_predicate:FOO".into()),
     env: Default::default(),
   });
 
@@ -184,7 +184,53 @@ fn unsupported_when_predicate_is_failed() {
     .find(|c| c.name.contains("when"))
     .expect("expected a `when` predicate check");
   assert_eq!(c.status, CheckStatus::Failed);
-  assert!(c.detail.contains("env_set"));
+  assert!(c.detail.contains("bogus_predicate"));
+}
+
+#[test]
+fn negated_supported_keyword_is_ok() {
+  // `!env_set:CI` should be accepted: the doctor must reach past the
+  // leading `!` (and any other boolean operator) and validate each
+  // atom against the supported-keyword list.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "skip-in-ci".into(),
+    run: "./scripts/full-build.sh".into(),
+    when: Some("!env_set:CI".into()),
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("when"))
+    .expect("expected a `when` predicate check");
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+#[test]
+fn unsupported_keyword_on_rhs_of_and_is_failed() {
+  // Compound expressions need atom-level validation. A LHS that looks
+  // legitimate (`file_exists:a`) must not paper over a bogus RHS.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "compound".into(),
+    run: "true".into(),
+    when: Some("file_exists:a && bogus_predicate:1".into()),
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("when"))
+    .expect("expected a `when` predicate check");
+  assert_eq!(c.status, CheckStatus::Failed);
+  assert!(c.detail.contains("bogus_predicate"));
 }
 
 #[test]

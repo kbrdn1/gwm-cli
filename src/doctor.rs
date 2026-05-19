@@ -189,15 +189,20 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
     .with_hint("declare the missing `[[bootstrap.guard]]` block(s) or drop the reference")
 }
 
-/// Recognised `when:` predicates. Update this list when a new keyword
-/// lands in `bootstrap.rs::evaluate_when`.
-const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:"];
+/// Recognised `when:` predicate keywords. Update this list when a new
+/// keyword lands in `bootstrap.rs::evaluate_when`.
+const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_set:", "env_eq:", "glob_exists:"];
 
 /// Check #3: every `[[bootstrap.command]].when` predicate uses one of the
 /// supported keywords. Unknown predicates default to `true` in
-/// `bootstrap::check_when`, so the command runs anyway and the user's
+/// `bootstrap::evaluate_when`, so the command runs anyway and the user's
 /// intended gating condition is silently ignored — that's still a footgun
 /// worth flagging, just not "command never runs".
+///
+/// Walks every atom in the expression (via `bootstrap::when_atoms`) so
+/// negated atoms (`!env_set:CI`) and compound expressions
+/// (`file_exists:a && bogus:1`) are validated as a whole instead of
+/// being green-lit by their first keyword.
 fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let name = "`when` predicates supported";
   let bs = &ctx.config.bootstrap;
@@ -206,10 +211,20 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let mut recognised: usize = 0;
   for cmd in &bs.command {
     let Some(w) = &cmd.when else { continue };
-    if SUPPORTED_WHEN_PREFIXES.iter().any(|p| w.starts_with(p)) {
+    // Walk every atom in the expression (via `bootstrap::when_atoms`) so
+    // negated atoms (`!env_set:CI`) and compound expressions (`file_exists:a
+    // && bogus:1`) are validated as a whole rather than green-lit by their
+    // first keyword. A command is `recognised` only when all its atoms
+    // pass — a single unknown atom kicks it into `unknown`.
+    let mut had_unknown = false;
+    for atom in crate::bootstrap::when_atoms(w) {
+      if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| atom.starts_with(p)) {
+        unknown.push(format!("{} (on command `{}`)", atom, cmd.name));
+        had_unknown = true;
+      }
+    }
+    if !had_unknown {
       recognised += 1;
-    } else {
-      unknown.push(format!("{} (on command `{}`)", w, cmd.name));
     }
   }
 

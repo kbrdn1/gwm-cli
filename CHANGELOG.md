@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Extended `[[bootstrap.command]].when` predicates** — the evaluator now recognises four additional keyword atoms alongside the legacy `file_exists:`: `cmd_exists:<binary>` (resolves via `which`), `env_set:<NAME>` (variable defined), `env_eq:<NAME>=<value>` (variable equals literal), `glob_exists:<pattern>` (recursive `**` glob match under the worktree). Atoms compose with `!`, `&&`, `||` at the conventional precedence (`!` > `&&` > `||`); no parentheses. Example: `when = "file_exists:package.json && cmd_exists:bun"` picks `bun install` only when bun is on PATH. `bootstrap::evaluate_when` is now part of the public lib surface. `gwm doctor` recognises the new keywords; unknown keywords still default to true. Closes #25.
+
 ### Fixed
 
 - `gwm doctor`: `is_writable_dir` now uses a random-suffixed `tempfile`-managed probe file (was a fixed `.gwm-doctor-write-probe` colliding under concurrent runs and leaking on SIGKILL). Closes #54.
@@ -42,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `shell-words` `1` (new, runtime) — POSIX shell tokeniser used by the doctor's `extract_binary`.
 - `tempfile` moved from `[dev-dependencies]` to `[dependencies]` — used at runtime by the doctor's `is_writable_dir` write-probe.
+- `glob` `0.3` (new) — backs the `glob_exists:` predicate in `bootstrap::evaluate_when`.
 
 ## Past releases
 
