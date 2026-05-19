@@ -16,11 +16,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gwm shell-init <bash|zsh|fish|powershell>` — prints a shell wrapper defining `gcd <pattern>` (the function does the actual `cd`, since the binary can't change the parent shell's directory). One-liner install: `eval "$(gwm shell-init zsh)"` in your rc file → `gcd auth` jumps to the matching worktree. The bash/zsh and PowerShell variants `unalias gcd` first so the function takes effect even if the shell already had a `gcd` alias (e.g. oh-my-zsh's `gcd=git checkout`). Closes #19.
 - `gwm doctor` — diagnose the gwm setup. Aggregates 7 cheap checks (`.gwm.toml` parses, guard references resolve, `when` predicates supported, external binaries on PATH, no prunable worktrees, no orphan gwm branches, base directory writable) and reports each with `✓ / ! / ✗`. Exit code `0` (all green), `1` (any warning), `2` (any failure) — wirable into CI / pre-commit. New `src/doctor.rs` module exposing `DoctorReport` / `Check` / `Severity` / `DoctorCtx` for library users. Closes #20.
 
+### CI
+
+- New advisory job `gwm doctor` in `.github/workflows/ci.yml` — runs `cargo build --release` then `./target/release/gwm doctor` against the repo on every push to `dev` and on every PR targeting `dev`. `continue-on-error: true` so it never blocks a merge, but a non-zero exit surfaces config / env / worktree-state regressions for human review. Closes #49.
+
 ### Docs
 
 - `CLAUDE.md` (new, repo root) — house rules for AI-assisted contributions. Promotes **TDD as the primordial contribution rule** (red → green → refactor, mandatory failing test before production code).
 - `CONTRIBUTING.md` — `TDD expectations` section rewritten as `🔴 TDD is mandatory — non-negotiable`: explicit loop, narrow exceptions, reviewer enforcement via `git log --stat tests/`.
 - `CODE_OF_CONDUCT.md` — new `Engineering conduct` section anchoring the TDD rule as a contribution-conduct expectation (applies equally to human and AI-assisted PRs).
+- `CLAUDE.md` — two new house rules: pre-validate environment-dependent tests with a stripped `PATH` before push (one-liner included), and run `gwm doctor` locally on PRs that touch `.gwm.toml` / bootstrap / doctor. Codifies the recipe that would have spared the 3 CI round-trips on PR #43.
 
 ### Dependencies
 
