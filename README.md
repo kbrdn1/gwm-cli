@@ -91,13 +91,40 @@ gwm create feat 123 foo --no-bootstrap      # skip the .gwm.toml bootstrap stage
 gwm list                                    # list all worktrees of the current repo
 gwm list --format=names                     # one worktree name per line (for shell completion)
 gwm path auth                               # print the resolved path (use $(gwm path ...))
+gwm cd auth                                 # same — primitive for the `gcd` wrapper
 gwm bootstrap                               # re-run bootstrap on the CWD worktree
 gwm bootstrap auth                          # ...or on a named one
 gwm remove auth                             # remove (fuzzy match) — keeps the branch
 gwm remove auth --delete-branch             # remove + drop the branch
 gwm prune                                   # clean stale .git/worktrees entries
 gwm completions zsh                         # print a zsh / bash / fish / powershell / elvish script
+gwm shell-init zsh                          # print a `gcd <pattern>` shell wrapper (one-line cd)
 ```
+
+### one-line cd into a worktree
+
+The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that wraps `gwm cd` — `eval` it in your rc file and use `gcd <pattern>` as a one-liner:
+
+```bash
+# zsh
+echo 'eval "$(gwm shell-init zsh)"' >> ~/.zshrc
+# bash
+echo 'eval "$(gwm shell-init bash)"' >> ~/.bashrc
+# fish (also persist by adding to ~/.config/fish/config.fish)
+gwm shell-init fish | source
+# PowerShell (current session)
+Invoke-Expression (& gwm shell-init powershell | Out-String)
+# PowerShell (persist via $PROFILE)
+gwm shell-init powershell | Out-File -Append -Encoding utf8 $PROFILE
+```
+
+Then:
+
+```bash
+gcd auth   # → cd $(gwm cd auth) → e.g. ~/cc-worktree/myrepo/feat-99-user-authentication
+```
+
+`gcd` propagates the exit code from `gwm cd` and never attempts the `cd` if the lookup failed (no match, ambiguous pattern, not in a git repo).
 
 ### shell completions
 
