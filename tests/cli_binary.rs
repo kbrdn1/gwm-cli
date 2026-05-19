@@ -30,16 +30,21 @@ fn help_prints_subcommands() {
 }
 
 #[test]
-fn doctor_on_fresh_repo_exits_zero_and_prints_checks() {
+fn doctor_on_fresh_repo_prints_checks() {
   let (dir, _repo) = init_repo();
   let mut cmd = Command::cargo_bin("gwm").unwrap();
+  // Exit code is intentionally not asserted here: in environments without
+  // `lazygit` on PATH (most CI runners) or a pre-existing `~/cc-worktree/`
+  // parent, the report legitimately surfaces Warning entries and exits 1.
+  // The 0/1/2 exit-code contract is exercised at the unit level in
+  // `tests/doctor_tests.rs` where the environment is fully controlled.
   cmd
     .current_dir(dir.path())
     .arg("doctor")
     .assert()
-    .success()
     .stdout(predicate::str::contains("✓"))
-    .stdout(predicate::str::contains(".gwm.toml"));
+    .stdout(predicate::str::contains(".gwm.toml"))
+    .stdout(predicate::str::contains("base directory writable"));
 }
 
 #[test]
