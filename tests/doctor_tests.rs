@@ -373,11 +373,19 @@ fn fresh_repo_has_no_prunable_worktrees() {
 // --------------------------------------------------------------------------
 
 #[test]
-fn orphan_gwm_branch_is_warning() {
+fn orphan_unmerged_gwm_branch_is_warning() {
   let (dir, repo) = init_repo();
-  // Manufacture a gwm-style branch with no worktree pointing at it.
+  // Build a commit that is NOT reachable from main, then branch off it.
+  // This is what an in-flight WIP branch looks like: still divergent from
+  // the trunk, so leaving it around is genuine dead weight.
   let head = repo.head().unwrap().peel_to_commit().unwrap();
-  repo.branch("feat/#99-stale-thing", &head, false).unwrap();
+  let sig = git2::Signature::now("test", "test@test").unwrap();
+  let tree = head.tree().unwrap();
+  let oid = repo
+    .commit(None, &sig, &sig, "off-main commit", &tree, &[&head])
+    .unwrap();
+  let commit = repo.find_commit(oid).unwrap();
+  repo.branch("feat/#99-stale-thing", &commit, false).unwrap();
 
   let config = Config::default();
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
@@ -390,6 +398,28 @@ fn orphan_gwm_branch_is_warning() {
   assert!(
     c.detail.contains("feat/#99-stale-thing"),
     "orphan branch should be quoted in the detail, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn merged_gwm_branch_is_not_flagged_as_orphan() {
+  // CONTRIBUTING.md mandates "never delete the source branch after merge".
+  // So a branch fully merged into a trunk (`dev` or `main`) is preserved
+  // on purpose — flagging it would be noise on every doctor run. The
+  // doctor must filter it out.
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  // Branch points at the same commit as main — fully merged by definition.
+  repo.branch("feat/#99-already-merged", &head, false).unwrap();
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    !c.detail.contains("feat/#99-already-merged"),
+    "merged branch must not appear in the orphan list, got: {}",
     c.detail
   );
 }

@@ -341,10 +341,21 @@ fn check_prunable_worktrees(ctx: &DoctorCtx<'_>) -> Check {
   .with_hint("run `gwm prune` to clear them")
 }
 
+/// Trunk branches the doctor considers "merged into" — branches fully
+/// reachable from one of these are deliberately preserved per
+/// CONTRIBUTING.md (`Never delete the source branch after merge`), so we
+/// don't flag them as orphan even when their worktree is gone.
+const TRUNK_BRANCHES: &[&str] = &["dev", "main"];
+
 /// Check #6: every local branch matching the `<type>/#<issue>-<desc>`
 /// shape has a worktree pointing at it. A branch without a worktree was
 /// likely created by `gwm create` and lost its worktree without a
 /// `--delete-branch` — purely cosmetic dead weight, hence Warning not Failed.
+///
+/// Branches already fully merged into one of the trunk branches
+/// (`dev`, `main`) are filtered out: keeping them is the project
+/// convention, and surfacing them would make the check produce N false
+/// positives on every successful release.
 fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
   let name = "no orphan gwm branches";
 
@@ -354,33 +365,73 @@ fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
   };
   let claimed: BTreeSet<String> = trees.iter().filter_map(|w| w.branch.clone()).collect();
 
+  // Resolve the trunk OIDs once. Missing trunks (e.g. a repo without `dev`)
+  // are silently skipped — we only check against what exists.
+  let trunk_oids: Vec<git2::Oid> = TRUNK_BRANCHES
+    .iter()
+    .filter_map(|t| {
+      ctx
+        .repo
+        .find_branch(t, BranchType::Local)
+        .ok()
+        .and_then(|b| b.get().target())
+    })
+    .collect();
+
   let branches = match ctx.repo.branches(Some(BranchType::Local)) {
     Ok(b) => b,
     Err(e) => return Check::failed(name, format!("could not list local branches: {}", e)),
   };
 
   let mut orphans: Vec<String> = Vec::new();
+  let mut merged_count: usize = 0;
   for entry in branches.flatten() {
     let (branch, _) = entry;
     let Ok(Some(branch_name)) = branch.name() else { continue };
     if parse_branch(branch_name).is_none() {
       continue; // user-managed branch, leave it alone
     }
-    if !claimed.contains(branch_name) {
-      orphans.push(branch_name.to_string());
+    if claimed.contains(branch_name) {
+      continue; // has a worktree — not orphan in any sense
     }
+    let Some(branch_oid) = branch.get().target() else {
+      continue;
+    };
+    if is_merged_into_any(ctx.repo, branch_oid, &trunk_oids) {
+      merged_count += 1;
+      continue; // preserved on purpose per CONTRIBUTING — not flagged
+    }
+    orphans.push(branch_name.to_string());
   }
 
   if orphans.is_empty() {
-    return Check::ok(name, "every gwm-style branch has a matching worktree");
+    let detail = if merged_count == 0 {
+      "every gwm-style branch has a matching worktree".to_string()
+    } else {
+      format!(
+        "{} merged gwm-style branch(es) preserved per CONTRIBUTING, no unmerged orphans",
+        merged_count
+      )
+    };
+    return Check::ok(name, detail);
   }
 
   let suggestions: Vec<String> = orphans.iter().map(|b| format!("git branch -d {}", b)).collect();
   Check::warning(
     name,
-    format!("{} orphan branch(es): {}", orphans.len(), orphans.join(", ")),
+    format!("{} unmerged orphan branch(es): {}", orphans.len(), orphans.join(", ")),
   )
   .with_hint(suggestions.join(" && "))
+}
+
+/// Returns `true` iff `branch_oid` is fully reachable from at least one
+/// of `trunks` — i.e. the branch is merged into one of the trunks (or
+/// is equal to it). Implemented via libgit2's descendant check: trunk is
+/// a descendant of the branch iff the branch is reachable from trunk.
+fn is_merged_into_any(repo: &git2::Repository, branch_oid: git2::Oid, trunks: &[git2::Oid]) -> bool {
+  trunks
+    .iter()
+    .any(|trunk_oid| *trunk_oid == branch_oid || repo.graph_descendant_of(*trunk_oid, branch_oid).unwrap_or(false))
 }
 
 /// Probe a directory for write access by creating and deleting a sentinel
