@@ -82,3 +82,103 @@ fn severity_ok_when_no_checks_fail() {
   assert_eq!(report.severity(), Severity::Ok);
   assert_eq!(report.exit_code(), 0);
 }
+
+// --------------------------------------------------------------------------
+// Check #2 — guard references resolve
+// --------------------------------------------------------------------------
+
+#[test]
+fn dangling_guard_reference_is_failed() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.copy.push(gwm::config::CopyStep {
+    from: ".env".into(),
+    to: ".env".into(),
+    required: false,
+    guards: vec!["does-not-exist".into()],
+    fallback: None,
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("guard"))
+    .expect("expected a guard-references check");
+  assert_eq!(c.status, CheckStatus::Failed);
+  assert!(c.detail.contains("does-not-exist"));
+  assert_eq!(report.severity(), Severity::Failed);
+}
+
+#[test]
+fn matching_guard_reference_is_ok() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.guard.push(gwm::config::Guard {
+    name: "no-aws-rds".into(),
+    deny_patterns: vec!["amazonaws".into()],
+    on_match: "abort".into(),
+    example_file: None,
+  });
+  config.bootstrap.copy.push(gwm::config::CopyStep {
+    from: ".env".into(),
+    to: ".env".into(),
+    required: false,
+    guards: vec!["no-aws-rds".into()],
+    fallback: None,
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("guard")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+// --------------------------------------------------------------------------
+// Check #3 — `when` predicates use a supported keyword
+// --------------------------------------------------------------------------
+
+#[test]
+fn unsupported_when_predicate_is_failed() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "noop".into(),
+    run: "true".into(),
+    when: Some("env_set:FOO".into()),
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("when"))
+    .expect("expected a `when` predicate check");
+  assert_eq!(c.status, CheckStatus::Failed);
+  assert!(c.detail.contains("env_set"));
+}
+
+#[test]
+fn file_exists_when_predicate_is_ok() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "direnv allow".into(),
+    run: "direnv allow .".into(),
+    when: Some("file_exists:.envrc".into()),
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+#[test]
+fn no_when_predicates_is_ok() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}
