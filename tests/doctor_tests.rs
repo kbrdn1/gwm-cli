@@ -173,7 +173,7 @@ fn unsupported_when_predicate_is_failed() {
   config.bootstrap.command.push(gwm::config::CommandStep {
     name: "noop".into(),
     run: "true".into(),
-    when: Some("env_set:FOO".into()),
+    when: Some("bogus_predicate:FOO".into()),
     env: Default::default(),
   });
 
@@ -184,7 +184,7 @@ fn unsupported_when_predicate_is_failed() {
     .find(|c| c.name.contains("when"))
     .expect("expected a `when` predicate check");
   assert_eq!(c.status, CheckStatus::Failed);
-  assert!(c.detail.contains("env_set"));
+  assert!(c.detail.contains("bogus_predicate"));
 }
 
 #[test]

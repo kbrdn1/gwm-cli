@@ -174,9 +174,9 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
     .with_hint("declare the missing `[[bootstrap.guard]]` block(s) or drop the reference")
 }
 
-/// Recognised `when:` predicates. Update this list when a new keyword
-/// lands in `bootstrap.rs::evaluate_when`.
-const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:"];
+/// Recognised `when:` predicate keywords. Update this list when a new
+/// keyword lands in `bootstrap.rs::evaluate_when`.
+const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_set:", "env_eq:", "glob_exists:"];
 
 /// Check #3: every `[[bootstrap.command]].when` predicate uses one of the
 /// supported keywords. Unknown predicates default to `true` in

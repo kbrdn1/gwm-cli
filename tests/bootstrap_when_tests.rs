@@ -83,10 +83,22 @@ fn env_set_false_for_unset_var() {
 
 #[test]
 fn env_eq_true_when_value_matches() {
+  // Picking a known env var whose value contains spaces or `&&` would
+  // make the tokenizer split the atom mid-value, so we cherry-pick any
+  // currently-set variable with a clean value at runtime. This keeps the
+  // test portable across CI environments without relying on a specific
+  // variable being defined.
   let dir = TempDir::new().unwrap();
-  let path = std::env::var("PATH").expect("PATH must be set");
-  let expr = format!("env_eq:PATH={}", path);
-  assert!(evaluate_when(&expr, dir.path()));
+  let (name, value) = std::env::vars()
+    .find(|(_, v)| !v.is_empty() && !v.contains(char::is_whitespace) && !v.contains("&&") && !v.contains("||"))
+    .expect("at least one env var should have a simple value at test time");
+  let expr = format!("env_eq:{}={}", name, value);
+  assert!(
+    evaluate_when(&expr, dir.path()),
+    "expected env_eq:{}={} to evaluate true",
+    name,
+    value
+  );
 }
 
 #[test]
@@ -244,10 +256,7 @@ fn extra_whitespace_around_operators_is_tolerated() {
   let dir = TempDir::new().unwrap();
   std::fs::write(dir.path().join("a"), "").unwrap();
   std::fs::write(dir.path().join("b"), "").unwrap();
-  assert!(evaluate_when(
-    "  file_exists:a   &&   file_exists:b  ",
-    dir.path()
-  ));
+  assert!(evaluate_when("  file_exists:a   &&   file_exists:b  ", dir.path()));
 }
 
 // --------------------------------------------------------------------------
