@@ -303,10 +303,7 @@ fn resolvable_command_binary_is_ok() {
   // which would pass even on `[sh,other]` or `sh\n` formatting.
   if c.status == CheckStatus::Warning {
     let missing_section = c.detail.split("not on PATH:").nth(1).unwrap_or("");
-    let missing: Vec<&str> = missing_section
-      .split(|c: char| c == ',' || c == '\n')
-      .map(str::trim)
-      .collect();
+    let missing: Vec<&str> = missing_section.split([',', '\n']).map(str::trim).collect();
     assert!(
       !missing.contains(&"sh"),
       "sh must not be reported missing, got: {}",
