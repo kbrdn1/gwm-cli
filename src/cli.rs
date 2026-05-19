@@ -115,7 +115,10 @@ fn cmd_list(format: ListFormat) -> Result<()> {
   let trees = worktree::list(&repo)?;
 
   if format == ListFormat::Names {
-    for w in &trees {
+    // Mirror `worktree::find_fuzzy`, which excludes the main workdir:
+    // emitting its name here would suggest a completion candidate that
+    // `path` / `remove` / `bootstrap` can never accept.
+    for w in trees.iter().filter(|w| !w.is_main) {
       println!("{}", w.name);
     }
     return Ok(());

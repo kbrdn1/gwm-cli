@@ -114,7 +114,11 @@ fn list_format_names_emits_one_name_per_line() {
     .success()
     // No table header, no leading "*" marker, no STATUS column.
     .stdout(predicate::str::contains("NAME").not())
-    .stdout(predicate::str::contains("STATUS").not());
+    .stdout(predicate::str::contains("STATUS").not())
+    // Main worktree is excluded so the output mirrors what `find_fuzzy`
+    // accepts (path/remove/bootstrap skip the main workdir). A fresh repo
+    // therefore prints nothing.
+    .stdout(predicate::str::is_empty());
 }
 
 #[test]
