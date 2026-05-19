@@ -173,3 +173,106 @@ fn malformed_config_returns_error() {
   let res = Config::load_for_repo(dir.path());
   assert!(res.is_err());
 }
+
+// Issue #30: the TUI confirm overlay has a configurable safety countdown
+// when `delete_branch_on_remove` is armed. Default 3s (matches the
+// example in the issue body); range 0..=5 where 0 means "no countdown —
+// fall back to the classic single-keystroke confirm". Values above 5 are
+// clamped on read so a misconfigured repo never strands a destructive
+// action behind a 60s wait.
+
+#[test]
+fn tui_section_defaults_to_three_second_countdown() {
+  let cfg = Config::default();
+  assert_eq!(cfg.tui.confirm_countdown_secs, 3);
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
+}
+
+#[test]
+fn tui_section_absent_keeps_defaults() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[worktree]
+base = "/tmp/wt/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
+}
+
+#[test]
+fn tui_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 2
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.confirm_countdown_secs, 2);
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 2);
+}
+
+#[test]
+fn tui_countdown_zero_disables_countdown() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 0
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 0);
+}
+
+#[test]
+fn tui_countdown_clamped_to_five_seconds() {
+  // A user who types `confirm_countdown_secs = 30` in their .gwm.toml
+  // wants more friction; we cap it at 5 so the destructive path is never
+  // unreasonably slow. The raw field stays at the user's value (for
+  // diagnostics / round-trip), only the accessor clamps.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 30
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.confirm_countdown_secs, 30);
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
+}
+
+#[test]
+fn tui_countdown_value_above_u8_max_still_clamps() {
+  // Regression for Copilot review on PR #66: the documented contract is
+  // "values above 5 are clamped on read". A `u8` field would cap at 255
+  // *at parse time*, turning a typo like `confirm_countdown_secs = 300`
+  // into a hard `Config::load_for_repo` error instead of the documented
+  // clamp-to-5. The field must accept any non-negative integer so the
+  // promise stays whole.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 300
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).expect("300 must parse, not error");
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
+}

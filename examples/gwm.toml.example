@@ -106,3 +106,14 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [doctor]
 # trunks = ["master", "release-3.x", "release-4.x"]
+
+# --- TUI knobs --------------------------------------------------------------
+# Safety countdown (in seconds) applied to the delete-confirm overlay when
+# `delete branch on remove` is armed (`p` in the TUI). The high-risk path
+# becomes a two-step `y → countdown → auto-fire`; `y` during the countdown
+# cancels. Range: 0..=5. `0` disables the countdown (classic single-
+# keystroke confirm even when `p` is armed); values above `5` are clamped
+# to `5` on read. Default: 3.
+#
+# [tui]
+# confirm_countdown_secs = 3

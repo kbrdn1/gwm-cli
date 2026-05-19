@@ -2,9 +2,10 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
-use gwm::tui::{App, Field, View};
+use gwm::tui::{filled_cells_for_progress, App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 /// Build a synthetic worktree row for state-machine tests that need a known
 /// list shape (fuzzy filter ranking, multi-row navigation). Lets the test
@@ -801,4 +802,211 @@ fn picker_cancel_outside_picker_mode_is_inert() {
     !app.picker_should_exit,
     "picker_cancel outside picker mode must not flip the exit flag"
   );
+}
+
+// ---- Confirm countdown state machine (issue #30) -------------------------
+//
+// The countdown only arms when `delete_branch_on_remove` is ON AND the
+// configured `confirm_countdown_secs` is non-zero. In every other case
+// (off, or countdown_secs = 0) the modal stays single-keystroke. These
+// tests pin every branch of that dispatch so a regression on either knob
+// fails loudly.
+//
+// Time injection: `confirm_press_y`, `tick_confirm_countdown`, and the
+// progress / remaining getters all take an `Instant` parameter so the
+// tests can step through the countdown without sleeping. The event loop
+// passes `Instant::now()` at the real call sites.
+
+#[test]
+fn countdown_total_zero_when_delete_branch_off() {
+  let (_dir, app) = make_app();
+  assert!(!app.delete_branch_on_remove);
+  assert_eq!(app.confirm_countdown_total(), Duration::ZERO);
+  assert!(!app.confirm_is_countdown_mode());
+}
+
+#[test]
+fn countdown_total_matches_config_when_delete_branch_on() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  assert!(app.delete_branch_on_remove);
+  assert_eq!(app.confirm_countdown_total(), Duration::from_secs(3));
+  assert!(app.confirm_is_countdown_mode());
+}
+
+#[test]
+fn countdown_total_zero_when_config_says_zero() {
+  let (_dir, mut app) = make_app();
+  app.config.tui.confirm_countdown_secs = 0;
+  app.toggle_delete_branch();
+  assert_eq!(app.confirm_countdown_total(), Duration::ZERO);
+  assert!(
+    !app.confirm_is_countdown_mode(),
+    "countdown_secs=0 must fall back to the classic modal even when delete_branch is armed"
+  );
+}
+
+#[test]
+fn confirm_press_y_in_classic_mode_fires_immediately() {
+  let (_dir, mut app) = make_app();
+  // delete_branch OFF → classic flow
+  let action = app.confirm_press_y(Instant::now());
+  assert_eq!(action, ConfirmKeyAction::FireNow);
+  assert!(
+    app.confirm_countdown_started_at.is_none(),
+    "classic mode must never set the timer"
+  );
+}
+
+#[test]
+fn confirm_press_y_in_countdown_mode_arms_the_timer() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let now = Instant::now();
+  let action = app.confirm_press_y(now);
+  assert_eq!(action, ConfirmKeyAction::Armed);
+  assert_eq!(app.confirm_countdown_started_at, Some(now));
+}
+
+#[test]
+fn confirm_press_y_a_second_time_disarms_the_timer() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let t0 = Instant::now();
+  app.confirm_press_y(t0);
+  let t1 = t0 + Duration::from_millis(500);
+  let action = app.confirm_press_y(t1);
+  assert_eq!(action, ConfirmKeyAction::Disarmed);
+  assert!(app.confirm_countdown_started_at.is_none());
+}
+
+#[test]
+fn confirm_dismiss_resets_timer_and_returns_to_list() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  app.view = View::Confirm;
+  app.confirm_press_y(Instant::now());
+  assert!(app.confirm_countdown_started_at.is_some());
+  app.confirm_dismiss();
+  assert_eq!(app.view, View::List);
+  assert!(
+    app.confirm_countdown_started_at.is_none(),
+    "Esc/n must always disarm the countdown"
+  );
+}
+
+#[test]
+fn tick_unarmed_is_noop() {
+  let (_dir, mut app) = make_app();
+  let outcome = app.tick_confirm_countdown(Instant::now());
+  assert_eq!(outcome, CountdownTickOutcome::NotArmed);
+}
+
+#[test]
+fn tick_before_duration_is_pending() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let t0 = Instant::now();
+  app.confirm_press_y(t0);
+  let outcome = app.tick_confirm_countdown(t0 + Duration::from_millis(1500));
+  assert_eq!(outcome, CountdownTickOutcome::Pending);
+  assert!(
+    app.confirm_countdown_started_at.is_some(),
+    "pending tick must not clear the timer"
+  );
+}
+
+#[test]
+fn tick_at_duration_signals_ready_to_fire() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let t0 = Instant::now();
+  app.confirm_press_y(t0);
+  let outcome = app.tick_confirm_countdown(t0 + Duration::from_secs(3));
+  assert_eq!(outcome, CountdownTickOutcome::ReadyToFire);
+}
+
+#[test]
+fn tick_past_duration_signals_ready_to_fire() {
+  // Tick rate is 200ms (mod.rs), so the elapsed value handed to the App
+  // can overshoot the configured duration slightly. The state machine
+  // must still report ReadyToFire, not Pending.
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let t0 = Instant::now();
+  app.confirm_press_y(t0);
+  let outcome = app.tick_confirm_countdown(t0 + Duration::from_millis(3500));
+  assert_eq!(outcome, CountdownTickOutcome::ReadyToFire);
+}
+
+#[test]
+fn countdown_progress_grows_with_elapsed() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let t0 = Instant::now();
+  app.confirm_press_y(t0);
+  assert!((app.confirm_countdown_progress(t0) - 0.0).abs() < 1e-9);
+  let mid = app.confirm_countdown_progress(t0 + Duration::from_millis(1500));
+  assert!((0.49..=0.51).contains(&mid), "got progress = {mid}");
+  let done = app.confirm_countdown_progress(t0 + Duration::from_secs(10));
+  assert!((done - 1.0).abs() < 1e-9, "progress clamps to 1.0; got {done}");
+}
+
+#[test]
+fn countdown_remaining_secs_counts_down_to_zero() {
+  let (_dir, mut app) = make_app();
+  app.toggle_delete_branch();
+  let t0 = Instant::now();
+  app.confirm_press_y(t0);
+  assert_eq!(app.confirm_countdown_remaining_secs(t0), 3);
+  // Anywhere strictly inside [2s, 3s) still rounds up to "1s left".
+  assert_eq!(
+    app.confirm_countdown_remaining_secs(t0 + Duration::from_millis(2500)),
+    1
+  );
+  assert_eq!(app.confirm_countdown_remaining_secs(t0 + Duration::from_secs(3)), 0);
+}
+
+// Regression for Copilot review on PR #66: the gauge previously used
+// `round()`, which rendered a fully-filled 10-cell bar at progress 0.95
+// even though `confirm_delete` only fires at progress 1.0. The user saw
+// "bar full" but the action hadn't happened yet — a false-positive
+// signal on the destructive path. The fix: floor the cell count and
+// keep the last cell empty until progress actually hits 1.0.
+
+#[test]
+fn filled_cells_zero_at_progress_zero() {
+  assert_eq!(filled_cells_for_progress(0.0, 10), 0);
+}
+
+#[test]
+fn filled_cells_full_only_at_progress_one() {
+  assert_eq!(filled_cells_for_progress(1.0, 10), 10);
+}
+
+#[test]
+fn filled_cells_below_one_keeps_last_cell_empty() {
+  // 0.95 used to round() up to 10 cells (full bar) — that's the bug.
+  // It must now floor to 9 (or less), reserving the last cell for the
+  // "action fires" moment.
+  assert_eq!(filled_cells_for_progress(0.95, 10), 9);
+  // 0.99 even closer to full — still must not paint the last cell.
+  assert!(filled_cells_for_progress(0.99, 10) < 10);
+  // 0.999_999 same story — float weirdness must not flip the last cell.
+  assert!(filled_cells_for_progress(0.999_999, 10) < 10);
+}
+
+#[test]
+fn filled_cells_clamps_above_one() {
+  // Float drift on an overshooting tick (200ms poll past N×1000ms) can
+  // hand a progress > 1.0; the bar must clamp at the cell count.
+  assert_eq!(filled_cells_for_progress(1.5, 10), 10);
+}
+
+#[test]
+fn filled_cells_floors_partial_progress() {
+  // 0.55 with 10 cells → 5.5 floor → 5 (not 6 from rounding).
+  assert_eq!(filled_cells_for_progress(0.55, 10), 5);
+  // 0.5 exact → 5 cells.
+  assert_eq!(filled_cells_for_progress(0.5, 10), 5);
 }
