@@ -460,14 +460,19 @@ fn exec_shell(step: &CommandStep, cwd: &Path) -> Result<String> {
   for (k, v) in &step.env {
     cmd.env(k, v);
   }
+  // The `bootstrap step '…'` prefix used to live in the variant's
+  // Display impl; it moved into the data string when the variant was
+  // generalised in #65 so other subcommands (gwm tmux / gwm zellij)
+  // don't inherit a misleading "bootstrap" prefix on their own
+  // spawn failures.
   let out = cmd
     .output()
-    .map_err(|e| GwmError::CommandFailed(format!("{}: {}", step.name, e)))?;
+    .map_err(|e| GwmError::CommandFailed(format!("bootstrap step '{}': {}", step.name, e)))?;
   let stdout = String::from_utf8_lossy(&out.stdout).to_string();
   let stderr = String::from_utf8_lossy(&out.stderr).to_string();
   if !out.status.success() {
     return Err(GwmError::CommandFailed(format!(
-      "{} exited with {}\n{}",
+      "bootstrap step '{}' exited with {}\n{}",
       step.name,
       out.status,
       if stderr.is_empty() { stdout } else { stderr }

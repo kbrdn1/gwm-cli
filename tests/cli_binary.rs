@@ -31,6 +31,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  completions "))
     .stdout(predicate::str::contains("  shell-init "))
     .stdout(predicate::str::contains("  switch "))
+    .stdout(predicate::str::contains("  tmux "))
+    .stdout(predicate::str::contains("  zellij "))
     .stdout(predicate::str::contains("  doctor "));
 }
 
@@ -448,4 +450,127 @@ fn list_format_table_is_default() {
     .success()
     .stdout(predicate::str::contains("NAME"))
     .stdout(predicate::str::contains("STATUS"));
+}
+
+// --------------------------------------------------------------------------
+// Issue #23 — `gwm tmux <pattern>` / `gwm zellij <pattern>`
+// --------------------------------------------------------------------------
+//
+// The actual spawn (`std::process::Command::new("tmux").args(...)`) is out
+// of scope here — driving it would require a live tmux/zellij server on
+// every CI runner. We instead pin the user-visible contract:
+//
+//   1. The subcommands exist and are listed in `gwm --help`.
+//   2. Outside the corresponding multiplexer (no `$TMUX` / `$ZELLIJ`),
+//      the command exits non-zero with a clear stderr that names the
+//      missing multiplexer — no silent no-op.
+//   3. Outside a git repo, the standard `NotInGitRepo` error wins.
+//   4. The argv-builder unit tests in `tests/multiplexer_tests.rs`
+//      cover what gets handed to the spawn.
+
+#[test]
+fn tmux_outside_tmux_session_fails_with_clear_error() {
+  // CI runners and most local shells don't have `$TMUX` set. The command
+  // must refuse loudly rather than spawn `tmux` against no server, which
+  // would either start a brand-new tmux server or error opaquely.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("TMUX")
+    .args(["tmux", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("tmux").and(predicate::str::contains("not")));
+}
+
+#[test]
+fn zellij_outside_zellij_session_fails_with_clear_error() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("ZELLIJ")
+    .args(["zellij", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("zellij").and(predicate::str::contains("not")));
+}
+
+#[test]
+fn tmux_outside_git_repo_fails() {
+  // `NotInGitRepo` wins over the multiplexer-not-running gate when both
+  // apply — the user is told to fix the more fundamental problem first.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("TMUX")
+    .args(["tmux", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn zellij_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("ZELLIJ")
+    .args(["zellij", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// regression: PR #65 Copilot review — the not-running error carried a
+// literal backslash before the env var name (`\$TMUX` instead of
+// `$TMUX`). The `\\` came from a shell-escape habit; this is stderr,
+// not shell source, so the dollar must render bare.
+#[test]
+fn tmux_outside_tmux_error_does_not_escape_dollar() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("TMUX")
+    .args(["tmux", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("\\$").not())
+    // And `$TMUX` itself must still appear so the hint is actionable.
+    .stderr(predicate::str::contains("$TMUX"));
+}
+
+#[test]
+fn zellij_outside_zellij_error_does_not_escape_dollar() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env_remove("ZELLIJ")
+    .args(["zellij", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("\\$").not())
+    .stderr(predicate::str::contains("$ZELLIJ"));
+}
+
+#[test]
+fn tmux_help_mentions_split_flag() {
+  // The `-p` flag (split-pane instead of new-window) is the one knob users
+  // care about; it must show up in `--help` so it's discoverable without
+  // reading the README.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["tmux", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("--split"));
+}
+
+#[test]
+fn zellij_help_mentions_split_flag() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["zellij", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("--split"));
 }
