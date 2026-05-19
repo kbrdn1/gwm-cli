@@ -298,8 +298,51 @@ fn resolvable_command_binary_is_ok() {
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
   let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
   // We don't assert Ok strictly — `lazygit` may be missing on a CI runner.
-  // The relevant assertion is: the run-string binary doesn't show up as missing.
-  assert!(!c.detail.contains("sh "), "sh should resolve, got: {}", c.detail);
+  // The relevant assertion is: when the doctor reports missing binaries, `sh`
+  // is not in that list. Distinguished from the previous loose `!contains("sh ")`
+  // which would pass even on `[sh,other]` or `sh\n` formatting.
+  if c.status == CheckStatus::Warning {
+    let missing_section = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+    let missing: Vec<&str> = missing_section
+      .split(|c: char| c == ',' || c == '\n')
+      .map(str::trim)
+      .collect();
+    assert!(
+      !missing.contains(&"sh"),
+      "sh must not be reported missing, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn extract_binary_handles_shell_quoted_run_strings() {
+  // Pre-fix, `extract_binary` used `split_whitespace` and returned `"my`
+  // as the binary name for a quoted run-string like `"my tool" --flag`,
+  // producing a "binary not on PATH" warning that doesn't match anything
+  // the user actually wrote. After the shell-words migration, the
+  // binary is correctly identified as the full quoted command name.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "quoted".into(),
+    run: r#""definitely-not-on-path-quoted-xyz" --help"#.into(),
+    when: None,
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-quoted-xyz"),
+    "shell-quoted binary name must be unquoted in the report, got: {}",
+    c.detail
+  );
+  assert!(
+    !c.detail.contains("\"definitely"),
+    "the leading quote must be stripped, got: {}",
+    c.detail
+  );
 }
 
 // --------------------------------------------------------------------------

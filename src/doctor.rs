@@ -210,12 +210,16 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
     .with_hint(format!("supported keywords: {}", SUPPORTED_WHEN_PREFIXES.join(", ")))
 }
 
-/// Extract the executable name from a shell command string. Skips leading
-/// `FOO=bar` env assignments (which the shell would treat as one-shot env)
-/// and returns the first token that isn't `KEY=VAL`. Returns `None` for
-/// empty strings.
-fn extract_binary(run: &str) -> Option<&str> {
-  run.split_whitespace().find(|t| !t.contains('='))
+/// Extract the executable name from a shell command string. Tokenises
+/// via `shell_words` so quoted args (`"my tool" --flag`) and escaped
+/// whitespace are handled the way the shell would, then skips leading
+/// `FOO=bar` env assignments and returns the first token that isn't
+/// `KEY=VAL`. Returns `None` for empty strings or strings that fail
+/// to parse (unbalanced quotes — better to surface nothing than a
+/// garbage binary name that would produce a confusing PATH warning).
+fn extract_binary(run: &str) -> Option<String> {
+  let tokens = shell_words::split(run).ok()?;
+  tokens.into_iter().find(|t| !t.contains('='))
 }
 
 /// Check #4: every binary referenced by the bootstrap commands resolves on
@@ -238,7 +242,7 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   // Whatever the user's own bootstrap commands invoke.
   for cmd in &ctx.config.bootstrap.command {
     if let Some(bin) = extract_binary(&cmd.run) {
-      needed.insert(bin.to_string());
+      needed.insert(bin);
     }
   }
 
@@ -464,15 +468,16 @@ fn is_merged_into_any(
   Ok(false)
 }
 
-/// Probe a directory for write access by creating and deleting a sentinel
-/// file. More reliable across platforms than parsing Unix mode bits.
+/// Probe a directory for write access by creating and deleting a unique
+/// sentinel file. More reliable across platforms than parsing Unix mode
+/// bits. Uses `tempfile::Builder` so concurrent `gwm doctor` runs don't
+/// collide on a fixed filename, and so a SIGKILL mid-probe doesn't leak
+/// a stray sentinel into the user's worktree base — `NamedTempFile`
+/// RAII-cleans on drop.
 fn is_writable_dir(dir: &Path) -> bool {
-  let probe = dir.join(".gwm-doctor-write-probe");
-  match std::fs::File::create(&probe) {
-    Ok(_) => {
-      let _ = std::fs::remove_file(&probe);
-      true
-    }
-    Err(_) => false,
-  }
+  tempfile::Builder::new()
+    .prefix(".gwm-doctor-probe-")
+    .rand_bytes(8)
+    .tempfile_in(dir)
+    .is_ok()
 }
