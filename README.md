@@ -182,7 +182,14 @@ Checks performed:
 
 ### one-line cd into a worktree
 
-The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that wraps `gwm cd` — `eval` it in your rc file and use `gcd <pattern>` as a one-liner:
+The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that bridges two flows in one wrapper:
+
+- **`gcd <pattern>`** → `gwm cd <pattern>` (fuzzy resolve, exits `0` on a hit, `1` on miss / ambiguous / not in a repo).
+- **`gcd`** (no argument) → `gwm switch` (interactive picker — `Enter` to commit, `Esc` / `Ctrl-C` / `q` to cancel with exit code `1`).
+
+In both cases the wrapper only performs the `cd` after a successful exit code, so a cancelled picker or a missed pattern never strands you in `$HOME`.
+
+`eval` the wrapper in your rc file:
 
 ```bash
 # zsh
@@ -201,21 +208,19 @@ Then:
 
 ```bash
 gcd auth   # → cd $(gwm cd auth) → e.g. ~/cc-worktree/myrepo/feat-99-user-authentication
-gcd        # no arg → opens `gwm switch` and cd's into the picked worktree
+gcd        # → cd $(gwm switch)  → opens the picker, cd's into the chosen worktree
 ```
-
-`gcd` propagates the exit code from `gwm cd` (or `gwm switch`, when called without args) and never attempts the `cd` if the lookup / pick failed (no match, ambiguous pattern, cancelled picker, not in a git repo).
 
 ### interactive picker (`gwm switch`)
 
 When you can't remember the exact pattern, `gwm switch` opens the worktree TUI in picker mode — same table, fuzzy filter bar pre-open, create / delete / bootstrap disabled. `Enter` confirms the highlighted row and prints its path on stdout; `Esc` / `q` / `Ctrl-C` cancels with exit code `1`.
 
+The recommended invocation is via the `gcd` wrapper from [one-line cd into a worktree](#one-line-cd-into-a-worktree) — bare `gcd` (no argument) routes to `gwm switch` and cd's into the chosen worktree in one keystroke. If you haven't installed the wrapper, the raw form is:
+
 ```bash
 cd "$(gwm switch)"   # open picker, type to narrow, Enter to commit
 gwm s                # same, via the alias
 ```
-
-The shell wrapper installed by `gwm shell-init` makes this even quicker: bare `gcd` (no argument) invokes `gwm switch` and cd's into the chosen worktree in one keystroke.
 
 ### shell completions
 
