@@ -59,6 +59,48 @@ jobs:
       - name: cargo test
         run: cargo test --verbose
 
+  hook-smoke:
+    name: pre-commit hook smoke
+    runs-on: ubuntu-latest
+    # Cheap regression net for .githooks/pre-commit. Runs in parallel with
+    # the heavy `test` job — no Rust toolchain needed, just shell + git.
+    steps:
+      - uses: actions/checkout@v6
+      - name: shellcheck pre-commit hook
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: ./.githooks
+          severity: error
+      - name: hook is executable
+        run: test -x .githooks/pre-commit
+      - name: hook short-circuits on empty index
+        run: |
+          scratch=$(mktemp -d)
+          (
+            cd "$scratch"
+            git init -q
+            git config user.email "ci@gwm.test"
+            git config user.name "ci"
+            cp "$GITHUB_WORKSPACE/.githooks/pre-commit" pre-commit
+            sh pre-commit
+          )
+      - name: gate 2 detects .gwm.toml and skips when gwm absent
+        run: |
+          scratch=$(mktemp -d)
+          (
+            cd "$scratch"
+            git init -q
+            git config user.email "ci@gwm.test"
+            git config user.name "ci"
+            cp "$GITHUB_WORKSPACE/.githooks/pre-commit" pre-commit
+            echo "[bootstrap]" > .gwm.toml
+            git add .gwm.toml
+            out=$(PATH="/usr/bin:/bin" sh pre-commit 2>&1)
+            echo "$out"
+            echo "$out" | grep -q "gwm not in PATH" \
+              || (echo "FAIL: gate 2 should print 'gwm not in PATH' skip message" && exit 1)
+          )
+
   audit:
     name: cargo audit
     runs-on: ubuntu-latest
