@@ -43,7 +43,12 @@ pub enum GwmError {
   #[error("guard '{name}' tripped: file {file} matches deny pattern")]
   GuardTripped { name: String, file: String },
 
-  #[error("bootstrap command failed: {0}")]
+  /// Generic command/spawn failure. The variant is shared between
+  /// every subcommand that shells out (bootstrap steps, `gwm tmux`,
+  /// `gwm zellij`, …); callers prepend their own operation name into
+  /// the inner string so the rendered message stays attributable to
+  /// the verb the user actually typed.
+  #[error("command failed: {0}")]
   CommandFailed(String),
 
   #[error("config error: {0}")]

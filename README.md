@@ -134,8 +134,18 @@ gwm remove auth --delete-branch             # remove + drop the branch
 gwm prune                                   # clean stale .git/worktrees entries
 gwm completions zsh                         # print a zsh / bash / fish / powershell / elvish script
 gwm shell-init zsh                          # print a `gcd <pattern>` shell wrapper (one-line cd)
+gwm tmux auth                               # open the matched worktree in a new tmux window
+gwm tmux auth -p                            # ...or in a split of the current pane
+gwm zellij auth                             # same, but for zellij — new tab via `--cwd`
+gwm zellij auth -p                          # ...or in a new pane of the current tab
 gwm doctor                                  # diagnose config + env + worktree state (exit 0/1/2)
 ```
+
+### multiplexer integration (`gwm tmux` / `gwm zellij`)
+
+Inside an already-running tmux session, `gwm tmux <pattern>` shells out to `tmux new-window -n <name> -c <path>` so the new window's shell lands directly inside the matched worktree. `-p` (or `--split`) swaps the verb for `split-window` — same `-c`, current window's layout. `gwm zellij <pattern>` does the same for zellij via `zellij action new-tab --name <name> --cwd <path>` (or `new-pane --cwd` with `-p`); the `--cwd` flag on `new-tab` needs zellij ≥ 0.40.
+
+Both require the corresponding multiplexer to actually be running (i.e. `$TMUX` / `$ZELLIJ` set in the calling environment). Outside a session the command refuses with a clear error rather than spawning a stray server.
 
 ### diagnose your setup
 
