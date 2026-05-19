@@ -379,6 +379,57 @@ fn shell_init_powershell_no_arg_invokes_switch() {
     .stdout(predicate::str::contains("IsNullOrEmpty"));
 }
 
+// Issue #58: users who eval the wrapper without reading the README must
+// still discover the no-arg route. Pin a one-line cheat-sheet comment in
+// the script header that names the bridge to `gwm switch`. The exact
+// phrase `picker via `gwm switch`` is asserted because the README, the
+// CLI --help, and the wrapper now share that wording — drift in one
+// surface should break the test instead of going unnoticed.
+#[test]
+fn shell_init_posix_header_documents_no_arg_route() {
+  for shell in ["bash", "zsh"] {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd.args(["shell-init", shell]);
+    cmd
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("picker via `gwm switch`"));
+  }
+}
+
+#[test]
+fn shell_init_fish_header_documents_no_arg_route() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "fish"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("picker via `gwm switch`"));
+}
+
+#[test]
+fn shell_init_powershell_header_documents_no_arg_route() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "powershell"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("picker via `gwm switch`"));
+}
+
+// Issue #58: a user who lands on `gwm switch --help` first (e.g. via tab
+// completion) should learn that the recommended invocation is the `gcd`
+// wrapper from `gwm shell-init`, not the raw `cd "$(gwm switch)"` form.
+#[test]
+fn switch_help_mentions_gcd_wrapper() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["switch", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gcd").and(predicate::str::contains("shell-init")));
+}
+
 #[test]
 fn shell_init_rejects_unknown_shell() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();

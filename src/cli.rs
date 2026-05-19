@@ -112,7 +112,9 @@ pub enum Command {
   /// away. Press Enter to commit the highlighted pick; Esc / Ctrl-C / `q`
   /// quits without printing anything (exit code 1).
   ///
-  /// Daily usage:  cd "$(gwm switch)"   (or `gwm s`, the alias).
+  /// Typically invoked via `gcd` (no arg) from the bundled `gwm shell-init`
+  /// wrapper, which cd's into the picked worktree in one keystroke. The raw
+  /// form is `cd "$(gwm switch)"` (or `gwm s`, the alias).
   #[command(visible_alias = "s")]
   Switch,
 }
@@ -411,6 +413,11 @@ pub fn shell_init_script(shell: InitShell) -> &'static str {
 
 const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: eval "$(gwm shell-init bash)"   # or zsh
+#
+# Two paths:
+#   gcd <pattern>        # fuzzy resolve via `gwm cd <pattern>`, then cd
+#   gcd                  # no arg → opens the interactive picker via `gwm switch`, then cd
+#
 # Note: the `function name { ... }` form (zsh/bash-extended) is used instead
 # of the parenthesised POSIX form so the parser does not error out with
 # `defining function based on alias 'gcd'` when zsh already has a `gcd`
@@ -433,6 +440,10 @@ unalias gcd 2>/dev/null || true
 
 const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
+#
+# Two paths:
+#   gcd <pattern>        # fuzzy resolve via `gwm cd <pattern>`, then cd
+#   gcd                  # no arg → opens the interactive picker via `gwm switch`, then cd
 function gcd --description 'cd into a gwm worktree (no arg = interactive picker)'
   set -l target
   if test (count $argv) -eq 0
@@ -452,6 +463,11 @@ end
 
 const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
+#
+# Two paths:
+#   gcd <pattern>        # fuzzy resolve via `gwm cd <pattern>`, then Set-Location
+#   gcd                  # no arg → opens the interactive picker via `gwm switch`, then Set-Location
+#
 # Note: this clears any prior `gcd` alias so the function takes effect.
 Remove-Alias -Name gcd -Force -ErrorAction SilentlyContinue
 function gcd {
