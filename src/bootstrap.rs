@@ -402,23 +402,26 @@ impl<'a> WhenParser<'a> {
 }
 
 fn eval_when_atom(atom: &str, cwd: &Path) -> bool {
+  // Each atom-argument is trimmed to absorb any Unicode whitespace that
+  // the ASCII-only tokenizer left glued to the value. Preserves the
+  // legacy `file_exists:` tolerance from the pre-tokenizer evaluator.
   if let Some(rest) = atom.strip_prefix("file_exists:") {
-    return cwd.join(rest).exists();
+    return cwd.join(rest.trim()).exists();
   }
   if let Some(rest) = atom.strip_prefix("cmd_exists:") {
-    return which::which(rest).is_ok();
+    return which::which(rest.trim()).is_ok();
   }
   if let Some(rest) = atom.strip_prefix("env_set:") {
-    return std::env::var(rest).is_ok();
+    return std::env::var(rest.trim()).is_ok();
   }
   if let Some(rest) = atom.strip_prefix("env_eq:") {
     let Some((name, value)) = rest.split_once('=') else {
       return false;
     };
-    return std::env::var(name).ok().as_deref() == Some(value);
+    return std::env::var(name.trim()).ok().as_deref() == Some(value);
   }
   if let Some(pattern) = atom.strip_prefix("glob_exists:") {
-    return glob_exists(pattern, cwd);
+    return glob_exists(pattern.trim(), cwd);
   }
   // Unknown keyword: default to true so we don't silently neutralise a
   // command the user clearly wanted to run.

@@ -259,6 +259,35 @@ fn extra_whitespace_around_operators_is_tolerated() {
   assert!(evaluate_when("  file_exists:a   &&   file_exists:b  ", dir.path()));
 }
 
+#[test]
+fn unicode_whitespace_inside_atom_is_trimmed() {
+  // The tokenizer only splits on ASCII whitespace, so a non-ASCII Unicode
+  // whitespace character (here NBSP `\u{00A0}`) stays glued to the atom.
+  // Pre-fix `evaluate_when` would forward the whitespace-prefixed string
+  // straight to `Path::join`, producing a path that doesn't exist. The
+  // restored `.trim()` on the keyword remainder keeps the legacy
+  // `file_exists:` tolerance intact.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join("payload"), "").unwrap();
+  let expr = "file_exists:\u{00A0}payload";
+  assert!(
+    evaluate_when(expr, dir.path()),
+    "expected `file_exists:` to strip leading Unicode whitespace"
+  );
+}
+
+#[test]
+fn unicode_path_does_not_panic() {
+  // Regression guard for tokenize_when: it slices `expr` by byte index.
+  // The delimiters (`!`, `&`, `|`, ASCII whitespace) are all single-byte
+  // ASCII codepoints, so the loop can never break mid-character of a
+  // multi-byte UTF-8 sequence. This test pins that invariant down.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join("σ.rs"), "// greek lowercase sigma").unwrap();
+  assert!(evaluate_when("file_exists:σ.rs", dir.path()));
+  assert!(!evaluate_when("file_exists:λ.rs", dir.path()));
+}
+
 // --------------------------------------------------------------------------
 // Backward compatibility — unknown keyword still defaults to true
 // --------------------------------------------------------------------------
