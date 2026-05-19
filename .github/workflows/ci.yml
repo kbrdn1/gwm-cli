@@ -71,3 +71,33 @@ jobs:
       - name: cargo audit
         run: cargo audit
         continue-on-error: true
+
+  doctor:
+    name: gwm doctor (advisory)
+    runs-on: ubuntu-latest
+    needs: test
+    # Restrict to the `dev` integration branch only — `main` is meant to be
+    # stable, the doctor exists to catch in-development regressions before
+    # they reach a release. Without this guard the job would also run on
+    # every push/PR targeting `main` (the workflow header lists both).
+    if: |
+      (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
+      (github.event_name == 'pull_request' && github.base_ref == 'dev')
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: configure git identity
+        run: |
+          git config --global user.email "ci@gwm.test"
+          git config --global user.name "ci"
+      # Build the binary once with the same release profile gh actions
+      # cache benefits from, then ask it to diagnose this very repo.
+      # Advisory: a non-zero exit means we want eyes on the report, but
+      # not a blocked merge. `lazygit` is intentionally absent on the
+      # runner so a Warning here is the floor, not a regression.
+      - name: cargo build
+        run: cargo build --release --quiet
+      - name: gwm doctor
+        run: ./target/release/gwm doctor
+        continue-on-error: true

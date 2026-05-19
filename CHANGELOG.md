@@ -23,12 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `gwm doctor` no longer flags gwm-style branches as orphan when they're already fully merged into one of the trunk branches (`dev`, `main`). CONTRIBUTING.md mandates preserving the source branch post-merge, so the previous behaviour produced N false-positives on every successful release. The Ok detail now reads e.g. `7 merged gwm-style branch(es) preserved per CONTRIBUTING, no unmerged orphans`. Genuine WIP branches (no worktree, no merge into a trunk) still surface as Warning. Closes #47.
 
+### CI
+
+- New advisory job `gwm doctor` in `.github/workflows/ci.yml` — runs `cargo build --release` then `./target/release/gwm doctor` against the repo on every push to `dev` and on every PR targeting `dev`. `continue-on-error: true` so it never blocks a merge, but a non-zero exit surfaces config / env / worktree-state regressions for human review. Closes #49.
+
 ### Docs
 
 - `CLAUDE.md` (new, repo root) — house rules for AI-assisted contributions. Promotes **TDD as the primordial contribution rule** (red → green → refactor, mandatory failing test before production code).
 - `CONTRIBUTING.md` — `TDD expectations` section rewritten as `🔴 TDD is mandatory — non-negotiable`: explicit loop, narrow exceptions, reviewer enforcement via `git log --stat tests/`.
 - `CODE_OF_CONDUCT.md` — new `Engineering conduct` section anchoring the TDD rule as a contribution-conduct expectation (applies equally to human and AI-assisted PRs).
 - `CHANGELOG.md` trimmed to the in-progress release only; past releases moved under `changelogs/`.
+- `CLAUDE.md` — two new house rules: pre-validate environment-dependent tests with a stripped `PATH` before push (one-liner included), and run `gwm doctor` locally on PRs that touch `.gwm.toml` / bootstrap / doctor. Codifies the recipe that would have spared the 3 CI round-trips on PR #43.
 
 ### Dependencies
 
