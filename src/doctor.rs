@@ -180,9 +180,14 @@ const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:", "cmd_exists:", "env_s
 
 /// Check #3: every `[[bootstrap.command]].when` predicate uses one of the
 /// supported keywords. Unknown predicates default to `true` in
-/// `bootstrap::check_when`, so the command runs anyway and the user's
+/// `bootstrap::evaluate_when`, so the command runs anyway and the user's
 /// intended gating condition is silently ignored — that's still a footgun
 /// worth flagging, just not "command never runs".
+///
+/// Walks every atom in the expression (via `bootstrap::when_atoms`) so
+/// negated atoms (`!env_set:CI`) and compound expressions
+/// (`file_exists:a && bogus:1`) are validated as a whole instead of
+/// being green-lit by their first keyword.
 fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let name = "`when` predicates supported";
   let bs = &ctx.config.bootstrap;
@@ -192,8 +197,10 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   for cmd in &bs.command {
     let Some(w) = &cmd.when else { continue };
     checked += 1;
-    if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| w.starts_with(p)) {
-      unknown.push(format!("{} (on command `{}`)", w, cmd.name));
+    for atom in crate::bootstrap::when_atoms(w) {
+      if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| atom.starts_with(p)) {
+        unknown.push(format!("{} (on command `{}`)", atom, cmd.name));
+      }
     }
   }
 

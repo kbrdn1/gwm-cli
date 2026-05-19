@@ -296,6 +296,21 @@ pub fn evaluate_when(expr: &str, cwd: &Path) -> bool {
   parser.parse_or()
 }
 
+/// Return every atom string contained in a `when` expression, dropping
+/// the boolean operators. Callers (e.g. `doctor::check_when_predicates`)
+/// can then validate each atom independently — `w.starts_with(prefix)`
+/// on the raw expression misses negated atoms (`!env_set:CI`) and
+/// unsupported keywords sitting on the RHS of `&&` / `||`.
+pub fn when_atoms(expr: &str) -> Vec<String> {
+  tokenize_when(expr)
+    .into_iter()
+    .filter_map(|t| match t {
+      WhenToken::Atom(s) => Some(s),
+      _ => None,
+    })
+    .collect()
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum WhenToken {
   Atom(String),
