@@ -260,6 +260,8 @@ fn no_when_predicates_is_ok() {
 
 #[test]
 fn when_predicates_detail_counts_checked_predicates_not_keywords() {
+  // regression: doctor detail used SUPPORTED_WHEN_PREFIXES.len() and reported
+  // "1 predicate" regardless of the number of `when:` clauses actually checked.
   let (dir, repo) = init_repo();
   let mut config = Config::default();
   // Three commands carrying a `when:` predicate. The detail message must
@@ -288,6 +290,8 @@ fn when_predicates_detail_counts_checked_predicates_not_keywords() {
 
 #[test]
 fn when_predicates_detail_says_none_when_no_predicates_configured() {
+  // regression: same SUPPORTED_WHEN_PREFIXES.len() miscount as above, surfaced
+  // even when zero `when:` predicates were configured.
   let (dir, repo) = init_repo();
   let config = Config::default();
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
@@ -360,6 +364,9 @@ fn resolvable_command_binary_is_ok() {
 
 #[test]
 fn extract_binary_handles_shell_quoted_run_strings() {
+  // regression: `extract_binary` used `split_whitespace` and returned the
+  // leading-quoted token `"my` for `"my tool" --flag` before the shell-words
+  // migration.
   // Pre-fix, `extract_binary` used `split_whitespace` and returned `"my`
   // as the binary name for a quoted run-string like `"my tool" --flag`,
   // producing a "binary not on PATH" warning that doesn't match anything

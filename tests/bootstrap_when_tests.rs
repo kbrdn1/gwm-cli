@@ -261,6 +261,8 @@ fn extra_whitespace_around_operators_is_tolerated() {
 
 #[test]
 fn unicode_whitespace_inside_atom_is_trimmed() {
+  // regression: NBSP-prefixed atoms were forwarded to Path::join before the
+  // `.trim()` on the keyword remainder was restored.
   // The tokenizer only splits on ASCII whitespace, so a non-ASCII Unicode
   // whitespace character (here NBSP `\u{00A0}`) stays glued to the atom.
   // Pre-fix `evaluate_when` would forward the whitespace-prefixed string
@@ -278,6 +280,8 @@ fn unicode_whitespace_inside_atom_is_trimmed() {
 
 #[test]
 fn unicode_path_does_not_panic() {
+  // regression: tokenize_when byte-slicing must not break inside a
+  // multibyte UTF-8 codepoint when the path contains non-ASCII chars.
   // Regression guard for tokenize_when: it slices `expr` by byte index.
   // The delimiters (`!`, `&`, `|`, ASCII whitespace) are all single-byte
   // ASCII codepoints, so the loop can never break mid-character of a

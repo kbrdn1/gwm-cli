@@ -315,6 +315,8 @@ fn enter_filter_activates_capture_and_disarms_gg() {
 
 #[test]
 fn enter_filter_drops_sidebar_focus() {
+  // regression: PR #44 Copilot review — sidebar focus survived `/` and broke
+  // j/k navigation after Enter committed the filter.
   // Regression for the Copilot review on PR #44: if the sidebar held focus
   // when the user hit `/`, after `exit_filter_keep` (Enter) the focus would
   // still be on the sidebar, so `j` / `k` would scroll it instead of walking
@@ -724,6 +726,8 @@ fn picker_confirm_with_selection_signals_exit() {
 
 #[test]
 fn picker_confirm_without_selection_does_not_signal_exit() {
+  // regression: PR #53 Copilot review — picker_confirm with an empty filter
+  // result unconditionally broke the event loop and exited 1.
   // When the fuzzy filter narrows the list down to zero matches, Enter
   // must keep the TUI open so the user can back-space and try again,
   // not exit with code 1.
@@ -742,6 +746,8 @@ fn picker_confirm_without_selection_does_not_signal_exit() {
 
 #[test]
 fn picker_confirm_without_selection_reports_status() {
+  // regression: PR #53 — Enter on an empty filter result was silently
+  // swallowed; no status-bar hint surfaced the no-match state.
   // The user needs feedback explaining why Enter was inert. Surface a
   // status-bar hint so the no-match case isn't silently swallowed.
   let (_dir, mut app) = make_app();
@@ -765,6 +771,8 @@ fn picker_confirm_without_selection_reports_status() {
 
 #[test]
 fn picker_cancel_signals_exit_without_path() {
+  // regression: PR #53 — picker footer reads `esc:cancel` but Esc-in-filter
+  // only cleared the query; the picker contract wasn't honored.
   let (_dir, mut app) = make_app();
   app.picker_mode = true;
   app.list_state.select(Some(0));

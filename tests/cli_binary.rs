@@ -291,6 +291,8 @@ fn shell_init_posix_does_not_use_paren_function_syntax() {
 // regardless of the user's prior aliases.
 #[test]
 fn shell_init_posix_unaliases_gcd_first() {
+  // regression: oh-my-zsh's git plugin defines `gcd='git checkout'` which
+  // shadowed our gcd function ("defining function based on alias").
   for shell in ["bash", "zsh"] {
     let mut cmd = Command::cargo_bin("gwm").unwrap();
     cmd.args(["shell-init", shell]);
@@ -327,6 +329,8 @@ fn shell_init_fish_emits_function_block() {
 // parsing and glob expansion.
 #[test]
 fn shell_init_fish_quotes_target_with_double_dash() {
+  // regression: fish wildcard expansion mangled paths containing `[`, `]`,
+  // or `*` when the helper used `cd $target` without `cd -- "$target"`.
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["shell-init", "fish"]);
   cmd
