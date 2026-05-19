@@ -1,5 +1,6 @@
 use crate::bootstrap::{self, BootstrapCtx, StepStatus};
 use crate::config::Config;
+use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree;
@@ -77,6 +78,11 @@ pub enum Command {
   },
   /// Prune stale worktree references (admin files without a working dir).
   Prune,
+  /// Diagnose the gwm setup (config, env, worktree state).
+  ///
+  /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
+  /// suitable for CI / pre-commit hooks.
+  Doctor,
   /// List the supported branch types.
   Types,
   /// Generate a shell completion script on stdout.
@@ -122,6 +128,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Cd { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target),
     Command::Prune => cmd_prune(),
+    Command::Doctor => cmd_doctor(),
     Command::Types => cmd_types(),
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
@@ -305,6 +312,39 @@ fn cmd_prune() -> Result<()> {
   let n = worktree::prune(&repo)?;
   println!("pruned {} stale worktree(s)", n);
   Ok(())
+}
+
+fn cmd_doctor() -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let config = Config::load_for_repo(&workdir).unwrap_or_default();
+
+  let ctx = DoctorCtx { repo_workdir: &workdir, repo: &repo, config: &config };
+  let report = doctor::run(&ctx)?;
+  print_doctor_report(&report);
+
+  let code = report.exit_code();
+  if code != 0 {
+    std::process::exit(code);
+  }
+  Ok(())
+}
+
+fn print_doctor_report(report: &doctor::DoctorReport) {
+  for c in &report.checks {
+    let sigil = match c.status {
+      CheckStatus::Ok => "✓",
+      CheckStatus::Warning => "!",
+      CheckStatus::Failed => "✗",
+    };
+    println!("{} {}", sigil, c.name);
+    if !c.detail.is_empty() {
+      println!("    {}", c.detail);
+    }
+    if let Some(hint) = &c.fix_hint {
+      println!("    → {}", hint);
+    }
+  }
 }
 
 fn cmd_types() -> Result<()> {
