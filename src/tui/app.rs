@@ -397,8 +397,14 @@ impl App {
   /// Open the inline filter bar. The existing query is preserved so the user
   /// can refine an already-sticky filter; `Esc` is the way to start fresh.
   /// Disarms any pending `gg` motion so `/g` doesn't half-trigger it.
+  ///
+  /// Forces focus back onto the list: opening `/` is an intent to narrow the
+  /// list, and the post-`Enter` contract is "navigation returns to the
+  /// table". Leaving the sidebar focused would make `j` / `k` scroll it
+  /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
     self.filter_active = true;
+    self.sidebar_focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
   }

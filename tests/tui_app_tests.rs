@@ -314,6 +314,25 @@ fn enter_filter_activates_capture_and_disarms_gg() {
 }
 
 #[test]
+fn enter_filter_drops_sidebar_focus() {
+  // Regression for the Copilot review on PR #44: if the sidebar held focus
+  // when the user hit `/`, after `exit_filter_keep` (Enter) the focus would
+  // still be on the sidebar, so `j` / `k` would scroll it instead of walking
+  // the filtered worktrees — contradicting the documented "navigation
+  // returns to the table" contract. Opening the filter bar must therefore
+  // pre-emptively pull focus back to the list.
+  let (_dir, mut app) = make_app();
+  app.sidebar_open = true;
+  app.sidebar_focused = true;
+
+  app.enter_filter();
+  assert!(
+    !app.sidebar_focused,
+    "opening the filter bar must hand focus back to the list"
+  );
+}
+
+#[test]
 fn enter_filter_preserves_existing_query() {
   // Hitting `/` on a sticky filter re-opens the bar so the user can refine
   // it; only Esc clears.
@@ -407,18 +426,29 @@ fn filtered_indices_keeps_only_matching_worktrees() {
 
 #[test]
 fn filtered_indices_supports_subsequence_match() {
-  // 'auth' is a sub-sequence of 'user-authentication' — nucleo's fuzzy
-  // matcher must surface it even without an exact substring.
+  // The candidate must NOT contain the query as a contiguous substring —
+  // otherwise a regression that downgrades the fuzzy matcher to plain
+  // substring matching would still pass. Spread the query characters across
+  // the haystack so only the subsequence path can score it.
   let (_dir, mut app) = make_app();
   app.worktrees = vec![
-    worktree_fixture("feat-99-user-authentication"),
+    // 'a'-'u'-'t'-'h' appear in order but separated by other characters;
+    // there is no literal `auth` substring anywhere in this name.
+    worktree_fixture("a-foo-u-bar-t-baz-h-qux"),
     worktree_fixture("chore-1-bump-deps"),
   ];
   app.filter_query = "auth".into();
+  // Sanity-guard the precondition: if a future refactor introduces an `auth`
+  // substring into the fixture, the test would silently degrade to a
+  // substring check again.
+  assert!(
+    !app.worktrees[0].name.contains("auth"),
+    "fixture must not contain 'auth' as a substring or the test stops covering subsequence"
+  );
 
   let idx = app.filtered_indices();
   assert_eq!(idx.len(), 1);
-  assert_eq!(app.worktrees[idx[0]].name, "feat-99-user-authentication");
+  assert_eq!(app.worktrees[idx[0]].name, "a-foo-u-bar-t-baz-h-qux");
 }
 
 #[test]
