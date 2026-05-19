@@ -89,12 +89,43 @@ gwm types                                   # list valid branch types
 gwm create feat 123 "user-authentication"   # → feat/#123-user-authentication
 gwm create feat 123 foo --no-bootstrap      # skip the .gwm.toml bootstrap stages
 gwm list                                    # list all worktrees of the current repo
+gwm list --format=names                     # one worktree name per line (for shell completion)
 gwm path auth                               # print the resolved path (use $(gwm path ...))
 gwm bootstrap                               # re-run bootstrap on the CWD worktree
 gwm bootstrap auth                          # ...or on a named one
 gwm remove auth                             # remove (fuzzy match) — keeps the branch
 gwm remove auth --delete-branch             # remove + drop the branch
 gwm prune                                   # clean stale .git/worktrees entries
+gwm completions zsh                         # print a zsh / bash / fish / powershell / elvish script
+```
+
+### shell completions
+
+`gwm completions <shell>` prints a static completion script (generated from the live clap argument tree, so it never drifts from the actual subcommands). Supported shells: `zsh`, `bash`, `fish`, `powershell`, `elvish`.
+
+```bash
+# zsh — drop into the first writable fpath entry
+gwm completions zsh > "${fpath[1]}/_gwm"
+
+# bash — system-wide
+gwm completions bash | sudo tee /etc/bash_completion.d/gwm > /dev/null
+# bash — per-user
+gwm completions bash > ~/.local/share/bash-completion/completions/gwm
+
+# fish
+gwm completions fish > ~/.config/fish/completions/gwm.fish
+
+# PowerShell — load into the current session (ephemeral)
+gwm completions powershell | Out-String | Invoke-Expression
+# PowerShell — persist by appending to $PROFILE
+gwm completions powershell | Out-File -Append -Encoding utf8 $PROFILE
+```
+
+For dynamic completion of worktree names (the `<pattern>` arg of `path` / `remove` / `bootstrap`), wire a custom completer to `gwm list --format=names` — e.g. in zsh:
+
+```zsh
+_gwm_worktrees() { compadd $(gwm list --format=names 2>/dev/null) }
+compdef _gwm_worktrees gwm-path gwm-remove gwm-bootstrap
 ```
 
 ## configuration
@@ -172,13 +203,13 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 71 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 81 tests (config / naming / bootstrap / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 71 tests
+cargo test               # 81 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
