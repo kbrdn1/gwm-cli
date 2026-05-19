@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `gwm completions <shell>` — prints a static completion script on stdout, generated from the live clap argument tree via [`clap_complete`](https://docs.rs/clap_complete). Supported shells: `zsh`, `bash`, `fish`, `powershell`, `elvish`. Closes #18.
+- `gwm list --format=names` — prints one worktree name per line (no header, no marker, no STATUS column). Suitable for backing dynamic completion of the `<pattern>` arg of `path` / `remove` / `bootstrap` (see the README "shell completions" section for a zsh wiring example).
+
+### Dependencies
+
+- `clap_complete` `4.5` (new).
+
 ## [0.2.0] - 2026-05-18
 
 Validated via `v0.2.0-rc.1` (pre-release published on 2026-05-18).
