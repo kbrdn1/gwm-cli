@@ -355,13 +355,13 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 140 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 190 tests (config / naming / bootstrap / doctor / flake / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 140 tests
+cargo test               # 190 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
@@ -381,10 +381,18 @@ tests/
 ├── config_tests.rs               # .gwm.toml parsing + write_default
 ├── naming_tests.rs               # kebab, branch validation, parse roundtrip
 ├── bootstrap_tests.rs            # copies / guards / no-symlink / commands
+├── bootstrap_when_tests.rs       # `when:` predicate grammar (file/cmd/env/glob + boolean ops)
+├── doctor_tests.rs               # `gwm doctor` checks + severity arithmetic
+├── flake_tests.rs                # Nix flake structure (build, devShell, app)
 ├── worktree_integration.rs       # git2 add/list/remove/prune
 ├── tui_app_tests.rs              # state transitions (ratatui-free)
 └── cli_binary.rs                 # assert_cmd end-to-end
 ```
+
+Sentinel tests (pinned to catch a specific regression) are prefixed with a
+`// regression: <one-line>` tag inside the test body so the target incident
+is discoverable without `git blame`. Suite hygiene was last audited in
+[`claudedocs/test-audit-0.4.0.md`](claudedocs/test-audit-0.4.0.md).
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / commit / PR conventions.
 
