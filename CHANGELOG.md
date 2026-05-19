@@ -14,6 +14,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `gwm cd <pattern>` — fuzzy-resolve a worktree and print its on-disk path. Same semantics as `gwm path`, exposed under an explicit name for the cd flow.
 - `gwm shell-init <bash|zsh|fish|powershell>` — prints a shell wrapper defining `gcd <pattern>` (the function does the actual `cd`, since the binary can't change the parent shell's directory). One-liner install: `eval "$(gwm shell-init zsh)"` in your rc file → `gcd auth` jumps to the matching worktree. Closes #19.
 
+### Docs
+
+- `CLAUDE.md` (new, repo root) — house rules for AI-assisted contributions. Promotes **TDD as the primordial contribution rule** (red → green → refactor, mandatory failing test before production code).
+- `CONTRIBUTING.md` — `TDD expectations` section rewritten as `🔴 TDD is mandatory — non-negotiable`: explicit loop, narrow exceptions, reviewer enforcement via `git log --stat tests/`.
+- `CODE_OF_CONDUCT.md` — new `Engineering conduct` section anchoring the TDD rule as a contribution-conduct expectation (applies equally to human and AI-assisted PRs).
+
 ### Dependencies
 
 - `clap_complete` `4.5` (new).

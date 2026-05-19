@@ -34,6 +34,16 @@ Maintainers have the right and responsibility to remove, edit, or reject comment
 
 This Code of Conduct applies within all project spaces (issues, pull requests, discussions, code review) and also applies when an individual is officially representing the project in public spaces.
 
+## Engineering conduct
+
+Beyond the interpersonal standards above, contributions are also expected to meet a baseline of engineering discipline. The non-negotiable rule is:
+
+- **Test-Driven Development is mandatory.** No production code is merged without a failing test that pinned the behaviour down first. Submitting code that adds or changes behaviour without an accompanying test in `tests/` is considered a breach of contribution conduct, not a stylistic preference. Reviewers will close such PRs with a pointer to [`CONTRIBUTING.md`](CONTRIBUTING.md#-tdd-is-mandatory--non-negotiable) and to the project-level [`CLAUDE.md`](CLAUDE.md) which both spell out the red → green → refactor loop.
+
+This rule exists to protect users (regressions are caught at the boundary, not after release) and reviewers (a PR's test diff is what reviewers read first). It applies equally to human contributors and to changes authored or assisted by AI tools.
+
+Exceptions are narrowly enumerated in `CONTRIBUTING.md` and must be argued explicitly in the PR description.
+
 ## Enforcement
 
 Instances of abusive, harassing, or otherwise unacceptable behaviour may be reported to the project maintainer at the contact listed on the GitHub profile. All complaints will be reviewed and investigated promptly and fairly.
