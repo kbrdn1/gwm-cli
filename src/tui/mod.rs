@@ -15,18 +15,15 @@ use std::time::Duration;
 pub use app::{App, Field, View};
 
 pub fn run() -> Result<()> {
-  enable_raw_mode()?;
-  let mut stdout = io::stdout();
-  execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-  let backend = CrosstermBackend::new(stdout);
-  let mut terminal = Terminal::new(backend)?;
-
-  let result = run_app(&mut terminal, App::new()?);
-
-  disable_raw_mode()?;
-  execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-  terminal.show_cursor()?;
-
+  // Construct the App BEFORE touching the terminal: if discovery / config
+  // load fails (e.g. not inside a git repo), the user's terminal stays in
+  // its pristine cooked state. Addresses Copilot's PR #53 review — the
+  // previous order left raw mode + alt-screen on when `App::new()?`
+  // bubbled up.
+  let app = App::new()?;
+  let mut terminal = enter_terminal()?;
+  let result = run_app(&mut terminal, app);
+  leave_terminal(&mut terminal)?;
   result.map(|_| ())
 }
 
@@ -36,20 +33,33 @@ pub fn run() -> Result<()> {
 /// Drives the terminal setup separately from `run` so the alternate screen
 /// is always torn down before the caller prints the chosen path on stdout.
 pub fn run_picker() -> Result<Option<PathBuf>> {
+  // Same teardown-safety pattern as `run`: any error from
+  // `App::new_picker_at` (repo discovery, config load) bubbles up with the
+  // terminal still in cooked mode.
+  let app = App::new_picker_at(None)?;
+  let mut terminal = enter_terminal()?;
+  let result = run_app(&mut terminal, app);
+  leave_terminal(&mut terminal)?;
+  result
+}
+
+/// Enable raw mode + alternate screen + mouse capture and hand back a
+/// configured `Terminal`. Centralised so `run` and `run_picker` cannot
+/// drift on the setup recipe.
+fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
   enable_raw_mode()?;
   let mut stdout = io::stdout();
   execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-  let backend = CrosstermBackend::new(stdout);
-  let mut terminal = Terminal::new(backend)?;
+  Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+}
 
-  let app = App::new_picker_at(None)?;
-  let result = run_app(&mut terminal, app);
-
+/// Inverse of `enter_terminal`. Always called from the same scope as
+/// `enter_terminal` so the order of teardown matches the order of setup.
+fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
   terminal.show_cursor()?;
-
-  result
+  Ok(())
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
@@ -74,7 +84,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       // so the user can type a query containing `q`, `?`, `/`, etc. The only
       // ways out are Enter (sticky filter) or Esc (clear filter).
       View::List if app.filter_active => match key.code {
-        KeyCode::Esc => app.exit_filter_cancel(),
+        KeyCode::Esc => {
+          // Picker contract (footer `esc:cancel`): Esc inside the filter
+          // bar quits the picker, it doesn't merely clear the filter.
+          // Regular TUI keeps the two-step Esc (clear → quit) so a typo'd
+          // filter doesn't accidentally close the long-lived session.
+          if app.picker_mode {
+            app.picker_cancel();
+          } else {
+            app.exit_filter_cancel();
+          }
+        }
         KeyCode::Enter => {
           // In picker mode (`gwm switch`), Enter doubles as "stop typing the
           // filter AND commit the highlighted pick". Exiting the filter bar
@@ -82,7 +102,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           app.exit_filter_keep();
           if app.picker_mode {
             app.picker_confirm();
-            break;
           }
         }
         KeyCode::Backspace => app.filter_pop_char(),
@@ -130,9 +149,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           KeyCode::Enter => {
             if app.picker_mode {
               app.picker_confirm();
-              break;
+            } else {
+              app.copy_path_to_status();
             }
-            app.copy_path_to_status();
           }
           _ => {}
         }
@@ -175,6 +194,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         }
         _ => {}
       },
+    }
+
+    // Picker contract (Copilot PR #53): only break when the App has
+    // explicitly signalled exit — set by `picker_confirm` (only if a
+    // worktree was actually selected) and `picker_cancel`. Replaces the
+    // unconditional `break` after Enter that turned an empty-match
+    // Enter into a surprise exit-1.
+    if app.picker_should_exit {
+      break;
     }
   }
   Ok(app.picker_result)
