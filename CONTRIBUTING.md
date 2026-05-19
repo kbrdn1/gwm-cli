@@ -95,16 +95,40 @@ cargo test --test worktree_integration  # libgit2 integration
 cargo test -- --nocapture               # see println from tests
 ```
 
-### TDD expectations
+### 🔴 TDD is mandatory — non-negotiable
 
-Any new feature ships with tests. The bar is:
+**Test-Driven Development is the primary contribution rule of this repo.** No production code lands without a failing test that pinned the behaviour down first. This is not a guideline, it is a hard merge requirement. PRs that add or change behaviour without tests are sent back, full stop.
+
+The loop is **red → green → refactor**:
+
+1. **Red** — write a failing test capturing the new behaviour (or the bug you are fixing). Run it. It MUST fail for the right reason (assertion mismatch, not a compile error in unrelated code).
+2. **Green** — write the minimum production code that turns the test green. No speculative abstractions.
+3. **Refactor** — clean up under green tests. Re-run the suite after each refactor step.
+
+Where the test lives:
 
 - **unit logic** (config parsing, naming, kebab, guard regex) → tests in the matching `tests/*_tests.rs` file.
 - **disk side effects** (file copy, symlink removal, command exec) → use `tempfile::TempDir`.
 - **git operations** → use `tests/common::init_repo()` which gives you a fresh repo on `main` with one commit.
 - **public CLI surface** → end-to-end test in `tests/cli_binary.rs` via `assert_cmd`.
+- **bootstrap stages** (copy, guard, no-symlink, command) → `tests/bootstrap_tests.rs`.
+- **TUI state transitions** → ratatui-free state-machine tests in `tests/tui_app_tests.rs`.
 
-A PR that adds behaviour without tests will be sent back.
+#### Exceptions (must be argued in the PR description)
+
+The bar to skip a test is "observably untestable from the public surface":
+
+- Pure formatting / typo fixes in incidental strings (not asserted anywhere).
+- Dependency bumps with no behaviour change (CI green is the test).
+- Comment-only changes.
+
+Everything else needs a test. "I tested it manually" is not an exception — codify it as an integration test.
+
+#### Enforcement
+
+- Reviewers run `git log --stat <branch>..HEAD -- tests/`. If the touched module has no companion test diff and the change isn't one of the exceptions above, the PR is blocked.
+- The `## Tests` checklist in the PR template is binding. Do not tick `cargo test` unless it actually ran green locally.
+- `tests/cli_binary.rs::help_prints_subcommands` is the canary — update it whenever a new CLI subcommand is added.
 
 ## Branches
 

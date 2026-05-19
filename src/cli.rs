@@ -23,6 +23,14 @@ pub enum ListFormat {
   Names,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InitShell {
+  Bash,
+  Zsh,
+  Fish,
+  Powershell,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
   /// Write a default .gwm.toml to the current repo.
@@ -57,6 +65,11 @@ pub enum Command {
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   Path { pattern: String },
+  /// Print the on-disk path of a worktree, framed for the cd flow.
+  ///
+  /// The binary itself cannot change the parent shell's directory. Pair with
+  /// `gwm shell-init <shell>` (it defines a `gcd` function that wraps this).
+  Cd { pattern: String },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
@@ -75,6 +88,17 @@ pub enum Command {
     /// Target shell.
     #[arg(value_enum)]
     shell: Shell,
+  },
+  /// Print a shell wrapper exposing `gcd <pattern>` (one-line cd into a worktree).
+  ///
+  /// Install (zsh):        `echo 'eval "$(gwm shell-init zsh)"' >> ~/.zshrc`
+  /// Install (bash):       `echo 'eval "$(gwm shell-init bash)"' >> ~/.bashrc`
+  /// Install (fish):       `gwm shell-init fish | source` (also add to config.fish)
+  /// Install (powershell): `Invoke-Expression (& gwm shell-init powershell | Out-String)`
+  ShellInit {
+    /// Target shell.
+    #[arg(value_enum)]
+    shell: InitShell,
   },
 }
 
@@ -95,10 +119,12 @@ pub fn run(cli: Cli) -> Result<()> {
     } => cmd_create(branch_type, issue, desc, no_bootstrap),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
+    Command::Cd { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target),
     Command::Prune => cmd_prune(),
     Command::Types => cmd_types(),
     Command::Completions { shell } => cmd_completions(shell),
+    Command::ShellInit { shell } => cmd_shell_init(shell),
   }
 }
 
@@ -294,6 +320,66 @@ fn cmd_completions(shell: Shell) -> Result<()> {
   generate(shell, &mut cmd, name, &mut io::stdout());
   Ok(())
 }
+
+fn cmd_shell_init(shell: InitShell) -> Result<()> {
+  print!("{}", shell_init_script(shell));
+  Ok(())
+}
+
+pub fn shell_init_script(shell: InitShell) -> &'static str {
+  match shell {
+    InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
+    InitShell::Fish => FISH_SHELL_INIT,
+    InitShell::Powershell => POWERSHELL_SHELL_INIT,
+  }
+}
+
+const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: eval "$(gwm shell-init bash)"   # or zsh
+# Note: the `function name { ... }` form (zsh/bash-extended) is used instead
+# of the parenthesised POSIX form so the parser does not error out with
+# `defining function based on alias 'gcd'` when zsh already has a `gcd`
+# alias (e.g. oh-my-zsh's `gcd=git checkout`). The `unalias` after the
+# definition is what makes the function reachable at call time, since zsh
+# still resolves the alias first when both exist.
+function gcd {
+  if [ "$#" -eq 0 ]; then
+    echo "usage: gcd <pattern>" >&2
+    return 2
+  fi
+  local target
+  target="$(command gwm cd "$@")" || return $?
+  cd "$target" || return $?
+}
+unalias gcd 2>/dev/null || true
+"#;
+
+const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
+function gcd --description 'cd into a gwm worktree by fuzzy pattern'
+  if test (count $argv) -eq 0
+    echo "usage: gcd <pattern>" >&2
+    return 2
+  end
+  set -l target (command gwm cd $argv)
+  or return $status
+  # `--` stops option parsing, "$target" prevents wildcard expansion on
+  # paths containing `[`, `]`, or `*`.
+  cd -- "$target"
+end
+"#;
+
+const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
+# Note: this clears any prior `gcd` alias so the function takes effect.
+Remove-Alias -Name gcd -Force -ErrorAction SilentlyContinue
+function gcd {
+  param([Parameter(Mandatory = $true)][string]$Pattern)
+  $target = & gwm cd $Pattern
+  if ($LASTEXITCODE -ne 0) { return }
+  Set-Location $target
+}
+"#;
 
 fn print_report(report: &bootstrap::BootstrapReport) {
   println!();
