@@ -71,7 +71,7 @@ exception; codify the manual test as an integration test.
   reproduces a CI-like minimal PATH:
 
   ```bash
-  PATH="$(dirname $(which cargo)):/usr/bin:/bin" cargo test
+  PATH="$(dirname "$(command -v cargo)"):/usr/bin:/bin" cargo test
   ```
 
   Run it before push. The cost is one minute; the cost of skipping
