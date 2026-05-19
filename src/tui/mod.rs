@@ -10,9 +10,9 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-pub use app::{App, Field, View};
+pub use app::{App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
 
 pub fn run() -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config
@@ -65,6 +65,24 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resu
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
     terminal.draw(|f| ui::draw(f, &mut app))?;
+
+    // Tick the confirm-overlay safety countdown (issue #30) before
+    // polling for input. Driving it from the poll cadence keeps the UI
+    // smooth (the 200ms poll already drives the redraw); doing it after
+    // the keypress branch would skip a tick whenever a poll-timeout
+    // doesn't fire a key event, stretching a 3s countdown by the
+    // input-handling latency of every armed iteration.
+    if app.view == View::Confirm {
+      match app.tick_confirm_countdown(Instant::now()) {
+        CountdownTickOutcome::ReadyToFire => {
+          if let Err(e) = app.confirm_delete() {
+            app.status = format!("delete failed: {}", e);
+            app.view = View::List;
+          }
+        }
+        CountdownTickOutcome::Pending | CountdownTickOutcome::NotArmed => {}
+      }
+    }
 
     if !event::poll(Duration::from_millis(200))? {
       continue;
@@ -180,11 +198,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ => {}
       },
       View::Confirm => match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => match app.confirm_delete() {
-          Ok(_) => {}
-          Err(e) => app.status = format!("delete failed: {}", e),
+        KeyCode::Char('y') | KeyCode::Enter => match app.confirm_press_y(Instant::now()) {
+          ConfirmKeyAction::FireNow => match app.confirm_delete() {
+            Ok(_) => {}
+            Err(e) => app.status = format!("delete failed: {}", e),
+          },
+          // Armed / Disarmed update the App's status line; the loop
+          // keeps the modal open and lets the countdown tick (or wait
+          // for another y / Esc).
+          ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
         },
-        KeyCode::Char('n') | KeyCode::Esc => app.view = View::List,
+        KeyCode::Char('n') | KeyCode::Esc => app.confirm_dismiss(),
         _ => {}
       },
       View::Report => match key.code {

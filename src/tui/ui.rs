@@ -9,6 +9,7 @@ use ratatui::{
   widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
   Frame,
 };
+use std::time::Instant;
 
 /// Minimum total terminal width required to render the sidebar alongside the
 /// worktree table without compressing the table beyond readability.
@@ -643,15 +644,61 @@ fn draw_confirm(f: &mut Frame, app: &App) {
         app.delete_branch_on_remove
       )));
       lines.push(Line::from(""));
-      lines.push(Line::from(Span::styled(
-        "y/Enter: confirm    n/Esc: cancel",
-        Style::default().fg(Color::DarkGray),
-      )));
+
+      // Footer + (optional) countdown progress bar. Countdown applies
+      // only when delete_branch is ON and config secs > 0 (issue #30);
+      // otherwise the modal stays single-keystroke as before.
+      if app.confirm_is_countdown_mode() {
+        let now = Instant::now();
+        let total_secs = app.confirm_countdown_total().as_secs();
+        if app.confirm_countdown_started_at.is_some() {
+          lines.push(Line::from(countdown_bar(
+            app.confirm_countdown_progress(now),
+            app.confirm_countdown_remaining_secs(now),
+          )));
+          lines.push(Line::from(Span::styled(
+            "y: cancel countdown    n/Esc: cancel",
+            Style::default().fg(Color::DarkGray),
+          )));
+        } else {
+          lines.push(Line::from(Span::styled(
+            format!("y/Enter: arm {total_secs}s countdown    n/Esc: cancel"),
+            Style::default().fg(Color::DarkGray),
+          )));
+        }
+      } else {
+        lines.push(Line::from(Span::styled(
+          "y/Enter: confirm    n/Esc: cancel",
+          Style::default().fg(Color::DarkGray),
+        )));
+      }
       lines
     }
     None => vec![Line::from("nothing selected")],
   };
   f.render_widget(Paragraph::new(body).block(block).wrap(Wrap { trim: false }), area);
+}
+
+/// Build the `[████░░] Ns — Esc to cancel` countdown line. Width is fixed
+/// at 10 cells so the bar reads the same regardless of modal size.
+fn countdown_bar<'a>(progress: f64, remaining_secs: u64) -> Vec<Span<'a>> {
+  const CELLS: usize = 10;
+  let filled = ((progress.clamp(0.0, 1.0)) * CELLS as f64).round() as usize;
+  let filled = filled.min(CELLS);
+  let bar: String = std::iter::repeat('█')
+    .take(filled)
+    .chain(std::iter::repeat('░').take(CELLS - filled))
+    .collect();
+  vec![
+    Span::styled("  [", Style::default().fg(Color::DarkGray)),
+    Span::styled(bar, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+    Span::styled("] ", Style::default().fg(Color::DarkGray)),
+    Span::styled(
+      format!("{remaining_secs}s"),
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    ),
+    Span::styled(" — Esc to cancel", Style::default().fg(Color::DarkGray)),
+  ]
 }
 
 fn draw_report(f: &mut Frame, app: &App) {
