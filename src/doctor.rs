@@ -179,25 +179,31 @@ fn check_guard_references(ctx: &DoctorCtx<'_>) -> Check {
 const SUPPORTED_WHEN_PREFIXES: &[&str] = &["file_exists:"];
 
 /// Check #3: every `[[bootstrap.command]].when` predicate uses one of the
-/// supported keywords. Unknown predicates silently make the command never
-/// run, which is the worst kind of failure (no error, no effect).
+/// supported keywords. Unknown predicates default to `true` in
+/// `bootstrap::check_when`, so the command runs anyway and the user's
+/// intended gating condition is silently ignored — that's still a footgun
+/// worth flagging, just not "command never runs".
 fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let name = "`when` predicates supported";
   let bs = &ctx.config.bootstrap;
 
   let mut unknown: Vec<String> = Vec::new();
+  let mut checked: usize = 0;
   for cmd in &bs.command {
     let Some(w) = &cmd.when else { continue };
+    checked += 1;
     if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| w.starts_with(p)) {
       unknown.push(format!("{} (on command `{}`)", w, cmd.name));
     }
   }
 
   if unknown.is_empty() {
-    return Check::ok(
-      name,
-      format!("{} predicate(s) recognised", SUPPORTED_WHEN_PREFIXES.len().max(1)),
-    );
+    let detail = if checked == 0 {
+      "no `when:` predicates configured".to_string()
+    } else {
+      format!("{} predicate(s) recognised", checked)
+    };
+    return Check::ok(name, detail);
   }
 
   Check::failed(name, format!("unknown `when` predicate(s): {}", unknown.join("; ")))
@@ -327,9 +333,10 @@ fn check_prunable_worktrees(ctx: &DoctorCtx<'_>) -> Check {
     return Check::ok(name, format!("{} worktree(s) tracked, none prunable", trees.len()));
   }
 
+  let noun = if prunable.len() == 1 { "entry" } else { "entries" };
   Check::warning(
     name,
-    format!("{} prunable entrie(s): {}", prunable.len(), prunable.join(", ")),
+    format!("{} prunable {}: {}", prunable.len(), noun, prunable.join(", ")),
   )
   .with_hint("run `gwm prune` to clear them")
 }

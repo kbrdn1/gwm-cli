@@ -212,6 +212,50 @@ fn no_when_predicates_is_ok() {
   assert_eq!(c.status, CheckStatus::Ok);
 }
 
+#[test]
+fn when_predicates_detail_counts_checked_predicates_not_keywords() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  // Three commands carrying a `when:` predicate. The detail message must
+  // reflect the count we actually checked (3), not the count of supported
+  // keywords (1, `file_exists:`). Pre-fix the impl wrote
+  // `format!("{} predicate(s) recognised", SUPPORTED_WHEN_PREFIXES.len()…)`
+  // which always reported 1 regardless of the number of predicates.
+  for n in 0..3 {
+    config.bootstrap.command.push(gwm::config::CommandStep {
+      name: format!("step-{n}"),
+      run: "true".into(),
+      when: Some("file_exists:.envrc".into()),
+      env: Default::default(),
+    });
+  }
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    c.detail.contains("3 predicate"),
+    "expected detail to mention 3 checked predicates, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn when_predicates_detail_says_none_when_no_predicates_configured() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+  // Pre-fix the impl said "1 predicate(s) recognised" even with zero
+  // configured. After the fix, no predicates → detail mentions 0 or "none".
+  assert!(
+    !c.detail.contains("1 predicate"),
+    "no predicates were configured; detail must not claim 1, got: {}",
+    c.detail
+  );
+}
+
 // --------------------------------------------------------------------------
 // Check #4 — binaries referenced by bootstrap commands resolve on PATH
 // --------------------------------------------------------------------------
@@ -297,6 +341,19 @@ fn base_dir_missing_but_parent_writable_is_ok() {
 // --------------------------------------------------------------------------
 // Check #5 — no prunable worktrees
 // --------------------------------------------------------------------------
+
+#[test]
+fn prunable_check_detail_uses_singular_plural_correctly() {
+  // The `entrie(s)` text from the first cut was a typo. The doctor output is
+  // user-facing, so the singular and plural forms should each be spelled
+  // out — `entry` for 1, `entries` for >1, never `entrie`.
+  let mut report = gwm::doctor::DoctorReport::new();
+  report.checks.push(gwm::doctor::Check::warning(
+    "no prunable worktrees",
+    "1 prunable entry: feat-12-old",
+  ));
+  assert!(!report.checks[0].detail.contains("entrie("));
+}
 
 #[test]
 fn fresh_repo_has_no_prunable_worktrees() {

@@ -116,7 +116,7 @@ $ gwm doctor
 ✓ external binaries on PATH
     3/3 binaries found
 ! no prunable worktrees
-    1 prunable entrie(s): feat-12-old
+    1 prunable entry: feat-12-old
     → run `gwm prune` to clear them
 ! no orphan gwm branches
     1 orphan branch(es): feat/#23-stale
