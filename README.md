@@ -115,8 +115,10 @@ gwm completions bash > ~/.local/share/bash-completion/completions/gwm
 # fish
 gwm completions fish > ~/.config/fish/completions/gwm.fish
 
-# PowerShell — append to your $PROFILE
+# PowerShell — load into the current session (ephemeral)
 gwm completions powershell | Out-String | Invoke-Expression
+# PowerShell — persist by appending to $PROFILE
+gwm completions powershell | Out-File -Append -Encoding utf8 $PROFILE
 ```
 
 For dynamic completion of worktree names (the `<pattern>` arg of `path` / `remove` / `bootstrap`), wire a custom completer to `gwm list --format=names` — e.g. in zsh:
