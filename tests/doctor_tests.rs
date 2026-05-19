@@ -76,15 +76,40 @@ branch_pattern = "{type}/#{issue}-{desc}"
   assert_eq!(cfg.status, CheckStatus::Ok);
 }
 
+// Severity/exit-code arithmetic is asserted on hand-built reports so the
+// test is independent of the environment (whether `lazygit` happens to be
+// on PATH, whether `~/cc-worktree/` already exists, etc.). The end-to-end
+// `doctor::run` is exercised by the per-check tests above.
+
 #[test]
-fn severity_ok_when_no_checks_fail() {
-  let (dir, repo) = init_repo();
-  let config = Config::default();
-  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
-  // A fresh repo with no `.gwm.toml` and no orphan branches must come back
-  // green — anything else means the doctor is over-flagging vanilla setups.
+fn severity_ok_when_all_checks_ok() {
+  let mut report = gwm::doctor::DoctorReport::new();
+  report.checks.push(gwm::doctor::Check::ok("a", "fine"));
+  report.checks.push(gwm::doctor::Check::ok("b", "fine"));
   assert_eq!(report.severity(), Severity::Ok);
   assert_eq!(report.exit_code(), 0);
+}
+
+#[test]
+fn severity_warning_when_any_check_warns() {
+  let mut report = gwm::doctor::DoctorReport::new();
+  report.checks.push(gwm::doctor::Check::ok("a", "fine"));
+  report.checks.push(gwm::doctor::Check::warning("b", "meh"));
+  report.checks.push(gwm::doctor::Check::ok("c", "fine"));
+  assert_eq!(report.severity(), Severity::Warning);
+  assert_eq!(report.exit_code(), 1);
+}
+
+#[test]
+fn severity_failed_dominates_warning() {
+  let mut report = gwm::doctor::DoctorReport::new();
+  report.checks.push(gwm::doctor::Check::warning("a", "meh"));
+  report.checks.push(gwm::doctor::Check::failed("b", "broken"));
+  report.checks.push(gwm::doctor::Check::warning("c", "meh"));
+  // A single Failed must lift the report to Failed regardless of how many
+  // Warnings sit alongside — that's the contract the exit-code 2 relies on.
+  assert_eq!(report.severity(), Severity::Failed);
+  assert_eq!(report.exit_code(), 2);
 }
 
 // --------------------------------------------------------------------------
