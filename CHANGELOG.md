@@ -12,44 +12,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`gwm switch` (alias `gwm s`)** — interactive picker that opens the worktree TUI in a stripped-down "pick one" mode. The fuzzy filter bar opens immediately so typing narrows the list right away; `Enter` commits the highlighted worktree and prints its path on stdout (exit `0`), `Esc` / `Ctrl-C` / `q` quits without output (exit `1`). The create / delete / bootstrap actions (`n` / `d` / `b` / `p`) are inert in picker mode; navigation (`j` / `k` / `gg` / `G`), sidebar (`v` / `Tab`), filter (`/`), `o` (open in finder), `l` (lazygit), `r` (refresh), and `?` (help) remain available. Header carries a `[picker]` tag and the help / footer adapt their key cheatsheet to match. Daily flow: `cd "$(gwm switch)"`. Closes #22.
-- **TUI fuzzy filter (`/`)** — press `/` on the worktree list to open an inline filter bar at the bottom of the table. As you type, the table narrows in real time via [`nucleo-matcher`](https://docs.rs/nucleo-matcher) (same matcher as Helix / Zellij), ranking contiguous substring hits above spread-out subsequence hits. `Enter` confirms (filter sticks, navigation returns to the table); `Esc` clears the filter and restores the full list. `j` / `k` / `gg` / `G` continue to work on the filtered subset. Table title shows `worktrees (N/M)` while a filter is active. `Esc` on the plain list view clears any sticky filter before it considers quitting, so a stale filter can't accidentally exit the TUI. Closes #21.
-- `gwm completions <shell>` — prints a static completion script on stdout, generated from the live clap argument tree via [`clap_complete`](https://docs.rs/clap_complete). Supported shells: `zsh`, `bash`, `fish`, `powershell`, `elvish`. Closes #18.
-- `gwm list --format=names` — prints one worktree name per line (no header, no marker, no STATUS column). Suitable for backing dynamic completion of the `<pattern>` arg of `path` / `remove` / `bootstrap` (see the README "shell completions" section for a zsh wiring example).
-- `gwm cd <pattern>` — fuzzy-resolve a worktree and print its on-disk path. Same semantics as `gwm path`, exposed under an explicit name for the cd flow.
-- `gwm shell-init <bash|zsh|fish|powershell>` — prints a shell wrapper defining `gcd <pattern>` (the function does the actual `cd`, since the binary can't change the parent shell's directory). One-liner install: `eval "$(gwm shell-init zsh)"` in your rc file → `gcd auth` jumps to the matching worktree. The bash/zsh and PowerShell variants `unalias gcd` first so the function takes effect even if the shell already had a `gcd` alias (e.g. oh-my-zsh's `gcd=git checkout`). Closes #19.
-- `gwm doctor` — diagnose the gwm setup. Aggregates 7 cheap checks (`.gwm.toml` parses, guard references resolve, `when` predicates supported, external binaries on PATH, no prunable worktrees, no orphan gwm branches, base directory writable) and reports each with `✓ / ! / ✗`. Exit code `0` (all green), `1` (any warning), `2` (any failure) — wirable into CI / pre-commit. New `src/doctor.rs` module exposing `DoctorReport` / `Check` / `Severity` / `DoctorCtx` for library users. Closes #20.
+- **`gwm switch` (visible alias `gwm s`)** — interactive worktree picker built on the existing TUI. The fuzzy filter bar opens immediately, `Enter` commits the highlighted worktree and prints its path on stdout, `Esc` / `Ctrl-C` / `q` cancels with exit code `1`. Drop-in for the daily flow `cd "$(gwm switch)"`. The bundled `gcd` shell wrapper routes its no-arg branch through `gwm switch` so `gcd` (no argument) opens the picker. Closes #22.
+- **Extended `[[bootstrap.command]].when` predicates** — the evaluator now recognises four additional keyword atoms alongside the legacy `file_exists:`: `cmd_exists:<binary>` (resolves via `which`), `env_set:<NAME>` (variable defined), `env_eq:<NAME>=<value>` (variable equals literal), `glob_exists:<pattern>` (recursive `**` glob match under the worktree). Atoms compose with `!`, `&&`, `||` at the conventional precedence (`!` > `&&` > `||`); no parentheses. Example: `when = "file_exists:package.json && cmd_exists:bun"` picks `bun install` only when bun is on PATH. `bootstrap::evaluate_when` is now part of the public lib surface. `gwm doctor` recognises the new keywords; unknown keywords still default to true. Closes #25.
 
 ### Fixed
 
-- `gwm switch`: pressing Enter when the fuzzy filter narrows the list down to zero matches no longer exits the picker with code `1`. The TUI now stays open with a status hint (`no worktree selected — adjust the filter and try again`) so the user can back-space and refine. Addresses Copilot's review on PR #53.
-- `gwm switch`: pressing Esc while typing in the filter bar now cancels the picker cleanly (matching the footer's `esc:cancel` contract) instead of merely clearing the filter. The regular TUI keeps its two-step Esc semantics (clear → quit) — only the picker contract changed. Addresses Copilot's review on PR #53.
-- TUI entry points (`run`, `run_picker`): the `App` is now constructed before raw mode / alt-screen are enabled, so a failed repo discovery or config load no longer leaves the user's terminal stuck in raw mode. Centralised the terminal setup/teardown into `enter_terminal` / `leave_terminal` helpers so the two entry points cannot drift. Addresses Copilot's review on PR #53.
+- `gwm doctor`: `is_writable_dir` now uses a random-suffixed `tempfile`-managed probe file (was a fixed `.gwm-doctor-write-probe` colliding under concurrent runs and leaking on SIGKILL). Closes #54.
+- `gwm doctor`: `extract_binary` parses shell-quoted run-strings via `shell-words` (was `split_whitespace`, which sliced through quotes and produced false-positive "binary not on PATH" warnings on configs like `run = "\"my tool\" --flag"`). Closes #54.
 
 ### Changed
 
-- `gwm doctor` no longer flags gwm-style branches as orphan when they're already fully merged into one of the trunk branches (`dev`, `main`). CONTRIBUTING.md mandates preserving the source branch post-merge, so the previous behaviour produced N false-positives on every successful release. The Ok detail now reads e.g. `7 merged gwm-style branch(es) preserved per CONTRIBUTING, no unmerged orphans`. Genuine WIP branches (no worktree, no merge into a trunk) still surface as Warning. Closes #47.
+- `gwm cd <pattern>` is now exposed as a clap `visible_alias` of `gwm path` instead of a separate `Command::Cd` variant. Same UX, one routing path. The `--help` listing shows `path … [aliases: cd]`. Closes #54.
 
-### CI
+### Refactored
 
-- New advisory job `gwm doctor` in `.github/workflows/ci.yml` — runs `cargo build --release` then `./target/release/gwm doctor` against the repo on every push to `dev` and on every PR targeting `dev`. `continue-on-error: true` so it never blocks a merge, but a non-zero exit surfaces config / env / worktree-state regressions for human review. Closes #49.
+- `doctor::Severity` collapsed into `CheckStatus` (the two enums were structurally identical). A `pub type Severity = CheckStatus;` alias is kept so 0.3.0 library callers keep compiling. Closes #54.
+- `doctor::run` now hoists `worktree::list` once and passes `&[WorktreeInfo]` into the two checks that need it (`prunable` + `orphan`), saving a libgit2 call per `gwm doctor` invocation and unifying the error-handling path. Closes #54.
+- `check_when_predicates`: counter renamed from `checked` to `recognised` and incremented only after the prefix match, so the variable name accurately tracks what the `"N predicate(s) recognised"` detail reports. Closes #54.
+
+### Tests
+
+- `doctor_on_fresh_repo_prints_checks`: exit code is now bounded to `[0, 1]` (was unbounded, a panic / SEGV / exit-2 regression would have passed silently).
+- `shell_init_{bash,zsh,fish,powershell}_emits_*`: assertions tightened to pin the actual invocation (`gwm cd "$@"` / `gwm cd $argv` / `gwm cd $Pattern`) rather than the loose `contains("gwm cd")` which would have passed even if `gwm cd` appeared only in a comment.
+- `resolvable_command_binary_is_ok`: the loose `!contains("sh ")` assertion (would have passed on `[sh,other]` formatting) is replaced with structured parsing of the "not on PATH:" list.
 
 ### Docs
 
-- `CLAUDE.md` (new, repo root) — house rules for AI-assisted contributions. Promotes **TDD as the primordial contribution rule** (red → green → refactor, mandatory failing test before production code).
-- `CONTRIBUTING.md` — `TDD expectations` section rewritten as `🔴 TDD is mandatory — non-negotiable`: explicit loop, narrow exceptions, reviewer enforcement via `git log --stat tests/`.
-- `CODE_OF_CONDUCT.md` — new `Engineering conduct` section anchoring the TDD rule as a contribution-conduct expectation (applies equally to human and AI-assisted PRs).
-- `CHANGELOG.md` trimmed to the in-progress release only; past releases moved under `changelogs/`.
-- `CLAUDE.md` — two new house rules: pre-validate environment-dependent tests with a stripped `PATH` before push (one-liner included), and run `gwm doctor` locally on PRs that touch `.gwm.toml` / bootstrap / doctor. Codifies the recipe that would have spared the 3 CI round-trips on PR #43.
+- README: doctor sample output updated to reflect the post-#47 `✓ N merged gwm-style branch(es) preserved` wording; a second block shows the Warning-with-hint case so users see both happy and remediation paths.
+- README: test count refreshed from a stale "81" to the actual 140.
+- New `changelogs/pre-releases/` directory holding per-RC notes (one file per RC, covering only the delta vs. the previous RC). Back-fills `0.2.0-rc.1`, `0.3.0-rc.1`, `0.3.0-rc.2`, `0.3.0-rc.3`. `CHANGELOG.md > Past releases` gains a `### Pre-releases` sub-index. The corresponding GitHub Release bodies are re-pointed at these files via `gh release edit --notes-file` (instead of inheriting the full `CHANGELOG.md` as before).
+- `CONTRIBUTING.md > Pre-release (from dev)` describes the new per-RC notes flow; `Stable release (from main)` mentions `--notes-file` for the body.
 
 ### Dependencies
 
-- `clap_complete` `4.5` (new).
-- `nucleo-matcher` `0.3` (new) — fuzzy match engine for the TUI `/` filter.
+- `shell-words` `1` (new, runtime) — POSIX shell tokeniser used by the doctor's `extract_binary`.
+- `tempfile` moved from `[dev-dependencies]` to `[dependencies]` — used at runtime by the doctor's `is_writable_dir` write-probe.
+- `glob` `0.3` (new) — backs the `glob_exists:` predicate in `bootstrap::evaluate_when`.
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`0.3.0`](changelogs/0.3.0.md) — 2026-05-19
 - [`0.2.0`](changelogs/0.2.0.md) — 2026-05-18
 - [`0.1.0`](changelogs/0.1.0.md) — 2026-05-18
+
+### Pre-releases
+
+Per-RC notes covering only the delta against the previous RC (or against the previous stable, for `rc.1`):
+
+- [`0.3.0-rc.3`](changelogs/pre-releases/0.3.0-rc.3.md) — 2026-05-19
+- [`0.3.0-rc.2`](changelogs/pre-releases/0.3.0-rc.2.md) — 2026-05-19
+- [`0.3.0-rc.1`](changelogs/pre-releases/0.3.0-rc.1.md) — 2026-05-19
+- [`0.2.0-rc.1`](changelogs/pre-releases/0.2.0-rc.1.md) — 2026-05-18

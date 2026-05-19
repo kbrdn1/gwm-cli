@@ -173,7 +173,7 @@ fn unsupported_when_predicate_is_failed() {
   config.bootstrap.command.push(gwm::config::CommandStep {
     name: "noop".into(),
     run: "true".into(),
-    when: Some("env_set:FOO".into()),
+    when: Some("bogus_predicate:FOO".into()),
     env: Default::default(),
   });
 
@@ -184,7 +184,53 @@ fn unsupported_when_predicate_is_failed() {
     .find(|c| c.name.contains("when"))
     .expect("expected a `when` predicate check");
   assert_eq!(c.status, CheckStatus::Failed);
-  assert!(c.detail.contains("env_set"));
+  assert!(c.detail.contains("bogus_predicate"));
+}
+
+#[test]
+fn negated_supported_keyword_is_ok() {
+  // `!env_set:CI` should be accepted: the doctor must reach past the
+  // leading `!` (and any other boolean operator) and validate each
+  // atom against the supported-keyword list.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "skip-in-ci".into(),
+    run: "./scripts/full-build.sh".into(),
+    when: Some("!env_set:CI".into()),
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("when"))
+    .expect("expected a `when` predicate check");
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+#[test]
+fn unsupported_keyword_on_rhs_of_and_is_failed() {
+  // Compound expressions need atom-level validation. A LHS that looks
+  // legitimate (`file_exists:a`) must not paper over a bogus RHS.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "compound".into(),
+    run: "true".into(),
+    when: Some("file_exists:a && bogus_predicate:1".into()),
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("when"))
+    .expect("expected a `when` predicate check");
+  assert_eq!(c.status, CheckStatus::Failed);
+  assert!(c.detail.contains("bogus_predicate"));
 }
 
 #[test]
@@ -298,8 +344,48 @@ fn resolvable_command_binary_is_ok() {
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
   let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
   // We don't assert Ok strictly — `lazygit` may be missing on a CI runner.
-  // The relevant assertion is: the run-string binary doesn't show up as missing.
-  assert!(!c.detail.contains("sh "), "sh should resolve, got: {}", c.detail);
+  // The relevant assertion is: when the doctor reports missing binaries, `sh`
+  // is not in that list. Distinguished from the previous loose `!contains("sh ")`
+  // which would pass even on `[sh,other]` or `sh\n` formatting.
+  if c.status == CheckStatus::Warning {
+    let missing_section = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+    let missing: Vec<&str> = missing_section.split([',', '\n']).map(str::trim).collect();
+    assert!(
+      !missing.contains(&"sh"),
+      "sh must not be reported missing, got: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn extract_binary_handles_shell_quoted_run_strings() {
+  // Pre-fix, `extract_binary` used `split_whitespace` and returned `"my`
+  // as the binary name for a quoted run-string like `"my tool" --flag`,
+  // producing a "binary not on PATH" warning that doesn't match anything
+  // the user actually wrote. After the shell-words migration, the
+  // binary is correctly identified as the full quoted command name.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "quoted".into(),
+    run: r#""definitely-not-on-path-quoted-xyz" --help"#.into(),
+    when: None,
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-quoted-xyz"),
+    "shell-quoted binary name must be unquoted in the report, got: {}",
+    c.detail
+  );
+  assert!(
+    !c.detail.contains("\"definitely"),
+    "the leading quote must be stripped, got: {}",
+    c.detail
+  );
 }
 
 // --------------------------------------------------------------------------
