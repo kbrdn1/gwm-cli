@@ -94,3 +94,15 @@ when = "file_exists:package.json && !cmd_exists:bun"
 name = "full local build"
 run = "./scripts/full-build.sh"
 when = "glob_exists:src/**/*.rs && !env_set:CI"
+
+# --- doctor knobs -----------------------------------------------------------
+# Trunk branches `gwm doctor`'s orphan-branch check treats as merge
+# destinations. A gwm-style branch fully reachable from one of these is
+# preserved per CONTRIBUTING ("never delete the source branch after
+# merge") and is NOT flagged as orphan. Default: ["dev", "main"]. Repos
+# with non-standard trunk conventions (e.g. release trains) opt in here.
+# An empty list (`trunks = []`) disables the filter — every unclaimed
+# gwm-style branch becomes an orphan warning.
+#
+# [doctor]
+# trunks = ["master", "release-3.x", "release-4.x"]

@@ -11,6 +11,8 @@ pub struct Config {
   pub worktree: WorktreeConfig,
   #[serde(default)]
   pub bootstrap: BootstrapConfig,
+  #[serde(default)]
+  pub doctor: DoctorConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +97,34 @@ pub struct CommandStep {
 pub struct FallbackContent {
   pub target: String,
   pub content: String,
+}
+
+/// `[doctor]` table — knobs for `gwm doctor`. Currently exposes the trunk
+/// list used by the orphan-branch check; previously this was hardcoded to
+/// `["dev", "main"]` in `doctor.rs`, which silently no-op'd the filter on
+/// any repo using a different trunk convention (`master`, `trunk`,
+/// `release-1.x`, …). Default preserves the previous behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorConfig {
+  /// Trunk branches the orphan-branch check treats as "merge destinations".
+  /// A gwm-style branch fully reachable from one of these is preserved per
+  /// CONTRIBUTING.md ("never delete the source branch after merge") and is
+  /// therefore not flagged as orphan. An empty list disables the filter
+  /// entirely (every unclaimed gwm-style branch becomes orphan).
+  #[serde(default = "default_trunks")]
+  pub trunks: Vec<String>,
+}
+
+impl Default for DoctorConfig {
+  fn default() -> Self {
+    Self {
+      trunks: default_trunks(),
+    }
+  }
+}
+
+fn default_trunks() -> Vec<String> {
+  vec!["dev".into(), "main".into()]
 }
 
 impl Config {

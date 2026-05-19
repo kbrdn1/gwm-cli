@@ -372,29 +372,30 @@ fn check_prunable_worktrees(trees: &[worktree::WorktreeInfo]) -> Check {
   .with_hint("run `gwm prune` to clear them")
 }
 
-/// Trunk branches the doctor considers "merged into" — branches fully
-/// reachable from one of these are deliberately preserved per
-/// CONTRIBUTING.md (`Never delete the source branch after merge`), so we
-/// don't flag them as orphan even when their worktree is gone.
-const TRUNK_BRANCHES: &[&str] = &["dev", "main"];
-
 /// Check #6: every local branch matching the `<type>/#<issue>-<desc>`
 /// shape has a worktree pointing at it. A branch without a worktree was
 /// likely created by `gwm create` and lost its worktree without a
 /// `--delete-branch` — purely cosmetic dead weight, hence Warning not Failed.
 ///
 /// Branches already fully merged into one of the trunk branches
-/// (`dev`, `main`) are filtered out: keeping them is the project
-/// convention, and surfacing them would make the check produce N false
-/// positives on every successful release.
+/// (configured via `[doctor].trunks`, default `["dev", "main"]`) are
+/// filtered out: keeping them is the project convention, and surfacing
+/// them would make the check produce N false positives on every
+/// successful release. Repos with non-standard trunk names (`master`,
+/// release-trains like `release-3.x`, …) opt in by overriding the list
+/// in `.gwm.toml`. An empty list disables the filter entirely.
 fn check_orphan_branches(ctx: &DoctorCtx<'_>, trees: &[worktree::WorktreeInfo]) -> Check {
   let name = "no orphan gwm branches";
 
   let claimed: BTreeSet<String> = trees.iter().filter_map(|w| w.branch.clone()).collect();
 
-  // Resolve the trunk OIDs once. Missing trunks (e.g. a repo without `dev`)
-  // are silently skipped — we only check against what exists.
-  let trunk_oids: Vec<git2::Oid> = TRUNK_BRANCHES
+  // Resolve the trunk OIDs once. Missing trunks (e.g. a repo without `dev`,
+  // or a `[doctor].trunks` entry that doesn't exist locally) are silently
+  // skipped — we only check against what exists.
+  let trunk_oids: Vec<git2::Oid> = ctx
+    .config
+    .doctor
+    .trunks
     .iter()
     .filter_map(|t| {
       ctx

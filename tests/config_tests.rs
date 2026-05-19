@@ -12,6 +12,78 @@ fn defaults_are_sane() {
 }
 
 #[test]
+fn doctor_section_defaults_to_dev_and_main() {
+  // The hardcoded list previously living in `src/doctor.rs` is now a
+  // configurable default — but the default value must stay
+  // `["dev", "main"]` so existing repos see zero behaviour change.
+  let cfg = Config::default();
+  assert_eq!(cfg.doctor.trunks, vec!["dev".to_string(), "main".to_string()]);
+}
+
+#[test]
+fn doctor_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[doctor]
+trunks = ["master", "release-3.x", "release-4.x"]
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(
+    cfg.doctor.trunks,
+    vec![
+      "master".to_string(),
+      "release-3.x".to_string(),
+      "release-4.x".to_string()
+    ]
+  );
+}
+
+#[test]
+fn doctor_section_absent_keeps_defaults() {
+  // A config that defines only `[worktree]` (no `[doctor]` section) must
+  // still resolve `cfg.doctor.trunks` to the documented default — that's
+  // the backwards-compatibility contract for repos predating the section.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[worktree]
+base = "/tmp/wt/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.doctor.trunks, vec!["dev".to_string(), "main".to_string()]);
+}
+
+#[test]
+fn doctor_section_empty_trunks_means_no_filter() {
+  // An explicit empty list is a valid config choice — it tells doctor
+  // "no merge filter, flag every gwm-style branch without a worktree".
+  // Distinct from "section absent" (which falls back to defaults).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[doctor]
+trunks = []
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert!(cfg.doctor.trunks.is_empty());
+}
+
+#[test]
 fn placeholders_expand() {
   let out = expand_placeholders(
     "{home}/cc-worktree/{repo}/{type}-{issue}-{desc}",

@@ -570,3 +570,92 @@ fn non_gwm_branch_is_not_flagged_as_orphan() {
   let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
   assert_eq!(c.status, CheckStatus::Ok);
 }
+
+#[test]
+fn orphan_check_honours_configured_trunks() {
+  // Repos with non-standard trunk conventions (`master`, `release-3.x`,
+  // …) must be able to opt in via `[doctor].trunks`. Pre-#59 the trunk
+  // list was hardcoded to `["dev", "main"]` and `[doctor].trunks` was
+  // silently ignored, so any repo with a different trunk saw every
+  // merged gwm-style branch flagged as "unmerged orphan".
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  let sig = git2::Signature::now("test", "test@test").unwrap();
+  let tree = head.tree().unwrap();
+
+  // Divergent commit off main's HEAD. This is what an in-flight feature
+  // branch looks like before merge.
+  let feature_oid = repo.commit(None, &sig, &sig, "feature work", &tree, &[&head]).unwrap();
+  let feature_commit = repo.find_commit(feature_oid).unwrap();
+  repo.branch("feat/#77-on-custom-trunk", &feature_commit, false).unwrap();
+
+  // `custom-trunk` carries the feature work — i.e. the gwm branch is
+  // fully merged into the configured trunk but NOT into `main`.
+  repo.branch("custom-trunk", &feature_commit, false).unwrap();
+
+  let mut config = Config::default();
+  config.doctor.trunks = vec!["custom-trunk".into()];
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan"))
+    .expect("expected an orphan-branches check");
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    !c.detail.contains("feat/#77-on-custom-trunk"),
+    "merged branch must not appear in the orphan list when its trunk is configured, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn orphan_check_with_empty_trunks_disables_merge_filter() {
+  // `trunks = []` is the documented escape hatch: report every unclaimed
+  // gwm-style branch, regardless of whether it's merged. Pre-#59 the
+  // empty config silently fell back to the hardcoded `["dev", "main"]`
+  // because the value lived in a `const`. Confirms the config value is
+  // actually wired through.
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+
+  // A gwm-style branch pointing at main's tip. With the default config
+  // this would be filtered out (equality short-circuit, merged into main).
+  repo.branch("feat/#88-merged-into-main", &head, false).unwrap();
+
+  let mut config = Config::default();
+  config.doctor.trunks = vec![];
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan"))
+    .expect("expected an orphan-branches check");
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.contains("feat/#88-merged-into-main"),
+    "with no configured trunks every gwm branch must surface as orphan, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn orphan_check_ignores_configured_trunks_that_do_not_exist() {
+  // A trunk listed in config but absent from the repo must not crash
+  // the check — doctor should silently skip the missing trunk and use
+  // the rest of the list. Matches the existing tolerance for "no `dev`
+  // branch" in a fresh `gwm init` repo.
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-merged-into-main", &head, false).unwrap();
+
+  let mut config = Config::default();
+  // `phantom-trunk` doesn't exist; `main` does and reaches the gwm branch.
+  config.doctor.trunks = vec!["phantom-trunk".into(), "main".into()];
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}
