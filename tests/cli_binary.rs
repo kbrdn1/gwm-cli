@@ -11,17 +11,21 @@ use predicates::prelude::*;
 fn help_prints_subcommands() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.arg("--help");
+  // Match the subcommand-listing column exactly: clap aligns subcommand
+  // names with two leading spaces and at least two trailing spaces before
+  // the description. A loose `contains("cd")` would also match prose like
+  // "to cd into it" in another subcommand's description.
   cmd
     .assert()
     .success()
-    .stdout(predicate::str::contains("init"))
-    .stdout(predicate::str::contains("list"))
-    .stdout(predicate::str::contains("create"))
-    .stdout(predicate::str::contains("bootstrap"))
-    .stdout(predicate::str::contains("prune"))
-    .stdout(predicate::str::contains("completions"))
-    .stdout(predicate::str::contains("cd"))
-    .stdout(predicate::str::contains("shell-init"));
+    .stdout(predicate::str::contains("  init "))
+    .stdout(predicate::str::contains("  list "))
+    .stdout(predicate::str::contains("  create "))
+    .stdout(predicate::str::contains("  bootstrap "))
+    .stdout(predicate::str::contains("  prune "))
+    .stdout(predicate::str::contains("  completions "))
+    .stdout(predicate::str::contains("  cd "))
+    .stdout(predicate::str::contains("  shell-init "));
 }
 
 #[test]
@@ -219,6 +223,20 @@ fn shell_init_fish_emits_function_block() {
     .stdout(predicate::str::contains("function gcd"))
     .stdout(predicate::str::contains("gwm cd"))
     .stdout(predicate::str::contains("end"));
+}
+
+// Regression: fish performs wildcard expansion on unquoted variables, so
+// `cd $target` would mangle paths containing `[`, `]`, or `*`. The
+// emitted helper must use `cd -- "$target"` to disable both option
+// parsing and glob expansion.
+#[test]
+fn shell_init_fish_quotes_target_with_double_dash() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "fish"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("cd -- \"$target\""));
 }
 
 #[test]

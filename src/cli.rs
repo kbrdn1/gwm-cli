@@ -363,7 +363,9 @@ function gcd --description 'cd into a gwm worktree by fuzzy pattern'
   end
   set -l target (command gwm cd $argv)
   or return $status
-  cd $target
+  # `--` stops option parsing, "$target" prevents wildcard expansion on
+  # paths containing `[`, `]`, or `*`.
+  cd -- "$target"
 end
 "#;
 
