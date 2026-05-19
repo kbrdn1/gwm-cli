@@ -131,8 +131,14 @@ jobs:
     runs-on: ubuntu-latest
     # Stable releases only — rc/alpha/beta must never reach `brew install gwm`,
     # otherwise users tracking the tap would silently move to a pre-release.
+    # Intentionally does NOT gate on `event_name == 'push'`: the documented
+    # recovery path (`gh workflow run release.yml --ref <tag>`) needs to
+    # re-drive this job after a transient failure, which is a
+    # workflow_dispatch event. The suffix filter alone is sufficient
+    # because dispatch-from-a-branch would already break the upstream
+    # `build` / `release` jobs (they archive `${{ github.ref_name }}`),
+    # so the whole workflow is implicitly tag-scoped.
     if: |
-      github.event_name == 'push' &&
       !contains(github.ref_name, '-rc.') &&
       !contains(github.ref_name, '-alpha.') &&
       !contains(github.ref_name, '-beta.')
