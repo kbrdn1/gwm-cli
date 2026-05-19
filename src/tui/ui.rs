@@ -15,14 +15,35 @@ use ratatui::{
 pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-  let chunks = Layout::default()
-    .direction(Direction::Vertical)
-    .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
-    .split(f.area());
+  // Filter bar is shown while the user is typing, AND while a sticky filter
+  // remains in effect (so they can see what's filtering the list).
+  let filter_visible = app.filter_active || !app.filter_query.is_empty();
+
+  let chunks = if filter_visible {
+    Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([
+        Constraint::Length(3),
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(2),
+      ])
+      .split(f.area())
+  } else {
+    Layout::default()
+      .direction(Direction::Vertical)
+      .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+      .split(f.area())
+  };
 
   draw_header(f, chunks[0], app);
   draw_body(f, chunks[1], app);
-  draw_footer(f, chunks[2], app);
+  if filter_visible {
+    draw_filter_bar(f, chunks[2], app);
+    draw_footer(f, chunks[3], app);
+  } else {
+    draw_footer(f, chunks[2], app);
+  }
 
   match app.view {
     View::Help => draw_help(f),
@@ -31,6 +52,29 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::Report => draw_report(f, app),
     View::List => {}
   }
+}
+
+/// Single-line filter bar rendered between the table and the footer.
+/// Mirrors Vim's `/` prompt: leading slash, the live query, and a block cursor
+/// while the user is actively typing.
+fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
+  let mut spans = vec![
+    Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    Span::raw(app.filter_query.as_str().to_string()),
+  ];
+  if app.filter_active {
+    spans.push(Span::styled(
+      "█",
+      Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+    ));
+  } else {
+    // Sticky filter: hint how to clear / refine without re-entering the bar.
+    spans.push(Span::styled(
+      "   (sticky — / to refine, esc on list to clear)",
+      Style::default().fg(Color::DarkGray),
+    ));
+  }
+  f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// Decide whether to split horizontally for a sidebar, based on terminal width
@@ -67,10 +111,16 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
-  // Dynamic column widths: derive from current data, capped to keep room for the path column.
-  // The path column is always last and takes whatever remains.
-  let name_w = column_width(app.worktrees.iter().map(|w| w.name.as_str()), 18, 38);
-  let branch_w = column_width(app.worktrees.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
+  // Filter-aware: the visible rows are the filtered subset (issue #21). When
+  // there is no active filter, this is the identity over `app.worktrees`.
+  let filtered = app.filtered_indices();
+  let visible: Vec<&WorktreeInfo> = filtered.iter().filter_map(|&i| app.worktrees.get(i)).collect();
+
+  // Dynamic column widths derived from the visible subset so columns fit the
+  // rows actually on screen. The path column is always last and absorbs the
+  // remaining width.
+  let name_w = column_width(visible.iter().map(|w| w.name.as_str()), 18, 38);
+  let branch_w = column_width(visible.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
   let status_w: u16 = 16;
 
   let header = Row::new(vec![
@@ -82,8 +132,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   ])
   .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
-  let rows: Vec<Row> = app
-    .worktrees
+  let rows: Vec<Row> = visible
     .iter()
     .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
@@ -99,13 +148,19 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
   let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
 
+  let title = if app.filter_query.is_empty() {
+    format!(" worktrees ({}) ", app.worktrees.len())
+  } else {
+    format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
+  };
+
   let table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
     .block(
       Block::default()
         .borders(Borders::ALL)
-        .title(format!(" worktrees ({}) ", app.worktrees.len()))
+        .title(title)
         .border_style(Style::default().fg(border_color)),
     )
     .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
@@ -236,6 +291,7 @@ fn sidebar_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
     ("    r", "Refresh"),
     ("    v", "Toggle this sidebar"),
     ("  Tab", "Swap focus list ↔ sidebar"),
+    ("    /", "Fuzzy filter worktrees"),
     ("   gg", "Jump to first worktree"),
     ("    G", "Jump to last worktree"),
     ("  j/k", "Next / Prev (or scroll sidebar)"),
@@ -397,7 +453,8 @@ fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
 }
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  let help = "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus gg/G:top/bot j/k:nav r:refresh ?:help q:quit";
+  let help =
+    "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit";
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
     Span::raw("  "),
@@ -430,6 +487,7 @@ fn draw_help(f: &mut Frame) {
     Line::from("  l             launch lazygit fullscreen on selected worktree"),
     Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
     Line::from("  Tab           swap focus between worktree list and sidebar"),
+    Line::from("  /             open fuzzy filter bar (enter: sticky, esc: clear)"),
     Line::from("  r             refresh"),
     Line::from("  p             toggle 'delete branch on remove'"),
     Line::from("  enter         show path in status bar"),

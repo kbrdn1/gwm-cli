@@ -33,6 +33,7 @@ regex = "1"
 shellexpand = "3"
 chrono = { version = "0.4", features = ["serde"] }
 which = "8"
+nucleo-matcher = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
