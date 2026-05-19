@@ -147,6 +147,11 @@ fn cd_outside_git_repo_fails() {
     .stderr(predicate::str::contains("not inside a git repository"));
 }
 
+// Use `function gcd { ... }` (zsh-style, also valid in bash) rather than
+// `gcd() { ... }`. The latter triggers `zsh: defining function based on
+// alias 'gcd'` at parse time when an alias of the same name already
+// exists — even if a preceding `unalias` would remove it, since zsh
+// parses the whole eval'd block before running any of it.
 #[test]
 fn shell_init_bash_emits_gcd_function() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
@@ -154,7 +159,7 @@ fn shell_init_bash_emits_gcd_function() {
   cmd
     .assert()
     .success()
-    .stdout(predicate::str::contains("gcd()"))
+    .stdout(predicate::str::contains("function gcd"))
     .stdout(predicate::str::contains("gwm cd"));
 }
 
@@ -165,8 +170,18 @@ fn shell_init_zsh_emits_gcd_function() {
   cmd
     .assert()
     .success()
-    .stdout(predicate::str::contains("gcd()"))
+    .stdout(predicate::str::contains("function gcd"))
     .stdout(predicate::str::contains("gwm cd"));
+}
+
+#[test]
+fn shell_init_posix_does_not_use_paren_function_syntax() {
+  for shell in ["bash", "zsh"] {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd.args(["shell-init", shell]);
+    // `gcd()` is the form that explodes under an existing alias.
+    cmd.assert().success().stdout(predicate::str::contains("gcd()").not());
+  }
 }
 
 // Regression: in zsh, an existing alias (e.g. `gcd='git checkout'` from

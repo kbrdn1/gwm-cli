@@ -336,9 +336,13 @@ pub fn shell_init_script(shell: InitShell) -> &'static str {
 
 const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
 # Install: eval "$(gwm shell-init bash)"   # or zsh
-# Note: this clears any prior `gcd` alias (e.g. oh-my-zsh's `gcd=git checkout`).
-unalias gcd 2>/dev/null || true
-gcd() {
+# Note: the `function name { ... }` form (zsh/bash-extended) is used instead
+# of the parenthesised POSIX form so the parser does not error out with
+# `defining function based on alias 'gcd'` when zsh already has a `gcd`
+# alias (e.g. oh-my-zsh's `gcd=git checkout`). The `unalias` after the
+# definition is what makes the function reachable at call time, since zsh
+# still resolves the alias first when both exist.
+function gcd {
   if [ "$#" -eq 0 ]; then
     echo "usage: gcd <pattern>" >&2
     return 2
@@ -347,6 +351,7 @@ gcd() {
   target="$(command gwm cd "$@")" || return $?
   cd "$target" || return $?
 }
+unalias gcd 2>/dev/null || true
 "#;
 
 const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
