@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI fuzzy filter (`/`)** — press `/` on the worktree list to open an inline filter bar at the bottom of the table. As you type, the table narrows in real time via [`nucleo-matcher`](https://docs.rs/nucleo-matcher) (same matcher as Helix / Zellij), ranking contiguous substring hits above spread-out subsequence hits. `Enter` confirms (filter sticks, navigation returns to the table); `Esc` clears the filter and restores the full list. `j` / `k` / `gg` / `G` continue to work on the filtered subset. Table title shows `worktrees (N/M)` while a filter is active. `Esc` on the plain list view clears any sticky filter before it considers quitting, so a stale filter can't accidentally exit the TUI. Closes #21.
 - `gwm completions <shell>` — prints a static completion script on stdout, generated from the live clap argument tree via [`clap_complete`](https://docs.rs/clap_complete). Supported shells: `zsh`, `bash`, `fish`, `powershell`, `elvish`. Closes #18.
 - `gwm list --format=names` — prints one worktree name per line (no header, no marker, no STATUS column). Suitable for backing dynamic completion of the `<pattern>` arg of `path` / `remove` / `bootstrap` (see the README "shell completions" section for a zsh wiring example).
 - `gwm cd <pattern>` — fuzzy-resolve a worktree and print its on-disk path. Same semantics as `gwm path`, exposed under an explicit name for the cd flow.
@@ -23,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Dependencies
 
 - `clap_complete` `4.5` (new).
+- `nucleo-matcher` `0.3` (new) — fuzzy match engine for the TUI `/` filter.
 
 ## [0.2.0] - 2026-05-18
 

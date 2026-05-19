@@ -60,11 +60,13 @@ Key bindings:
 | `l`         | launch `lazygit -p <selected-worktree>` fullscreen; resume the TUI on exit      |
 | `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)     |
 | `Tab`       | swap focus between the worktree list and the sidebar                            |
+| `/`         | open the fuzzy filter bar (`Enter` confirms sticky filter · `Esc` clears)       |
 | `r`         | refresh                                                                         |
 | `p`         | toggle "delete branch on remove"                                                |
 | `Enter`     | show selected path in status bar                                                |
 | `?`         | help overlay                                                                    |
-| `q` / `Esc` | quit                                                                            |
+| `q`         | quit                                                                            |
+| `Esc`       | clear a sticky filter if any, otherwise quit                                    |
 
 ### details sidebar
 
@@ -76,6 +78,19 @@ When the terminal is at least **120 columns wide** and the sidebar is enabled (d
 - **Commands** — keybindings cheat-sheet.
 
 Press `Tab` to focus the sidebar; `j` / `k` (or arrow keys) then scroll it instead of moving the worktree selection. The focused panel's border turns cyan.
+
+### fuzzy filter
+
+Press `/` to open an inline filter bar at the bottom of the worktree table. As you type, the table narrows in real time using [`nucleo-matcher`](https://docs.rs/nucleo-matcher) — the same fuzzy engine used by Helix and Zellij. Matches are ranked by how tight the hit is (contiguous substring beats spread-out subsequence), so the most likely candidate sits on top.
+
+```
+/                            → filter bar opens
+auth                         → table now shows feat-99-user-authentication only
+<Enter>                       → filter sticks, navigation back on the table
+<Esc>                         → clears filter, full list back
+```
+
+The filter is sticky between Enter and Esc: `j` / `k` / `gg` / `G` continue to work on the filtered subset, and the table title shows `worktrees (N/M)` (visible / total). Hit `/` again to re-open the bar and refine the query. `Esc` from the list view clears the sticky filter before it considers quitting, so you can't accidentally quit when you meant to drop the filter.
 
 ### lazygit integration
 
