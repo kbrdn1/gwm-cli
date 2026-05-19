@@ -25,7 +25,51 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  prune "))
     .stdout(predicate::str::contains("  completions "))
     .stdout(predicate::str::contains("  cd "))
-    .stdout(predicate::str::contains("  shell-init "));
+    .stdout(predicate::str::contains("  shell-init "))
+    .stdout(predicate::str::contains("  doctor "));
+}
+
+#[test]
+fn doctor_on_fresh_repo_prints_checks() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  // Exit code is intentionally not asserted here: in environments without
+  // `lazygit` on PATH (most CI runners) or a pre-existing `~/cc-worktree/`
+  // parent, the report legitimately surfaces Warning entries and exits 1.
+  // The 0/1/2 exit-code contract is exercised at the unit level in
+  // `tests/doctor_tests.rs` where the environment is fully controlled.
+  cmd
+    .current_dir(dir.path())
+    .arg("doctor")
+    .assert()
+    .stdout(predicate::str::contains("✓"))
+    .stdout(predicate::str::contains(".gwm.toml"))
+    .stdout(predicate::str::contains("base directory writable"));
+}
+
+#[test]
+fn doctor_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("doctor")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn doctor_exits_two_on_invalid_config() {
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "broken = [unterminated").unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("doctor")
+    .assert()
+    .code(2)
+    .stdout(predicate::str::contains("✗"));
 }
 
 #[test]

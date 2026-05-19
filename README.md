@@ -114,7 +114,40 @@ gwm remove auth --delete-branch             # remove + drop the branch
 gwm prune                                   # clean stale .git/worktrees entries
 gwm completions zsh                         # print a zsh / bash / fish / powershell / elvish script
 gwm shell-init zsh                          # print a `gcd <pattern>` shell wrapper (one-line cd)
+gwm doctor                                  # diagnose config + env + worktree state (exit 0/1/2)
 ```
+
+### diagnose your setup
+
+`gwm doctor` runs a series of cheap checks and reports each with `✓ / ! / ✗`, then exits `0` (all green), `1` (any warning), or `2` (any failure) — so it can be wired into CI or a pre-commit hook.
+
+```bash
+$ gwm doctor
+✓ .gwm.toml parses
+    /path/to/repo/.gwm.toml parses cleanly
+✓ guard references resolve
+    2 guard reference(s) resolve
+✓ `when` predicates supported
+✓ external binaries on PATH
+    3/3 binaries found
+! no prunable worktrees
+    1 prunable entry: feat-12-old
+    → run `gwm prune` to clear them
+! no orphan gwm branches
+    1 orphan branch(es): feat/#23-stale
+    → git branch -d feat/#23-stale
+✓ base directory writable
+```
+
+Checks performed:
+
+1. **`.gwm.toml` parses** — Ok if it parses (or absent, defaults assumed); Failed if the TOML is broken.
+2. **guard references resolve** — every `[[bootstrap.copy]].guards = [...]` points at an existing `[[bootstrap.guard]]`.
+3. **`when` predicates supported** — every `[[bootstrap.command]].when` uses a known keyword prefix (currently only `file_exists:`).
+4. **external binaries on PATH** — `lazygit` (TUI `l` keybinding), `direnv` (only if `.envrc` exists), and the first executable token of every `[[bootstrap.command]].run`.
+5. **no prunable worktrees** — `.git/worktrees/` entries whose working dir was removed manually.
+6. **no orphan gwm branches** — local branches matching `<type>/#<issue>-<desc>` (created by `gwm create`) with no worktree. User-managed branches (`main`, `release-*`, `dependabot/...`) are ignored.
+7. **base directory writable** — the configured `[worktree].base` exists and is writable, or its parent is (gwm creates the base lazily on first `gwm create`).
 
 ### one-line cd into a worktree
 
