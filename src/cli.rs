@@ -106,6 +106,16 @@ pub enum Command {
     #[arg(value_enum)]
     shell: InitShell,
   },
+  /// Open an interactive picker; print the chosen worktree's path on stdout.
+  ///
+  /// Same TUI as `gwm` itself, minus the create / delete / bootstrap actions.
+  /// The fuzzy filter bar opens immediately so typing narrows the list right
+  /// away. Press Enter to commit the highlighted pick; Esc / Ctrl-C / `q`
+  /// quits without printing anything (exit code 1).
+  ///
+  /// Daily usage:  cd "$(gwm switch)"   (or `gwm s`, the alias).
+  #[command(visible_alias = "s")]
+  Switch,
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -132,6 +142,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Types => cmd_types(),
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
+    Command::Switch => cmd_switch(),
   }
 }
 
@@ -370,6 +381,28 @@ fn cmd_shell_init(shell: InitShell) -> Result<()> {
   Ok(())
 }
 
+/// `gwm switch` — open the TUI picker and emit the chosen worktree's path
+/// on stdout. Returning a non-zero exit code when the user cancels lets the
+/// shell wrapper (`gcd` in `shell-init`) skip the `cd` instead of cd'ing to
+/// an empty argument.
+///
+/// The git-repo check runs before `tui::run_picker()` to keep the error
+/// path identical to every other repo-bound subcommand (clean stderr,
+/// no flicker into the alternate screen).
+fn cmd_switch() -> Result<()> {
+  // Probe the repo first; this is also what surfaces "not inside a git
+  // repository" before we touch the terminal. Discarding the handle is
+  // fine — `run_picker` re-discovers it via its own `App::new_picker_at`.
+  let _ = worktree::discover_repo(None)?;
+  match crate::tui::run_picker()? {
+    Some(path) => {
+      println!("{}", path.display());
+      Ok(())
+    }
+    None => std::process::exit(1),
+  }
+}
+
 pub fn shell_init_script(shell: InitShell) -> &'static str {
   match shell {
     InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
@@ -378,7 +411,7 @@ pub fn shell_init_script(shell: InitShell) -> &'static str {
   }
 }
 
-const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: eval "$(gwm shell-init bash)"   # or zsh
 # Note: the `function name { ... }` form (zsh/bash-extended) is used instead
 # of the parenthesised POSIX form so the parser does not error out with
@@ -387,39 +420,51 @@ const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the p
 # definition is what makes the function reachable at call time, since zsh
 # still resolves the alias first when both exist.
 function gcd {
-  if [ "$#" -eq 0 ]; then
-    echo "usage: gcd <pattern>" >&2
-    return 2
-  fi
   local target
-  target="$(command gwm cd "$@")" || return $?
+  if [ "$#" -eq 0 ]; then
+    # No arg → open the interactive picker. `gwm switch` exits non-zero on
+    # cancel, in which case `gcd` must NOT attempt the `cd` (would land in $HOME).
+    target="$(command gwm switch)" || return $?
+  else
+    target="$(command gwm cd "$@")" || return $?
+  fi
   cd "$target" || return $?
 }
 unalias gcd 2>/dev/null || true
 "#;
 
-const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
-function gcd --description 'cd into a gwm worktree by fuzzy pattern'
+function gcd --description 'cd into a gwm worktree (no arg = interactive picker)'
+  set -l target
   if test (count $argv) -eq 0
-    echo "usage: gcd <pattern>" >&2
-    return 2
+    # No arg → open the interactive picker; cancel exits non-zero, in which
+    # case we must NOT attempt the cd (would land in $HOME).
+    set target (command gwm switch)
+    or return $status
+  else
+    set target (command gwm cd $argv)
+    or return $status
   end
-  set -l target (command gwm cd $argv)
-  or return $status
   # `--` stops option parsing, "$target" prevents wildcard expansion on
   # paths containing `[`, `]`, or `*`.
   cd -- "$target"
 end
 "#;
 
-const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
 # Note: this clears any prior `gcd` alias so the function takes effect.
 Remove-Alias -Name gcd -Force -ErrorAction SilentlyContinue
 function gcd {
-  param([Parameter(Mandatory = $true)][string]$Pattern)
-  $target = & gwm cd $Pattern
+  param([string]$Pattern)
+  if ([string]::IsNullOrEmpty($Pattern)) {
+    # No arg → open the interactive picker. The binary exits non-zero on
+    # cancel; bail out before attempting Set-Location so we don't land in $HOME.
+    $target = & gwm switch
+  } else {
+    $target = & gwm cd $Pattern
+  }
   if ($LASTEXITCODE -ne 0) { return }
   Set-Location $target
 }
