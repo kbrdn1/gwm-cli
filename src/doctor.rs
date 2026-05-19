@@ -4,7 +4,9 @@
 
 use crate::config::{expand_placeholders, Config, CONFIG_FILE};
 use crate::error::Result;
+use crate::naming::parse_branch;
 use crate::worktree;
+use git2::BranchType;
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -112,6 +114,8 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
   report.checks.push(check_guard_references(ctx));
   report.checks.push(check_when_predicates(ctx));
   report.checks.push(check_binaries_on_path(ctx));
+  report.checks.push(check_prunable_worktrees(ctx));
+  report.checks.push(check_orphan_branches(ctx));
   report.checks.push(check_base_dir_writable(ctx));
   Ok(report)
 }
@@ -292,6 +296,65 @@ fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
     Check::failed(name, format!("parent {} is not writable", parent.display()))
       .with_hint("fix the permissions, or set `[worktree].base` to a writable path")
   }
+}
+
+/// Check #5: no prunable worktree entries left in `.git/worktrees/`. These
+/// happen when a worktree's working directory is deleted manually without
+/// going through `gwm remove` — the admin record stays and confuses future
+/// `gwm list` invocations.
+fn check_prunable_worktrees(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "no prunable worktrees";
+  let trees = match worktree::list(ctx.repo) {
+    Ok(t) => t,
+    Err(e) => return Check::failed(name, format!("could not list worktrees: {}", e)),
+  };
+
+  let prunable: Vec<String> = trees.iter().filter(|w| w.is_prunable).map(|w| w.name.clone()).collect();
+  if prunable.is_empty() {
+    return Check::ok(name, format!("{} worktree(s) tracked, none prunable", trees.len()));
+  }
+
+  Check::warning(name, format!("{} prunable entrie(s): {}", prunable.len(), prunable.join(", ")))
+    .with_hint("run `gwm prune` to clear them")
+}
+
+/// Check #6: every local branch matching the `<type>/#<issue>-<desc>`
+/// shape has a worktree pointing at it. A branch without a worktree was
+/// likely created by `gwm create` and lost its worktree without a
+/// `--delete-branch` — purely cosmetic dead weight, hence Warning not Failed.
+fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "no orphan gwm branches";
+
+  let trees = match worktree::list(ctx.repo) {
+    Ok(t) => t,
+    Err(e) => return Check::failed(name, format!("could not list worktrees: {}", e)),
+  };
+  let claimed: BTreeSet<String> = trees.iter().filter_map(|w| w.branch.clone()).collect();
+
+  let branches = match ctx.repo.branches(Some(BranchType::Local)) {
+    Ok(b) => b,
+    Err(e) => return Check::failed(name, format!("could not list local branches: {}", e)),
+  };
+
+  let mut orphans: Vec<String> = Vec::new();
+  for entry in branches.flatten() {
+    let (branch, _) = entry;
+    let Ok(Some(branch_name)) = branch.name() else { continue };
+    if parse_branch(branch_name).is_none() {
+      continue; // user-managed branch, leave it alone
+    }
+    if !claimed.contains(branch_name) {
+      orphans.push(branch_name.to_string());
+    }
+  }
+
+  if orphans.is_empty() {
+    return Check::ok(name, "every gwm-style branch has a matching worktree");
+  }
+
+  let suggestions: Vec<String> = orphans.iter().map(|b| format!("git branch -d {}", b)).collect();
+  Check::warning(name, format!("{} orphan branch(es): {}", orphans.len(), orphans.join(", ")))
+    .with_hint(suggestions.join(" && "))
 }
 
 /// Probe a directory for write access by creating and deleting a sentinel

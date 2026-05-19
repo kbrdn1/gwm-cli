@@ -264,3 +264,61 @@ fn base_dir_missing_but_parent_writable_is_ok() {
   let c = report.checks.iter().find(|c| c.name.contains("base")).unwrap();
   assert_eq!(c.status, CheckStatus::Ok);
 }
+
+// --------------------------------------------------------------------------
+// Check #5 — no prunable worktrees
+// --------------------------------------------------------------------------
+
+#[test]
+fn fresh_repo_has_no_prunable_worktrees() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("prunable"))
+    .expect("expected a prunable check");
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+// --------------------------------------------------------------------------
+// Check #6 — orphan branches matching <type>/#<issue>-<desc>
+// --------------------------------------------------------------------------
+
+#[test]
+fn orphan_gwm_branch_is_warning() {
+  let (dir, repo) = init_repo();
+  // Manufacture a gwm-style branch with no worktree pointing at it.
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-stale-thing", &head, false).unwrap();
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan"))
+    .expect("expected an orphan-branches check");
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.contains("feat/#99-stale-thing"),
+    "orphan branch should be quoted in the detail, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn non_gwm_branch_is_not_flagged_as_orphan() {
+  let (dir, repo) = init_repo();
+  // Branches that don't match the <type>/#<issue>-<desc> shape are user-
+  // managed (release branches, dependabot bumps, etc.) and must be left alone.
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("release-2.0", &head, false).unwrap();
+  repo.branch("dependabot/cargo/serde-1.0.200", &head, false).unwrap();
+
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}
