@@ -336,6 +336,8 @@ pub fn shell_init_script(shell: InitShell) -> &'static str {
 
 const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
 # Install: eval "$(gwm shell-init bash)"   # or zsh
+# Note: this clears any prior `gcd` alias (e.g. oh-my-zsh's `gcd=git checkout`).
+unalias gcd 2>/dev/null || true
 gcd() {
   if [ "$#" -eq 0 ]; then
     echo "usage: gcd <pattern>" >&2
@@ -362,6 +364,8 @@ end
 
 const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
 # Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
+# Note: this clears any prior `gcd` alias so the function takes effect.
+Remove-Alias -Name gcd -Force -ErrorAction SilentlyContinue
 function gcd {
   param([Parameter(Mandatory = $true)][string]$Pattern)
   $target = & gwm cd $Pattern
