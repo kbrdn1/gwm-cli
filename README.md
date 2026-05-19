@@ -72,7 +72,7 @@ Key bindings:
 | `gg`        | jump to the first worktree                                                      |
 | `G`         | jump to the last worktree                                                       |
 | `n`         | new worktree (form: type → issue → description)                                 |
-| `d`         | delete selected (confirm `y`)                                                   |
+| `d`         | delete selected (confirm `y` · countdown when `p` is armed — see below)         |
 | `b`         | re-run bootstrap on the selected worktree                                       |
 | `o`         | open the worktree dir in the OS file manager (`open` / `xdg-open` / `explorer`) |
 | `l`         | launch `lazygit -p <selected-worktree>` fullscreen; resume the TUI on exit      |
@@ -109,6 +109,21 @@ auth                         → table now shows feat-99-user-authentication onl
 ```
 
 The filter is sticky between Enter and Esc: `j` / `k` / `gg` / `G` continue to work on the filtered subset, and the table title shows `worktrees (N/M)` (visible / total). Hit `/` again to re-open the bar and refine the query. `Esc` from the list view clears the sticky filter before it considers quitting, so you can't accidentally quit when you meant to drop the filter.
+
+### confirm-overlay countdown ([#30](https://github.com/kbrdn1/gwm-cli/issues/30))
+
+The `d` confirm overlay has two modes, picked automatically based on whether `p` was pressed earlier in the session:
+
+- **Classic** (`delete branch on remove` is OFF): single keystroke. `y` / `Enter` fires the delete; `n` / `Esc` cancels. Same as the pre-#30 behaviour.
+- **Countdown** (`delete branch on remove` is ON): the overlay shows the branch about to disappear plus an `arm` step. `y` / `Enter` *arms* a safety countdown (default 3s, visualised by a progress bar); the actual delete only fires once the bar fills. `Esc` / `n` cancels at any time; pressing `y` again during the countdown disarms it without firing.
+
+The countdown duration is configurable via `[tui].confirm_countdown_secs` in `.gwm.toml`. Accepted range: `0..=5`. Setting it to `0` keeps the classic single-keystroke modal even when `delete branch on remove` is armed; values above `5` are clamped to `5` on read.
+
+```toml
+[tui]
+# 3s default. Set to 0 to disable the countdown (classic modal even when p is armed).
+confirm_countdown_secs = 3
+```
 
 ### lazygit integration
 
