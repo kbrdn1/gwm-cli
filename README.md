@@ -201,13 +201,11 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / commit / PR convention
 
 ## roadmap
 
-- `--watch` mode (gwq parity)
-- TUI fuzzy filter on the worktree list
-- Pluggable `when` predicates beyond `file_exists:`
-- Optional per-worktree env file (`.gwm.env`) sourced before commands
-- Per-OS path overrides in `.gwm.toml`
+The full roadmap (with grouped categories and per-item issue links) lives in [`ROADMAP.md`](ROADMAP.md). Highlights for the next minor:
 
-Contributions welcome — open a [feature request issue](.github/ISSUE_TEMPLATE/feature_request.yml).
+- Shell completions ([#18](https://github.com/kbrdn1/gwm-cli/issues/18)), `gwm cd` + `shell-init` ([#19](https://github.com/kbrdn1/gwm-cli/issues/19)), `gwm doctor` ([#20](https://github.com/kbrdn1/gwm-cli/issues/20)), TUI fuzzy filter ([#21](https://github.com/kbrdn1/gwm-cli/issues/21)).
+
+Contributions welcome — open a [feature request issue](.github/ISSUE_TEMPLATE/feature_request.yml) or pick an item from [`ROADMAP.md`](ROADMAP.md).
 
 ## license
 
@@ -217,6 +215,7 @@ MIT — see [LICENSE.md](LICENSE.md).
 
 - [`CHANGELOG.md`](CHANGELOG.md)
 - [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- [`ROADMAP.md`](ROADMAP.md)
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - [`.github/LABELS.md`](.github/LABELS.md)
 - [`examples/gwm.toml.example`](examples/gwm.toml.example)
