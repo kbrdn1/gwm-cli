@@ -34,9 +34,10 @@ shellexpand = "3"
 chrono = { version = "0.4", features = ["serde"] }
 which = "8"
 nucleo-matcher = "0.3"
+shell-words = "1"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 

@@ -244,9 +244,11 @@ Versioning is SemVer (`MAJOR.MINOR.PATCH`), with `-rc.N` / `-alpha.N` / `-beta.N
 When `dev` is ready to be exercised by early adopters before promotion:
 
 1. Stay on `dev` (do not merge to `main` yet).
-2. Tag: `git tag -a v0.x.y-rc.1 -m "v0.x.y-rc.1" && git push --tags`.
-3. GitHub Actions (`pre-release.yml`) builds binaries and publishes a **prerelease** (5 targets — Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64).
-4. Iterate: subsequent candidates are `v0.x.y-rc.2`, `v0.x.y-rc.3`, …
+2. Write per-RC notes in a new file `changelogs/pre-releases/<version>-rc.N.md` — heading `# [<version>-rc.N] - YYYY-MM-DD`, body describing only the **delta** against the previous RC (or against the previous stable, for `rc.1`). One file per RC, not a running log. (See [`changelogs/pre-releases/0.3.0-rc.2.md`](changelogs/pre-releases/0.3.0-rc.2.md) for the expected layout.)
+3. Add the entry to `CHANGELOG.md`'s `## Past releases > ### Pre-releases` index.
+4. Tag: `git tag -a v0.x.y-rc.N -m "v0.x.y-rc.N" && git push --tags`.
+5. GitHub Actions (`pre-release.yml`) builds binaries and publishes a **prerelease** (5 targets — Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64). The release body is populated from the per-RC file via `--notes-file changelogs/pre-releases/<version>-rc.N.md` (run `gh release edit <tag> --notes-file <path>` after the workflow if you need to refresh it).
+6. Iterate: subsequent candidates are `v0.x.y-rc.2`, `v0.x.y-rc.3`, …
 
 ### Stable release (from `main`)
 
@@ -256,7 +258,7 @@ Once the rc is validated and promoted to `main`:
 2. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
 3. Merge `dev` → `main` (regular merge, never squash; see [Merge strategy](#merge-strategy)).
 4. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
-5. GitHub Actions (`release.yml`) builds binaries and publishes the stable release.
+5. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
 
 Triggering matrix:
 
