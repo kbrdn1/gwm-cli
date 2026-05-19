@@ -325,6 +325,36 @@ Triggering matrix:
 | `v0.x.y-alpha.N`         | `pre-release.yml`| `true`            |
 | `v0.x.y-beta.N`          | `pre-release.yml`| `true`            |
 
+### Homebrew tap (`brew install kbrdn1/tap/gwm`)
+
+Stable releases automatically refresh [`kbrdn1/homebrew-tap`](https://github.com/kbrdn1/homebrew-tap) (`Formula/gwm.rb`) via the `homebrew-tap-update` job in [`release.yml`](.github/workflows/release.yml). Pre-releases (`-rc.N` / `-alpha.N` / `-beta.N`) are filtered out so `brew install gwm` always tracks the latest stable.
+
+The canonical formula source lives at [`packaging/homebrew/gwm.rb.template`](packaging/homebrew/gwm.rb.template). Edits to the template (new shell completion call, license bump, extra `test do` block) flow to the tap on the next stable release — no manual sync needed.
+
+#### One-time bootstrap (maintainer)
+
+The job needs a fine-grained personal access token (PAT) with `contents: write` scoped to the tap repo. Create it once:
+
+1. Generate a PAT at <https://github.com/settings/personal-access-tokens/new>:
+   - **Resource owner**: your user (or the org owning `homebrew-tap`).
+   - **Repository access**: select `kbrdn1/homebrew-tap` only.
+   - **Permissions**: Contents → **Read and write**. Nothing else.
+   - **Expiration**: ≥ 1 year (set a calendar reminder to rotate).
+2. Add it as a secret on the `gwm-cli` repo:
+   - <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>
+   - Name: `HOMEBREW_TAP_TOKEN`. Value: the PAT.
+3. Flip `continue-on-error: true` to `false` on the `homebrew-tap-update` job in [`release.yml`](.github/workflows/release.yml) after the first successful sync — failures should then block the workflow loudly.
+
+#### Re-running after a failed sync
+
+If the job failed (typically: PAT missing or expired) after the GitHub release already shipped, re-drive the tap refresh without re-tagging:
+
+```bash
+gh workflow run release.yml --ref <tag>   # e.g. v0.5.0
+```
+
+The `workflow_dispatch` path is gated to the same stable-only condition; rc/alpha/beta will skip the tap step automatically.
+
 ---
 
 By contributing, you agree your changes are licensed under the MIT License (see `LICENSE.md`).

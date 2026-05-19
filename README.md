@@ -32,6 +32,15 @@ cargo install --path .
 
 The binary lands in `~/.cargo/bin/gwm`.
 
+### via Homebrew (macOS)
+
+```bash
+brew tap kbrdn1/tap
+brew install gwm
+```
+
+The formula lives at [`kbrdn1/homebrew-tap`](https://github.com/kbrdn1/homebrew-tap) (`Formula/gwm.rb`) and is refreshed automatically on every stable release of `gwm-cli` by the `homebrew-tap-update` job in [`release.yml`](.github/workflows/release.yml). The canonical formula source lives at [`packaging/homebrew/gwm.rb.template`](packaging/homebrew/gwm.rb.template) — pre-release tags (`-rc.N`, `-alpha.N`, `-beta.N`) are filtered out so `brew install gwm` always points at a stable build.
+
 ### prebuilt binaries
 
 Releases at <https://github.com/kbrdn1/gwm-cli/releases> ship Linux (x86_64 + aarch64), macOS (Intel + Apple Silicon), and Windows binaries with `.sha256` sidecars.
