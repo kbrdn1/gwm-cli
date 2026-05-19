@@ -36,6 +36,24 @@ The binary lands in `~/.cargo/bin/gwm`.
 
 Releases at <https://github.com/kbrdn1/gwm-cli/releases> ship Linux (x86_64 + aarch64), macOS (Intel + Apple Silicon), and Windows binaries with `.sha256` sidecars.
 
+### via Nix flake
+
+A `flake.nix` lives at the repo root. With flakes enabled:
+
+```bash
+# one-shot run, no clone
+nix run github:kbrdn1/gwm-cli -- list
+
+# install into your profile
+nix profile install github:kbrdn1/gwm-cli
+
+# in a NixOS / nix-darwin config, via the overlay
+nixpkgs.overlays = [ inputs.gwm.overlays.default ];
+environment.systemPackages = [ pkgs.gwm ];
+```
+
+The package is built via `rustPlatform.buildRustPackage` and pins `Cargo.lock`; `git2`'s `vendored-libgit2` feature keeps the closure free of system libgit2.
+
 ## usage
 
 ### TUI (interactive)
@@ -328,6 +346,12 @@ cargo test               # 140 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
+```
+
+Nix users can drop into a pinned dev shell — Rust toolchain, `rust-analyzer`, `clippy`, `rustfmt`, `cargo-watch`, `cargo-edit`, and the libgit2 build deps — without touching the host system:
+
+```bash
+nix develop              # bundled toolchain + LSP + linter + formatter
 ```
 
 All tests live under `tests/`:
