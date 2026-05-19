@@ -255,3 +255,24 @@ confirm_countdown_secs = 30
   assert_eq!(cfg.tui.confirm_countdown_secs, 30);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
 }
+
+#[test]
+fn tui_countdown_value_above_u8_max_still_clamps() {
+  // Regression for Copilot review on PR #66: the documented contract is
+  // "values above 5 are clamped on read". A `u8` field would cap at 255
+  // *at parse time*, turning a typo like `confirm_countdown_secs = 300`
+  // into a hard `Config::load_for_repo` error instead of the documented
+  // clamp-to-5. The field must accept any non-negative integer so the
+  // promise stays whole.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 300
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).expect("300 must parse, not error");
+  assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
+}

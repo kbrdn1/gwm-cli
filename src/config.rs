@@ -136,15 +136,19 @@ fn default_trunks() -> Vec<String> {
 /// destructive action actually fires. `0` disables the countdown and
 /// falls back to the classic single-keystroke confirm even when delete-
 /// branch is armed; the value is clamped to `5` at read time so a typo
-/// like `confirm_countdown_secs = 30` can never strand a destructive
-/// path behind a 30-second wait.
+/// like `confirm_countdown_secs = 300` can never strand a destructive
+/// path behind a 300-second wait.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TuiConfig {
   /// Safety countdown (in seconds) applied to the confirm overlay when
-  /// `delete_branch_on_remove` is ON. Accepts `0..=5`; values outside
-  /// the range are clamped on read via [`Self::effective_confirm_countdown_secs`].
+  /// `delete_branch_on_remove` is ON. Accepts any non-negative integer;
+  /// values above [`Self::MAX_CONFIRM_COUNTDOWN_SECS`] are clamped on
+  /// read via [`Self::effective_confirm_countdown_secs`]. The field is
+  /// `u32` (rather than `u8`) so a typo like `confirm_countdown_secs = 300`
+  /// still round-trips through TOML deserialization and reaches the
+  /// clamp instead of erroring out at parse time.
   #[serde(default = "default_confirm_countdown_secs")]
-  pub confirm_countdown_secs: u8,
+  pub confirm_countdown_secs: u32,
 }
 
 impl Default for TuiConfig {
@@ -158,18 +162,18 @@ impl Default for TuiConfig {
 impl TuiConfig {
   /// Documented range cap. Centralised so the TUI and the doctor share
   /// the same clamp logic.
-  pub const MAX_CONFIRM_COUNTDOWN_SECS: u8 = 5;
+  pub const MAX_CONFIRM_COUNTDOWN_SECS: u32 = 5;
 
   /// Effective countdown value used by the TUI, clamped to
   /// `[0, MAX_CONFIRM_COUNTDOWN_SECS]`. The raw field stays at the
   /// user's value so a future doctor check can surface "your config
   /// asked for X but we capped at 5".
-  pub fn effective_confirm_countdown_secs(&self) -> u8 {
+  pub fn effective_confirm_countdown_secs(&self) -> u32 {
     self.confirm_countdown_secs.min(Self::MAX_CONFIRM_COUNTDOWN_SECS)
   }
 }
 
-fn default_confirm_countdown_secs() -> u8 {
+fn default_confirm_countdown_secs() -> u32 {
   3
 }
 

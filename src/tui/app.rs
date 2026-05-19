@@ -474,7 +474,7 @@ impl App {
   /// `Duration::ZERO` means "no countdown — classic modal".
   pub fn confirm_countdown_total(&self) -> Duration {
     if self.delete_branch_on_remove {
-      Duration::from_secs(self.config.tui.effective_confirm_countdown_secs() as u64)
+      Duration::from_secs(u64::from(self.config.tui.effective_confirm_countdown_secs()))
     } else {
       Duration::ZERO
     }
