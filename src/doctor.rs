@@ -20,13 +20,16 @@ impl DoctorReport {
     Self::default()
   }
 
-  /// Highest severity present in the report.
-  pub fn severity(&self) -> Severity {
-    let mut s = Severity::Ok;
+  /// Highest severity present in the report — `Failed` wins over `Warning`
+  /// wins over `Ok`. Returned as a `CheckStatus` (a previous `Severity`
+  /// enum was a verbatim duplicate; collapsing into one type avoids the
+  /// translation match and keeps the public surface minimal).
+  pub fn severity(&self) -> CheckStatus {
+    let mut s = CheckStatus::Ok;
     for c in &self.checks {
       match c.status {
-        CheckStatus::Failed => return Severity::Failed,
-        CheckStatus::Warning if s == Severity::Ok => s = Severity::Warning,
+        CheckStatus::Failed => return CheckStatus::Failed,
+        CheckStatus::Warning if s == CheckStatus::Ok => s = CheckStatus::Warning,
         _ => {}
       }
     }
@@ -38,9 +41,9 @@ impl DoctorReport {
   /// Suitable for wiring into CI / pre-commit.
   pub fn exit_code(&self) -> i32 {
     match self.severity() {
-      Severity::Ok => 0,
-      Severity::Warning => 1,
-      Severity::Failed => 2,
+      CheckStatus::Ok => 0,
+      CheckStatus::Warning => 1,
+      CheckStatus::Failed => 2,
     }
   }
 }
@@ -95,12 +98,10 @@ pub enum CheckStatus {
   Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Severity {
-  Ok,
-  Warning,
-  Failed,
-}
+/// Backwards-compatibility alias. `Severity` was a verbatim duplicate of
+/// `CheckStatus` introduced before they were unified; keep the name so
+/// callers from 0.3.0 keep compiling while we converge on `CheckStatus`.
+pub type Severity = CheckStatus;
 
 pub struct DoctorCtx<'a> {
   pub repo_workdir: &'a Path,
@@ -114,8 +115,22 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
   report.checks.push(check_guard_references(ctx));
   report.checks.push(check_when_predicates(ctx));
   report.checks.push(check_binaries_on_path(ctx));
-  report.checks.push(check_prunable_worktrees(ctx));
-  report.checks.push(check_orphan_branches(ctx));
+
+  // The next two checks both need the worktree list. Hoist the libgit2
+  // call here so it runs once per `gwm doctor` invocation and so each
+  // check carries the same view of the world.
+  match worktree::list(ctx.repo) {
+    Ok(trees) => {
+      report.checks.push(check_prunable_worktrees(&trees));
+      report.checks.push(check_orphan_branches(ctx, &trees));
+    }
+    Err(e) => {
+      let detail = format!("could not list worktrees: {}", e);
+      report.checks.push(Check::failed("no prunable worktrees", &detail));
+      report.checks.push(Check::failed("no orphan gwm branches", &detail));
+    }
+  }
+
   report.checks.push(check_base_dir_writable(ctx));
   Ok(report)
 }
@@ -188,20 +203,21 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
   let bs = &ctx.config.bootstrap;
 
   let mut unknown: Vec<String> = Vec::new();
-  let mut checked: usize = 0;
+  let mut recognised: usize = 0;
   for cmd in &bs.command {
     let Some(w) = &cmd.when else { continue };
-    checked += 1;
-    if !SUPPORTED_WHEN_PREFIXES.iter().any(|p| w.starts_with(p)) {
+    if SUPPORTED_WHEN_PREFIXES.iter().any(|p| w.starts_with(p)) {
+      recognised += 1;
+    } else {
       unknown.push(format!("{} (on command `{}`)", w, cmd.name));
     }
   }
 
   if unknown.is_empty() {
-    let detail = if checked == 0 {
+    let detail = if recognised == 0 {
       "no `when:` predicates configured".to_string()
     } else {
-      format!("{} predicate(s) recognised", checked)
+      format!("{} predicate(s) recognised", recognised)
     };
     return Check::ok(name, detail);
   }
@@ -325,12 +341,8 @@ fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
 /// happen when a worktree's working directory is deleted manually without
 /// going through `gwm remove` — the admin record stays and confuses future
 /// `gwm list` invocations.
-fn check_prunable_worktrees(ctx: &DoctorCtx<'_>) -> Check {
+fn check_prunable_worktrees(trees: &[worktree::WorktreeInfo]) -> Check {
   let name = "no prunable worktrees";
-  let trees = match worktree::list(ctx.repo) {
-    Ok(t) => t,
-    Err(e) => return Check::failed(name, format!("could not list worktrees: {}", e)),
-  };
 
   let prunable: Vec<String> = trees.iter().filter(|w| w.is_prunable).map(|w| w.name.clone()).collect();
   if prunable.is_empty() {
@@ -360,13 +372,9 @@ const TRUNK_BRANCHES: &[&str] = &["dev", "main"];
 /// (`dev`, `main`) are filtered out: keeping them is the project
 /// convention, and surfacing them would make the check produce N false
 /// positives on every successful release.
-fn check_orphan_branches(ctx: &DoctorCtx<'_>) -> Check {
+fn check_orphan_branches(ctx: &DoctorCtx<'_>, trees: &[worktree::WorktreeInfo]) -> Check {
   let name = "no orphan gwm branches";
 
-  let trees = match worktree::list(ctx.repo) {
-    Ok(t) => t,
-    Err(e) => return Check::failed(name, format!("could not list worktrees: {}", e)),
-  };
   let claimed: BTreeSet<String> = trees.iter().filter_map(|w| w.branch.clone()).collect();
 
   // Resolve the trunk OIDs once. Missing trunks (e.g. a repo without `dev`)
