@@ -57,6 +57,11 @@ pub enum Command {
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   Path { pattern: String },
+  /// Print the on-disk path of a worktree, framed for the cd flow.
+  ///
+  /// The binary itself cannot change the parent shell's directory. Pair with
+  /// `gwm shell-init <shell>` (it defines a `gcd` function that wraps this).
+  Cd { pattern: String },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
@@ -95,6 +100,7 @@ pub fn run(cli: Cli) -> Result<()> {
     } => cmd_create(branch_type, issue, desc, no_bootstrap),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
+    Command::Cd { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target),
     Command::Prune => cmd_prune(),
     Command::Types => cmd_types(),
