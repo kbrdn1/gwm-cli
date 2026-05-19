@@ -609,3 +609,188 @@ fn exit_filter_cancel_restores_full_list_selection() {
   // full list (index 0). The clamp logic doesn't move it forward, only back.
   assert_eq!(app.list_state.selected(), Some(0));
 }
+
+// ---- picker mode (issue #22) --------------------------------------------
+
+#[test]
+fn picker_mode_defaults_to_false() {
+  // The regular `gwm` TUI entry point must not behave like a picker. The
+  // create / delete / bootstrap actions stay reachable, and `picker_result`
+  // is unset until an explicit picker session asks for it.
+  let (_dir, app) = make_app();
+  assert!(!app.picker_mode, "default App must not be in picker mode");
+  assert!(
+    app.picker_result.is_none(),
+    "no path is selected until the user confirms"
+  );
+}
+
+#[test]
+fn new_picker_at_enables_picker_mode() {
+  // `gwm switch` enters the TUI through this constructor; the picker flag
+  // is what drives the event loop into "Enter confirms, n/d/b are inert".
+  let (dir, _) = init_repo();
+  let app = App::new_picker_at(Some(dir.path())).unwrap();
+  assert!(app.picker_mode, "new_picker_at must set picker_mode=true");
+}
+
+#[test]
+fn new_picker_at_opens_filter_bar() {
+  // Per issue #22: "switch could open the filter bar immediately on
+  // startup". A user invoking `gwm switch` already knows they want to
+  // narrow the list; opening the bar saves one keystroke.
+  let (dir, _) = init_repo();
+  let app = App::new_picker_at(Some(dir.path())).unwrap();
+  assert!(app.filter_active, "picker mode must open with the filter bar active");
+}
+
+#[test]
+fn picker_confirm_records_selected_path() {
+  // Enter in picker mode commits the highlighted worktree path so the
+  // event loop can return it to the caller (which prints it to stdout
+  // for the `cd "$(gwm switch)"` flow).
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.list_state.select(Some(0));
+  let expected = app.selected().expect("test fixture must have a worktree").path.clone();
+
+  app.picker_confirm();
+  assert_eq!(
+    app.picker_result,
+    Some(expected),
+    "picker_confirm must record the selected worktree's path"
+  );
+}
+
+#[test]
+fn picker_confirm_with_no_selection_keeps_result_none() {
+  // If the filter wipes the list down to zero matches, hitting Enter must
+  // not crash and must not record a bogus path. The event loop is then
+  // free to keep the TUI open (or break with None, which is the caller's
+  // call).
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.picker_confirm();
+  assert!(
+    app.picker_result.is_none(),
+    "picker_confirm with no selection must leave picker_result unset"
+  );
+}
+
+#[test]
+fn picker_confirm_outside_picker_mode_is_inert() {
+  // Defensive: `picker_confirm` shouldn't poison the regular TUI flow if
+  // it's ever wired into the wrong event branch. Only picker mode reacts
+  // to Enter by recording a path; the normal `Enter = copy path to status
+  // bar` behaviour is left to its own handler.
+  let (_dir, mut app) = make_app();
+  app.list_state.select(Some(0));
+  assert!(!app.picker_mode);
+
+  app.picker_confirm();
+  assert!(
+    app.picker_result.is_none(),
+    "picker_confirm outside picker mode must not record a path"
+  );
+}
+
+// Copilot review (PR #53): the event loop unconditionally `break`s after
+// `picker_confirm()` in picker mode, even when no worktree is selected.
+// That turns Enter-on-an-empty-filter-result into an exit-1 surprise.
+// The fix surfaces a `picker_should_exit` flag so the loop can keep
+// running until the user actually picks something.
+
+#[test]
+fn picker_should_exit_defaults_false() {
+  let (_dir, app) = make_app();
+  assert!(!app.picker_should_exit, "newly-built App must not signal a picker exit");
+}
+
+#[test]
+fn picker_confirm_with_selection_signals_exit() {
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.list_state.select(Some(0));
+  app.picker_confirm();
+  assert!(
+    app.picker_should_exit,
+    "successful picker_confirm must signal the event loop to exit"
+  );
+  assert!(app.picker_result.is_some());
+}
+
+#[test]
+fn picker_confirm_without_selection_does_not_signal_exit() {
+  // When the fuzzy filter narrows the list down to zero matches, Enter
+  // must keep the TUI open so the user can back-space and try again,
+  // not exit with code 1.
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.picker_confirm();
+  assert!(
+    !app.picker_should_exit,
+    "picker_confirm with no selection must NOT signal exit"
+  );
+  assert!(app.picker_result.is_none());
+}
+
+#[test]
+fn picker_confirm_without_selection_reports_status() {
+  // The user needs feedback explaining why Enter was inert. Surface a
+  // status-bar hint so the no-match case isn't silently swallowed.
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.worktrees.clear();
+  app.list_state.select(None);
+
+  app.picker_confirm();
+  assert!(
+    app.status.to_lowercase().contains("no") || app.status.to_lowercase().contains("nothing"),
+    "picker_confirm with no selection must update the status bar (got: {:?})",
+    app.status
+  );
+}
+
+// Copilot review (PR #53): in picker mode, `Esc` during an active filter
+// only clears the filter — but the picker footer reads `esc:cancel`, so
+// the documented contract is "Esc cancels the picker". Add an explicit
+// `picker_cancel` that signals exit without recording a path so the
+// event loop can route filter-mode Esc to the picker contract.
+
+#[test]
+fn picker_cancel_signals_exit_without_path() {
+  let (_dir, mut app) = make_app();
+  app.picker_mode = true;
+  app.list_state.select(Some(0));
+
+  app.picker_cancel();
+  assert!(
+    app.picker_should_exit,
+    "picker_cancel must signal the event loop to exit"
+  );
+  assert!(
+    app.picker_result.is_none(),
+    "picker_cancel must NOT record a path (Esc is the no-pick exit)"
+  );
+}
+
+#[test]
+fn picker_cancel_outside_picker_mode_is_inert() {
+  // Defensive: like `picker_confirm`, `picker_cancel` should be a no-op
+  // when wired into the wrong branch — the regular TUI's Esc semantics
+  // are handled elsewhere.
+  let (_dir, mut app) = make_app();
+  assert!(!app.picker_mode);
+
+  app.picker_cancel();
+  assert!(
+    !app.picker_should_exit,
+    "picker_cancel outside picker mode must not flip the exit flag"
+  );
+}

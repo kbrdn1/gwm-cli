@@ -15,33 +15,80 @@ fn help_prints_subcommands() {
   // names with two leading spaces and at least two trailing spaces before
   // the description. A loose `contains("cd")` would also match prose like
   // "to cd into it" in another subcommand's description.
+  // `cd` is now a visible alias of `path` (clap renders it as
+  // `path  ...  [aliases: cd]`), so we assert the alias marker
+  // rather than a separate `  cd ` row.
   cmd
     .assert()
     .success()
     .stdout(predicate::str::contains("  init "))
     .stdout(predicate::str::contains("  list "))
     .stdout(predicate::str::contains("  create "))
+    .stdout(predicate::str::contains("  path "))
+    .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
     .stdout(predicate::str::contains("  prune "))
     .stdout(predicate::str::contains("  completions "))
-    .stdout(predicate::str::contains("  cd "))
     .stdout(predicate::str::contains("  shell-init "))
+    .stdout(predicate::str::contains("  switch "))
     .stdout(predicate::str::contains("  doctor "));
+}
+
+#[test]
+fn switch_alias_s_resolves_to_switch() {
+  // Issue #22: `gwm s` is the daily-driver alias for `gwm switch`. Resolving
+  // `gwm s --help` to the switch help text proves the alias is wired in.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["s", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("Open an interactive picker"));
+}
+
+#[test]
+fn top_level_help_advertises_switch_alias() {
+  // The visible alias must show up in the top-level help summary so users
+  // discover `gwm s` without reading the subcommand-specific page.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.arg("--help");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("switch").and(predicate::str::contains("[aliases: s]")));
+}
+
+#[test]
+fn switch_outside_git_repo_fails() {
+  // Same contract as the other repo-bound subcommands: bail out with a
+  // clear error rather than dropping the user into an empty TUI.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("switch")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
 }
 
 #[test]
 fn doctor_on_fresh_repo_prints_checks() {
   let (dir, _repo) = init_repo();
   let mut cmd = Command::cargo_bin("gwm").unwrap();
-  // Exit code is intentionally not asserted here: in environments without
-  // `lazygit` on PATH (most CI runners) or a pre-existing `~/cc-worktree/`
-  // parent, the report legitimately surfaces Warning entries and exits 1.
-  // The 0/1/2 exit-code contract is exercised at the unit level in
-  // `tests/doctor_tests.rs` where the environment is fully controlled.
+  // Exit code is intentionally not asserted to be 0: in environments
+  // without `lazygit` on PATH (most CI runners) or a pre-existing
+  // `~/cc-worktree/` parent, the report legitimately surfaces Warning
+  // entries and exits 1. But we still bound the contract — anything
+  // other than 0 (all green) or 1 (warning) on a vanilla fresh repo
+  // means the doctor is over-flagging (or panicking, which would also
+  // produce a non-0/1 code) and we want the test to fail loudly.
+  // The 0/1/2 mapping is unit-tested in `tests/doctor_tests.rs`.
   cmd
     .current_dir(dir.path())
     .arg("doctor")
     .assert()
+    .code(predicate::in_iter([0_i32, 1]))
     .stdout(predicate::str::contains("✓"))
     .stdout(predicate::str::contains(".gwm.toml"))
     .stdout(predicate::str::contains("base directory writable"));
@@ -204,11 +251,16 @@ fn cd_outside_git_repo_fails() {
 fn shell_init_bash_emits_gcd_function() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["shell-init", "bash"]);
+  // Pin the invocation site: a regression that mentions `gwm cd` only in
+  // a comment but doesn't actually call it from the function body would
+  // pass a loose `contains("gwm cd")`. `gwm cd "$@"` (POSIX-style
+  // argument forwarding) is what makes `gcd auth` translate into
+  // `gwm cd auth`.
   cmd
     .assert()
     .success()
     .stdout(predicate::str::contains("function gcd"))
-    .stdout(predicate::str::contains("gwm cd"));
+    .stdout(predicate::str::contains("gwm cd \"$@\""));
 }
 
 #[test]
@@ -219,7 +271,7 @@ fn shell_init_zsh_emits_gcd_function() {
     .assert()
     .success()
     .stdout(predicate::str::contains("function gcd"))
-    .stdout(predicate::str::contains("gwm cd"));
+    .stdout(predicate::str::contains("gwm cd \"$@\""));
 }
 
 #[test]
@@ -265,7 +317,7 @@ fn shell_init_fish_emits_function_block() {
     .assert()
     .success()
     .stdout(predicate::str::contains("function gcd"))
-    .stdout(predicate::str::contains("gwm cd"))
+    .stdout(predicate::str::contains("gwm cd $argv"))
     .stdout(predicate::str::contains("end"));
 }
 
@@ -291,8 +343,46 @@ fn shell_init_powershell_emits_function_block() {
     .assert()
     .success()
     .stdout(predicate::str::contains("function gcd"))
-    .stdout(predicate::str::contains("gwm cd"))
+    .stdout(predicate::str::contains("gwm cd $Pattern"))
     .stdout(predicate::str::contains("Set-Location"));
+}
+
+// Issue #22: with no argument, `gcd` should drop into `gwm switch` (the
+// interactive picker) rather than print a usage error. The wrapper must
+// still bail before cd'ing if the picker is cancelled (non-zero exit).
+#[test]
+fn shell_init_posix_no_arg_invokes_switch() {
+  for shell in ["bash", "zsh"] {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd.args(["shell-init", shell]);
+    cmd
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("gwm switch"))
+      .stdout(predicate::str::contains("\"$#\" -eq 0"));
+  }
+}
+
+#[test]
+fn shell_init_fish_no_arg_invokes_switch() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "fish"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gwm switch"))
+    .stdout(predicate::str::contains("count $argv) -eq 0"));
+}
+
+#[test]
+fn shell_init_powershell_no_arg_invokes_switch() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "powershell"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gwm switch"))
+    .stdout(predicate::str::contains("IsNullOrEmpty"));
 }
 
 #[test]

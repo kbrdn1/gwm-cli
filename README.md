@@ -16,7 +16,7 @@ Born as a rewrite of a project-specific `tools/worktree-manager.sh` script — t
 - **Per-repo config** in `.gwm.toml`: branch / path conventions, file copies, regex guards, shell hooks, no-symlink invariants.
 - **Branch convention**: `<type>/#<issue>-<description>` by default (`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`). Overridable per repo.
 - **Safety guards**: deny-list regexes on copied files (e.g. refuse to inherit a `.env` pointing at AWS RDS). Pluggable actions: `abort` or `seed-from-example`.
-- **Bootstrap hooks**: shell commands gated by `file_exists:` predicates and arbitrary `env` injection.
+- **Bootstrap hooks**: shell commands gated by composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`, with `!`, `&&`, `||`) and arbitrary `env` injection.
 - **Fuzzy lookup**: `gwm remove auth` matches `feat-123-user-authentication` if unambiguous.
 - **Branch status column**: dirty / clean / `↑N ↓M` vs upstream, color-coded in TUI and CLI output.
 
@@ -35,6 +35,24 @@ The binary lands in `~/.cargo/bin/gwm`.
 ### prebuilt binaries
 
 Releases at <https://github.com/kbrdn1/gwm-cli/releases> ship Linux (x86_64 + aarch64), macOS (Intel + Apple Silicon), and Windows binaries with `.sha256` sidecars.
+
+### via Nix flake
+
+A `flake.nix` lives at the repo root. With flakes enabled:
+
+```bash
+# one-shot run, no clone
+nix run github:kbrdn1/gwm-cli -- list
+
+# install into your profile
+nix profile install github:kbrdn1/gwm-cli
+
+# in a NixOS / nix-darwin config, via the overlay
+nixpkgs.overlays = [ inputs.gwm.overlays.default ];
+environment.systemPackages = [ pkgs.gwm ];
+```
+
+The package is built via `rustPlatform.buildRustPackage` and pins `Cargo.lock`; `git2`'s `vendored-libgit2` feature keeps the closure free of system libgit2.
 
 ## usage
 
@@ -107,6 +125,8 @@ gwm list                                    # list all worktrees of the current 
 gwm list --format=names                     # one worktree name per line (for shell completion)
 gwm path auth                               # print the resolved path (use $(gwm path ...))
 gwm cd auth                                 # same — primitive for the `gcd` wrapper
+gwm switch                                  # interactive picker — prints chosen path on stdout
+gwm s                                       # short alias for `switch`
 gwm bootstrap                               # re-run bootstrap on the CWD worktree
 gwm bootstrap auth                          # ...or on a named one
 gwm remove auth                             # remove (fuzzy match) — keeps the branch
@@ -128,22 +148,33 @@ $ gwm doctor
 ✓ guard references resolve
     2 guard reference(s) resolve
 ✓ `when` predicates supported
+    1 predicate(s) recognised
 ✓ external binaries on PATH
     3/3 binaries found
+✓ no prunable worktrees
+    5 worktree(s) tracked, none prunable
+✓ no orphan gwm branches
+    7 merged gwm-style branch(es) preserved per CONTRIBUTING, no unmerged orphans
+✓ base directory writable
+    /home/you/cc-worktree/myrepo is writable
+```
+
+If a real orphan (unmerged feature branch with no worktree) or a prunable entry exists, the doctor surfaces them as Warning with a remediation hint:
+
+```bash
 ! no prunable worktrees
     1 prunable entry: feat-12-old
     → run `gwm prune` to clear them
 ! no orphan gwm branches
-    1 orphan branch(es): feat/#23-stale
-    → git branch -d feat/#23-stale
-✓ base directory writable
+    1 unmerged orphan branch(es): feat/#99-wip-experiment
+    → git branch -d feat/#99-wip-experiment
 ```
 
 Checks performed:
 
 1. **`.gwm.toml` parses** — Ok if it parses (or absent, defaults assumed); Failed if the TOML is broken.
 2. **guard references resolve** — every `[[bootstrap.copy]].guards = [...]` points at an existing `[[bootstrap.guard]]`.
-3. **`when` predicates supported** — every `[[bootstrap.command]].when` uses a known keyword prefix (currently only `file_exists:`).
+3. **`when` predicates supported** — every `[[bootstrap.command]].when` uses one of the known keyword prefixes (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`). Boolean composition via `!`, `&&`, `||` (precedence `!` > `&&` > `||`) is allowed inside the expression.
 4. **external binaries on PATH** — `lazygit` (TUI `l` keybinding), `direnv` (only if `.envrc` exists), and the first executable token of every `[[bootstrap.command]].run`.
 5. **no prunable worktrees** — `.git/worktrees/` entries whose working dir was removed manually.
 6. **no orphan gwm branches** — local branches matching `<type>/#<issue>-<desc>` (created by `gwm create`) with no worktree. User-managed branches (`main`, `release-*`, `dependabot/...`) are ignored.
@@ -170,9 +201,21 @@ Then:
 
 ```bash
 gcd auth   # → cd $(gwm cd auth) → e.g. ~/cc-worktree/myrepo/feat-99-user-authentication
+gcd        # no arg → opens `gwm switch` and cd's into the picked worktree
 ```
 
-`gcd` propagates the exit code from `gwm cd` and never attempts the `cd` if the lookup failed (no match, ambiguous pattern, not in a git repo).
+`gcd` propagates the exit code from `gwm cd` (or `gwm switch`, when called without args) and never attempts the `cd` if the lookup / pick failed (no match, ambiguous pattern, cancelled picker, not in a git repo).
+
+### interactive picker (`gwm switch`)
+
+When you can't remember the exact pattern, `gwm switch` opens the worktree TUI in picker mode — same table, fuzzy filter bar pre-open, create / delete / bootstrap disabled. `Enter` confirms the highlighted row and prints its path on stdout; `Esc` / `q` / `Ctrl-C` cancels with exit code `1`.
+
+```bash
+cd "$(gwm switch)"   # open picker, type to narrow, Enter to commit
+gwm s                # same, via the alias
+```
+
+The shell wrapper installed by `gwm shell-init` makes this even quicker: bare `gcd` (no argument) invokes `gwm switch` and cd's into the chosen worktree in one keystroke.
 
 ### shell completions
 
@@ -252,7 +295,36 @@ name = "composer install"
 run  = "composer install --no-interaction --prefer-dist"
 when = "file_exists:composer.json"
 env  = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
+
+# composable when predicates: pick `bun install` if bun is on PATH,
+# fall back to `npm ci` otherwise, and skip the noisy step in CI.
+[[bootstrap.command]]
+name = "install (bun)"
+run  = "bun install"
+when = "file_exists:package.json && cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "install (npm fallback)"
+run  = "npm ci"
+when = "file_exists:package.json && !cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "build docs"
+run  = "./scripts/full-build.sh"
+when = "glob_exists:docs/**/*.md && !env_set:CI"
 ```
+
+`when` predicates recognised by the evaluator:
+
+| Predicate                    | True when …                                                  |
+|:-----------------------------|:-------------------------------------------------------------|
+| `file_exists:<path>`         | `<worktree>/<path>` resolves on disk                          |
+| `cmd_exists:<binary>`        | `<binary>` resolves on `$PATH` (`which` lookup)              |
+| `env_set:<NAME>`             | `std::env::var(NAME)` returns `Ok`                            |
+| `env_eq:<NAME>=<value>`      | `NAME` is set and its value matches `<value>` exactly         |
+| `glob_exists:<pattern>`      | at least one path under the worktree matches `<pattern>` (supports `**`) |
+
+Combine atoms with `!` (NOT), `&&` (AND), `||` (OR), conventional precedence `!` > `&&` > `||`. Whitespace around operators is tolerated. Unknown keywords default to `true` so old configs keep running while `gwm doctor` surfaces them.
 
 Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde (`~/...`) is also expanded.
 
@@ -278,16 +350,22 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 81 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 140 tests (config / naming / bootstrap / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 81 tests
+cargo test               # 140 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
+```
+
+Nix users can drop into a pinned dev shell — Rust toolchain, `rust-analyzer`, `clippy`, `rustfmt`, `cargo-watch`, `cargo-edit`, and the libgit2 build deps — without touching the host system:
+
+```bash
+nix develop              # bundled toolchain + LSP + linter + formatter
 ```
 
 All tests live under `tests/`:

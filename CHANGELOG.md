@@ -16,6 +16,16 @@ _Nothing yet — next entries land here once a new feature / fix / chore is merg
 
 In reverse chronological order:
 
+- [`0.4.0`](changelogs/0.4.0.md) — 2026-05-19
 - [`0.3.0`](changelogs/0.3.0.md) — 2026-05-19
 - [`0.2.0`](changelogs/0.2.0.md) — 2026-05-18
 - [`0.1.0`](changelogs/0.1.0.md) — 2026-05-18
+
+### Pre-releases
+
+Per-RC notes covering only the delta against the previous RC (or against the previous stable, for `rc.1`):
+
+- [`0.3.0-rc.3`](changelogs/pre-releases/0.3.0-rc.3.md) — 2026-05-19
+- [`0.3.0-rc.2`](changelogs/pre-releases/0.3.0-rc.2.md) — 2026-05-19
+- [`0.3.0-rc.1`](changelogs/pre-releases/0.3.0-rc.1.md) — 2026-05-19
+- [`0.2.0-rc.1`](changelogs/pre-releases/0.2.0-rc.1.md) — 2026-05-18

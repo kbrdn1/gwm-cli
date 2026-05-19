@@ -256,7 +256,7 @@ fn run_commands(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Boots
   for step in &bs.command {
     let label = format!("run {}", step.name);
     if let Some(ref guard) = step.when {
-      if !check_when(guard, ctx.worktree) {
+      if !evaluate_when(guard, ctx.worktree) {
         report.steps.push(StepResult {
           label,
           status: StepStatus::Skipped,
@@ -280,12 +280,178 @@ fn run_commands(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Boots
   }
 }
 
-fn check_when(expr: &str, cwd: &Path) -> bool {
-  if let Some(rest) = expr.strip_prefix("file_exists:") {
+/// Evaluate a `[[bootstrap.command]].when` expression against the given
+/// worktree. Supports the keyword predicates `file_exists:`, `cmd_exists:`,
+/// `env_set:`, `env_eq:`, `glob_exists:`, plus the boolean operators `!`,
+/// `&&`, `||` with conventional precedence (`!` > `&&` > `||`). Unknown
+/// keyword predicates default to `true` so older configs keep running while
+/// the doctor surfaces them as warnings.
+pub fn evaluate_when(expr: &str, cwd: &Path) -> bool {
+  let tokens = tokenize_when(expr);
+  let mut parser = WhenParser {
+    tokens: &tokens,
+    pos: 0,
+    cwd,
+  };
+  parser.parse_or()
+}
+
+/// Return every atom string contained in a `when` expression, dropping
+/// the boolean operators. Callers (e.g. `doctor::check_when_predicates`)
+/// can then validate each atom independently — `w.starts_with(prefix)`
+/// on the raw expression misses negated atoms (`!env_set:CI`) and
+/// unsupported keywords sitting on the RHS of `&&` / `||`.
+pub fn when_atoms(expr: &str) -> Vec<String> {
+  tokenize_when(expr)
+    .into_iter()
+    .filter_map(|t| match t {
+      WhenToken::Atom(s) => Some(s),
+      _ => None,
+    })
+    .collect()
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum WhenToken {
+  Atom(String),
+  Not,
+  And,
+  Or,
+}
+
+fn tokenize_when(expr: &str) -> Vec<WhenToken> {
+  let bytes = expr.as_bytes();
+  let mut tokens = Vec::new();
+  let mut i = 0;
+  while i < bytes.len() {
+    let c = bytes[i];
+    if c.is_ascii_whitespace() {
+      i += 1;
+      continue;
+    }
+    if c == b'!' {
+      tokens.push(WhenToken::Not);
+      i += 1;
+      continue;
+    }
+    if c == b'&' && bytes.get(i + 1) == Some(&b'&') {
+      tokens.push(WhenToken::And);
+      i += 2;
+      continue;
+    }
+    if c == b'|' && bytes.get(i + 1) == Some(&b'|') {
+      tokens.push(WhenToken::Or);
+      i += 2;
+      continue;
+    }
+    let start = i;
+    while i < bytes.len() {
+      let b = bytes[i];
+      if b.is_ascii_whitespace() {
+        break;
+      }
+      if b == b'&' && bytes.get(i + 1) == Some(&b'&') {
+        break;
+      }
+      if b == b'|' && bytes.get(i + 1) == Some(&b'|') {
+        break;
+      }
+      i += 1;
+    }
+    tokens.push(WhenToken::Atom(expr[start..i].to_string()));
+  }
+  tokens
+}
+
+struct WhenParser<'a> {
+  tokens: &'a [WhenToken],
+  pos: usize,
+  cwd: &'a Path,
+}
+
+impl<'a> WhenParser<'a> {
+  fn peek(&self) -> Option<&WhenToken> {
+    self.tokens.get(self.pos)
+  }
+
+  fn parse_or(&mut self) -> bool {
+    let mut acc = self.parse_and();
+    while let Some(WhenToken::Or) = self.peek() {
+      self.pos += 1;
+      let rhs = self.parse_and();
+      acc = acc || rhs;
+    }
+    acc
+  }
+
+  fn parse_and(&mut self) -> bool {
+    let mut acc = self.parse_not();
+    while let Some(WhenToken::And) = self.peek() {
+      self.pos += 1;
+      let rhs = self.parse_not();
+      acc = acc && rhs;
+    }
+    acc
+  }
+
+  fn parse_not(&mut self) -> bool {
+    if let Some(WhenToken::Not) = self.peek() {
+      self.pos += 1;
+      return !self.parse_not();
+    }
+    self.parse_atom()
+  }
+
+  fn parse_atom(&mut self) -> bool {
+    match self.tokens.get(self.pos) {
+      Some(WhenToken::Atom(s)) => {
+        self.pos += 1;
+        eval_when_atom(s, self.cwd)
+      }
+      // Empty expression or a dangling operator: fall back to true to
+      // match the "unknown predicate" contract — a config we can't
+      // understand should not silently skip every command.
+      _ => true,
+    }
+  }
+}
+
+fn eval_when_atom(atom: &str, cwd: &Path) -> bool {
+  // Each atom-argument is trimmed to absorb any Unicode whitespace that
+  // the ASCII-only tokenizer left glued to the value. Preserves the
+  // legacy `file_exists:` tolerance from the pre-tokenizer evaluator.
+  if let Some(rest) = atom.strip_prefix("file_exists:") {
     return cwd.join(rest.trim()).exists();
   }
-  // Unknown predicates default to true (so configs that we don't understand still run).
+  if let Some(rest) = atom.strip_prefix("cmd_exists:") {
+    return which::which(rest.trim()).is_ok();
+  }
+  if let Some(rest) = atom.strip_prefix("env_set:") {
+    return std::env::var(rest.trim()).is_ok();
+  }
+  if let Some(rest) = atom.strip_prefix("env_eq:") {
+    let Some((name, value)) = rest.split_once('=') else {
+      return false;
+    };
+    return std::env::var(name.trim()).ok().as_deref() == Some(value);
+  }
+  if let Some(pattern) = atom.strip_prefix("glob_exists:") {
+    return glob_exists(pattern.trim(), cwd);
+  }
+  // Unknown keyword: default to true so we don't silently neutralise a
+  // command the user clearly wanted to run.
   true
+}
+
+fn glob_exists(pattern: &str, cwd: &Path) -> bool {
+  let full = cwd.join(pattern);
+  let Some(full_str) = full.to_str() else {
+    return false;
+  };
+  match glob::glob(full_str) {
+    Ok(mut iter) => iter.any(|r| r.is_ok()),
+    Err(_) => false,
+  }
 }
 
 fn exec_shell(step: &CommandStep, cwd: &Path) -> Result<String> {
