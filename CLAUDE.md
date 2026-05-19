@@ -63,6 +63,27 @@ exception; codify the manual test as an integration test.
 
 ## Other house rules
 
+- **Pre-validate environment-dependent tests.** Any test that reads
+  `$PATH`, the user's home directory, or other ambient state must be
+  pre-validated locally against a stripped environment before the test
+  gets pushed — CI runners don't have `lazygit`, a pre-created
+  `~/cc-worktree/`, or your installed dev tooling. The one-liner that
+  reproduces a CI-like minimal PATH:
+
+  ```bash
+  PATH="$(dirname $(which cargo)):/usr/bin:/bin" cargo test
+  ```
+
+  Run it before push. The cost is one minute; the cost of skipping
+  it is at least two CI round-trips (witnessed on PR #43 — three
+  fix commits before the suite went green). If a test can't be made
+  env-independent, assert intent (sigils, names) instead of exit
+  codes; cover the deterministic 0/1/2 contract in a separate hand-
+  built unit test.
+- **Run `gwm doctor` locally** before opening a PR that touches
+  `.gwm.toml`, the bootstrap schema, or the doctor module itself. The
+  same check runs in CI as an advisory job — green there means you'll
+  not surprise a reviewer.
 - **Indentation**: 2 spaces. `cargo fmt` is run on every commit; CI
   enforces `cargo fmt --check`.
 - **Linter**: `cargo clippy --all-targets -- -D warnings` must pass.
