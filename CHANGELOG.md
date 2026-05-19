@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `[doctor].trunks` in `.gwm.toml` ([#59](https://github.com/kbrdn1/gwm-cli/issues/59)) — `gwm doctor`'s orphan-branch check now reads its trunk list from a new `[doctor]` table, default `["dev", "main"]`. Repos with non-standard trunk conventions (`master`, release trains like `release-3.x` / `release-4.x`) can opt in via config instead of seeing every merged gwm-style branch flagged as "unmerged orphan" — the silent no-op that previously affected every repo not following gwm-cli's own convention. An explicit empty list (`trunks = []`) disables the merge filter entirely. Zero-diff for repos without a `[doctor]` section, since `#[serde(default)]` on `Config::doctor` resolves to the same `["dev", "main"]` that lived in the removed `TRUNK_BRANCHES` const.
+
 ### Docs
 
 - `CLAUDE.md` + `CONTRIBUTING.md` §Releases — new "Step 0: reconcile open PRs" rule. Before any RC or stable cut, run `gh pr list --state open` and reconcile every open PR (in the changeset, intentionally deferred, or closed as stale). Codifies the lesson from the v0.3.0 cut, which shipped without three queued feature PRs (#51, #52, #53) and required an immediate v0.4.0 promotion 38 minutes later. Step 0 sits explicitly at the top of both the pre-release and stable-release procedures.
+- `examples/gwm.toml.example` — documents the new `[doctor].trunks` knob with a commented-out block matching the bootstrap-step style already in the file.
 
 ## Past releases
 
