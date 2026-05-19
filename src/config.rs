@@ -13,6 +13,8 @@ pub struct Config {
   pub bootstrap: BootstrapConfig,
   #[serde(default)]
   pub doctor: DoctorConfig,
+  #[serde(default)]
+  pub tui: TuiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +127,50 @@ impl Default for DoctorConfig {
 
 fn default_trunks() -> Vec<String> {
   vec!["dev".into(), "main".into()]
+}
+
+/// `[tui]` table — runtime knobs for the worktree TUI. Currently exposes
+/// the safety countdown on the delete-confirm overlay (issue #30): when
+/// `delete_branch_on_remove` has been toggled ON, the modal forces the
+/// user to wait N seconds (visualised by a progress bar) before the
+/// destructive action actually fires. `0` disables the countdown and
+/// falls back to the classic single-keystroke confirm even when delete-
+/// branch is armed; the value is clamped to `5` at read time so a typo
+/// like `confirm_countdown_secs = 30` can never strand a destructive
+/// path behind a 30-second wait.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiConfig {
+  /// Safety countdown (in seconds) applied to the confirm overlay when
+  /// `delete_branch_on_remove` is ON. Accepts `0..=5`; values outside
+  /// the range are clamped on read via [`Self::effective_confirm_countdown_secs`].
+  #[serde(default = "default_confirm_countdown_secs")]
+  pub confirm_countdown_secs: u8,
+}
+
+impl Default for TuiConfig {
+  fn default() -> Self {
+    Self {
+      confirm_countdown_secs: default_confirm_countdown_secs(),
+    }
+  }
+}
+
+impl TuiConfig {
+  /// Documented range cap. Centralised so the TUI and the doctor share
+  /// the same clamp logic.
+  pub const MAX_CONFIRM_COUNTDOWN_SECS: u8 = 5;
+
+  /// Effective countdown value used by the TUI, clamped to
+  /// `[0, MAX_CONFIRM_COUNTDOWN_SECS]`. The raw field stays at the
+  /// user's value so a future doctor check can surface "your config
+  /// asked for X but we capped at 5".
+  pub fn effective_confirm_countdown_secs(&self) -> u8 {
+    self.confirm_countdown_secs.min(Self::MAX_CONFIRM_COUNTDOWN_SECS)
+  }
+}
+
+fn default_confirm_countdown_secs() -> u8 {
+  3
 }
 
 impl Config {
