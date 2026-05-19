@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use app::{App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
+pub use ui::filled_cells_for_progress;
 
 pub fn run() -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config

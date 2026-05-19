@@ -683,11 +683,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 /// at 10 cells so the bar reads the same regardless of modal size.
 fn countdown_bar<'a>(progress: f64, remaining_secs: u64) -> Vec<Span<'a>> {
   const CELLS: usize = 10;
-  let filled = ((progress.clamp(0.0, 1.0)) * CELLS as f64).round() as usize;
-  let filled = filled.min(CELLS);
-  let bar: String = std::iter::repeat('█')
-    .take(filled)
-    .chain(std::iter::repeat('░').take(CELLS - filled))
+  let filled = filled_cells_for_progress(progress, CELLS);
+  let bar: String = std::iter::repeat_n('█', filled)
+    .chain(std::iter::repeat_n('░', CELLS - filled))
     .collect();
   vec![
     Span::styled("  [", Style::default().fg(Color::DarkGray)),
@@ -699,6 +697,32 @@ fn countdown_bar<'a>(progress: f64, remaining_secs: u64) -> Vec<Span<'a>> {
     ),
     Span::styled(" — Esc to cancel", Style::default().fg(Color::DarkGray)),
   ]
+}
+
+/// Compute the number of filled cells for a countdown progress bar.
+///
+/// Contract pinned by Copilot review on PR #66:
+/// - Returns `0` when `progress <= 0.0`.
+/// - Returns `cells` only when `progress >= 1.0`. For any
+///   `progress in (0.0, 1.0)`, the result is strictly less than
+///   `cells` — the last cell stays empty so the visual "bar full"
+///   moment lines up with the actual delete firing (not 50ms before).
+/// - Clamps to `cells` for `progress > 1.0` (handles float drift on
+///   an overshooting tick).
+///
+/// Uses `floor` rather than `round` so a progress of `0.95` paints 9
+/// cells, not 10 — the previous `round()` behaviour painted a full bar
+/// before the destructive action actually fired.
+pub fn filled_cells_for_progress(progress: f64, cells: usize) -> usize {
+  if progress >= 1.0 {
+    return cells;
+  }
+  if progress <= 0.0 || cells == 0 {
+    return 0;
+  }
+  let raw = (progress * cells as f64).floor() as usize;
+  // Reserve the last cell for the progress >= 1.0 moment.
+  raw.min(cells.saturating_sub(1))
 }
 
 fn draw_report(f: &mut Frame, app: &App) {

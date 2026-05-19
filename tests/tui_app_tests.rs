@@ -2,7 +2,7 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
-use gwm::tui::{App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
+use gwm::tui::{filled_cells_for_progress, App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -965,4 +965,48 @@ fn countdown_remaining_secs_counts_down_to_zero() {
     1
   );
   assert_eq!(app.confirm_countdown_remaining_secs(t0 + Duration::from_secs(3)), 0);
+}
+
+// Regression for Copilot review on PR #66: the gauge previously used
+// `round()`, which rendered a fully-filled 10-cell bar at progress 0.95
+// even though `confirm_delete` only fires at progress 1.0. The user saw
+// "bar full" but the action hadn't happened yet — a false-positive
+// signal on the destructive path. The fix: floor the cell count and
+// keep the last cell empty until progress actually hits 1.0.
+
+#[test]
+fn filled_cells_zero_at_progress_zero() {
+  assert_eq!(filled_cells_for_progress(0.0, 10), 0);
+}
+
+#[test]
+fn filled_cells_full_only_at_progress_one() {
+  assert_eq!(filled_cells_for_progress(1.0, 10), 10);
+}
+
+#[test]
+fn filled_cells_below_one_keeps_last_cell_empty() {
+  // 0.95 used to round() up to 10 cells (full bar) — that's the bug.
+  // It must now floor to 9 (or less), reserving the last cell for the
+  // "action fires" moment.
+  assert_eq!(filled_cells_for_progress(0.95, 10), 9);
+  // 0.99 even closer to full — still must not paint the last cell.
+  assert!(filled_cells_for_progress(0.99, 10) < 10);
+  // 0.999_999 same story — float weirdness must not flip the last cell.
+  assert!(filled_cells_for_progress(0.999_999, 10) < 10);
+}
+
+#[test]
+fn filled_cells_clamps_above_one() {
+  // Float drift on an overshooting tick (200ms poll past N×1000ms) can
+  // hand a progress > 1.0; the bar must clamp at the cell count.
+  assert_eq!(filled_cells_for_progress(1.5, 10), 10);
+}
+
+#[test]
+fn filled_cells_floors_partial_progress() {
+  // 0.55 with 10 cells → 5.5 floor → 5 (not 6 from rounding).
+  assert_eq!(filled_cells_for_progress(0.55, 10), 5);
+  // 0.5 exact → 5 cells.
+  assert_eq!(filled_cells_for_progress(0.5, 10), 5);
 }
