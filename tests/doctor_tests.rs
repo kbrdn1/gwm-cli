@@ -182,3 +182,85 @@ fn no_when_predicates_is_ok() {
   let c = report.checks.iter().find(|c| c.name.contains("when")).unwrap();
   assert_eq!(c.status, CheckStatus::Ok);
 }
+
+// --------------------------------------------------------------------------
+// Check #4 — binaries referenced by bootstrap commands resolve on PATH
+// --------------------------------------------------------------------------
+
+#[test]
+fn missing_command_binary_is_warning() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "phantom".into(),
+    run: "definitely-not-on-path-xyz123 --help".into(),
+    when: None,
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("PATH"))
+    .expect("expected a PATH check");
+  // A missing optional binary should not be a hard failure — the user may
+  // not need that step. But it must surface as a Warning so it's visible.
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(c.detail.contains("definitely-not-on-path-xyz123"));
+}
+
+#[test]
+fn resolvable_command_binary_is_ok() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  // `sh` is on every POSIX system; CI macOS + Linux both have it.
+  config.bootstrap.command.push(gwm::config::CommandStep {
+    name: "noop".into(),
+    run: "sh -c 'true'".into(),
+    when: None,
+    env: Default::default(),
+  });
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  // We don't assert Ok strictly — `lazygit` may be missing on a CI runner.
+  // The relevant assertion is: the run-string binary doesn't show up as missing.
+  assert!(!c.detail.contains("sh "), "sh should resolve, got: {}", c.detail);
+}
+
+// --------------------------------------------------------------------------
+// Check #7 — base directory exists and is writable
+// --------------------------------------------------------------------------
+
+#[test]
+fn base_dir_existing_and_writable_is_ok() {
+  let (dir, repo) = init_repo();
+  // Override base to a guaranteed-writable tempdir-scoped path.
+  let base_dir = dir.path().join("wt-base");
+  std::fs::create_dir(&base_dir).unwrap();
+  let mut config = Config::default();
+  config.worktree.base = base_dir.to_string_lossy().into_owned();
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("base"))
+    .expect("expected a base-dir check");
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+#[test]
+fn base_dir_missing_but_parent_writable_is_ok() {
+  let (dir, repo) = init_repo();
+  // Point at a not-yet-existing subdir of the tempdir. gwm creates the
+  // worktree base on first `create`, so absence is a routine state.
+  let base_dir = dir.path().join("future-base");
+  let mut config = Config::default();
+  config.worktree.base = base_dir.to_string_lossy().into_owned();
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("base")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}

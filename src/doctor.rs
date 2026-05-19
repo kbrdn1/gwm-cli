@@ -2,8 +2,10 @@
 //! into a single report so users (and CI) can answer "is my setup sane?"
 //! without running a dozen ad-hoc commands.
 
-use crate::config::{Config, CONFIG_FILE};
+use crate::config::{expand_placeholders, Config, CONFIG_FILE};
 use crate::error::Result;
+use crate::worktree;
+use std::collections::BTreeSet;
 use std::path::Path;
 
 #[derive(Debug, Clone, Default)]
@@ -109,6 +111,8 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
   report.checks.push(check_config_parses(ctx));
   report.checks.push(check_guard_references(ctx));
   report.checks.push(check_when_predicates(ctx));
+  report.checks.push(check_binaries_on_path(ctx));
+  report.checks.push(check_base_dir_writable(ctx));
   Ok(report)
 }
 
@@ -188,4 +192,117 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
 
   Check::failed(name, format!("unknown `when` predicate(s): {}", unknown.join("; ")))
     .with_hint(format!("supported keywords: {}", SUPPORTED_WHEN_PREFIXES.join(", ")))
+}
+
+/// Extract the executable name from a shell command string. Skips leading
+/// `FOO=bar` env assignments (which the shell would treat as one-shot env)
+/// and returns the first token that isn't `KEY=VAL`. Returns `None` for
+/// empty strings.
+fn extract_binary(run: &str) -> Option<&str> {
+  for token in run.split_whitespace() {
+    if !token.contains('=') {
+      return Some(token);
+    }
+  }
+  None
+}
+
+/// Check #4: every binary referenced by the bootstrap commands resolves on
+/// `$PATH`. `lazygit` (the TUI's `l` keybinding) and `direnv` (only if the
+/// repo has an `.envrc`) are also checked because they're the two "ambient"
+/// dependencies whose absence routinely confuses new users.
+///
+/// Missing binaries are surfaced as Warning, not Failed — the user may not
+/// rely on that step at all, but the visibility matters.
+fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "external binaries on PATH";
+  let mut needed: BTreeSet<String> = BTreeSet::new();
+
+  // Ambient deps the rest of the CLI uses.
+  needed.insert("lazygit".into());
+  if ctx.repo_workdir.join(".envrc").exists() {
+    needed.insert("direnv".into());
+  }
+
+  // Whatever the user's own bootstrap commands invoke.
+  for cmd in &ctx.config.bootstrap.command {
+    if let Some(bin) = extract_binary(&cmd.run) {
+      needed.insert(bin.to_string());
+    }
+  }
+
+  let mut missing: Vec<String> = Vec::new();
+  let mut found: usize = 0;
+  for bin in &needed {
+    if which::which(bin).is_ok() {
+      found += 1;
+    } else {
+      missing.push(bin.clone());
+    }
+  }
+
+  if missing.is_empty() {
+    return Check::ok(name, format!("{}/{} binaries found", found, needed.len()));
+  }
+
+  Check::warning(name, format!("not on PATH: {}", missing.join(", ")))
+    .with_hint("install the missing binaries or remove the steps that need them")
+}
+
+/// Check #7: the configured worktree `base` directory exists and is
+/// writable. Absence is fine when the parent is writable (gwm creates the
+/// base lazily on `gwm create`); a non-writable base is a Failed because
+/// every future `create` would error out.
+fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "base directory writable";
+  let repo_name = worktree::repo_name(ctx.repo);
+  let base_expanded = match expand_placeholders(&ctx.config.worktree.base, &repo_name, None, None, None) {
+    Ok(s) => s,
+    Err(e) => return Check::failed(name, format!("could not expand base placeholders: {}", e)),
+  };
+  let base = Path::new(&base_expanded);
+
+  if base.exists() {
+    return if is_writable_dir(base) {
+      Check::ok(name, format!("{} is writable", base.display()))
+    } else {
+      Check::failed(name, format!("{} exists but is not writable", base.display()))
+        .with_hint("fix the permissions, or set `[worktree].base` to a writable path")
+    };
+  }
+
+  // Base doesn't exist yet — gwm will create it. Check the parent instead.
+  let parent = match base.parent() {
+    Some(p) if !p.as_os_str().is_empty() => p,
+    _ => return Check::ok(name, format!("{} will be created on first `gwm create`", base.display())),
+  };
+  if !parent.exists() {
+    return Check::warning(
+      name,
+      format!("neither {} nor its parent {} exists yet", base.display(), parent.display()),
+    )
+    .with_hint("create the parent directory, or pick a different `[worktree].base`");
+  }
+  if is_writable_dir(parent) {
+    Check::ok(
+      name,
+      format!("{} will be created on first `gwm create` (parent writable)", base.display()),
+    )
+  } else {
+    Check::failed(name, format!("parent {} is not writable", parent.display()))
+      .with_hint("fix the permissions, or set `[worktree].base` to a writable path")
+  }
+}
+
+/// Probe a directory for write access by creating and deleting a sentinel
+/// file. More reliable across platforms than parsing Unix mode bits.
+fn is_writable_dir(dir: &Path) -> bool {
+  let probe = dir.join(".gwm-doctor-write-probe");
+  match std::fs::File::create(&probe) {
+    Ok(_) => {
+      let _ = std::fs::remove_file(&probe);
+      true
+    }
+    Err(_) => false,
+  }
 }
