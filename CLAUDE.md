@@ -1,0 +1,110 @@
+# gwm-cli — house rules for AI assistants
+
+This file is the project-level CLAUDE.md. Anything stated here OVERRIDES
+defaults and applies to every contribution made via an AI assistant in
+this repository.
+
+## 🔴 Primordial rule — Test-Driven Development is mandatory
+
+**No production code lands without a failing test that pinned the
+behaviour down first.** This is not a guideline, it is a hard merge
+requirement. PRs that add or change behaviour without tests are sent
+back, full stop.
+
+### The TDD loop (red → green → refactor)
+
+1. **Red** — write a failing test that captures the new behaviour or
+   the bug you are fixing. Run it. It MUST fail for the right reason
+   (assertion mismatch, not a compile error in unrelated code). Commit
+   the test alone if it helps reviewers see the contract.
+2. **Green** — write the minimum production code to make the test pass.
+   No extra branches, no speculative abstractions.
+3. **Refactor** — clean up while the tests are green. Re-run the full
+   suite after every refactor step.
+
+### What counts as "behaviour"
+
+Anything observable from outside the function under test:
+
+- A new CLI subcommand, flag, or output format → end-to-end test in
+  `tests/cli_binary.rs` via `assert_cmd`.
+- A new public function in `src/<module>.rs` → unit test in
+  `tests/<module>_tests.rs`.
+- A new bootstrap step (file copy, guard, no-symlink, command hook) →
+  integration test in `tests/bootstrap_tests.rs` exercising it against
+  a `tempfile::TempDir`.
+- A libgit2 worktree operation → integration test in
+  `tests/worktree_integration.rs` using `tests/common::init_repo()`.
+- A TUI state transition → state-machine test in
+  `tests/tui_app_tests.rs` (ratatui-free).
+
+### Exceptions (narrow, must be argued in the PR description)
+
+The bar to skip a test is "the change is observably untestable from
+the public surface". Concretely:
+
+- **Pure formatting / typo fixes** in user-facing strings → no test
+  required if the string is incidental (a log line, a help blurb). If
+  the string is asserted somewhere, update the assertion.
+- **Dependency bumps** without behaviour change → CI green is the test.
+- **Comments-only changes** → no test required.
+
+Everything else needs a test. "I tested it manually" is not an
+exception; codify the manual test as an integration test.
+
+### Enforcement
+
+- PR template ships with a `cargo test` checkbox under **Tests**. Do
+  not tick it unless the suite actually ran green locally.
+- Reviewers will run `git log --stat <branch>..HEAD -- tests/` and
+  block the PR if the touched module has no companion test diff.
+- `tests/cli_binary.rs::help_prints_subcommands` should be updated
+  every time a new subcommand is added — treat this as the canary.
+
+## Other house rules
+
+- **Pre-validate environment-dependent tests.** Any test that reads
+  `$PATH`, the user's home directory, or other ambient state must be
+  pre-validated locally against a stripped environment before the test
+  gets pushed — CI runners don't have `lazygit`, a pre-created
+  `~/cc-worktree/`, or your installed dev tooling. The one-liner that
+  reproduces a CI-like minimal PATH:
+
+  ```bash
+  PATH="$(dirname "$(command -v cargo)"):/usr/bin:/bin" cargo test
+  ```
+
+  Run it before push. The cost is one minute; the cost of skipping
+  it is at least two CI round-trips (witnessed on PR #43 — three
+  fix commits before the suite went green). If a test can't be made
+  env-independent, assert intent (sigils, names) instead of exit
+  codes; cover the deterministic 0/1/2 contract in a separate hand-
+  built unit test.
+- **Run `gwm doctor` locally** before opening a PR that touches
+  `.gwm.toml`, the bootstrap schema, or the doctor module itself. The
+  same check runs in CI as an advisory job — green there means you'll
+  not surprise a reviewer.
+- **Indentation**: 2 spaces. `cargo fmt` is run on every commit; CI
+  enforces `cargo fmt --check`.
+- **Linter**: `cargo clippy --all-targets -- -D warnings` must pass.
+  Do not `#[allow(...)]` warnings without a comment explaining why.
+- **No `unwrap()` on user-facing paths**: return a `GwmError` variant
+  instead. `unwrap()` is acceptable inside tests and in genuinely
+  infallible spots (e.g. `.lock()` on a never-poisoned mutex), but it
+  must be a deliberate choice, not a shortcut.
+- **No `println!` in TUI render code**: the status bar is the only
+  channel for runtime feedback inside the TUI.
+- **Branch convention**: `<type>/#<issue>-<description>`. Use
+  `gwm create <type> <issue> <description>` — it bootstraps the
+  worktree and creates the branch in one go.
+- **Commit format**: Gitmoji + Conventional Commits. See
+  [CONTRIBUTING.md](CONTRIBUTING.md#commits).
+- **Merge strategy**: regular merge commit, never squash, never delete
+  the source branch. The atomic commit history is the artefact.
+
+## Where to look for the rest
+
+- Branch / commit / PR conventions → [CONTRIBUTING.md](CONTRIBUTING.md)
+- Community standards → [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- Public roadmap → [ROADMAP.md](ROADMAP.md)
+- Release process → [CONTRIBUTING.md §Releases](CONTRIBUTING.md#releases)

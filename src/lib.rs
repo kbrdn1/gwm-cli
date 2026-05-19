@@ -6,6 +6,7 @@
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
+pub mod doctor;
 pub mod error;
 pub mod naming;
 pub mod tui;

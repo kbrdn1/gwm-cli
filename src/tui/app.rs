@@ -4,6 +4,10 @@ use crate::error::{GwmError, Result};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
+use nucleo_matcher::{
+  pattern::{CaseMatching, Normalization, Pattern},
+  Config as NucleoConfig, Matcher, Utf32Str,
+};
 use ratatui::{text::Line, widgets::TableState};
 use std::path::{Path, PathBuf};
 
@@ -58,6 +62,14 @@ pub struct App {
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   pub pending_g: bool,
+
+  // Inline fuzzy filter on the worktree list (issue #21).
+  // `filter_active` is true while the user is typing in the filter bar (`/`).
+  // `filter_query` carries the current pattern; when non-empty, the list view
+  // shows only matching worktrees ranked by `nucleo_matcher`. Esc clears the
+  // query, Enter confirms (sticky filter, focus returns to the list).
+  pub filter_active: bool,
+  pub filter_query: String,
 }
 
 impl App {
@@ -96,20 +108,14 @@ impl App {
       sidebar_cache: None,
       sidebar_max_scroll: 0,
       pending_g: false,
+      filter_active: false,
+      filter_query: String::new(),
     })
   }
 
   pub fn refresh(&mut self) -> Result<()> {
     self.worktrees = worktree::list(&self.repo)?;
-    if self.worktrees.is_empty() {
-      self.list_state.select(None);
-    } else if self.list_state.selected().is_none() {
-      self.list_state.select(Some(0));
-    } else if let Some(i) = self.list_state.selected() {
-      if i >= self.worktrees.len() {
-        self.list_state.select(Some(self.worktrees.len() - 1));
-      }
-    }
+    self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
     Ok(())
@@ -127,11 +133,12 @@ impl App {
       self.sidebar_scroll_down();
       return;
     }
-    if self.worktrees.is_empty() {
+    let len = self.filtered_indices().len();
+    if len == 0 {
       return;
     }
     let i = match self.list_state.selected() {
-      Some(i) => (i + 1) % self.worktrees.len(),
+      Some(i) => (i + 1) % len,
       None => 0,
     };
     self.list_state.select(Some(i));
@@ -144,11 +151,12 @@ impl App {
       self.sidebar_scroll_up();
       return;
     }
-    if self.worktrees.is_empty() {
+    let len = self.filtered_indices().len();
+    if len == 0 {
       return;
     }
     let i = match self.list_state.selected() {
-      Some(0) | None => self.worktrees.len() - 1,
+      Some(0) | None => len - 1,
       Some(i) => i - 1,
     };
     self.list_state.select(Some(i));
@@ -159,7 +167,8 @@ impl App {
   // ---- Vim-style motions / list jumps -------------------------------------
 
   pub fn first(&mut self) {
-    if !self.worktrees.is_empty() {
+    let len = self.filtered_indices().len();
+    if len > 0 {
       self.list_state.select(Some(0));
       self.sidebar_scroll = 0;
       self.invalidate_sidebar_cache();
@@ -167,8 +176,9 @@ impl App {
   }
 
   pub fn last(&mut self) {
-    if !self.worktrees.is_empty() {
-      self.list_state.select(Some(self.worktrees.len() - 1));
+    let len = self.filtered_indices().len();
+    if len > 0 {
+      self.list_state.select(Some(len - 1));
       self.sidebar_scroll = 0;
       self.invalidate_sidebar_cache();
     }
@@ -233,7 +243,13 @@ impl App {
   }
 
   pub fn selected(&self) -> Option<&WorktreeInfo> {
-    self.list_state.selected().and_then(|i| self.worktrees.get(i))
+    // The visible list is the filtered subset, so the table state's index is
+    // into `filtered_indices()`, not the raw `worktrees` vec. Resolving the
+    // selection means hopping through the filter map.
+    let i = self.list_state.selected()?;
+    let filtered = self.filtered_indices();
+    let original = *filtered.get(i)?;
+    self.worktrees.get(original)
   }
 
   pub fn copy_path_to_status(&mut self) {
@@ -374,6 +390,102 @@ impl App {
     self.status = format!("removed {} ({})", name, label);
     self.view = View::List;
     self.refresh()
+  }
+
+  // ---- Fuzzy filter (issue #21) -------------------------------------------
+
+  /// Open the inline filter bar. The existing query is preserved so the user
+  /// can refine an already-sticky filter; `Esc` is the way to start fresh.
+  /// Disarms any pending `gg` motion so `/g` doesn't half-trigger it.
+  ///
+  /// Forces focus back onto the list: opening `/` is an intent to narrow the
+  /// list, and the post-`Enter` contract is "navigation returns to the
+  /// table". Leaving the sidebar focused would make `j` / `k` scroll it
+  /// instead of walking the filtered worktrees after the filter sticks.
+  pub fn enter_filter(&mut self) {
+    self.filter_active = true;
+    self.sidebar_focused = false;
+    self.cancel_pending_motion();
+    self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
+  }
+
+  /// Close the filter bar but keep the query: `Enter` confirms the current
+  /// match set and returns the cursor to list navigation.
+  pub fn exit_filter_keep(&mut self) {
+    self.filter_active = false;
+    self.status = if self.filter_query.is_empty() {
+      "press ? for help".into()
+    } else {
+      format!("filter sticky: {}", self.filter_query)
+    };
+  }
+
+  /// Close the filter bar and clear the query: `Esc` returns to the full list.
+  pub fn exit_filter_cancel(&mut self) {
+    let had_query = !self.filter_query.is_empty();
+    self.filter_active = false;
+    self.filter_query.clear();
+    self.clamp_selection_to_filter();
+    self.invalidate_sidebar_cache();
+    self.status = if had_query {
+      "filter cleared".into()
+    } else {
+      "press ? for help".into()
+    };
+  }
+
+  pub fn filter_push_char(&mut self, c: char) {
+    self.filter_query.push(c);
+    self.clamp_selection_to_filter();
+    self.invalidate_sidebar_cache();
+  }
+
+  pub fn filter_pop_char(&mut self) {
+    if self.filter_query.pop().is_some() {
+      self.clamp_selection_to_filter();
+      self.invalidate_sidebar_cache();
+    }
+  }
+
+  /// Indices into `self.worktrees`, in display order:
+  /// - empty query: identity (every worktree in source order).
+  /// - non-empty: only worktrees whose name matches the query via
+  ///   `nucleo_matcher`, ranked by descending score (nucleo intrinsically
+  ///   ranks exact/substring/prefix matches above subsequence matches).
+  ///
+  /// Score ties are broken by original index so output is stable.
+  pub fn filtered_indices(&self) -> Vec<usize> {
+    if self.filter_query.is_empty() {
+      return (0..self.worktrees.len()).collect();
+    }
+    let pattern = Pattern::parse(self.filter_query.as_str(), CaseMatching::Smart, Normalization::Smart);
+    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
+    let mut buf: Vec<char> = Vec::new();
+    let mut scored: Vec<(u32, usize)> = Vec::with_capacity(self.worktrees.len());
+    for (i, w) in self.worktrees.iter().enumerate() {
+      let hay = Utf32Str::new(&w.name, &mut buf);
+      if let Some(score) = pattern.score(hay, &mut matcher) {
+        scored.push((score, i));
+      }
+    }
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    scored.into_iter().map(|(_, i)| i).collect()
+  }
+
+  /// Reposition the selection so it stays inside the current filtered subset.
+  /// Called whenever the filter mutates (`/`-mode typing, `Esc`-clear) or the
+  /// worktree list itself changes (`refresh`).
+  fn clamp_selection_to_filter(&mut self) {
+    let len = self.filtered_indices().len();
+    if len == 0 {
+      self.list_state.select(None);
+      return;
+    }
+    match self.list_state.selected() {
+      Some(i) if i >= len => self.list_state.select(Some(len - 1)),
+      Some(_) => {}
+      None => self.list_state.select(Some(0)),
+    }
   }
 
   // ---- Bootstrap flow ------------------------------------------------------

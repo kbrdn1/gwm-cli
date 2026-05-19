@@ -1,9 +1,12 @@
 use crate::bootstrap::{self, BootstrapCtx, StepStatus};
 use crate::config::Config;
+use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{generate, Shell};
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -13,12 +16,32 @@ pub struct Cli {
   pub command: Option<Command>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ListFormat {
+  /// Human-readable table (default).
+  Table,
+  /// One worktree name per line — suitable for shell completion.
+  Names,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum InitShell {
+  Bash,
+  Zsh,
+  Fish,
+  Powershell,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum Command {
   /// Write a default .gwm.toml to the current repo.
   Init,
   /// List worktrees in the current repo.
-  List,
+  List {
+    /// Output format. `names` prints one worktree name per line (for shell completion).
+    #[arg(long, value_enum, default_value_t = ListFormat::Table)]
+    format: ListFormat,
+  },
   /// Create a new worktree (and matching branch).
   Create {
     /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
@@ -43,6 +66,11 @@ pub enum Command {
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   Path { pattern: String },
+  /// Print the on-disk path of a worktree, framed for the cd flow.
+  ///
+  /// The binary itself cannot change the parent shell's directory. Pair with
+  /// `gwm shell-init <shell>` (it defines a `gcd` function that wraps this).
+  Cd { pattern: String },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
@@ -50,8 +78,34 @@ pub enum Command {
   },
   /// Prune stale worktree references (admin files without a working dir).
   Prune,
+  /// Diagnose the gwm setup (config, env, worktree state).
+  ///
+  /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
+  /// suitable for CI / pre-commit hooks.
+  Doctor,
   /// List the supported branch types.
   Types,
+  /// Generate a shell completion script on stdout.
+  ///
+  /// Install (zsh):  `gwm completions zsh > $fpath[1]/_gwm`
+  /// Install (bash): `gwm completions bash > /etc/bash_completion.d/gwm`
+  /// Install (fish): `gwm completions fish > ~/.config/fish/completions/gwm.fish`
+  Completions {
+    /// Target shell.
+    #[arg(value_enum)]
+    shell: Shell,
+  },
+  /// Print a shell wrapper exposing `gcd <pattern>` (one-line cd into a worktree).
+  ///
+  /// Install (zsh):        `echo 'eval "$(gwm shell-init zsh)"' >> ~/.zshrc`
+  /// Install (bash):       `echo 'eval "$(gwm shell-init bash)"' >> ~/.bashrc`
+  /// Install (fish):       `gwm shell-init fish | source` (also add to config.fish)
+  /// Install (powershell): `Invoke-Expression (& gwm shell-init powershell | Out-String)`
+  ShellInit {
+    /// Target shell.
+    #[arg(value_enum)]
+    shell: InitShell,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -62,7 +116,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
   match cmd {
     Command::Init => cmd_init(),
-    Command::List => cmd_list(),
+    Command::List { format } => cmd_list(format),
     Command::Create {
       branch_type,
       issue,
@@ -71,9 +125,13 @@ pub fn run(cli: Cli) -> Result<()> {
     } => cmd_create(branch_type, issue, desc, no_bootstrap),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
+    Command::Cd { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target),
     Command::Prune => cmd_prune(),
+    Command::Doctor => cmd_doctor(),
     Command::Types => cmd_types(),
+    Command::Completions { shell } => cmd_completions(shell),
+    Command::ShellInit { shell } => cmd_shell_init(shell),
   }
 }
 
@@ -85,9 +143,19 @@ fn cmd_init() -> Result<()> {
   Ok(())
 }
 
-fn cmd_list() -> Result<()> {
+fn cmd_list(format: ListFormat) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
+
+  if format == ListFormat::Names {
+    // Mirror `worktree::find_fuzzy`, which excludes the main workdir:
+    // emitting its name here would suggest a completion candidate that
+    // `path` / `remove` / `bootstrap` can never accept.
+    for w in trees.iter().filter(|w| !w.is_main) {
+      println!("{}", w.name);
+    }
+    return Ok(());
+  }
 
   // Dynamic widths based on observed content.
   let name_w = trees.iter().map(|w| w.name.len()).max().unwrap_or(4).clamp(4, 40);
@@ -246,12 +314,116 @@ fn cmd_prune() -> Result<()> {
   Ok(())
 }
 
+fn cmd_doctor() -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let config = Config::load_for_repo(&workdir).unwrap_or_default();
+
+  let ctx = DoctorCtx {
+    repo_workdir: &workdir,
+    repo: &repo,
+    config: &config,
+  };
+  let report = doctor::run(&ctx)?;
+  print_doctor_report(&report);
+
+  let code = report.exit_code();
+  if code != 0 {
+    std::process::exit(code);
+  }
+  Ok(())
+}
+
+fn print_doctor_report(report: &doctor::DoctorReport) {
+  for c in &report.checks {
+    let sigil = match c.status {
+      CheckStatus::Ok => "✓",
+      CheckStatus::Warning => "!",
+      CheckStatus::Failed => "✗",
+    };
+    println!("{} {}", sigil, c.name);
+    if !c.detail.is_empty() {
+      println!("    {}", c.detail);
+    }
+    if let Some(hint) = &c.fix_hint {
+      println!("    → {}", hint);
+    }
+  }
+}
+
 fn cmd_types() -> Result<()> {
   for (t, d) in BRANCH_TYPES {
     println!("  {:<10} {}", t, d);
   }
   Ok(())
 }
+
+fn cmd_completions(shell: Shell) -> Result<()> {
+  let mut cmd = Cli::command();
+  let name = cmd.get_name().to_string();
+  generate(shell, &mut cmd, name, &mut io::stdout());
+  Ok(())
+}
+
+fn cmd_shell_init(shell: InitShell) -> Result<()> {
+  print!("{}", shell_init_script(shell));
+  Ok(())
+}
+
+pub fn shell_init_script(shell: InitShell) -> &'static str {
+  match shell {
+    InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
+    InitShell::Fish => FISH_SHELL_INIT,
+    InitShell::Powershell => POWERSHELL_SHELL_INIT,
+  }
+}
+
+const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: eval "$(gwm shell-init bash)"   # or zsh
+# Note: the `function name { ... }` form (zsh/bash-extended) is used instead
+# of the parenthesised POSIX form so the parser does not error out with
+# `defining function based on alias 'gcd'` when zsh already has a `gcd`
+# alias (e.g. oh-my-zsh's `gcd=git checkout`). The `unalias` after the
+# definition is what makes the function reachable at call time, since zsh
+# still resolves the alias first when both exist.
+function gcd {
+  if [ "$#" -eq 0 ]; then
+    echo "usage: gcd <pattern>" >&2
+    return 2
+  fi
+  local target
+  target="$(command gwm cd "$@")" || return $?
+  cd "$target" || return $?
+}
+unalias gcd 2>/dev/null || true
+"#;
+
+const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
+function gcd --description 'cd into a gwm worktree by fuzzy pattern'
+  if test (count $argv) -eq 0
+    echo "usage: gcd <pattern>" >&2
+    return 2
+  end
+  set -l target (command gwm cd $argv)
+  or return $status
+  # `--` stops option parsing, "$target" prevents wildcard expansion on
+  # paths containing `[`, `]`, or `*`.
+  cd -- "$target"
+end
+"#;
+
+const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` so the parent shell can cd.
+# Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
+# Note: this clears any prior `gcd` alias so the function takes effect.
+Remove-Alias -Name gcd -Force -ErrorAction SilentlyContinue
+function gcd {
+  param([Parameter(Mandatory = $true)][string]$Pattern)
+  $target = & gwm cd $Pattern
+  if ($LASTEXITCODE -ne 0) { return }
+  Set-Location $target
+}
+"#;
 
 fn print_report(report: &bootstrap::BootstrapReport) {
   println!();
