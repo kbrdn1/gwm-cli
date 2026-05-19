@@ -19,7 +19,9 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("create"))
     .stdout(predicate::str::contains("bootstrap"))
     .stdout(predicate::str::contains("prune"))
-    .stdout(predicate::str::contains("completions"));
+    .stdout(predicate::str::contains("completions"))
+    .stdout(predicate::str::contains("cd"))
+    .stdout(predicate::str::contains("shell-init"));
 }
 
 #[test]
@@ -119,6 +121,83 @@ fn list_format_names_emits_one_name_per_line() {
     // accepts (path/remove/bootstrap skip the main workdir). A fresh repo
     // therefore prints nothing.
     .stdout(predicate::str::is_empty());
+}
+
+#[test]
+fn cd_unknown_pattern_fails_with_not_found() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["cd", "nope"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn cd_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["cd", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn shell_init_bash_emits_gcd_function() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "bash"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gcd()"))
+    .stdout(predicate::str::contains("gwm cd"));
+}
+
+#[test]
+fn shell_init_zsh_emits_gcd_function() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "zsh"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("gcd()"))
+    .stdout(predicate::str::contains("gwm cd"));
+}
+
+#[test]
+fn shell_init_fish_emits_function_block() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "fish"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("function gcd"))
+    .stdout(predicate::str::contains("gwm cd"))
+    .stdout(predicate::str::contains("end"));
+}
+
+#[test]
+fn shell_init_powershell_emits_function_block() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "powershell"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("function gcd"))
+    .stdout(predicate::str::contains("gwm cd"))
+    .stdout(predicate::str::contains("Set-Location"));
+}
+
+#[test]
+fn shell_init_rejects_unknown_shell() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["shell-init", "tcsh"]);
+  cmd.assert().failure();
 }
 
 #[test]
