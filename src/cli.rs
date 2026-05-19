@@ -487,6 +487,9 @@ fn spawn_multiplexer(mux: Multiplexer, argv: &[String]) -> Result<()> {
       mux.binary()
     ))
   })?;
+  // The data string already names the binary (`tmux` / `zellij`), so
+  // the rendered message reads `command failed: tmux exited with
+  // status Some(1)` — attributable to the verb the user typed.
   let status = std::process::Command::new(bin)
     .args(rest)
     .status()
