@@ -234,6 +234,7 @@ impl App {
 
   pub fn refresh(&mut self) -> Result<()> {
     self.worktrees = worktree::list(&self.repo)?;
+    // `clamp_selection_to_filter` re-resolves the link cache for us.
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
@@ -263,6 +264,7 @@ impl App {
     self.list_state.select(Some(i));
     self.sidebar_scroll = 0;
     self.invalidate_sidebar_cache();
+    self.refresh_link();
   }
 
   pub fn prev(&mut self) {
@@ -281,6 +283,7 @@ impl App {
     self.list_state.select(Some(i));
     self.sidebar_scroll = 0;
     self.invalidate_sidebar_cache();
+    self.refresh_link();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------
@@ -291,6 +294,7 @@ impl App {
       self.list_state.select(Some(0));
       self.sidebar_scroll = 0;
       self.invalidate_sidebar_cache();
+      self.refresh_link();
     }
   }
 
@@ -300,6 +304,7 @@ impl App {
       self.list_state.select(Some(len - 1));
       self.sidebar_scroll = 0;
       self.invalidate_sidebar_cache();
+      self.refresh_link();
     }
   }
 
@@ -708,11 +713,15 @@ impl App {
 
   /// Reposition the selection so it stays inside the current filtered subset.
   /// Called whenever the filter mutates (`/`-mode typing, `Esc`-clear) or the
-  /// worktree list itself changes (`refresh`).
+  /// worktree list itself changes (`refresh`). Also re-resolves the issue/PR
+  /// link cache so the right-panel block tracks the new selection — PR #68
+  /// Copilot review caught that selection changes were leaving the cache
+  /// pointing at the previously selected worktree.
   fn clamp_selection_to_filter(&mut self) {
     let len = self.filtered_indices().len();
     if len == 0 {
       self.list_state.select(None);
+      self.refresh_link();
       return;
     }
     match self.list_state.selected() {
@@ -720,6 +729,7 @@ impl App {
       Some(_) => {}
       None => self.list_state.select(Some(0)),
     }
+    self.refresh_link();
   }
 
   // ---- Bootstrap flow ------------------------------------------------------

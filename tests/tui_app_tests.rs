@@ -1180,3 +1180,72 @@ fn refresh_link_invalidates_fetch_state() {
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
   assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
 }
+
+#[test]
+fn next_resets_fetch_state_on_selection_change() {
+  // PR #68 Copilot review: selection change must invalidate the cached
+  // GitHub fetch state, otherwise the right-panel Issue/PR block shows
+  // stale data from the previously selected worktree.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  app.apply_issue_fetch_result(Err("stale".into()));
+  app.next();
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn prev_resets_fetch_state_on_selection_change() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  app.apply_pr_fetch_result(Err("stale".into()));
+  app.prev();
+  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn first_resets_fetch_state_on_selection_change() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(1));
+  app.apply_issue_fetch_result(Err("stale".into()));
+  app.first();
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn last_resets_fetch_state_on_selection_change() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("alt"));
+  app.list_state.select(Some(0));
+  app.apply_issue_fetch_result(Err("stale".into()));
+  app.last();
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn filter_clamping_resets_fetch_state_when_selection_moves() {
+  // When typing into the filter narrows the visible set so much that the
+  // current selection no longer points at the same worktree, the link
+  // cache must invalidate too. Otherwise the right-panel block lies.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.worktrees.push(worktree_fixture("zzz-unique"));
+  app.list_state.select(Some(1));
+  app.apply_issue_fetch_result(Err("stale".into()));
+  app.enter_filter();
+  app.filter_push_char('z'); // only the second fixture matches
+                             // The selection survives but the link cache should still reset because
+                             // the filter operation can drop selection back to index 0 on the
+                             // filtered subset. The contract: any selection-state mutation refreshes.
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn refresh_worktrees_resets_fetch_state() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_pr_fetch_result(Err("stale".into()));
+  app.refresh().unwrap();
+  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+}
