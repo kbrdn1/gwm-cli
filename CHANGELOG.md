@@ -10,7 +10,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet — next entries land here once a new feature / fix / chore is merged into `dev`._
+### Changed
+
+- **TUI Details sidebar redesign** (#69) — the right pane is now made of four
+  independent rounded-border subsections (`Worktree` / `Issue / PR` /
+  `Working Tree` / `Recent Commits`) instead of one big `Details` block with
+  flat `Label:` headers. The outer `Details` frame is dropped to reclaim
+  vertical space. Section titles live on the block borders, so the inline
+  `Basic Settings:` / `Recent commits:` / `Working tree:` content lines are
+  gone. The redundant `─── Issue / PR ───` content header is removed in
+  favour of the block title.
+
+### Removed
+
+- **`Commands:` cheat-sheet from the Details sidebar** — the 15-line
+  keybindings list duplicated the `?` help overlay and pushed the
+  `Issue / PR` block off-screen on common terminal sizes. Press `?` for the
+  full key map. (#69)
+
+### Docs
+
+- **`skills/SKILL.md` refresh** — the bundled `gwm` Skill is updated to
+  match the current `0.6.0-rc.1` surface: new subcommands (`doctor`,
+  `switch`, `tmux`, `zellij`, `link` / `unlink` / `open` / `status`,
+  `completions`, `shell-init`), composable `when` predicates, `[doctor]` /
+  `[tui]` config sections, opt-in pre-commit hook at `.githooks/pre-commit`,
+  updated triggers / TUI key map / troubleshooting.
 
 ## Past releases
 
