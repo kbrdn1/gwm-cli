@@ -350,20 +350,26 @@ fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
 
 fn badges_line(w: &WorktreeInfo) -> Line<'static> {
   let mut spans: Vec<Span<'static>> = Vec::new();
-  // Status sigil: ✓ synced / clean | ● dirty | ↑N ↓M | unknown.
+  // Status sigil:
+  //   `?`     — unknown
+  //   `●`     — dirty (working tree or index)
+  //   `✓`     — synced / clean (no divergence)
+  //   (none)  — ahead / behind / both — the label already carries `↑N` /
+  //             `↓M` / `↑N ↓M`. Prefixing `✓` here would lie about
+  //             divergence (raised by PR #70 Copilot review).
   let status_label = branch_status_label(&w.status);
   let status_color = branch_status_color(&w.status);
-  let sigil = if w.status.unknown {
-    "?"
+  let is_diverged = w.status.has_upstream && (w.status.ahead > 0 || w.status.behind > 0);
+  let badge_text = if w.status.unknown {
+    format!("? {}", status_label)
   } else if w.status.is_dirty {
-    "●"
+    format!("● {}", status_label)
+  } else if is_diverged {
+    status_label
   } else {
-    "✓"
+    format!("✓ {}", status_label)
   };
-  spans.push(Span::styled(
-    format!("{} {}", sigil, status_label),
-    Style::default().fg(status_color),
-  ));
+  spans.push(Span::styled(badge_text, Style::default().fg(status_color)));
 
   let sep = || Span::styled("  ".to_string(), Style::default().fg(Color::DarkGray));
   if w.is_main {

@@ -1443,3 +1443,59 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
     text
   );
 }
+
+#[test]
+fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
+  // Regression: PR #70 review (Copilot) flagged that a non-dirty/non-unknown
+  // status always rendered `✓ <label>`, which produced misleading badges like
+  // `✓ ↑2` for branches that were *ahead* of upstream. The `✓` is reserved
+  // for synced / clean — divergence must use `↑` / `↓` / `⇅` (or no sigil).
+  let mut w = detailed_worktree_fixture();
+  w.status = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 2,
+    behind: 0,
+    unknown: false,
+  };
+  let sections = build_sidebar_sections(&w);
+  let badge = section_text_single(&sections.worktree[2]);
+  assert!(
+    !badge.contains("✓"),
+    "ahead-only branch must not display the synced/clean ✓ sigil: {}",
+    badge
+  );
+  assert!(badge.contains("↑2"), "ahead label must still be visible: {}", badge);
+}
+
+#[test]
+fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
+  let mut w = detailed_worktree_fixture();
+  w.status = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 0,
+    behind: 3,
+    unknown: false,
+  };
+  let sections = build_sidebar_sections(&w);
+  let badge = section_text_single(&sections.worktree[2]);
+  assert!(
+    !badge.contains("✓"),
+    "behind-only branch must not display the synced/clean ✓ sigil: {}",
+    badge
+  );
+  assert!(badge.contains("↓3"), "behind label must still be visible: {}", badge);
+}
+
+#[test]
+fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
+  // Sanity: the fixture has `has_upstream=true, ahead=0, behind=0` so the
+  // synced label *should* still display `✓`. Guards against an over-eager
+  // fix that would drop the sigil everywhere.
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let badge = section_text_single(&sections.worktree[2]);
+  assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
+  assert!(badge.contains("synced"), "label must still say synced: {}", badge);
+}
