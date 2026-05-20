@@ -336,8 +336,11 @@ pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
   parse_pr_json(&stdout)
 }
 
-/// Find the PR opened from `branch` (head ref) on the given repo. Returns
-/// `Ok(Some(N))` if exactly one open PR is found, `Ok(None)` if none.
+/// Find the most recent PR opened from `branch` (head ref) on the given
+/// repo, regardless of state. Returns `Ok(Some(N))` if at least one PR
+/// exists (open, draft, closed, or merged — `gh pr list --state all`),
+/// `Ok(None)` otherwise. Callers that need state-aware filtering should
+/// pair this with `fetch_pr` to inspect `PrState` afterwards.
 pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
   let stdout = run_gh(&[
     "pr", "list", "--repo", slug, "--head", branch, "--state", "all", "--json", "number", "--limit", "1",
