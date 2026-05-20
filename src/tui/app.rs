@@ -1,6 +1,7 @@
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::Config;
 use crate::error::{GwmError, Result};
+use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
@@ -47,6 +48,33 @@ pub enum View {
   Confirm,
   Report,
   Help,
+  /// Compact menu to pick which GitHub URL to open (issue / pr).
+  OpenMenu,
+  /// Two-stage prompt: pick the link kind, then enter the number.
+  LinkPrompt,
+}
+
+/// Target of an open / link action.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkTarget {
+  Issue,
+  Pr,
+}
+
+/// Stage of the two-step link prompt.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkPromptStage {
+  ChooseTarget,
+  InputNumber,
+}
+
+/// State of a background GitHub fetch (issue or PR).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitHubFetchState<T> {
+  Idle,
+  Loading,
+  Loaded(T),
+  Error(String),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -121,6 +149,20 @@ pub struct App {
   /// `confirm_countdown_secs = 0`), or armed-but-just-disarmed by a
   /// second `y` press.
   pub confirm_countdown_started_at: Option<Instant>,
+
+  // ---- Issue/PR linking (issue #67) -------------------------------------
+  /// Cached link for the currently selected worktree's branch.
+  link: BranchLink,
+  /// Repo slug parsed from `origin` (None when no GitHub remote).
+  link_slug: Option<String>,
+  issue_state: GitHubFetchState<IssueStatus>,
+  pr_state: GitHubFetchState<PrStatus>,
+  /// In `View::LinkPrompt`, which stage are we in.
+  link_prompt_stage: LinkPromptStage,
+  /// In `View::LinkPrompt::InputNumber`, the digits typed so far.
+  link_prompt_number: String,
+  /// In `View::LinkPrompt::InputNumber`, the chosen target.
+  link_prompt_target: Option<LinkTarget>,
 }
 
 impl App {
@@ -138,7 +180,7 @@ impl App {
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
-    Ok(Self {
+    let mut out = Self {
       repo,
       repo_name,
       workdir,
@@ -165,7 +207,16 @@ impl App {
       picker_result: None,
       picker_should_exit: false,
       confirm_countdown_started_at: None,
-    })
+      link: BranchLink::empty(),
+      link_slug: None,
+      issue_state: GitHubFetchState::Idle,
+      pr_state: GitHubFetchState::Idle,
+      link_prompt_stage: LinkPromptStage::ChooseTarget,
+      link_prompt_number: String::new(),
+      link_prompt_target: None,
+    };
+    out.refresh_link();
+    Ok(out)
   }
 
   /// Constructor for `gwm switch`: same App, but picker mode is on and the
@@ -738,5 +789,202 @@ impl App {
       }
       Err(e) => self.status = format!("bootstrap error: {}", e),
     }
+  }
+
+  // ---- Issue/PR linking (issue #67) -------------------------------------
+
+  /// Re-read the link for the currently selected worktree's branch. Also
+  /// re-resolves the repo slug from the origin remote, and resets any
+  /// previously cached GitHub fetch state since it would refer to a
+  /// different (issue, pr) tuple now.
+  pub fn refresh_link(&mut self) {
+    self.link = self.read_selected_link().unwrap_or_else(BranchLink::empty);
+    self.link_slug = github::repo_slug(&self.repo).ok();
+    self.issue_state = GitHubFetchState::Idle;
+    self.pr_state = GitHubFetchState::Idle;
+  }
+
+  fn read_selected_link(&self) -> Option<BranchLink> {
+    let branch = self
+      .selected()
+      .and_then(|w| w.branch.clone())
+      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))?;
+    github::read_link(&self.repo, &branch).ok()
+  }
+
+  pub fn current_link(&self) -> &BranchLink {
+    &self.link
+  }
+
+  pub fn current_slug(&self) -> Option<&str> {
+    self.link_slug.as_deref()
+  }
+
+  pub fn issue_fetch_state(&self) -> &GitHubFetchState<IssueStatus> {
+    &self.issue_state
+  }
+
+  pub fn pr_fetch_state(&self) -> &GitHubFetchState<PrStatus> {
+    &self.pr_state
+  }
+
+  /// Drive the issue/PR fetch synchronously. Called from the event loop
+  /// when the user presses `R`. Sets states to `Loading` first so the UI
+  /// can flag the in-flight state, then runs the fetches.
+  pub fn refresh_github_status(&mut self) {
+    if self.link.issue.is_none() && self.link.pr.is_none() {
+      self.status = "nothing linked — press L to link an issue or PR".into();
+      return;
+    }
+    let Some(slug) = self.link_slug.clone() else {
+      self.status = "no GitHub remote — cannot fetch status".into();
+      return;
+    };
+    if let Some(n) = self.link.issue {
+      self.issue_state = GitHubFetchState::Loading;
+      let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
+      self.apply_issue_fetch_result(r);
+    }
+    if let Some(n) = self.link.pr {
+      self.pr_state = GitHubFetchState::Loading;
+      let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
+      self.apply_pr_fetch_result(r);
+    }
+    self.status = "github status refreshed".into();
+  }
+
+  pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
+    self.issue_state = match r {
+      Ok(s) => GitHubFetchState::Loaded(s),
+      Err(e) => GitHubFetchState::Error(e),
+    };
+  }
+
+  pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
+    self.pr_state = match r {
+      Ok(s) => GitHubFetchState::Loaded(s),
+      Err(e) => GitHubFetchState::Error(e),
+    };
+  }
+
+  // ---- Open menu ----------------------------------------------------------
+
+  pub fn enter_open_menu(&mut self) {
+    // Re-resolve link + slug in case the user just linked something
+    // (`gwm link …` from a parallel terminal) or moved the origin remote.
+    self.refresh_link();
+    self.view = View::OpenMenu;
+  }
+
+  pub fn exit_open_menu(&mut self) {
+    self.view = View::List;
+  }
+
+  /// Pick a target from the open menu. Returns the URL to open, or `None`
+  /// when the link is missing (the status bar carries the explanation).
+  pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
+    self.view = View::List;
+    let Some(slug) = self.link_slug.clone() else {
+      self.status = "no GitHub remote — cannot build URL".into();
+      return None;
+    };
+    let url = match target {
+      LinkTarget::Issue => match self.link.issue {
+        Some(n) => github::issue_url(&slug, n),
+        None => {
+          self.status = "no issue linked — press L to link one".into();
+          return None;
+        }
+      },
+      LinkTarget::Pr => match self.link.pr {
+        Some(n) => github::pr_url(&slug, n),
+        None => {
+          self.status = "no PR linked — press L to link one".into();
+          return None;
+        }
+      },
+    };
+    Some(url)
+  }
+
+  // ---- Link prompt --------------------------------------------------------
+
+  pub fn enter_link_prompt(&mut self) {
+    self.view = View::LinkPrompt;
+    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
+    self.link_prompt_target = None;
+    self.link_prompt_number.clear();
+    self.status = "link: [i]ssue / [p]r · esc cancels".into();
+  }
+
+  pub fn link_prompt_cancel(&mut self) {
+    self.view = View::List;
+    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
+    self.link_prompt_target = None;
+    self.link_prompt_number.clear();
+  }
+
+  pub fn link_prompt_stage(&self) -> LinkPromptStage {
+    self.link_prompt_stage
+  }
+
+  pub fn link_prompt_number_input(&self) -> &str {
+    &self.link_prompt_number
+  }
+
+  pub fn link_prompt_target(&self) -> Option<LinkTarget> {
+    self.link_prompt_target
+  }
+
+  pub fn link_prompt_choose(&mut self, target: LinkTarget) {
+    self.link_prompt_target = Some(target);
+    self.link_prompt_stage = LinkPromptStage::InputNumber;
+    self.link_prompt_number.clear();
+    self.status = match target {
+      LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
+      LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
+    };
+  }
+
+  pub fn link_prompt_push_char(&mut self, c: char) {
+    if self.link_prompt_stage == LinkPromptStage::InputNumber && c.is_ascii_digit() {
+      self.link_prompt_number.push(c);
+    }
+  }
+
+  pub fn link_prompt_pop_char(&mut self) {
+    if self.link_prompt_stage == LinkPromptStage::InputNumber {
+      self.link_prompt_number.pop();
+    }
+  }
+
+  pub fn link_prompt_submit(&mut self) -> Result<()> {
+    let Some(target) = self.link_prompt_target else {
+      self.status = "no target chosen".into();
+      return Ok(());
+    };
+    let n: u64 = self
+      .link_prompt_number
+      .parse()
+      .map_err(|_| GwmError::Other("number is empty or invalid".into()))?;
+    let branch = self
+      .selected()
+      .and_then(|w| w.branch.clone())
+      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
+      .ok_or_else(|| GwmError::Other("no branch resolved for selected worktree".into()))?;
+    match target {
+      LinkTarget::Issue => github::link_issue(&self.repo, &branch, n)?,
+      LinkTarget::Pr => github::link_pr(&self.repo, &branch, n)?,
+    }
+    self.status = match target {
+      LinkTarget::Issue => format!("linked issue #{} to {}", n, branch),
+      LinkTarget::Pr => format!("linked PR #{} to {}", n, branch),
+    };
+    self.view = View::List;
+    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
+    self.link_prompt_target = None;
+    self.link_prompt_number.clear();
+    self.refresh_link();
+    Ok(())
   }
 }

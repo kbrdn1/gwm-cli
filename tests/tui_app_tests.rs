@@ -1010,3 +1010,173 @@ fn filled_cells_floors_partial_progress() {
   // 0.5 exact → 5 cells.
   assert_eq!(filled_cells_for_progress(0.5, 10), 5);
 }
+
+// ---- Issue / PR linking (issue #67) -------------------------------------
+
+use gwm::github::{IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use gwm::tui::{GitHubFetchState, LinkPromptStage, LinkTarget};
+
+fn make_app_on_branch(name: &str) -> (tempfile::TempDir, git2::Repository, App) {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch(name, &head, false).unwrap();
+  }
+  repo.set_head(&format!("refs/heads/{}", name)).unwrap();
+  let app = App::new_at(Some(dir.path())).unwrap();
+  (dir, repo, app)
+}
+
+#[test]
+fn current_link_reflects_branch_name_auto_detect() {
+  let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
+  let link = app.current_link();
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_source, LinkSource::BranchName);
+  assert_eq!(link.pr, None);
+}
+
+#[test]
+fn enter_open_menu_transitions_view() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_open_menu();
+  assert_eq!(app.view, View::OpenMenu);
+}
+
+#[test]
+fn open_menu_choose_issue_returns_url_when_linked_and_slug_available() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.enter_open_menu();
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+  assert_eq!(url, "https://github.com/kbrdn1/gwm-cli/issues/42");
+  // After picking, the view is back to the list.
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn open_menu_pick_returns_none_when_no_link() {
+  let (_dir, repo, mut app) = make_app_on_branch("random-branch");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.enter_open_menu();
+  let url = app.open_menu_pick(LinkTarget::Pr);
+  assert!(url.is_none());
+  // Status bar should hint why.
+  assert!(
+    app.status.to_lowercase().contains("no pr"),
+    "status should mention missing PR link: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_link_prompt_starts_at_choose_target() {
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.view, View::LinkPrompt);
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::ChooseTarget);
+  assert!(app.link_prompt_number_input().is_empty());
+}
+
+#[test]
+fn link_prompt_choose_issue_advances_to_input() {
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+}
+
+#[test]
+fn link_prompt_only_accepts_digits() {
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  for c in "12a3".chars() {
+    app.link_prompt_push_char(c);
+  }
+  assert_eq!(app.link_prompt_number_input(), "123");
+}
+
+#[test]
+fn link_prompt_submit_writes_branch_config() {
+  let (_dir, repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  for c in "42".chars() {
+    app.link_prompt_push_char(c);
+  }
+  app.link_prompt_submit().unwrap();
+  // After submit, view returns to list and the link is persisted.
+  assert_eq!(app.view, View::List);
+  let cfg = repo.config().unwrap();
+  let v = cfg.get_string("branch.random-branch.gwm-issue").unwrap();
+  assert_eq!(v, "42");
+}
+
+#[test]
+fn link_prompt_cancel_returns_to_list() {
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.link_prompt_cancel();
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn github_fetch_state_default_is_idle() {
+  let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn apply_fetch_results_loads_issue_and_pr_state() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let issue = IssueStatus {
+    number: 42,
+    title: "TUI search".into(),
+    state: IssueState::Open,
+    url: "https://example.test".into(),
+    labels: vec!["feature".into()],
+    updated_at: "2026-05-19T00:00:00Z".into(),
+  };
+  let pr = PrStatus {
+    number: 61,
+    title: "feat(tui): search".into(),
+    state: PrState::Draft,
+    url: "https://example.test/pr".into(),
+    updated_at: "2026-05-19T00:00:00Z".into(),
+    checks_passed: 2,
+    checks_total: 3,
+  };
+  app.apply_issue_fetch_result(Ok(issue.clone()));
+  app.apply_pr_fetch_result(Ok(pr.clone()));
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(_) => {}
+    other => panic!("expected Loaded, got {:?}", other),
+  }
+  match app.pr_fetch_state() {
+    GitHubFetchState::Loaded(_) => {}
+    other => panic!("expected Loaded, got {:?}", other),
+  }
+}
+
+#[test]
+fn apply_fetch_error_stores_error_state() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Err("gh not found".into()));
+  match app.issue_fetch_state() {
+    GitHubFetchState::Error(msg) => assert!(msg.contains("gh"), "msg = {}", msg),
+    other => panic!("expected Error, got {:?}", other),
+  }
+}
+
+#[test]
+fn refresh_link_invalidates_fetch_state() {
+  // After the user changes selection or the branch link changes, any
+  // previously fetched status no longer applies. The state must reset.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Err("e".into()));
+  app.refresh_link();
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+  assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
+}

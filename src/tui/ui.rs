@@ -1,5 +1,6 @@
-use super::app::{App, Field, View};
+use super::app::{App, Field, GitHubFetchState, LinkPromptStage, View};
 use crate::bootstrap::StepStatus;
+use crate::github::{IssueState, LinkSource, PrState};
 use crate::naming::BRANCH_TYPES;
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
@@ -51,6 +52,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::Create => draw_create(f, app),
     View::Confirm => draw_confirm(f, app),
     View::Report => draw_report(f, app),
+    View::OpenMenu => draw_open_menu(f, app),
+    View::LinkPrompt => draw_link_prompt(f, app),
     View::List => {}
   }
 }
@@ -190,7 +193,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   };
 
   // Resolve (or populate) the cached content for the currently selected worktree.
-  let lines: Vec<Line<'static>> = match app.selected().cloned() {
+  // The cached block is the git preview; the Issue/PR block is rebuilt every
+  // frame (it's small, and its state changes with fetch progress).
+  let mut lines: Vec<Line<'static>> = match app.selected().cloned() {
     Some(w) => {
       let needs_refresh = match &app.sidebar_cache {
         Some((p, _)) => *p != w.path,
@@ -203,6 +208,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     }
     None => vec![Line::from("(nothing selected)")],
   };
+  // Append the live Issue / PR block.
+  lines.push(Line::from(""));
+  lines.extend(github_status_lines(app));
 
   // Track the maximum scrollable offset so `sidebar_scroll_down` can clamp.
   // `area.height - 2` accounts for the top + bottom border lines.
@@ -518,6 +526,11 @@ fn draw_help(f: &mut Frame, app: &App) {
   if !app.picker_mode {
     lines.push(Line::from("  p             toggle 'delete branch on remove'"));
     lines.push(Line::from("  enter         show path in status bar"));
+    lines.push(Line::from(""));
+    lines.push(Line::from("issue / PR (#67)"));
+    lines.push(Line::from("  O             open menu — i=issue · p=pull request"));
+    lines.push(Line::from("  L             link prompt — i / p then digits"));
+    lines.push(Line::from("  R             refresh GitHub status via `gh`"));
   }
   lines.push(Line::from("  ?             this help"));
   if !app.picker_mode {
@@ -791,5 +804,187 @@ fn trunc(s: &str, max: usize) -> String {
     let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
     out.push('…');
     out
+  }
+}
+
+// ---- Issue/PR linking (issue #67) ---------------------------------------
+
+fn draw_open_menu(f: &mut Frame, _app: &App) {
+  let area = centered(40, 22, f.area());
+  f.render_widget(Clear, area);
+  let block = Block::default()
+    .borders(Borders::ALL)
+    .title(" open ")
+    .border_style(Style::default().fg(Color::Magenta));
+  let lines = vec![
+    Line::from(Span::styled(
+      "open in browser",
+      Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+    )),
+    Line::from(""),
+    Line::from("  i   linked issue"),
+    Line::from("  p   linked pull request"),
+    Line::from(""),
+    Line::from(Span::styled("  esc to cancel", Style::default().fg(Color::DarkGray))),
+  ];
+  f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_link_prompt(f: &mut Frame, app: &App) {
+  let area = centered(50, 30, f.area());
+  f.render_widget(Clear, area);
+  let block = Block::default()
+    .borders(Borders::ALL)
+    .title(" link ")
+    .border_style(Style::default().fg(Color::Yellow));
+
+  let lines = match app.link_prompt_stage() {
+    LinkPromptStage::ChooseTarget => vec![
+      Line::from(Span::styled(
+        "link this worktree to:",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+      )),
+      Line::from(""),
+      Line::from("  i   a GitHub issue"),
+      Line::from("  p   a pull request"),
+      Line::from(""),
+      Line::from(Span::styled("  esc to cancel", Style::default().fg(Color::DarkGray))),
+    ],
+    LinkPromptStage::InputNumber => {
+      let label = match app.link_prompt_target() {
+        Some(super::app::LinkTarget::Issue) => "issue #",
+        Some(super::app::LinkTarget::Pr) => "PR #",
+        None => "#",
+      };
+      vec![
+        Line::from(Span::styled(
+          format!("type the {} number", label.trim_end_matches('#').trim()),
+          Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(format!("  {}{}_", label, app.link_prompt_number_input())),
+        Line::from(""),
+        Line::from(Span::styled(
+          "  enter confirms · esc cancels · backspace deletes",
+          Style::default().fg(Color::DarkGray),
+        )),
+      ]
+    }
+  };
+  f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Append the issue/PR status block to the bottom of the sidebar. Called
+/// from `draw_sidebar` after the git preview, so it shows below the recent
+/// commits / status block.
+pub(super) fn github_status_lines(app: &App) -> Vec<Line<'static>> {
+  let link = app.current_link();
+  let mut lines: Vec<Line<'static>> = Vec::new();
+
+  lines.push(Line::from(Span::styled(
+    "─── Issue / PR ───",
+    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+  )));
+
+  if link.issue.is_none() && link.pr.is_none() {
+    lines.push(Line::from(Span::styled(
+      "  no link · press L to link",
+      Style::default().fg(Color::DarkGray),
+    )));
+    return lines;
+  }
+
+  if let Some(n) = link.issue {
+    lines.push(issue_summary_line(n, link.issue_source, app.issue_fetch_state()));
+  }
+  if let Some(n) = link.pr {
+    lines.push(pr_summary_line(n, link.pr_source, app.pr_fetch_state()));
+  }
+  if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
+  {
+    lines.push(Line::from(Span::styled(
+      "  press R to fetch status",
+      Style::default().fg(Color::DarkGray),
+    )));
+  }
+  lines
+}
+
+fn source_marker(s: LinkSource) -> &'static str {
+  match s {
+    LinkSource::None => "",
+    LinkSource::BranchName => " (auto)",
+    LinkSource::Explicit => "",
+  }
+}
+
+fn issue_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::github::IssueStatus>) -> Line<'static> {
+  let head = format!("Issue #{}{}", n, source_marker(src));
+  match state {
+    GitHubFetchState::Idle => Line::from(Span::styled(head, Style::default().fg(Color::White))),
+    GitHubFetchState::Loading => Line::from(format!("{} …loading", head)),
+    GitHubFetchState::Loaded(s) => {
+      let badge_color = match s.state {
+        IssueState::Open => Color::Green,
+        IssueState::Closed => Color::Red,
+      };
+      let badge = match s.state {
+        IssueState::Open => "open",
+        IssueState::Closed => "closed",
+      };
+      Line::from(vec![
+        Span::styled(head, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw(" ["),
+        Span::styled(
+          badge.to_string(),
+          Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("] "),
+        Span::raw(trunc(&s.title, 40)),
+      ])
+    }
+    GitHubFetchState::Error(e) => Line::from(vec![
+      Span::styled(head, Style::default().fg(Color::White)),
+      Span::raw(" "),
+      Span::styled(format!("!{}", trunc(e, 30)), Style::default().fg(Color::Red)),
+    ]),
+  }
+}
+
+fn pr_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::github::PrStatus>) -> Line<'static> {
+  let head = format!("PR    #{}{}", n, source_marker(src));
+  match state {
+    GitHubFetchState::Idle => Line::from(Span::styled(head, Style::default().fg(Color::White))),
+    GitHubFetchState::Loading => Line::from(format!("{} …loading", head)),
+    GitHubFetchState::Loaded(s) => {
+      let (badge, badge_color) = match s.state {
+        PrState::Open => ("open", Color::Green),
+        PrState::Draft => ("draft", Color::DarkGray),
+        PrState::Closed => ("closed", Color::Red),
+        PrState::Merged => ("merged", Color::Magenta),
+      };
+      let checks = if s.checks_total > 0 {
+        format!(" · checks {}/{}", s.checks_passed, s.checks_total)
+      } else {
+        String::new()
+      };
+      Line::from(vec![
+        Span::styled(head, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw(" ["),
+        Span::styled(
+          badge.to_string(),
+          Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("]"),
+        Span::raw(checks),
+        Span::raw(" "),
+        Span::raw(trunc(&s.title, 36)),
+      ])
+    }
+    GitHubFetchState::Error(e) => Line::from(vec![
+      Span::styled(head, Style::default().fg(Color::White)),
+      Span::raw(" "),
+      Span::styled(format!("!{}", trunc(e, 30)), Style::default().fg(Color::Red)),
+    ]),
   }
 }
