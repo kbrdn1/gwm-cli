@@ -1,0 +1,71 @@
+#!/bin/sh
+# .githooks/pre-commit — opt-in commit gates for gwm-cli contributors.
+#
+# Two gates that prevent the two most common CI round-trips this repo
+# has burned in the past:
+#
+#   1. Env-dependent test pre-validation. If staged tests/*.rs files
+#      reference ambient state (assert_cmd, std::env::var, which::which,
+#      dirs::, Command::cargo_bin), the suite is re-run under a stripped
+#      PATH ("$(dirname cargo):/usr/bin:/bin") to catch tests that pass
+#      in a rich dev shell but fail on minimal CI runners.
+#
+#   2. Local `gwm doctor`. If staged files touch .gwm.toml, the bootstrap
+#      module, the doctor module, the example config, or the bootstrap/
+#      doctor test files, `gwm doctor` is invoked. Exit codes follow the
+#      doctor contract: 0 silent, 1 advisory (warnings, commit proceeds),
+#      2 blocks the commit. Unknown gwm exits never block — fail open.
+#
+# Install (opt-in, recommended):
+#   git config core.hooksPath .githooks
+#
+# Bypass for a single commit (use sparingly):
+#   git commit --no-verify
+
+STAGED=$(git diff --cached --name-only --diff-filter=ACMR 2>/dev/null)
+[ -z "$STAGED" ] && exit 0
+
+# ─── Gate 1: env-dependent test pre-validation ───────────────────────────
+TEST_FILES=$(printf '%s\n' "$STAGED" | grep -E '^tests/.*\.rs$' || true)
+if [ -n "$TEST_FILES" ]; then
+  AMBIENT='Command::cargo_bin|which::which|dirs::|std::env::var|assert_cmd'
+  # IFS handles newline-separated TEST_FILES for git's pathspec expansion.
+  # shellcheck disable=SC2086
+  if git diff --cached -- $TEST_FILES | grep -qE "$AMBIENT"; then
+    printf 'pre-commit gate 1: staged tests touch ambient state — re-running under stripped PATH\n'
+    CARGO_PATH=$(command -v cargo 2>/dev/null)
+    if [ -z "$CARGO_PATH" ]; then
+      printf 'pre-commit gate 1: cargo not in PATH — skipping (install Rust toolchain)\n' >&2
+    else
+      CARGO_BIN_DIR=$(dirname "$CARGO_PATH")
+      if ! PATH="$CARGO_BIN_DIR:/usr/bin:/bin" cargo test --quiet; then
+        printf 'pre-commit gate 1: stripped-PATH cargo test FAILED — commit blocked.\n' >&2
+        printf '  Reproduce: PATH="%s:/usr/bin:/bin" cargo test\n' "$CARGO_BIN_DIR" >&2
+        printf '  Bypass (not recommended): git commit --no-verify\n' >&2
+        exit 1
+      fi
+    fi
+  fi
+fi
+
+# ─── Gate 2: local gwm doctor ────────────────────────────────────────────
+DOCTOR_TRIGGERS='^(\.gwm\.toml|src/bootstrap\.rs|src/doctor\.rs|examples/gwm\.toml\.example|tests/bootstrap.*|tests/doctor.*)$'
+if printf '%s\n' "$STAGED" | grep -qE "$DOCTOR_TRIGGERS"; then
+  if ! command -v gwm >/dev/null 2>&1; then
+    printf 'pre-commit gate 2: gwm not in PATH — skipping local doctor (install gwm to enable)\n' >&2
+  else
+    printf 'pre-commit gate 2: staged config/bootstrap/doctor files — running gwm doctor\n'
+    gwm doctor
+    DOCTOR_EXIT=$?
+    case $DOCTOR_EXIT in
+      0) ;;
+      1) printf 'pre-commit gate 2: gwm doctor reported warnings (advisory) — commit proceeds.\n' ;;
+      2) printf 'pre-commit gate 2: gwm doctor reported ERRORS — commit blocked.\n' >&2
+         printf '  Bypass (not recommended): git commit --no-verify\n' >&2
+         exit 1 ;;
+      *) printf 'pre-commit gate 2: gwm doctor unexpected exit %d — commit proceeds.\n' "$DOCTOR_EXIT" >&2 ;;
+    esac
+  fi
+fi
+
+exit 0

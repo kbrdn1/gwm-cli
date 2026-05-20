@@ -11,6 +11,10 @@ pub struct Config {
   pub worktree: WorktreeConfig,
   #[serde(default)]
   pub bootstrap: BootstrapConfig,
+  #[serde(default)]
+  pub doctor: DoctorConfig,
+  #[serde(default)]
+  pub tui: TuiConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -95,6 +99,82 @@ pub struct CommandStep {
 pub struct FallbackContent {
   pub target: String,
   pub content: String,
+}
+
+/// `[doctor]` table — knobs for `gwm doctor`. Currently exposes the trunk
+/// list used by the orphan-branch check; previously this was hardcoded to
+/// `["dev", "main"]` in `doctor.rs`, which silently no-op'd the filter on
+/// any repo using a different trunk convention (`master`, `trunk`,
+/// `release-1.x`, …). Default preserves the previous behaviour.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DoctorConfig {
+  /// Trunk branches the orphan-branch check treats as "merge destinations".
+  /// A gwm-style branch fully reachable from one of these is preserved per
+  /// CONTRIBUTING.md ("never delete the source branch after merge") and is
+  /// therefore not flagged as orphan. An empty list disables the filter
+  /// entirely (every unclaimed gwm-style branch becomes orphan).
+  #[serde(default = "default_trunks")]
+  pub trunks: Vec<String>,
+}
+
+impl Default for DoctorConfig {
+  fn default() -> Self {
+    Self {
+      trunks: default_trunks(),
+    }
+  }
+}
+
+fn default_trunks() -> Vec<String> {
+  vec!["dev".into(), "main".into()]
+}
+
+/// `[tui]` table — runtime knobs for the worktree TUI. Currently exposes
+/// the safety countdown on the delete-confirm overlay (issue #30): when
+/// `delete_branch_on_remove` has been toggled ON, the modal forces the
+/// user to wait N seconds (visualised by a progress bar) before the
+/// destructive action actually fires. `0` disables the countdown and
+/// falls back to the classic single-keystroke confirm even when delete-
+/// branch is armed; the value is clamped to `5` at read time so a typo
+/// like `confirm_countdown_secs = 300` can never strand a destructive
+/// path behind a 300-second wait.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TuiConfig {
+  /// Safety countdown (in seconds) applied to the confirm overlay when
+  /// `delete_branch_on_remove` is ON. Accepts any non-negative integer;
+  /// values above [`Self::MAX_CONFIRM_COUNTDOWN_SECS`] are clamped on
+  /// read via [`Self::effective_confirm_countdown_secs`]. The field is
+  /// `u32` (rather than `u8`) so a typo like `confirm_countdown_secs = 300`
+  /// still round-trips through TOML deserialization and reaches the
+  /// clamp instead of erroring out at parse time.
+  #[serde(default = "default_confirm_countdown_secs")]
+  pub confirm_countdown_secs: u32,
+}
+
+impl Default for TuiConfig {
+  fn default() -> Self {
+    Self {
+      confirm_countdown_secs: default_confirm_countdown_secs(),
+    }
+  }
+}
+
+impl TuiConfig {
+  /// Documented range cap. Centralised so the TUI and the doctor share
+  /// the same clamp logic.
+  pub const MAX_CONFIRM_COUNTDOWN_SECS: u32 = 5;
+
+  /// Effective countdown value used by the TUI, clamped to
+  /// `[0, MAX_CONFIRM_COUNTDOWN_SECS]`. The raw field stays at the
+  /// user's value so a future doctor check can surface "your config
+  /// asked for X but we capped at 5".
+  pub fn effective_confirm_countdown_secs(&self) -> u32 {
+    self.confirm_countdown_secs.min(Self::MAX_CONFIRM_COUNTDOWN_SECS)
+  }
+}
+
+fn default_confirm_countdown_secs() -> u32 {
+  3
 }
 
 impl Config {

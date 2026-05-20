@@ -260,6 +260,8 @@ fn no_when_predicates_is_ok() {
 
 #[test]
 fn when_predicates_detail_counts_checked_predicates_not_keywords() {
+  // regression: doctor detail used SUPPORTED_WHEN_PREFIXES.len() and reported
+  // "1 predicate" regardless of the number of `when:` clauses actually checked.
   let (dir, repo) = init_repo();
   let mut config = Config::default();
   // Three commands carrying a `when:` predicate. The detail message must
@@ -288,6 +290,8 @@ fn when_predicates_detail_counts_checked_predicates_not_keywords() {
 
 #[test]
 fn when_predicates_detail_says_none_when_no_predicates_configured() {
+  // regression: same SUPPORTED_WHEN_PREFIXES.len() miscount as above, surfaced
+  // even when zero `when:` predicates were configured.
   let (dir, repo) = init_repo();
   let config = Config::default();
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
@@ -360,6 +364,9 @@ fn resolvable_command_binary_is_ok() {
 
 #[test]
 fn extract_binary_handles_shell_quoted_run_strings() {
+  // regression: `extract_binary` used `split_whitespace` and returned the
+  // leading-quoted token `"my` for `"my tool" --flag` before the shell-words
+  // migration.
   // Pre-fix, `extract_binary` used `split_whitespace` and returned `"my`
   // as the binary name for a quoted run-string like `"my tool" --flag`,
   // producing a "binary not on PATH" warning that doesn't match anything
@@ -427,19 +434,6 @@ fn base_dir_missing_but_parent_writable_is_ok() {
 // --------------------------------------------------------------------------
 // Check #5 — no prunable worktrees
 // --------------------------------------------------------------------------
-
-#[test]
-fn prunable_check_detail_uses_singular_plural_correctly() {
-  // The `entrie(s)` text from the first cut was a typo. The doctor output is
-  // user-facing, so the singular and plural forms should each be spelled
-  // out — `entry` for 1, `entries` for >1, never `entrie`.
-  let mut report = gwm::doctor::DoctorReport::new();
-  report.checks.push(gwm::doctor::Check::warning(
-    "no prunable worktrees",
-    "1 prunable entry: feat-12-old",
-  ));
-  assert!(!report.checks[0].detail.contains("entrie("));
-}
 
 #[test]
 fn fresh_repo_has_no_prunable_worktrees() {
@@ -572,6 +566,95 @@ fn non_gwm_branch_is_not_flagged_as_orphan() {
   repo.branch("dependabot/cargo/serde-1.0.200", &head, false).unwrap();
 
   let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
+  assert_eq!(c.status, CheckStatus::Ok);
+}
+
+#[test]
+fn orphan_check_honours_configured_trunks() {
+  // Repos with non-standard trunk conventions (`master`, `release-3.x`,
+  // …) must be able to opt in via `[doctor].trunks`. Pre-#59 the trunk
+  // list was hardcoded to `["dev", "main"]` and `[doctor].trunks` was
+  // silently ignored, so any repo with a different trunk saw every
+  // merged gwm-style branch flagged as "unmerged orphan".
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  let sig = git2::Signature::now("test", "test@test").unwrap();
+  let tree = head.tree().unwrap();
+
+  // Divergent commit off main's HEAD. This is what an in-flight feature
+  // branch looks like before merge.
+  let feature_oid = repo.commit(None, &sig, &sig, "feature work", &tree, &[&head]).unwrap();
+  let feature_commit = repo.find_commit(feature_oid).unwrap();
+  repo.branch("feat/#77-on-custom-trunk", &feature_commit, false).unwrap();
+
+  // `custom-trunk` carries the feature work — i.e. the gwm branch is
+  // fully merged into the configured trunk but NOT into `main`.
+  repo.branch("custom-trunk", &feature_commit, false).unwrap();
+
+  let mut config = Config::default();
+  config.doctor.trunks = vec!["custom-trunk".into()];
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan"))
+    .expect("expected an orphan-branches check");
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    !c.detail.contains("feat/#77-on-custom-trunk"),
+    "merged branch must not appear in the orphan list when its trunk is configured, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn orphan_check_with_empty_trunks_disables_merge_filter() {
+  // `trunks = []` is the documented escape hatch: report every unclaimed
+  // gwm-style branch, regardless of whether it's merged. Pre-#59 the
+  // empty config silently fell back to the hardcoded `["dev", "main"]`
+  // because the value lived in a `const`. Confirms the config value is
+  // actually wired through.
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+
+  // A gwm-style branch pointing at main's tip. With the default config
+  // this would be filtered out (equality short-circuit, merged into main).
+  repo.branch("feat/#88-merged-into-main", &head, false).unwrap();
+
+  let mut config = Config::default();
+  config.doctor.trunks = vec![];
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("orphan"))
+    .expect("expected an orphan-branches check");
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.contains("feat/#88-merged-into-main"),
+    "with no configured trunks every gwm branch must surface as orphan, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn orphan_check_ignores_configured_trunks_that_do_not_exist() {
+  // A trunk listed in config but absent from the repo must not crash
+  // the check — doctor should silently skip the missing trunk and use
+  // the rest of the list. Matches the existing tolerance for "no `dev`
+  // branch" in a fresh `gwm init` repo.
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-merged-into-main", &head, false).unwrap();
+
+  let mut config = Config::default();
+  // `phantom-trunk` doesn't exist; `main` does and reaches the gwm branch.
+  config.doctor.trunks = vec!["phantom-trunk".into(), "main".into()];
+
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
   let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
   assert_eq!(c.status, CheckStatus::Ok);

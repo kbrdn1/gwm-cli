@@ -32,6 +32,15 @@ cargo install --path .
 
 The binary lands in `~/.cargo/bin/gwm`.
 
+### via Homebrew (macOS)
+
+```bash
+brew tap kbrdn1/tap
+brew install gwm
+```
+
+The formula lives at [`kbrdn1/homebrew-tap`](https://github.com/kbrdn1/homebrew-tap) (`Formula/gwm.rb`) and is refreshed automatically on every stable release of `gwm-cli` by the `homebrew-tap-update` job in [`release.yml`](.github/workflows/release.yml). The canonical formula source lives at [`packaging/homebrew/gwm.rb.template`](packaging/homebrew/gwm.rb.template) — pre-release tags (`-rc.N`, `-alpha.N`, `-beta.N`) are filtered out so `brew install gwm` always points at a stable build.
+
 ### prebuilt binaries
 
 Releases at <https://github.com/kbrdn1/gwm-cli/releases> ship Linux (x86_64 + aarch64), macOS (Intel + Apple Silicon), and Windows binaries with `.sha256` sidecars.
@@ -72,7 +81,7 @@ Key bindings:
 | `gg`        | jump to the first worktree                                                      |
 | `G`         | jump to the last worktree                                                       |
 | `n`         | new worktree (form: type → issue → description)                                 |
-| `d`         | delete selected (confirm `y`)                                                   |
+| `d`         | delete selected (confirm `y` · countdown when `p` is armed — see below)         |
 | `b`         | re-run bootstrap on the selected worktree                                       |
 | `o`         | open the worktree dir in the OS file manager (`open` / `xdg-open` / `explorer`) |
 | `l`         | launch `lazygit -p <selected-worktree>` fullscreen; resume the TUI on exit      |
@@ -110,6 +119,21 @@ auth                         → table now shows feat-99-user-authentication onl
 
 The filter is sticky between Enter and Esc: `j` / `k` / `gg` / `G` continue to work on the filtered subset, and the table title shows `worktrees (N/M)` (visible / total). Hit `/` again to re-open the bar and refine the query. `Esc` from the list view clears the sticky filter before it considers quitting, so you can't accidentally quit when you meant to drop the filter.
 
+### confirm-overlay countdown ([#30](https://github.com/kbrdn1/gwm-cli/issues/30))
+
+The `d` confirm overlay has two modes, picked automatically based on whether `p` was pressed earlier in the session:
+
+- **Classic** (`delete branch on remove` is OFF): single keystroke. `y` / `Enter` fires the delete; `n` / `Esc` cancels. Same as the pre-#30 behaviour.
+- **Countdown** (`delete branch on remove` is ON): the overlay shows the branch about to disappear plus an `arm` step. `y` / `Enter` *arms* a safety countdown (default 3s, visualised by a progress bar); the actual delete only fires once the bar fills. `Esc` / `n` cancels at any time; pressing `y` again during the countdown disarms it without firing.
+
+The countdown duration is configurable via `[tui].confirm_countdown_secs` in `.gwm.toml`. Accepted range: `0..=5`. Setting it to `0` keeps the classic single-keystroke modal even when `delete branch on remove` is armed; values above `5` are clamped to `5` on read.
+
+```toml
+[tui]
+# 3s default. Set to 0 to disable the countdown (classic modal even when p is armed).
+confirm_countdown_secs = 3
+```
+
 ### lazygit integration
 
 Press `l` on any worktree to suspend the TUI and open [`lazygit`](https://github.com/jesseduffield/lazygit) fullscreen on that worktree (`lazygit -p <path>`). When you quit lazygit, the gwm TUI is restored exactly where you left it. If `lazygit` is not on `$PATH`, the status bar reports it without crashing.
@@ -134,8 +158,18 @@ gwm remove auth --delete-branch             # remove + drop the branch
 gwm prune                                   # clean stale .git/worktrees entries
 gwm completions zsh                         # print a zsh / bash / fish / powershell / elvish script
 gwm shell-init zsh                          # print a `gcd <pattern>` shell wrapper (one-line cd)
+gwm tmux auth                               # open the matched worktree in a new tmux window
+gwm tmux auth -p                            # ...or in a split of the current pane
+gwm zellij auth                             # same, but for zellij — new tab via `--cwd`
+gwm zellij auth -p                          # ...or in a new pane of the current tab
 gwm doctor                                  # diagnose config + env + worktree state (exit 0/1/2)
 ```
+
+### multiplexer integration (`gwm tmux` / `gwm zellij`)
+
+Inside an already-running tmux session, `gwm tmux <pattern>` shells out to `tmux new-window -n <name> -c <path>` so the new window's shell lands directly inside the matched worktree. `-p` (or `--split`) swaps the verb for `split-window` — same `-c`, current window's layout. `gwm zellij <pattern>` does the same for zellij via `zellij action new-tab --name <name> --cwd <path>` (or `new-pane --cwd` with `-p`); the `--cwd` flag on `new-tab` needs zellij ≥ 0.40.
+
+Both require the corresponding multiplexer to actually be running (i.e. `$TMUX` / `$ZELLIJ` set in the calling environment). Outside a session the command refuses with a clear error rather than spawning a stray server.
 
 ### diagnose your setup
 
@@ -182,7 +216,14 @@ Checks performed:
 
 ### one-line cd into a worktree
 
-The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that wraps `gwm cd` — `eval` it in your rc file and use `gcd <pattern>` as a one-liner:
+The binary itself cannot change the parent shell's directory. `gwm shell-init <shell>` prints a function (`gcd`) that bridges two flows in one wrapper:
+
+- **`gcd <pattern>`** → `gwm cd <pattern>` (fuzzy resolve, exits `0` on a hit, `1` on miss / ambiguous / not in a repo).
+- **`gcd`** (no argument) → `gwm switch` (interactive picker — `Enter` to commit, `Esc` / `Ctrl-C` / `q` to cancel with exit code `1`).
+
+In both cases the wrapper only performs the `cd` after a successful exit code, so a cancelled picker or a missed pattern never strands you in `$HOME`.
+
+`eval` the wrapper in your rc file:
 
 ```bash
 # zsh
@@ -201,21 +242,19 @@ Then:
 
 ```bash
 gcd auth   # → cd $(gwm cd auth) → e.g. ~/cc-worktree/myrepo/feat-99-user-authentication
-gcd        # no arg → opens `gwm switch` and cd's into the picked worktree
+gcd        # → cd $(gwm switch)  → opens the picker, cd's into the chosen worktree
 ```
-
-`gcd` propagates the exit code from `gwm cd` (or `gwm switch`, when called without args) and never attempts the `cd` if the lookup / pick failed (no match, ambiguous pattern, cancelled picker, not in a git repo).
 
 ### interactive picker (`gwm switch`)
 
 When you can't remember the exact pattern, `gwm switch` opens the worktree TUI in picker mode — same table, fuzzy filter bar pre-open, create / delete / bootstrap disabled. `Enter` confirms the highlighted row and prints its path on stdout; `Esc` / `q` / `Ctrl-C` cancels with exit code `1`.
 
+The recommended invocation is via the `gcd` wrapper from [one-line cd into a worktree](#one-line-cd-into-a-worktree) — bare `gcd` (no argument) routes to `gwm switch` and cd's into the chosen worktree in one keystroke. If you haven't installed the wrapper, the raw form is:
+
 ```bash
 cd "$(gwm switch)"   # open picker, type to narrow, Enter to commit
 gwm s                # same, via the alias
 ```
-
-The shell wrapper installed by `gwm shell-init` makes this even quicker: bare `gcd` (no argument) invokes `gwm switch` and cd's into the chosen worktree in one keystroke.
 
 ### shell completions
 
@@ -350,13 +389,13 @@ Available placeholders: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`. Tilde
 | multi-repo portability              | per-project script   | one binary, per-repo config      |
 | TUI                                 | linear bash menu     | full ratatui screen              |
 | anti-RDS guard                      | hardcoded            | configurable regex deny-list     |
-| tests                               | none                 | 140 tests (config / naming / bootstrap / worktree / TUI / CLI) |
+| tests                               | none                 | 190 tests (config / naming / bootstrap / doctor / flake / worktree / TUI / CLI) |
 
 ## development
 
 ```bash
 cargo build              # debug build
-cargo test               # 140 tests
+cargo test               # 190 tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
@@ -376,10 +415,18 @@ tests/
 ├── config_tests.rs               # .gwm.toml parsing + write_default
 ├── naming_tests.rs               # kebab, branch validation, parse roundtrip
 ├── bootstrap_tests.rs            # copies / guards / no-symlink / commands
+├── bootstrap_when_tests.rs       # `when:` predicate grammar (file/cmd/env/glob + boolean ops)
+├── doctor_tests.rs               # `gwm doctor` checks + severity arithmetic
+├── flake_tests.rs                # Nix flake structure (build, devShell, app)
 ├── worktree_integration.rs       # git2 add/list/remove/prune
 ├── tui_app_tests.rs              # state transitions (ratatui-free)
 └── cli_binary.rs                 # assert_cmd end-to-end
 ```
+
+Sentinel tests (pinned to catch a specific regression) are prefixed with a
+`// regression: <one-line>` tag inside the test body so the target incident
+is discoverable without `git blame`. Suite hygiene was last audited in
+[`claudedocs/test-audit-0.4.0.md`](claudedocs/test-audit-0.4.0.md).
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the branch / commit / PR conventions.
 

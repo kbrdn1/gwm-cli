@@ -86,6 +86,44 @@ cargo install --path .   # install gwm into ~/.cargo/bin
 - **Linter**: `cargo clippy -- -D warnings`.
 - Run `cargo fmt && cargo clippy` before opening a PR.
 
+### Local hooks (recommended, opt-in)
+
+A POSIX `pre-commit` script lives under [`.githooks/`](.githooks/). It is **not installed automatically** — opt in with:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Once enabled, two gates run on every `git commit`:
+
+1. **Env-dependent test pre-validation.** If staged `tests/*.rs` hunks reference ambient state (`assert_cmd`, `std::env::var`, `which::which`, `dirs::`, `Command::cargo_bin`), the hook re-runs the suite under a stripped PATH:
+
+   ```bash
+   PATH="$(dirname "$(command -v cargo)"):/usr/bin:/bin" cargo test
+   ```
+
+   This catches tests that pass in your rich dev shell but fail on a minimal CI runner — the lesson from PR #43 (three CI round-trips before the suite went green).
+
+2. **Local `gwm doctor`.** If staged paths touch `.gwm.toml`, `src/bootstrap.rs`, `src/doctor.rs`, `examples/gwm.toml.example`, or `tests/{bootstrap,doctor}*`, the hook runs `gwm doctor`. Exit codes follow the doctor contract:
+
+   | Exit | Meaning  | Commit behaviour          |
+   |:-----|:---------|:--------------------------|
+   | `0`  | Clean    | proceeds silently         |
+   | `1`  | Warnings | proceeds with advisory    |
+   | `2`  | Errors   | **blocked** until resolved |
+
+   If `gwm` is not on `PATH`, the gate prints a skip notice and the commit proceeds — the CI `doctor` job is the safety net.
+
+Both gates short-circuit in O(1) when no staged paths match — contributors who never touch tests or config pay nothing per commit.
+
+**Bypass** for a single commit you know is safe:
+
+```bash
+git commit --no-verify
+```
+
+CI runs `shellcheck` against the hook and a smoke test on every PR — see the `hook-smoke` job in [`ci.yml`](.github/workflows/ci.yml) — so a broken hook is caught before it reaches you.
+
 ## Testing
 
 ```bash
@@ -239,26 +277,44 @@ Versioning is SemVer (`MAJOR.MINOR.PATCH`), with `-rc.N` / `-alpha.N` / `-beta.N
 - `PATCH` → bug fix
 - `-rc.N` / `-alpha.N` / `-beta.N` → release candidate / alpha / beta cut from `dev` before promotion to `main`
 
+### Step 0 — Reconcile open PRs (applies to every tag)
+
+Before any RC or stable cut, run:
+
+```bash
+gh pr list --state open
+```
+
+Every open PR must be in exactly one of these buckets:
+
+- **In the changeset** — merged into the source branch (`dev` for RCs / stables, `main` for hotfixes) before tagging.
+- **Intentionally deferred** — won't make this release, will land in a later one. Note why in the release notes if it was a known candidate.
+- **Closed as stale** — superseded, obsolete, or duplicate. Close with a one-line comment pointing at the supersession.
+
+Skipping this step caused the v0.3.0 cut to ship without three queued feature PRs (#51, #52, #53). Recovery required an immediate v0.4.0 promotion 38 minutes later. **Two minutes upfront beats a follow-up release.**
+
 ### Pre-release (from `dev`)
 
 When `dev` is ready to be exercised by early adopters before promotion:
 
-1. Stay on `dev` (do not merge to `main` yet).
-2. Write per-RC notes in a new file `changelogs/pre-releases/<version>-rc.N.md` — heading `# [<version>-rc.N] - YYYY-MM-DD`, body describing only the **delta** against the previous RC (or against the previous stable, for `rc.1`). One file per RC, not a running log. (See [`changelogs/pre-releases/0.3.0-rc.2.md`](changelogs/pre-releases/0.3.0-rc.2.md) for the expected layout.)
-3. Add the entry to `CHANGELOG.md`'s `## Past releases > ### Pre-releases` index.
-4. Tag: `git tag -a v0.x.y-rc.N -m "v0.x.y-rc.N" && git push --tags`.
-5. GitHub Actions (`pre-release.yml`) builds binaries and publishes a **prerelease** (5 targets — Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64). The release body is populated from the per-RC file via `--notes-file changelogs/pre-releases/<version>-rc.N.md` (run `gh release edit <tag> --notes-file <path>` after the workflow if you need to refresh it).
-6. Iterate: subsequent candidates are `v0.x.y-rc.2`, `v0.x.y-rc.3`, …
+1. **Step 0 first** — see above.
+2. Stay on `dev` (do not merge to `main` yet).
+3. Write per-RC notes in a new file `changelogs/pre-releases/<version>-rc.N.md` — heading `# [<version>-rc.N] - YYYY-MM-DD`, body describing only the **delta** against the previous RC (or against the previous stable, for `rc.1`). One file per RC, not a running log. (See [`changelogs/pre-releases/0.3.0-rc.2.md`](changelogs/pre-releases/0.3.0-rc.2.md) for the expected layout.)
+4. Add the entry to `CHANGELOG.md`'s `## Past releases > ### Pre-releases` index.
+5. Tag: `git tag -a v0.x.y-rc.N -m "v0.x.y-rc.N" && git push --tags`.
+6. GitHub Actions (`pre-release.yml`) builds binaries and publishes a **prerelease** (5 targets — Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64). The release body is populated from the per-RC file via `--notes-file changelogs/pre-releases/<version>-rc.N.md` (run `gh release edit <tag> --notes-file <path>` after the workflow if you need to refresh it).
+7. Iterate: subsequent candidates are `v0.x.y-rc.2`, `v0.x.y-rc.3`, …
 
 ### Stable release (from `main`)
 
 Once the rc is validated and promoted to `main`:
 
-1. Update `Cargo.toml` `version`.
-2. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
-3. Merge `dev` → `main` (regular merge, never squash; see [Merge strategy](#merge-strategy)).
-4. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
-5. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
+1. **Step 0 first** — see above.
+2. Update `Cargo.toml` `version`.
+3. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
+4. Merge `dev` → `main` (regular merge, never squash; see [Merge strategy](#merge-strategy)).
+5. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
+6. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
 
 Triggering matrix:
 
@@ -268,6 +324,36 @@ Triggering matrix:
 | `v0.x.y-rc.N`            | `pre-release.yml`| `true`            |
 | `v0.x.y-alpha.N`         | `pre-release.yml`| `true`            |
 | `v0.x.y-beta.N`          | `pre-release.yml`| `true`            |
+
+### Homebrew tap (`brew install kbrdn1/tap/gwm`)
+
+Stable releases automatically refresh [`kbrdn1/homebrew-tap`](https://github.com/kbrdn1/homebrew-tap) (`Formula/gwm.rb`) via the `homebrew-tap-update` job in [`release.yml`](.github/workflows/release.yml). Pre-releases (`-rc.N` / `-alpha.N` / `-beta.N`) are filtered out so `brew install gwm` always tracks the latest stable.
+
+The canonical formula source lives at [`packaging/homebrew/gwm.rb.template`](packaging/homebrew/gwm.rb.template). Edits to the template (new shell completion call, license bump, extra `test do` block) flow to the tap on the next stable release — no manual sync needed.
+
+#### One-time bootstrap (maintainer)
+
+The job needs a fine-grained personal access token (PAT) with `contents: write` scoped to the tap repo. Create it once:
+
+1. Generate a PAT at <https://github.com/settings/personal-access-tokens/new>:
+   - **Resource owner**: your user (or the org owning `homebrew-tap`).
+   - **Repository access**: select `kbrdn1/homebrew-tap` only.
+   - **Permissions**: Contents → **Read and write**. Nothing else.
+   - **Expiration**: ≥ 1 year (set a calendar reminder to rotate).
+2. Add it as a secret on the `gwm-cli` repo:
+   - <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>
+   - Name: `HOMEBREW_TAP_TOKEN`. Value: the PAT.
+3. Flip `continue-on-error: true` to `false` on the `homebrew-tap-update` job in [`release.yml`](.github/workflows/release.yml) after the first successful sync — failures should then block the workflow loudly.
+
+#### Re-running after a failed sync
+
+If the job failed (typically: PAT missing or expired) after the GitHub release already shipped, re-drive the tap refresh without re-tagging:
+
+```bash
+gh workflow run release.yml --ref <tag>   # e.g. v0.5.0
+```
+
+The `workflow_dispatch` path is gated to the same stable-only condition; rc/alpha/beta will skip the tap step automatically.
 
 ---
 

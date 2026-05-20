@@ -2,6 +2,9 @@ use crate::bootstrap::{self, BootstrapCtx, StepStatus};
 use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
+use crate::multiplexer::{
+  build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
+};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -112,9 +115,37 @@ pub enum Command {
   /// away. Press Enter to commit the highlighted pick; Esc / Ctrl-C / `q`
   /// quits without printing anything (exit code 1).
   ///
-  /// Daily usage:  cd "$(gwm switch)"   (or `gwm s`, the alias).
+  /// Typically invoked via `gcd` (no arg) from the bundled `gwm shell-init`
+  /// wrapper, which cd's into the picked worktree in one keystroke. The raw
+  /// form is `cd "$(gwm switch)"` (or `gwm s`, the alias).
   #[command(visible_alias = "s")]
   Switch,
+  /// Open the matched worktree in a new tmux window (current session).
+  ///
+  /// Requires `$TMUX` to be set — i.e. gwm must be invoked from inside an
+  /// existing tmux session. Outside a tmux session the command exits
+  /// non-zero with a clear error rather than spawning a stray server.
+  /// Use `--split` to open in a horizontal split of the current pane
+  /// instead of a new window.
+  Tmux {
+    /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
+    pattern: String,
+    /// Split the current pane instead of opening a new window.
+    #[arg(short = 'p', long = "split")]
+    split: bool,
+  },
+  /// Open the matched worktree in a new zellij tab (current session).
+  ///
+  /// Requires `$ZELLIJ` to be set. `--cwd` on `zellij action new-tab`
+  /// needs zellij ≥ 0.40. Use `--split` to open in a new pane of the
+  /// current tab instead of a new tab.
+  Zellij {
+    /// Fuzzy worktree name pattern (same matcher as `gwm path / remove`).
+    pattern: String,
+    /// Split the current tab into a new pane instead of opening a new tab.
+    #[arg(short = 'p', long = "split")]
+    split: bool,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -141,6 +172,8 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
     Command::Switch => cmd_switch(),
+    Command::Tmux { pattern, split } => cmd_multiplexer(Multiplexer::Tmux, pattern, split),
+    Command::Zellij { pattern, split } => cmd_multiplexer(Multiplexer::Zellij, pattern, split),
   }
 }
 
@@ -401,6 +434,79 @@ fn cmd_switch() -> Result<()> {
   }
 }
 
+/// `gwm tmux <pattern>` / `gwm zellij <pattern>` — open the matched
+/// worktree in a new window/tab (or split with `--split`). The handler
+/// is shared between the two multiplexers because the only difference
+/// is the argv shape, already encoded in `multiplexer::build_*_command`.
+///
+/// Error contract (ordered, first match wins):
+///   1. Not inside a git repo → `NotInGitRepo`.
+///   2. Multiplexer not running → `Other("<bin> session not running …")`.
+///   3. Worktree pattern doesn't match → `WorktreeNotFound`.
+///   4. Spawn or non-zero exit from the multiplexer → `CommandFailed`.
+///
+/// Ordering #1 before #2 matches `gwm cd` / `gwm switch`: the repo gate
+/// is the more fundamental problem, so we surface it first.
+fn cmd_multiplexer(mux: Multiplexer, pattern: String, split: bool) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+
+  let env_name = match mux {
+    Multiplexer::Tmux => "TMUX",
+    Multiplexer::Zellij => "ZELLIJ",
+  };
+  let env_value = std::env::var(env_name).ok();
+  let running = match mux {
+    Multiplexer::Tmux => detect_tmux(env_value),
+    Multiplexer::Zellij => detect_zellij(env_value),
+  };
+  if !running {
+    // `${env_name}` renders bare in stderr (not shell source, so no
+    // backslash escaping). Pre-fix this read `\\${env_name}` and
+    // surfaced `\$TMUX` to the user — caught at PR #65 review.
+    return Err(GwmError::Other(format!(
+      "{0} session not running (${1} unset) — run `gwm {0} <pattern>` from inside a {0} session",
+      mux.binary(),
+      env_name,
+    )));
+  }
+
+  let found = worktree::find_fuzzy(&repo, &pattern)?;
+  let mode = if split { SpawnMode::Split } else { SpawnMode::Window };
+  let argv = match mux {
+    Multiplexer::Tmux => build_tmux_command(&found.name, &found.path, mode),
+    Multiplexer::Zellij => build_zellij_command(&found.name, &found.path, mode),
+  };
+  spawn_multiplexer(mux, &argv)
+}
+
+/// Spawn the multiplexer command and surface its exit status. argv[0] is
+/// the binary; argv[1..] are the args. Matches `tui::mod::run_lazygit`
+/// in shape — `.status()` so the user sees the child's own stderr live
+/// instead of swallowing it into a buffered `CommandFailed`.
+fn spawn_multiplexer(mux: Multiplexer, argv: &[String]) -> Result<()> {
+  let (bin, rest) = argv.split_first().ok_or_else(|| {
+    GwmError::Other(format!(
+      "empty argv for {} spawn (build_*_command returned [])",
+      mux.binary()
+    ))
+  })?;
+  // The data string already names the binary (`tmux` / `zellij`), so
+  // the rendered message reads `command failed: tmux exited with
+  // status Some(1)` — attributable to the verb the user typed.
+  let status = std::process::Command::new(bin)
+    .args(rest)
+    .status()
+    .map_err(|e| GwmError::CommandFailed(format!("could not spawn {}: {}", bin, e)))?;
+  if !status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "{} exited with status {:?}",
+      bin,
+      status.code()
+    )));
+  }
+  Ok(())
+}
+
 pub fn shell_init_script(shell: InitShell) -> &'static str {
   match shell {
     InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
@@ -411,6 +517,11 @@ pub fn shell_init_script(shell: InitShell) -> &'static str {
 
 const POSIX_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: eval "$(gwm shell-init bash)"   # or zsh
+#
+# Two paths:
+#   gcd <pattern>        # fuzzy resolve via `gwm cd <pattern>`, then cd
+#   gcd                  # no arg → opens the interactive picker via `gwm switch`, then cd
+#
 # Note: the `function name { ... }` form (zsh/bash-extended) is used instead
 # of the parenthesised POSIX form so the parser does not error out with
 # `defining function based on alias 'gcd'` when zsh already has a `gcd`
@@ -433,6 +544,10 @@ unalias gcd 2>/dev/null || true
 
 const FISH_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: gwm shell-init fish | source   # then persist in ~/.config/fish/config.fish
+#
+# Two paths:
+#   gcd <pattern>        # fuzzy resolve via `gwm cd <pattern>`, then cd
+#   gcd                  # no arg → opens the interactive picker via `gwm switch`, then cd
 function gcd --description 'cd into a gwm worktree (no arg = interactive picker)'
   set -l target
   if test (count $argv) -eq 0
@@ -452,6 +567,11 @@ end
 
 const POWERSHELL_SHELL_INIT: &str = r#"# gwm shell helper — wraps `gwm cd` / `gwm switch` so the parent shell can cd.
 # Install: Invoke-Expression (& gwm shell-init powershell | Out-String)
+#
+# Two paths:
+#   gcd <pattern>        # fuzzy resolve via `gwm cd <pattern>`, then Set-Location
+#   gcd                  # no arg → opens the interactive picker via `gwm switch`, then Set-Location
+#
 # Note: this clears any prior `gcd` alias so the function takes effect.
 Remove-Alias -Name gcd -Force -ErrorAction SilentlyContinue
 function gcd {

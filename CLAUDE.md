@@ -63,6 +63,13 @@ exception; codify the manual test as an integration test.
 
 ## Other house rules
 
+- **Reconcile open PRs before any tag.** Before cutting an RC or a
+  stable, run `gh pr list --state open` and account for every open
+  PR: either it's in the changeset, intentionally deferred, or
+  closed as stale. The v0.3.0 stable shipped without three queued
+  feature PRs (#51, #52, #53) because this check was skipped —
+  forced an immediate v0.4.0 promotion 38 minutes later. Two
+  minutes upfront beats a rushed follow-up release.
 - **Pre-validate environment-dependent tests.** Any test that reads
   `$PATH`, the user's home directory, or other ambient state must be
   pre-validated locally against a stripped environment before the test
