@@ -1534,3 +1534,117 @@ fn tilde_compress_falls_back_when_path_outside_home() {
   // Sibling directory starting with the same letters → no match.
   assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
 }
+
+// ---- Issue / PR summary line width budgeting ----------------------------
+
+use gwm::tui::{issue_summary_line, pr_summary_line};
+
+fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
+  line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+#[test]
+fn issue_summary_line_truncates_loaded_state_to_budget() {
+  // Regression: with a 48-column sidebar, a fully-loaded issue line was
+  // `#67 (auto) [open] <40-char title>` ≈ 58 chars, overflowing the
+  // Issue/PR block and forcing ratatui's `Wrap` to push the title onto a
+  // second visual row that the layout's `Constraint::Length` didn't
+  // budget for. The Loaded variant must keep the head + badge prefix
+  // intact and trim the title so the total ≤ max_width.
+  let status = gwm::github::IssueStatus {
+    number: 828,
+    title:
+      "Stats: subscriptions distribution across schools and individual customers (very long title to force truncation)"
+        .into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    828,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    30,
+  );
+  let width = line_visible_width(&line);
+  assert!(
+    width <= 30,
+    "loaded issue line must fit in 30 cols, got {}: {:?}",
+    width,
+    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+  );
+  // Ellipsis confirms the title was actually trimmed (not just clipped).
+  let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(joined.ends_with('…'), "expected trailing ellipsis: {}", joined);
+}
+
+#[test]
+fn pr_summary_line_truncates_loaded_state_to_budget() {
+  let status = gwm::github::PrStatus {
+    number: 70,
+    title: "feat(tui): redesign Details sidebar with bordered subsections and four cards".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 3,
+    checks_total: 3,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    70,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    35,
+  );
+  let width = line_visible_width(&line);
+  assert!(
+    width <= 35,
+    "loaded PR line must fit in 35 cols, got {}: {:?}",
+    width,
+    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn issue_summary_line_keeps_short_title_intact() {
+  // Sanity: budget large enough → no truncation, no spurious ellipsis.
+  let status = gwm::github::IssueStatus {
+    number: 1,
+    title: "short".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    1,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+  );
+  let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains("short"),
+    "short title must not be truncated: {}",
+    joined
+  );
+  assert!(
+    !joined.contains('…'),
+    "no ellipsis when budget exceeds content: {}",
+    joined
+  );
+}
+
+#[test]
+fn issue_summary_line_truncates_error_state_to_budget() {
+  let line = issue_summary_line(
+    42,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Error(
+      "gh: API rate limit exceeded for user, retry after 60s with exponential backoff please".into(),
+    ),
+    30,
+  );
+  let width = line_visible_width(&line);
+  assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
+}

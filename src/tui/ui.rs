@@ -231,7 +231,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       recent_commits: vec![],
     },
   };
-  let issue_pr_lines = github_status_lines(app);
+  // Inner width = block area − 2 border columns − 1 leading-padding column
+  // (applied by `render_section`). Summary lines trim their variable parts
+  // (title / error blob) so the total visible width fits — without this,
+  // long PR titles would either overflow the block right border or be
+  // wrapped onto a second visual row that the `Constraint::Length` below
+  // never budgeted for, breaking the layout.
+  let issue_pr_inner_width = area.width.saturating_sub(3) as usize;
+  let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
 
   // Per-section block height = content rows + 2 border lines. Fixed for
   // the small sections (worktree / issue-PR / working-tree); Recent
@@ -981,29 +988,37 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 
 /// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)
 /// is supplied by [`draw_sidebar`] via the surrounding `Block`, so this
-/// function only returns the content rows.
-pub(super) fn github_status_lines(app: &App) -> Vec<Line<'static>> {
+/// function only returns the content rows. `max_width` is the inner
+/// width of the Issue / PR block (chunk width minus 2 borders and the
+/// 1-char left padding applied by [`render_section`]); summary lines
+/// trim their variable parts so total visible width ≤ `max_width`.
+pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   let link = app.current_link();
   let mut lines: Vec<Line<'static>> = Vec::new();
 
   if link.issue.is_none() && link.pr.is_none() {
     lines.push(Line::from(Span::styled(
-      "no link · press L to link".to_string(),
+      trunc("no link · press L to link", max_width),
       Style::default().fg(Color::DarkGray),
     )));
     return lines;
   }
 
   if let Some(n) = link.issue {
-    lines.push(issue_summary_line(n, link.issue_source, app.issue_fetch_state()));
+    lines.push(issue_summary_line(
+      n,
+      link.issue_source,
+      app.issue_fetch_state(),
+      max_width,
+    ));
   }
   if let Some(n) = link.pr {
-    lines.push(pr_summary_line(n, link.pr_source, app.pr_fetch_state()));
+    lines.push(pr_summary_line(n, link.pr_source, app.pr_fetch_state(), max_width));
   }
   if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
   {
     lines.push(Line::from(Span::styled(
-      "press R to fetch status".to_string(),
+      trunc("press R to fetch status", max_width),
       Style::default().fg(Color::DarkGray),
     )));
   }
@@ -1018,11 +1033,21 @@ fn source_marker(s: LinkSource) -> &'static str {
   }
 }
 
-fn issue_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::github::IssueStatus>) -> Line<'static> {
+/// Render the Loaded / Idle / Loading / Error variants for an issue link
+/// row in the sidebar. `max_width` is the number of columns the line is
+/// allowed to occupy (sidebar inner width minus padding); the variable
+/// part (title or error blob) is trimmed so the total visible width
+/// stays ≤ `max_width`. Fixed elements (head, badge) are preserved.
+pub fn issue_summary_line(
+  n: u64,
+  src: LinkSource,
+  state: &GitHubFetchState<crate::github::IssueStatus>,
+  max_width: usize,
+) -> Line<'static> {
   let head = format!("Issue #{}{}", n, source_marker(src));
   match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(head, Style::default().fg(Color::White))),
-    GitHubFetchState::Loading => Line::from(format!("{} …loading", head)),
+    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
+    GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
       let badge_color = match s.state {
         IssueState::Open => Color::Green,
@@ -1032,6 +1057,18 @@ fn issue_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::g
         IssueState::Open => "open",
         IssueState::Closed => "closed",
       };
+      // Fixed prefix = "<head> [<badge>] " — try to preserve in full and
+      // trim the title to whatever budget remains. If the prefix alone
+      // already exceeds the width budget (very narrow sidebar), fall
+      // back to flattening the line into a single styled string and
+      // truncating it — preserves no badge color but stays inside the
+      // block.
+      let fixed = head.chars().count() + 4 + badge.chars().count(); // " [" + badge + "] "
+      if fixed >= max_width {
+        let raw = format!("{} [{}] {}", head, badge, s.title);
+        return Line::from(trunc(&raw, max_width));
+      }
+      let budget = max_width - fixed;
       Line::from(vec![
         Span::styled(head, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" ["),
@@ -1040,22 +1077,35 @@ fn issue_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::g
           Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("] "),
-        Span::raw(trunc(&s.title, 40)),
+        Span::raw(trunc(&s.title, budget)),
       ])
     }
-    GitHubFetchState::Error(e) => Line::from(vec![
-      Span::styled(head, Style::default().fg(Color::White)),
-      Span::raw(" "),
-      Span::styled(format!("!{}", trunc(e, 30)), Style::default().fg(Color::Red)),
-    ]),
+    GitHubFetchState::Error(e) => {
+      let fixed = head.chars().count() + 2; // " " + "!"
+      let budget = max_width.saturating_sub(fixed);
+      Line::from(vec![
+        Span::styled(head, Style::default().fg(Color::White)),
+        Span::raw(" "),
+        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(Color::Red)),
+      ])
+    }
   }
 }
 
-fn pr_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::github::PrStatus>) -> Line<'static> {
+/// Render the Loaded / Idle / Loading / Error variants for a PR link
+/// row in the sidebar. See [`issue_summary_line`] for the `max_width`
+/// contract — same idea, with a `checks N/M` segment squeezed in between
+/// badge and title when the rollup is non-zero.
+pub fn pr_summary_line(
+  n: u64,
+  src: LinkSource,
+  state: &GitHubFetchState<crate::github::PrStatus>,
+  max_width: usize,
+) -> Line<'static> {
   let head = format!("PR    #{}{}", n, source_marker(src));
   match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(head, Style::default().fg(Color::White))),
-    GitHubFetchState::Loading => Line::from(format!("{} …loading", head)),
+    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
+    GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
       let (badge, badge_color) = match s.state {
         PrState::Open => ("open", Color::Green),
@@ -1068,6 +1118,14 @@ fn pr_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::gith
       } else {
         String::new()
       };
+      let fixed = head.chars().count() + 3 + badge.chars().count() + checks.chars().count() + 1; // " [" + badge + "]" + checks + " "
+      if fixed >= max_width {
+        // Very narrow sidebar — fall back to a single truncated string.
+        // Drops the badge color but keeps the line inside the block.
+        let raw = format!("{} [{}]{} {}", head, badge, checks, s.title);
+        return Line::from(trunc(&raw, max_width));
+      }
+      let budget = max_width - fixed;
       Line::from(vec![
         Span::styled(head, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
         Span::raw(" ["),
@@ -1078,13 +1136,17 @@ fn pr_summary_line(n: u64, src: LinkSource, state: &GitHubFetchState<crate::gith
         Span::raw("]"),
         Span::raw(checks),
         Span::raw(" "),
-        Span::raw(trunc(&s.title, 36)),
+        Span::raw(trunc(&s.title, budget)),
       ])
     }
-    GitHubFetchState::Error(e) => Line::from(vec![
-      Span::styled(head, Style::default().fg(Color::White)),
-      Span::raw(" "),
-      Span::styled(format!("!{}", trunc(e, 30)), Style::default().fg(Color::Red)),
-    ]),
+    GitHubFetchState::Error(e) => {
+      let fixed = head.chars().count() + 2; // " " + "!"
+      let budget = max_width.saturating_sub(fixed);
+      Line::from(vec![
+        Span::styled(head, Style::default().fg(Color::White)),
+        Span::raw(" "),
+        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(Color::Red)),
+      ])
+    }
   }
 }
