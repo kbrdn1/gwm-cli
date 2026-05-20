@@ -12,7 +12,9 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
+pub use app::{
+  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, View,
+};
 pub use ui::filled_cells_for_progress;
 
 pub fn run() -> Result<()> {
@@ -165,6 +167,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           KeyCode::Char('b') if !app.picker_mode => app.bootstrap_selected(),
           KeyCode::Char('p') if !app.picker_mode => app.toggle_delete_branch(),
           KeyCode::Char('o') => app.open_selected_in_finder(),
+          // Issue/PR linking (issue #67).
+          KeyCode::Char('O') if !app.picker_mode => app.enter_open_menu(),
+          KeyCode::Char('L') if !app.picker_mode => app.enter_link_prompt(),
+          KeyCode::Char('R') if !app.picker_mode => app.refresh_github_status(),
           KeyCode::Enter => {
             if app.picker_mode {
               app.picker_confirm();
@@ -219,6 +225,33 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         }
         _ => {}
       },
+      View::OpenMenu => match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.exit_open_menu(),
+        KeyCode::Char('i') => {
+          if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
+            open_url(&url, &mut app);
+          }
+        }
+        KeyCode::Char('p') => {
+          if let Some(url) = app.open_menu_pick(LinkTarget::Pr) {
+            open_url(&url, &mut app);
+          }
+        }
+        _ => {}
+      },
+      View::LinkPrompt => match (app.link_prompt_stage(), key.code) {
+        (_, KeyCode::Esc) => app.link_prompt_cancel(),
+        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => app.link_prompt_choose(LinkTarget::Issue),
+        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => app.link_prompt_choose(LinkTarget::Pr),
+        (app::LinkPromptStage::InputNumber, KeyCode::Enter) => {
+          if let Err(e) = app.link_prompt_submit() {
+            app.status = format!("link failed: {}", e);
+          }
+        }
+        (app::LinkPromptStage::InputNumber, KeyCode::Char(c)) => app.link_prompt_push_char(c),
+        (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
+        _ => {}
+      },
     }
 
     // Picker contract (Copilot PR #53): only break when the App has
@@ -258,4 +291,20 @@ fn run_lazygit(
     Err(e) => app.status = format!("failed to launch lazygit: {}", e),
   }
   Ok(())
+}
+
+/// Spawn the OS opener for `url` (used by the OpenMenu key handler).
+/// Failures land in the status bar — we never propagate up.
+fn open_url(url: &str, app: &mut App) {
+  let opener = if cfg!(target_os = "macos") {
+    "open"
+  } else if cfg!(target_os = "windows") {
+    "explorer"
+  } else {
+    "xdg-open"
+  };
+  match std::process::Command::new(opener).arg(url).spawn() {
+    Ok(_) => app.status = format!("opened {}", url),
+    Err(e) => app.status = format!("failed to open {}: {}", url, e),
+  }
 }

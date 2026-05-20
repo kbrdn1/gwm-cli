@@ -163,7 +163,29 @@ gwm tmux auth -p                            # ...or in a split of the current pa
 gwm zellij auth                             # same, but for zellij — new tab via `--cwd`
 gwm zellij auth -p                          # ...or in a new pane of the current tab
 gwm doctor                                  # diagnose config + env + worktree state (exit 0/1/2)
+gwm link issue 42                           # link an issue to the current worktree
+gwm link pr 61                              # link a PR
+gwm unlink issue                            # remove the issue link (auto-detect resurfaces)
+gwm open issue                              # open the linked issue in the browser
+gwm open pr --print-url                     # print the URL on stdout instead of spawning
+gwm status                                  # show link + live state via `gh`
+gwm status --json                           # machine-readable JSON of the status
 ```
+
+### Issue / PR linking ([#67](https://github.com/kbrdn1/gwm-cli/issues/67))
+
+Every worktree can be linked to a GitHub issue and / or pull request:
+
+- Branches following `<type>/#<N>-<slug>` are auto-linked to issue `#N` — zero setup.
+- Explicit overrides land in `git config branch.<name>.gwm-issue` / `gwm-pr` (local, per-branch, no extra file).
+- `gwm status` shells out to `gh issue view` / `gh pr view` to fetch the live state, title, labels, and CI rollup. Without `gh` (or outside a GitHub remote), only the local link is shown.
+
+In the TUI:
+
+- `O` — open menu (`i` open issue, `p` open PR) in the browser.
+- `L` — link prompt (`i` issue, `p` pr, then type the number).
+- `R` — refresh the GitHub status (synchronous fetch).
+- The right details panel renders a live block: `Issue #42 [open] TUI: fuzzy search` / `PR #61 [draft] · checks 2/3`.
 
 ### multiplexer integration (`gwm tmux` / `gwm zellij`)
 
