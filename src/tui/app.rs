@@ -860,7 +860,43 @@ impl App {
       let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
       self.apply_pr_fetch_result(r);
     }
-    self.status = "github status refreshed".into();
+    self.report_github_refresh_status();
+  }
+
+  /// Compute the post-refresh status line message based on the actual
+  /// outcome of the issue / PR fetches. PR #68 Copilot review caught
+  /// that always printing "refreshed" misled users when one of the
+  /// fetches had failed.
+  pub fn report_github_refresh_status(&mut self) {
+    let issue_err = matches!(self.issue_state, GitHubFetchState::Error(_));
+    let pr_err = matches!(self.pr_state, GitHubFetchState::Error(_));
+    self.status = match (issue_err, pr_err) {
+      (false, false) => "github status refreshed".into(),
+      (true, false) => format!(
+        "issue fetch failed: {}",
+        self.issue_error_message().unwrap_or("?".into())
+      ),
+      (false, true) => format!("pr fetch failed: {}", self.pr_error_message().unwrap_or("?".into())),
+      (true, true) => format!(
+        "issue + pr fetch failed — issue: {} · pr: {}",
+        self.issue_error_message().unwrap_or("?".into()),
+        self.pr_error_message().unwrap_or("?".into())
+      ),
+    };
+  }
+
+  fn issue_error_message(&self) -> Option<String> {
+    match &self.issue_state {
+      GitHubFetchState::Error(e) => Some(e.clone()),
+      _ => None,
+    }
+  }
+
+  fn pr_error_message(&self) -> Option<String> {
+    match &self.pr_state {
+      GitHubFetchState::Error(e) => Some(e.clone()),
+      _ => None,
+    }
   }
 
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {

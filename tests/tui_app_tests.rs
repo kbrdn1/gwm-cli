@@ -1249,3 +1249,57 @@ fn refresh_worktrees_resets_fetch_state() {
   app.refresh().unwrap();
   assert!(matches!(app.pr_fetch_state(), GitHubFetchState::Idle));
 }
+
+#[test]
+fn refresh_github_status_message_reflects_partial_failure() {
+  // PR #68 Copilot review: when one of the fetches fails the status line
+  // must not claim "refreshed" — the user should see something hinting
+  // the refresh was incomplete.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // Simulate the result of a refresh where the issue fetch failed but
+  // (for the sake of this test) the PR fetch went through. Apply the
+  // failure directly — we can't shell out to `gh` in unit tests.
+  app.apply_issue_fetch_result(Err("gh: connection refused".into()));
+  let pr = gwm::github::PrStatus {
+    number: 1,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: "https://example.test/pr".into(),
+    updated_at: "".into(),
+    checks_passed: 0,
+    checks_total: 0,
+  };
+  app.apply_pr_fetch_result(Ok(pr));
+  // Now call the same status-rendering logic the refresh would have run.
+  app.report_github_refresh_status();
+  assert!(
+    !app.status.contains("refreshed"),
+    "status must not claim 'refreshed' on partial failure: {}",
+    app.status
+  );
+  assert!(
+    app.status.to_lowercase().contains("error") || app.status.to_lowercase().contains("fail"),
+    "status should mention failure: {}",
+    app.status
+  );
+}
+
+#[test]
+fn refresh_github_status_message_celebrates_full_success() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let issue = gwm::github::IssueStatus {
+    number: 42,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: "https://example.test".into(),
+    labels: vec![],
+    updated_at: "".into(),
+  };
+  app.apply_issue_fetch_result(Ok(issue));
+  app.report_github_refresh_status();
+  assert!(
+    app.status.to_lowercase().contains("refreshed") || app.status.to_lowercase().contains("ok"),
+    "all-green refresh should signal success: {}",
+    app.status
+  );
+}
