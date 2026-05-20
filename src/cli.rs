@@ -2,6 +2,7 @@ use crate::bootstrap::{self, BootstrapCtx, StepStatus};
 use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
+use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
@@ -9,6 +10,7 @@ use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
+use git2::Repository;
 use std::io;
 use std::path::PathBuf;
 
@@ -33,6 +35,15 @@ pub enum InitShell {
   Zsh,
   Fish,
   Powershell,
+}
+
+/// Target of `gwm link / unlink / open` — issue or pull request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum LinkTarget {
+  /// GitHub issue.
+  Issue,
+  /// GitHub pull request.
+  Pr,
 }
 
 #[derive(Debug, Subcommand)]
@@ -146,6 +157,66 @@ pub enum Command {
     #[arg(short = 'p', long = "split")]
     split: bool,
   },
+  /// Link the current (or named) worktree to a GitHub issue or pull request.
+  ///
+  /// The link is stored in `git config branch.<name>.gwm-issue` (or
+  /// `gwm-pr`) — local, per-branch, survives worktree moves. Issue
+  /// numbers are auto-detected from the `<type>/#<N>-<slug>` convention
+  /// when no explicit override is set; `gwm link issue <N>` overrides
+  /// that. PR numbers are not auto-detected; link them explicitly with
+  /// `gwm link pr <N>`.
+  Link {
+    /// What to link: `issue` or `pr`.
+    #[arg(value_enum)]
+    target: LinkTarget,
+    /// Number to link (digits only).
+    number: u64,
+    /// Optional worktree pattern; defaults to the current worktree (CWD).
+    #[arg(long)]
+    worktree: Option<String>,
+  },
+  /// Remove the explicit issue / PR link on the current (or named) worktree.
+  ///
+  /// After `gwm unlink issue`, auto-detection from the branch name
+  /// resurfaces if the branch follows `<type>/#<N>-<slug>`. Idempotent —
+  /// safe to run when nothing is linked.
+  Unlink {
+    /// What to unlink: `issue` or `pr`.
+    #[arg(value_enum)]
+    target: LinkTarget,
+    /// Optional worktree pattern; defaults to the current worktree (CWD).
+    #[arg(long)]
+    worktree: Option<String>,
+  },
+  /// Open the linked issue or PR in the browser.
+  ///
+  /// Uses the OS opener (`open` on macOS, `xdg-open` on Linux,
+  /// `explorer` on Windows). Pass `--print-url` to emit the URL on
+  /// stdout instead — useful for piping, testing, and headless shells.
+  Open {
+    /// What to open: `issue` or `pr`.
+    #[arg(value_enum)]
+    target: LinkTarget,
+    /// Optional worktree pattern; defaults to the current worktree (CWD).
+    #[arg(long)]
+    worktree: Option<String>,
+    /// Print the URL on stdout instead of spawning the browser.
+    #[arg(long)]
+    print_url: bool,
+  },
+  /// Show the issue / PR link and (when `gh` is available) live GitHub status.
+  ///
+  /// Shells out to `gh issue view` and `gh pr view` to fetch state, title,
+  /// labels, and CI rollup. Without `gh` (or outside a GitHub repo), prints
+  /// only the local link. `--json` emits a stable schema for scripting.
+  Status {
+    /// Optional worktree pattern; defaults to the current worktree (CWD).
+    #[arg(long)]
+    worktree: Option<String>,
+    /// Emit JSON instead of the human-readable summary.
+    #[arg(long)]
+    json: bool,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -174,6 +245,18 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Switch => cmd_switch(),
     Command::Tmux { pattern, split } => cmd_multiplexer(Multiplexer::Tmux, pattern, split),
     Command::Zellij { pattern, split } => cmd_multiplexer(Multiplexer::Zellij, pattern, split),
+    Command::Link {
+      target,
+      number,
+      worktree,
+    } => cmd_link(target, number, worktree),
+    Command::Unlink { target, worktree } => cmd_unlink(target, worktree),
+    Command::Open {
+      target,
+      worktree,
+      print_url,
+    } => cmd_open(target, worktree, print_url),
+    Command::Status { worktree, json } => cmd_status(worktree, json),
   }
 }
 
@@ -505,6 +588,276 @@ fn spawn_multiplexer(mux: Multiplexer, argv: &[String]) -> Result<()> {
     )));
   }
   Ok(())
+}
+
+// ---- Issue / PR link commands (issue #67) -------------------------------
+
+/// Resolve the repo + branch + repo-relative path to operate on.
+///
+/// `--worktree <pattern>` overrides; otherwise we use the current directory.
+/// The returned Repository is opened *at the target worktree*, so reading
+/// HEAD gives the branch the user expects, but git config writes still land
+/// on the main repo's config (git2 propagates branch.* config up).
+fn resolve_target_repo(worktree: Option<String>) -> Result<(Repository, String, PathBuf)> {
+  let path: PathBuf = match worktree {
+    Some(pat) => {
+      // Allow either a fuzzy worktree pattern or a direct path.
+      let p = PathBuf::from(&pat);
+      if p.is_dir() {
+        p
+      } else {
+        let main = worktree::discover_repo(None)?;
+        worktree::find_fuzzy(&main, &pat)?.path
+      }
+    }
+    None => std::env::current_dir()?,
+  };
+  let repo = Repository::discover(&path).map_err(|_| GwmError::NotInGitRepo)?;
+  let branch = current_branch(&repo)?;
+  Ok((repo, branch, path))
+}
+
+fn current_branch(repo: &Repository) -> Result<String> {
+  let head = repo
+    .head()
+    .map_err(|_| GwmError::Other("HEAD is unborn or detached".into()))?;
+  head
+    .shorthand()
+    .map(|s| s.to_string())
+    .ok_or_else(|| GwmError::Other("HEAD has no shorthand (detached?)".into()))
+}
+
+fn cmd_link(target: LinkTarget, number: u64, worktree: Option<String>) -> Result<()> {
+  let (repo, branch, _path) = resolve_target_repo(worktree)?;
+  match target {
+    LinkTarget::Issue => {
+      github::link_issue(&repo, &branch, number)?;
+      println!("✓ linked issue #{} to branch {}", number, branch);
+    }
+    LinkTarget::Pr => {
+      github::link_pr(&repo, &branch, number)?;
+      println!("✓ linked PR #{} to branch {}", number, branch);
+    }
+  }
+  Ok(())
+}
+
+fn cmd_unlink(target: LinkTarget, worktree: Option<String>) -> Result<()> {
+  let (repo, branch, _path) = resolve_target_repo(worktree)?;
+  match target {
+    LinkTarget::Issue => {
+      github::unlink_issue(&repo, &branch)?;
+      println!("✓ unlinked issue on branch {}", branch);
+    }
+    LinkTarget::Pr => {
+      github::unlink_pr(&repo, &branch)?;
+      println!("✓ unlinked PR on branch {}", branch);
+    }
+  }
+  Ok(())
+}
+
+fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Result<()> {
+  let (repo, branch, _path) = resolve_target_repo(worktree)?;
+  let link = github::read_link(&repo, &branch)?;
+  let slug = github::repo_slug(&repo)?;
+
+  let url = match target {
+    LinkTarget::Issue => {
+      let n = link
+        .issue
+        .ok_or_else(|| GwmError::Other(format!("no issue linked to branch '{}'", branch)))?;
+      github::issue_url(&slug, n)
+    }
+    LinkTarget::Pr => {
+      let n = link
+        .pr
+        .ok_or_else(|| GwmError::Other(format!("no PR linked to branch '{}'", branch)))?;
+      github::pr_url(&slug, n)
+    }
+  };
+
+  if print_url {
+    println!("{}", url);
+    return Ok(());
+  }
+  spawn_opener(&url)
+}
+
+fn spawn_opener(url: &str) -> Result<()> {
+  let opener = if cfg!(target_os = "macos") {
+    "open"
+  } else if cfg!(target_os = "windows") {
+    "explorer"
+  } else {
+    "xdg-open"
+  };
+  let status = std::process::Command::new(opener)
+    .arg(url)
+    .status()
+    .map_err(|e| GwmError::CommandFailed(format!("could not spawn {}: {}", opener, e)))?;
+  if !status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "{} exited with status {:?}",
+      opener,
+      status.code()
+    )));
+  }
+  Ok(())
+}
+
+fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
+  let (repo, branch, _path) = resolve_target_repo(worktree)?;
+  let link = github::read_link(&repo, &branch)?;
+
+  // Slug + fetched status are best-effort: if there's no GitHub remote
+  // or `gh` isn't installed, we still print the local link.
+  let slug = github::repo_slug(&repo).ok();
+  let (issue_status, pr_status) = fetch_link_status(&link, slug.as_deref());
+
+  if json {
+    print_status_json(&branch, slug.as_deref(), &link, &issue_status, &pr_status);
+  } else {
+    print_status_human(&branch, slug.as_deref(), &link, &issue_status, &pr_status);
+  }
+  Ok(())
+}
+
+fn fetch_link_status(link: &BranchLink, slug: Option<&str>) -> (Option<IssueStatus>, Option<PrStatus>) {
+  let Some(slug) = slug else {
+    return (None, None);
+  };
+  // `gh` is optional — if either call fails we degrade gracefully.
+  let issue = link.issue.and_then(|n| github::fetch_issue(slug, n).ok());
+  let pr = link.pr.and_then(|n| github::fetch_pr(slug, n).ok());
+  (issue, pr)
+}
+
+fn issue_state_str(s: IssueState) -> &'static str {
+  match s {
+    IssueState::Open => "open",
+    IssueState::Closed => "closed",
+  }
+}
+
+fn pr_state_str(s: PrState) -> &'static str {
+  match s {
+    PrState::Open => "open",
+    PrState::Draft => "draft",
+    PrState::Closed => "closed",
+    PrState::Merged => "merged",
+  }
+}
+
+fn link_source_str(s: LinkSource) -> &'static str {
+  match s {
+    LinkSource::None => "none",
+    LinkSource::BranchName => "branch-name",
+    LinkSource::Explicit => "explicit",
+  }
+}
+
+fn print_status_human(
+  branch: &str,
+  slug: Option<&str>,
+  link: &BranchLink,
+  issue: &Option<IssueStatus>,
+  pr: &Option<PrStatus>,
+) {
+  println!("branch: {}", branch);
+  if let Some(s) = slug {
+    println!("repo:   {}", s);
+  }
+  println!("link:   {}", link.summary());
+
+  if let Some(n) = link.issue {
+    print!("issue:  #{}", n);
+    match issue {
+      Some(s) => println!(" [{}] {}", issue_state_str(s.state), s.title),
+      None => println!(" (status unavailable)"),
+    }
+  }
+  if let Some(n) = link.pr {
+    print!("pr:     #{}", n);
+    match pr {
+      Some(s) => {
+        let checks = if s.checks_total > 0 {
+          format!(" · checks {}/{}", s.checks_passed, s.checks_total)
+        } else {
+          String::new()
+        };
+        println!(" [{}]{} {}", pr_state_str(s.state), checks, s.title);
+      }
+      None => println!(" (status unavailable)"),
+    }
+  }
+}
+
+fn print_status_json(
+  branch: &str,
+  slug: Option<&str>,
+  link: &BranchLink,
+  issue: &Option<IssueStatus>,
+  pr: &Option<PrStatus>,
+) {
+  let mut obj = serde_json::Map::new();
+  obj.insert("branch".into(), serde_json::Value::String(branch.into()));
+  if let Some(s) = slug {
+    obj.insert("repo".into(), serde_json::Value::String(s.into()));
+  }
+  obj.insert(
+    "issue".into(),
+    match link.issue {
+      Some(n) => {
+        let mut o = serde_json::Map::new();
+        o.insert("number".into(), serde_json::Value::Number(n.into()));
+        o.insert(
+          "source".into(),
+          serde_json::Value::String(link_source_str(link.issue_source).into()),
+        );
+        if let Some(s) = issue {
+          o.insert(
+            "state".into(),
+            serde_json::Value::String(issue_state_str(s.state).into()),
+          );
+          o.insert("title".into(), serde_json::Value::String(s.title.clone()));
+          o.insert(
+            "labels".into(),
+            serde_json::Value::Array(s.labels.iter().map(|l| serde_json::Value::String(l.clone())).collect()),
+          );
+          o.insert("url".into(), serde_json::Value::String(s.url.clone()));
+        }
+        serde_json::Value::Object(o)
+      }
+      None => serde_json::Value::Null,
+    },
+  );
+  obj.insert(
+    "pr".into(),
+    match link.pr {
+      Some(n) => {
+        let mut o = serde_json::Map::new();
+        o.insert("number".into(), serde_json::Value::Number(n.into()));
+        o.insert(
+          "source".into(),
+          serde_json::Value::String(link_source_str(link.pr_source).into()),
+        );
+        if let Some(s) = pr {
+          o.insert("state".into(), serde_json::Value::String(pr_state_str(s.state).into()));
+          o.insert("title".into(), serde_json::Value::String(s.title.clone()));
+          o.insert(
+            "checks_passed".into(),
+            serde_json::Value::Number(s.checks_passed.into()),
+          );
+          o.insert("checks_total".into(), serde_json::Value::Number(s.checks_total.into()));
+          o.insert("url".into(), serde_json::Value::String(s.url.clone()));
+        }
+        serde_json::Value::Object(o)
+      }
+      None => serde_json::Value::Null,
+    },
+  );
+  println!("{}", serde_json::Value::Object(obj));
 }
 
 pub fn shell_init_script(shell: InitShell) -> &'static str {
