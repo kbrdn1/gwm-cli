@@ -169,7 +169,12 @@ fn parse_github_slug(url: &str) -> Result<String> {
 }
 
 fn trim_git_suffix(s: &str) -> &str {
-  s.strip_suffix(".git").unwrap_or(s).trim_end_matches('/')
+  // Normalise trailing slashes first so `owner/repo.git/` becomes
+  // `owner/repo.git` before the `.git` strip kicks in. Pre-fix this
+  // returned `owner/repo.git` because `.git` was sought with a trailing
+  // `/` still attached (Copilot PR #68 review).
+  let trimmed = s.trim_end_matches('/');
+  trimmed.strip_suffix(".git").unwrap_or(trimmed)
 }
 
 // ---- Issue / PR status ---------------------------------------------------

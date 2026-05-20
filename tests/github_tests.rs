@@ -138,6 +138,29 @@ fn repo_slug_strips_trailing_dot_git_when_absent() {
 }
 
 #[test]
+fn repo_slug_handles_trailing_slash_after_dot_git() {
+  // Copilot PR #68 review: `https://…/repo.git/` previously left ".git"
+  // in the slug because we stripped `.git` before trimming `/`. The fix
+  // is to normalise trailing slashes first, then strip `.git`.
+  let (_dir, repo) = init_repo();
+  set_origin(&repo, "https://github.com/kbrdn1/gwm-cli.git/");
+
+  let slug = github::repo_slug(&repo).unwrap();
+
+  assert_eq!(slug, "kbrdn1/gwm-cli");
+}
+
+#[test]
+fn repo_slug_handles_trailing_slash_without_dot_git() {
+  let (_dir, repo) = init_repo();
+  set_origin(&repo, "https://github.com/kbrdn1/gwm-cli/");
+
+  let slug = github::repo_slug(&repo).unwrap();
+
+  assert_eq!(slug, "kbrdn1/gwm-cli");
+}
+
+#[test]
 fn repo_slug_errors_when_no_origin_remote() {
   let (_dir, repo) = init_repo();
 
