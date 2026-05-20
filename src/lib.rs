@@ -8,6 +8,7 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod error;
+pub mod github;
 pub mod multiplexer;
 pub mod naming;
 pub mod tui;
