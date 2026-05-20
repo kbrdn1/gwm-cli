@@ -124,3 +124,96 @@ jobs:
             dist/*.zip.sha256
           draft: false
           prerelease: false
+
+  homebrew-tap-update:
+    name: update homebrew tap
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `brew install gwm`,
+    # otherwise users tracking the tap would silently move to a pre-release.
+    # Intentionally does NOT gate on `event_name == 'push'`: the documented
+    # recovery path (`gh workflow run release.yml --ref <tag>`) needs to
+    # re-drive this job after a transient failure, which is a
+    # workflow_dispatch event. The suffix filter alone is sufficient
+    # because dispatch-from-a-branch would already break the upstream
+    # `build` / `release` jobs (they archive `${{ github.ref_name }}`),
+    # so the whole workflow is implicitly tag-scoped.
+    if: |
+      !contains(github.ref_name, '-rc.') &&
+      !contains(github.ref_name, '-alpha.') &&
+      !contains(github.ref_name, '-beta.')
+    # While HOMEBREW_TAP_TOKEN is being provisioned the first time, a missing
+    # secret would fail this job. Keep it advisory so the GitHub release
+    # still lands and the tap refresh can be re-driven manually via
+    # workflow_dispatch once the secret exists. Flip to false after the
+    # first successful sync (see CONTRIBUTING.md > Releases > Homebrew tap).
+    continue-on-error: true
+    steps:
+      - name: verify HOMEBREW_TAP_TOKEN is configured
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > Homebrew tap setup."
+            exit 1
+          fi
+
+      - name: checkout gwm-cli (template + render script)
+        uses: actions/checkout@v6
+        with:
+          path: gwm-cli
+
+      - name: checkout kbrdn1/homebrew-tap
+        uses: actions/checkout@v6
+        with:
+          repository: kbrdn1/homebrew-tap
+          path: homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: fetch sha256 sidecars from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p sha
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            gh release download "$TAG" \
+              --repo kbrdn1/gwm-cli \
+              --pattern "gwm-${TAG}-${target}.tar.gz.sha256" \
+              --dir sha
+          done
+          ls -la sha
+
+      - name: render Formula/gwm.rb
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          SHA_ARM64=$(awk '{print $1}' "sha/gwm-${TAG}-aarch64-apple-darwin.tar.gz.sha256")
+          SHA_X86_64=$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-apple-darwin.tar.gz.sha256")
+          mkdir -p homebrew-tap/Formula
+          sh gwm-cli/.github/scripts/render-tap-formula.sh \
+            "$TAG" "$VERSION" "$SHA_ARM64" "$SHA_X86_64" \
+            gwm-cli/packaging/homebrew/gwm.rb.template \
+            > homebrew-tap/Formula/gwm.rb
+          echo "=== rendered Formula/gwm.rb ==="
+          cat homebrew-tap/Formula/gwm.rb
+
+      - name: commit + push to tap
+        working-directory: homebrew-tap
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name  "gwm-cli release bot"
+          git config user.email "release-bot@gwm-cli.local"
+          git add Formula/gwm.rb
+          if git diff --cached --quiet; then
+            echo "Formula/gwm.rb unchanged — nothing to push."
+            exit 0
+          fi
+          git commit -m "gwm ${TAG#v} (${TAG})"
+          git push
