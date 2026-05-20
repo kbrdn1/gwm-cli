@@ -274,11 +274,11 @@ fn next_prev_invalidate_sidebar_cache() {
   // Moving selection must drop any cached sidebar content so the new
   // worktree's preview is recomputed on the next frame.
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.next();
   assert!(app.sidebar_cache.is_none(), "next() must invalidate the sidebar cache");
 
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.prev();
   assert!(app.sidebar_cache.is_none(), "prev() must invalidate the sidebar cache");
 }
@@ -286,7 +286,7 @@ fn next_prev_invalidate_sidebar_cache() {
 #[test]
 fn refresh_invalidates_sidebar_cache() {
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.refresh().unwrap();
   assert!(app.sidebar_cache.is_none());
 }
@@ -1301,5 +1301,145 @@ fn refresh_github_status_message_celebrates_full_success() {
     app.status.to_lowercase().contains("refreshed") || app.status.to_lowercase().contains("ok"),
     "all-green refresh should signal success: {}",
     app.status
+  );
+}
+
+// ---- Sidebar sections (Option C — bordered subsections, no Commands block) ----
+
+use gwm::tui::build_sidebar_sections;
+
+fn detailed_worktree_fixture() -> WorktreeInfo {
+  WorktreeInfo {
+    name: "api-rest".into(),
+    path: PathBuf::from("/Users/test/cc-worktree/api-rest"),
+    branch: Some("feat/#42-api-rest".into()),
+    head: Some("08d1029f1234567890abcdef".into()),
+    is_main: true,
+    is_locked: false,
+    is_prunable: false,
+    status: BranchStatus {
+      is_dirty: false,
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      unknown: false,
+    },
+  }
+}
+
+fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
+  lines
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+    .collect::<Vec<_>>()
+    .join("")
+}
+
+#[test]
+fn sidebar_sections_omit_commands_block() {
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let all = format!(
+    "{}\n{}\n{}",
+    section_text(&sections.worktree),
+    section_text(&sections.working_tree),
+    section_text(&sections.recent_commits),
+  );
+  assert!(
+    !all.contains("Commands"),
+    "the Commands cheat-sheet block must be removed (lives in ? help); got: {}",
+    all
+  );
+  assert!(
+    !all.contains("Bootstrap worktree"),
+    "help-overlay phrasing must not leak into the sidebar: {}",
+    all
+  );
+  assert!(
+    !all.contains("Toggle this sidebar"),
+    "help-overlay phrasing must not leak into the sidebar: {}",
+    all
+  );
+}
+
+#[test]
+fn sidebar_sections_omit_inline_section_headers() {
+  // The new layout puts section titles on the Block borders, so the inline
+  // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
+  // disappear from the content lines.
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let all = format!(
+    "{}\n{}\n{}",
+    section_text(&sections.worktree),
+    section_text(&sections.working_tree),
+    section_text(&sections.recent_commits),
+  );
+  assert!(!all.contains("Basic Settings:"), "got: {}", all);
+  assert!(!all.contains("Recent commits:"), "got: {}", all);
+  assert!(!all.contains("Working tree:"), "got: {}", all);
+}
+
+#[test]
+fn sidebar_worktree_section_is_compact_identity() {
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let text = section_text(&sections.worktree);
+
+  assert!(text.contains("api-rest"), "name on top line: {}", text);
+  assert!(text.contains("feat/#42-api-rest"), "branch shown: {}", text);
+  assert!(text.contains("08d1029"), "short head shown: {}", text);
+  assert!(
+    text.contains("synced") || text.contains("✓"),
+    "synced state badge shown: {}",
+    text
+  );
+  assert!(
+    text.contains("main") || text.contains("★"),
+    "main badge shown: {}",
+    text
+  );
+}
+
+#[test]
+fn sidebar_worktree_section_short_enough_for_compact_layout() {
+  // Compact identity block: name, branch · head, badges, path → 4 lines target.
+  // Allow ≤5 to leave headroom for variable badges.
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  assert!(
+    sections.worktree.len() <= 5,
+    "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
+    sections.worktree.len(),
+    sections.worktree.iter().map(section_text_single).collect::<Vec<_>>()
+  );
+}
+
+fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn sidebar_worktree_section_skips_irrelevant_badges() {
+  // A non-main, unlocked, non-prunable worktree should NOT advertise
+  // those flags — only the ones that are true add visual noise.
+  let mut w = detailed_worktree_fixture();
+  w.is_main = false;
+  let sections = build_sidebar_sections(&w);
+  let text = section_text(&sections.worktree);
+  assert!(
+    !text.contains("★ main"),
+    "non-main worktree must not show ★ main: {}",
+    text
+  );
+  assert!(
+    !text.contains("locked"),
+    "unlocked worktree must not show locked badge: {}",
+    text
+  );
+  assert!(
+    !text.contains("prunable"),
+    "non-prunable worktree must not show prunable badge: {}",
+    text
   );
 }
