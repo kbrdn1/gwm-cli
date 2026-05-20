@@ -423,8 +423,25 @@ fn recent_commits_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
 /// the path doesn't live under it.
 fn tilde_compress(path: &str) -> String {
   if let Some(home) = dirs::home_dir() {
-    let home_s = home.display().to_string();
-    if let Some(rest) = path.strip_prefix(&home_s) {
+    tilde_compress_with_home(path, &home)
+  } else {
+    path.to_string()
+  }
+}
+
+/// Pure variant of [`tilde_compress`] that takes the home directory
+/// explicitly. Exposed for tests — the production `tilde_compress`
+/// wrapper just looks up `dirs::home_dir()` and delegates.
+///
+/// Enforces a path-separator boundary at the end of the home prefix so
+/// `/home/al` does not slice into `/home/alice/repo` and produce
+/// `~ice/repo` (raised by PR #70 Copilot review).
+pub fn tilde_compress_with_home(path: &str, home: &std::path::Path) -> String {
+  let home_s = home.display().to_string();
+  if let Some(rest) = path.strip_prefix(&home_s) {
+    // Accept exact-home (`rest.is_empty()`) and home-followed-by-separator
+    // matches. Reject prefix matches that bleed into a longer dir name.
+    if rest.is_empty() || rest.starts_with('/') || rest.starts_with(std::path::MAIN_SEPARATOR) {
       return format!("~{}", rest);
     }
   }

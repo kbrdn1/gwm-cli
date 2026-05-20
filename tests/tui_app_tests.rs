@@ -1499,3 +1499,38 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
   assert!(badge.contains("synced"), "label must still say synced: {}", badge);
 }
+
+// ---- tilde_compress path-boundary safety (PR #70 review, Copilot) -------
+
+use gwm::tui::tilde_compress_with_home;
+
+#[test]
+fn tilde_compress_does_not_slice_across_path_boundaries() {
+  // Regression: PR #70 review (Copilot) flagged that string `strip_prefix`
+  // on the rendered home dir would slice into longer directory names that
+  // merely *start with* the same characters — e.g. home `/home/al` would
+  // turn `/home/alice/repo` into `~ice/repo`. The compression must only
+  // fire when the prefix ends at a path separator boundary.
+  let home = std::path::Path::new("/home/al");
+  assert_eq!(
+    tilde_compress_with_home("/home/alice/repo", home),
+    "/home/alice/repo",
+    "must not slice across the `alice` directory name"
+  );
+}
+
+#[test]
+fn tilde_compress_compresses_exact_home_match() {
+  let home = std::path::Path::new("/home/alice");
+  assert_eq!(tilde_compress_with_home("/home/alice", home), "~");
+  assert_eq!(tilde_compress_with_home("/home/alice/repo", home), "~/repo");
+  assert_eq!(tilde_compress_with_home("/home/alice/repo/sub", home), "~/repo/sub");
+}
+
+#[test]
+fn tilde_compress_falls_back_when_path_outside_home() {
+  let home = std::path::Path::new("/home/alice");
+  assert_eq!(tilde_compress_with_home("/var/log/x", home), "/var/log/x");
+  // Sibling directory starting with the same letters → no match.
+  assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
+}
