@@ -7,10 +7,29 @@ use ratatui::{
   layout::{Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+  widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
   Frame,
 };
 use std::time::Instant;
+
+/// Per-section content of the worktree details sidebar. Rendered by
+/// [`draw_sidebar`] into separate rounded-border blocks (no outer
+/// `Details` frame, so each section reads as an independent card).
+///
+/// The Issue / PR section is intentionally absent here: it depends on
+/// live `App` fetch state and is built per-frame via
+/// [`github_status_lines`], not cached on the worktree.
+#[derive(Debug, Clone, Default)]
+pub struct SidebarSections {
+  /// Compact identity block: name (bold), `branch · head`, badges
+  /// (`✓ synced` / `● dirty` / `↑N` / `↓M` plus optional `★ main`,
+  /// `🔒 locked`, `⚠ prunable`), tilde-compressed path.
+  pub worktree: Vec<Line<'static>>,
+  /// `git status --short` lines, or `✓ clean`, or a load error.
+  pub working_tree: Vec<Line<'static>>,
+  /// Up to 10 oneline commits, or an empty / error notice.
+  pub recent_commits: Vec<Line<'static>>,
+}
 
 /// Minimum total terminal width required to render the sidebar alongside the
 /// worktree table without compressing the table beyond readability.
@@ -192,155 +211,218 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     Color::DarkGray
   };
 
-  // Resolve (or populate) the cached content for the currently selected worktree.
-  // The cached block is the git preview; the Issue/PR block is rebuilt every
-  // frame (it's small, and its state changes with fetch progress).
-  let mut lines: Vec<Line<'static>> = match app.selected().cloned() {
+  // Resolve (or populate) the cached worktree sections for the current
+  // selection. Issue / PR block is rebuilt every frame (its fetch state
+  // moves independently of the worktree info).
+  let sections = match app.selected().cloned() {
     Some(w) => {
       let needs_refresh = match &app.sidebar_cache {
         Some((p, _)) => *p != w.path,
         None => true,
       };
       if needs_refresh {
-        app.sidebar_cache = Some((w.path.clone(), sidebar_lines(&w)));
+        app.sidebar_cache = Some((w.path.clone(), build_sidebar_sections(&w)));
       }
-      app.sidebar_cache.as_ref().map(|(_, l)| l.clone()).unwrap_or_default()
+      app.sidebar_cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default()
     }
-    None => vec![Line::from("(nothing selected)")],
+    None => SidebarSections {
+      worktree: vec![Line::from("(nothing selected)")],
+      working_tree: vec![],
+      recent_commits: vec![],
+    },
   };
-  // Append the live Issue / PR block.
-  lines.push(Line::from(""));
-  lines.extend(github_status_lines(app));
+  let issue_pr_lines = github_status_lines(app);
 
-  // Track the maximum scrollable offset so `sidebar_scroll_down` can clamp.
-  // `area.height - 2` accounts for the top + bottom border lines.
-  let content_len = lines.len() as u16;
-  let visible = area.height.saturating_sub(2);
-  app.sidebar_max_scroll = content_len.saturating_sub(visible);
+  // Per-section block height = content rows + 2 border lines. Fixed for
+  // the small sections (worktree / issue-PR / working-tree); Recent
+  // Commits flexes to fill the rest of the sidebar height.
+  let h = |lines: usize| (lines as u16).saturating_add(2);
+  let constraints = [
+    Constraint::Length(h(sections.worktree.len())),
+    Constraint::Length(h(issue_pr_lines.len())),
+    Constraint::Length(h(sections.working_tree.len())),
+    Constraint::Min(3),
+  ];
+  let chunks = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints(constraints)
+    .split(area);
+
+  render_section(f, chunks[0], " Worktree ", sections.worktree, border_color, 0);
+  render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0);
+  render_section(f, chunks[2], " Working Tree ", sections.working_tree, border_color, 0);
+
+  // Recent Commits is the only scrollable section. Clamp the scroll
+  // offset to its visible area so `j` / `k` can't scroll past the end.
+  let commits_area = chunks[3];
+  let commits_visible = commits_area.height.saturating_sub(2);
+  app.sidebar_max_scroll = (sections.recent_commits.len() as u16).saturating_sub(commits_visible);
   if app.sidebar_scroll > app.sidebar_max_scroll {
     app.sidebar_scroll = app.sidebar_max_scroll;
   }
+  render_section(
+    f,
+    commits_area,
+    " Recent Commits ",
+    sections.recent_commits,
+    border_color,
+    app.sidebar_scroll,
+  );
+}
 
+fn render_section(
+  f: &mut Frame,
+  area: Rect,
+  title: &'static str,
+  lines: Vec<Line<'static>>,
+  border_color: Color,
+  scroll: u16,
+) {
   let block = Block::default()
     .borders(Borders::ALL)
-    .title(" Details ")
+    .border_type(BorderType::Rounded)
+    .title(title)
     .border_style(Style::default().fg(border_color));
-
-  let paragraph = Paragraph::new(lines)
+  // Pad content with one leading space per line for breathing room against
+  // the left border. Cheap and avoids per-call `format!` churn.
+  let padded: Vec<Line<'static>> = lines
+    .into_iter()
+    .map(|l| {
+      let mut spans = Vec::with_capacity(l.spans.len() + 1);
+      spans.push(Span::raw(" "));
+      spans.extend(l.spans);
+      Line::from(spans)
+    })
+    .collect();
+  let paragraph = Paragraph::new(padded)
     .block(block)
     .wrap(Wrap { trim: false })
-    .scroll((app.sidebar_scroll, 0));
-
+    .scroll((scroll, 0));
   f.render_widget(paragraph, area);
 }
 
-fn sidebar_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
-  let mut out: Vec<Line> = vec![
-    // Header — worktree name in bold.
-    Line::from(Span::styled(
-      w.name.clone(),
-      Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-    )),
-    Line::from(""),
-    // Basic Settings block.
-    section_header("Basic Settings:"),
-    kv("Branch", w.branch.clone().unwrap_or_else(|| "-".into()), Color::Green),
-    kv("Path", w.path.display().to_string(), Color::Gray),
-    kv(
-      "Head",
-      w.head.as_deref().map(short_oid).unwrap_or_else(|| "-".into()),
-      Color::Yellow,
-    ),
-    kv("Main", yes_no(w.is_main), Color::Yellow),
-    kv("Locked", yes_no(w.is_locked), Color::Magenta),
-    kv("Prunable", yes_no(w.is_prunable), Color::Red),
-    kv("Status", branch_status_label(&w.status), branch_status_color(&w.status)),
-    Line::from(""),
-  ];
-
-  // Recent commits block.
-  out.push(section_header("Recent commits:"));
-  match worktree::git_log_oneline(&w.path, 10) {
-    Ok(s) if !s.trim().is_empty() => {
-      for line in s.lines() {
-        out.push(Line::from(format!("  {}", line)));
-      }
-    }
-    Ok(_) => out.push(Line::from(Span::styled(
-      "  (no commits)",
-      Style::default().fg(Color::DarkGray),
-    ))),
-    Err(e) => out.push(Line::from(Span::styled(
-      format!("  ! {}", e),
-      Style::default().fg(Color::Red),
-    ))),
+/// Build the per-section content of the details sidebar for one worktree.
+///
+/// The Commands cheat-sheet block is intentionally not produced here — it
+/// duplicated the `?` help overlay and consumed ~15 vertical lines for no
+/// new information. Press `?` for the full key map.
+pub fn build_sidebar_sections(w: &WorktreeInfo) -> SidebarSections {
+  SidebarSections {
+    worktree: worktree_identity_lines(w),
+    working_tree: working_tree_lines(w),
+    recent_commits: recent_commits_lines(w),
   }
-  out.push(Line::from(""));
+}
 
-  // Working tree block.
-  out.push(section_header("Working tree:"));
-  match worktree::git_status_short(&w.path) {
-    Ok(s) if s.trim().is_empty() => out.push(Line::from(Span::styled("  ✓ clean", Style::default().fg(Color::Green)))),
-    Ok(s) => {
-      for line in s.lines() {
-        out.push(Line::from(format!("  {}", line)));
-      }
-    }
-    Err(e) => out.push(Line::from(Span::styled(
-      format!("  ! {}", e),
-      Style::default().fg(Color::Red),
-    ))),
-  }
-  out.push(Line::from(""));
+/// 3–4 line identity card: name, `branch · head`, status + flag badges,
+/// tilde-compressed path. Skips badges whose flags are false to avoid
+/// visual noise (`false`/`true` columns scaled poorly with the old layout).
+fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
+  let mut out: Vec<Line<'static>> = Vec::with_capacity(4);
 
-  // Commands cheat-sheet (lazyssh style).
-  out.push(section_header("Commands:"));
-  for (key, label) in [
-    ("Enter", "Copy path to status"),
-    ("    l", "Launch lazygit fullscreen"),
-    ("    o", "Open dir in OS file manager"),
-    ("    b", "Bootstrap worktree"),
-    ("    n", "New worktree"),
-    ("    d", "Delete worktree"),
-    ("    p", "Toggle delete-branch-on-remove"),
-    ("    r", "Refresh"),
-    ("    v", "Toggle this sidebar"),
-    ("  Tab", "Swap focus list ↔ sidebar"),
-    ("    /", "Fuzzy filter worktrees"),
-    ("   gg", "Jump to first worktree"),
-    ("    G", "Jump to last worktree"),
-    ("  j/k", "Next / Prev (or scroll sidebar)"),
-    ("    ?", "Help"),
-    ("    q", "Quit"),
-  ] {
-    out.push(Line::from(vec![
-      Span::styled(format!("  {}: ", key), Style::default().fg(Color::Cyan)),
-      Span::raw(label),
-    ]));
+  // Line 1 — worktree name in bold white.
+  out.push(Line::from(Span::styled(
+    w.name.clone(),
+    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+  )));
+
+  // Line 2 — "<branch> · <short head>". Skip head sub-span when absent.
+  let branch = w.branch.clone().unwrap_or_else(|| "-".into());
+  let mut spans = vec![Span::styled(branch, Style::default().fg(Color::Green))];
+  if let Some(head) = w.head.as_deref() {
+    spans.push(Span::styled("  ·  ".to_string(), Style::default().fg(Color::DarkGray)));
+    spans.push(Span::styled(short_oid(head), Style::default().fg(Color::Yellow)));
   }
+  out.push(Line::from(spans));
+
+  // Line 3 — status badge + optional flag badges. Only renders the badges
+  // that are *true* / *interesting*; the false cases stay invisible.
+  out.push(badges_line(w));
+
+  // Line 4 — path, tilde-compressed for compactness.
+  out.push(Line::from(Span::styled(
+    tilde_compress(&w.path.display().to_string()),
+    Style::default().fg(Color::DarkGray),
+  )));
+
   out
 }
 
-fn section_header(text: &str) -> Line<'static> {
-  Line::from(Span::styled(
-    text.to_string(),
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-  ))
-}
-
-fn kv(key: &str, value: String, value_color: Color) -> Line<'static> {
-  Line::from(vec![
-    Span::styled(format!("  {}: ", key), Style::default().fg(Color::DarkGray)),
-    Span::styled(value, Style::default().fg(value_color)),
-  ])
-}
-
-fn yes_no(b: bool) -> String {
-  if b {
-    "true".into()
+fn badges_line(w: &WorktreeInfo) -> Line<'static> {
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  // Status sigil: ✓ synced / clean | ● dirty | ↑N ↓M | unknown.
+  let status_label = branch_status_label(&w.status);
+  let status_color = branch_status_color(&w.status);
+  let sigil = if w.status.unknown {
+    "?"
+  } else if w.status.is_dirty {
+    "●"
   } else {
-    "false".into()
+    "✓"
+  };
+  spans.push(Span::styled(
+    format!("{} {}", sigil, status_label),
+    Style::default().fg(status_color),
+  ));
+
+  let sep = || Span::styled("  ".to_string(), Style::default().fg(Color::DarkGray));
+  if w.is_main {
+    spans.push(sep());
+    spans.push(Span::styled("★ main".to_string(), Style::default().fg(Color::Yellow)));
   }
+  if w.is_locked {
+    spans.push(sep());
+    spans.push(Span::styled(
+      "🔒 locked".to_string(),
+      Style::default().fg(Color::Magenta),
+    ));
+  }
+  if w.is_prunable {
+    spans.push(sep());
+    spans.push(Span::styled("⚠ prunable".to_string(), Style::default().fg(Color::Red)));
+  }
+  Line::from(spans)
+}
+
+fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
+  match worktree::git_status_short(&w.path) {
+    Ok(s) if s.trim().is_empty() => vec![Line::from(Span::styled(
+      "✓ clean".to_string(),
+      Style::default().fg(Color::Green),
+    ))],
+    Ok(s) => s.lines().map(|l| Line::from(l.to_string())).collect(),
+    Err(e) => vec![Line::from(Span::styled(
+      format!("! {}", e),
+      Style::default().fg(Color::Red),
+    ))],
+  }
+}
+
+fn recent_commits_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
+  match worktree::git_log_oneline(&w.path, 10) {
+    Ok(s) if !s.trim().is_empty() => s.lines().map(|l| Line::from(l.to_string())).collect(),
+    Ok(_) => vec![Line::from(Span::styled(
+      "(no commits)".to_string(),
+      Style::default().fg(Color::DarkGray),
+    ))],
+    Err(e) => vec![Line::from(Span::styled(
+      format!("! {}", e),
+      Style::default().fg(Color::Red),
+    ))],
+  }
+}
+
+/// Replace the user's home prefix with `~` so paths render compactly in
+/// the narrow sidebar. Falls back to the raw path if `$HOME` is unset or
+/// the path doesn't live under it.
+fn tilde_compress(path: &str) -> String {
+  if let Some(home) = dirs::home_dir() {
+    let home_s = home.display().to_string();
+    if let Some(rest) = path.strip_prefix(&home_s) {
+      return format!("~{}", rest);
+    }
+  }
+  path.to_string()
 }
 
 fn short_oid(oid: &str) -> String {
@@ -874,21 +956,16 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-/// Append the issue/PR status block to the bottom of the sidebar. Called
-/// from `draw_sidebar` after the git preview, so it shows below the recent
-/// commits / status block.
+/// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)
+/// is supplied by [`draw_sidebar`] via the surrounding `Block`, so this
+/// function only returns the content rows.
 pub(super) fn github_status_lines(app: &App) -> Vec<Line<'static>> {
   let link = app.current_link();
   let mut lines: Vec<Line<'static>> = Vec::new();
 
-  lines.push(Line::from(Span::styled(
-    "─── Issue / PR ───",
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-  )));
-
   if link.issue.is_none() && link.pr.is_none() {
     lines.push(Line::from(Span::styled(
-      "  no link · press L to link",
+      "no link · press L to link".to_string(),
       Style::default().fg(Color::DarkGray),
     )));
     return lines;
@@ -903,7 +980,7 @@ pub(super) fn github_status_lines(app: &App) -> Vec<Line<'static>> {
   if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
   {
     lines.push(Line::from(Span::styled(
-      "  press R to fetch status",
+      "press R to fetch status".to_string(),
       Style::default().fg(Color::DarkGray),
     )));
   }
