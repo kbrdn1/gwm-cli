@@ -448,12 +448,15 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// per-row format:
 ///
 /// ```text
-/// <8-char hash>  <author initials>  <subject>
+/// <8-char hash>  <author initials>  <node>  <subject>
 /// ```
 ///
-/// The subject is **not** truncated here — the renderer relies on ratatui's
-/// view-level hard-clip (no `Wrap`) to match lazygit's gocui behaviour: one
-/// commit per visual line, overflow cut at the right edge without `…`.
+/// where `<node>` is `○` for a normal commit and `◎` for a merge commit
+/// (≥ 2 parents), matching `lazygit/pkg/gui/presentation/graph/cell.go`
+/// constants `CommitSymbol` / `MergeSymbol`. The subject is **not**
+/// truncated here — the renderer relies on ratatui's view-level
+/// hard-clip (no `Wrap`) to match lazygit's gocui behaviour: one commit
+/// per visual line, overflow cut at the right edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
   match worktree::git_log_with_author(&w.path, limit) {
     Ok(rows) if !rows.is_empty() => rows.into_iter().map(commit_row_line).collect(),

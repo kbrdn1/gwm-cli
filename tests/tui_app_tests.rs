@@ -1858,7 +1858,10 @@ fn commit_row_carries_parent_hashes() {
 }
 
 #[test]
-fn recent_commits_line_marks_merge_commit_with_open_diamond() {
+fn recent_commits_line_marks_merge_commit_with_bullseye() {
+  // U+25CE ◎ is named "BULLSEYE" in Unicode — it is what lazygit uses
+  // for `MergeSymbol`. The previous test name said "diamond" which
+  // was geometrically wrong; this name pins the actual glyph.
   let (dir, repo) = init_repo();
   add_merge_commit(&repo);
   let w = worktree_pointing_at_dir(dir.path());
@@ -1874,7 +1877,7 @@ fn recent_commits_line_marks_merge_commit_with_open_diamond() {
   let joined: String = merge.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
     joined.contains('◎'),
-    "merge row must carry the ◎ marker, got: {}",
+    "merge row must carry the ◎ bullseye marker, got: {}",
     joined
   );
 }

@@ -256,9 +256,12 @@ pub fn prune(repo: &Repository) -> Result<usize> {
 /// A commit row pulled from `git log` for the Recent Commits sidebar block.
 /// Mirrors lazygit's columnar layout (hash + author + subject) so the
 /// renderer can lay out one commit per visual line. Hashes are full
-/// 40-char SHAs; the renderer trims them to the configured display
-/// length (default 8 chars, à la lazygit). `parents.len() >= 2` flags
-/// a merge commit, which the renderer marks with `◎` instead of `○`.
+/// 40-char SHAs; the renderer trims them on display to a fixed length
+/// (the `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/ui.rs`, currently
+/// 8 chars, matching lazygit's `Gui.CommitHashLength` default). Not
+/// user-configurable today — change the constant to retune.
+/// `parents.len() >= 2` flags a merge commit, which the renderer marks
+/// with `◎` instead of `○`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRow {
   pub hash: String,
