@@ -30,3 +30,10 @@ when = "file_exists:.envrc"
 name = "cargo fetch"
 run  = "cargo fetch"
 when = "file_exists:Cargo.toml"
+
+# -- TUI `R: review` launcher (issue #75) ------------------------------------
+# Press `R` in the worktree list to review the selected branch against its
+# resolved base (upstream → branch.<n>.gwm-base → default_base → dev → main).
+# `lumen` preset = `lumen diff {base}..{head}` fullscreen suspend-and-resume.
+[review]
+tool = "lumen"

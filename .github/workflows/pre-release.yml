@@ -149,12 +149,30 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Release notes come from the per-rc file under `changelogs/pre-releases/`,
+      # not the top-level `CHANGELOG.md` (which is only the in-progress
+      # index — RC entries land in `changelogs/pre-releases/X.Y.Z-rc.N.md`
+      # when the RC is cut). Sourcing from the index would publish an
+      # empty body, as observed for v0.6.0-rc.1 before this fix.
+      - name: resolve changelog path
+        id: changelog
+        shell: bash
+        run: |
+          TAG="${{ steps.tag.outputs.name }}"
+          VERSION="${TAG#v}"
+          CHANGELOG_PATH="changelogs/pre-releases/${VERSION}.md"
+          if [ ! -f "${CHANGELOG_PATH}" ]; then
+            echo "::error::Expected ${CHANGELOG_PATH} to exist for tag ${TAG} — release notes would otherwise fall back to the empty CHANGELOG.md index."
+            exit 1
+          fi
+          echo "path=${CHANGELOG_PATH}" >> "$GITHUB_OUTPUT"
+
       - name: publish pre-release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.tag.outputs.name }}
           name: ${{ steps.tag.outputs.name }}
-          body_path: CHANGELOG.md
+          body_path: ${{ steps.changelog.outputs.path }}
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256

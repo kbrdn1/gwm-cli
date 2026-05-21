@@ -111,12 +111,31 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # Release notes come from the per-version file under `changelogs/`,
+      # not the top-level `CHANGELOG.md` (which is only the in-progress
+      # index — entries get moved into `changelogs/X.Y.Z.md` when the
+      # release is cut). Sourcing from the index would publish an empty
+      # body with the past-releases list, as observed for v0.6.0 / v0.6.0-rc.1
+      # before this fix.
+      - name: resolve changelog path
+        id: changelog
+        shell: bash
+        run: |
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          CHANGELOG_PATH="changelogs/${VERSION}.md"
+          if [ ! -f "${CHANGELOG_PATH}" ]; then
+            echo "::error::Expected ${CHANGELOG_PATH} to exist for tag ${TAG} — release notes would otherwise fall back to the empty CHANGELOG.md index."
+            exit 1
+          fi
+          echo "path=${CHANGELOG_PATH}" >> "$GITHUB_OUTPUT"
+
       - name: publish release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body_path: CHANGELOG.md
+          body_path: ${{ steps.changelog.outputs.path }}
           files: |
             dist/*.tar.gz
             dist/*.tar.gz.sha256

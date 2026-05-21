@@ -5,7 +5,10 @@
 mod common;
 
 use common::{init_repo, paths_equal};
+use git2::{Repository, Signature, Time};
 use gwm::worktree;
+use std::path::Path;
+use std::time::Duration;
 use tempfile::TempDir;
 
 #[test]
@@ -39,6 +42,26 @@ fn add_creates_branch_and_worktree() {
   let trees = worktree::list(&repo).unwrap();
   assert_eq!(trees.len(), 2);
   assert!(trees.iter().any(|w| w.name == "feat-1-foo" && !w.is_main));
+}
+
+#[test]
+fn add_records_gwm_base_for_new_branch() {
+  // Issue #75: `branch.<name>.gwm-base` is the second link in the
+  // review base-resolution chain. `gwm create` (via `worktree::add`)
+  // must set it to HEAD's short name so the review launcher can fall
+  // back to the original parent even on branches without an upstream.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-7-launcher");
+  worktree::add(&repo, "feat-7-launcher", &target, "feat/#7-launcher").unwrap();
+
+  let cfg = repo.config().unwrap();
+  let base = cfg.get_string("branch.feat/#7-launcher.gwm-base").unwrap();
+  assert_eq!(
+    base, "main",
+    "worktree::add must record HEAD's short name as gwm-base for the review fallback"
+  );
 }
 
 #[test]
@@ -195,4 +218,183 @@ fn git_log_oneline_errors_outside_repo() {
   let empty = TempDir::new().unwrap();
   let err = worktree::git_log_oneline(empty.path(), 5);
   assert!(err.is_err(), "expected error outside a git repo, got: {:?}", err);
+}
+
+// Issue #73: relative-duration formatter + branch age. The formatter is a
+// pure function (table-driven tests below); `branch_age` walks the commit
+// graph and needs a real repo with controlled commit timestamps.
+
+#[test]
+fn format_relative_duration_under_one_minute_renders_seconds() {
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(0)), "0s");
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(1)), "1s");
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(59)), "59s");
+}
+
+#[test]
+fn format_relative_duration_steps_through_units() {
+  // Anchor cases at the lazygit boundary (>= unit threshold → render in that unit).
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(60)), "1m");
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(60 * 59)), "59m");
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(3600)), "1h");
+  assert_eq!(
+    worktree::format_relative_duration(Duration::from_secs(3600 * 23)),
+    "23h"
+  );
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(86_400)), "1d");
+  assert_eq!(
+    worktree::format_relative_duration(Duration::from_secs(86_400 * 6)),
+    "6d"
+  );
+  assert_eq!(
+    worktree::format_relative_duration(Duration::from_secs(86_400 * 7)),
+    "1w"
+  );
+  // 4 weeks is still rendered as weeks; the month cutoff sits at ~30 days.
+  assert_eq!(
+    worktree::format_relative_duration(Duration::from_secs(86_400 * 28)),
+    "4w"
+  );
+}
+
+#[test]
+fn format_relative_duration_handles_months_and_years() {
+  // Month uses a 30.25-day approximation (lazygit `pkg/utils/date.go`).
+  let one_month = 30 * 86_400 + 6 * 3600;
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(one_month)), "1M");
+  assert_eq!(
+    worktree::format_relative_duration(Duration::from_secs(one_month * 11)),
+    "11M"
+  );
+  let one_year = 365 * 86_400 + 6 * 3600;
+  assert_eq!(worktree::format_relative_duration(Duration::from_secs(one_year)), "1y");
+  assert_eq!(
+    worktree::format_relative_duration(Duration::from_secs(one_year * 3 + 86_400 * 10)),
+    "3y"
+  );
+}
+
+#[test]
+fn format_relative_duration_output_stays_under_four_chars_for_realistic_inputs() {
+  // Lazygit's recency column is documented as "always three characters";
+  // gwm cell is slightly more lenient (4) but the lazygit promise must hold
+  // for every value below 100 of any unit.
+  for secs in [
+    0, 1, 59, 60, 3599, 3600, 86_399, 86_400, 604_799, 604_800, 2_595_600, 2_595_601,
+  ] {
+    let out = worktree::format_relative_duration(Duration::from_secs(secs));
+    assert!(
+      out.len() <= 4,
+      "format_relative_duration({}s) = {:?} exceeded 4 chars",
+      secs,
+      out
+    );
+  }
+}
+
+#[test]
+fn branch_age_returns_none_for_main_only_repo() {
+  // Repo with a single branch (`main`) and no divergence has no "branch
+  // creation" date — `branch_age` returns None so the UI can fall back to
+  // a dash.
+  let (dir, _) = init_repo();
+  let repo = Repository::open(dir.path()).unwrap();
+  assert!(worktree::branch_age(&repo, "main").is_none());
+}
+
+#[test]
+fn branch_age_reflects_oldest_branch_commit() {
+  // Build a `feat/age` branch with two commits — `branch_age` must return
+  // the elapsed time since the *oldest* commit on that branch (the one
+  // that pinned the branch creation), not the latest tip commit.
+  let (dir, repo) = init_repo();
+  // Anchor "branch creation" at a known instant — 3 days ago, so the
+  // formatter rendering layer can also be sanity-checked downstream.
+  let three_days_ago = chrono::Utc::now().timestamp() - 3 * 86_400;
+  let one_hour_ago = chrono::Utc::now().timestamp() - 3600;
+
+  let main_oid = repo.head().unwrap().target().unwrap();
+  let main_commit = repo.find_commit(main_oid).unwrap();
+  repo.branch("feat/age", &main_commit, false).unwrap();
+
+  // First commit on the branch — dated 3 days ago.
+  commit_with_time(dir.path(), &repo, "refs/heads/feat/age", "branch-old", three_days_ago);
+  // Second commit on the branch — dated 1 hour ago.
+  commit_with_time(dir.path(), &repo, "refs/heads/feat/age", "branch-recent", one_hour_ago);
+
+  let age = worktree::branch_age(&repo, "feat/age").expect("branch must have an age");
+  let three_days_secs = 3 * 86_400;
+  // Allow a 5-minute wiggle for test execution time.
+  let drift = age.as_secs().abs_diff(three_days_secs);
+  assert!(
+    drift < 300,
+    "expected ~{} seconds, got {} (drift {}s)",
+    three_days_secs,
+    age.as_secs(),
+    drift
+  );
+}
+
+#[test]
+fn branch_age_treats_master_and_dev_as_trunks() {
+  // A `feat/work` branch must still get a non-None age even when the
+  // default trunk is `dev` (not `main`). Verifies the trunk-candidates
+  // list covers the common conventions.
+  let dir = TempDir::new().unwrap();
+  let repo = Repository::init(dir.path()).unwrap();
+  repo.set_head("refs/heads/dev").ok();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+  let dev_oid = repo.head().unwrap().target().unwrap();
+  let dev_commit = repo.find_commit(dev_oid).unwrap();
+  repo.branch("feat/work", &dev_commit, false).unwrap();
+
+  let two_days_ago = chrono::Utc::now().timestamp() - 2 * 86_400;
+  commit_with_time(dir.path(), &repo, "refs/heads/feat/work", "branch-commit", two_days_ago);
+
+  let age = worktree::branch_age(&repo, "feat/work").expect("dev-rooted branch must have an age");
+  let drift = age.as_secs().abs_diff(2 * 86_400);
+  assert!(drift < 300, "expected ~2 days, got {}s", age.as_secs());
+}
+
+#[test]
+fn branch_age_returns_none_when_no_trunk_candidate_exists_locally() {
+  // PR #74 Copilot review: if none of the trunk candidates (main /
+  // master / dev) resolves as a local branch, the revwalk hides nothing
+  // and `branch_age` falls back to the repo's initial commit — turning
+  // every branch into a misleadingly large age (the repo's lifetime).
+  // The intent is "branch age relative to a trunk baseline"; without
+  // a baseline, we must surface `None` so the UI renders `-`.
+  let dir = TempDir::new().unwrap();
+  let repo = Repository::init(dir.path()).unwrap();
+  // Initialise the repo on a branch that's *not* a trunk candidate so
+  // the seed commit lives on `feat/standalone`, not `main`/`master`/`dev`.
+  repo.set_head("refs/heads/feat/standalone").ok();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+  assert!(
+    worktree::branch_age(&repo, "feat/standalone").is_none(),
+    "no trunk baseline → branch_age must be None, not the repo's lifetime"
+  );
+}
+
+/// Helper: append a commit (empty tree, configurable timestamp) on top of
+/// the given ref. The committer / author share the same timestamp so
+/// `branch_age` (which reads committer time) is deterministic.
+fn commit_with_time(workdir: &Path, repo: &Repository, ref_name: &str, message: &str, unix_secs: i64) {
+  let _ = workdir; // currently unused but reserved if we later need to touch the index
+  let time = Time::new(unix_secs, 0);
+  let sig = Signature::new("gwm-test", "gwm@test", &time).unwrap();
+  let parent_oid = repo.find_reference(ref_name).unwrap().target().unwrap();
+  let parent = repo.find_commit(parent_oid).unwrap();
+  let tree_id = parent.tree_id();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo
+    .commit(Some(ref_name), &sig, &sig, message, &tree, &[&parent])
+    .unwrap();
 }

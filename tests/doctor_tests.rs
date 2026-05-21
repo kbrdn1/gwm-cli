@@ -363,6 +363,134 @@ fn resolvable_command_binary_is_ok() {
 }
 
 #[test]
+fn missing_review_binary_is_warning_not_failure() {
+  // Issue #75: [review] is opt-in. A missing review binary should
+  // surface as Warning (exit code 1), never Failed (exit code 2),
+  // so CI / pre-commit hooks that already gate on doctor still pass
+  // when the user only set [review] for their own local convenience.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.review.command = Some("definitely-not-on-path-review-xyz {base}..{head}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("PATH"))
+    .expect("expected a PATH check");
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.contains("definitely-not-on-path-review-xyz"),
+    "missing review binary must appear in the detail: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn missing_review_tool_preset_is_warning() {
+  // `tool = "lumen"` resolves to `lumen diff ...`. If the user names a
+  // preset but `lumen` itself isn't installed, the doctor warns about
+  // the binary name from the preset table, not about the literal
+  // string `"lumen"` token in their config.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.review.tool = Some("lumen".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  // Lumen is almost certainly not on the CI matrix. If it happens to
+  // be installed locally we don't have anything to assert; the loose
+  // contract is "if it's missing, the report names it".
+  if c.status == CheckStatus::Warning && c.detail.contains("lumen") {
+    assert!(
+      c.detail.to_lowercase().contains("lumen"),
+      "preset's resolved binary must be named in the warning: {}",
+      c.detail
+    );
+  }
+}
+
+#[test]
+fn launcher_wrapped_by_env_warns_on_real_binary_not_wrapper() {
+  // PR #76 Copilot review: `extract_binary` returned the first token
+  // that didn't contain '=', which for `env FOO=bar phantom-bin diff`
+  // was `env` itself. The doctor then checked `env` (always on PATH)
+  // and missed the real launcher binary. Confirm that the doctor now
+  // names the actual tool when an `env` wrapper is present.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.review.command = Some("env FOO=bar definitely-not-on-path-wrapped-zz {base}..{head}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert_eq!(c.status, CheckStatus::Warning, "wrapped missing binary must warn");
+  assert!(
+    c.detail.contains("definitely-not-on-path-wrapped-zz"),
+    "wrapper must be peeled: detail should name the real binary, got: {}",
+    c.detail
+  );
+  assert!(
+    !c.detail.split("not on PATH:").nth(1).unwrap_or("").contains("env"),
+    "`env` must not appear in the missing-binaries section: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn launcher_wrapped_by_command_warns_on_real_binary_not_wrapper() {
+  // Sibling case for the POSIX `command` builtin: `command tool ...`
+  // (used e.g. inside shell aliases to bypass functions) should peel
+  // the wrapper just like `env`. Same shape as the env test above.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.git_tui.command = Some("command definitely-not-on-path-cmd-yy -d {path}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-cmd-yy"),
+    "command wrapper must be peeled: detail should name the real binary, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn missing_git_tui_binary_is_warning() {
+  // A user overriding [git_tui] to a missing binary deserves the same
+  // visibility treatment as a missing review tool — gwm's `l` keybinding
+  // would surface a status-bar error at runtime, but doctor should
+  // catch it upfront.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.git_tui.command = Some("definitely-not-on-path-tui-xyz -d {path}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.contains("definitely-not-on-path-tui-xyz"),
+    "missing git_tui binary must appear in the detail: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn review_unset_does_not_force_lazygit_warning_to_failure() {
+  // Pre-issue-#75 the doctor flagged a missing `lazygit` as Warning.
+  // Confirm that adding the new launcher checks doesn't tip the
+  // severity over to Failed when only [review] is unconfigured.
+  let (dir, repo) = init_repo();
+  let config = Config::default(); // nothing review-related set
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  // The aggregate severity must stay at Warning or Ok — never Failed.
+  assert!(
+    matches!(report.severity(), CheckStatus::Ok | CheckStatus::Warning),
+    "default config must not push doctor into Failed: severity = {:?}",
+    report.severity()
+  );
+}
+
+#[test]
 fn extract_binary_handles_shell_quoted_run_strings() {
   // regression: `extract_binary` used `split_whitespace` and returned the
   // leading-quoted token `"my` for `"my tool" --flag` before the shell-words

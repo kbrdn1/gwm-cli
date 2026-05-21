@@ -117,3 +117,66 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [tui]
 # confirm_countdown_secs = 3
+
+# --- TUI launcher: `l` (git_tui) keybinding (issue #75) ----------------------
+# The `l` key suspends the gwm TUI and launches a git TUI on the selected
+# worktree. Placeholders: {path}. Default (no section) → `lazygit -p {path}`
+# fullscreen=true, identical to the pre-issue-#75 hardcoded behaviour.
+#
+# Switch to gitui:
+# [git_tui]
+# command = "gitui -d {path}"
+# fullscreen = true
+#
+# Or to a non-TUI tool (gwm stays visible, stderr first-line lands in the
+# status bar):
+# [git_tui]
+# command = "code {path}"
+# fullscreen = false
+
+# --- TUI launcher: `R` (review) keybinding (issue #75) -----------------------
+# The `R` key runs a code-review tool against the resolved base ref.
+# Placeholders in `command`:
+#   {base}  — resolved base (upstream → branch.<n>.gwm-base → default_base
+#             → "dev" → "main")
+#   {head}  — selected worktree's branch name
+#   {path}  — absolute path of the selected worktree
+#   {diff}  — path to a temp file holding `git diff {base}..{head}`
+#             (lazily materialised; only created if the template uses it)
+#
+# Built-in presets — pick one with `tool = "<name>"` instead of `command`:
+#   lumen  → "lumen diff {base}..{head}"             · fullscreen=true
+#   claude → "claude --print 'review the diff {base}..{head}'" · fullscreen=false
+#   codex  → "codex review {base}..{head}"           · fullscreen=false
+#   aider  → "aider --message 'review {base}..{head}'" · fullscreen=true
+#   gh     → "gh pr view --web"                      · fullscreen=false
+#
+# When both `command` and `tool` are set, `command` wins (the TUI flags
+# the shadow in the status bar). Setting neither leaves `R` inert with
+# a status-bar hint.
+#
+# [review]
+# tool = "lumen"
+# skip_when_no_changes = true   # default true — skip when `git rev-list --count {base}..{head} == 0`
+# # default_base = "dev"        # optional pin overriding the auto-discovery chain
+#
+# Explicit form (overrides any preset):
+# [review]
+# command              = "lumen diff {base}..{head}"
+# fullscreen           = true
+# skip_when_no_changes = true
+
+# --- `o: open` dispatch (issue #73) -----------------------------------------
+# How the `o` key behaves on the highlighted worktree. Three modes:
+#   "shell"  — suspend the TUI and spawn $SHELL with cwd = worktree.
+#              Lazygit-style. Default. Exit the shell ⇒ TUI restores.
+#   "editor" — suspend the TUI and run $EDITOR <worktree-path>.
+#   "finder" — pre-#73 behaviour: hand off to the OS file manager
+#              (`open` / `xdg-open` / `explorer`).
+# `shell_cmd` / `editor_cmd` override the env var when set (empty string
+# = unset). An unknown `mode` is a hard config error at load time.
+#
+# [tui.open]
+# mode = "shell"
+# shell_cmd = ""        # leave empty to read $SHELL
+# editor_cmd = "hx"     # example: Helix

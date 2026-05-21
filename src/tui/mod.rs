@@ -1,4 +1,11 @@
 mod app;
+/// Commit-graph topology renderer, ported from lazygit. **Not part of the
+/// public SemVer surface** — exposed only so the integration tests under
+/// `tests/` can pin the algorithm. Use `gwm::tui::recent_commits_lines`
+/// (re-exported below) for the stable entry point that callers should
+/// actually depend on.
+#[doc(hidden)]
+pub mod commit_graph;
 mod ui;
 
 use crate::error::Result;
@@ -12,8 +19,35 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
-pub use ui::filled_cells_for_progress;
+pub use app::{
+  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget,
+  OpenTarget, View,
+};
+
+/// Ordered list of clipboard tools to try for the host OS (issue #73).
+/// First entry that resolves on `$PATH` wins. Returned in the
+/// platform's preferred order — `pbcopy` first on macOS, `wl-copy`
+/// then `xclip` then `xsel` on Linux, `clip.exe` on Windows. Exposed
+/// from the crate root so the tests in `tui_app_tests.rs` can pin the
+/// non-empty contract without spawning anything.
+pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
+  if cfg!(target_os = "macos") {
+    vec![("pbcopy", vec![])]
+  } else if cfg!(target_os = "windows") {
+    vec![("clip", vec![])]
+  } else {
+    vec![
+      ("wl-copy", vec![]),
+      ("xclip", vec!["-selection", "clipboard"]),
+      ("xsel", vec!["--clipboard", "--input"]),
+    ]
+  }
+}
+pub use ui::{
+  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color, header_title,
+  issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines, table_marker,
+  tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+};
 
 pub fn run() -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config
@@ -153,18 +187,45 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           KeyCode::Tab => app.toggle_focus(),
           KeyCode::Char('/') => app.enter_filter(),
           KeyCode::Char('l') => {
-            if let Some(path) = app.launch_lazygit() {
-              run_lazygit(terminal, &path, &mut app)?;
+            // Issue #75: `l` is driven by the configurable `[git_tui]`
+            // launcher pipeline (default `lazygit -p {path}`,
+            // fullscreen=true). Replaces the old hardcoded lazygit call.
+            if let Some(plan) = app.prepare_git_tui() {
+              run_launcher(terminal, plan, &mut app)?;
             }
           }
-          KeyCode::Char('r') => app.refresh()?,
+          // Issue #75 keybinding reshuffle (was `r` → refresh worktree list).
+          // `f` is the new mnemonic; the `r` alias is kept for muscle memory.
+          KeyCode::Char('f') | KeyCode::Char('r') => app.refresh()?,
           // Mutating actions are inert in picker mode — the issue explicitly
           // calls for a stripped-down picker that only navigates and selects.
           KeyCode::Char('n') if !app.picker_mode => app.enter_create(),
           KeyCode::Char('d') if !app.picker_mode => app.enter_confirm_delete(),
           KeyCode::Char('b') if !app.picker_mode => app.bootstrap_selected(),
           KeyCode::Char('p') if !app.picker_mode => app.toggle_delete_branch(),
-          KeyCode::Char('o') => app.open_selected_in_finder(),
+          KeyCode::Char('y') => yank_selected_path_to_clipboard(&mut app),
+          KeyCode::Char('o') => match app.resolve_open_target() {
+            None => app.status = "nothing selected".into(),
+            Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
+            Some(OpenTarget::Shell { path, command }) => {
+              run_subshell(terminal, &command, &[], Some(&path), &mut app, "shell")?
+            }
+            Some(OpenTarget::Editor { path, command }) => {
+              let path_str = path.display().to_string();
+              run_subshell(terminal, &command, &[&path_str], None, &mut app, "editor")?
+            }
+          },
+          // Issue/PR linking (issue #67).
+          KeyCode::Char('O') if !app.picker_mode => app.enter_open_menu(),
+          KeyCode::Char('L') if !app.picker_mode => app.enter_link_prompt(),
+          // Issue #75 reshuffle: `F` is the new mnemonic for "fetch GitHub
+          // status" (was `R`). `R` now triggers the configured review tool.
+          KeyCode::Char('F') if !app.picker_mode => app.refresh_github_status(),
+          KeyCode::Char('R') if !app.picker_mode => {
+            if let Some(plan) = app.prepare_review() {
+              run_launcher(terminal, plan, &mut app)?;
+            }
+          }
           KeyCode::Enter => {
             if app.picker_mode {
               app.picker_confirm();
@@ -219,6 +280,33 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         }
         _ => {}
       },
+      View::OpenMenu => match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.exit_open_menu(),
+        KeyCode::Char('i') => {
+          if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
+            open_url(&url, &mut app);
+          }
+        }
+        KeyCode::Char('p') => {
+          if let Some(url) = app.open_menu_pick(LinkTarget::Pr) {
+            open_url(&url, &mut app);
+          }
+        }
+        _ => {}
+      },
+      View::LinkPrompt => match (app.link_prompt_stage(), key.code) {
+        (_, KeyCode::Esc) => app.link_prompt_cancel(),
+        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => app.link_prompt_choose(LinkTarget::Issue),
+        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => app.link_prompt_choose(LinkTarget::Pr),
+        (app::LinkPromptStage::InputNumber, KeyCode::Enter) => {
+          if let Err(e) = app.link_prompt_submit() {
+            app.status = format!("link failed: {}", e);
+          }
+        }
+        (app::LinkPromptStage::InputNumber, KeyCode::Char(c)) => app.link_prompt_push_char(c),
+        (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
+        _ => {}
+      },
     }
 
     // Picker contract (Copilot PR #53): only break when the App has
@@ -233,29 +321,203 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
   Ok(app.picker_result)
 }
 
-/// Suspend the TUI, run `lazygit -p <path>` inheriting the terminal, then restore.
-/// Errors from lazygit itself are surfaced via the status bar, never propagated up.
-fn run_lazygit(
+/// Dispatch a [`LauncherPlan`] from [`App::prepare_git_tui`] /
+/// [`App::prepare_review`]. When `fullscreen=true` the TUI is
+/// suspended (raw mode off, alt-screen left) for the call and restored
+/// on exit — same recipe as the previous hardcoded `lazygit` flow.
+///
+/// **Non-fullscreen launchers also run synchronously**: gwm stays in
+/// the alt-screen, `Command::output()` waits for the child to exit,
+/// then the first line of its stderr lands on the status bar. The
+/// TUI is therefore unresponsive until the tool returns — fine for
+/// print-only AI reviewers (`claude --print`, `gh pr view --web`)
+/// that terminate quickly, but a long-running tool will visibly
+/// block. Pick `fullscreen = true` (proper suspend/resume) for
+/// anything that's not a quick one-shot. Caught by Copilot's review
+/// on PR #76; the previous docstring claimed "run in the background"
+/// which `output()` does not.
+///
+/// `LauncherPlan` is consumed by-value so the `{diff}` tempfile it
+/// carries lives at least until the child process has been waited on.
+/// Errors are never propagated — the user pressed a key in the TUI,
+/// and surfacing failures via the status bar is the documented
+/// contract (see [`Self::run_lazygit`] in the pre-issue-#75 codebase).
+fn run_launcher(
   terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-  path: &std::path::Path,
+  plan: app::LauncherPlan,
   app: &mut App,
 ) -> Result<()> {
-  // Release the terminal so lazygit can take over.
+  use std::process::{Command, Stdio};
+
+  let argv = plan.expanded.argv.clone();
+  let Some((bin, rest)) = argv.split_first() else {
+    app.status = "launcher template produced an empty argv".into();
+    return Ok(());
+  };
+
+  // Probe `$PATH` before paying the suspend/restore tax. Missing
+  // binaries get a clean status-bar error instead of a flicker.
+  if which::which(bin).is_err() {
+    app.status = format!(
+      "`{}` not on $PATH — install it or change [review]/[git_tui] in .gwm.toml",
+      bin
+    );
+    return Ok(());
+  }
+
+  if plan.fullscreen {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+
+    let spawn = Command::new(bin).args(rest).current_dir(&plan.cwd).status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+
+    match spawn {
+      Ok(s) if s.success() => app.status = format!("{} exited ok", bin),
+      Ok(s) => app.status = format!("{} exited with code {:?}", bin, s.code()),
+      Err(e) => app.status = format!("failed to launch {}: {}", bin, e),
+    }
+  } else {
+    // Non-TUI tool: capture stderr so its first line can land in the
+    // status bar without taking over the screen. stdout is dropped on
+    // the floor — printing it would crash through ratatui's frame.
+    let out = Command::new(bin)
+      .args(rest)
+      .current_dir(&plan.cwd)
+      .stdout(Stdio::null())
+      .stderr(Stdio::piped())
+      .output();
+    match out {
+      Ok(o) if o.status.success() => app.status = format!("{} done", bin),
+      Ok(o) => {
+        let first = String::from_utf8_lossy(&o.stderr)
+          .lines()
+          .next()
+          .unwrap_or_default()
+          .trim()
+          .to_string();
+        app.status = if first.is_empty() {
+          format!("{} exited with code {:?}", bin, o.status.code())
+        } else {
+          format!("{}: {}", bin, first)
+        };
+      }
+      Err(e) => app.status = format!("failed to launch {}: {}", bin, e),
+    }
+  }
+  // `plan.expanded.diff_file` drops here, unlinking the tempfile if any.
+  drop(plan);
+  Ok(())
+}
+
+/// Suspend the TUI, spawn `cmd args...` (optionally with `cwd`), wait for
+/// its exit, then restore the TUI. Used by the `o: open` dispatch when the
+/// resolved [`OpenTarget`] is `Shell` or `Editor`. The lifecycle is
+/// identical to [`run_lazygit`] so the user can't observe a difference
+/// between pressing `l` (lazygit) and pressing `o` with `mode = "shell"`.
+///
+/// `label` is the noun used in status-bar messages (`"shell"`, `"editor"`).
+fn run_subshell(
+  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  cmd: &str,
+  args: &[&str],
+  cwd: Option<&std::path::Path>,
+  app: &mut App,
+  label: &str,
+) -> Result<()> {
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
   terminal.show_cursor()?;
 
-  let spawn = std::process::Command::new("lazygit").arg("-p").arg(path).status();
+  let mut command = std::process::Command::new(cmd);
+  command.args(args);
+  if let Some(dir) = cwd {
+    command.current_dir(dir);
+  }
+  let spawn = command.status();
 
-  // Always restore the TUI, even if lazygit failed.
+  // Always restore the TUI, even if the child failed to spawn or exited non-zero.
   enable_raw_mode()?;
   execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
   terminal.clear()?;
 
   match spawn {
-    Ok(s) if s.success() => app.status = format!("lazygit exited ok ({})", path.display()),
-    Ok(s) => app.status = format!("lazygit exited with code {:?}", s.code()),
-    Err(e) => app.status = format!("failed to launch lazygit: {}", e),
+    Ok(s) if s.success() => app.status = format!("{} exited ok ({})", label, cmd),
+    Ok(s) => app.status = format!("{} exited with code {:?}", label, s.code()),
+    Err(e) => app.status = format!("failed to launch {} ({}): {}", label, cmd, e),
   }
   Ok(())
+}
+
+/// Push the selected worktree's path into the system clipboard via
+/// [`clipboard_candidates`]. Walks the candidates in order, uses the
+/// first one whose binary is on `$PATH`, and feeds the path through
+/// its stdin. Failures and "no tool found" both surface in the status
+/// bar — no propagation, the TUI must never die on a clipboard miss.
+fn yank_selected_path_to_clipboard(app: &mut App) {
+  use std::io::Write;
+  let Some(path) = app.yank_selected_path() else {
+    app.status = "nothing selected".into();
+    return;
+  };
+  let text = path.display().to_string();
+  for (cmd, args) in clipboard_candidates() {
+    if which::which(cmd).is_err() {
+      continue;
+    }
+    let child = std::process::Command::new(cmd)
+      .args(&args)
+      .stdin(std::process::Stdio::piped())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn();
+    match child {
+      Ok(mut c) => {
+        if let Some(mut stdin) = c.stdin.take() {
+          let _ = stdin.write_all(text.as_bytes());
+        }
+        match c.wait() {
+          Ok(s) if s.success() => {
+            app.status = format!("yanked path ({})", cmd);
+            return;
+          }
+          Ok(s) => {
+            app.status = format!("{} exited with code {:?}", cmd, s.code());
+            return;
+          }
+          Err(e) => {
+            app.status = format!("{} wait failed: {}", cmd, e);
+            return;
+          }
+        }
+      }
+      Err(e) => {
+        // Tool was resolvable on PATH but spawning failed — surface and stop;
+        // trying the next candidate would mask the real error.
+        app.status = format!("failed to spawn {}: {}", cmd, e);
+        return;
+      }
+    }
+  }
+  app.status = "y: no clipboard tool found (install pbcopy / wl-copy / xclip / xsel / clip)".into();
+}
+
+/// Spawn the OS opener for `url` (used by the OpenMenu key handler).
+/// Failures land in the status bar — we never propagate up.
+fn open_url(url: &str, app: &mut App) {
+  let opener = if cfg!(target_os = "macos") {
+    "open"
+  } else if cfg!(target_os = "windows") {
+    "explorer"
+  } else {
+    "xdg-open"
+  };
+  match std::process::Command::new(opener).arg(url).spawn() {
+    Ok(_) => app.status = format!("opened {}", url),
+    Err(e) => app.status = format!("failed to open {}: {}", url, e),
+  }
 }

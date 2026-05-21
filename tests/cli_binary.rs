@@ -33,7 +33,11 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  switch "))
     .stdout(predicate::str::contains("  tmux "))
     .stdout(predicate::str::contains("  zellij "))
-    .stdout(predicate::str::contains("  doctor "));
+    .stdout(predicate::str::contains("  doctor "))
+    .stdout(predicate::str::contains("  link "))
+    .stdout(predicate::str::contains("  unlink "))
+    .stdout(predicate::str::contains("  open "))
+    .stdout(predicate::str::contains("  status "));
 }
 
 #[test]
@@ -106,6 +110,31 @@ fn doctor_outside_git_repo_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn doctor_exits_one_when_review_binary_missing() {
+  // Issue #75: configuring [review] with a binary that's not on $PATH
+  // must produce a Warning (exit code 1), not a Failed (exit code 2).
+  // Review is opt-in — a CI pre-commit hook gated on `gwm doctor`
+  // should still let the user push when only the review tool is
+  // missing locally.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[review]
+command = "definitely-not-on-path-review-cli {base}..{head}"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("doctor")
+    .assert()
+    .code(1)
+    .stdout(predicate::str::contains("definitely-not-on-path-review-cli"));
 }
 
 #[test]
@@ -573,4 +602,174 @@ fn zellij_help_mentions_split_flag() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["zellij", "--help"]);
   cmd.assert().success().stdout(predicate::str::contains("--split"));
+}
+
+// --- Issue/PR linking (issue #67) ----------------------------------------
+
+#[test]
+fn link_help_documents_issue_and_pr_targets() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["link", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("issue"))
+    .stdout(predicate::str::contains("pr"));
+}
+
+#[test]
+fn unlink_help_documents_issue_and_pr_targets() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["unlink", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("issue"))
+    .stdout(predicate::str::contains("pr"));
+}
+
+#[test]
+fn open_help_documents_issue_and_pr_and_print_url() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["open", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("issue"))
+    .stdout(predicate::str::contains("pr"))
+    .stdout(predicate::str::contains("--print-url"));
+}
+
+#[test]
+fn status_help_documents_json_flag() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["status", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("--json"));
+}
+
+#[test]
+fn link_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["link", "issue", "42"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn link_issue_persists_and_status_reflects_it() {
+  // E2E: link an issue then `gwm status --json` reads it back.
+  // The repo has no remote configured so `status` runs in "local link only" mode
+  // (no GitHub fetch). The JSON output should still carry the linked number.
+  let (dir, repo) = init_repo();
+  // Need a branch that's checked out for the CWD-resolved status to find it.
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+
+  // link
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["link", "issue", "99"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("issue #99"));
+
+  // status --json
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["status", "--json"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("\"issue\""))
+    .stdout(predicate::str::contains("99"));
+}
+
+#[test]
+fn unlink_issue_falls_back_to_branch_name_auto_detect() {
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+
+  // Override then unlink.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["link", "issue", "99"])
+    .assert()
+    .success();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["unlink", "issue"])
+    .assert()
+    .success();
+
+  // After unlink the branch-name auto-detect should resurface (issue #42).
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["status", "--json"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("42"));
+}
+
+#[test]
+fn open_print_url_emits_url_without_spawning_browser() {
+  // `--print-url` is the test-friendly mode: we want to assert the URL
+  // construction without actually shelling out to `open`/`xdg-open`.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["open", "issue", "--print-url"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("https://github.com/kbrdn1/gwm-cli/issues/42"));
+}
+
+#[test]
+fn open_pr_without_link_fails_clearly() {
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  // Branch without an issue number (no auto-detect) and no explicit PR link.
+  repo.branch("random-branch", &head, false).unwrap();
+  repo.set_head("refs/heads/random-branch").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["open", "pr", "--print-url"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("no PR linked"));
+}
+
+#[test]
+fn status_on_branch_with_no_link_reports_no_link() {
+  let (dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("random-branch", &head, false).unwrap();
+  repo.set_head("refs/heads/random-branch").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["status"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no link"));
 }

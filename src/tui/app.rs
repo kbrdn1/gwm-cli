@@ -1,6 +1,8 @@
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
-use crate::config::Config;
+use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
+use crate::github::{self, BranchLink, IssueStatus, PrStatus};
+use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
@@ -8,9 +10,28 @@ use nucleo_matcher::{
   pattern::{CaseMatching, Normalization, Pattern},
   Config as NucleoConfig, Matcher, Utf32Str,
 };
-use ratatui::{text::Line, widgets::TableState};
+use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Spawnable launcher plan handed to the event loop by
+/// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
+/// expanded argv, the cwd to set on the child, and the `fullscreen`
+/// toggle that decides whether gwm suspends its own TUI for the call.
+///
+/// The `diff_file` inside `expanded` (when set) is kept alive for the
+/// lifetime of the plan, so a `{diff}` tempfile survives until the
+/// spawned reviewer has had a chance to consume it.
+#[derive(Debug)]
+pub struct LauncherPlan {
+  pub expanded: ExpandedCommand,
+  pub cwd: std::path::PathBuf,
+  pub fullscreen: bool,
+  /// Resolved base ref, when the launcher cares about it (review).
+  /// `None` for the git_tui launcher. Surfaced so the status bar /
+  /// caller can mention which ref was used.
+  pub base: Option<String>,
+}
 
 /// Outcome of pressing `y` / Enter on the confirm overlay. The event loop
 /// in `super::run_app` matches on this to decide whether to fire the
@@ -47,6 +68,51 @@ pub enum View {
   Confirm,
   Report,
   Help,
+  /// Compact menu to pick which GitHub URL to open (issue / pr).
+  OpenMenu,
+  /// Two-stage prompt: pick the link kind, then enter the number.
+  LinkPrompt,
+}
+
+/// Target of an open / link action.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkTarget {
+  Issue,
+  Pr,
+}
+
+/// Dispatch target for the `o` key (issue #73). Resolved by
+/// [`App::resolve_open_target`] from the current selection + the
+/// `[tui.open]` config so the event loop can hand off to the right
+/// runner (shell suspend, editor suspend, OS file manager) without
+/// re-reading the config or `$SHELL` / `$EDITOR` itself.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum OpenTarget {
+  /// Spawn `command` with `cwd = path`. Caller suspends the TUI and
+  /// restores it on the child's exit (same lifecycle as `l: lazygit`).
+  Shell { path: PathBuf, command: String },
+  /// Spawn `command <path>` and wait. Same suspend/restore lifecycle
+  /// as `Shell`.
+  Editor { path: PathBuf, command: String },
+  /// Hand off to the OS opener (`open` / `xdg-open` / `explorer`).
+  /// Doesn't suspend the TUI — the opener detaches.
+  Finder { path: PathBuf },
+}
+
+/// Stage of the two-step link prompt.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkPromptStage {
+  ChooseTarget,
+  InputNumber,
+}
+
+/// State of a background GitHub fetch (issue or PR).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitHubFetchState<T> {
+  Idle,
+  Loading,
+  Loaded(T),
+  Error(String),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -80,10 +146,11 @@ pub struct App {
   pub sidebar_open: bool,
   pub sidebar_focused: bool,
   pub sidebar_scroll: u16,
-  /// Cache of rendered sidebar lines, keyed by the selected worktree path.
-  /// Prevents re-shelling `git log` / `git status` on every TUI redraw — they
-  /// only run when the selection actually changes (or on explicit refresh).
-  pub sidebar_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+  /// Cache of the rendered sidebar sections, keyed by the selected worktree
+  /// path. Prevents re-shelling `git log` / `git status` on every TUI redraw
+  /// — they only run when the selection actually changes (or on explicit
+  /// refresh).
+  pub sidebar_cache: Option<(PathBuf, super::ui::SidebarSections)>,
   /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
   /// Keeps scrolling clamped to the rendered content height so the user can't
   /// scroll the panel entirely off-screen.
@@ -121,6 +188,20 @@ pub struct App {
   /// `confirm_countdown_secs = 0`), or armed-but-just-disarmed by a
   /// second `y` press.
   pub confirm_countdown_started_at: Option<Instant>,
+
+  // ---- Issue/PR linking (issue #67) -------------------------------------
+  /// Cached link for the currently selected worktree's branch.
+  link: BranchLink,
+  /// Repo slug parsed from `origin` (None when no GitHub remote).
+  link_slug: Option<String>,
+  issue_state: GitHubFetchState<IssueStatus>,
+  pr_state: GitHubFetchState<PrStatus>,
+  /// In `View::LinkPrompt`, which stage are we in.
+  link_prompt_stage: LinkPromptStage,
+  /// In `View::LinkPrompt::InputNumber`, the digits typed so far.
+  link_prompt_number: String,
+  /// In `View::LinkPrompt::InputNumber`, the chosen target.
+  link_prompt_target: Option<LinkTarget>,
 }
 
 impl App {
@@ -138,7 +219,7 @@ impl App {
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
-    Ok(Self {
+    let mut out = Self {
       repo,
       repo_name,
       workdir,
@@ -165,7 +246,16 @@ impl App {
       picker_result: None,
       picker_should_exit: false,
       confirm_countdown_started_at: None,
-    })
+      link: BranchLink::empty(),
+      link_slug: None,
+      issue_state: GitHubFetchState::Idle,
+      pr_state: GitHubFetchState::Idle,
+      link_prompt_stage: LinkPromptStage::ChooseTarget,
+      link_prompt_number: String::new(),
+      link_prompt_target: None,
+    };
+    out.refresh_link();
+    Ok(out)
   }
 
   /// Constructor for `gwm switch`: same App, but picker mode is on and the
@@ -183,6 +273,7 @@ impl App {
 
   pub fn refresh(&mut self) -> Result<()> {
     self.worktrees = worktree::list(&self.repo)?;
+    // `clamp_selection_to_filter` re-resolves the link cache for us.
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
@@ -212,6 +303,7 @@ impl App {
     self.list_state.select(Some(i));
     self.sidebar_scroll = 0;
     self.invalidate_sidebar_cache();
+    self.refresh_link();
   }
 
   pub fn prev(&mut self) {
@@ -230,6 +322,7 @@ impl App {
     self.list_state.select(Some(i));
     self.sidebar_scroll = 0;
     self.invalidate_sidebar_cache();
+    self.refresh_link();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------
@@ -240,6 +333,7 @@ impl App {
       self.list_state.select(Some(0));
       self.sidebar_scroll = 0;
       self.invalidate_sidebar_cache();
+      self.refresh_link();
     }
   }
 
@@ -249,6 +343,7 @@ impl App {
       self.list_state.select(Some(len - 1));
       self.sidebar_scroll = 0;
       self.invalidate_sidebar_cache();
+      self.refresh_link();
     }
   }
 
@@ -301,6 +396,10 @@ impl App {
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
   /// The caller drives the actual TUI suspension/restoration around the spawn.
+  ///
+  /// Retained for callers that still want the legacy "lazygit only"
+  /// path; new code should go through [`Self::prepare_git_tui`], which
+  /// honours the configurable `[git_tui]` block (issue #75).
   pub fn launch_lazygit(&mut self) -> Option<PathBuf> {
     let path = self.selected()?.path.clone();
     if which::which("lazygit").is_err() {
@@ -308,6 +407,106 @@ impl App {
       return None;
     }
     Some(path)
+  }
+
+  // ---- Configurable launchers (issue #75) ---------------------------------
+
+  /// Build the [`LauncherPlan`] for the `l` keybinding. Reads
+  /// `[git_tui]` from `.gwm.toml` (default `lazygit -p {path}`
+  /// fullscreen=true) and expands the `{path}` placeholder against
+  /// the selected worktree. Returns `None` (and sets a status hint)
+  /// when nothing is selected or the template is malformed.
+  pub fn prepare_git_tui(&mut self) -> Option<LauncherPlan> {
+    let Some(wt) = self.selected().cloned() else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    let resolved = self.config.git_tui.resolved();
+    let ctx = LauncherContext {
+      worktree_path: &wt.path,
+      base: None,
+      head: None,
+      repo_workdir: Some(&self.workdir),
+    };
+    match launcher::expand_command(&resolved.command, &ctx) {
+      Ok(expanded) => Some(LauncherPlan {
+        expanded,
+        cwd: wt.path,
+        fullscreen: resolved.fullscreen,
+        base: None,
+      }),
+      Err(e) => {
+        self.status = format!("git_tui template error: {}", e);
+        None
+      }
+    }
+  }
+
+  /// Build the [`LauncherPlan`] for the `R` keybinding. Implements the
+  /// full review contract from issue #75:
+  ///
+  /// 1. `[review]` must resolve to a concrete launcher (`command`
+  ///    set, or `tool = "<preset>"` matched).
+  /// 2. The selected worktree must carry a branch name.
+  /// 3. The review base is resolved via the documented chain (upstream
+  ///    → `gwm-base` → `[review].default_base` → `"dev"` → `"main"`).
+  /// 4. When `skip_when_no_changes` is on (default), a zero
+  ///    `git rev-list --count {base}..HEAD` short-circuits with a
+  ///    status-bar hint naming the base.
+  /// 5. The template is expanded; `{diff}` lazily materialises a
+  ///    tempfile so unused placeholders never spawn `git diff`.
+  pub fn prepare_review(&mut self) -> Option<LauncherPlan> {
+    let resolved = match self.config.review.resolved() {
+      Some(r) => r,
+      None => {
+        self.status = "review tool not configured — set [review] in .gwm.toml".into();
+        return None;
+      }
+    };
+    let Some(wt) = self.selected().cloned() else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    let Some(head) = wt.branch.clone() else {
+      self.status = "selected worktree has no branch — cannot review".into();
+      return None;
+    };
+
+    let base = launcher::resolve_review_base(&self.repo, &head, self.config.review.default_base.as_deref());
+
+    if self.config.review.skip_when_no_changes {
+      let n = launcher::count_commits_ahead(&wt.path, &base, "HEAD");
+      if n == 0 {
+        self.status = format!("no changes to review (already at {})", base);
+        return None;
+      }
+    }
+
+    let ctx = LauncherContext {
+      worktree_path: &wt.path,
+      base: Some(&base),
+      head: Some(&head),
+      repo_workdir: Some(&self.workdir),
+    };
+    match launcher::expand_command(&resolved.command, &ctx) {
+      Ok(expanded) => {
+        if self.config.review.has_shadowed_tool() {
+          self.status = format!("review: command overrides tool — running {}", base);
+        } else {
+          self.status = format!("review: {} vs {}", head, base);
+        }
+        Some(LauncherPlan {
+          expanded,
+          cwd: wt.path,
+          fullscreen: resolved.fullscreen,
+          base: Some(base),
+        })
+      }
+      Err(e) => {
+        self.status = format!("review template error: {}", e);
+        None
+      }
+    }
   }
 
   pub fn selected(&self) -> Option<&WorktreeInfo> {
@@ -327,7 +526,9 @@ impl App {
   }
 
   /// Reveal the selected worktree's directory in the OS file manager.
-  /// macOS: `open`, Linux: `xdg-open`, Windows: `explorer`.
+  /// macOS: `open`, Linux: `xdg-open`, Windows: `explorer`. Used by
+  /// `resolve_open_target` when the config picks `mode = "finder"`,
+  /// and by the event loop directly to spawn the opener.
   pub fn open_selected_in_finder(&mut self) {
     let path = match self.selected() {
       Some(w) => w.path.clone(),
@@ -347,6 +548,34 @@ impl App {
       Ok(_) => self.status = format!("opened {} in {}", path.display(), opener),
       Err(e) => self.status = format!("failed to open {}: {}", path.display(), e),
     }
+  }
+
+  /// Return the path that the `y: yank` key should push into the system
+  /// clipboard, or `None` when nothing is selected. Pure — the actual
+  /// shell-out (`pbcopy` / `wl-copy` / `xclip` / `clip`) is handled by
+  /// the event loop so this method stays trivially testable.
+  pub fn yank_selected_path(&self) -> Option<PathBuf> {
+    self.selected().map(|w| w.path.clone())
+  }
+
+  /// Resolve what the `o` key should do for the currently selected
+  /// worktree. Returns `None` when nothing is selected (the event loop
+  /// surfaces a status message in that case). The exact command is
+  /// resolved once here (config override > env var > hardcoded fallback)
+  /// so the event loop never has to reason about precedence.
+  pub fn resolve_open_target(&self) -> Option<OpenTarget> {
+    let path = self.selected()?.path.clone();
+    Some(match self.config.tui.open.mode {
+      TuiOpenMode::Shell => OpenTarget::Shell {
+        path,
+        command: resolve_shell_command(&self.config.tui.open),
+      },
+      TuiOpenMode::Editor => OpenTarget::Editor {
+        path,
+        command: resolve_editor_command(&self.config.tui.open),
+      },
+      TuiOpenMode::Finder => OpenTarget::Finder { path },
+    })
   }
 
   pub fn toggle_delete_branch(&mut self) {
@@ -657,11 +886,15 @@ impl App {
 
   /// Reposition the selection so it stays inside the current filtered subset.
   /// Called whenever the filter mutates (`/`-mode typing, `Esc`-clear) or the
-  /// worktree list itself changes (`refresh`).
+  /// worktree list itself changes (`refresh`). Also re-resolves the issue/PR
+  /// link cache so the right-panel block tracks the new selection — PR #68
+  /// Copilot review caught that selection changes were leaving the cache
+  /// pointing at the previously selected worktree.
   fn clamp_selection_to_filter(&mut self) {
     let len = self.filtered_indices().len();
     if len == 0 {
       self.list_state.select(None);
+      self.refresh_link();
       return;
     }
     match self.list_state.selected() {
@@ -669,6 +902,7 @@ impl App {
       Some(_) => {}
       None => self.list_state.select(Some(0)),
     }
+    self.refresh_link();
   }
 
   // ---- Bootstrap flow ------------------------------------------------------
@@ -739,4 +973,261 @@ impl App {
       Err(e) => self.status = format!("bootstrap error: {}", e),
     }
   }
+
+  // ---- Issue/PR linking (issue #67) -------------------------------------
+
+  /// Re-read the link for the currently selected worktree's branch. Also
+  /// re-resolves the repo slug from the origin remote, and resets any
+  /// previously cached GitHub fetch state since it would refer to a
+  /// different (issue, pr) tuple now.
+  pub fn refresh_link(&mut self) {
+    self.link = self.read_selected_link().unwrap_or_else(BranchLink::empty);
+    self.link_slug = github::repo_slug(&self.repo).ok();
+    self.issue_state = GitHubFetchState::Idle;
+    self.pr_state = GitHubFetchState::Idle;
+  }
+
+  fn read_selected_link(&self) -> Option<BranchLink> {
+    let branch = self
+      .selected()
+      .and_then(|w| w.branch.clone())
+      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))?;
+    github::read_link(&self.repo, &branch).ok()
+  }
+
+  pub fn current_link(&self) -> &BranchLink {
+    &self.link
+  }
+
+  pub fn current_slug(&self) -> Option<&str> {
+    self.link_slug.as_deref()
+  }
+
+  pub fn issue_fetch_state(&self) -> &GitHubFetchState<IssueStatus> {
+    &self.issue_state
+  }
+
+  pub fn pr_fetch_state(&self) -> &GitHubFetchState<PrStatus> {
+    &self.pr_state
+  }
+
+  /// Drive the issue/PR fetch synchronously. Called from the event loop
+  /// when the user presses `R`. Sets states to `Loading` first so the UI
+  /// can flag the in-flight state, then runs the fetches.
+  pub fn refresh_github_status(&mut self) {
+    if self.link.issue.is_none() && self.link.pr.is_none() {
+      self.status = "nothing linked — press L to link an issue or PR".into();
+      return;
+    }
+    let Some(slug) = self.link_slug.clone() else {
+      self.status = "no GitHub remote — cannot fetch status".into();
+      return;
+    };
+    if let Some(n) = self.link.issue {
+      self.issue_state = GitHubFetchState::Loading;
+      let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
+      self.apply_issue_fetch_result(r);
+    }
+    if let Some(n) = self.link.pr {
+      self.pr_state = GitHubFetchState::Loading;
+      let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
+      self.apply_pr_fetch_result(r);
+    }
+    self.report_github_refresh_status();
+  }
+
+  /// Compute the post-refresh status line message based on the actual
+  /// outcome of the issue / PR fetches. PR #68 Copilot review caught
+  /// that always printing "refreshed" misled users when one of the
+  /// fetches had failed.
+  pub fn report_github_refresh_status(&mut self) {
+    let issue_err = matches!(self.issue_state, GitHubFetchState::Error(_));
+    let pr_err = matches!(self.pr_state, GitHubFetchState::Error(_));
+    self.status = match (issue_err, pr_err) {
+      (false, false) => "github status refreshed".into(),
+      (true, false) => format!(
+        "issue fetch failed: {}",
+        self.issue_error_message().unwrap_or("?".into())
+      ),
+      (false, true) => format!("pr fetch failed: {}", self.pr_error_message().unwrap_or("?".into())),
+      (true, true) => format!(
+        "issue + pr fetch failed — issue: {} · pr: {}",
+        self.issue_error_message().unwrap_or("?".into()),
+        self.pr_error_message().unwrap_or("?".into())
+      ),
+    };
+  }
+
+  fn issue_error_message(&self) -> Option<String> {
+    match &self.issue_state {
+      GitHubFetchState::Error(e) => Some(e.clone()),
+      _ => None,
+    }
+  }
+
+  fn pr_error_message(&self) -> Option<String> {
+    match &self.pr_state {
+      GitHubFetchState::Error(e) => Some(e.clone()),
+      _ => None,
+    }
+  }
+
+  pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
+    self.issue_state = match r {
+      Ok(s) => GitHubFetchState::Loaded(s),
+      Err(e) => GitHubFetchState::Error(e),
+    };
+  }
+
+  pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
+    self.pr_state = match r {
+      Ok(s) => GitHubFetchState::Loaded(s),
+      Err(e) => GitHubFetchState::Error(e),
+    };
+  }
+
+  // ---- Open menu ----------------------------------------------------------
+
+  pub fn enter_open_menu(&mut self) {
+    // Re-resolve link + slug in case the user just linked something
+    // (`gwm link …` from a parallel terminal) or moved the origin remote.
+    self.refresh_link();
+    self.view = View::OpenMenu;
+  }
+
+  pub fn exit_open_menu(&mut self) {
+    self.view = View::List;
+  }
+
+  /// Pick a target from the open menu. Returns the URL to open, or `None`
+  /// when the link is missing (the status bar carries the explanation).
+  pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
+    self.view = View::List;
+    let Some(slug) = self.link_slug.clone() else {
+      self.status = "no GitHub remote — cannot build URL".into();
+      return None;
+    };
+    let url = match target {
+      LinkTarget::Issue => match self.link.issue {
+        Some(n) => github::issue_url(&slug, n),
+        None => {
+          self.status = "no issue linked — press L to link one".into();
+          return None;
+        }
+      },
+      LinkTarget::Pr => match self.link.pr {
+        Some(n) => github::pr_url(&slug, n),
+        None => {
+          self.status = "no PR linked — press L to link one".into();
+          return None;
+        }
+      },
+    };
+    Some(url)
+  }
+
+  // ---- Link prompt --------------------------------------------------------
+
+  pub fn enter_link_prompt(&mut self) {
+    self.view = View::LinkPrompt;
+    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
+    self.link_prompt_target = None;
+    self.link_prompt_number.clear();
+    self.status = "link: [i]ssue / [p]r · esc cancels".into();
+  }
+
+  pub fn link_prompt_cancel(&mut self) {
+    self.view = View::List;
+    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
+    self.link_prompt_target = None;
+    self.link_prompt_number.clear();
+  }
+
+  pub fn link_prompt_stage(&self) -> LinkPromptStage {
+    self.link_prompt_stage
+  }
+
+  pub fn link_prompt_number_input(&self) -> &str {
+    &self.link_prompt_number
+  }
+
+  pub fn link_prompt_target(&self) -> Option<LinkTarget> {
+    self.link_prompt_target
+  }
+
+  pub fn link_prompt_choose(&mut self, target: LinkTarget) {
+    self.link_prompt_target = Some(target);
+    self.link_prompt_stage = LinkPromptStage::InputNumber;
+    self.link_prompt_number.clear();
+    self.status = match target {
+      LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
+      LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
+    };
+  }
+
+  pub fn link_prompt_push_char(&mut self, c: char) {
+    if self.link_prompt_stage == LinkPromptStage::InputNumber && c.is_ascii_digit() {
+      self.link_prompt_number.push(c);
+    }
+  }
+
+  pub fn link_prompt_pop_char(&mut self) {
+    if self.link_prompt_stage == LinkPromptStage::InputNumber {
+      self.link_prompt_number.pop();
+    }
+  }
+
+  pub fn link_prompt_submit(&mut self) -> Result<()> {
+    let Some(target) = self.link_prompt_target else {
+      self.status = "no target chosen".into();
+      return Ok(());
+    };
+    let n: u64 = self
+      .link_prompt_number
+      .parse()
+      .map_err(|_| GwmError::Other("number is empty or invalid".into()))?;
+    let branch = self
+      .selected()
+      .and_then(|w| w.branch.clone())
+      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
+      .ok_or_else(|| GwmError::Other("no branch resolved for selected worktree".into()))?;
+    match target {
+      LinkTarget::Issue => github::link_issue(&self.repo, &branch, n)?,
+      LinkTarget::Pr => github::link_pr(&self.repo, &branch, n)?,
+    }
+    self.status = match target {
+      LinkTarget::Issue => format!("linked issue #{} to {}", n, branch),
+      LinkTarget::Pr => format!("linked PR #{} to {}", n, branch),
+    };
+    self.view = View::List;
+    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
+    self.link_prompt_target = None;
+    self.link_prompt_number.clear();
+    self.refresh_link();
+    Ok(())
+  }
+}
+
+/// Resolve the shell command for `mode = "shell"`. Precedence:
+/// `shell_cmd` in `.gwm.toml` → `$SHELL` env var → `/bin/sh`. The
+/// hardcoded fallback exists for the (rare) case where neither is set —
+/// the TUI's spawn-and-restore loop assumes a non-empty command string.
+fn resolve_shell_command(cfg: &TuiOpenConfig) -> String {
+  cfg
+    .shell_cmd
+    .clone()
+    .or_else(|| std::env::var("SHELL").ok())
+    .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// Resolve the editor command for `mode = "editor"`. Precedence:
+/// `editor_cmd` in `.gwm.toml` → `$EDITOR` env var → `vi` (POSIX
+/// baseline). Mirrors `resolve_shell_command` so the two flows share
+/// the same precedence story.
+fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
+  cfg
+    .editor_cmd
+    .clone()
+    .or_else(|| std::env::var("EDITOR").ok())
+    .unwrap_or_else(|| "vi".into())
 }
