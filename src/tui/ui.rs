@@ -336,7 +336,8 @@ fn sidebar_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   for (key, label) in [
     ("Enter", "Copy path to status"),
     ("    l", "Launch lazygit fullscreen"),
-    ("    o", "Open dir in OS file manager"),
+    ("    o", "Open per [tui.open] (shell/editor/finder)"),
+    ("    y", "Yank path to system clipboard"),
     ("    b", "Bootstrap worktree"),
     ("    n", "New worktree"),
     ("    d", "Delete worktree"),
@@ -534,9 +535,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Picker mode hides the mutating actions (n/d/b/p) — they're inert in the
   // event loop, so advertising them would be a lie.
   let help = if app.picker_mode {
-    "enter:select esc:cancel o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+    "enter:select esc:cancel o:open y:yank l:lazygit v:sidebar Tab:focus /:filter j/k:nav r:refresh ?:help q:quit"
   } else {
-    "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+    "n:new d:del b:boot o:open y:yank l:lazygit v:sidebar Tab:focus /:filter j/k:nav r:refresh ?:help q:quit"
   };
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
@@ -579,7 +580,8 @@ fn draw_help(f: &mut Frame, app: &App) {
     lines.push(Line::from("  b             bootstrap selected"));
   }
   lines.extend([
-    Line::from("  o             open dir in OS file manager (open / xdg-open / explorer)"),
+    Line::from("  o             open per [tui.open] — shell (default) / editor / finder"),
+    Line::from("  y             yank selected path to system clipboard"),
     Line::from("  l             launch lazygit fullscreen on selected worktree"),
     Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
     Line::from("  Tab           swap focus between worktree list and sidebar"),
