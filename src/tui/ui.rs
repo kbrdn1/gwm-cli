@@ -303,7 +303,9 @@ fn sidebar_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
     ("    n", "New worktree"),
     ("    d", "Delete worktree"),
     ("    p", "Toggle delete-branch-on-remove"),
-    ("    r", "Refresh"),
+    ("    f", "Refresh worktree list"),
+    ("    F", "Refresh GitHub issue/PR status"),
+    ("    R", "Run [review] launcher vs base"),
     ("    v", "Toggle this sidebar"),
     ("  Tab", "Swap focus list ↔ sidebar"),
     ("    /", "Fuzzy filter worktrees"),
@@ -471,9 +473,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Picker mode hides the mutating actions (n/d/b/p) — they're inert in the
   // event loop, so advertising them would be a lie.
   let help = if app.picker_mode {
-    "enter:select esc:cancel o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+    "enter:select esc:cancel o:open l:git_tui v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav f:refresh ?:help q:quit"
   } else {
-    "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+    "n:new d:del b:boot o:open l:git_tui R:review v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav f:refresh F:gh ?:help q:quit"
   };
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
@@ -517,11 +519,13 @@ fn draw_help(f: &mut Frame, app: &App) {
   }
   lines.extend([
     Line::from("  o             open dir in OS file manager (open / xdg-open / explorer)"),
-    Line::from("  l             launch lazygit fullscreen on selected worktree"),
+    Line::from("  l             launch [git_tui] launcher (default lazygit -p, configurable)"),
     Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
     Line::from("  Tab           swap focus between worktree list and sidebar"),
     Line::from("  /             open fuzzy filter bar (enter: sticky, esc: clear)"),
-    Line::from("  r             refresh"),
+    Line::from("  f             refresh worktree list"),
+    Line::from("  F             refresh GitHub issue/PR status via `gh`"),
+    Line::from("  R             run [review] launcher against the resolved base"),
   ]);
   if !app.picker_mode {
     lines.push(Line::from("  p             toggle 'delete branch on remove'"));
@@ -530,7 +534,6 @@ fn draw_help(f: &mut Frame, app: &App) {
     lines.push(Line::from("issue / PR (#67)"));
     lines.push(Line::from("  O             open menu — i=issue · p=pull request"));
     lines.push(Line::from("  L             link prompt — i / p then digits"));
-    lines.push(Line::from("  R             refresh GitHub status via `gh`"));
   }
   lines.push(Line::from("  ?             this help"));
   if !app.picker_mode {
