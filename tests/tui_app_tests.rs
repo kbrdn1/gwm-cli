@@ -1435,3 +1435,117 @@ fn issue_state_variants_compile() {
   let _ = IssueState::Open;
   let _ = IssueState::Closed;
 }
+
+// ---- Issue #73: configurable `o:` open key ---------------------------------
+// `App::resolve_open_target` returns an `OpenTarget` that the event loop
+// dispatches on (suspend-and-spawn for shell/editor, OS opener for finder).
+// Pure resolution — no side effects, no spawn — so the test can pin the
+// command resolution under every config / env combination.
+
+use gwm::config::{TuiOpenConfig, TuiOpenMode};
+use gwm::tui::OpenTarget;
+
+#[test]
+fn resolve_open_target_returns_none_when_nothing_selected() {
+  let (_dir, mut app) = make_app();
+  app.list_state.select(None);
+  assert!(app.resolve_open_target().is_none());
+}
+
+#[test]
+fn resolve_open_target_defaults_to_shell_mode() {
+  // Default config (`mode = "shell"`) + a worktree selected → Shell variant
+  // carrying the worktree path. The exact command depends on env / fallback;
+  // here we only pin the variant + path so the test isn't $SHELL-dependent.
+  let (_dir, app) = make_app();
+  let target = app
+    .resolve_open_target()
+    .expect("main worktree should always be selectable");
+  match target {
+    OpenTarget::Shell { path, command } => {
+      assert_eq!(path, app.worktrees[0].path);
+      assert!(!command.is_empty(), "shell command must never be empty");
+    }
+    other => panic!("expected Shell variant, got {:?}", other),
+  }
+}
+
+#[test]
+fn resolve_open_target_honours_shell_cmd_override() {
+  // `shell_cmd = "/usr/bin/fish"` must beat `$SHELL` — that's the whole
+  // point of the override. Use a sentinel that's unlikely to be the
+  // ambient shell to make the assertion deterministic.
+  let (_dir, mut app) = make_app();
+  app.config.tui.open = TuiOpenConfig {
+    mode: TuiOpenMode::Shell,
+    shell_cmd: Some("/sentinel/shell".into()),
+    editor_cmd: None,
+  };
+  match app.resolve_open_target().unwrap() {
+    OpenTarget::Shell { command, .. } => assert_eq!(command, "/sentinel/shell"),
+    other => panic!("expected Shell, got {:?}", other),
+  }
+}
+
+#[test]
+fn resolve_open_target_uses_editor_mode_when_configured() {
+  let (_dir, mut app) = make_app();
+  app.config.tui.open = TuiOpenConfig {
+    mode: TuiOpenMode::Editor,
+    shell_cmd: None,
+    editor_cmd: Some("hx".into()),
+  };
+  match app.resolve_open_target().unwrap() {
+    OpenTarget::Editor { path, command } => {
+      assert_eq!(path, app.worktrees[0].path);
+      assert_eq!(command, "hx");
+    }
+    other => panic!("expected Editor, got {:?}", other),
+  }
+}
+
+// ---- Issue #73: `y: yank` clipboard support -------------------------------
+// `App::yank_selected_path` returns the path to push into the clipboard,
+// or None when nothing's selected. The actual shell-out (pbcopy / wl-copy
+// / xclip / clip) is tested manually — CI machines don't necessarily
+// have any of these installed, so we keep the test scope to the pure
+// resolution step and rely on the smoke test in the TUI for the rest.
+
+#[test]
+fn yank_selected_path_returns_path_for_selected_worktree() {
+  let (_dir, app) = make_app();
+  let path = app.yank_selected_path().expect("main worktree must be yankable");
+  assert_eq!(path, app.worktrees[0].path);
+}
+
+#[test]
+fn yank_selected_path_returns_none_when_nothing_selected() {
+  let (_dir, mut app) = make_app();
+  app.list_state.select(None);
+  assert!(app.yank_selected_path().is_none());
+}
+
+#[test]
+fn yank_candidates_for_current_platform_is_non_empty() {
+  // Whatever the host OS, the candidate list must offer at least one
+  // tool to try — empty would mean `y` could never succeed even with a
+  // working pbcopy / xclip installed.
+  assert!(
+    !gwm::tui::clipboard_candidates().is_empty(),
+    "clipboard candidates must include at least one tool for this OS"
+  );
+}
+
+#[test]
+fn resolve_open_target_uses_finder_mode_for_legacy_behaviour() {
+  let (_dir, mut app) = make_app();
+  app.config.tui.open = TuiOpenConfig {
+    mode: TuiOpenMode::Finder,
+    shell_cmd: None,
+    editor_cmd: None,
+  };
+  match app.resolve_open_target().unwrap() {
+    OpenTarget::Finder { path } => assert_eq!(path, app.worktrees[0].path),
+    other => panic!("expected Finder, got {:?}", other),
+  }
+}
