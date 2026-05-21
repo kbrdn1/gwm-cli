@@ -152,9 +152,13 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .collect();
 
   let widths = [
-    // Fixed at 4 chars — `2d`, `3w`, `1M`, `5y`, `-` all fit; never
-    // expands so BRANCH stays the elastic column.
-    Constraint::Length(4),
+    // Age column sits at column 0 — recency-first. Width = 6 because
+    // the highlight symbol "▶ " is rendered INSIDE the first cell area
+    // (eating ~2 cells when any row is selected, which is always the
+    // case here), and we need 3 visible cells for max content ("22h",
+    // "14m", "59s", "1M ", etc.) plus 1 trailing pad. 6 - 2 (symbol)
+    // - 1 (column_spacing baseline) = 3 visible cells minimum.
+    Constraint::Length(6),
     Constraint::Length(2),
     Constraint::Length(name_w),
     Constraint::Length(branch_w),
@@ -475,15 +479,18 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
 
   let status_cell = build_status_cell(w, status_w as usize);
 
-  // PR #74 follow-up: surface branch age + freshness right in the table
-  // so it stays visible when the sidebar is hidden (<120 cols or `v`
-  // collapsed). `branch_age_for` opens the worktree's repo and runs the
-  // libgit2 revwalk; per-frame cost is bounded by the number of visible
-  // rows (typically <20) so we re-resolve on every draw without caching.
+  // PR #74 follow-up: surface branch age right in the table so it stays
+  // visible when the sidebar is hidden (<120 cols or `v` collapsed).
+  // `branch_age_for` opens the worktree's repo and runs the libgit2
+  // revwalk; per-frame cost is bounded by the number of visible rows
+  // (typically <20) so we re-resolve on every draw without caching.
+  // Colour stays uniform Gray — the saturated freshness palette
+  // (green/yellow/darkgray) reads as noise next to the more important
+  // BRANCH-status colour, so we keep it muted in the table and let the
+  // sidebar's `Created:` row carry the colour-coded signal.
   let age = branch_age_for(w);
   let age_label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
-  let age_color = age.map(freshness_color).unwrap_or(Color::DarkGray);
-  let age_cell = Cell::from(age_label).style(Style::default().fg(age_color));
+  let age_cell = Cell::from(age_label).style(Style::default().fg(Color::DarkGray));
 
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
 
