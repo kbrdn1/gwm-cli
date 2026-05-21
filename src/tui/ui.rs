@@ -152,13 +152,15 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .collect();
 
   let widths = [
-    // Age column sits at column 0 — recency-first. Width = 6 because
-    // the highlight symbol "▶ " is rendered INSIDE the first cell area
-    // (eating ~2 cells when any row is selected, which is always the
-    // case here), and we need 3 visible cells for max content ("22h",
-    // "14m", "59s", "1M ", etc.) plus 1 trailing pad. 6 - 2 (symbol)
-    // - 1 (column_spacing baseline) = 3 visible cells minimum.
-    Constraint::Length(6),
+    // Age column sits at column 0. The first column is special in
+    // ratatui's Table: it carries the `highlight_symbol` overlay
+    // (rendered IN-CELL, not as a prefix), AND ratatui reserves the
+    // symbol width on every row to keep the layout stable. That
+    // reservation, plus the table's own column_spacing(1) on the
+    // right, eats ~4 cells of the constraint. Empirically Length(6)
+    // truncated "22h" → "22". Bump to 8 so 3-char ages keep one
+    // trailing pad even on the selected row.
+    Constraint::Length(8),
     Constraint::Length(2),
     Constraint::Length(name_w),
     Constraint::Length(branch_w),
