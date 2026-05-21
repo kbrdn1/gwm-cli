@@ -2,6 +2,14 @@ use crate::error::{GwmError, Result};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+/// Trunk branches treated as "merge destinations" when measuring how
+/// long a branch has been alive. Order matters: the first match wins,
+/// so `main` (modern default) beats `master` (legacy) beats `dev` (gwm
+/// convention). Hardcoded here because `branch_age` is also reachable
+/// from contexts that don't carry a `Config` (CLI smoke paths).
+const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
 
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
@@ -290,6 +298,81 @@ pub fn git_status_short(path: &Path) -> Result<String> {
     )));
   }
   Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Time elapsed since the *oldest* commit on `branch` that's not also on a
+/// known trunk (main / master / dev). Returns `None` when no such commit
+/// exists — i.e. the branch is the trunk itself, has no divergence yet,
+/// or `branch` cannot be resolved. The "oldest commit" rule mirrors the
+/// lazygit branch-age semantics (pkg/utils/date.go::UnixToTimeAgo on the
+/// branch's founding commit) and is more meaningful for a worktree-manager
+/// than `git log -1`: it answers "how long has this branch been alive?"
+/// rather than "when did someone last touch it?".
+pub fn branch_age(repo: &Repository, branch: &str) -> Option<Duration> {
+  // The trunk itself has no "branch age" — there's no founding-commit
+  // distinct from the repository's initial commit, and the natural
+  // answer ("since forever") is more usefully encoded as `None` so the
+  // UI can render a dash instead of a misleadingly precise duration.
+  if TRUNK_CANDIDATES.contains(&branch) {
+    return None;
+  }
+
+  let local = repo.find_branch(branch, BranchType::Local).ok()?;
+  let head_oid = local.into_reference().target()?;
+
+  let mut walker = repo.revwalk().ok()?;
+  walker.push(head_oid).ok()?;
+  for trunk in TRUNK_CANDIDATES {
+    if let Ok(t) = repo.find_branch(trunk, BranchType::Local) {
+      if let Some(oid) = t.into_reference().target() {
+        let _ = walker.hide(oid);
+      }
+    }
+  }
+
+  let mut oldest_secs: Option<i64> = None;
+  for oid in walker.flatten() {
+    if let Ok(commit) = repo.find_commit(oid) {
+      let t = commit.time().seconds();
+      oldest_secs = Some(oldest_secs.map_or(t, |x| x.min(t)));
+    }
+  }
+  let oldest = oldest_secs?;
+  let now = chrono::Utc::now().timestamp();
+  let elapsed = (now - oldest).max(0) as u64;
+  Some(Duration::from_secs(elapsed))
+}
+
+/// Render a `Duration` as a lazygit-style compact relative label
+/// (`2d`, `3w`, `1M`, `5y`). Mirrors `pkg/utils/date.go::formatSecondsAgo`
+/// from lazygit: single-character suffix, no plural, capital `M` to
+/// disambiguate from minutes. Bounded at 4 chars for two-digit values in
+/// each unit, which is enough for any realistic branch age.
+pub fn format_relative_duration(d: Duration) -> String {
+  const MINUTE: u64 = 60;
+  const HOUR: u64 = 60 * MINUTE;
+  const DAY: u64 = 24 * HOUR;
+  const WEEK: u64 = 7 * DAY;
+  // Month = 30.25 days, year = 365.25 days (matches lazygit `pkg/utils/date.go`).
+  const MONTH: u64 = 30 * DAY + 6 * HOUR;
+  const YEAR: u64 = 365 * DAY + 6 * HOUR;
+
+  let s = d.as_secs();
+  if s < MINUTE {
+    format!("{}s", s)
+  } else if s < HOUR {
+    format!("{}m", s / MINUTE)
+  } else if s < DAY {
+    format!("{}h", s / HOUR)
+  } else if s < WEEK {
+    format!("{}d", s / DAY)
+  } else if s < MONTH {
+    format!("{}w", s / WEEK)
+  } else if s < YEAR {
+    format!("{}M", s / MONTH)
+  } else {
+    format!("{}y", s / YEAR)
+  }
 }
 
 /// Resolve a worktree by exact name first, then by substring (case-insensitive) within the dir name.
