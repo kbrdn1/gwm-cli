@@ -1,5 +1,5 @@
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
-use crate::config::Config;
+use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
@@ -10,7 +10,7 @@ use nucleo_matcher::{
   pattern::{CaseMatching, Normalization, Pattern},
   Config as NucleoConfig, Matcher, Utf32Str,
 };
-use ratatui::{text::Line, widgets::TableState};
+use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -81,6 +81,24 @@ pub enum LinkTarget {
   Pr,
 }
 
+/// Dispatch target for the `o` key (issue #73). Resolved by
+/// [`App::resolve_open_target`] from the current selection + the
+/// `[tui.open]` config so the event loop can hand off to the right
+/// runner (shell suspend, editor suspend, OS file manager) without
+/// re-reading the config or `$SHELL` / `$EDITOR` itself.
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum OpenTarget {
+  /// Spawn `command` with `cwd = path`. Caller suspends the TUI and
+  /// restores it on the child's exit (same lifecycle as `l: lazygit`).
+  Shell { path: PathBuf, command: String },
+  /// Spawn `command <path>` and wait. Same suspend/restore lifecycle
+  /// as `Shell`.
+  Editor { path: PathBuf, command: String },
+  /// Hand off to the OS opener (`open` / `xdg-open` / `explorer`).
+  /// Doesn't suspend the TUI — the opener detaches.
+  Finder { path: PathBuf },
+}
+
 /// Stage of the two-step link prompt.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum LinkPromptStage {
@@ -128,10 +146,11 @@ pub struct App {
   pub sidebar_open: bool,
   pub sidebar_focused: bool,
   pub sidebar_scroll: u16,
-  /// Cache of rendered sidebar lines, keyed by the selected worktree path.
-  /// Prevents re-shelling `git log` / `git status` on every TUI redraw — they
-  /// only run when the selection actually changes (or on explicit refresh).
-  pub sidebar_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+  /// Cache of the rendered sidebar sections, keyed by the selected worktree
+  /// path. Prevents re-shelling `git log` / `git status` on every TUI redraw
+  /// — they only run when the selection actually changes (or on explicit
+  /// refresh).
+  pub sidebar_cache: Option<(PathBuf, super::ui::SidebarSections)>,
   /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
   /// Keeps scrolling clamped to the rendered content height so the user can't
   /// scroll the panel entirely off-screen.
@@ -507,7 +526,9 @@ impl App {
   }
 
   /// Reveal the selected worktree's directory in the OS file manager.
-  /// macOS: `open`, Linux: `xdg-open`, Windows: `explorer`.
+  /// macOS: `open`, Linux: `xdg-open`, Windows: `explorer`. Used by
+  /// `resolve_open_target` when the config picks `mode = "finder"`,
+  /// and by the event loop directly to spawn the opener.
   pub fn open_selected_in_finder(&mut self) {
     let path = match self.selected() {
       Some(w) => w.path.clone(),
@@ -527,6 +548,34 @@ impl App {
       Ok(_) => self.status = format!("opened {} in {}", path.display(), opener),
       Err(e) => self.status = format!("failed to open {}: {}", path.display(), e),
     }
+  }
+
+  /// Return the path that the `y: yank` key should push into the system
+  /// clipboard, or `None` when nothing is selected. Pure — the actual
+  /// shell-out (`pbcopy` / `wl-copy` / `xclip` / `clip`) is handled by
+  /// the event loop so this method stays trivially testable.
+  pub fn yank_selected_path(&self) -> Option<PathBuf> {
+    self.selected().map(|w| w.path.clone())
+  }
+
+  /// Resolve what the `o` key should do for the currently selected
+  /// worktree. Returns `None` when nothing is selected (the event loop
+  /// surfaces a status message in that case). The exact command is
+  /// resolved once here (config override > env var > hardcoded fallback)
+  /// so the event loop never has to reason about precedence.
+  pub fn resolve_open_target(&self) -> Option<OpenTarget> {
+    let path = self.selected()?.path.clone();
+    Some(match self.config.tui.open.mode {
+      TuiOpenMode::Shell => OpenTarget::Shell {
+        path,
+        command: resolve_shell_command(&self.config.tui.open),
+      },
+      TuiOpenMode::Editor => OpenTarget::Editor {
+        path,
+        command: resolve_editor_command(&self.config.tui.open),
+      },
+      TuiOpenMode::Finder => OpenTarget::Finder { path },
+    })
   }
 
   pub fn toggle_delete_branch(&mut self) {
@@ -1157,4 +1206,28 @@ impl App {
     self.refresh_link();
     Ok(())
   }
+}
+
+/// Resolve the shell command for `mode = "shell"`. Precedence:
+/// `shell_cmd` in `.gwm.toml` → `$SHELL` env var → `/bin/sh`. The
+/// hardcoded fallback exists for the (rare) case where neither is set —
+/// the TUI's spawn-and-restore loop assumes a non-empty command string.
+fn resolve_shell_command(cfg: &TuiOpenConfig) -> String {
+  cfg
+    .shell_cmd
+    .clone()
+    .or_else(|| std::env::var("SHELL").ok())
+    .unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// Resolve the editor command for `mode = "editor"`. Precedence:
+/// `editor_cmd` in `.gwm.toml` → `$EDITOR` env var → `vi` (POSIX
+/// baseline). Mirrors `resolve_shell_command` so the two flows share
+/// the same precedence story.
+fn resolve_editor_command(cfg: &TuiOpenConfig) -> String {
+  cfg
+    .editor_cmd
+    .clone()
+    .or_else(|| std::env::var("EDITOR").ok())
+    .unwrap_or_else(|| "vi".into())
 }

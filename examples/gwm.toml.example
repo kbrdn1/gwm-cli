@@ -165,3 +165,18 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # command              = "lumen diff {base}..{head}"
 # fullscreen           = true
 # skip_when_no_changes = true
+
+# --- `o: open` dispatch (issue #73) -----------------------------------------
+# How the `o` key behaves on the highlighted worktree. Three modes:
+#   "shell"  — suspend the TUI and spawn $SHELL with cwd = worktree.
+#              Lazygit-style. Default. Exit the shell ⇒ TUI restores.
+#   "editor" — suspend the TUI and run $EDITOR <worktree-path>.
+#   "finder" — pre-#73 behaviour: hand off to the OS file manager
+#              (`open` / `xdg-open` / `explorer`).
+# `shell_cmd` / `editor_cmd` override the env var when set (empty string
+# = unset). An unknown `mode` is a hard config error at load time.
+#
+# [tui.open]
+# mode = "shell"
+# shell_cmd = ""        # leave empty to read $SHELL
+# editor_cmd = "hx"     # example: Helix

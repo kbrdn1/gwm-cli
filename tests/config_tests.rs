@@ -1,4 +1,4 @@
-use gwm::config::{expand_placeholders, review_tool_preset, Config, WorktreeConfig, CONFIG_FILE};
+use gwm::config::{expand_placeholders, review_tool_preset, Config, TuiOpenMode, WorktreeConfig, CONFIG_FILE};
 use tempfile::TempDir;
 
 #[test]
@@ -478,4 +478,103 @@ confirm_countdown_secs = 300
   .unwrap();
   let cfg = Config::load_for_repo(dir.path()).expect("300 must parse, not error");
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
+}
+
+// Issue #73: [tui.open] table. The `o` key in the TUI dispatches to one of
+// three behaviours (shell-in-worktree, editor, OS file manager) decided by
+// config. Default is `shell` — lazygit-style — to match the worktree-manager
+// workflow ("I want to *do work* in this worktree").
+
+#[test]
+fn tui_open_section_defaults_to_shell_mode() {
+  let cfg = Config::default();
+  assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
+  assert!(cfg.tui.open.shell_cmd.is_none());
+  assert!(cfg.tui.open.editor_cmd.is_none());
+}
+
+#[test]
+fn tui_open_section_absent_keeps_defaults() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[worktree]
+base = "/tmp/wt/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
+}
+
+#[test]
+fn tui_open_mode_editor_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.open]
+mode = "editor"
+editor_cmd = "hx"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.open.mode, TuiOpenMode::Editor);
+  assert_eq!(cfg.tui.open.editor_cmd.as_deref(), Some("hx"));
+}
+
+#[test]
+fn tui_open_mode_finder_preserves_legacy_behaviour() {
+  // Users who liked the pre-#73 default (`open` / `xdg-open` / `explorer`)
+  // can opt back in. The variant is named `Finder` after the dominant macOS
+  // use case but covers all three OS openers.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.open]
+mode = "finder"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.open.mode, TuiOpenMode::Finder);
+}
+
+#[test]
+fn tui_open_mode_shell_with_custom_cmd_round_trips() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.open]
+mode = "shell"
+shell_cmd = "/usr/bin/fish"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
+  assert_eq!(cfg.tui.open.shell_cmd.as_deref(), Some("/usr/bin/fish"));
+}
+
+#[test]
+fn tui_open_mode_invalid_value_errors_at_parse_time() {
+  // Unknown enum variants are a hard config error — we can't silently fall
+  // back to a default without confusing the user about which mode is active.
+  // Document the supported set in the example file; bad values surface here.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.open]
+mode = "neovim"
+"#,
+  )
+  .unwrap();
+  assert!(Config::load_for_repo(dir.path()).is_err());
 }

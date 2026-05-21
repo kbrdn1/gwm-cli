@@ -1,23 +1,27 @@
 ---
 name: gwm
-description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap worktrees, mentions `gwm`, `gwq`, `git worktree`, or asks about per-repo `.gwm.toml` config (branch conventions, file copies, regex guards on `.env`, shell hooks like composer/npm install, no-symlink invariants). Replaces project-specific `tools/worktree-manager.sh` bash wrappers. Triggers on "worktree", "gwm", "gwm create", "gwm list", "gwm bootstrap", ".gwm.toml", "bootstrap worktree", "feat/#", "fix/#".
+description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, diagnose with `gwm doctor`, drive tmux/zellij from a worktree, or wire `gcd` via `gwm shell-init`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `gwm create`, `gwm list`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
 # gwm — git worktree manager (Rust CLI + TUI)
 
-Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, and a declarative per-repo bootstrap (`.gwm.toml`). Replaces project-specific bash wrappers (`tools/worktree-manager.sh`-style) with one portable binary that works in any git repo.
+Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli
+Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0-rc.1`.
 
 ## When to use this skill
 
-- User runs or asks about `gwm <subcommand>` (init / list / create / remove / path / bootstrap / prune / types).
-- User opens the TUI by running `gwm` alone in a repo.
-- User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`.
+- User runs or asks about any `gwm <subcommand>`: `init`, `list`, `create`, `remove`, `path` / `cd`, `bootstrap`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`.
+- User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
+- User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
+- User asks about composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`) and the `!` / `&&` / `||` operators.
 - User wants to migrate a `tools/worktree-manager.sh` or `gwq`-based workflow to `gwm`.
 - User asks how to set up the AWS RDS guard, the safe `.env.testing` fallback, or the no-symlink invariant for `vendor/` / `node_modules/`.
 - User asks about the branch convention `<type>/#<issue>-<desc>` or its overrides.
+- User wants to link a worktree to a GitHub issue / PR, refresh GitHub status from inside the TUI, or run `gwm doctor` to validate setup before pushing.
+- User mentions `gcd <pattern>` (shell wrapper from `gwm shell-init <shell>`).
+- User wants tmux / zellij hand-off (`gwm tmux <pat>`, `gwm zellij <pat>` with optional `--split`).
 
 ## Prerequisites
 
@@ -25,6 +29,10 @@ Source: https://github.com/kbrdn1/gwm-cli
 command -v gwm           # required — installed by `cargo install --path .` from the gwm-cli repo
 command -v cargo         # required at install time (1.80+ recommended)
 command -v git           # required at runtime
+command -v gh            # OPTIONAL — needed for live `gwm status` GitHub data
+command -v tmux          # OPTIONAL — needed by `gwm tmux`
+command -v zellij        # OPTIONAL — needed by `gwm zellij` (≥ 0.40 for `--cwd` on new-tab)
+command -v lazygit       # OPTIONAL — needed by the TUI `l` hand-off
 ```
 
 `gwm` vendors `libgit2`, so no system git2 lib is needed. The binary is self-contained once compiled.
@@ -38,7 +46,7 @@ cargo install --path .         # → ~/.cargo/bin/gwm
 gwm --version
 ```
 
-Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): https://github.com/kbrdn1/gwm-cli/releases.
+Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): https://github.com/kbrdn1/gwm-cli/releases. A Homebrew formula ships under `packaging/homebrew/` and a Nix `flake.nix` is at the repo root.
 
 ## Default conventions
 
@@ -48,6 +56,8 @@ Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): ht
 | Worktree dir name   | `<type>-<issue>-<desc>`              | `.gwm.toml` `path_pattern`     |
 | Worktree base       | `~/cc-worktree/<repo>/`              | `.gwm.toml` `base`             |
 | Bootstrap           | none (just `git worktree add`)       | `.gwm.toml` `[bootstrap.*]`    |
+| Doctor trunks       | `["dev", "main"]`                    | `.gwm.toml` `[doctor] trunks`  |
+| TUI confirm timer   | `3` (clamped 0..=5)                  | `.gwm.toml` `[tui] confirm_countdown_secs` |
 
 Branch types: `feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`.
 
@@ -66,12 +76,73 @@ gwm create feat 123 foo --no-bootstrap    # skip the .gwm.toml stages
 
 gwm list                                  # list worktrees of the current repo
 gwm path <pattern>                        # print path (fuzzy match) → use $(gwm path auth)
+gwm cd   <pattern>                        # alias of `gwm path`
 gwm bootstrap                             # re-run bootstrap on cwd worktree
 gwm bootstrap <pattern>                   # ...or on a named worktree
 gwm remove <pattern>                      # remove (fuzzy). Keeps the branch.
 gwm remove <pattern> --delete-branch      # also drop the local branch
 gwm prune                                 # clean stale .git/worktrees entries
+
+gwm doctor                                # diagnose setup. Exit: 0=green, 1=warn, 2=fail
+gwm completions <bash|elvish|fish|powershell|zsh>   # emit a shell-completion script on stdout
+gwm shell-init  <bash|fish|powershell|zsh>          # emit a `gcd <pattern>` wrapper to eval/source
+
+gwm switch                                # interactive picker → prints chosen path to stdout
+gwm s                                     # alias of `gwm switch`
+
+gwm tmux   <pattern> [-p|--split]         # open matched worktree in new tmux window (or split)
+gwm zellij <pattern> [-p|--split]         # open matched worktree in new zellij tab (or pane)
+
+gwm link   issue|pr <N> [--worktree PAT]  # bind a worktree to a GitHub issue or PR
+gwm unlink issue|pr      [--worktree PAT] # remove the explicit link
+gwm open   [issue|pr]    [--worktree PAT] # open the linked URL in $BROWSER
+gwm status [--worktree PAT] [--json]      # show link + live GitHub state (needs `gh`)
 ```
+
+### `gwm doctor`
+
+Runs a structured set of checks across config, environment, and worktree state. Designed for CI / pre-commit hooks:
+
+| Exit | Meaning                                                                  |
+|:-----|:-------------------------------------------------------------------------|
+| `0`  | All checks green                                                         |
+| `1`  | At least one **warning** (advisory, e.g. orphan gwm-style branch)        |
+| `2`  | At least one **failure** (broken config, prunable worktree, etc.)        |
+
+Trunk branches the orphan-branch check treats as merge destinations come from `[doctor] trunks = [...]` (default `["dev", "main"]`). Setting `trunks = []` disables the filter (every unclaimed gwm-style branch is flagged).
+
+### `gwm shell-init` → `gcd <pattern>`
+
+The emitted wrapper defines a `gcd` function that resolves a worktree by fuzzy pattern and `cd`s into it in one keystroke. Install per shell:
+
+```bash
+# zsh
+echo 'eval "$(gwm shell-init zsh)"'  >> ~/.zshrc
+# bash
+echo 'eval "$(gwm shell-init bash)"' >> ~/.bashrc
+# fish
+gwm shell-init fish | source        # also add the eval to ~/.config/fish/config.fish
+# powershell
+Invoke-Expression (& gwm shell-init powershell | Out-String)
+```
+
+`gcd` (no arg) launches `gwm switch` (the picker) and `cd`s into the chosen entry.
+
+### GitHub linking (`link` / `unlink` / `open` / `status`)
+
+Links live in **per-branch git config**:
+
+- `branch.<name>.gwm-issue` ← `gwm link issue <N>`
+- `branch.<name>.gwm-pr`    ← `gwm link pr <N>`
+
+Local, per-branch, survives worktree moves. Issue numbers are auto-detected from the `<type>/#<N>-<slug>` convention when no explicit override is set; PR numbers are **not** auto-detected and must be linked explicitly.
+
+`gwm status` shells out to `gh issue view` / `gh pr view` to fetch state, title, labels, and the CI rollup. Without `gh` (or outside a GitHub repo), it prints only the local link. `--json` emits a stable schema for scripting.
+
+### Multiplexer hand-off (`tmux` / `zellij`)
+
+- `gwm tmux <pat>` requires `$TMUX` to be set (i.e. you are already inside a tmux session) — otherwise it exits non-zero with a clear error rather than spawning a stray server. `--split` opens a horizontal split of the current pane instead of a new window.
+- `gwm zellij <pat>` requires `$ZELLIJ`. `--cwd` on `zellij action new-tab` needs zellij ≥ 0.40. `--split` opens a new pane in the current tab instead of a new tab.
 
 ## Status column
 
@@ -98,27 +169,37 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 | `↓` / `j`   | next worktree (scrolls the sidebar when it has focus)                           |
 | `gg`        | jump to the first worktree                                                      |
 | `G`         | jump to the last worktree                                                       |
+| `/`         | enter fuzzy filter mode (live narrowing as you type; `Esc` to clear)            |
 | `n`         | new worktree form (type ↑/↓, Tab between fields, Enter on desc submits)         |
-| `d`         | delete (confirm `y`)                                                            |
+| `d`         | delete (confirm `y`; under the safety countdown, `y` again cancels)             |
+| `p`         | toggle "delete branch on remove" (arms the safety countdown when ON)            |
 | `b`         | re-run bootstrap on selected                                                    |
-| `o`         | open worktree dir in OS file manager (`open` / `xdg-open` / `explorer`)         |
+| `o`         | open worktree per `[tui.open]` (default `shell`, else `editor` / `finder`)      |
+| `y`         | yank the selected worktree's path to the system clipboard (issue #73)           |
 | `l`         | run the configured `[git_tui]` launcher (default `lazygit -p <selected-worktree>` fullscreen) |
 | `R`         | run the configured `[review]` launcher against the resolved base (issue #75)    |
-| `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)    |
+| `O`         | open menu — pick issue or PR URL to open in `$BROWSER`                          |
+| `L`         | link prompt — bind selected worktree to a GitHub issue or PR number             |
+| `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)     |
 | `Tab`       | swap focus between the worktree list and the sidebar                            |
 | `f`         | refresh worktree list (also accepts `r` for muscle memory)                      |
-| `F`         | refresh GitHub issue/PR status via `gh`                                         |
+| `F`         | refresh GitHub issue/PR status via `gh` (was `R` pre-#75)                       |
 | `p`         | toggle "delete branch on remove"                                                |
-| `Enter`     | show path in status bar                                                         |
+| `Enter`     | show path in status bar (in picker mode: print path to stdout + exit)           |
 | `?`         | help overlay                                                                    |
-| `q` / `Esc` | quit                                                                            |
+| `q` / `Esc` | quit (Esc also exits filter / overlays without quitting)                        |
 | `Ctrl-C`    | force quit                                                                      |
+
+## Picker mode (`gwm switch` / `gcd`)
+
+`gwm switch` opens the same TUI minus the create / delete / bootstrap actions. The fuzzy filter bar opens immediately so typing narrows the list right away. `Enter` commits the highlighted pick (path → stdout). `Esc` / `Ctrl-C` / `q` exit non-zero without printing.
 
 ## Details sidebar
 
-When the terminal width is ≥ 120 columns and the sidebar is open (default ON, toggle with `v`), the right pane shows a lazyssh-style details panel for the selected worktree:
+When the terminal width is ≥ 120 columns and the sidebar is open (default ON, toggle with `v`), the right pane shows a details panel for the selected worktree:
 
 - **Basic Settings**: branch, path, head (short OID), main / locked / prunable flags, branch status.
+- **GitHub**: linked issue / PR with live state (open / closed / merged), title, labels, CI rollup — populated by `gh`. State machine per worktree: `Idle → Loading → Loaded(T) | Error(String)`. Refresh manually with `R`.
 - **Recent commits**: `git log --oneline -n 10` (shells out to `git`).
 - **Working tree**: `git status --short` (`✓ clean` when empty).
 - **Commands**: keybindings cheat-sheet inside the panel.
@@ -189,7 +270,7 @@ base           = "{home}/cc-worktree/{repo}"
 path_pattern   = "{type}-{issue}-{desc}"
 branch_pattern = "{type}/#{issue}-{desc}"
 
-# File copies main → worktree (run in order).
+# --- file copies main → worktree (run in order) -----------------------------
 [[bootstrap.copy]]
 from = ".env.testing"
 to   = ".env.testing"
@@ -202,15 +283,15 @@ to   = ".env"
 required = false
 guards = ["no-aws-rds"]       # references guard names
 
-# Regex guards on copied files.
+# --- regex guards on copied files -------------------------------------------
 [[bootstrap.guard]]
 name           = "no-aws-rds"
 deny_patterns  = ["amazonaws\\.com", "\\.rds\\."]
 on_match       = "seed-from-example"   # or "abort"
 example_file   = ".env.example"
 
-# Inline fallback when a required source is missing.
-# Key is the destination filename normalized: ".env.testing" → "env_testing".
+# --- inline fallback when a required source is missing ----------------------
+# Key is the destination filename normalised: ".env.testing" → "env_testing".
 [bootstrap.fallback.env_testing]
 target  = ".env.testing"
 content = """
@@ -219,24 +300,53 @@ DB_CONNECTION=sqlite
 DB_DATABASE=:memory:
 """
 
-# Symlinks to refuse (inherited from main).
+# --- symlinks to refuse (inherited from main) ------------------------------
 [[bootstrap.no_symlink]]
 path = "vendor"
 
 [[bootstrap.no_symlink]]
 path = "node_modules"
 
-# Shell commands after copies.
+# --- shell commands after copies -------------------------------------------
 [[bootstrap.command]]
 name = "composer install"
 run  = "composer install --no-interaction --prefer-dist"
-when = "file_exists:composer.json"     # only predicate supported today
+when = "file_exists:composer.json"
 env  = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
 
+# --- composable when predicates --------------------------------------------
+# Atoms : file_exists:<path> | cmd_exists:<bin> | env_set:<VAR>
+#         env_eq:<VAR>=<value> | glob_exists:<pattern>
+# Ops   : ! (NOT) | && (AND) | || (OR)
+# Precedence: ! > && > ||
+
 [[bootstrap.command]]
-name = "direnv allow"
-run  = "direnv allow ."
-when = "file_exists:.envrc"
+name = "install (bun if available)"
+run  = "bun install"
+when = "file_exists:package.json && cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "install (npm fallback)"
+run  = "npm ci"
+when = "file_exists:package.json && !cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "full local build"
+run  = "./scripts/full-build.sh"
+when = "glob_exists:src/**/*.rs && !env_set:CI"
+
+# --- doctor knobs -----------------------------------------------------------
+# Trunks the orphan-branch check treats as merge destinations.
+# Default: ["dev", "main"]. `trunks = []` disables the filter entirely.
+[doctor]
+trunks = ["master", "release-3.x", "release-4.x"]
+
+# --- TUI knobs --------------------------------------------------------------
+# Safety countdown (seconds) applied to the delete-confirm overlay when
+# `delete branch on remove` (`p` in the TUI) is armed. Range 0..=5;
+# above 5 is clamped on read; 0 disables the countdown. Default: 3.
+[tui]
+confirm_countdown_secs = 3
 ```
 
 ## Bootstrap report
@@ -261,6 +371,8 @@ A run with any ✗ should be inspected before testing inside the worktree.
 3. Replace `./tools/worktree-manager.sh create feat 123 foo` with `gwm create feat 123 foo`.
 4. Replace `gwq list` / `gwq remove` / `gwq prune` with `gwm list` / `gwm remove` / `gwm prune`.
 5. Drop `gwq` from the repo's prerequisites (gwm is self-contained).
+6. Wire `gcd` into your shell: `echo 'eval "$(gwm shell-init zsh)"' >> ~/.zshrc`.
+7. Add `gwm doctor` to CI / pre-commit to catch broken setups before push.
 
 ### Setting up the AWS RDS guard (Laravel / production-safe)
 
@@ -309,7 +421,7 @@ when = "file_exists:composer.json"
 env  = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
 ```
 
-### Node project (npm / pnpm / bun)
+### Node project (bun preferred, npm fallback)
 
 ```toml
 [[bootstrap.copy]]
@@ -321,9 +433,14 @@ required = false
 path = "node_modules"
 
 [[bootstrap.command]]
-name = "install deps"
+name = "install (bun)"
+run  = "bun install"
+when = "file_exists:package.json && cmd_exists:bun"
+
+[[bootstrap.command]]
+name = "install (npm fallback)"
 run  = "npm ci"
-when = "file_exists:package-lock.json"
+when = "file_exists:package.json && !cmd_exists:bun"
 ```
 
 ### Quick create + cd
@@ -331,13 +448,63 @@ when = "file_exists:package-lock.json"
 ```bash
 gwm create feat 42 cool-thing
 cd "$(gwm path cool-thing)"
+# …or with the shell wrapper installed:
+gcd cool-thing
 ```
 
-Wrap as a shell function:
+### Picker → cd in one keystroke
 
 ```bash
-gwmcd() { cd "$(gwm path "$1")"; }
-gwmcd cool-thing
+# After `eval "$(gwm shell-init zsh)"`
+gcd            # opens the picker; cd into the chosen worktree on Enter
+```
+
+### Hand-off into tmux / zellij
+
+```bash
+# Inside tmux:
+gwm tmux api-rewrite              # new window in current session
+gwm tmux api-rewrite --split      # …or split the current pane
+
+# Inside zellij (>= 0.40):
+gwm zellij api-rewrite            # new tab
+gwm zellij api-rewrite --split    # …or new pane in current tab
+```
+
+### Link a worktree to a GitHub issue / PR
+
+```bash
+# Auto-detected from feat/#123-foo branches → no link needed.
+gwm status                                  # shows the local link + (with gh) live state
+
+# Explicit linking:
+gwm link issue 456                          # current worktree → issue #456
+gwm link pr   789  --worktree api-rewrite   # named worktree → PR #789
+gwm open      pr                            # open the PR URL in $BROWSER
+gwm unlink    issue                         # drop the explicit issue link
+
+# Scripting:
+gwm status --json
+```
+
+### Pre-push sanity check
+
+```bash
+gwm doctor && git push           # blocks the push on any warning/failure
+```
+
+### Opt-in pre-commit hook (contributors)
+
+The repo ships an opt-in hook at `.githooks/pre-commit` that combines two gates:
+
+1. **Env-dependent test pre-validation** — if any staged `tests/*.rs` file references ambient state (`assert_cmd`, `std::env::var`, `which::which`, `dirs::`, `Command::cargo_bin`), the suite is re-run under a stripped `PATH="$(dirname cargo):/usr/bin:/bin"` to catch tests that pass in a rich dev shell but fail on minimal CI.
+2. **Local `gwm doctor`** — if staged files touch `.gwm.toml`, the bootstrap / doctor modules, the example config, or their tests, `gwm doctor` runs. Exit `0` is silent, `1` is advisory (commit proceeds), `2` blocks the commit. Unknown exits fail open.
+
+Enable per-clone:
+
+```bash
+git config core.hooksPath .githooks
+git commit --no-verify        # bypass for one commit, sparingly
 ```
 
 ## Architecture (for skill agents asked to extend gwm)
@@ -347,30 +514,37 @@ src/
 ├── lib.rs               # public re-exports — tests import these
 ├── main.rs              # bin entry, dispatches to cli::run
 ├── error.rs             # GwmError (thiserror) + Result alias
-├── config.rs            # serde TOML → Config (worktree, bootstrap)
+├── config.rs            # serde TOML → Config (worktree, bootstrap, doctor, tui)
 ├── naming.rs            # BranchSpec, kebab(), parse_branch()
-├── worktree.rs          # discover_repo, list, add, remove, prune, find_fuzzy (all via git2)
-├── bootstrap.rs         # run(BootstrapCtx) → BootstrapReport
+├── worktree.rs          # discover_repo, list, add, remove, prune, find_fuzzy (libgit2)
+├── bootstrap.rs         # run(BootstrapCtx) → BootstrapReport (copies / guards / commands / when DSL)
+├── doctor.rs            # `gwm doctor` checks (config, env, orphan branches, prunable wts)
+├── github.rs            # issue / PR link storage in git config + `gh` shell-out
+├── multiplexer.rs       # tmux / zellij hand-off (window/tab/split)
 ├── cli.rs               # clap subcommands + handlers
 └── tui/
-    ├── mod.rs           # crossterm event loop
-    ├── app.rs           # App state, transitions
-    └── ui.rs            # ratatui drawing
+    ├── mod.rs           # crossterm event loop (filter, link prompt, open menu, refresh)
+    ├── app.rs           # App state, transitions, GitHubFetchState<T>, ConfirmKeyAction
+    └── ui.rs            # ratatui drawing (sidebar incl. GitHub panel)
 ```
 
-Tests under `tests/` mirror this layout. TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one.
+Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.rs`, `bootstrap_when_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `error_tests.rs`, `flake_tests.rs`, `github_tests.rs`, `homebrew_formula_tests.rs`, `multiplexer_tests.rs`, `naming_tests.rs`, `precommit_hook_tests.rs`, `tui_app_tests.rs`, `worktree_integration.rs` (+ `tests/common/` helpers). **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
 
 ## Differences vs. the bash + gwq stack
 
-| Capability                  | bash + gwq            | gwm                            |
-|:----------------------------|:----------------------|:-------------------------------|
-| worktree engine             | `gwq` CLI external    | `libgit2` vendored             |
-| bootstrap                   | hardcoded shell       | declarative TOML + hooks       |
-| portability across repos    | per-project script    | one binary + per-repo config   |
-| TUI                         | linear bash menu      | full ratatui screen            |
-| anti-RDS guard              | hardcoded `grep`      | configurable regex deny-list   |
-| tests                       | 0                     | 71 (config / naming / bootstrap / worktree / TUI / CLI) |
-| install                     | `chmod +x` per repo   | `cargo install --path .`       |
+| Capability                  | bash + gwq            | gwm                                                      |
+|:----------------------------|:----------------------|:---------------------------------------------------------|
+| worktree engine             | `gwq` CLI external    | `libgit2` vendored                                       |
+| bootstrap                   | hardcoded shell       | declarative TOML + composable `when` predicates          |
+| portability across repos    | per-project script    | one binary + per-repo config                             |
+| TUI                         | linear bash menu      | full ratatui screen + filter + GitHub panel              |
+| picker                      | none                  | `gwm switch` / `gcd` shell wrapper                       |
+| multiplexer hand-off        | none                  | `gwm tmux` / `gwm zellij` (window/tab/split)             |
+| GitHub linking              | none                  | issue / PR per-branch git config + `gh` live status      |
+| diagnostics                 | none                  | `gwm doctor` (exit 0/1/2, CI-ready)                      |
+| anti-RDS guard              | hardcoded `grep`      | configurable regex deny-list                             |
+| tests                       | 0                     | 316 across 14 test files (config / bootstrap / when DSL / doctor / github / multiplexer / TUI / CLI / homebrew / flake / pre-commit hook) |
+| install                     | `chmod +x` per repo   | `cargo install --path .` (or Homebrew / Nix / prebuilts) |
 
 ## Troubleshooting
 
@@ -384,22 +558,42 @@ Tests under `tests/` mirror this layout. TDD bar: any new behaviour ships with a
 
 **TUI shows `(prunable)` next to a worktree** — its working dir was deleted out-of-band. Run `gwm prune` (or hit `r` in the TUI after manual cleanup).
 
+**`gwm doctor` exits `2` complaining about an orphan branch** — the branch matches `<type>/#<N>-<slug>` but isn't reachable from any trunk in `[doctor] trunks`. Either delete the branch, merge it, or add its merge target to `trunks`.
+
+**`gwm tmux` says `not inside a tmux session`** — `$TMUX` is unset. Start tmux first; gwm refuses to spawn a stray server.
+
+**`gwm zellij` errors on `--cwd`** — your zellij is older than 0.40. Upgrade, or fall back to opening the path manually.
+
+**`gwm status` shows only the local link, no live data** — `gh` isn't on `$PATH` (or you're outside a GitHub repo). Install GitHub CLI and `gh auth login`.
+
 **`cargo install --path .` fails to build libgit2** — install a C toolchain (`xcode-select --install` on macOS, `build-essential` on Debian/Ubuntu). The `git2` crate uses `vendored-libgit2` so it builds from source.
 
 **`.env` was copied even though it points to prod** — the guard's regex didn't match. Test it with `echo $YOUR_HOST | grep -E '<pattern>'`. Regex syntax is Rust `regex` crate (PCRE-like, no lookaround).
 
+**`gcd` says command not found** — the shell-init wrapper isn't sourced. Re-run `eval "$(gwm shell-init <shell>)"` in your current shell and add it to your shell's rc file.
+
 ## Quick reference card
 
 ```
-gwm                        # TUI
-gwm init                   # scaffold .gwm.toml
-gwm create <t> <#> <desc>  # create + bootstrap
-gwm list                   # list worktrees
-gwm path <pat>             # print path
-gwm bootstrap [pat]        # re-run bootstrap
-gwm remove <pat> [-b]      # remove (-b drops branch)
-gwm prune                  # clean stale refs
-gwm types                  # show branch types
+gwm                          # TUI
+gwm init                     # scaffold .gwm.toml
+gwm create <t> <#> <desc>    # create + bootstrap
+gwm list                     # list worktrees
+gwm path|cd <pat>            # print path
+gwm switch | gwm s | gcd     # interactive picker (cd via shell wrapper)
+gwm bootstrap [pat]          # re-run bootstrap
+gwm remove <pat> [-b]        # remove (-b drops branch)
+gwm prune                    # clean stale refs
+gwm types                    # show branch types
+gwm doctor                   # diagnose setup (exit 0/1/2)
+gwm completions <shell>      # emit shell completion script (bash/elvish/fish/powershell/zsh)
+gwm shell-init  <shell>      # emit gcd wrapper to eval (bash/fish/powershell/zsh)
+gwm tmux   <pat> [-p]        # tmux window / split hand-off
+gwm zellij <pat> [-p]        # zellij tab / pane hand-off
+gwm link   issue|pr <N>      # bind to GitHub issue / PR
+gwm unlink issue|pr          # drop the link
+gwm open   [issue|pr]        # open URL in $BROWSER
+gwm status [--json]          # local link + live gh state
 ```
 
 ## Related
@@ -407,3 +601,4 @@ gwm types                  # show branch types
 - Repo: https://github.com/kbrdn1/gwm-cli
 - Bash predecessor: `tools/worktree-manager.sh` (skill: `worktree-wrapper`) — `gwm` is the multi-repo replacement.
 - Naming convention: `CONTRIBUTING.md` (per repo) — matches `gwm` defaults.
+- Project rules for contributors / AI agents: `CLAUDE.md` (TDD mandatory, `gwm doctor` before PRs touching `.gwm.toml` / bootstrap schema / doctor).
