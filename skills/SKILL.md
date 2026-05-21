@@ -280,7 +280,7 @@ Two TUI keybindings share the same mini-API: take a `command` template from `.gw
 | `l` | `[git_tui]` | `lazygit -p {path}`           | `{path}`                              | `true`               |
 | `R` | `[review]`  | _(inert until configured)_    | `{base} {head} {path} {diff}`         | `false`              |
 
-`fullscreen = true` suspends the gwm TUI for a TUI-style takeover (same recipe as the pre-issue-#75 `l` → lazygit flow); `fullscreen = false` runs the command in the background, captures stderr's first line, and lands it on the status bar. The `{diff}` placeholder is **lazy** — gwm only shells out to `git diff {base}..{head}` (into a tempfile) when the template references it.
+`fullscreen = true` suspends the gwm TUI for a TUI-style takeover (same recipe as the pre-issue-#75 `l` → lazygit flow); `fullscreen = false` runs the command **synchronously in-place** — gwm stays in the alt-screen, `Command::output()` blocks the TUI until the child exits, and the first line of stderr lands on the status bar. Fine for quick print-only tools (`claude --print`, `gh pr view --web`); pick `fullscreen = true` for anything long-running so the TUI is properly suspended and restored. The `{diff}` placeholder is **lazy** — gwm only shells out to `git diff {base}..{head}` (into a tempfile) when the template references it.
 
 ### `[review]` base resolution chain (for `{base}`)
 
