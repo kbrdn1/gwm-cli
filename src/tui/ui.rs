@@ -483,17 +483,27 @@ fn commit_row_line(row: worktree::CommitRow) -> Line<'static> {
   ])
 }
 
-/// Derive lazygit-style author initials from a full name. Mirrors
-/// `getInitials` in lazygit's `pkg/gui/presentation/authors/authors.go`:
+/// Derive lazygit-style author initials from a full name. Closely
+/// mirrors `getInitials` in lazygit's
+/// `pkg/gui/presentation/authors/authors.go`:
 ///
-/// - Empty → empty.
-/// - Multi-codepoint first grapheme (emoji / CJK) → return that grapheme.
-/// - Single word → first 2 chars of that word.
-/// - ≥ 2 words → first char of split[0] + first char of split[1].
+/// - Empty / whitespace-only → empty.
+/// - Single word → first 2 Unicode scalar values of that word.
+/// - ≥ 2 words → first scalar of split[0] + first scalar of split[1].
 ///
-/// "Kylian Bardini" → `KB`. "Linus" → `Li`. "🦀 Crab" → `🦀C` (first
-/// grapheme then char[0] of split[1]). Capped at 2 visible chars
-/// (`CommitAuthorShortLength` in lazygit).
+/// "Kylian Bardini" → `KB`. "Linus" → `Li`. "🦀 Crab" → `🦀C`.
+/// Capped at 2 visible characters (`CommitAuthorShortLength` in
+/// lazygit).
+///
+/// **Divergence from lazygit** (PR #72 review, Copilot): lazygit uses
+/// `uniseg.FirstGraphemeClusterInString` and keeps multi-scalar
+/// grapheme clusters intact (e.g. regional-indicator flags like
+/// "🇫🇷"). gwm slices on Unicode scalar values via `str::chars()`,
+/// so the French flag is split into its two regional indicators and
+/// only the first survives. We accept this divergence intentionally
+/// — pulling in `unicode-segmentation` for a near-zero-impact author
+/// renderer would inflate the dependency tree without user-visible
+/// benefit on the typical "FirstName LastName" pattern.
 pub fn author_initials(author: &str) -> String {
   let trimmed = author.trim();
   if trimmed.is_empty() {

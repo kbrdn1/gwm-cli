@@ -1772,6 +1772,23 @@ fn author_initials_empty_returns_empty() {
 }
 
 #[test]
+fn author_initials_takes_first_unicode_scalar_per_token() {
+  // Documented divergence from lazygit (PR #72 Copilot review): gwm's
+  // `author_initials` uses `str::chars()` and slices on Unicode scalar
+  // values, NOT grapheme clusters. Single-scalar emoji ("🦀") survive
+  // intact, but multi-scalar grapheme clusters like the French flag
+  // "🇫🇷" (two regional indicators) are split — only the first scalar
+  // makes it into the initials. Pinning this so a future contributor
+  // doesn't quietly break it by adopting a grapheme-aware crate.
+  assert_eq!(author_initials("🦀 Crab"), "🦀C");
+  assert_eq!(
+    author_initials("🇫🇷 Bardini"),
+    "🇫B",
+    "two-scalar grapheme cluster (flag) is intentionally split per scalar"
+  );
+}
+
+#[test]
 fn recent_commits_line_starts_with_short_hash() {
   // The first span of every row must be a hash of exactly
   // COMMIT_HASH_DISPLAY_LEN hex chars (8 by default, matching lazygit).
