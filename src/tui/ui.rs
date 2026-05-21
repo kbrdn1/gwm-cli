@@ -127,17 +127,52 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let visible: Vec<&WorktreeInfo> = filtered.iter().filter_map(|&i| app.worktrees.get(i)).collect();
 
   // Dynamic column widths derived from the visible subset so columns fit the
-  // rows actually on screen. The path column is always last and absorbs the
-  // remaining width.
+  // rows actually on screen.
   let name_w = column_width(visible.iter().map(|w| w.name.as_str()), 18, 38);
   let branch_w = column_width(visible.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
   let status_w: u16 = 16;
 
+  let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
+  let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
+
+  let title = if app.filter_query.is_empty() {
+    format!(" worktrees ({}) ", app.worktrees.len())
+  } else {
+    format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
+  };
+
+  // Pre-allocate the age strip OUTSIDE ratatui's Table widget so the
+  // 4-cell fixed width is never squeezed by the layout solver. The
+  // Table's solver respects `Length` only up to a best-effort budget
+  // (per ratatui docs, Min > Max > Length > Percentage > Ratio > Fill);
+  // when the table area is tight (e.g. sidebar open, narrow terminal),
+  // it shrinks `Length` columns proportionally, dropping age from 4 to
+  // 3 (or fewer) cells. The only way to guarantee a fixed width is to
+  // reserve the cells via an outer `Layout::horizontal` before handing
+  // the rest to the Table.
+  //
+  // Layout: [outer block] → inner → [4 cells age | 1 cell gap | Fill(table)].
+  // The outer block (borders + title) wraps the whole area; the inner
+  // split divides the work between the manual age renderer and the
+  // Table widget.
+  let outer_block = Block::default()
+    .borders(Borders::ALL)
+    .title(title)
+    .border_style(Style::default().fg(border_color));
+  let inner_area = outer_block.inner(area);
+  f.render_widget(outer_block, area);
+
+  let inner_split = Layout::horizontal([
+    Constraint::Length(4), // age strip — fixed, never squeezed
+    Constraint::Length(1), // gap
+    Constraint::Fill(1),   // table area — absorbs the rest
+  ])
+  .split(inner_area);
+  let age_strip = inner_split[0];
+  let table_area = inner_split[2];
+
+  // The Table no longer carries the age column; col 0 is the marker.
   let header = Row::new(vec![
-    // Age column lives at column 0 — recency-first, lazygit-style. No
-    // caption; the glyphs (`2d`, `3w`, `1M`, `5y`, `-`) are self-evident
-    // and a header would steal space from BRANCH on narrow terminals.
-    Cell::from(""),
     Cell::from(""),
     Cell::from("NAME"),
     Cell::from("BRANCH"),
@@ -151,21 +186,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
 
-  // ratatui's Layout solver squeezes the FIRST `Length` column to
-  // satisfy the others when terminal width is tight. We want the age
-  // column rock-stable at 4 cells (the cost of losing the unit
-  // letter to truncation — "22h" → "22" — is worse than name/branch
-  // shrinking by a char or two). Strategy:
-  //   - `Length(4)` for age, `Length(2)` for marker, `Length(16)` for
-  //     status: hard-fixed lengths the solver must honour.
-  //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
-  //     when the terminal is narrow (they shrink down to 8) and grow
-  //     to the original clamped width (or more) when there's room.
-  //   - `Fill(1)` for path: takes whatever's left, vanishes last.
-  // Verified by standalone probe down to 40-cell terminals: col 0
-  // stays at 4 cells across every size.
   let widths = [
-    Constraint::Length(4),
     Constraint::Length(2),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
@@ -173,28 +194,44 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Fill(1),
   ];
 
-  let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
-  let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
-
-  let title = if app.filter_query.is_empty() {
-    format!(" worktrees ({}) ", app.worktrees.len())
-  } else {
-    format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
-  };
-
   let table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
-    .block(
-      Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(border_color)),
-    )
     .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
-  f.render_stateful_widget(table, area, &mut app.list_state);
+  f.render_stateful_widget(table, table_area, &mut app.list_state);
+
+  // Now overlay the age values on age_strip. Row 0 is the (empty)
+  // header line, rows 1..=visible.len() carry the values. We mirror
+  // the Table's row_highlight_style on the selected row so the band
+  // stays visually continuous across the gap.
+  render_age_strip(f, age_strip, &visible, app.list_state.selected());
+}
+
+/// Render the manually-allocated 4-cell-wide age column to the left of
+/// the Table widget. Aligns one Line per Table row (header line first,
+/// then one per visible worktree) and mirrors the Table's row_highlight
+/// background on the selected row so the user can't tell the column is
+/// rendered outside the Table.
+fn render_age_strip(f: &mut Frame, area: Rect, visible: &[&WorktreeInfo], selected: Option<usize>) {
+  if area.width == 0 || area.height == 0 {
+    return;
+  }
+  let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
+  // Header row aligns with the Table's header (empty caption — the
+  // glyphs are self-evident).
+  lines.push(Line::from(""));
+  for (i, w) in visible.iter().enumerate() {
+    let age = branch_age_for(w);
+    let label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+    let mut style = Style::default().fg(Color::DarkGray);
+    if Some(i) == selected {
+      style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+    }
+    lines.push(Line::from(Span::styled(label, style)));
+  }
+  f.render_widget(Paragraph::new(lines), area);
 }
 
 /// Details panel for the selected worktree — structured info, recent commits,
@@ -486,23 +523,12 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
 
   let status_cell = build_status_cell(w, status_w as usize);
 
-  // PR #74 follow-up: surface branch age right in the table so it stays
-  // visible when the sidebar is hidden (<120 cols or `v` collapsed).
-  // `branch_age_for` opens the worktree's repo and runs the libgit2
-  // revwalk; per-frame cost is bounded by the number of visible rows
-  // (typically <20) so we re-resolve on every draw without caching.
-  // Colour stays uniform Gray — the saturated freshness palette
-  // (green/yellow/darkgray) reads as noise next to the more important
-  // BRANCH-status colour, so we keep it muted in the table and let the
-  // sidebar's `Created:` row carry the colour-coded signal.
-  let age = branch_age_for(w);
-  let age_label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
-  let age_cell = Cell::from(age_label).style(Style::default().fg(Color::DarkGray));
-
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
 
+  // Age column lives OUTSIDE the Table (pre-allocated in draw_list)
+  // to guarantee a fixed 4-cell width regardless of layout pressure;
+  // see `render_age_strip`.
   Row::new(vec![
-    age_cell,
     Cell::from(marker_label).style(Style::default().fg(marker_color)),
     name_cell,
     branch_cell,
