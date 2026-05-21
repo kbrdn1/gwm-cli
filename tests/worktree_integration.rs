@@ -339,6 +339,30 @@ fn branch_age_treats_master_and_dev_as_trunks() {
   assert!(drift < 300, "expected ~2 days, got {}s", age.as_secs());
 }
 
+#[test]
+fn branch_age_returns_none_when_no_trunk_candidate_exists_locally() {
+  // PR #74 Copilot review: if none of the trunk candidates (main /
+  // master / dev) resolves as a local branch, the revwalk hides nothing
+  // and `branch_age` falls back to the repo's initial commit — turning
+  // every branch into a misleadingly large age (the repo's lifetime).
+  // The intent is "branch age relative to a trunk baseline"; without
+  // a baseline, we must surface `None` so the UI renders `-`.
+  let dir = TempDir::new().unwrap();
+  let repo = Repository::init(dir.path()).unwrap();
+  // Initialise the repo on a branch that's *not* a trunk candidate so
+  // the seed commit lives on `feat/standalone`, not `main`/`master`/`dev`.
+  repo.set_head("refs/heads/feat/standalone").ok();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[]).unwrap();
+
+  assert!(
+    worktree::branch_age(&repo, "feat/standalone").is_none(),
+    "no trunk baseline → branch_age must be None, not the repo's lifetime"
+  );
+}
+
 /// Helper: append a commit (empty tree, configurable timestamp) on top of
 /// the given ref. The committer / author share the same timestamp so
 /// `branch_age` (which reads committer time) is deterministic.

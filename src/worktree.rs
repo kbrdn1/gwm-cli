@@ -322,12 +322,24 @@ pub fn branch_age(repo: &Repository, branch: &str) -> Option<Duration> {
 
   let mut walker = repo.revwalk().ok()?;
   walker.push(head_oid).ok()?;
+  // Track whether any trunk baseline was actually hidden. Without one,
+  // the revwalk degenerates into "all commits reachable from HEAD" and
+  // the oldest one is the repo's initial commit — i.e. the branch's
+  // age becomes the repo's lifetime. PR #74 review caught this: when
+  // no trunk candidate resolves locally, return `None` so the UI
+  // renders `-` instead of a misleadingly large duration.
+  let mut hidden_any = false;
   for trunk in TRUNK_CANDIDATES {
     if let Ok(t) = repo.find_branch(trunk, BranchType::Local) {
       if let Some(oid) = t.into_reference().target() {
-        let _ = walker.hide(oid);
+        if walker.hide(oid).is_ok() {
+          hidden_any = true;
+        }
       }
     }
+  }
+  if !hidden_any {
+    return None;
   }
 
   let mut oldest_secs: Option<i64> = None;
