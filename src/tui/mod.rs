@@ -20,11 +20,32 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use app::{
-  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, View,
+  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, OpenTarget, View,
 };
+
+/// Ordered list of clipboard tools to try for the host OS (issue #73).
+/// First entry that resolves on `$PATH` wins. Returned in the
+/// platform's preferred order — `pbcopy` first on macOS, `wl-copy`
+/// then `xclip` then `xsel` on Linux, `clip.exe` on Windows. Exposed
+/// from the crate root so the tests in `tui_app_tests.rs` can pin the
+/// non-empty contract without spawning anything.
+pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
+  if cfg!(target_os = "macos") {
+    vec![("pbcopy", vec![])]
+  } else if cfg!(target_os = "windows") {
+    vec![("clip", vec![])]
+  } else {
+    vec![
+      ("wl-copy", vec![]),
+      ("xclip", vec!["-selection", "clipboard"]),
+      ("xsel", vec!["--clipboard", "--input"]),
+    ]
+  }
+}
 pub use ui::{
-  author_initials, build_sidebar_sections, filled_cells_for_progress, issue_summary_line, pr_summary_line,
-  recent_commits_lines, tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color,
+  issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines, table_marker,
+  tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run() -> Result<()> {
@@ -176,7 +197,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           KeyCode::Char('d') if !app.picker_mode => app.enter_confirm_delete(),
           KeyCode::Char('b') if !app.picker_mode => app.bootstrap_selected(),
           KeyCode::Char('p') if !app.picker_mode => app.toggle_delete_branch(),
-          KeyCode::Char('o') => app.open_selected_in_finder(),
+          KeyCode::Char('y') => yank_selected_path_to_clipboard(&mut app),
+          KeyCode::Char('o') => match app.resolve_open_target() {
+            None => app.status = "nothing selected".into(),
+            Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
+            Some(OpenTarget::Shell { path, command }) => {
+              run_subshell(terminal, &command, &[], Some(&path), &mut app, "shell")?
+            }
+            Some(OpenTarget::Editor { path, command }) => {
+              let path_str = path.display().to_string();
+              run_subshell(terminal, &command, &[&path_str], None, &mut app, "editor")?
+            }
+          },
           // Issue/PR linking (issue #67).
           KeyCode::Char('O') if !app.picker_mode => app.enter_open_menu(),
           KeyCode::Char('L') if !app.picker_mode => app.enter_link_prompt(),
@@ -301,6 +333,98 @@ fn run_lazygit(
     Err(e) => app.status = format!("failed to launch lazygit: {}", e),
   }
   Ok(())
+}
+
+/// Suspend the TUI, spawn `cmd args...` (optionally with `cwd`), wait for
+/// its exit, then restore the TUI. Used by the `o: open` dispatch when the
+/// resolved [`OpenTarget`] is `Shell` or `Editor`. The lifecycle is
+/// identical to [`run_lazygit`] so the user can't observe a difference
+/// between pressing `l` (lazygit) and pressing `o` with `mode = "shell"`.
+///
+/// `label` is the noun used in status-bar messages (`"shell"`, `"editor"`).
+fn run_subshell(
+  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  cmd: &str,
+  args: &[&str],
+  cwd: Option<&std::path::Path>,
+  app: &mut App,
+  label: &str,
+) -> Result<()> {
+  disable_raw_mode()?;
+  execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+  terminal.show_cursor()?;
+
+  let mut command = std::process::Command::new(cmd);
+  command.args(args);
+  if let Some(dir) = cwd {
+    command.current_dir(dir);
+  }
+  let spawn = command.status();
+
+  // Always restore the TUI, even if the child failed to spawn or exited non-zero.
+  enable_raw_mode()?;
+  execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+  terminal.clear()?;
+
+  match spawn {
+    Ok(s) if s.success() => app.status = format!("{} exited ok ({})", label, cmd),
+    Ok(s) => app.status = format!("{} exited with code {:?}", label, s.code()),
+    Err(e) => app.status = format!("failed to launch {} ({}): {}", label, cmd, e),
+  }
+  Ok(())
+}
+
+/// Push the selected worktree's path into the system clipboard via
+/// [`clipboard_candidates`]. Walks the candidates in order, uses the
+/// first one whose binary is on `$PATH`, and feeds the path through
+/// its stdin. Failures and "no tool found" both surface in the status
+/// bar — no propagation, the TUI must never die on a clipboard miss.
+fn yank_selected_path_to_clipboard(app: &mut App) {
+  use std::io::Write;
+  let Some(path) = app.yank_selected_path() else {
+    app.status = "nothing selected".into();
+    return;
+  };
+  let text = path.display().to_string();
+  for (cmd, args) in clipboard_candidates() {
+    if which::which(cmd).is_err() {
+      continue;
+    }
+    let child = std::process::Command::new(cmd)
+      .args(&args)
+      .stdin(std::process::Stdio::piped())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn();
+    match child {
+      Ok(mut c) => {
+        if let Some(mut stdin) = c.stdin.take() {
+          let _ = stdin.write_all(text.as_bytes());
+        }
+        match c.wait() {
+          Ok(s) if s.success() => {
+            app.status = format!("yanked path ({})", cmd);
+            return;
+          }
+          Ok(s) => {
+            app.status = format!("{} exited with code {:?}", cmd, s.code());
+            return;
+          }
+          Err(e) => {
+            app.status = format!("{} wait failed: {}", cmd, e);
+            return;
+          }
+        }
+      }
+      Err(e) => {
+        // Tool was resolvable on PATH but spawning failed — surface and stop;
+        // trying the next candidate would mask the real error.
+        app.status = format!("failed to spawn {}: {}", cmd, e);
+        return;
+      }
+    }
+  }
+  app.status = "y: no clipboard tool found (install pbcopy / wl-copy / xclip / xsel / clip)".into();
 }
 
 /// Spawn the OS opener for `url` (used by the OpenMenu key handler).

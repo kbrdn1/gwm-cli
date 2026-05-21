@@ -2,8 +2,12 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
-use gwm::tui::{filled_cells_for_progress, App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
+use gwm::tui::{
+  branch_name_color, filled_cells_for_progress, freshness_color, pr_badge_color, App, ConfirmKeyAction,
+  CountdownTickOutcome, Field, View,
+};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
+use ratatui::style::Color;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -20,6 +24,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     is_locked: false,
     is_prunable: false,
     status: BranchStatus::default(),
+    link: gwm::github::BranchLink::empty(),
   }
 }
 
@@ -1304,6 +1309,295 @@ fn refresh_github_status_message_celebrates_full_success() {
   );
 }
 
+// ---- Issue #73: lazygit-style color helpers --------------------------------
+// Three pure functions live in `tui/ui.rs` and are re-exported through
+// `tui/mod.rs` so the table-driven tests below can pin the contract.
+// Visual regressions land here first, before showing up in screenshots.
+
+#[test]
+fn branch_name_color_codes_synced_branch_as_green() {
+  let synced = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&synced), Color::Green);
+}
+
+#[test]
+fn branch_name_color_codes_dirty_branch_as_red() {
+  // Dirty = local working copy has uncommitted work. Lazygit doesn't surface
+  // dirty in its branches view (it has a dedicated files view), but for a
+  // worktree manager the most important signal is "this worktree has work
+  // not yet captured anywhere" — red flags that hard.
+  let dirty = BranchStatus {
+    is_dirty: true,
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&dirty), Color::Red);
+}
+
+#[test]
+fn branch_name_color_codes_ahead_or_behind_as_yellow() {
+  let ahead = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 3,
+    behind: 0,
+    unknown: false,
+  };
+  let behind = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 0,
+    behind: 2,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&ahead), Color::Yellow);
+  assert_eq!(branch_name_color(&behind), Color::Yellow);
+}
+
+#[test]
+fn branch_name_color_codes_unpublished_branch_as_magenta() {
+  // No upstream + nothing dirty = branch exists locally only. Mirrors
+  // lazygit's "?" magenta marker for RemoteBranchNotStoredLocally —
+  // distinct from "synced" (green) and from "behind" (yellow) so the user
+  // can tell at a glance whether they've pushed yet.
+  let unpublished = BranchStatus {
+    is_dirty: false,
+    has_upstream: false,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&unpublished), Color::Magenta);
+}
+
+#[test]
+fn branch_name_color_codes_unknown_status_as_darkgray() {
+  let unknown = BranchStatus {
+    unknown: true,
+    ..BranchStatus::default()
+  };
+  assert_eq!(branch_name_color(&unknown), Color::DarkGray);
+}
+
+#[test]
+fn freshness_color_picks_green_for_recent_branches() {
+  assert_eq!(freshness_color(Duration::from_secs(0)), Color::Green);
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 3)), Color::Green);
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 6 + 3600 * 23)),
+    Color::Green
+  );
+}
+
+#[test]
+fn freshness_color_picks_yellow_for_one_to_four_week_branches() {
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 7)), Color::Yellow);
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 15)), Color::Yellow);
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 29 + 3600 * 23)),
+    Color::Yellow
+  );
+}
+
+#[test]
+fn freshness_color_picks_darkgray_for_stale_branches() {
+  // Branches older than a month read as "stale" — gwm encourages cleanup
+  // via `gwm doctor`, so the colour reinforces the prompt.
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 30)), Color::DarkGray);
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 365)), Color::DarkGray);
+}
+
+#[test]
+fn pr_badge_color_maps_each_state_to_its_lazygit_palette() {
+  // Mirrors `pkg/gui/presentation/branches.go::WithPrColor` — open=green,
+  // draft=darkgray, merged=magenta, closed=red. The actual lazygit RGB
+  // shades are slightly off-palette for terminal themes; we use the
+  // 16-color names so the dots respect the user's colour scheme.
+  assert_eq!(pr_badge_color(PrState::Open), Color::Green);
+  assert_eq!(pr_badge_color(PrState::Draft), Color::DarkGray);
+  assert_eq!(pr_badge_color(PrState::Merged), Color::Magenta);
+  assert_eq!(pr_badge_color(PrState::Closed), Color::Red);
+}
+
+// Ensure the IssueState variants stay accessible — once `branch_name_color`
+// and the rest land, the sidebar's badge function will need to fall back to
+// an issue-derived colour when no PR is linked. The compile-time check below
+// catches a stale import without polluting the runtime tests.
+#[test]
+fn issue_state_variants_compile() {
+  let _ = IssueState::Open;
+  let _ = IssueState::Closed;
+}
+
+// ---- Issue #73: configurable `o:` open key ---------------------------------
+// `App::resolve_open_target` returns an `OpenTarget` that the event loop
+// dispatches on (suspend-and-spawn for shell/editor, OS opener for finder).
+// Pure resolution — no side effects, no spawn — so the test can pin the
+// command resolution under every config / env combination.
+
+use gwm::config::{TuiOpenConfig, TuiOpenMode};
+use gwm::tui::OpenTarget;
+
+#[test]
+fn resolve_open_target_returns_none_when_nothing_selected() {
+  let (_dir, mut app) = make_app();
+  app.list_state.select(None);
+  assert!(app.resolve_open_target().is_none());
+}
+
+#[test]
+fn resolve_open_target_defaults_to_shell_mode() {
+  // Default config (`mode = "shell"`) + a worktree selected → Shell variant
+  // carrying the worktree path. The exact command depends on env / fallback;
+  // here we only pin the variant + path so the test isn't $SHELL-dependent.
+  let (_dir, app) = make_app();
+  let target = app
+    .resolve_open_target()
+    .expect("main worktree should always be selectable");
+  match target {
+    OpenTarget::Shell { path, command } => {
+      assert_eq!(path, app.worktrees[0].path);
+      assert!(!command.is_empty(), "shell command must never be empty");
+    }
+    other => panic!("expected Shell variant, got {:?}", other),
+  }
+}
+
+#[test]
+fn resolve_open_target_honours_shell_cmd_override() {
+  // `shell_cmd = "/usr/bin/fish"` must beat `$SHELL` — that's the whole
+  // point of the override. Use a sentinel that's unlikely to be the
+  // ambient shell to make the assertion deterministic.
+  let (_dir, mut app) = make_app();
+  app.config.tui.open = TuiOpenConfig {
+    mode: TuiOpenMode::Shell,
+    shell_cmd: Some("/sentinel/shell".into()),
+    editor_cmd: None,
+  };
+  match app.resolve_open_target().unwrap() {
+    OpenTarget::Shell { command, .. } => assert_eq!(command, "/sentinel/shell"),
+    other => panic!("expected Shell, got {:?}", other),
+  }
+}
+
+#[test]
+fn resolve_open_target_uses_editor_mode_when_configured() {
+  let (_dir, mut app) = make_app();
+  app.config.tui.open = TuiOpenConfig {
+    mode: TuiOpenMode::Editor,
+    shell_cmd: None,
+    editor_cmd: Some("hx".into()),
+  };
+  match app.resolve_open_target().unwrap() {
+    OpenTarget::Editor { path, command } => {
+      assert_eq!(path, app.worktrees[0].path);
+      assert_eq!(command, "hx");
+    }
+    other => panic!("expected Editor, got {:?}", other),
+  }
+}
+
+// ---- Issue #73: `y: yank` clipboard support -------------------------------
+// `App::yank_selected_path` returns the path to push into the clipboard,
+// or None when nothing's selected. The actual shell-out (pbcopy / wl-copy
+// / xclip / clip) is tested manually — CI machines don't necessarily
+// have any of these installed, so we keep the test scope to the pure
+// resolution step and rely on the smoke test in the TUI for the rest.
+
+#[test]
+fn yank_selected_path_returns_path_for_selected_worktree() {
+  let (_dir, app) = make_app();
+  let path = app.yank_selected_path().expect("main worktree must be yankable");
+  assert_eq!(path, app.worktrees[0].path);
+}
+
+#[test]
+fn yank_selected_path_returns_none_when_nothing_selected() {
+  let (_dir, mut app) = make_app();
+  app.list_state.select(None);
+  assert!(app.yank_selected_path().is_none());
+}
+
+// ---- Issue #73 (PR #74 follow-up): table marker pastille ------------------
+// The marker column (first cell) doubles as the lazygit-style status dot.
+// `★` still wins for main; non-main worktrees that carry a link (issue or
+// PR) get `●` so the row visually signals "this has GitHub context", even
+// when the sidebar is hidden (`<120` cols or `v` collapsed).
+
+#[test]
+fn table_marker_for_main_worktree_is_yellow_star() {
+  use gwm::github::BranchLink;
+  let mut w = worktree_fixture("main");
+  w.is_main = true;
+  w.link = BranchLink::empty();
+  let (label, color) = gwm::tui::table_marker(&w);
+  assert_eq!(label, "★");
+  assert_eq!(color, Color::Yellow);
+}
+
+#[test]
+fn table_marker_for_linked_non_main_is_neutral_dot() {
+  // No fetched state available at the table layer — colour stays neutral
+  // (Cyan) so the dot reads as "has link" without claiming a specific
+  // open/closed status. The coloured dot lives in the sidebar header where
+  // the live fetch state is known.
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: Some(42),
+    pr: None,
+    issue_source: LinkSource::BranchName,
+    pr_source: LinkSource::None,
+  };
+  let (label, color) = gwm::tui::table_marker(&w);
+  assert_eq!(label, "●");
+  assert_eq!(color, Color::Cyan);
+}
+
+#[test]
+fn table_marker_for_unlinked_non_main_is_blank() {
+  use gwm::github::BranchLink;
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink::empty();
+  let (label, _color) = gwm::tui::table_marker(&w);
+  assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
+}
+
+#[test]
+fn yank_candidates_for_current_platform_is_non_empty() {
+  // Whatever the host OS, the candidate list must offer at least one
+  // tool to try — empty would mean `y` could never succeed even with a
+  // working pbcopy / xclip installed.
+  assert!(
+    !gwm::tui::clipboard_candidates().is_empty(),
+    "clipboard candidates must include at least one tool for this OS"
+  );
+}
+
+#[test]
+fn resolve_open_target_uses_finder_mode_for_legacy_behaviour() {
+  let (_dir, mut app) = make_app();
+  app.config.tui.open = TuiOpenConfig {
+    mode: TuiOpenMode::Finder,
+    shell_cmd: None,
+    editor_cmd: None,
+  };
+  match app.resolve_open_target().unwrap() {
+    OpenTarget::Finder { path } => assert_eq!(path, app.worktrees[0].path),
+    other => panic!("expected Finder, got {:?}", other),
+  }
+}
+
 // ---- Sidebar sections (Option C — bordered subsections, no Commands block) ----
 
 use gwm::tui::build_sidebar_sections;
@@ -1324,6 +1618,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
       behind: 0,
       unknown: false,
     },
+    link: gwm::github::BranchLink::empty(),
   }
 }
 
@@ -1676,6 +1971,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     is_locked: false,
     is_prunable: false,
     status: BranchStatus::default(),
+    link: gwm::github::BranchLink::empty(),
   }
 }
 

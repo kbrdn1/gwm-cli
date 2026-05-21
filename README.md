@@ -83,7 +83,8 @@ Key bindings:
 | `n`         | new worktree (form: type → issue → description)                                 |
 | `d`         | delete selected (confirm `y` · countdown when `p` is armed — see below)         |
 | `b`         | re-run bootstrap on the selected worktree                                       |
-| `o`         | open the worktree dir in the OS file manager (`open` / `xdg-open` / `explorer`) |
+| `o`         | open the worktree per [`[tui.open]`](#open-dispatch) — `shell` (default) / `editor` / `finder` |
+| `y`         | yank the selected worktree's path to the system clipboard (pbcopy / wl-copy / xclip / xsel / clip) |
 | `l`         | launch `lazygit -p <selected-worktree>` fullscreen; resume the TUI on exit      |
 | `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)     |
 | `Tab`       | swap focus between the worktree list and the sidebar                            |
@@ -97,14 +98,32 @@ Key bindings:
 
 ### details sidebar
 
-When the terminal is at least **120 columns wide** and the sidebar is enabled (default ON, toggle with `v`), the right pane shows a lazyssh-style details panel for the currently selected worktree:
+When the terminal is at least **120 columns wide** and the sidebar is enabled (default ON, toggle with `v`), the right pane shows a lazygit-style details panel for the currently selected worktree:
 
-- **Basic Settings** — branch, path, head (short OID), main / locked / prunable flags, branch status.
+- **Header** — `● <worktree-name>`, with the `●` colour tracking the linked PR / issue state (open=green, draft=gray, merged=magenta, closed=red, neutral=darkgray when nothing's linked).
+- **Basic Settings** — branch (coloured by status: synced=green, ahead/behind=yellow, dirty=red, unpublished=magenta, unknown=darkgray), path, head (short OID), **Created** (branch age in compact `2d` / `3w` / `1M` form, coloured by freshness), main / locked / prunable flags, branch status.
 - **Recent commits** — `git log --oneline -n 10`.
 - **Working tree** — `git status --short` (`✓ clean` when empty).
 - **Commands** — keybindings cheat-sheet.
 
 Press `Tab` to focus the sidebar; `j` / `k` (or arrow keys) then scroll it instead of moving the worktree selection. The focused panel's border turns cyan.
+
+#### open dispatch
+
+The `o` key dispatches on `[tui.open]` in `.gwm.toml`:
+
+```toml
+[tui.open]
+mode = "shell"          # "shell" (default) | "editor" | "finder"
+shell_cmd = ""           # override $SHELL; empty = unset
+editor_cmd = "hx"        # override $EDITOR; empty = unset
+```
+
+- `shell` (default, **changed in v0.6**): suspend the TUI and spawn `$SHELL` with `cwd` set to the worktree — same lifecycle as `l: lazygit`. Exit the shell, the TUI restores.
+- `editor`: suspend the TUI and run `$EDITOR <worktree-path>`.
+- `finder`: pre-v0.6 behaviour — hand off to the OS file manager (`open` / `xdg-open` / `explorer`) without suspending the TUI.
+
+Unknown `mode` values are a hard config error at load time, surfaced before the TUI opens.
 
 ### fuzzy filter
 

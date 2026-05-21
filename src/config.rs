@@ -149,14 +149,73 @@ pub struct TuiConfig {
   /// clamp instead of erroring out at parse time.
   #[serde(default = "default_confirm_countdown_secs")]
   pub confirm_countdown_secs: u32,
+
+  /// `[tui.open]` sub-table — drives the dispatch of the `o` key in the
+  /// list view. Default mode is `shell` (lazygit-like worktree-manager
+  /// workflow); pre-#73 behaviour (`open` / `xdg-open` / `explorer`) is
+  /// kept available under `mode = "finder"`.
+  #[serde(default)]
+  pub open: TuiOpenConfig,
 }
 
 impl Default for TuiConfig {
   fn default() -> Self {
     Self {
       confirm_countdown_secs: default_confirm_countdown_secs(),
+      open: TuiOpenConfig::default(),
     }
   }
+}
+
+/// `[tui.open]` — how the `o` key resolves the action on the selected
+/// worktree. Adds a configurable hook on top of the historical "reveal
+/// in OS file manager" so users with a worktree-heavy workflow can land
+/// in a shell or `$EDITOR` directly, sharing the spawn-and-restore
+/// lifecycle that `l: lazygit` already uses.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TuiOpenConfig {
+  #[serde(default)]
+  pub mode: TuiOpenMode,
+  /// Override `$SHELL` when `mode = "shell"`. Falls back to `$SHELL`,
+  /// then `/bin/sh`. Empty TOML string reads as `None` so
+  /// `shell_cmd = ""` and an omitted key are observationally identical.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub shell_cmd: Option<String>,
+  /// Override `$EDITOR` when `mode = "editor"`. Falls back to `$EDITOR`,
+  /// then `vi`. Same empty-string-as-unset convention as `shell_cmd`.
+  #[serde(default, deserialize_with = "deserialize_optional_non_empty")]
+  pub editor_cmd: Option<String>,
+}
+
+/// The three documented behaviours of the `o` key. Serialised in
+/// lowercase so `.gwm.toml` keys stay idiomatic (`mode = "shell"`); an
+/// unknown value is a hard config error surfaced by
+/// `Config::load_for_repo`, never silently coerced to a default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TuiOpenMode {
+  /// Spawn an interactive shell with `cwd` set to the worktree
+  /// (lazygit-style suspend / spawn / restore). Default — matches the
+  /// "I want to do work in this worktree" intent of a worktree manager.
+  #[default]
+  Shell,
+  /// Spawn `$EDITOR <worktree-path>` and wait for it to exit. Useful
+  /// for drive-by edits without dropping into a full shell session.
+  Editor,
+  /// Pre-#73 behaviour: ask the OS to reveal the worktree directory
+  /// (`open` on macOS, `xdg-open` on Linux, `explorer` on Windows).
+  Finder,
+}
+
+/// Serde helper: treat an empty TOML string as `None`. Keeps
+/// `shell_cmd = ""` and an omitted key identical at the call site so
+/// the TUI never has to special-case the empty command.
+fn deserialize_optional_non_empty<'de, D>(d: D) -> std::result::Result<Option<String>, D::Error>
+where
+  D: serde::Deserializer<'de>,
+{
+  let opt = Option::<String>::deserialize(d)?;
+  Ok(opt.filter(|s| !s.is_empty()))
 }
 
 impl TuiConfig {

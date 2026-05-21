@@ -10,7 +10,7 @@ use ratatui::{
   widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
   Frame,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Per-section content of the worktree details sidebar. Rendered by
 /// [`draw_sidebar`] into separate rounded-border blocks (no outer
@@ -153,6 +153,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let status_w: u16 = 16;
 
   let header = Row::new(vec![
+    // Age column lives at column 0 — recency-first, lazygit-style. No
+    // caption; the glyphs (`2d`, `3w`, `1M`, `5y`, `-`) are self-evident
+    // and a header would steal space from BRANCH on narrow terminals.
+    Cell::from(""),
     Cell::from(""),
     Cell::from("NAME"),
     Cell::from("BRANCH"),
@@ -166,12 +170,26 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
 
+  // ratatui's Layout solver squeezes the FIRST `Length` column to
+  // satisfy the others when terminal width is tight. We want the age
+  // column rock-stable at 4 cells (the cost of losing the unit
+  // letter to truncation — "22h" → "22" — is worse than name/branch
+  // shrinking by a char or two). Strategy:
+  //   - `Length(4)` for age, `Length(2)` for marker, `Length(16)` for
+  //     status: hard-fixed lengths the solver must honour.
+  //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
+  //     when the terminal is narrow (they shrink down to 8) and grow
+  //     to the original clamped width (or more) when there's room.
+  //   - `Fill(1)` for path: takes whatever's left, vanishes last.
+  // Verified by standalone probe down to 40-cell terminals: col 0
+  // stays at 4 cells across every size.
   let widths = [
+    Constraint::Length(4),
     Constraint::Length(2),
-    Constraint::Length(name_w),
-    Constraint::Length(branch_w),
+    Constraint::Min(name_w),
+    Constraint::Min(branch_w),
     Constraint::Length(status_w),
-    Constraint::Min(20),
+    Constraint::Fill(1),
   ];
 
   let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
@@ -213,7 +231,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 
   // Resolve (or populate) the cached worktree sections for the current
   // selection. Issue / PR block is rebuilt every frame (its fetch state
-  // moves independently of the worktree info).
+  // moves independently of the worktree info). The leading `●` status
+  // dot line on the Worktree section is also rebuilt fresh each frame
+  // (issue #73) so it tracks live PR / issue fetches without
+  // invalidating the expensive git-preview cache underneath.
   let sections = match app.selected().cloned() {
     Some(w) => {
       let needs_refresh = match &app.sidebar_cache {
@@ -223,7 +244,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       if needs_refresh {
         app.sidebar_cache = Some((w.path.clone(), build_sidebar_sections(&w)));
       }
-      app.sidebar_cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default()
+      let mut cached = app.sidebar_cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
+      let mut worktree = vec![sidebar_header_line(&w, app)];
+      worktree.append(&mut cached.worktree);
+      SidebarSections {
+        worktree,
+        working_tree: cached.working_tree,
+        recent_commits: cached.recent_commits,
+      }
     }
     None => SidebarSections {
       worktree: vec![Line::from("(nothing selected)")],
@@ -331,11 +359,48 @@ fn render_section(
   f.render_widget(paragraph, area);
 }
 
+/// Lazygit-style header line: `● <name>` where the dot's colour tracks
+/// the linked PR / issue state. Rendered fresh every frame (not cached)
+/// so the dot reflects the live fetch result without invalidating the
+/// expensive git preview cache underneath.
+fn sidebar_header_line(w: &WorktreeInfo, app: &App) -> Line<'static> {
+  let (dot, dot_color) = sidebar_status_dot(app);
+  let name_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+  Line::from(vec![
+    Span::styled(dot, Style::default().fg(dot_color).add_modifier(Modifier::BOLD)),
+    Span::styled(w.name.clone(), name_style),
+  ])
+}
+
+/// Resolve the leading status dot for the sidebar header. PR state wins
+/// over issue state (a worktree most often tracks a PR); falls back to a
+/// neutral darkgray dot when the worktree has no link at all so the
+/// alignment stays consistent across rows.
+fn sidebar_status_dot(app: &App) -> (&'static str, Color) {
+  if let GitHubFetchState::Loaded(pr) = app.pr_fetch_state() {
+    return ("● ", pr_badge_color(pr.state));
+  }
+  if let GitHubFetchState::Loaded(issue) = app.issue_fetch_state() {
+    return ("● ", issue_badge_color(issue.state));
+  }
+  let link = app.current_link();
+  if link.pr.is_some() || link.issue.is_some() {
+    // Link exists but not fetched yet — neutral white so the user sees
+    // there's *something* to refresh with `F`.
+    return ("● ", Color::White);
+  }
+  ("● ", Color::DarkGray)
+}
+
 /// Build the per-section content of the details sidebar for one worktree.
 ///
 /// The Commands cheat-sheet block is intentionally not produced here — it
 /// duplicated the `?` help overlay and consumed ~15 vertical lines for no
 /// new information. Press `?` for the full key map.
+///
+/// The `●` status-dot header is intentionally NOT in `worktree` here either —
+/// it's rebuilt fresh by `draw_sidebar` on every frame so the dot tracks
+/// live PR / issue fetch state without invalidating this cached payload.
 pub fn build_sidebar_sections(w: &WorktreeInfo) -> SidebarSections {
   SidebarSections {
     worktree: worktree_identity_lines(w),
@@ -344,26 +409,36 @@ pub fn build_sidebar_sections(w: &WorktreeInfo) -> SidebarSections {
   }
 }
 
-/// 3–4 line identity card: name, `branch · head`, status + flag badges,
-/// tilde-compressed path. Skips badges whose flags are false to avoid
-/// visual noise (`false`/`true` columns scaled poorly with the old layout).
+/// Compact identity card for the Worktree block — `branch · head`,
+/// `Created: <age>`, status + flag badges, tilde-compressed path. The
+/// `●` status dot + bold name line is prepended live by `draw_sidebar`,
+/// not cached here, so the dot can track GitHub fetch state without
+/// invalidating the git-preview cache. Skips badges whose flags are
+/// false to avoid visual noise.
 fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   let mut out: Vec<Line<'static>> = Vec::with_capacity(4);
 
-  // Line 1 — worktree name in bold white.
-  out.push(Line::from(Span::styled(
-    w.name.clone(),
-    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-  )));
-
-  // Line 2 — "<branch> · <short head>". Skip head sub-span when absent.
+  // Line 1 — "<branch> · <short head>". Branch colour follows the
+  // lazygit scheme (PR #73): worst-state wins (dirty → red,
+  // ahead/behind → yellow, unpublished → magenta, synced → green,
+  // unknown → dark gray) so the most actionable signal stays at eye
+  // level.
+  let branch_color = branch_name_color(&w.status);
   let branch = w.branch.clone().unwrap_or_else(|| "-".into());
-  let mut spans = vec![Span::styled(branch, Style::default().fg(Color::Green))];
+  let mut spans = vec![Span::styled(branch, Style::default().fg(branch_color))];
   if let Some(head) = w.head.as_deref() {
     spans.push(Span::styled("  ·  ".to_string(), Style::default().fg(Color::DarkGray)));
     spans.push(Span::styled(short_oid(head), Style::default().fg(Color::Yellow)));
   }
   out.push(Line::from(spans));
+
+  // Line 2 — "Created: <age>" (compact relative duration, colour-coded
+  // by freshness — PR #73). Skipped when the branch has no measurable
+  // age (trunk, detached HEAD, or repo open failure).
+  out.push(Line::from(vec![
+    Span::styled("Created: ".to_string(), Style::default().fg(Color::DarkGray)),
+    Span::styled(branch_age_label(w), Style::default().fg(branch_age_color(w))),
+  ]));
 
   // Line 3 — status badge + optional flag badges. Only renders the badges
   // that are *true* / *interesting*; the false cases stay invisible.
@@ -376,6 +451,28 @@ fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   )));
 
   out
+}
+
+/// Render the "Created" line value: compact relative duration (`2d`,
+/// `3w`, `1M`, …) computed from the worktree's own repository handle, or
+/// `"-"` when the branch has no measurable age (trunk, detached HEAD, or
+/// repo open failure). The cost is one libgit2 revwalk on each sidebar
+/// rebuild — gated by `sidebar_cache` so it only runs on selection
+/// change, not every frame.
+fn branch_age_label(w: &WorktreeInfo) -> String {
+  branch_age_for(w)
+    .map(worktree::format_relative_duration)
+    .unwrap_or_else(|| "-".into())
+}
+
+fn branch_age_color(w: &WorktreeInfo) -> Color {
+  branch_age_for(w).map(freshness_color).unwrap_or(Color::DarkGray)
+}
+
+fn branch_age_for(w: &WorktreeInfo) -> Option<Duration> {
+  let branch = w.branch.as_ref()?;
+  let repo = git2::Repository::open(&w.path).ok()?;
+  worktree::branch_age(&repo, branch)
 }
 
 fn badges_line(w: &WorktreeInfo) -> Line<'static> {
@@ -619,25 +716,50 @@ fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) ->
 }
 
 fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row<'static> {
-  let marker = if w.is_main { "★" } else { " " };
+  let (marker_label, marker_color) = table_marker(w);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
   let name_cell =
     Cell::from(trunc(&w.name, name_w as usize)).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
 
-  let branch_cell = Cell::from(trunc(&branch_text, branch_w as usize)).style(Style::default().fg(Color::Green));
+  // Issue #73: branch column tracks the worst-state colour so the
+  // colour-coded signal is visible without expanding the sidebar.
+  let branch_cell =
+    Cell::from(trunc(&branch_text, branch_w as usize)).style(Style::default().fg(branch_name_color(&w.status)));
 
   let status_cell = build_status_cell(w, status_w as usize);
+
+  // PR #74 follow-up: surface branch age right in the table so it stays
+  // visible when the sidebar is hidden (<120 cols or `v` collapsed).
+  // `branch_age_for` opens the worktree's repo and runs the libgit2
+  // revwalk; per-frame cost is bounded by the number of visible rows
+  // (typically <20) so we re-resolve on every draw without caching.
+  // Colour stays uniform Gray — the saturated freshness palette
+  // (green/yellow/darkgray) reads as noise next to the more important
+  // BRANCH-status colour, so we keep it muted in the table and let the
+  // sidebar's `Created:` row carry the colour-coded signal.
+  let age = branch_age_for(w);
+  let age_label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+  let age_cell = Cell::from(age_label).style(Style::default().fg(Color::DarkGray));
 
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
 
   Row::new(vec![
-    Cell::from(marker).style(Style::default().fg(Color::Yellow)),
+    age_cell,
+    Cell::from(marker_label).style(Style::default().fg(marker_color)),
     name_cell,
     branch_cell,
     status_cell,
     path_cell,
   ])
+}
+
+/// Owned-String wrapper around `worktree::format_relative_duration` so
+/// the table-row builder can hand a `Cell::from` an owned value without
+/// re-allocating downstream. Centralised here purely to keep `build_row`
+/// readable.
+fn format_relative_duration_str(d: std::time::Duration) -> String {
+  worktree::format_relative_duration(d)
 }
 
 fn build_status_cell(w: &WorktreeInfo, width: usize) -> Cell<'static> {
@@ -696,9 +818,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Picker mode hides the mutating actions (n/d/b/p) — they're inert in the
   // event loop, so advertising them would be a lie.
   let help = if app.picker_mode {
-    "enter:select esc:cancel o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+    "enter:select esc:cancel o:open y:yank l:lazygit v:sidebar Tab:focus /:filter j/k:nav r:refresh ?:help q:quit"
   } else {
-    "n:new d:del b:boot o:open l:lazygit v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav r:refresh ?:help q:quit"
+    "n:new d:del b:boot o:open y:yank l:lazygit v:sidebar Tab:focus /:filter j/k:nav r:refresh ?:help q:quit"
   };
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
@@ -741,7 +863,8 @@ fn draw_help(f: &mut Frame, app: &App) {
     lines.push(Line::from("  b             bootstrap selected"));
   }
   lines.extend([
-    Line::from("  o             open dir in OS file manager (open / xdg-open / explorer)"),
+    Line::from("  o             open per [tui.open] — shell (default) / editor / finder"),
+    Line::from("  y             yank selected path to system clipboard"),
     Line::from("  l             launch lazygit fullscreen on selected worktree"),
     Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
     Line::from("  Tab           swap focus between worktree list and sidebar"),
@@ -1262,4 +1385,95 @@ pub fn pr_summary_line(
       ])
     }
   }
+}
+
+// ---- Issue #73: lazygit-style colour helpers -------------------------------
+// Pure functions exposed at the crate boundary so the table-driven tests
+// in `tests/tui_app_tests.rs` can pin the visual contract without spinning
+// up a real terminal. Anything that takes `BranchStatus` / `PrState` /
+// `IssueState` / a `Duration` and returns a `Color` belongs here.
+
+/// Pick a colour for a branch name based on its `BranchStatus`. Worst
+/// signal wins so the most actionable state stays visible at a glance.
+/// Priority (top down): `unknown` → `dirty` → `ahead/behind` → no
+/// upstream → synced/clean. Mirrors lazygit's branches view scheme
+/// (`pkg/gui/presentation/branches.go::getBranchDisplayStrings`) with
+/// one local addition: `dirty` lands on red because for a worktree
+/// manager the most actionable "do something" signal is uncommitted
+/// work.
+pub fn branch_name_color(s: &BranchStatus) -> Color {
+  if s.unknown {
+    return Color::DarkGray;
+  }
+  if s.is_dirty {
+    return Color::Red;
+  }
+  if s.ahead > 0 || s.behind > 0 {
+    return Color::Yellow;
+  }
+  if !s.has_upstream {
+    // Lazygit's `?` marker — branch never pushed yet. Distinct from
+    // synced so the user knows whether they need to run `git push`.
+    return Color::Magenta;
+  }
+  Color::Green
+}
+
+/// Map a branch age to a freshness colour: green < 7d, yellow < 30d,
+/// darkgray otherwise. Cutoffs are wide on purpose — a 6-day branch
+/// is "fresh", a 4-week one is "ageing", a 5-week one is "stale" —
+/// so the colour shift registers as signal rather than noise.
+pub fn freshness_color(age: Duration) -> Color {
+  const WEEK: u64 = 7 * 86_400;
+  const MONTH: u64 = 30 * 86_400;
+  let s = age.as_secs();
+  if s < WEEK {
+    Color::Green
+  } else if s < MONTH {
+    Color::Yellow
+  } else {
+    Color::DarkGray
+  }
+}
+
+/// Pick a colour for the PR-status dot rendered in the sidebar header.
+/// Ports the lazygit `WithPrColor` palette (open=green, draft=gray,
+/// merged=magenta, closed=red) but uses 16-colour names instead of
+/// hex RGB so the badge respects the user's terminal theme.
+pub fn pr_badge_color(state: PrState) -> Color {
+  match state {
+    PrState::Open => Color::Green,
+    PrState::Draft => Color::DarkGray,
+    PrState::Merged => Color::Magenta,
+    PrState::Closed => Color::Red,
+  }
+}
+
+/// Same idea as [`pr_badge_color`] but for a linked issue. Closed maps
+/// to magenta (treated as "moved on") rather than red so a routinely
+/// resolved issue doesn't read as alarming.
+pub fn issue_badge_color(state: IssueState) -> Color {
+  match state {
+    IssueState::Open => Color::Green,
+    IssueState::Closed => Color::Magenta,
+  }
+}
+
+/// Pick the marker glyph + colour for the table's first column. `★`
+/// for the main worktree (preserves the pre-#73 convention), `●` for
+/// any other worktree that carries an issue or PR link, blank space
+/// otherwise so unlinked rows don't read as "claimed". Colour stays
+/// neutral (Cyan) — the live PR / issue state isn't known at the
+/// table layer (only the selected worktree triggers a fetch), so the
+/// table dot signals "has link" rather than a specific status. The
+/// colour-coded `●` lives in the sidebar header where the fetch state
+/// is available.
+pub fn table_marker(w: &WorktreeInfo) -> (&'static str, Color) {
+  if w.is_main {
+    return ("★", Color::Yellow);
+  }
+  if w.link.issue.is_some() || w.link.pr.is_some() {
+    return ("●", Color::Cyan);
+  }
+  (" ", Color::Reset)
 }
