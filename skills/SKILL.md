@@ -8,13 +8,13 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0-rc.1`.
+Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0`.
 
 ## When to use this skill
 
 - User runs or asks about any `gwm <subcommand>`: `init`, `list`, `create`, `remove`, `path` / `cd`, `bootstrap`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`.
 - User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
-- User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
+- User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[tui.open]`, `[git_tui]`, `[review]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
 - User asks about composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`) and the `!` / `&&` / `||` operators.
 - User wants to migrate a `tools/worktree-manager.sh` or `gwq`-based workflow to `gwm`.
 - User asks how to set up the AWS RDS guard, the safe `.env.testing` fallback, or the no-symlink invariant for `vendor/` / `node_modules/`.
@@ -22,6 +22,8 @@ Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0-rc.1`.
 - User wants to link a worktree to a GitHub issue / PR, refresh GitHub status from inside the TUI, or run `gwm doctor` to validate setup before pushing.
 - User mentions `gcd <pattern>` (shell wrapper from `gwm shell-init <shell>`).
 - User wants tmux / zellij hand-off (`gwm tmux <pat>`, `gwm zellij <pat>` with optional `--split`).
+- User wants to configure the TUI `l` (git_tui) / `R` (review) launchers, the `o` (open dispatch: shell/editor/finder), or `y` (yank path to clipboard) keys.
+- User asks about the `branch.<n>.gwm-base` key (review base-resolution anchor) or any of the `lumen` / `claude` / `codex` / `aider` / `gh` review presets.
 
 ## Prerequisites
 
@@ -29,10 +31,15 @@ Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0-rc.1`.
 command -v gwm           # required — installed by `cargo install --path .` from the gwm-cli repo
 command -v cargo         # required at install time (1.80+ recommended)
 command -v git           # required at runtime
-command -v gh            # OPTIONAL — needed for live `gwm status` GitHub data
+command -v gh            # OPTIONAL — needed for live `gwm status` / TUI GitHub state / `R: review` preset
 command -v tmux          # OPTIONAL — needed by `gwm tmux`
 command -v zellij        # OPTIONAL — needed by `gwm zellij` (≥ 0.40 for `--cwd` on new-tab)
-command -v lazygit       # OPTIONAL — needed by the TUI `l` hand-off
+command -v lazygit       # OPTIONAL — default `[git_tui]` binary backing the TUI `l` key
+command -v lumen         # OPTIONAL — `[review] tool = "lumen"` preset (default review tool)
+command -v claude        # OPTIONAL — `[review] tool = "claude"` preset
+command -v codex         # OPTIONAL — `[review] tool = "codex"` preset
+command -v aider         # OPTIONAL — `[review] tool = "aider"` preset
+command -v pbcopy        # OPTIONAL — TUI `y: yank` on macOS (wl-copy/xclip/xsel on Linux, clip on Windows)
 ```
 
 `gwm` vendors `libgit2`, so no system git2 lib is needed. The binary is self-contained once compiled.
@@ -134,6 +141,7 @@ Links live in **per-branch git config**:
 
 - `branch.<name>.gwm-issue` ← `gwm link issue <N>`
 - `branch.<name>.gwm-pr`    ← `gwm link pr <N>`
+- `branch.<name>.gwm-base`  ← _written by `gwm create`_ — anchors the `[review].{base}` resolution chain so the parent ref survives even when the branch has no upstream yet. Not user-facing; surfaces only via the `R: review` launcher.
 
 Local, per-branch, survives worktree moves. Issue numbers are auto-detected from the `<type>/#<N>-<slug>` convention when no explicit override is set; PR numbers are **not** auto-detected and must be linked explicitly.
 
@@ -196,15 +204,72 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 
 ## Details sidebar
 
-When the terminal width is ≥ 120 columns and the sidebar is open (default ON, toggle with `v`), the right pane shows a details panel for the selected worktree:
+When the terminal width is ≥ 120 columns and the sidebar is open (default ON, toggle with `v`), the right pane shows a details panel for the selected worktree. Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically — no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
 
-- **Basic Settings**: branch, path, head (short OID), main / locked / prunable flags, branch status.
-- **GitHub**: linked issue / PR with live state (open / closed / merged), title, labels, CI rollup — populated by `gh`. State machine per worktree: `Idle → Loading → Loaded(T) | Error(String)`. Refresh manually with `R`.
-- **Recent commits**: `git log --oneline -n 10` (shells out to `git`).
-- **Working tree**: `git status --short` (`✓ clean` when empty).
-- **Commands**: keybindings cheat-sheet inside the panel.
+```
+╭─ Worktree ──────────────────────╮      ●  status dot tracks the linked PR / issue
+│ ● api-rest                      │         state (open=green, draft=darkgray,
+│ feat/#42-api-rest · 08d1029     │         merged=magenta, closed=red, white=link
+│ Created: 2d                     │         not yet fetched, darkgray=no link).
+│ ✓ synced  ★ main                │         Rebuilt fresh every frame so it tracks
+│ ~/Projects/Flippad/…/api-rest   │         live `gh` fetches without invalidating
+╰─────────────────────────────────╯         the cached git preview.
 
-`Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the focused panel. The focused panel's border turns cyan.
+╭─ Issue / PR ────────────────────╮      Live `gh issue view` / `gh pr view` data:
+│ #42 · open · 3 labels           │         state + checks rollup. Refresh with `F`.
+│ checks 7/8                      │         Empty block hints "press L to link" when
+╰─────────────────────────────────╯         the worktree has no link.
+
+╭─ Working Tree ──────────────────╮      `git status --short` (`✓ clean` when empty).
+│ ✓ clean                         │
+╰─────────────────────────────────╯
+
+╭─ Recent Commits ────────────────╮      Full lazygit-style topology graph (issue #71):
+│ 08d1029  KB  ○  feat: …         │         per-row format `<hash>  <initials>  <node>
+│ 4d874e7  KB  ○  fix: …          │         <subject>`, `○` for commit, `◎` for merge,
+│ 2d1d3ae  KB  ◎  merge: …        │         vertical pipes `│`, corners `╮ ╭ ╯ ╰`,
+│ … (300 commits, scrollable)     │         junctions `┴ ┬`, horizontal strokes `─`.
+│                          7 of 14│         Subjects hard-clipped (no Wrap). Buffer =
+╰─────────────────────────────────╯         300 commits (matches lazygit's `log -300`).
+                                            Bottom-right footer: `<bottom> of <total>`.
+```
+
+Worktree block: name (bold) prefixed by the `●` dot · `branch · short-head` (branch coloured by `BranchStatus` — worst-state wins: dirty=red, ahead/behind=yellow, unpublished=magenta, synced=green, unknown=darkgray) · `Created: <age>` with freshness colour (green < 7d, yellow < 30d, darkgray ≥ 30d; `-` when undeterminable, e.g. trunk / detached HEAD) · status + flag badges (only the relevant ones — false flags stay invisible: `★ main`, `🔒 locked`, `⚠ prunable`) · tilde-compressed path.
+
+GitHub fetch state machine per worktree: `Idle → Loading → Loaded(T) | Error(String)`. Manual refresh = `F` (the legacy `R` was rebound to `R: review` in #75).
+
+`Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the Recent Commits block when the sidebar is focused — the small blocks above stay pinned. The focused panel's border turns cyan.
+
+## `o: open` dispatch — issue #73
+
+The `o` key in the TUI is controlled by `[tui.open]`. Three modes:
+
+| `mode = ` | Behaviour                                                                                  |
+|:----------|:-------------------------------------------------------------------------------------------|
+| `"shell"` _(default)_ | Suspend the TUI and spawn `$SHELL` with `cwd = <worktree>` — lazygit-style. Exiting the shell restores the TUI. |
+| `"editor"` | Suspend the TUI and run `$EDITOR <worktree-path>`.                                        |
+| `"finder"` | Pre-#73 behaviour: hand off to the OS file manager (`open` / `xdg-open` / `explorer`).    |
+
+```toml
+[tui.open]
+mode       = "shell"     # "shell" (default) | "editor" | "finder"
+shell_cmd  = ""          # override $SHELL when set ("" = read $SHELL)
+editor_cmd = "hx"        # override $EDITOR when set ("" = read $EDITOR)
+```
+
+`shell_cmd` and `editor_cmd` win over the env var when non-empty. An unknown `mode` is a hard config-load error.
+
+## `y: yank` — issue #73
+
+The `y` key copies the selected worktree's absolute path to the system clipboard. Probe order (first hit wins on `$PATH`):
+
+| OS         | Candidates (in order)                                                              |
+|:-----------|:-----------------------------------------------------------------------------------|
+| macOS      | `pbcopy`                                                                           |
+| Linux      | `wl-copy`, `xclip -selection clipboard`, `xsel --clipboard --input`                |
+| Windows    | `clip`                                                                             |
+
+Missing tool surfaces a status-bar hint, never a panic. No config knob — the probe list is built per-platform.
 
 ## Configurable launchers (`l` git_tui · `R` review) — issue #75
 
@@ -347,6 +412,33 @@ trunks = ["master", "release-3.x", "release-4.x"]
 # above 5 is clamped on read; 0 disables the countdown. Default: 3.
 [tui]
 confirm_countdown_secs = 3
+
+# --- `o: open` dispatch (issue #73) ------------------------------------------
+# Three modes: "shell" (default — $SHELL in the worktree), "editor"
+# ($EDITOR <path>), "finder" (pre-#73 OS file manager). `shell_cmd` /
+# `editor_cmd` override the env var when non-empty.
+[tui.open]
+mode       = "shell"
+shell_cmd  = ""
+editor_cmd = "hx"
+
+# --- TUI `l: git_tui` launcher (issue #75) -----------------------------------
+# Default: `lazygit -p {path}` fullscreen=true (matches pre-#75 behaviour).
+# Placeholders: {path}.
+[git_tui]
+command    = "lazygit -p {path}"
+fullscreen = true
+
+# --- TUI `R: review` launcher (issue #75) ------------------------------------
+# Either a free-form `command` (placeholders: {base} {head} {path} {diff})
+# or a `tool = "<preset>"` sugar (lumen / claude / codex / aider / gh).
+# `command` always wins when both are set. `{diff}` is lazy — only
+# materialised when the template references it. Base resolution chain:
+# upstream → branch.<n>.gwm-base → [review].default_base → "dev" → "main".
+[review]
+tool                  = "lumen"
+skip_when_no_changes  = true     # default true — `git rev-list --count {base}..{head} == 0` ⇒ skip
+# default_base        = "dev"    # optional pin overriding the auto-discovery chain
 ```
 
 ## Bootstrap report
@@ -514,21 +606,30 @@ src/
 ├── lib.rs               # public re-exports — tests import these
 ├── main.rs              # bin entry, dispatches to cli::run
 ├── error.rs             # GwmError (thiserror) + Result alias
-├── config.rs            # serde TOML → Config (worktree, bootstrap, doctor, tui)
+├── config.rs            # serde TOML → Config (worktree, bootstrap, doctor, tui, tui.open, git_tui, review)
 ├── naming.rs            # BranchSpec, kebab(), parse_branch()
-├── worktree.rs          # discover_repo, list, add, remove, prune, find_fuzzy (libgit2)
+├── worktree.rs          # discover_repo, list, add, remove, prune, find_fuzzy, branch_age,
+│                        # format_relative_duration, git_log_with_author (libgit2 + shell-out)
 ├── bootstrap.rs         # run(BootstrapCtx) → BootstrapReport (copies / guards / commands / when DSL)
-├── doctor.rs            # `gwm doctor` checks (config, env, orphan branches, prunable wts)
-├── github.rs            # issue / PR link storage in git config + `gh` shell-out
+├── doctor.rs            # `gwm doctor` checks (config, env, orphan branches, prunable wts, launcher PATH probes)
+├── github.rs            # issue / PR link storage in git config + `gh` shell-out, BranchLink
 ├── multiplexer.rs       # tmux / zellij hand-off (window/tab/split)
+├── launcher.rs          # shared `l` / `R` launcher pipeline — placeholder expansion
+│                        # ({base}/{head}/{path}/{diff} with lazy tempfile), shell-words split,
+│                        # base-resolution chain, count_commits_ahead, which::which probing
 ├── cli.rs               # clap subcommands + handlers
 └── tui/
-    ├── mod.rs           # crossterm event loop (filter, link prompt, open menu, refresh)
-    ├── app.rs           # App state, transitions, GitHubFetchState<T>, ConfirmKeyAction
-    └── ui.rs            # ratatui drawing (sidebar incl. GitHub panel)
+    ├── mod.rs           # crossterm event loop (filter, link prompt, open menu, refresh,
+    │                    # clipboard_candidates, run_launcher, yank_selected_path_to_clipboard)
+    ├── app.rs           # App state, transitions, GitHubFetchState<T>, ConfirmKeyAction,
+    │                    # LauncherPlan, OpenTarget, resolve_open_target, prepare_review, prepare_git_tui
+    ├── commit_graph.rs  # lazygit-style topology renderer (Rust port of pkg/gui/presentation/graph/)
+    └── ui.rs            # ratatui drawing — 4-section bordered sidebar, sidebar_header_line,
+                         # build_sidebar_sections, worktree_identity_lines, badges_line,
+                         # recent_commits_lines, branch_name_color, freshness_color, etc.
 ```
 
-Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.rs`, `bootstrap_when_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `error_tests.rs`, `flake_tests.rs`, `github_tests.rs`, `homebrew_formula_tests.rs`, `multiplexer_tests.rs`, `naming_tests.rs`, `precommit_hook_tests.rs`, `tui_app_tests.rs`, `worktree_integration.rs` (+ `tests/common/` helpers). **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
+Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.rs`, `bootstrap_when_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `error_tests.rs`, `flake_tests.rs`, `github_tests.rs`, `homebrew_formula_tests.rs`, `launcher_tests.rs`, `multiplexer_tests.rs`, `naming_tests.rs`, `precommit_hook_tests.rs`, `tui_app_tests.rs`, `worktree_integration.rs` (+ `tests/common/` helpers). **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
 
 ## Differences vs. the bash + gwq stack
 
@@ -543,7 +644,7 @@ Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.
 | GitHub linking              | none                  | issue / PR per-branch git config + `gh` live status      |
 | diagnostics                 | none                  | `gwm doctor` (exit 0/1/2, CI-ready)                      |
 | anti-RDS guard              | hardcoded `grep`      | configurable regex deny-list                             |
-| tests                       | 0                     | 316 across 14 test files (config / bootstrap / when DSL / doctor / github / multiplexer / TUI / CLI / homebrew / flake / pre-commit hook) |
+| tests                       | 0                     | 430+ across 15 test files (config / bootstrap / when DSL / doctor / github / multiplexer / TUI + commit graph / launcher / CLI / homebrew / flake / pre-commit hook) |
 | install                     | `chmod +x` per repo   | `cargo install --path .` (or Homebrew / Nix / prebuilts) |
 
 ## Troubleshooting
@@ -571,6 +672,21 @@ Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.
 **`.env` was copied even though it points to prod** — the guard's regex didn't match. Test it with `echo $YOUR_HOST | grep -E '<pattern>'`. Regex syntax is Rust `regex` crate (PCRE-like, no lookaround).
 
 **`gcd` says command not found** — the shell-init wrapper isn't sourced. Re-run `eval "$(gwm shell-init <shell>)"` in your current shell and add it to your shell's rc file.
+
+**Pressing `R` in the TUI does nothing / shows a status hint** — `[review]` is opt-in. Either no `[review]` section exists in `.gwm.toml`, the resolved binary isn't on `$PATH` (`gwm doctor` flags it as Warning), or `skip_when_no_changes = true` (default) found 0 commits between `{base}..{head}`. Add a `[review] tool = "lumen"` (or another preset) to enable it.
+
+**`R: review` resolves the wrong `{base}`** — the chain is upstream → `branch.<n>.gwm-base` → `[review].default_base` → `"dev"` → `"main"`. Pin it explicitly with `[review] default_base = "<branch>"` or set the per-branch override with `git config branch.<name>.gwm-base <ref>`.
+
+**`l` launches lazygit when the repo wants gitui (or vice versa)** — `[git_tui]` defaults to `lazygit -p {path}`. Override:
+```toml
+[git_tui]
+command = "gitui -d {path}"
+fullscreen = true
+```
+
+**Pressing `o` opens a shell when you want the file manager (or vice versa)** — `[tui.open] mode = "shell"` is the new default since issue #73. Set `mode = "finder"` for the pre-#73 OS file manager hand-off, or `mode = "editor"` to spawn `$EDITOR <path>`.
+
+**Pressing `y` does nothing / status bar says "no clipboard tool found"** — install a per-OS clipboard helper: `pbcopy` (macOS, built-in), `wl-copy` (Wayland), `xclip` / `xsel` (X11), `clip` (Windows, built-in). The probe list is platform-fixed; first hit on `$PATH` wins.
 
 ## Quick reference card
 
