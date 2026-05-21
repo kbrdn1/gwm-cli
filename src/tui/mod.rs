@@ -413,7 +413,7 @@ fn yank_selected_path_to_clipboard(app: &mut App) {
       }
     }
   }
-  app.status = "y: no clipboard tool found (install pbcopy / wl-copy / xclip / clip)".into();
+  app.status = "y: no clipboard tool found (install pbcopy / wl-copy / xclip / xsel / clip)".into();
 }
 
 /// Spawn the OS opener for `url` (used by the OpenMenu key handler).
