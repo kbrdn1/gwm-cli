@@ -282,9 +282,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// [`App::prepare_review`]. When `fullscreen=true` the TUI is
 /// suspended (raw mode off, alt-screen left) for the call and restored
 /// on exit — same recipe as the previous hardcoded `lazygit` flow.
-/// Non-fullscreen launchers run in the background; their stderr's
-/// first line is surfaced on the status bar so the user gets feedback
-/// even when the tool doesn't take over the screen.
+///
+/// **Non-fullscreen launchers also run synchronously**: gwm stays in
+/// the alt-screen, `Command::output()` waits for the child to exit,
+/// then the first line of its stderr lands on the status bar. The
+/// TUI is therefore unresponsive until the tool returns — fine for
+/// print-only AI reviewers (`claude --print`, `gh pr view --web`)
+/// that terminate quickly, but a long-running tool will visibly
+/// block. Pick `fullscreen = true` (proper suspend/resume) for
+/// anything that's not a quick one-shot. Caught by Copilot's review
+/// on PR #76; the previous docstring claimed "run in the background"
+/// which `output()` does not.
 ///
 /// `LauncherPlan` is consumed by-value so the `{diff}` tempfile it
 /// carries lives at least until the child process has been waited on.
