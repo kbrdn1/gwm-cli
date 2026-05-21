@@ -13,10 +13,12 @@
 //!
 //! Differences from lazygit, all intentional:
 //!
-//! - **Single muted colour** (`Color::DarkGray`) for connectors and a
-//!   neutral `Color::Blue` for `○` / `◎` nodes. Lazygit uses per-author
+//! - **Single green palette** — `Color::Green` for connectors and
+//!   `Color::Green` + bold for `○` / `◎` nodes. Lazygit uses per-author
 //!   MD5→HSL→RGB colours; we skip that for now — every commit on `gwm`
-//!   is authored by the same person, so the rainbow is wasted ink.
+//!   is authored by the same person, so the rainbow is wasted ink. The
+//!   green matches the `Worktree` block's "synced" status badge for
+//!   visual consistency across the sidebar.
 //! - **No selected-commit override** — lazygit highlights the pipes
 //!   originating from the cursor; our sidebar's selection lives on the
 //!   *worktree* list, not on a specific commit.
@@ -350,8 +352,8 @@ pub fn render_pipe_set(pipes: &[Pipe]) -> Vec<Span<'static>> {
     c.set_type(if is_merge { CellType::Merge } else { CellType::Commit });
   }
 
-  let connector_style = Style::default().fg(Color::DarkGray);
-  let node_style = Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD);
+  let connector_style = Style::default().fg(Color::Green);
+  let node_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
 
   let mut out: Vec<Span<'static>> = Vec::with_capacity(cells.len() * 2);
   for cell in &cells {
