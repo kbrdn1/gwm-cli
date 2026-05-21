@@ -70,6 +70,18 @@ exception; codify the manual test as an integration test.
   feature PRs (#51, #52, #53) because this check was skipped —
   forced an immediate v0.4.0 promotion 38 minutes later. Two
   minutes upfront beats a rushed follow-up release.
+- **Release notes are per-version, never the index.** The release
+  workflows (`release.yml` / `pre-release.yml`) source their
+  `body_path` from `changelogs/<version>.md` (stable) or
+  `changelogs/pre-releases/<version>.md` (rc/alpha/beta), NOT from
+  the top-level `CHANGELOG.md` (which is the in-progress index —
+  entries get moved into the per-version file when the release is
+  cut, so the index is empty at tag time). Before tagging, verify
+  the per-version file exists and contains the release contents;
+  the workflow now hard-fails if the file is missing rather than
+  silently publishing the empty index (witnessed on v0.6.0 /
+  v0.6.0-rc.1 — both releases had to be re-edited post-hoc via
+  `gh release edit --notes-file`).
 - **Pre-validate environment-dependent tests.** Any test that reads
   `$PATH`, the user's home directory, or other ambient state must be
   pre-validated locally against a stripped environment before the test
