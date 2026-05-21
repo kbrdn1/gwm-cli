@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 pub use app::{
   App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget, View,
 };
-pub use ui::filled_cells_for_progress;
+pub use ui::{filled_cells_for_progress, header_title};
 
 pub fn run() -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config

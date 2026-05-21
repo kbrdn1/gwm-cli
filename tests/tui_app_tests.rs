@@ -2,7 +2,7 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
-use gwm::tui::{filled_cells_for_progress, App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
+use gwm::tui::{filled_cells_for_progress, header_title, App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -27,6 +27,39 @@ fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
   let app = App::new_at(Some(dir.path())).unwrap();
   (dir, app)
+}
+
+#[test]
+fn header_title_includes_running_version_repo_and_workdir() {
+  // The TUI header surfaces `gwm v<version> — <repo> (<workdir>)`.
+  // Cross-check both halves: the version comes from CARGO_PKG_VERSION
+  // (the same string `gwm --version` prints) and the format wraps
+  // each piece exactly as the docstring describes — so a regression
+  // dropping the `v` prefix, the em-dash, or the repo name fails the
+  // test for the right reason.
+  let title = header_title("gwm-cli", "/Users/kbrdn1/Projects/Perso/gwm-cli");
+  assert!(title.contains("gwm-cli"), "missing repo name: {}", title);
+  assert!(
+    title.contains("/Users/kbrdn1/Projects/Perso/gwm-cli"),
+    "missing workdir: {}",
+    title
+  );
+  let version_token = format!("v{}", env!("CARGO_PKG_VERSION"));
+  assert!(
+    title.contains(&version_token),
+    "missing running version `{}`: {}",
+    version_token,
+    title
+  );
+  // Pin the exact layout so a refactor moving the version pre/post
+  // would have to update this assertion deliberately.
+  assert_eq!(
+    title,
+    format!(
+      " gwm v{} — gwm-cli (/Users/kbrdn1/Projects/Perso/gwm-cli) ",
+      env!("CARGO_PKG_VERSION")
+    )
+  );
 }
 
 #[test]

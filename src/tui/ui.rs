@@ -58,6 +58,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   }
 }
 
+/// Format the TUI header title `" gwm v<version> — <repo> (<path>) "`.
+/// The version comes from `CARGO_PKG_VERSION` so it stays in lockstep
+/// with `gwm --version` without a second source of truth — important
+/// for users juggling multiple installs (a `cargo install`-ed gwm next
+/// to a worktree-built dev binary). Extracted from `draw_header` so
+/// the format can be pinned by a unit test without spinning up the
+/// ratatui backend.
+pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
+  format!(
+    " gwm v{} — {} ({}) ",
+    env!("CARGO_PKG_VERSION"),
+    repo_name,
+    workdir_display
+  )
+}
+
 /// Single-line filter bar rendered between the table and the footer.
 /// Mirrors Vim's `/` prompt: leading slash, the live query, and a block cursor
 /// while the user is actively typing.
@@ -101,7 +117,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-  let title = format!(" gwm — {} ({}) ", app.repo_name, app.workdir.display());
+  let title = header_title(&app.repo_name, &app.workdir.to_string_lossy());
   let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
   let mut spans = vec![Span::styled(title, title_style)];
   // Picker mode flags the header so the user can never confuse a `gwm switch`
