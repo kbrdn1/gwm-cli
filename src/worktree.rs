@@ -1,4 +1,5 @@
 use crate::error::{GwmError, Result};
+use crate::github::{self, BranchLink};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,6 +22,11 @@ pub struct WorktreeInfo {
   pub is_locked: bool,
   pub is_prunable: bool,
   pub status: BranchStatus,
+  /// Issue/PR link resolved at list time, so the table marker column
+  /// can show `●` on rows that carry GitHub context without each frame
+  /// re-shelling `git config`. Empty link = no marker dot. See
+  /// `tui/ui.rs::table_marker`.
+  pub link: BranchLink,
 }
 
 /// Cheap snapshot of "where are we vs. clean / upstream".
@@ -119,6 +125,10 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let head_ref = repo.head().ok();
     let branch = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
     let head = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
+    let link = branch
+      .as_deref()
+      .and_then(|b| github::read_link(repo, b).ok())
+      .unwrap_or_else(BranchLink::empty);
     out.push(WorktreeInfo {
       name: workdir
         .file_name()
@@ -131,6 +141,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked: false,
       is_prunable: false,
       status: compute_status(repo),
+      link,
     });
   }
 
@@ -163,6 +174,10 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       ),
     };
 
+    let link = branch
+      .as_deref()
+      .and_then(|b| github::read_link(repo, b).ok())
+      .unwrap_or_else(BranchLink::empty);
     out.push(WorktreeInfo {
       name: name.to_string(),
       path,
@@ -172,6 +187,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked,
       is_prunable,
       status,
+      link,
     });
   }
 

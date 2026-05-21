@@ -35,7 +35,9 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
     ]
   }
 }
-pub use ui::{branch_name_color, filled_cells_for_progress, freshness_color, issue_badge_color, pr_badge_color};
+pub use ui::{
+  branch_name_color, filled_cells_for_progress, freshness_color, issue_badge_color, pr_badge_color, table_marker,
+};
 
 pub fn run() -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config

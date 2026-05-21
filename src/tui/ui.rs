@@ -138,6 +138,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Cell::from("NAME"),
     Cell::from("BRANCH"),
     Cell::from("STATUS"),
+    Cell::from("CREATED"),
     Cell::from("PATH"),
   ])
   .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
@@ -147,11 +148,15 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
 
+  // Created column is fixed-width (4 chars — `2d`, `3w`, `1M`, … all fit;
+  // `-` for trunks / unknown takes 1 cell). Lives between STATUS and PATH
+  // so the most useful signal sits at eye level next to the status label.
   let widths = [
     Constraint::Length(2),
     Constraint::Length(name_w),
     Constraint::Length(branch_w),
     Constraint::Length(status_w),
+    Constraint::Length(7),
     Constraint::Min(20),
   ];
 
@@ -455,7 +460,7 @@ fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) ->
 }
 
 fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row<'static> {
-  let marker = if w.is_main { "★" } else { " " };
+  let (marker_label, marker_color) = table_marker(w);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
   let name_cell =
@@ -468,15 +473,34 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
 
   let status_cell = build_status_cell(w, status_w as usize);
 
+  // PR #74 follow-up: surface branch age + freshness right in the table
+  // so it stays visible when the sidebar is hidden (<120 cols or `v`
+  // collapsed). `branch_age_for` opens the worktree's repo and runs the
+  // libgit2 revwalk; per-frame cost is bounded by the number of visible
+  // rows (typically <20) so we re-resolve on every draw without caching.
+  let age = branch_age_for(w);
+  let age_label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+  let age_color = age.map(freshness_color).unwrap_or(Color::DarkGray);
+  let age_cell = Cell::from(age_label).style(Style::default().fg(age_color));
+
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
 
   Row::new(vec![
-    Cell::from(marker).style(Style::default().fg(Color::Yellow)),
+    Cell::from(marker_label).style(Style::default().fg(marker_color)),
     name_cell,
     branch_cell,
     status_cell,
+    age_cell,
     path_cell,
   ])
+}
+
+/// Owned-String wrapper around `worktree::format_relative_duration` so
+/// the table-row builder can hand a `Cell::from` an owned value without
+/// re-allocating downstream. Centralised here purely to keep `build_row`
+/// readable.
+fn format_relative_duration_str(d: std::time::Duration) -> String {
+  worktree::format_relative_duration(d)
 }
 
 fn build_status_cell(w: &WorktreeInfo, width: usize) -> Cell<'static> {
@@ -1124,4 +1148,23 @@ pub fn issue_badge_color(state: IssueState) -> Color {
     IssueState::Open => Color::Green,
     IssueState::Closed => Color::Magenta,
   }
+}
+
+/// Pick the marker glyph + colour for the table's first column. `★`
+/// for the main worktree (preserves the pre-#73 convention), `●` for
+/// any other worktree that carries an issue or PR link, blank space
+/// otherwise so unlinked rows don't read as "claimed". Colour stays
+/// neutral (Cyan) — the live PR / issue state isn't known at the
+/// table layer (only the selected worktree triggers a fetch), so the
+/// table dot signals "has link" rather than a specific status. The
+/// colour-coded `●` lives in the sidebar header where the fetch state
+/// is available.
+pub fn table_marker(w: &WorktreeInfo) -> (&'static str, Color) {
+  if w.is_main {
+    return ("★", Color::Yellow);
+  }
+  if w.link.issue.is_some() || w.link.pr.is_some() {
+    return ("●", Color::Cyan);
+  }
+  (" ", Color::Reset)
 }

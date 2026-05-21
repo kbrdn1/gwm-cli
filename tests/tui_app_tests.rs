@@ -24,6 +24,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     is_locked: false,
     is_prunable: false,
     status: BranchStatus::default(),
+    link: gwm::github::BranchLink::empty(),
   }
 }
 
@@ -1523,6 +1524,53 @@ fn yank_selected_path_returns_none_when_nothing_selected() {
   let (_dir, mut app) = make_app();
   app.list_state.select(None);
   assert!(app.yank_selected_path().is_none());
+}
+
+// ---- Issue #73 (PR #74 follow-up): table marker pastille ------------------
+// The marker column (first cell) doubles as the lazygit-style status dot.
+// `★` still wins for main; non-main worktrees that carry a link (issue or
+// PR) get `●` so the row visually signals "this has GitHub context", even
+// when the sidebar is hidden (`<120` cols or `v` collapsed).
+
+#[test]
+fn table_marker_for_main_worktree_is_yellow_star() {
+  use gwm::github::BranchLink;
+  let mut w = worktree_fixture("main");
+  w.is_main = true;
+  w.link = BranchLink::empty();
+  let (label, color) = gwm::tui::table_marker(&w);
+  assert_eq!(label, "★");
+  assert_eq!(color, Color::Yellow);
+}
+
+#[test]
+fn table_marker_for_linked_non_main_is_neutral_dot() {
+  // No fetched state available at the table layer — colour stays neutral
+  // (Cyan) so the dot reads as "has link" without claiming a specific
+  // open/closed status. The coloured dot lives in the sidebar header where
+  // the live fetch state is known.
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: Some(42),
+    pr: None,
+    issue_source: LinkSource::BranchName,
+    pr_source: LinkSource::None,
+  };
+  let (label, color) = gwm::tui::table_marker(&w);
+  assert_eq!(label, "●");
+  assert_eq!(color, Color::Cyan);
+}
+
+#[test]
+fn table_marker_for_unlinked_non_main_is_blank() {
+  use gwm::github::BranchLink;
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink::empty();
+  let (label, _color) = gwm::tui::table_marker(&w);
+  assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
 }
 
 #[test]
