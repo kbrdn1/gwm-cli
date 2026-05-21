@@ -84,7 +84,7 @@ Key bindings:
 | `d`         | delete selected (confirm `y` · countdown when `p` is armed — see below)         |
 | `b`         | re-run bootstrap on the selected worktree                                       |
 | `o`         | open the worktree per [`[tui.open]`](#open-dispatch) — `shell` (default) / `editor` / `finder` |
-| `y`         | yank the selected worktree's path to the system clipboard (pbcopy / wl-copy / xclip / clip) |
+| `y`         | yank the selected worktree's path to the system clipboard (pbcopy / wl-copy / xclip / xsel / clip) |
 | `l`         | launch `lazygit -p <selected-worktree>` fullscreen; resume the TUI on exit      |
 | `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)     |
 | `Tab`       | swap focus between the worktree list and the sidebar                            |
