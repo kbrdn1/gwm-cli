@@ -9,7 +9,7 @@ use nucleo_matcher::{
   pattern::{CaseMatching, Normalization, Pattern},
   Config as NucleoConfig, Matcher, Utf32Str,
 };
-use ratatui::{text::Line, widgets::TableState};
+use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -126,10 +126,11 @@ pub struct App {
   pub sidebar_open: bool,
   pub sidebar_focused: bool,
   pub sidebar_scroll: u16,
-  /// Cache of rendered sidebar lines, keyed by the selected worktree path.
-  /// Prevents re-shelling `git log` / `git status` on every TUI redraw — they
-  /// only run when the selection actually changes (or on explicit refresh).
-  pub sidebar_cache: Option<(PathBuf, Vec<Line<'static>>)>,
+  /// Cache of the rendered sidebar sections, keyed by the selected worktree
+  /// path. Prevents re-shelling `git log` / `git status` on every TUI redraw
+  /// — they only run when the selection actually changes (or on explicit
+  /// refresh).
+  pub sidebar_cache: Option<(PathBuf, super::ui::SidebarSections)>,
   /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
   /// Keeps scrolling clamped to the rendered content height so the user can't
   /// scroll the panel entirely off-screen.
