@@ -1,6 +1,6 @@
 [package]
 name = "gwm"
-version = "0.6.0-rc.1"
+version = "0.6.0"
 edition = "2021"
 description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
