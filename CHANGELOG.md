@@ -12,6 +12,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **TUI Recent Commits panel — lazygit-style layout** (#71) — each commit
+  now occupies exactly **one visual line** (was wrapping onto two on long
+  subjects), and the block **fills the available height** instead of
+  showing a hardcoded 10 entries. Per-row format mirrors lazygit:
+  `<8-char hash>  <author initials>  <node>  <subject>`, where `<node>`
+  is `○` for a normal commit and `◎` for a merge commit (matches
+  `lazygit/pkg/gui/presentation/graph/cell.go` constants
+  `CommitSymbol` / `MergeSymbol`). Initials follow the same
+  `KB`-from-`Kylian Bardini` rule as
+  `lazygit/pkg/gui/presentation/authors/authors.go`. Subjects are
+  **hard-clipped** at the panel's right edge — `Paragraph::wrap` is
+  disabled across every sidebar block now, so the `Constraint::Length`
+  budget always matches the rendered height. A right-aligned footer
+  `<viewport-bottom> of <total>` lives at the bottom of the block, à la
+  lazygit's panel footer. Default buffer is **300 commits** (same as
+  lazygit's initial `git log -300`). Includes the full graph topology
+  renderer — vertical pipes `│`, corners `╮ ╭ ╯ ╰`, junctions `┴ ┬`,
+  horizontal strokes `─` — driven by a Rust port of lazygit's
+  `pkg/gui/presentation/graph/` package (`graph.go` / `cell.go`).
+  Linear history collapses to a single `○`-stack column; merges spawn
+  fresh columns to the right, and the algorithm is width-deterministic
+  on the commit list (independent of terminal width).
+
 - **TUI Details sidebar redesign** (#69) — the right pane is now made of four
   independent rounded-border subsections (`Worktree` / `Issue / PR` /
   `Working Tree` / `Recent Commits`) instead of one big `Details` block with

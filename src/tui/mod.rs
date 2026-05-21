@@ -1,4 +1,11 @@
 mod app;
+/// Commit-graph topology renderer, ported from lazygit. **Not part of the
+/// public SemVer surface** — exposed only so the integration tests under
+/// `tests/` can pin the algorithm. Use `gwm::tui::recent_commits_lines`
+/// (re-exported below) for the stable entry point that callers should
+/// actually depend on.
+#[doc(hidden)]
+pub mod commit_graph;
 mod ui;
 
 use crate::error::Result;
@@ -16,8 +23,8 @@ pub use app::{
   App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, View,
 };
 pub use ui::{
-  build_sidebar_sections, filled_cells_for_progress, issue_summary_line, pr_summary_line, tilde_compress_with_home,
-  SidebarSections,
+  author_initials, build_sidebar_sections, filled_cells_for_progress, issue_summary_line, pr_summary_line,
+  recent_commits_lines, tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run() -> Result<()> {
