@@ -241,16 +241,48 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
     .with_hint(format!("supported keywords: {}", SUPPORTED_WHEN_PREFIXES.join(", ")))
 }
 
+/// Common shell wrappers that introduce the real binary after their
+/// own switches / env assignments. Caught by Copilot's review on
+/// PR #76: pre-fix, `env FOO=bar lumen diff` made the doctor check
+/// `env` against `$PATH` (which is always present) and miss the real
+/// launcher `lumen`. Keep this list narrow on purpose — exotic
+/// wrappers (`nice`, `time`, `nohup`) take positional args, which we
+/// would risk consuming and ending up with the wrong binary.
+const COMMAND_WRAPPERS: &[&str] = &["env", "command"];
+
 /// Extract the executable name from a shell command string. Tokenises
 /// via `shell_words` so quoted args (`"my tool" --flag`) and escaped
 /// whitespace are handled the way the shell would, then skips leading
-/// `FOO=bar` env assignments and returns the first token that isn't
-/// `KEY=VAL`. Returns `None` for empty strings or strings that fail
-/// to parse (unbalanced quotes — better to surface nothing than a
-/// garbage binary name that would produce a confusing PATH warning).
+/// `FOO=bar` env assignments and recognised `env`/`command` wrappers
+/// (and the wrapper's own `KEY=VAL` / `-flag` tokens) before returning
+/// the first token that looks like a real binary name. Returns `None`
+/// for empty strings or strings that fail to parse (unbalanced quotes
+/// — better to surface nothing than a garbage binary name that would
+/// produce a confusing PATH warning).
 fn extract_binary(run: &str) -> Option<String> {
   let tokens = shell_words::split(run).ok()?;
-  tokens.into_iter().find(|t| !t.contains('='))
+  let mut iter = tokens.into_iter().peekable();
+
+  // Skip leading `KEY=VAL` env assignments (POSIX `FOO=bar tool` form).
+  while iter.peek().is_some_and(|t| !t.starts_with('=') && t.contains('=')) {
+    iter.next();
+  }
+
+  // Recognise a wrapper (`env`, `command`) and skip its own `-flag` /
+  // `KEY=VAL` arguments before reaching the real binary. Stops on the
+  // first positional non-flag, non-assignment token.
+  if iter.peek().is_some_and(|t| COMMAND_WRAPPERS.contains(&t.as_str())) {
+    iter.next(); // consume the wrapper itself
+    while let Some(t) = iter.peek() {
+      if t.starts_with('-') || (!t.starts_with('=') && t.contains('=')) {
+        iter.next();
+      } else {
+        break;
+      }
+    }
+  }
+
+  iter.next()
 }
 
 /// Same as [`extract_binary`] but pre-strips the launcher placeholders

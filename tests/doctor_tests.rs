@@ -411,6 +411,50 @@ fn missing_review_tool_preset_is_warning() {
 }
 
 #[test]
+fn launcher_wrapped_by_env_warns_on_real_binary_not_wrapper() {
+  // PR #76 Copilot review: `extract_binary` returned the first token
+  // that didn't contain '=', which for `env FOO=bar phantom-bin diff`
+  // was `env` itself. The doctor then checked `env` (always on PATH)
+  // and missed the real launcher binary. Confirm that the doctor now
+  // names the actual tool when an `env` wrapper is present.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.review.command = Some("env FOO=bar definitely-not-on-path-wrapped-zz {base}..{head}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert_eq!(c.status, CheckStatus::Warning, "wrapped missing binary must warn");
+  assert!(
+    c.detail.contains("definitely-not-on-path-wrapped-zz"),
+    "wrapper must be peeled: detail should name the real binary, got: {}",
+    c.detail
+  );
+  assert!(
+    !c.detail.split("not on PATH:").nth(1).unwrap_or("").contains("env"),
+    "`env` must not appear in the missing-binaries section: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn launcher_wrapped_by_command_warns_on_real_binary_not_wrapper() {
+  // Sibling case for the POSIX `command` builtin: `command tool ...`
+  // (used e.g. inside shell aliases to bypass functions) should peel
+  // the wrapper just like `env`. Same shape as the env test above.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.git_tui.command = Some("command definitely-not-on-path-cmd-yy -d {path}".into());
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  assert!(
+    c.detail.contains("definitely-not-on-path-cmd-yy"),
+    "command wrapper must be peeled: detail should name the real binary, got: {}",
+    c.detail
+  );
+}
+
+#[test]
 fn missing_git_tui_binary_is_warning() {
   // A user overriding [git_tui] to a missing binary deserves the same
   // visibility treatment as a missing review tool — gwm's `l` keybinding
