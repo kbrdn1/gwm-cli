@@ -271,8 +271,13 @@ pub struct ReviewConfig {
   /// Default `true`.
   #[serde(default = "default_skip_when_no_changes")]
   pub skip_when_no_changes: bool,
-  /// Optional pin for the review base ref. When set, it overrides the
-  /// upstream / `gwm-base` / `dev` / `main` fallback chain.
+  /// Optional pin for the review base ref. Slots into the base-
+  /// resolution chain *after* `branch.<n>.merge` (upstream) and
+  /// `branch.<n>.gwm-base`, and *before* the static `dev` / `main`
+  /// fallback. Setting it overrides only the `dev` / `main` step —
+  /// upstream and gwm-base still win when present. See
+  /// [`crate::launcher::resolve_review_base`] for the canonical
+  /// order.
   #[serde(default)]
   pub default_base: Option<String>,
 }
