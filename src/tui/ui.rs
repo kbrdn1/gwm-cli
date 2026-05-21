@@ -135,10 +135,14 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 
   let header = Row::new(vec![
     Cell::from(""),
+    // Age column sits immediately after the marker, ahead of NAME, with
+    // no header label — the glyphs are self-evident (`2d`, `3w`, `1M`)
+    // and a "CREATED" caption would steal space from the BRANCH column.
+    // Matches lazygit's recency-first layout.
+    Cell::from(""),
     Cell::from("NAME"),
     Cell::from("BRANCH"),
     Cell::from("STATUS"),
-    Cell::from("CREATED"),
     Cell::from("PATH"),
   ])
   .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
@@ -148,15 +152,14 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
 
-  // Created column is fixed-width (4 chars — `2d`, `3w`, `1M`, … all fit;
-  // `-` for trunks / unknown takes 1 cell). Lives between STATUS and PATH
-  // so the most useful signal sits at eye level next to the status label.
   let widths = [
     Constraint::Length(2),
+    // Fixed at 4 chars — `2d`, `3w`, `1M`, `5y`, `-` all fit; never
+    // expands so BRANCH stays the elastic column.
+    Constraint::Length(4),
     Constraint::Length(name_w),
     Constraint::Length(branch_w),
     Constraint::Length(status_w),
-    Constraint::Length(7),
     Constraint::Min(20),
   ];
 
@@ -487,10 +490,10 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
 
   Row::new(vec![
     Cell::from(marker_label).style(Style::default().fg(marker_color)),
+    age_cell,
     name_cell,
     branch_cell,
     status_cell,
-    age_cell,
     path_cell,
   ])
 }
