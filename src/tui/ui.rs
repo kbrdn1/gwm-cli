@@ -471,6 +471,7 @@ pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>
 fn commit_row_line(row: worktree::CommitRow) -> Line<'static> {
   let short_hash: String = row.hash.chars().take(COMMIT_HASH_DISPLAY_LEN).collect();
   let initials = author_initials(&row.author);
+  let marker = commit_node_marker(&row);
   Line::from(vec![
     Span::styled(short_hash, Style::default().fg(Color::Yellow)),
     Span::raw("  "),
@@ -479,8 +480,30 @@ fn commit_row_line(row: worktree::CommitRow) -> Line<'static> {
       Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     ),
     Span::raw("  "),
+    Span::styled(marker.to_string(), Style::default().fg(Color::Blue)),
+    Span::raw("  "),
     Span::raw(row.subject),
   ])
+}
+
+/// Glyph that marks a commit node in the Recent Commits graph column.
+/// Mirrors lazygit's `CommitSymbol` / `MergeSymbol`
+/// (`pkg/gui/presentation/graph/cell.go:11-14`):
+///
+/// - `○` (U+25CB) — normal commit (one parent, or the root commit with
+///   no parents).
+/// - `◎` (U+25CE) — merge commit (≥ 2 parents).
+///
+/// gwm renders a single graph column without inter-row connectors
+/// (`│ ╮ ╭ ╯ ╰`) — those need full graph-topology tracking across
+/// rows and would clutter a narrow sidebar. The node-only column is
+/// the most readable subset for a previewer.
+fn commit_node_marker(row: &worktree::CommitRow) -> char {
+  if row.parents.len() >= 2 {
+    '◎'
+  } else {
+    '○'
+  }
 }
 
 /// Derive lazygit-style author initials from a full name. Closely

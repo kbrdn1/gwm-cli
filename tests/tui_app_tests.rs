@@ -1788,6 +1788,115 @@ fn author_initials_takes_first_unicode_scalar_per_token() {
   );
 }
 
+// ---- Graph node markers (○ commit, ◎ merge) -----------------------------
+
+fn add_merge_commit(repo: &git2::Repository) -> git2::Oid {
+  use git2::Signature;
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+
+  // Start from current HEAD. Create a sibling branch with one commit, then
+  // merge it back into HEAD with a true 2-parent merge commit.
+  let base = repo.head().unwrap().peel_to_commit().unwrap();
+  let branch_name = "tmp-side";
+  repo.branch(branch_name, &base, false).unwrap();
+  // Side commit.
+  let side_oid = {
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    repo
+      .commit(
+        Some(&format!("refs/heads/{}", branch_name)),
+        &sig,
+        &sig,
+        "side",
+        &tree,
+        &[&base],
+      )
+      .unwrap()
+  };
+  let side = repo.find_commit(side_oid).unwrap();
+  // Merge commit on HEAD with two parents.
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo
+    .commit(
+      Some("HEAD"),
+      &sig,
+      &sig,
+      "merge: side into trunk",
+      &tree,
+      &[&base, &side],
+    )
+    .unwrap()
+}
+
+#[test]
+fn commit_row_carries_parent_hashes() {
+  // Regression: the renderer needs the parent count to pick ○ vs ◎.
+  // git_log_with_author must surface the parent list, not flatten it.
+  let (dir, repo) = init_repo();
+  add_merge_commit(&repo); // adds two extra commits (side + merge)
+  let rows = gwm::worktree::git_log_with_author(dir.path(), 10).unwrap();
+  // First row = merge commit (HEAD), should have 2 parents.
+  assert!(!rows.is_empty(), "expected at least 1 commit");
+  assert_eq!(
+    rows[0].parents.len(),
+    2,
+    "HEAD is a merge commit and must surface both parents, got {:?}",
+    rows[0].parents
+  );
+  // The seed `init` commit has no parent.
+  let seed = rows
+    .iter()
+    .find(|r| r.subject == "init")
+    .expect("seed commit must be in log");
+  assert!(
+    seed.parents.is_empty(),
+    "seed commit has no parents, got {:?}",
+    seed.parents
+  );
+}
+
+#[test]
+fn recent_commits_line_marks_merge_commit_with_open_diamond() {
+  let (dir, repo) = init_repo();
+  add_merge_commit(&repo);
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 10);
+  // Find the merge commit row by subject; assert it carries ◎ somewhere.
+  let merge = lines
+    .iter()
+    .find(|l| {
+      let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+      joined.contains("merge: side into trunk")
+    })
+    .expect("merge row must be present");
+  let joined: String = merge.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains('◎'),
+    "merge row must carry the ◎ marker, got: {}",
+    joined
+  );
+}
+
+#[test]
+fn recent_commits_line_marks_normal_commit_with_open_circle() {
+  let (dir, _repo) = init_repo();
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 1);
+  let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains('○'),
+    "non-merge row must carry the ○ marker, got: {}",
+    joined
+  );
+  assert!(
+    !joined.contains('◎'),
+    "non-merge row must NOT carry the ◎ marker, got: {}",
+    joined
+  );
+}
+
 #[test]
 fn recent_commits_line_starts_with_short_hash() {
   // The first span of every row must be a hash of exactly
