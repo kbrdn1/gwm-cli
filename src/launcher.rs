@@ -174,7 +174,20 @@ pub fn resolve_review_base(repo: &Repository, branch: &str, default_base: Option
   if let Some(d) = default_base.map(str::trim).filter(|s| !s.is_empty()) {
     return d.to_string();
   }
-  "dev".to_string()
+  // Final fallback: prefer `dev` when it exists locally (gwm's project
+  // convention), otherwise `main` (universal git default). Returning
+  // `dev` blindly when the repo only has `main` would make the launcher's
+  // subsequent `git rev-list` / `git diff` calls fail loudly — caught by
+  // Copilot's review on PR #76.
+  if branch_exists(repo, "dev") {
+    "dev".to_string()
+  } else {
+    "main".to_string()
+  }
+}
+
+fn branch_exists(repo: &Repository, name: &str) -> bool {
+  repo.find_branch(name, git2::BranchType::Local).is_ok()
 }
 
 /// Persist `branch.<name>.gwm-base = <base>` so the review base chain

@@ -143,12 +143,26 @@ fn expand_materialises_diff_lazily() {
 // ---- Base resolution chain ----------------------------------------------
 
 #[test]
-fn resolve_base_falls_back_to_dev_when_nothing_set() {
-  // Empty git config + no .gwm.toml default ⇒ "dev" wins. This matches
-  // gwm's project convention (the project itself targets `dev`).
+fn resolve_base_falls_back_to_main_when_no_dev_branch_exists() {
+  // PR #76 Copilot review: the docstring promises a `"dev" → "main"`
+  // fallback. `init_repo` creates only `main`, so resolution must
+  // land on `main` instead of returning a non-existent `dev` that
+  // would later make `git diff` / `git rev-list` fail.
   let (_dir, repo) = init_repo();
   let base = resolve_review_base(&repo, "feat/x", None);
-  assert_eq!(base, "dev");
+  assert_eq!(base, "main", "no dev branch ⇒ fall through to main");
+}
+
+#[test]
+fn resolve_base_falls_back_to_dev_when_dev_branch_exists() {
+  // The "dev" fallback is gwm's project convention. We only prefer
+  // it when it actually exists locally — otherwise we'd hand a bogus
+  // ref to `git diff`. Mirror of the `main` fallback test.
+  let (_dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("dev", &head, false).unwrap();
+  let base = resolve_review_base(&repo, "feat/x", None);
+  assert_eq!(base, "dev", "dev branch present ⇒ prefer it over main");
 }
 
 #[test]
