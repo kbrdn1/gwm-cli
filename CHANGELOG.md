@@ -27,9 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   budget always matches the rendered height. A right-aligned footer
   `<viewport-bottom> of <total>` lives at the bottom of the block, à la
   lazygit's panel footer. Default buffer is **300 commits** (same as
-  lazygit's initial `git log -300`). gwm renders the node column only
-  — full inter-row connectors (`│ ╮ ╭ ╯ ╰`) would clutter a narrow
-  sidebar and need cross-row topology tracking.
+  lazygit's initial `git log -300`). Includes the full graph topology
+  renderer — vertical pipes `│`, corners `╮ ╭ ╯ ╰`, junctions `┴ ┬`,
+  horizontal strokes `─` — driven by a Rust port of lazygit's
+  `pkg/gui/presentation/graph/` package (`graph.go` / `cell.go`).
+  Linear history collapses to a single `○`-stack column; merges spawn
+  fresh columns to the right, and the algorithm is width-deterministic
+  on the commit list (independent of terminal width).
 
 - **TUI Details sidebar redesign** (#69) — the right pane is now made of four
   independent rounded-border subsections (`Worktree` / `Issue / PR` /

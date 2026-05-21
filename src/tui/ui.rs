@@ -448,18 +448,30 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// per-row format:
 ///
 /// ```text
-/// <8-char hash>  <author initials>  <node>  <subject>
+/// <8-char hash>  <author initials>  <graph>  <subject>
 /// ```
 ///
-/// where `<node>` is `○` for a normal commit and `◎` for a merge commit
-/// (≥ 2 parents), matching `lazygit/pkg/gui/presentation/graph/cell.go`
-/// constants `CommitSymbol` / `MergeSymbol`. The subject is **not**
-/// truncated here — the renderer relies on ratatui's view-level
-/// hard-clip (no `Wrap`) to match lazygit's gocui behaviour: one commit
-/// per visual line, overflow cut at the right edge without `…`.
+/// where `<graph>` is the per-row output of the topology renderer in
+/// [`super::commit_graph`] — a sequence of `2 * (max_pos + 1)` cells
+/// drawing `○` / `◎` nodes plus the `│ ─ ╮ ╭ ╯ ╰ …` connectors that
+/// link consecutive commits across branch / merge boundaries. The
+/// graph width is deterministic on the commit list — independent of
+/// terminal width — so the cache stays valid across resizes.
+///
+/// The subject is **not** truncated here — the renderer relies on
+/// ratatui's view-level hard-clip (no `Wrap`) to match lazygit's gocui
+/// behaviour: one commit per visual line, overflow cut at the right
+/// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
   match worktree::git_log_with_author(&w.path, limit) {
-    Ok(rows) if !rows.is_empty() => rows.into_iter().map(commit_row_line).collect(),
+    Ok(rows) if !rows.is_empty() => {
+      let graphs = super::commit_graph::render_commits(&rows);
+      rows
+        .into_iter()
+        .zip(graphs)
+        .map(|(row, graph_spans)| commit_row_line(row, graph_spans))
+        .collect()
+    }
     Ok(_) => vec![Line::from(Span::styled(
       "(no commits)".to_string(),
       Style::default().fg(Color::DarkGray),
@@ -471,42 +483,21 @@ pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>
   }
 }
 
-fn commit_row_line(row: worktree::CommitRow) -> Line<'static> {
+fn commit_row_line(row: worktree::CommitRow, graph: Vec<Span<'static>>) -> Line<'static> {
   let short_hash: String = row.hash.chars().take(COMMIT_HASH_DISPLAY_LEN).collect();
   let initials = author_initials(&row.author);
-  let marker = commit_node_marker(&row);
-  Line::from(vec![
-    Span::styled(short_hash, Style::default().fg(Color::Yellow)),
-    Span::raw("  "),
-    Span::styled(
-      format!("{:<2}", initials),
-      Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    ),
-    Span::raw("  "),
-    Span::styled(marker.to_string(), Style::default().fg(Color::Blue)),
-    Span::raw("  "),
-    Span::raw(row.subject),
-  ])
-}
-
-/// Glyph that marks a commit node in the Recent Commits graph column.
-/// Mirrors lazygit's `CommitSymbol` / `MergeSymbol`
-/// (`pkg/gui/presentation/graph/cell.go:11-14`):
-///
-/// - `○` (U+25CB) — normal commit (one parent, or the root commit with
-///   no parents).
-/// - `◎` (U+25CE) — merge commit (≥ 2 parents).
-///
-/// gwm renders a single graph column without inter-row connectors
-/// (`│ ╮ ╭ ╯ ╰`) — those need full graph-topology tracking across
-/// rows and would clutter a narrow sidebar. The node-only column is
-/// the most readable subset for a previewer.
-fn commit_node_marker(row: &worktree::CommitRow) -> char {
-  if row.parents.len() >= 2 {
-    '◎'
-  } else {
-    '○'
-  }
+  let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + graph.len());
+  spans.push(Span::styled(short_hash, Style::default().fg(Color::Yellow)));
+  spans.push(Span::raw("  "));
+  spans.push(Span::styled(
+    format!("{:<2}", initials),
+    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+  ));
+  spans.push(Span::raw("  "));
+  spans.extend(graph);
+  spans.push(Span::raw(" "));
+  spans.push(Span::raw(row.subject));
+  Line::from(spans)
 }
 
 /// Derive lazygit-style author initials from a full name. Closely

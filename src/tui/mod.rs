@@ -1,4 +1,5 @@
 mod app;
+pub mod commit_graph;
 mod ui;
 
 use crate::error::Result;

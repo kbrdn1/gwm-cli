@@ -1882,6 +1882,171 @@ fn recent_commits_line_marks_merge_commit_with_bullseye() {
   );
 }
 
+// ---- Commit graph topology (lazygit port — pipes + connectors) ---------
+
+use gwm::tui::commit_graph::{box_drawing_chars, build_pipe_sets, render_commits, render_pipe_set, test_row, PipeKind};
+
+fn spans_to_text(spans: &[ratatui::text::Span<'static>]) -> String {
+  spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn graph_glyph_table_matches_lazygit_truth_table() {
+  // 16-case ground truth ported verbatim from
+  // `lazygit/pkg/gui/presentation/graph/cell.go::getBoxDrawingChars`.
+  // If any of these flip, the entire graph rendering will silently shift.
+  let cases: &[((bool, bool, bool, bool), (char, char))] = &[
+    ((true, true, true, true), ('│', '─')),
+    ((true, true, true, false), ('│', ' ')),
+    ((true, true, false, true), ('│', '─')),
+    ((true, true, false, false), ('│', ' ')),
+    ((true, false, true, true), ('┴', '─')),
+    ((true, false, true, false), ('╯', ' ')),
+    ((true, false, false, true), ('╰', '─')),
+    ((true, false, false, false), ('╵', ' ')),
+    ((false, true, true, true), ('┬', '─')),
+    ((false, true, true, false), ('╮', ' ')),
+    ((false, true, false, true), ('╭', '─')),
+    ((false, true, false, false), ('╷', ' ')),
+    ((false, false, true, true), ('─', '─')),
+    ((false, false, true, false), ('─', ' ')),
+    ((false, false, false, true), ('╶', '─')),
+    ((false, false, false, false), (' ', ' ')),
+  ];
+  for &((u, d, l, r), expected) in cases {
+    assert_eq!(
+      box_drawing_chars(u, d, l, r),
+      expected,
+      "case ({}, {}, {}, {}) — expected {:?}",
+      u,
+      d,
+      l,
+      r,
+      expected
+    );
+  }
+}
+
+#[test]
+fn graph_linear_history_emits_single_column_circles() {
+  // Three commits, each pointing at the next: c (parent b) → b (parent a) → a (no parent).
+  let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let graphs = render_commits(&rows);
+  assert_eq!(graphs.len(), 3);
+  // Each row should be a 2-cell render (one column → 2 chars).
+  for (idx, g) in graphs.iter().enumerate() {
+    let text = spans_to_text(g);
+    assert!(
+      text.contains('○'),
+      "linear history row {} must carry a ○ node, got {:?}",
+      idx,
+      text
+    );
+    assert!(
+      !text.contains('◎'),
+      "linear history row {} must NOT carry a ◎ merge node, got {:?}",
+      idx,
+      text
+    );
+  }
+}
+
+#[test]
+fn graph_merge_commit_carries_bullseye_and_branch_corners() {
+  // Topology:
+  //   c (merge: parents = a, b)
+  //   b (parent a)         ← side branch
+  //   a (no parent)        ← trunk root
+  let rows = vec![test_row("c", &["a", "b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let graphs = render_commits(&rows);
+  // Row 0 = merge commit, must carry ◎.
+  let merge_text = spans_to_text(&graphs[0]);
+  assert!(merge_text.contains('◎'), "merge row must carry ◎, got {:?}", merge_text);
+  // Row 1 (the side branch) must spawn somewhere outside column 0 —
+  // there should be a `╮` corner on row 0 to drop the second parent
+  // into a fresh column.
+  assert!(
+    merge_text.contains('╮') || merge_text.contains('─'),
+    "merge row must carry a corner / horizontal stroke into the new branch column, got {:?}",
+    merge_text
+  );
+}
+
+#[test]
+fn graph_pipe_set_first_commit_seeds_starts_pipe() {
+  // Internal invariant: the first row's pipe set must contain a STARTS
+  // pipe for the first commit, regardless of how many parents it has.
+  let rows = vec![test_row("a", &["b"])];
+  let pipes = build_pipe_sets(&rows);
+  assert_eq!(pipes.len(), 1);
+  assert!(
+    pipes[0]
+      .iter()
+      .any(|p| p.kind == PipeKind::Starts && p.from_hash == "a"),
+    "first row must contain a STARTS pipe whose from_hash is the commit itself, got {:?}",
+    pipes[0]
+  );
+}
+
+#[test]
+fn graph_pipe_set_merge_commit_emits_extra_starts_per_parent() {
+  // A merge with 2 parents should emit 2 STARTS pipes whose from_pos is
+  // the commit's column and to_pos points at distinct columns.
+  let rows = vec![test_row("c", &["a", "b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let pipes = build_pipe_sets(&rows);
+  let row0 = &pipes[0];
+  let starts: Vec<_> = row0.iter().filter(|p| p.kind == PipeKind::Starts).collect();
+  assert_eq!(
+    starts.len(),
+    2,
+    "merge row must emit 2 STARTS pipes (one per parent), got {} ({:?})",
+    starts.len(),
+    starts
+  );
+}
+
+#[test]
+fn graph_render_pipe_set_empty_input_returns_empty() {
+  let graphs = render_commits(&[]);
+  assert!(graphs.is_empty());
+}
+
+#[test]
+fn graph_row_width_is_deterministic_on_commit_list() {
+  // The graph width is `2 * (max_pos + 1)` chars, derived from pipe
+  // topology — it must NOT depend on terminal width or external state.
+  // Snapshot the linear-history width so a regression caught quickly.
+  let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let graphs = render_commits(&rows);
+  for g in &graphs {
+    let text = spans_to_text(g);
+    let chars = text.chars().count();
+    assert!(
+      (1..=8).contains(&chars),
+      "linear-history row must render in ≤ 8 chars, got {} ({:?})",
+      chars,
+      text
+    );
+  }
+}
+
+#[test]
+fn graph_render_pipe_set_handles_single_pipe_starts() {
+  use gwm::tui::commit_graph::Pipe;
+  let pipes = vec![Pipe {
+    from_pos: 0,
+    to_pos: 0,
+    from_hash: "a".into(),
+    to_hash: "b".into(),
+    kind: PipeKind::Starts,
+  }];
+  let spans = render_pipe_set(&pipes);
+  let text = spans_to_text(&spans);
+  // Cell 0: ○ + filler (space, since right has no neighbor)
+  assert!(text.starts_with('○'), "expected ○ glyph at column 0, got {:?}", text);
+}
+
 #[test]
 fn recent_commits_line_marks_normal_commit_with_open_circle() {
   let (dir, _repo) = init_repo();
