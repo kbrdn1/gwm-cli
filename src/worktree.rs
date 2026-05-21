@@ -195,6 +195,11 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
 }
 
 /// Create a new worktree with a brand-new branch off of HEAD.
+///
+/// Records the HEAD ref's short name into `branch.<branch_name>.gwm-base`
+/// so the review launcher (issue #75) can recover the original parent
+/// ref later — even on branches without an upstream. The write is
+/// best-effort: a config-write error does not roll the worktree back.
 pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str) -> Result<PathBuf> {
   // Refuse to clobber an existing directory.
   if target_path.exists() {
@@ -206,8 +211,12 @@ pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str)
     std::fs::create_dir_all(parent)?;
   }
 
-  // Create branch ref if it doesn't already exist.
-  let head_commit = repo.head()?.peel_to_commit()?;
+  // Capture HEAD's short name BEFORE creating the new branch so the
+  // record points at the actual parent (`main` / `dev` / a release
+  // train), not the freshly-created `branch_name` itself.
+  let head_ref = repo.head()?;
+  let head_short = head_ref.shorthand().map(|s| s.to_string());
+  let head_commit = head_ref.peel_to_commit()?;
   let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
     Ok(b) => b,
     Err(_) => repo.branch(branch_name, &head_commit, false)?,
@@ -218,6 +227,12 @@ pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str)
   opts.reference(Some(&reference));
 
   repo.worktree(name, target_path, Some(&opts))?;
+
+  // Record the parent ref for the launcher's base resolution chain.
+  if let Some(parent_ref) = head_short {
+    let _ = crate::launcher::write_gwm_base(repo, branch_name, &parent_ref);
+  }
+
   Ok(target_path.to_path_buf())
 }
 

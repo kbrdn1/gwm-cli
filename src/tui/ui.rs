@@ -77,6 +77,22 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   }
 }
 
+/// Format the TUI header title `" gwm v<version> — <repo> (<path>) "`.
+/// The version comes from `CARGO_PKG_VERSION` so it stays in lockstep
+/// with `gwm --version` without a second source of truth — important
+/// for users juggling multiple installs (a `cargo install`-ed gwm next
+/// to a worktree-built dev binary). Extracted from `draw_header` so
+/// the format can be pinned by a unit test without spinning up the
+/// ratatui backend.
+pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
+  format!(
+    " gwm v{} — {} ({}) ",
+    env!("CARGO_PKG_VERSION"),
+    repo_name,
+    workdir_display
+  )
+}
+
 /// Single-line filter bar rendered between the table and the footer.
 /// Mirrors Vim's `/` prompt: leading slash, the live query, and a block cursor
 /// while the user is actively typing.
@@ -120,7 +136,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-  let title = format!(" gwm — {} ({}) ", app.repo_name, app.workdir.display());
+  let title = header_title(&app.repo_name, &app.workdir.to_string_lossy());
   let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
   let mut spans = vec![Span::styled(title, title_style)];
   // Picker mode flags the header so the user can never confuse a `gwm switch`
@@ -818,9 +834,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Picker mode hides the mutating actions (n/d/b/p) — they're inert in the
   // event loop, so advertising them would be a lie.
   let help = if app.picker_mode {
-    "enter:select esc:cancel o:open y:yank l:lazygit v:sidebar Tab:focus /:filter j/k:nav r:refresh ?:help q:quit"
+    "enter:select esc:cancel o:open y:yank l:git_tui v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav f:refresh ?:help q:quit"
   } else {
-    "n:new d:del b:boot o:open y:yank l:lazygit v:sidebar Tab:focus /:filter j/k:nav r:refresh ?:help q:quit"
+    "n:new d:del b:boot o:open y:yank l:git_tui R:review v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav f:refresh F:gh ?:help q:quit"
   };
   let text = Line::from(vec![
     Span::styled(help, Style::default().fg(Color::DarkGray)),
@@ -865,11 +881,13 @@ fn draw_help(f: &mut Frame, app: &App) {
   lines.extend([
     Line::from("  o             open per [tui.open] — shell (default) / editor / finder"),
     Line::from("  y             yank selected path to system clipboard"),
-    Line::from("  l             launch lazygit fullscreen on selected worktree"),
+    Line::from("  l             launch [git_tui] launcher (default lazygit -p, configurable)"),
     Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
     Line::from("  Tab           swap focus between worktree list and sidebar"),
     Line::from("  /             open fuzzy filter bar (enter: sticky, esc: clear)"),
-    Line::from("  r             refresh"),
+    Line::from("  f             refresh worktree list"),
+    Line::from("  F             refresh GitHub issue/PR status via `gh`"),
+    Line::from("  R             run [review] launcher against the resolved base"),
   ]);
   if !app.picker_mode {
     lines.push(Line::from("  p             toggle 'delete branch on remove'"));
@@ -878,7 +896,6 @@ fn draw_help(f: &mut Frame, app: &App) {
     lines.push(Line::from("issue / PR (#67)"));
     lines.push(Line::from("  O             open menu — i=issue · p=pull request"));
     lines.push(Line::from("  L             link prompt — i / p then digits"));
-    lines.push(Line::from("  R             refresh GitHub status via `gh`"));
   }
   lines.push(Line::from("  ?             this help"));
   if !app.picker_mode {

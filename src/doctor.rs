@@ -241,22 +241,70 @@ fn check_when_predicates(ctx: &DoctorCtx<'_>) -> Check {
     .with_hint(format!("supported keywords: {}", SUPPORTED_WHEN_PREFIXES.join(", ")))
 }
 
+/// Common shell wrappers that introduce the real binary after their
+/// own switches / env assignments. Caught by Copilot's review on
+/// PR #76: pre-fix, `env FOO=bar lumen diff` made the doctor check
+/// `env` against `$PATH` (which is always present) and miss the real
+/// launcher `lumen`. Keep this list narrow on purpose — exotic
+/// wrappers (`nice`, `time`, `nohup`) take positional args, which we
+/// would risk consuming and ending up with the wrong binary.
+const COMMAND_WRAPPERS: &[&str] = &["env", "command"];
+
 /// Extract the executable name from a shell command string. Tokenises
 /// via `shell_words` so quoted args (`"my tool" --flag`) and escaped
 /// whitespace are handled the way the shell would, then skips leading
-/// `FOO=bar` env assignments and returns the first token that isn't
-/// `KEY=VAL`. Returns `None` for empty strings or strings that fail
-/// to parse (unbalanced quotes — better to surface nothing than a
-/// garbage binary name that would produce a confusing PATH warning).
+/// `FOO=bar` env assignments and recognised `env`/`command` wrappers
+/// (and the wrapper's own `KEY=VAL` / `-flag` tokens) before returning
+/// the first token that looks like a real binary name. Returns `None`
+/// for empty strings or strings that fail to parse (unbalanced quotes
+/// — better to surface nothing than a garbage binary name that would
+/// produce a confusing PATH warning).
 fn extract_binary(run: &str) -> Option<String> {
   let tokens = shell_words::split(run).ok()?;
-  tokens.into_iter().find(|t| !t.contains('='))
+  let mut iter = tokens.into_iter().peekable();
+
+  // Skip leading `KEY=VAL` env assignments (POSIX `FOO=bar tool` form).
+  while iter.peek().is_some_and(|t| !t.starts_with('=') && t.contains('=')) {
+    iter.next();
+  }
+
+  // Recognise a wrapper (`env`, `command`) and skip its own `-flag` /
+  // `KEY=VAL` arguments before reaching the real binary. Stops on the
+  // first positional non-flag, non-assignment token.
+  if iter.peek().is_some_and(|t| COMMAND_WRAPPERS.contains(&t.as_str())) {
+    iter.next(); // consume the wrapper itself
+    while let Some(t) = iter.peek() {
+      if t.starts_with('-') || (!t.starts_with('=') && t.contains('=')) {
+        iter.next();
+      } else {
+        break;
+      }
+    }
+  }
+
+  iter.next()
+}
+
+/// Same as [`extract_binary`] but pre-strips the launcher placeholders
+/// so a template like `lumen diff {base}..{head}` reduces to `lumen`
+/// before tokenisation. Used for the issue #75 [`crate::config::GitTuiConfig`] /
+/// [`crate::config::ReviewConfig`] entries so the doctor warning
+/// names the actual binary, not a placeholder fragment.
+fn extract_launcher_binary(command: &str) -> Option<String> {
+  let cleaned = command
+    .replace("{base}", "BASE")
+    .replace("{head}", "HEAD")
+    .replace("{path}", "PATH")
+    .replace("{diff}", "/tmp/diff");
+  extract_binary(&cleaned)
 }
 
 /// Check #4: every binary referenced by the bootstrap commands resolves on
-/// `$PATH`. `lazygit` (the TUI's `l` keybinding) and `direnv` (only if the
-/// repo has an `.envrc`) are also checked because they're the two "ambient"
-/// dependencies whose absence routinely confuses new users.
+/// `$PATH`. `lazygit` (the TUI's `l` keybinding's default) and `direnv`
+/// (only if the repo has an `.envrc`) are also checked because they're
+/// the two "ambient" dependencies whose absence routinely confuses new
+/// users. Configured launchers ([git_tui], [review] — issue #75) are
+/// added to the same set so the user gets one consolidated warning.
 ///
 /// Missing binaries are surfaced as Warning, not Failed — the user may not
 /// rely on that step at all, but the visibility matters.
@@ -264,10 +312,22 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   let name = "external binaries on PATH";
   let mut needed: BTreeSet<String> = BTreeSet::new();
 
-  // Ambient deps the rest of the CLI uses.
-  needed.insert("lazygit".into());
+  // Ambient deps the rest of the CLI uses. `[git_tui]` may override the
+  // lazygit default; we extract whatever binary the resolved launcher
+  // names so a `gitui` / `tig` user gets the right warning.
+  let git_tui = ctx.config.git_tui.resolved();
+  if let Some(bin) = extract_launcher_binary(&git_tui.command) {
+    needed.insert(bin);
+  }
   if ctx.repo_workdir.join(".envrc").exists() {
     needed.insert("direnv".into());
+  }
+  // Review launcher is opt-in; only probe when the user actually
+  // configured one (`command` or `tool`).
+  if let Some(review) = ctx.config.review.resolved() {
+    if let Some(bin) = extract_launcher_binary(&review.command) {
+      needed.insert(bin);
+    }
   }
 
   // Whatever the user's own bootstrap commands invoke.

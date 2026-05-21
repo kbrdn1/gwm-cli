@@ -2,6 +2,7 @@ use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueStatus, PrStatus};
+use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::{BranchSpec, BRANCH_TYPES};
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
@@ -12,6 +13,25 @@ use nucleo_matcher::{
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+/// Spawnable launcher plan handed to the event loop by
+/// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
+/// expanded argv, the cwd to set on the child, and the `fullscreen`
+/// toggle that decides whether gwm suspends its own TUI for the call.
+///
+/// The `diff_file` inside `expanded` (when set) is kept alive for the
+/// lifetime of the plan, so a `{diff}` tempfile survives until the
+/// spawned reviewer has had a chance to consume it.
+#[derive(Debug)]
+pub struct LauncherPlan {
+  pub expanded: ExpandedCommand,
+  pub cwd: std::path::PathBuf,
+  pub fullscreen: bool,
+  /// Resolved base ref, when the launcher cares about it (review).
+  /// `None` for the git_tui launcher. Surfaced so the status bar /
+  /// caller can mention which ref was used.
+  pub base: Option<String>,
+}
 
 /// Outcome of pressing `y` / Enter on the confirm overlay. The event loop
 /// in `super::run_app` matches on this to decide whether to fire the
@@ -376,6 +396,10 @@ impl App {
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
   /// The caller drives the actual TUI suspension/restoration around the spawn.
+  ///
+  /// Retained for callers that still want the legacy "lazygit only"
+  /// path; new code should go through [`Self::prepare_git_tui`], which
+  /// honours the configurable `[git_tui]` block (issue #75).
   pub fn launch_lazygit(&mut self) -> Option<PathBuf> {
     let path = self.selected()?.path.clone();
     if which::which("lazygit").is_err() {
@@ -383,6 +407,106 @@ impl App {
       return None;
     }
     Some(path)
+  }
+
+  // ---- Configurable launchers (issue #75) ---------------------------------
+
+  /// Build the [`LauncherPlan`] for the `l` keybinding. Reads
+  /// `[git_tui]` from `.gwm.toml` (default `lazygit -p {path}`
+  /// fullscreen=true) and expands the `{path}` placeholder against
+  /// the selected worktree. Returns `None` (and sets a status hint)
+  /// when nothing is selected or the template is malformed.
+  pub fn prepare_git_tui(&mut self) -> Option<LauncherPlan> {
+    let Some(wt) = self.selected().cloned() else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    let resolved = self.config.git_tui.resolved();
+    let ctx = LauncherContext {
+      worktree_path: &wt.path,
+      base: None,
+      head: None,
+      repo_workdir: Some(&self.workdir),
+    };
+    match launcher::expand_command(&resolved.command, &ctx) {
+      Ok(expanded) => Some(LauncherPlan {
+        expanded,
+        cwd: wt.path,
+        fullscreen: resolved.fullscreen,
+        base: None,
+      }),
+      Err(e) => {
+        self.status = format!("git_tui template error: {}", e);
+        None
+      }
+    }
+  }
+
+  /// Build the [`LauncherPlan`] for the `R` keybinding. Implements the
+  /// full review contract from issue #75:
+  ///
+  /// 1. `[review]` must resolve to a concrete launcher (`command`
+  ///    set, or `tool = "<preset>"` matched).
+  /// 2. The selected worktree must carry a branch name.
+  /// 3. The review base is resolved via the documented chain (upstream
+  ///    → `gwm-base` → `[review].default_base` → `"dev"` → `"main"`).
+  /// 4. When `skip_when_no_changes` is on (default), a zero
+  ///    `git rev-list --count {base}..HEAD` short-circuits with a
+  ///    status-bar hint naming the base.
+  /// 5. The template is expanded; `{diff}` lazily materialises a
+  ///    tempfile so unused placeholders never spawn `git diff`.
+  pub fn prepare_review(&mut self) -> Option<LauncherPlan> {
+    let resolved = match self.config.review.resolved() {
+      Some(r) => r,
+      None => {
+        self.status = "review tool not configured — set [review] in .gwm.toml".into();
+        return None;
+      }
+    };
+    let Some(wt) = self.selected().cloned() else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    let Some(head) = wt.branch.clone() else {
+      self.status = "selected worktree has no branch — cannot review".into();
+      return None;
+    };
+
+    let base = launcher::resolve_review_base(&self.repo, &head, self.config.review.default_base.as_deref());
+
+    if self.config.review.skip_when_no_changes {
+      let n = launcher::count_commits_ahead(&wt.path, &base, "HEAD");
+      if n == 0 {
+        self.status = format!("no changes to review (already at {})", base);
+        return None;
+      }
+    }
+
+    let ctx = LauncherContext {
+      worktree_path: &wt.path,
+      base: Some(&base),
+      head: Some(&head),
+      repo_workdir: Some(&self.workdir),
+    };
+    match launcher::expand_command(&resolved.command, &ctx) {
+      Ok(expanded) => {
+        if self.config.review.has_shadowed_tool() {
+          self.status = format!("review: command overrides tool — running {}", base);
+        } else {
+          self.status = format!("review: {} vs {}", head, base);
+        }
+        Some(LauncherPlan {
+          expanded,
+          cwd: wt.path,
+          fullscreen: resolved.fullscreen,
+          base: Some(base),
+        })
+      }
+      Err(e) => {
+        self.status = format!("review template error: {}", e);
+        None
+      }
+    }
   }
 
   pub fn selected(&self) -> Option<&WorktreeInfo> {

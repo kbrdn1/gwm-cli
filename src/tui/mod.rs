@@ -20,7 +20,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use app::{
-  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, OpenTarget, View,
+  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget,
+  OpenTarget, View,
 };
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
@@ -43,7 +44,7 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color,
+  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color, header_title,
   issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines, table_marker,
   tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
@@ -186,11 +187,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           KeyCode::Tab => app.toggle_focus(),
           KeyCode::Char('/') => app.enter_filter(),
           KeyCode::Char('l') => {
-            if let Some(path) = app.launch_lazygit() {
-              run_lazygit(terminal, &path, &mut app)?;
+            // Issue #75: `l` is driven by the configurable `[git_tui]`
+            // launcher pipeline (default `lazygit -p {path}`,
+            // fullscreen=true). Replaces the old hardcoded lazygit call.
+            if let Some(plan) = app.prepare_git_tui() {
+              run_launcher(terminal, plan, &mut app)?;
             }
           }
-          KeyCode::Char('r') => app.refresh()?,
+          // Issue #75 keybinding reshuffle (was `r` → refresh worktree list).
+          // `f` is the new mnemonic; the `r` alias is kept for muscle memory.
+          KeyCode::Char('f') | KeyCode::Char('r') => app.refresh()?,
           // Mutating actions are inert in picker mode — the issue explicitly
           // calls for a stripped-down picker that only navigates and selects.
           KeyCode::Char('n') if !app.picker_mode => app.enter_create(),
@@ -212,7 +218,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           // Issue/PR linking (issue #67).
           KeyCode::Char('O') if !app.picker_mode => app.enter_open_menu(),
           KeyCode::Char('L') if !app.picker_mode => app.enter_link_prompt(),
-          KeyCode::Char('R') if !app.picker_mode => app.refresh_github_status(),
+          // Issue #75 reshuffle: `F` is the new mnemonic for "fetch GitHub
+          // status" (was `R`). `R` now triggers the configured review tool.
+          KeyCode::Char('F') if !app.picker_mode => app.refresh_github_status(),
+          KeyCode::Char('R') if !app.picker_mode => {
+            if let Some(plan) = app.prepare_review() {
+              run_launcher(terminal, plan, &mut app)?;
+            }
+          }
           KeyCode::Enter => {
             if app.picker_mode {
               app.picker_confirm();
@@ -308,30 +321,96 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
   Ok(app.picker_result)
 }
 
-/// Suspend the TUI, run `lazygit -p <path>` inheriting the terminal, then restore.
-/// Errors from lazygit itself are surfaced via the status bar, never propagated up.
-fn run_lazygit(
+/// Dispatch a [`LauncherPlan`] from [`App::prepare_git_tui`] /
+/// [`App::prepare_review`]. When `fullscreen=true` the TUI is
+/// suspended (raw mode off, alt-screen left) for the call and restored
+/// on exit — same recipe as the previous hardcoded `lazygit` flow.
+///
+/// **Non-fullscreen launchers also run synchronously**: gwm stays in
+/// the alt-screen, `Command::output()` waits for the child to exit,
+/// then the first line of its stderr lands on the status bar. The
+/// TUI is therefore unresponsive until the tool returns — fine for
+/// print-only AI reviewers (`claude --print`, `gh pr view --web`)
+/// that terminate quickly, but a long-running tool will visibly
+/// block. Pick `fullscreen = true` (proper suspend/resume) for
+/// anything that's not a quick one-shot. Caught by Copilot's review
+/// on PR #76; the previous docstring claimed "run in the background"
+/// which `output()` does not.
+///
+/// `LauncherPlan` is consumed by-value so the `{diff}` tempfile it
+/// carries lives at least until the child process has been waited on.
+/// Errors are never propagated — the user pressed a key in the TUI,
+/// and surfacing failures via the status bar is the documented
+/// contract (see [`Self::run_lazygit`] in the pre-issue-#75 codebase).
+fn run_launcher(
   terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-  path: &std::path::Path,
+  plan: app::LauncherPlan,
   app: &mut App,
 ) -> Result<()> {
-  // Release the terminal so lazygit can take over.
-  disable_raw_mode()?;
-  execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
-  terminal.show_cursor()?;
+  use std::process::{Command, Stdio};
 
-  let spawn = std::process::Command::new("lazygit").arg("-p").arg(path).status();
+  let argv = plan.expanded.argv.clone();
+  let Some((bin, rest)) = argv.split_first() else {
+    app.status = "launcher template produced an empty argv".into();
+    return Ok(());
+  };
 
-  // Always restore the TUI, even if lazygit failed.
-  enable_raw_mode()?;
-  execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
-  terminal.clear()?;
-
-  match spawn {
-    Ok(s) if s.success() => app.status = format!("lazygit exited ok ({})", path.display()),
-    Ok(s) => app.status = format!("lazygit exited with code {:?}", s.code()),
-    Err(e) => app.status = format!("failed to launch lazygit: {}", e),
+  // Probe `$PATH` before paying the suspend/restore tax. Missing
+  // binaries get a clean status-bar error instead of a flicker.
+  if which::which(bin).is_err() {
+    app.status = format!(
+      "`{}` not on $PATH — install it or change [review]/[git_tui] in .gwm.toml",
+      bin
+    );
+    return Ok(());
   }
+
+  if plan.fullscreen {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    terminal.show_cursor()?;
+
+    let spawn = Command::new(bin).args(rest).current_dir(&plan.cwd).status();
+
+    enable_raw_mode()?;
+    execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
+    terminal.clear()?;
+
+    match spawn {
+      Ok(s) if s.success() => app.status = format!("{} exited ok", bin),
+      Ok(s) => app.status = format!("{} exited with code {:?}", bin, s.code()),
+      Err(e) => app.status = format!("failed to launch {}: {}", bin, e),
+    }
+  } else {
+    // Non-TUI tool: capture stderr so its first line can land in the
+    // status bar without taking over the screen. stdout is dropped on
+    // the floor — printing it would crash through ratatui's frame.
+    let out = Command::new(bin)
+      .args(rest)
+      .current_dir(&plan.cwd)
+      .stdout(Stdio::null())
+      .stderr(Stdio::piped())
+      .output();
+    match out {
+      Ok(o) if o.status.success() => app.status = format!("{} done", bin),
+      Ok(o) => {
+        let first = String::from_utf8_lossy(&o.stderr)
+          .lines()
+          .next()
+          .unwrap_or_default()
+          .trim()
+          .to_string();
+        app.status = if first.is_empty() {
+          format!("{} exited with code {:?}", bin, o.status.code())
+        } else {
+          format!("{}: {}", bin, first)
+        };
+      }
+      Err(e) => app.status = format!("failed to launch {}: {}", bin, e),
+    }
+  }
+  // `plan.expanded.diff_file` drops here, unlinking the tempfile if any.
+  drop(plan);
   Ok(())
 }
 

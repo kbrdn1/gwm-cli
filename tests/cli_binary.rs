@@ -113,6 +113,31 @@ fn doctor_outside_git_repo_fails() {
 }
 
 #[test]
+fn doctor_exits_one_when_review_binary_missing() {
+  // Issue #75: configuring [review] with a binary that's not on $PATH
+  // must produce a Warning (exit code 1), not a Failed (exit code 2).
+  // Review is opt-in — a CI pre-commit hook gated on `gwm doctor`
+  // should still let the user push when only the review tool is
+  // missing locally.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[review]
+command = "definitely-not-on-path-review-cli {base}..{head}"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("doctor")
+    .assert()
+    .code(1)
+    .stdout(predicate::str::contains("definitely-not-on-path-review-cli"));
+}
+
+#[test]
 fn doctor_exits_two_on_invalid_config() {
   let (dir, _repo) = init_repo();
   std::fs::write(dir.path().join(".gwm.toml"), "broken = [unterminated").unwrap();

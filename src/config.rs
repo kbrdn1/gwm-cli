@@ -15,6 +15,10 @@ pub struct Config {
   pub doctor: DoctorConfig,
   #[serde(default)]
   pub tui: TuiConfig,
+  #[serde(default)]
+  pub git_tui: GitTuiConfig,
+  #[serde(default)]
+  pub review: ReviewConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,6 +267,153 @@ impl Config {
   pub fn guard_by_name(&self, name: &str) -> Option<&Guard> {
     self.bootstrap.guard.iter().find(|g| g.name == name)
   }
+}
+
+/// `[git_tui]` table — drives the `l` keybinding in the TUI worktree list
+/// (issue #75). Absent ⇒ legacy default `lazygit -p {path}` with
+/// fullscreen=true, so no `.gwm.toml` change is required for repos that
+/// were happy with the previous behaviour. Sharing `[`ReviewConfig`]`'s
+/// shape (placeholder expansion + `fullscreen` flag) keeps the user's
+/// mental model consistent across the two launcher keybindings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct GitTuiConfig {
+  /// Shell line. Accepts the `{path}` placeholder. When `None`, the
+  /// resolved launcher uses `lazygit -p {path}`.
+  #[serde(default)]
+  pub command: Option<String>,
+  /// Whether gwm should suspend its own TUI before exec'ing the command.
+  /// Defaults to `true` for TUI tools like lazygit / gitui / tig; set to
+  /// `false` to launch e.g. a GUI editor that should run alongside gwm.
+  #[serde(default)]
+  pub fullscreen: Option<bool>,
+}
+
+impl GitTuiConfig {
+  /// Resolve to a concrete `(command, fullscreen)` pair. The default
+  /// (no `[git_tui]` block in `.gwm.toml`) is `lazygit -p {path}` so the
+  /// `l` keybinding behaves exactly as it did before issue #75 landed.
+  pub fn resolved(&self) -> ResolvedLauncher {
+    ResolvedLauncher {
+      command: self.command.clone().unwrap_or_else(|| "lazygit -p {path}".into()),
+      fullscreen: self.fullscreen.unwrap_or(true),
+    }
+  }
+}
+
+/// `[review]` table — drives the `R` keybinding in the TUI worktree list
+/// (issue #75). The user picks one of three forms:
+///
+/// - `command = "<shell line>"` — the primary contract; any CLI on $PATH
+///   with any arguments. Placeholders `{base} {head} {path} {diff}` are
+///   substituted before the shell line is split with `shell-words`.
+/// - `tool = "<preset>"` — sugar for a built-in `(command, fullscreen)`
+///   pair (see [`ReviewConfig::resolved`]).
+/// - neither — the `R` key is inert and the status bar carries a hint.
+///
+/// When both are set, `command` wins (and the TUI surfaces a status-bar
+/// hint at startup so the user notices their `tool` choice is shadowed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewConfig {
+  /// Shell line. Accepts `{base} {head} {path} {diff}` placeholders.
+  #[serde(default)]
+  pub command: Option<String>,
+  /// Whether gwm should suspend its own TUI before exec'ing the command.
+  /// Defaults to `false` so non-TUI tools (a linter, `gh pr view --web`)
+  /// don't black-out the screen.
+  #[serde(default)]
+  pub fullscreen: Option<bool>,
+  /// Preset name; one of `lumen`, `claude`, `codex`, `aider`, `gh`.
+  /// Resolved to a `(command, fullscreen)` pair by [`ReviewConfig::resolved`].
+  #[serde(default)]
+  pub tool: Option<String>,
+  /// Skip the shell-out when `git rev-list --count {base}..{head} == 0`.
+  /// Default `true`.
+  #[serde(default = "default_skip_when_no_changes")]
+  pub skip_when_no_changes: bool,
+  /// Optional pin for the review base ref. Slots into the base-
+  /// resolution chain *after* `branch.<n>.merge` (upstream) and
+  /// `branch.<n>.gwm-base`, and *before* the static `dev` / `main`
+  /// fallback. Setting it overrides only the `dev` / `main` step —
+  /// upstream and gwm-base still win when present. See
+  /// [`crate::launcher::resolve_review_base`] for the canonical
+  /// order.
+  #[serde(default)]
+  pub default_base: Option<String>,
+}
+
+impl Default for ReviewConfig {
+  fn default() -> Self {
+    Self {
+      command: None,
+      fullscreen: None,
+      tool: None,
+      skip_when_no_changes: default_skip_when_no_changes(),
+      default_base: None,
+    }
+  }
+}
+
+fn default_skip_when_no_changes() -> bool {
+  true
+}
+
+impl ReviewConfig {
+  /// Resolve the user's choice to a concrete `(command, fullscreen)`
+  /// pair, or `None` when neither `command` nor a recognised `tool` was
+  /// set. The `command` field wins when both are present.
+  pub fn resolved(&self) -> Option<ResolvedLauncher> {
+    if let Some(cmd) = self.command.as_ref().filter(|s| !s.trim().is_empty()) {
+      return Some(ResolvedLauncher {
+        command: cmd.clone(),
+        fullscreen: self.fullscreen.unwrap_or(false),
+      });
+    }
+    let tool = self.tool.as_deref()?.trim();
+    if tool.is_empty() {
+      return None;
+    }
+    let (cmd, fullscreen_default) = review_tool_preset(tool)?;
+    Some(ResolvedLauncher {
+      command: cmd.into(),
+      fullscreen: self.fullscreen.unwrap_or(fullscreen_default),
+    })
+  }
+
+  /// True when `command` and `tool` are both set — the TUI uses this to
+  /// surface a one-shot warning ("your `tool = X` is shadowed by
+  /// `command = Y`") on first render.
+  pub fn has_shadowed_tool(&self) -> bool {
+    self.command.as_ref().is_some_and(|s| !s.trim().is_empty())
+      && self.tool.as_ref().is_some_and(|s| !s.trim().is_empty())
+  }
+}
+
+/// Built-in preset table for `[review].tool`. Returns `Some((command,
+/// fullscreen))` for known tools, `None` otherwise.
+///
+/// The table is the canonical place to add new presets; it's exposed
+/// (via [`ReviewConfig::resolved`]) so docs and `gwm doctor` can refer
+/// to a single source of truth instead of duplicating the strings.
+pub fn review_tool_preset(tool: &str) -> Option<(&'static str, bool)> {
+  Some(match tool {
+    "lumen" => ("lumen diff {base}..{head}", true),
+    "claude" => ("claude --print 'review the diff {base}..{head}'", false),
+    "codex" => ("codex review {base}..{head}", false),
+    "aider" => ("aider --message 'review {base}..{head}'", true),
+    "gh" => ("gh pr view --web", false),
+    _ => return None,
+  })
+}
+
+/// Concrete `(command, fullscreen)` pair derived from a [`GitTuiConfig`]
+/// or [`ReviewConfig`] by [`GitTuiConfig::resolved`] /
+/// [`ReviewConfig::resolved`]. The launcher then expands placeholders
+/// in `command` and decides whether to suspend the TUI based on
+/// `fullscreen`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedLauncher {
+  pub command: String,
+  pub fullscreen: bool,
 }
 
 /// Expand `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}` in a template string.
