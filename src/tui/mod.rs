@@ -16,8 +16,8 @@ pub use app::{
   App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, View,
 };
 pub use ui::{
-  build_sidebar_sections, filled_cells_for_progress, issue_summary_line, pr_summary_line, tilde_compress_with_home,
-  SidebarSections,
+  author_initials, build_sidebar_sections, filled_cells_for_progress, issue_summary_line, pr_summary_line,
+  recent_commits_lines, tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run() -> Result<()> {

@@ -255,18 +255,36 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     .constraints(constraints)
     .split(area);
 
-  render_section(f, chunks[0], " Worktree ", sections.worktree, border_color, 0);
-  render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0);
-  render_section(f, chunks[2], " Working Tree ", sections.working_tree, border_color, 0);
+  render_section(f, chunks[0], " Worktree ", sections.worktree, border_color, 0, None);
+  render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0, None);
+  render_section(
+    f,
+    chunks[2],
+    " Working Tree ",
+    sections.working_tree,
+    border_color,
+    0,
+    None,
+  );
 
   // Recent Commits is the only scrollable section. Clamp the scroll
   // offset to its visible area so `j` / `k` can't scroll past the end.
+  // The block's bottom-right title mirrors lazygit's footer
+  // ("<i+1> of <N>") so the user can tell at a glance how much history
+  // is queued and where the viewport sits.
   let commits_area = chunks[3];
   let commits_visible = commits_area.height.saturating_sub(2);
-  app.sidebar_max_scroll = (sections.recent_commits.len() as u16).saturating_sub(commits_visible);
+  let commits_len = sections.recent_commits.len() as u16;
+  app.sidebar_max_scroll = commits_len.saturating_sub(commits_visible);
   if app.sidebar_scroll > app.sidebar_max_scroll {
     app.sidebar_scroll = app.sidebar_max_scroll;
   }
+  let footer = if commits_len == 0 {
+    None
+  } else {
+    let bottom = app.sidebar_scroll.saturating_add(commits_visible).min(commits_len);
+    Some(format!(" {} of {} ", bottom, commits_len))
+  };
   render_section(
     f,
     commits_area,
@@ -274,6 +292,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     sections.recent_commits,
     border_color,
     app.sidebar_scroll,
+    footer,
   );
 }
 
@@ -284,12 +303,16 @@ fn render_section(
   lines: Vec<Line<'static>>,
   border_color: Color,
   scroll: u16,
+  footer: Option<String>,
 ) {
-  let block = Block::default()
+  let mut block = Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
     .title(title)
     .border_style(Style::default().fg(border_color));
+  if let Some(f) = footer {
+    block = block.title_bottom(ratatui::text::Line::from(f).right_aligned());
+  }
   // Pad content with one leading space per line for breathing room against
   // the left border. Cheap and avoids per-call `format!` churn.
   let padded: Vec<Line<'static>> = lines
@@ -301,10 +324,10 @@ fn render_section(
       Line::from(spans)
     })
     .collect();
-  let paragraph = Paragraph::new(padded)
-    .block(block)
-    .wrap(Wrap { trim: false })
-    .scroll((scroll, 0));
+  // No `Wrap`: every section now relies on ratatui's view-level hard-clip,
+  // matching lazygit's commits panel and ensuring 1 logical row = 1 visual
+  // row (so the layout's `Constraint::Length` always matches what we draw).
+  let paragraph = Paragraph::new(padded).block(block).scroll((scroll, 0));
   f.render_widget(paragraph, area);
 }
 
@@ -317,7 +340,7 @@ pub fn build_sidebar_sections(w: &WorktreeInfo) -> SidebarSections {
   SidebarSections {
     worktree: worktree_identity_lines(w),
     working_tree: working_tree_lines(w),
-    recent_commits: recent_commits_lines(w),
+    recent_commits: recent_commits_lines(w, RECENT_COMMITS_LIMIT),
   }
 }
 
@@ -411,9 +434,29 @@ fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   }
 }
 
-fn recent_commits_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
-  match worktree::git_log_oneline(&w.path, 10) {
-    Ok(s) if !s.trim().is_empty() => s.lines().map(|l| Line::from(l.to_string())).collect(),
+/// Default number of commits pulled into the Recent Commits block — chosen
+/// to match lazygit's initial `git log -300` window so the panel stays
+/// dense on tall terminals without paginating.
+pub const RECENT_COMMITS_LIMIT: usize = 300;
+
+/// Number of hex chars rendered for each commit's SHA in the sidebar.
+/// Matches lazygit's `Gui.CommitHashLength` default of 8.
+pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
+
+/// Produce the styled rows of the Recent Commits sidebar block for a
+/// worktree, limited to `limit` entries. Each `Line` mirrors lazygit's
+/// per-row format:
+///
+/// ```text
+/// <8-char hash>  <author initials>  <subject>
+/// ```
+///
+/// The subject is **not** truncated here — the renderer relies on ratatui's
+/// view-level hard-clip (no `Wrap`) to match lazygit's gocui behaviour: one
+/// commit per visual line, overflow cut at the right edge without `…`.
+pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
+  match worktree::git_log_with_author(&w.path, limit) {
+    Ok(rows) if !rows.is_empty() => rows.into_iter().map(commit_row_line).collect(),
     Ok(_) => vec![Line::from(Span::styled(
       "(no commits)".to_string(),
       Style::default().fg(Color::DarkGray),
@@ -422,6 +465,49 @@ fn recent_commits_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
       format!("! {}", e),
       Style::default().fg(Color::Red),
     ))],
+  }
+}
+
+fn commit_row_line(row: worktree::CommitRow) -> Line<'static> {
+  let short_hash: String = row.hash.chars().take(COMMIT_HASH_DISPLAY_LEN).collect();
+  let initials = author_initials(&row.author);
+  Line::from(vec![
+    Span::styled(short_hash, Style::default().fg(Color::Yellow)),
+    Span::raw("  "),
+    Span::styled(
+      format!("{:<2}", initials),
+      Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    ),
+    Span::raw("  "),
+    Span::raw(row.subject),
+  ])
+}
+
+/// Derive lazygit-style author initials from a full name. Mirrors
+/// `getInitials` in lazygit's `pkg/gui/presentation/authors/authors.go`:
+///
+/// - Empty → empty.
+/// - Multi-codepoint first grapheme (emoji / CJK) → return that grapheme.
+/// - Single word → first 2 chars of that word.
+/// - ≥ 2 words → first char of split[0] + first char of split[1].
+///
+/// "Kylian Bardini" → `KB`. "Linus" → `Li`. "🦀 Crab" → `🦀C` (first
+/// grapheme then char[0] of split[1]). Capped at 2 visible chars
+/// (`CommitAuthorShortLength` in lazygit).
+pub fn author_initials(author: &str) -> String {
+  let trimmed = author.trim();
+  if trimmed.is_empty() {
+    return String::new();
+  }
+  let mut parts = trimmed.split_whitespace();
+  let first = parts.next().unwrap_or("");
+  match parts.next() {
+    Some(second) => {
+      let a: String = first.chars().take(1).collect();
+      let b: String = second.chars().take(1).collect();
+      format!("{}{}", a, b)
+    }
+    None => first.chars().take(2).collect(),
   }
 }
 

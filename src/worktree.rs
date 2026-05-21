@@ -253,6 +253,53 @@ pub fn prune(repo: &Repository) -> Result<usize> {
   Ok(pruned)
 }
 
+/// A commit row pulled from `git log` for the Recent Commits sidebar block.
+/// Mirrors lazygit's columnar layout (hash + author + subject) so the
+/// renderer can lay out one commit per visual line. Hashes are full
+/// 40-char SHAs; the renderer trims them to the configured display
+/// length (default 8 chars, à la lazygit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitRow {
+  pub hash: String,
+  pub author: String,
+  pub subject: String,
+}
+
+/// Shell out to `git log --format='%H%x00%aN%x00%s' -n <n>` inside `path` and
+/// parse the NUL-separated output into [`CommitRow`]s. The TUI sidebar uses
+/// this for the Recent Commits block — the NUL separator avoids ambiguity
+/// when a subject contains the usual ` `, `|`, or tab characters lazygit
+/// also relies on.
+pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["log", "--format=%H%x00%aN%x00%s", "-n"])
+    .arg(n.to_string())
+    .output()
+    .map_err(|e| GwmError::Other(format!("git log failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::Other(format!(
+      "git log exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+  let mut rows = Vec::new();
+  for line in raw.lines() {
+    let mut parts = line.splitn(3, '\u{0}');
+    let hash = parts.next().unwrap_or("").to_string();
+    let author = parts.next().unwrap_or("").to_string();
+    let subject = parts.next().unwrap_or("").to_string();
+    if hash.is_empty() {
+      continue;
+    }
+    rows.push(CommitRow { hash, author, subject });
+  }
+  Ok(rows)
+}
+
 /// Shell out to `git log --oneline -n <n>` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview recent commits of the selected worktree.
 pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
