@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 pub use app::{
   App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LinkPromptStage, LinkTarget, View,
 };
-pub use ui::filled_cells_for_progress;
+pub use ui::{branch_name_color, filled_cells_for_progress, freshness_color, issue_badge_color, pr_badge_color};
 
 pub fn run() -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config

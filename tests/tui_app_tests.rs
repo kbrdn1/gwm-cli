@@ -2,8 +2,12 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
-use gwm::tui::{filled_cells_for_progress, App, ConfirmKeyAction, CountdownTickOutcome, Field, View};
+use gwm::tui::{
+  branch_name_color, filled_cells_for_progress, freshness_color, pr_badge_color, App, ConfirmKeyAction,
+  CountdownTickOutcome, Field, View,
+};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
+use ratatui::style::Color;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1302,4 +1306,132 @@ fn refresh_github_status_message_celebrates_full_success() {
     "all-green refresh should signal success: {}",
     app.status
   );
+}
+
+// ---- Issue #73: lazygit-style color helpers --------------------------------
+// Three pure functions live in `tui/ui.rs` and are re-exported through
+// `tui/mod.rs` so the table-driven tests below can pin the contract.
+// Visual regressions land here first, before showing up in screenshots.
+
+#[test]
+fn branch_name_color_codes_synced_branch_as_green() {
+  let synced = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&synced), Color::Green);
+}
+
+#[test]
+fn branch_name_color_codes_dirty_branch_as_red() {
+  // Dirty = local working copy has uncommitted work. Lazygit doesn't surface
+  // dirty in its branches view (it has a dedicated files view), but for a
+  // worktree manager the most important signal is "this worktree has work
+  // not yet captured anywhere" — red flags that hard.
+  let dirty = BranchStatus {
+    is_dirty: true,
+    has_upstream: true,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&dirty), Color::Red);
+}
+
+#[test]
+fn branch_name_color_codes_ahead_or_behind_as_yellow() {
+  let ahead = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 3,
+    behind: 0,
+    unknown: false,
+  };
+  let behind = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 0,
+    behind: 2,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&ahead), Color::Yellow);
+  assert_eq!(branch_name_color(&behind), Color::Yellow);
+}
+
+#[test]
+fn branch_name_color_codes_unpublished_branch_as_magenta() {
+  // No upstream + nothing dirty = branch exists locally only. Mirrors
+  // lazygit's "?" magenta marker for RemoteBranchNotStoredLocally —
+  // distinct from "synced" (green) and from "behind" (yellow) so the user
+  // can tell at a glance whether they've pushed yet.
+  let unpublished = BranchStatus {
+    is_dirty: false,
+    has_upstream: false,
+    ahead: 0,
+    behind: 0,
+    unknown: false,
+  };
+  assert_eq!(branch_name_color(&unpublished), Color::Magenta);
+}
+
+#[test]
+fn branch_name_color_codes_unknown_status_as_darkgray() {
+  let unknown = BranchStatus {
+    unknown: true,
+    ..BranchStatus::default()
+  };
+  assert_eq!(branch_name_color(&unknown), Color::DarkGray);
+}
+
+#[test]
+fn freshness_color_picks_green_for_recent_branches() {
+  assert_eq!(freshness_color(Duration::from_secs(0)), Color::Green);
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 3)), Color::Green);
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 6 + 3600 * 23)),
+    Color::Green
+  );
+}
+
+#[test]
+fn freshness_color_picks_yellow_for_one_to_four_week_branches() {
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 7)), Color::Yellow);
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 15)), Color::Yellow);
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 29 + 3600 * 23)),
+    Color::Yellow
+  );
+}
+
+#[test]
+fn freshness_color_picks_darkgray_for_stale_branches() {
+  // Branches older than a month read as "stale" — gwm encourages cleanup
+  // via `gwm doctor`, so the colour reinforces the prompt.
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 30)), Color::DarkGray);
+  assert_eq!(freshness_color(Duration::from_secs(86_400 * 365)), Color::DarkGray);
+}
+
+#[test]
+fn pr_badge_color_maps_each_state_to_its_lazygit_palette() {
+  // Mirrors `pkg/gui/presentation/branches.go::WithPrColor` — open=green,
+  // draft=darkgray, merged=magenta, closed=red. The actual lazygit RGB
+  // shades are slightly off-palette for terminal themes; we use the
+  // 16-color names so the dots respect the user's colour scheme.
+  assert_eq!(pr_badge_color(PrState::Open), Color::Green);
+  assert_eq!(pr_badge_color(PrState::Draft), Color::DarkGray);
+  assert_eq!(pr_badge_color(PrState::Merged), Color::Magenta);
+  assert_eq!(pr_badge_color(PrState::Closed), Color::Red);
+}
+
+// Ensure the IssueState variants stay accessible — once `branch_name_color`
+// and the rest land, the sidebar's badge function will need to fall back to
+// an issue-derived colour when no PR is linked. The compile-time check below
+// catches a stale import without polluting the runtime tests.
+#[test]
+fn issue_state_variants_compile() {
+  let _ = IssueState::Open;
+  let _ = IssueState::Closed;
 }
