@@ -1,4 +1,4 @@
-use gwm::config::{expand_placeholders, Config, WorktreeConfig, CONFIG_FILE};
+use gwm::config::{expand_placeholders, review_tool_preset, Config, WorktreeConfig, CONFIG_FILE};
 use tempfile::TempDir;
 
 #[test]
@@ -254,6 +254,209 @@ confirm_countdown_secs = 30
   let cfg = Config::load_for_repo(dir.path()).unwrap();
   assert_eq!(cfg.tui.confirm_countdown_secs, 30);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
+}
+
+// Issue #75: configurable launchers for `l` (git_tui) and `R` (review).
+// Two sibling sections share the same shape — `command` (shell line with
+// placeholders) + `fullscreen` (suspend gwm TUI for TUI tools). The
+// `[review]` section also takes a `tool = ...` sugar for built-in
+// presets and a `skip_when_no_changes` knob (default true). Absent
+// sections must keep gwm's previous behaviour: `l` → `lazygit -p {path}`
+// fullscreen, `R` inert with a status-bar hint.
+
+#[test]
+fn git_tui_section_defaults_to_lazygit_preserving_legacy_behaviour() {
+  // Backwards-compat contract: no `[git_tui]` in `.gwm.toml` must keep
+  // the `l` keybinding pointed at `lazygit -p {path}` with fullscreen,
+  // i.e. identical to the hardcoded behaviour before issue #75 landed.
+  let cfg = Config::default();
+  let r = cfg.git_tui.resolved();
+  assert_eq!(r.command, "lazygit -p {path}");
+  assert!(r.fullscreen, "lazygit is a TUI tool, gwm must suspend itself");
+}
+
+#[test]
+fn git_tui_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[git_tui]
+command = "gitui -d {path}"
+fullscreen = true
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let r = cfg.git_tui.resolved();
+  assert_eq!(r.command, "gitui -d {path}");
+  assert!(r.fullscreen);
+}
+
+#[test]
+fn git_tui_can_opt_out_of_fullscreen() {
+  // A user who wires `l` to launch a non-TUI editor (`code {path}`) needs
+  // to keep gwm visible — fullscreen=false skips the suspend dance.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[git_tui]
+command = "code {path}"
+fullscreen = false
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let r = cfg.git_tui.resolved();
+  assert_eq!(r.command, "code {path}");
+  assert!(!r.fullscreen);
+}
+
+#[test]
+fn review_section_defaults_to_disabled_with_skip_true() {
+  // No `[review]` block ⇒ `R` is inert; the TUI shows a status-bar
+  // hint inviting the user to configure it. `skip_when_no_changes`
+  // defaults to true so a deliberately-set-but-empty review run
+  // doesn't shell out for nothing.
+  let cfg = Config::default();
+  assert!(
+    cfg.review.resolved().is_none(),
+    "default review must be inert until configured"
+  );
+  assert!(cfg.review.skip_when_no_changes);
+  assert!(cfg.review.default_base.is_none());
+  assert!(!cfg.review.has_shadowed_tool());
+}
+
+#[test]
+fn review_section_explicit_command_wins() {
+  // The primary contract: a free-form shell line. Placeholders are not
+  // expanded here — that's the launcher module's job.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[review]
+command = "my-review --base {base} --head {head}"
+fullscreen = true
+skip_when_no_changes = false
+default_base = "trunk"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let r = cfg.review.resolved().expect("explicit command must resolve");
+  assert_eq!(r.command, "my-review --base {base} --head {head}");
+  assert!(r.fullscreen);
+  assert!(!cfg.review.skip_when_no_changes);
+  assert_eq!(cfg.review.default_base.as_deref(), Some("trunk"));
+}
+
+#[test]
+fn review_section_tool_preset_lumen_resolves_to_fullscreen_diff() {
+  // `tool = "lumen"` is the canonical example from the issue.
+  // Resolves to `lumen diff {base}..{head}` with fullscreen=true
+  // because lumen is a ratatui TUI like gwm itself.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[review]
+tool = "lumen"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let r = cfg.review.resolved().expect("lumen preset must resolve");
+  assert_eq!(r.command, "lumen diff {base}..{head}");
+  assert!(r.fullscreen, "lumen is a TUI — gwm must suspend itself");
+}
+
+#[test]
+fn review_tool_preset_table_covers_documented_set() {
+  // Pin the canonical table the docs / SKILL.md reference. A regression
+  // that renames or drops one of these would break the docs silently.
+  assert_eq!(review_tool_preset("lumen"), Some(("lumen diff {base}..{head}", true)));
+  assert_eq!(
+    review_tool_preset("claude"),
+    Some(("claude --print 'review the diff {base}..{head}'", false))
+  );
+  assert_eq!(
+    review_tool_preset("codex"),
+    Some(("codex review {base}..{head}", false))
+  );
+  assert_eq!(
+    review_tool_preset("aider"),
+    Some(("aider --message 'review {base}..{head}'", true))
+  );
+  assert_eq!(review_tool_preset("gh"), Some(("gh pr view --web", false)));
+  assert_eq!(review_tool_preset("unknown"), None);
+}
+
+#[test]
+fn review_unknown_tool_resolves_to_none() {
+  // Unknown preset is a soft no-op — the resolved launcher is `None` so
+  // the TUI can surface a status-bar hint instead of crashing.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[review]
+tool = "made-up"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert!(
+    cfg.review.resolved().is_none(),
+    "unknown preset must not silently fall back to a real tool"
+  );
+}
+
+#[test]
+fn review_command_overrides_tool() {
+  // Both `command` and `tool` set ⇒ command wins. The user can still
+  // detect the shadow via `has_shadowed_tool()` for a startup warning.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[review]
+tool = "lumen"
+command = "my-bot --diff-file {diff}"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let r = cfg.review.resolved().unwrap();
+  assert_eq!(
+    r.command, "my-bot --diff-file {diff}",
+    "`command` must override `tool` when both are set"
+  );
+  assert!(cfg.review.has_shadowed_tool());
+}
+
+#[test]
+fn review_fullscreen_overrides_preset_default() {
+  // The preset for `tool = "lumen"` defaults fullscreen=true. The user
+  // must be able to opt out per-repo (e.g. running lumen in a tmux pane).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[review]
+tool = "lumen"
+fullscreen = false
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let r = cfg.review.resolved().unwrap();
+  assert!(
+    !r.fullscreen,
+    "explicit fullscreen=false must override the preset default"
+  );
 }
 
 #[test]

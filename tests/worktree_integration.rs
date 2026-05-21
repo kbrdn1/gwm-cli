@@ -42,6 +42,26 @@ fn add_creates_branch_and_worktree() {
 }
 
 #[test]
+fn add_records_gwm_base_for_new_branch() {
+  // Issue #75: `branch.<name>.gwm-base` is the second link in the
+  // review base-resolution chain. `gwm create` (via `worktree::add`)
+  // must set it to HEAD's short name so the review launcher can fall
+  // back to the original parent even on branches without an upstream.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-7-launcher");
+  worktree::add(&repo, "feat-7-launcher", &target, "feat/#7-launcher").unwrap();
+
+  let cfg = repo.config().unwrap();
+  let base = cfg.get_string("branch.feat/#7-launcher.gwm-base").unwrap();
+  assert_eq!(
+    base, "main",
+    "worktree::add must record HEAD's short name as gwm-base for the review fallback"
+  );
+}
+
+#[test]
 fn add_refuses_to_clobber_existing_dir() {
   let (dir, _) = init_repo();
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();

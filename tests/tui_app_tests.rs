@@ -1284,6 +1284,143 @@ fn refresh_github_status_message_reflects_partial_failure() {
   );
 }
 
+// ---- Configurable launchers (issue #75) --------------------------------
+//
+// The `R` key in the worktree-list view now triggers the [review]
+// launcher; the previous "refresh GitHub status" action moves to `F`.
+// `f` becomes the worktree refresh (previously `r`). These tests pin
+// the new methods that back those keybindings; the actual key
+// dispatch sits in `src/tui/mod.rs` and is exercised by the
+// behaviour we assert here.
+
+#[test]
+fn prepare_review_returns_none_when_no_review_configured() {
+  // Default config has no [review] block ⇒ pressing `R` must surface
+  // a status-bar hint, not spawn anything.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let plan = app.prepare_review();
+  assert!(plan.is_none(), "no [review] config ⇒ no launcher plan");
+  let s = app.status.to_lowercase();
+  assert!(
+    s.contains("review") && (s.contains("not configured") || s.contains("not set") || s.contains("gwm.toml")),
+    "status bar must explain why R was inert: {}",
+    app.status
+  );
+}
+
+#[test]
+fn prepare_review_skips_when_no_changes_and_flag_on() {
+  // skip_when_no_changes defaults to true. A fresh repo has zero
+  // commits past `main` ⇒ R must short-circuit with the documented
+  // "no changes to review" status line.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.config.review.command = Some("lumen diff {base}..{head}".into());
+  app.config.review.fullscreen = Some(true);
+  // The branch was created from HEAD (main), and we have made no new
+  // commits — count_commits_ahead must be 0.
+  let plan = app.prepare_review();
+  assert!(plan.is_none(), "no commits past base + skip_when_no_changes ⇒ skip");
+  let s = app.status.to_lowercase();
+  assert!(
+    s.contains("no changes"),
+    "status bar must say 'no changes': {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("main") || app.status.contains("dev"),
+    "status should name the resolved base: {}",
+    app.status
+  );
+}
+
+#[test]
+fn prepare_review_returns_plan_when_configured_and_diff_exists() {
+  // The full happy path: [review].command set, head ≠ base (one extra
+  // commit), skip_when_no_changes off so we don't have to bother
+  // creating a diff. The plan must surface the expanded argv with all
+  // placeholders substituted.
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.config.review.command = Some("reviewer --base {base} --head {head}".into());
+  app.config.review.skip_when_no_changes = false;
+  // Force a known base so the test isn't sensitive to the chain order.
+  app.config.review.default_base = Some("main".into());
+  // Drop the upstream / gwm-base config so default_base wins.
+  let mut cfg = repo.config().unwrap();
+  let _ = cfg.remove("branch.feat/#42-tui-search.gwm-base");
+
+  let plan = app.prepare_review().expect("configured + no skip ⇒ plan present");
+  let argv = &plan.expanded.argv;
+  assert_eq!(argv[0], "reviewer");
+  assert_eq!(argv[1], "--base");
+  assert_eq!(argv[2], "main");
+  assert_eq!(argv[3], "--head");
+  assert_eq!(argv[4], "feat/#42-tui-search");
+  // The cwd must be the worktree path so the spawned tool sees the
+  // selected branch's working tree as `.`. Use `paths_equal` so the
+  // macOS `/private/var` ↔ `/var` symlink doesn't flake the assertion.
+  assert!(
+    common::paths_equal(&plan.cwd, dir.path()),
+    "plan.cwd = {} vs dir = {}",
+    plan.cwd.display(),
+    dir.path().display()
+  );
+}
+
+#[test]
+fn prepare_review_respects_default_base_chain() {
+  // `branch.<n>.gwm-base` (set by gwm create) must outrank
+  // `[review].default_base`. Recorded as `main` by the fixture.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // Manually record gwm-base since the test fixture didn't go through
+  // worktree::add. The base chain reads from this key.
+  gwm::launcher::write_gwm_base(&app.repo, "feat/#42-tui-search", "release-3.x").unwrap();
+  app.config.review.command = Some("echo {base}".into());
+  app.config.review.skip_when_no_changes = false;
+  app.config.review.default_base = Some("trunk".into());
+
+  let plan = app.prepare_review().expect("must resolve");
+  assert_eq!(
+    plan.expanded.argv,
+    vec!["echo", "release-3.x"],
+    "gwm-base must win over [review].default_base"
+  );
+}
+
+#[test]
+fn prepare_git_tui_default_uses_lazygit() {
+  // Backwards-compat: no `[git_tui]` block ⇒ `l` still runs
+  // `lazygit -p <path>` fullscreen.
+  let (dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let plan = app.prepare_git_tui().expect("git_tui has a default");
+  let argv = &plan.expanded.argv;
+  assert_eq!(argv[0], "lazygit");
+  assert_eq!(argv[1], "-p");
+  // The path the launcher injects is the *currently selected* worktree;
+  // make_app_on_branch only creates the main, so the default selection
+  // is the main repo's path. Use `paths_equal` to dodge the macOS
+  // `/private/var` ↔ `/var` mismatch (same trick as elsewhere in the
+  // suite).
+  assert!(
+    common::paths_equal(std::path::Path::new(&argv[2]), dir.path()),
+    "argv[2] = {} vs dir = {}",
+    argv[2],
+    dir.path().display()
+  );
+  assert!(plan.fullscreen, "lazygit defaults to fullscreen");
+}
+
+#[test]
+fn prepare_git_tui_uses_user_command_when_set() {
+  // [git_tui].command override must beat the lazygit default.
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.config.git_tui.command = Some("gitui -d {path}".into());
+  app.config.git_tui.fullscreen = Some(false);
+  let plan = app.prepare_git_tui().expect("must resolve");
+  assert_eq!(plan.expanded.argv[0], "gitui");
+  assert_eq!(plan.expanded.argv[1], "-d");
+  assert!(!plan.fullscreen, "user opted out of fullscreen");
+}
+
 #[test]
 fn refresh_github_status_message_celebrates_full_success() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
