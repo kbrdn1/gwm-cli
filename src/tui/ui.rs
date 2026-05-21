@@ -151,20 +151,24 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .map(|w| build_row(w, name_w, branch_w, status_w))
     .collect();
 
-  // ratatui's Layout solver, given a series of `Length` constraints
-  // plus a final `Min(N)` that must be honoured, squeezes the FIRST
-  // `Length` column when the terminal is too narrow. Empirically at a
-  // <90-col terminal that turned the age column (`Length(8)`) into 2
-  // cells and truncated "22h" → "22". Swapping `Min(20)` for `Fill(1)`
-  // on the PATH column lets the path absorb the pressure instead —
-  // it shrinks (or vanishes) before the age column loses a single
-  // cell. The age stays at exactly 4 cells, which is what max
-  // content (`22h`, `14m`, `1M`, `5y`, `-`) needs.
+  // ratatui's Layout solver squeezes the FIRST `Length` column to
+  // satisfy the others when terminal width is tight. We want the age
+  // column rock-stable at 4 cells (the cost of losing the unit
+  // letter to truncation — "22h" → "22" — is worse than name/branch
+  // shrinking by a char or two). Strategy:
+  //   - `Length(4)` for age, `Length(2)` for marker, `Length(16)` for
+  //     status: hard-fixed lengths the solver must honour.
+  //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
+  //     when the terminal is narrow (they shrink down to 8) and grow
+  //     to the original clamped width (or more) when there's room.
+  //   - `Fill(1)` for path: takes whatever's left, vanishes last.
+  // Verified by standalone probe down to 40-cell terminals: col 0
+  // stays at 4 cells across every size.
   let widths = [
     Constraint::Length(4),
     Constraint::Length(2),
-    Constraint::Length(name_w),
-    Constraint::Length(branch_w),
+    Constraint::Min(name_w),
+    Constraint::Min(branch_w),
     Constraint::Length(status_w),
     Constraint::Fill(1),
   ];
