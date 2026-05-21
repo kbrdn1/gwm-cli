@@ -274,11 +274,11 @@ fn next_prev_invalidate_sidebar_cache() {
   // Moving selection must drop any cached sidebar content so the new
   // worktree's preview is recomputed on the next frame.
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.next();
   assert!(app.sidebar_cache.is_none(), "next() must invalidate the sidebar cache");
 
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.prev();
   assert!(app.sidebar_cache.is_none(), "prev() must invalidate the sidebar cache");
 }
@@ -286,7 +286,7 @@ fn next_prev_invalidate_sidebar_cache() {
 #[test]
 fn refresh_invalidates_sidebar_cache() {
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), vec![]));
+  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.refresh().unwrap();
   assert!(app.sidebar_cache.is_none());
 }
@@ -1301,5 +1301,829 @@ fn refresh_github_status_message_celebrates_full_success() {
     app.status.to_lowercase().contains("refreshed") || app.status.to_lowercase().contains("ok"),
     "all-green refresh should signal success: {}",
     app.status
+  );
+}
+
+// ---- Sidebar sections (Option C — bordered subsections, no Commands block) ----
+
+use gwm::tui::build_sidebar_sections;
+
+fn detailed_worktree_fixture() -> WorktreeInfo {
+  WorktreeInfo {
+    name: "api-rest".into(),
+    path: PathBuf::from("/Users/test/cc-worktree/api-rest"),
+    branch: Some("feat/#42-api-rest".into()),
+    head: Some("08d1029f1234567890abcdef".into()),
+    is_main: true,
+    is_locked: false,
+    is_prunable: false,
+    status: BranchStatus {
+      is_dirty: false,
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      unknown: false,
+    },
+  }
+}
+
+fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
+  lines
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+    .collect::<Vec<_>>()
+    .join("")
+}
+
+#[test]
+fn sidebar_sections_omit_commands_block() {
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let all = format!(
+    "{}\n{}\n{}",
+    section_text(&sections.worktree),
+    section_text(&sections.working_tree),
+    section_text(&sections.recent_commits),
+  );
+  assert!(
+    !all.contains("Commands"),
+    "the Commands cheat-sheet block must be removed (lives in ? help); got: {}",
+    all
+  );
+  assert!(
+    !all.contains("Bootstrap worktree"),
+    "help-overlay phrasing must not leak into the sidebar: {}",
+    all
+  );
+  assert!(
+    !all.contains("Toggle this sidebar"),
+    "help-overlay phrasing must not leak into the sidebar: {}",
+    all
+  );
+}
+
+#[test]
+fn sidebar_sections_omit_inline_section_headers() {
+  // The new layout puts section titles on the Block borders, so the inline
+  // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
+  // disappear from the content lines.
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let all = format!(
+    "{}\n{}\n{}",
+    section_text(&sections.worktree),
+    section_text(&sections.working_tree),
+    section_text(&sections.recent_commits),
+  );
+  assert!(!all.contains("Basic Settings:"), "got: {}", all);
+  assert!(!all.contains("Recent commits:"), "got: {}", all);
+  assert!(!all.contains("Working tree:"), "got: {}", all);
+}
+
+#[test]
+fn sidebar_worktree_section_is_compact_identity() {
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let text = section_text(&sections.worktree);
+
+  assert!(text.contains("api-rest"), "name on top line: {}", text);
+  assert!(text.contains("feat/#42-api-rest"), "branch shown: {}", text);
+  assert!(text.contains("08d1029"), "short head shown: {}", text);
+  assert!(
+    text.contains("synced") || text.contains("✓"),
+    "synced state badge shown: {}",
+    text
+  );
+  assert!(
+    text.contains("main") || text.contains("★"),
+    "main badge shown: {}",
+    text
+  );
+}
+
+#[test]
+fn sidebar_worktree_section_short_enough_for_compact_layout() {
+  // Compact identity block: name, branch · head, badges, path → 4 lines target.
+  // Allow ≤5 to leave headroom for variable badges.
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  assert!(
+    sections.worktree.len() <= 5,
+    "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
+    sections.worktree.len(),
+    sections.worktree.iter().map(section_text_single).collect::<Vec<_>>()
+  );
+}
+
+fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
+  l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+fn sidebar_worktree_section_skips_irrelevant_badges() {
+  // A non-main, unlocked, non-prunable worktree should NOT advertise
+  // those flags — only the ones that are true add visual noise.
+  let mut w = detailed_worktree_fixture();
+  w.is_main = false;
+  let sections = build_sidebar_sections(&w);
+  let text = section_text(&sections.worktree);
+  assert!(
+    !text.contains("★ main"),
+    "non-main worktree must not show ★ main: {}",
+    text
+  );
+  assert!(
+    !text.contains("locked"),
+    "unlocked worktree must not show locked badge: {}",
+    text
+  );
+  assert!(
+    !text.contains("prunable"),
+    "non-prunable worktree must not show prunable badge: {}",
+    text
+  );
+}
+
+#[test]
+fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
+  // Regression: PR #70 review (Copilot) flagged that a non-dirty/non-unknown
+  // status always rendered `✓ <label>`, which produced misleading badges like
+  // `✓ ↑2` for branches that were *ahead* of upstream. The `✓` is reserved
+  // for synced / clean — divergence must use `↑` / `↓` / `⇅` (or no sigil).
+  let mut w = detailed_worktree_fixture();
+  w.status = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 2,
+    behind: 0,
+    unknown: false,
+  };
+  let sections = build_sidebar_sections(&w);
+  let badge = section_text_single(&sections.worktree[2]);
+  assert!(
+    !badge.contains("✓"),
+    "ahead-only branch must not display the synced/clean ✓ sigil: {}",
+    badge
+  );
+  assert!(badge.contains("↑2"), "ahead label must still be visible: {}", badge);
+}
+
+#[test]
+fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
+  let mut w = detailed_worktree_fixture();
+  w.status = BranchStatus {
+    is_dirty: false,
+    has_upstream: true,
+    ahead: 0,
+    behind: 3,
+    unknown: false,
+  };
+  let sections = build_sidebar_sections(&w);
+  let badge = section_text_single(&sections.worktree[2]);
+  assert!(
+    !badge.contains("✓"),
+    "behind-only branch must not display the synced/clean ✓ sigil: {}",
+    badge
+  );
+  assert!(badge.contains("↓3"), "behind label must still be visible: {}", badge);
+}
+
+#[test]
+fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
+  // Sanity: the fixture has `has_upstream=true, ahead=0, behind=0` so the
+  // synced label *should* still display `✓`. Guards against an over-eager
+  // fix that would drop the sigil everywhere.
+  let w = detailed_worktree_fixture();
+  let sections = build_sidebar_sections(&w);
+  let badge = section_text_single(&sections.worktree[2]);
+  assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
+  assert!(badge.contains("synced"), "label must still say synced: {}", badge);
+}
+
+// ---- tilde_compress path-boundary safety (PR #70 review, Copilot) -------
+
+use gwm::tui::tilde_compress_with_home;
+
+#[test]
+fn tilde_compress_does_not_slice_across_path_boundaries() {
+  // Regression: PR #70 review (Copilot) flagged that string `strip_prefix`
+  // on the rendered home dir would slice into longer directory names that
+  // merely *start with* the same characters — e.g. home `/home/al` would
+  // turn `/home/alice/repo` into `~ice/repo`. The compression must only
+  // fire when the prefix ends at a path separator boundary.
+  let home = std::path::Path::new("/home/al");
+  assert_eq!(
+    tilde_compress_with_home("/home/alice/repo", home),
+    "/home/alice/repo",
+    "must not slice across the `alice` directory name"
+  );
+}
+
+#[test]
+fn tilde_compress_compresses_exact_home_match() {
+  let home = std::path::Path::new("/home/alice");
+  assert_eq!(tilde_compress_with_home("/home/alice", home), "~");
+  assert_eq!(tilde_compress_with_home("/home/alice/repo", home), "~/repo");
+  assert_eq!(tilde_compress_with_home("/home/alice/repo/sub", home), "~/repo/sub");
+}
+
+#[test]
+fn tilde_compress_falls_back_when_path_outside_home() {
+  let home = std::path::Path::new("/home/alice");
+  assert_eq!(tilde_compress_with_home("/var/log/x", home), "/var/log/x");
+  // Sibling directory starting with the same letters → no match.
+  assert_eq!(tilde_compress_with_home("/home/alicent/x", home), "/home/alicent/x");
+}
+
+// ---- Issue / PR summary line width budgeting ----------------------------
+
+use gwm::tui::{issue_summary_line, pr_summary_line};
+
+fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
+  line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+#[test]
+fn issue_summary_line_truncates_loaded_state_to_budget() {
+  // Regression: with a 48-column sidebar, a fully-loaded issue line was
+  // `#67 (auto) [open] <40-char title>` ≈ 58 chars, overflowing the
+  // Issue/PR block and forcing ratatui's `Wrap` to push the title onto a
+  // second visual row that the layout's `Constraint::Length` didn't
+  // budget for. The Loaded variant must keep the head + badge prefix
+  // intact and trim the title so the total ≤ max_width.
+  let status = gwm::github::IssueStatus {
+    number: 828,
+    title:
+      "Stats: subscriptions distribution across schools and individual customers (very long title to force truncation)"
+        .into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    828,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    30,
+  );
+  let width = line_visible_width(&line);
+  assert!(
+    width <= 30,
+    "loaded issue line must fit in 30 cols, got {}: {:?}",
+    width,
+    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+  );
+  // Ellipsis confirms the title was actually trimmed (not just clipped).
+  let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(joined.ends_with('…'), "expected trailing ellipsis: {}", joined);
+}
+
+#[test]
+fn pr_summary_line_truncates_loaded_state_to_budget() {
+  let status = gwm::github::PrStatus {
+    number: 70,
+    title: "feat(tui): redesign Details sidebar with bordered subsections and four cards".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 3,
+    checks_total: 3,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    70,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    35,
+  );
+  let width = line_visible_width(&line);
+  assert!(
+    width <= 35,
+    "loaded PR line must fit in 35 cols, got {}: {:?}",
+    width,
+    line.spans.iter().map(|s| s.content.as_ref()).collect::<Vec<_>>()
+  );
+}
+
+#[test]
+fn issue_summary_line_keeps_short_title_intact() {
+  // Sanity: budget large enough → no truncation, no spurious ellipsis.
+  let status = gwm::github::IssueStatus {
+    number: 1,
+    title: "short".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    1,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+  );
+  let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains("short"),
+    "short title must not be truncated: {}",
+    joined
+  );
+  assert!(
+    !joined.contains('…'),
+    "no ellipsis when budget exceeds content: {}",
+    joined
+  );
+}
+
+#[test]
+fn issue_summary_line_truncates_error_state_to_budget() {
+  let line = issue_summary_line(
+    42,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Error(
+      "gh: API rate limit exceeded for user, retry after 60s with exponential backoff please".into(),
+    ),
+    30,
+  );
+  let width = line_visible_width(&line);
+  assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
+}
+
+// ---- Recent Commits panel: lazygit-style fill + clip (issue #71) ---------
+
+use gwm::tui::{recent_commits_lines, RECENT_COMMITS_LIMIT};
+
+fn add_commits(repo: &git2::Repository, count: usize) {
+  use git2::Signature;
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+  for i in 0..count {
+    let parent = repo.head().unwrap().peel_to_commit().unwrap();
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    repo
+      .commit(Some("HEAD"), &sig, &sig, &format!("commit-{}", i), &tree, &[&parent])
+      .unwrap();
+  }
+}
+
+fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
+  WorktreeInfo {
+    name: "test".into(),
+    path: dir.to_path_buf(),
+    branch: Some("main".into()),
+    head: None,
+    is_main: true,
+    is_locked: false,
+    is_prunable: false,
+    status: BranchStatus::default(),
+  }
+}
+
+#[test]
+fn recent_commits_lines_respects_limit_when_repo_has_more() {
+  let (dir, repo) = init_repo();
+  add_commits(&repo, 14); // 15 total commits (1 seed + 14)
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 5);
+  assert_eq!(
+    lines.len(),
+    5,
+    "limit=5 must produce exactly 5 lines, got {}",
+    lines.len()
+  );
+}
+
+#[test]
+fn recent_commits_lines_returns_all_when_under_limit() {
+  let (dir, _repo) = init_repo();
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 100);
+  assert_eq!(
+    lines.len(),
+    1,
+    "init_repo has 1 commit, asking for 100 should still return 1, got {}",
+    lines.len()
+  );
+}
+
+#[test]
+#[allow(clippy::assertions_on_constants)] // intentional const pin
+fn recent_commits_default_limit_fills_modern_terminal_heights() {
+  // Regression: the previous hardcoded limit of 10 left the bottom of tall
+  // sidebars empty. On a 50-line terminal, the Recent Commits block gets
+  // ~12–18 rows after the small fixed sections take their slice; on a
+  // 100-line terminal it gets ~70+. Keep the default generous so the
+  // block fills the panel without re-shelling git on scroll. A future
+  // contributor that lowers the constant will trip this test.
+  assert!(
+    RECENT_COMMITS_LIMIT >= 50,
+    "RECENT_COMMITS_LIMIT must be ≥ 50 to fill a typical sidebar, got {}",
+    RECENT_COMMITS_LIMIT
+  );
+}
+
+#[test]
+fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
+  // Wire-up smoke: build_sidebar_sections must use RECENT_COMMITS_LIMIT (or
+  // higher) so the cached section is dense enough to fill a tall panel.
+  let (dir, repo) = init_repo();
+  add_commits(&repo, 30); // 31 total commits
+  let w = worktree_pointing_at_dir(dir.path());
+  let sections = build_sidebar_sections(&w);
+  assert_eq!(
+    sections.recent_commits.len(),
+    31,
+    "expected all 31 commits to be cached (default limit ≥ 50 ≥ 31), got {}",
+    sections.recent_commits.len()
+  );
+}
+
+// ---- lazygit-style row format (hash + initials + subject) ----------------
+
+use gwm::tui::{author_initials, COMMIT_HASH_DISPLAY_LEN};
+
+#[test]
+fn author_initials_two_word_name_picks_first_letters_of_each() {
+  assert_eq!(author_initials("Kylian Bardini"), "KB");
+  assert_eq!(author_initials("Jesse Duffield"), "JD");
+}
+
+#[test]
+fn author_initials_single_word_takes_first_two_chars() {
+  assert_eq!(author_initials("Linus"), "Li");
+  assert_eq!(author_initials("kb"), "kb");
+}
+
+#[test]
+fn author_initials_three_or_more_words_only_uses_first_two() {
+  // Lazygit caps the result at 2 chars regardless of token count.
+  assert_eq!(author_initials("Jean-Paul Marie Dupont"), "JM");
+}
+
+#[test]
+fn author_initials_strips_leading_whitespace() {
+  assert_eq!(author_initials("  Kylian Bardini"), "KB");
+}
+
+#[test]
+fn author_initials_empty_returns_empty() {
+  assert_eq!(author_initials(""), "");
+  assert_eq!(author_initials("   "), "");
+}
+
+#[test]
+fn author_initials_takes_first_unicode_scalar_per_token() {
+  // Documented divergence from lazygit (PR #72 Copilot review): gwm's
+  // `author_initials` uses `str::chars()` and slices on Unicode scalar
+  // values, NOT grapheme clusters. Single-scalar emoji ("🦀") survive
+  // intact, but multi-scalar grapheme clusters like the French flag
+  // "🇫🇷" (two regional indicators) are split — only the first scalar
+  // makes it into the initials. Pinning this so a future contributor
+  // doesn't quietly break it by adopting a grapheme-aware crate.
+  assert_eq!(author_initials("🦀 Crab"), "🦀C");
+  assert_eq!(
+    author_initials("🇫🇷 Bardini"),
+    "🇫B",
+    "two-scalar grapheme cluster (flag) is intentionally split per scalar"
+  );
+}
+
+// ---- Graph node markers (○ commit, ◎ merge) -----------------------------
+
+fn add_merge_commit(repo: &git2::Repository) -> git2::Oid {
+  use git2::Signature;
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+
+  // Start from current HEAD. Create a sibling branch with one commit, then
+  // merge it back into HEAD with a true 2-parent merge commit.
+  let base = repo.head().unwrap().peel_to_commit().unwrap();
+  let branch_name = "tmp-side";
+  repo.branch(branch_name, &base, false).unwrap();
+  // Side commit.
+  let side_oid = {
+    let tree_id = repo.index().unwrap().write_tree().unwrap();
+    let tree = repo.find_tree(tree_id).unwrap();
+    repo
+      .commit(
+        Some(&format!("refs/heads/{}", branch_name)),
+        &sig,
+        &sig,
+        "side",
+        &tree,
+        &[&base],
+      )
+      .unwrap()
+  };
+  let side = repo.find_commit(side_oid).unwrap();
+  // Merge commit on HEAD with two parents.
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo
+    .commit(
+      Some("HEAD"),
+      &sig,
+      &sig,
+      "merge: side into trunk",
+      &tree,
+      &[&base, &side],
+    )
+    .unwrap()
+}
+
+#[test]
+fn commit_row_carries_parent_hashes() {
+  // Regression: the renderer needs the parent count to pick ○ vs ◎.
+  // git_log_with_author must surface the parent list, not flatten it.
+  let (dir, repo) = init_repo();
+  add_merge_commit(&repo); // adds two extra commits (side + merge)
+  let rows = gwm::worktree::git_log_with_author(dir.path(), 10).unwrap();
+  // First row = merge commit (HEAD), should have 2 parents.
+  assert!(!rows.is_empty(), "expected at least 1 commit");
+  assert_eq!(
+    rows[0].parents.len(),
+    2,
+    "HEAD is a merge commit and must surface both parents, got {:?}",
+    rows[0].parents
+  );
+  // The seed `init` commit has no parent.
+  let seed = rows
+    .iter()
+    .find(|r| r.subject == "init")
+    .expect("seed commit must be in log");
+  assert!(
+    seed.parents.is_empty(),
+    "seed commit has no parents, got {:?}",
+    seed.parents
+  );
+}
+
+#[test]
+fn recent_commits_line_marks_merge_commit_with_bullseye() {
+  // U+25CE ◎ is named "BULLSEYE" in Unicode — it is what lazygit uses
+  // for `MergeSymbol`. The previous test name said "diamond" which
+  // was geometrically wrong; this name pins the actual glyph.
+  let (dir, repo) = init_repo();
+  add_merge_commit(&repo);
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 10);
+  // Find the merge commit row by subject; assert it carries ◎ somewhere.
+  let merge = lines
+    .iter()
+    .find(|l| {
+      let joined: String = l.spans.iter().map(|s| s.content.as_ref()).collect();
+      joined.contains("merge: side into trunk")
+    })
+    .expect("merge row must be present");
+  let joined: String = merge.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains('◎'),
+    "merge row must carry the ◎ bullseye marker, got: {}",
+    joined
+  );
+}
+
+// ---- Commit graph topology (lazygit port — pipes + connectors) ---------
+
+use gwm::tui::commit_graph::{box_drawing_chars, build_pipe_sets, render_commits, render_pipe_set, test_row, PipeKind};
+
+fn spans_to_text(spans: &[ratatui::text::Span<'static>]) -> String {
+  spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+#[test]
+#[allow(clippy::type_complexity)]
+fn graph_glyph_table_matches_lazygit_truth_table() {
+  // 16-case ground truth ported verbatim from
+  // `lazygit/pkg/gui/presentation/graph/cell.go::getBoxDrawingChars`.
+  // If any of these flip, the entire graph rendering will silently shift.
+  let cases: &[((bool, bool, bool, bool), (char, char))] = &[
+    ((true, true, true, true), ('│', '─')),
+    ((true, true, true, false), ('│', ' ')),
+    ((true, true, false, true), ('│', '─')),
+    ((true, true, false, false), ('│', ' ')),
+    ((true, false, true, true), ('┴', '─')),
+    ((true, false, true, false), ('╯', ' ')),
+    ((true, false, false, true), ('╰', '─')),
+    ((true, false, false, false), ('╵', ' ')),
+    ((false, true, true, true), ('┬', '─')),
+    ((false, true, true, false), ('╮', ' ')),
+    ((false, true, false, true), ('╭', '─')),
+    ((false, true, false, false), ('╷', ' ')),
+    ((false, false, true, true), ('─', '─')),
+    ((false, false, true, false), ('─', ' ')),
+    ((false, false, false, true), ('╶', '─')),
+    ((false, false, false, false), (' ', ' ')),
+  ];
+  for &((u, d, l, r), expected) in cases {
+    assert_eq!(
+      box_drawing_chars(u, d, l, r),
+      expected,
+      "case ({}, {}, {}, {}) — expected {:?}",
+      u,
+      d,
+      l,
+      r,
+      expected
+    );
+  }
+}
+
+#[test]
+fn graph_linear_history_emits_single_column_circles() {
+  // Three commits, each pointing at the next: c (parent b) → b (parent a) → a (no parent).
+  let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let graphs = render_commits(&rows);
+  assert_eq!(graphs.len(), 3);
+  // Each row should be a 2-cell render (one column → 2 chars).
+  for (idx, g) in graphs.iter().enumerate() {
+    let text = spans_to_text(g);
+    assert!(
+      text.contains('○'),
+      "linear history row {} must carry a ○ node, got {:?}",
+      idx,
+      text
+    );
+    assert!(
+      !text.contains('◎'),
+      "linear history row {} must NOT carry a ◎ merge node, got {:?}",
+      idx,
+      text
+    );
+  }
+}
+
+#[test]
+fn graph_merge_commit_carries_bullseye_and_branch_corners() {
+  // Topology:
+  //   c (merge: parents = a, b)
+  //   b (parent a)         ← side branch
+  //   a (no parent)        ← trunk root
+  let rows = vec![test_row("c", &["a", "b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let graphs = render_commits(&rows);
+  // Row 0 = merge commit, must carry ◎.
+  let merge_text = spans_to_text(&graphs[0]);
+  assert!(merge_text.contains('◎'), "merge row must carry ◎, got {:?}", merge_text);
+  // Row 1 (the side branch) must spawn somewhere outside column 0 —
+  // there should be a `╮` corner on row 0 to drop the second parent
+  // into a fresh column.
+  assert!(
+    merge_text.contains('╮') || merge_text.contains('─'),
+    "merge row must carry a corner / horizontal stroke into the new branch column, got {:?}",
+    merge_text
+  );
+}
+
+#[test]
+fn graph_pipe_set_first_commit_seeds_starts_pipe() {
+  // Internal invariant: the first row's pipe set must contain a STARTS
+  // pipe for the first commit, regardless of how many parents it has.
+  let rows = vec![test_row("a", &["b"])];
+  let pipes = build_pipe_sets(&rows);
+  assert_eq!(pipes.len(), 1);
+  assert!(
+    pipes[0]
+      .iter()
+      .any(|p| p.kind == PipeKind::Starts && p.from_hash == "a"),
+    "first row must contain a STARTS pipe whose from_hash is the commit itself, got {:?}",
+    pipes[0]
+  );
+}
+
+#[test]
+fn graph_pipe_set_merge_commit_emits_extra_starts_per_parent() {
+  // A merge with 2 parents should emit 2 STARTS pipes whose from_pos is
+  // the commit's column and to_pos points at distinct columns.
+  let rows = vec![test_row("c", &["a", "b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let pipes = build_pipe_sets(&rows);
+  let row0 = &pipes[0];
+  let starts: Vec<_> = row0.iter().filter(|p| p.kind == PipeKind::Starts).collect();
+  assert_eq!(
+    starts.len(),
+    2,
+    "merge row must emit 2 STARTS pipes (one per parent), got {} ({:?})",
+    starts.len(),
+    starts
+  );
+}
+
+#[test]
+fn graph_render_pipe_set_empty_input_returns_empty() {
+  let graphs = render_commits(&[]);
+  assert!(graphs.is_empty());
+}
+
+#[test]
+fn graph_row_width_is_deterministic_on_commit_list() {
+  // The graph width is `2 * (max_pos + 1)` chars, derived from pipe
+  // topology — it must NOT depend on terminal width or external state.
+  // Snapshot the linear-history width so a regression caught quickly.
+  let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
+  let graphs = render_commits(&rows);
+  for g in &graphs {
+    let text = spans_to_text(g);
+    let chars = text.chars().count();
+    assert!(
+      (1..=8).contains(&chars),
+      "linear-history row must render in ≤ 8 chars, got {} ({:?})",
+      chars,
+      text
+    );
+  }
+}
+
+#[test]
+fn graph_render_pipe_set_handles_single_pipe_starts() {
+  use gwm::tui::commit_graph::Pipe;
+  let pipes = vec![Pipe {
+    from_pos: 0,
+    to_pos: 0,
+    from_hash: "a".into(),
+    to_hash: "b".into(),
+    kind: PipeKind::Starts,
+  }];
+  let spans = render_pipe_set(&pipes);
+  let text = spans_to_text(&spans);
+  // Cell 0: ○ + filler (space, since right has no neighbor)
+  assert!(text.starts_with('○'), "expected ○ glyph at column 0, got {:?}", text);
+}
+
+#[test]
+fn recent_commits_line_marks_normal_commit_with_open_circle() {
+  let (dir, _repo) = init_repo();
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 1);
+  let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains('○'),
+    "non-merge row must carry the ○ marker, got: {}",
+    joined
+  );
+  assert!(
+    !joined.contains('◎'),
+    "non-merge row must NOT carry the ◎ marker, got: {}",
+    joined
+  );
+}
+
+#[test]
+fn recent_commits_line_starts_with_short_hash() {
+  // The first span of every row must be a hash of exactly
+  // COMMIT_HASH_DISPLAY_LEN hex chars (8 by default, matching lazygit).
+  let (dir, _repo) = init_repo();
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 1);
+  assert_eq!(lines.len(), 1, "init_repo should produce 1 commit");
+  let head_span = lines[0]
+    .spans
+    .first()
+    .expect("commit row must carry at least the hash span");
+  assert_eq!(
+    head_span.content.chars().count(),
+    COMMIT_HASH_DISPLAY_LEN,
+    "expected hash span of {} chars, got {:?}",
+    COMMIT_HASH_DISPLAY_LEN,
+    head_span.content
+  );
+  // Must be all-hex.
+  assert!(
+    head_span.content.chars().all(|c| c.is_ascii_hexdigit()),
+    "expected hex hash, got {:?}",
+    head_span.content
+  );
+}
+
+#[test]
+fn recent_commits_line_includes_author_initials_after_hash() {
+  // init_repo signs commits as "gwm-test" — a single token → first 2 chars.
+  let (dir, _repo) = init_repo();
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 1);
+  let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  // Initials live as a styled span after the hash + double space.
+  assert!(
+    joined.contains("gw"),
+    "expected 'gw' initials from 'gwm-test', got {:?}",
+    joined
+  );
+}
+
+#[test]
+fn recent_commits_line_carries_subject_unclipped() {
+  // The renderer relies on ratatui's view-level clip — `recent_commits_lines`
+  // itself must NOT pre-truncate the subject (otherwise scrollback / wider
+  // sidebars would lose information). Verify the full subject is preserved.
+  let (dir, _repo) = init_repo();
+  let w = worktree_pointing_at_dir(dir.path());
+  let lines = recent_commits_lines(&w, 1);
+  let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    joined.contains("init"),
+    "expected the seed 'init' subject, got {:?}",
+    joined
+  );
+  assert!(
+    !joined.contains('…'),
+    "must not pre-emptively truncate with ellipsis: {:?}",
+    joined
   );
 }
