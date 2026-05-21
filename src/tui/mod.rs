@@ -1,4 +1,10 @@
 mod app;
+/// Commit-graph topology renderer, ported from lazygit. **Not part of the
+/// public SemVer surface** — exposed only so the integration tests under
+/// `tests/` can pin the algorithm. Use `gwm::tui::recent_commits_lines`
+/// (re-exported below) for the stable entry point that callers should
+/// actually depend on.
+#[doc(hidden)]
 pub mod commit_graph;
 mod ui;
 

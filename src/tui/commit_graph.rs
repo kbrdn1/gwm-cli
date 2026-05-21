@@ -6,10 +6,15 @@
 //! consecutive rows, and renders each row as a fixed sequence of 2-char
 //! cells (`<glyph><filler>`).
 //!
-//! The output is a `Vec<Line<'static>>` ready to drop into a ratatui
-//! `Paragraph`. Each row's width is exactly `2 * (max_pos + 1)` chars,
-//! independent of terminal width — the graph is width-deterministic on
-//! the input commit list (lazygit caches on `(head_hash, count)` only).
+//! The output is a `Vec<Span<'static>>` per row (from
+//! [`render_pipe_set`]) or a `Vec<Vec<Span<'static>>>` for the full
+//! commit list (from [`render_commits`]). Callers assemble those spans
+//! into a `ratatui::text::Line` together with the rest of the row
+//! (hash, author initials, subject) — see
+//! `src/tui/ui.rs::commit_row_line`. Each row's spans cover exactly
+//! `2 * (max_pos + 1)` cells, independent of terminal width — the
+//! graph is width-deterministic on the input commit list (lazygit
+//! caches on `(head_hash, count)` only).
 //!
 //! Differences from lazygit, all intentional:
 //!
@@ -22,9 +27,14 @@
 //! - **No selected-commit override** — lazygit highlights the pipes
 //!   originating from the cursor; our sidebar's selection lives on the
 //!   *worktree* list, not on a specific commit.
-//! - **No empty-tree sentinel** — lazygit emits an `EmptyTreeCommitHash`
-//!   target for the first commit so its `○` doesn't appear orphaned;
-//!   here we simply skip the seeded `Starts` pipe in that case.
+//! - **No empty-tree sentinel** — lazygit targets a synthetic
+//!   `EmptyTreeCommitHash` from the first commit's `Starts` pipe so
+//!   `○` doesn't look orphaned. gwm uses an empty string for the
+//!   first parent of a root commit; the rendered cell is still a
+//!   plain `○` because the seeded sentinel pipe from row 0 terminates
+//!   on it. The trivial commit-on-commit `Terminates` (where
+//!   `from_pos == to_pos == commit_pos`) is skipped in
+//!   [`render_pipe_set`] so it doesn't overwrite the node glyph.
 
 use crate::worktree::CommitRow;
 use ratatui::{
