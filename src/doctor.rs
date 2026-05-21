@@ -253,10 +253,26 @@ fn extract_binary(run: &str) -> Option<String> {
   tokens.into_iter().find(|t| !t.contains('='))
 }
 
+/// Same as [`extract_binary`] but pre-strips the launcher placeholders
+/// so a template like `lumen diff {base}..{head}` reduces to `lumen`
+/// before tokenisation. Used for the issue #75 [`crate::config::GitTuiConfig`] /
+/// [`crate::config::ReviewConfig`] entries so the doctor warning
+/// names the actual binary, not a placeholder fragment.
+fn extract_launcher_binary(command: &str) -> Option<String> {
+  let cleaned = command
+    .replace("{base}", "BASE")
+    .replace("{head}", "HEAD")
+    .replace("{path}", "PATH")
+    .replace("{diff}", "/tmp/diff");
+  extract_binary(&cleaned)
+}
+
 /// Check #4: every binary referenced by the bootstrap commands resolves on
-/// `$PATH`. `lazygit` (the TUI's `l` keybinding) and `direnv` (only if the
-/// repo has an `.envrc`) are also checked because they're the two "ambient"
-/// dependencies whose absence routinely confuses new users.
+/// `$PATH`. `lazygit` (the TUI's `l` keybinding's default) and `direnv`
+/// (only if the repo has an `.envrc`) are also checked because they're
+/// the two "ambient" dependencies whose absence routinely confuses new
+/// users. Configured launchers ([git_tui], [review] — issue #75) are
+/// added to the same set so the user gets one consolidated warning.
 ///
 /// Missing binaries are surfaced as Warning, not Failed — the user may not
 /// rely on that step at all, but the visibility matters.
@@ -264,10 +280,22 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   let name = "external binaries on PATH";
   let mut needed: BTreeSet<String> = BTreeSet::new();
 
-  // Ambient deps the rest of the CLI uses.
-  needed.insert("lazygit".into());
+  // Ambient deps the rest of the CLI uses. `[git_tui]` may override the
+  // lazygit default; we extract whatever binary the resolved launcher
+  // names so a `gitui` / `tig` user gets the right warning.
+  let git_tui = ctx.config.git_tui.resolved();
+  if let Some(bin) = extract_launcher_binary(&git_tui.command) {
+    needed.insert(bin);
+  }
   if ctx.repo_workdir.join(".envrc").exists() {
     needed.insert("direnv".into());
+  }
+  // Review launcher is opt-in; only probe when the user actually
+  // configured one (`command` or `tool`).
+  if let Some(review) = ctx.config.review.resolved() {
+    if let Some(bin) = extract_launcher_binary(&review.command) {
+      needed.insert(bin);
+    }
   }
 
   // Whatever the user's own bootstrap commands invoke.
