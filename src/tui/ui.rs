@@ -141,20 +141,21 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
   };
 
-  // Pre-allocate the age strip OUTSIDE ratatui's Table widget so the
-  // 4-cell fixed width is never squeezed by the layout solver. The
-  // Table's solver respects `Length` only up to a best-effort budget
-  // (per ratatui docs, Min > Max > Length > Percentage > Ratio > Fill);
-  // when the table area is tight (e.g. sidebar open, narrow terminal),
-  // it shrinks `Length` columns proportionally, dropping age from 4 to
-  // 3 (or fewer) cells. The only way to guarantee a fixed width is to
-  // reserve the cells via an outer `Layout::horizontal` before handing
-  // the rest to the Table.
+  // Pre-allocate the marker + age strips OUTSIDE ratatui's Table
+  // widget so their fixed widths are never squeezed by the layout
+  // solver. Per ratatui docs the constraint priority is
+  // `Min > Max > Length > Percentage > Ratio > Fill`, and when the
+  // Table area is tight (sidebar open ⇒ ~60% of frame, narrow term),
+  // `Length` columns still get shrunk proportionally — that's how
+  // the previous `Length(2)` marker and `Length(4)` age both dropped
+  // below their nominal widths.
   //
-  // Layout: [outer block] → inner → [4 cells age | 1 cell gap | Fill(table)].
-  // The outer block (borders + title) wraps the whole area; the inner
-  // split divides the work between the manual age renderer and the
-  // Table widget.
+  // Outer layout: borders → inner → `[2 marker | 4 age | 1 gap | Fill(table)]`.
+  // The four zones share the same row baseline (header on row 0,
+  // data rows from row 1 down), so the manual strips align cell-for-cell
+  // with the Table's rows. On the selected row we paint a DarkGray
+  // background across all four zones so the highlight reads as one
+  // continuous band rather than three disconnected fragments.
   let outer_block = Block::default()
     .borders(Borders::ALL)
     .title(title)
@@ -163,17 +164,20 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   f.render_widget(outer_block, area);
 
   let inner_split = Layout::horizontal([
-    Constraint::Length(4), // age strip — fixed, never squeezed
-    Constraint::Length(1), // gap
-    Constraint::Fill(1),   // table area — absorbs the rest
+    Constraint::Length(2),
+    Constraint::Length(4),
+    Constraint::Length(1),
+    Constraint::Fill(1),
   ])
   .split(inner_area);
-  let age_strip = inner_split[0];
-  let table_area = inner_split[2];
+  let marker_strip = inner_split[0];
+  let age_strip = inner_split[1];
+  let gap_strip = inner_split[2];
+  let table_area = inner_split[3];
 
-  // The Table no longer carries the age column; col 0 is the marker.
+  // Table now carries only the four growable columns; marker + age
+  // are rendered manually in their pre-allocated strips below.
   let header = Row::new(vec![
-    Cell::from(""),
     Cell::from("NAME"),
     Cell::from("BRANCH"),
     Cell::from("STATUS"),
@@ -187,51 +191,89 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .collect();
 
   let widths = [
-    Constraint::Length(2),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
     Constraint::Fill(1),
   ];
 
+  // No `highlight_symbol` — the manual marker strip already carries
+  // the `★ / ●` glyphs and an arrow would now appear after the
+  // strips, breaking visual alignment with the marker column.
   let table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
-    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-    .highlight_symbol("▶ ");
+    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
 
   f.render_stateful_widget(table, table_area, &mut app.list_state);
 
-  // Now overlay the age values on age_strip. Row 0 is the (empty)
-  // header line, rows 1..=visible.len() carry the values. We mirror
-  // the Table's row_highlight_style on the selected row so the band
-  // stays visually continuous across the gap.
-  render_age_strip(f, age_strip, &visible, app.list_state.selected());
+  render_left_strips(
+    f,
+    marker_strip,
+    age_strip,
+    gap_strip,
+    &visible,
+    app.list_state.selected(),
+  );
 }
 
-/// Render the manually-allocated 4-cell-wide age column to the left of
-/// the Table widget. Aligns one Line per Table row (header line first,
-/// then one per visible worktree) and mirrors the Table's row_highlight
-/// background on the selected row so the user can't tell the column is
-/// rendered outside the Table.
-fn render_age_strip(f: &mut Frame, area: Rect, visible: &[&WorktreeInfo], selected: Option<usize>) {
-  if area.width == 0 || area.height == 0 {
+/// Paint the manually-allocated marker + age strips, plus the 1-cell
+/// gap between them and the Table. Mirrors the Table's
+/// `row_highlight_style` (DarkGray background, bold) on the selected
+/// row across all three zones so the highlight reads as a single
+/// continuous band rather than three disconnected fragments.
+fn render_left_strips(
+  f: &mut Frame,
+  marker_strip: Rect,
+  age_strip: Rect,
+  gap_strip: Rect,
+  visible: &[&WorktreeInfo],
+  selected: Option<usize>,
+) {
+  if marker_strip.height == 0 {
     return;
   }
-  let mut lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
-  // Header row aligns with the Table's header (empty caption — the
-  // glyphs are self-evident).
-  lines.push(Line::from(""));
+
+  let mut marker_lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
+  let mut age_lines: Vec<Line<'static>> = Vec::with_capacity(visible.len() + 1);
+  // Row 0 = header (kept empty — the column glyphs are self-evident).
+  marker_lines.push(Line::from(""));
+  age_lines.push(Line::from(""));
+
   for (i, w) in visible.iter().enumerate() {
+    let (marker_label, marker_color) = table_marker(w);
+    let mut marker_style = Style::default().fg(marker_color);
+    let mut age_style = Style::default().fg(Color::DarkGray);
+    if Some(i) == selected {
+      marker_style = marker_style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+      age_style = age_style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
+    }
+    marker_lines.push(Line::from(Span::styled(marker_label, marker_style)));
     let age = branch_age_for(w);
     let label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
-    let mut style = Style::default().fg(Color::DarkGray);
-    if Some(i) == selected {
-      style = style.bg(Color::DarkGray).add_modifier(Modifier::BOLD);
-    }
-    lines.push(Line::from(Span::styled(label, style)));
+    age_lines.push(Line::from(Span::styled(label, age_style)));
   }
-  f.render_widget(Paragraph::new(lines), area);
+
+  f.render_widget(Paragraph::new(marker_lines), marker_strip);
+  f.render_widget(Paragraph::new(age_lines), age_strip);
+
+  // The 1-cell gap is empty space between the age strip and the
+  // Table. Without painting it, the selected-row highlight would
+  // show a 1-cell white slot between marker/age (DarkGray) and the
+  // Table (DarkGray). Paint the gap on the selected row only.
+  if let Some(sel) = selected {
+    // +1 for the header row that lives on `gap_strip.y`.
+    let row_y = gap_strip.y.saturating_add(1).saturating_add(sel as u16);
+    if row_y < gap_strip.y + gap_strip.height {
+      let gap_row = Rect {
+        x: gap_strip.x,
+        y: row_y,
+        width: gap_strip.width,
+        height: 1,
+      };
+      f.buffer_mut().set_style(gap_row, Style::default().bg(Color::DarkGray));
+    }
+  }
 }
 
 /// Details panel for the selected worktree — structured info, recent commits,
