@@ -102,10 +102,12 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 | `d`         | delete (confirm `y`)                                                            |
 | `b`         | re-run bootstrap on selected                                                    |
 | `o`         | open worktree dir in OS file manager (`open` / `xdg-open` / `explorer`)         |
-| `l`         | launch `lazygit -p <selected-worktree>` fullscreen; gwm resumes on lazygit exit |
+| `l`         | run the configured `[git_tui]` launcher (default `lazygit -p <selected-worktree>` fullscreen) |
+| `R`         | run the configured `[review]` launcher against the resolved base (issue #75)    |
 | `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)    |
 | `Tab`       | swap focus between the worktree list and the sidebar                            |
-| `r`         | refresh                                                                         |
+| `f`         | refresh worktree list (also accepts `r` for muscle memory)                      |
+| `F`         | refresh GitHub issue/PR status via `gh`                                         |
 | `p`         | toggle "delete branch on remove"                                                |
 | `Enter`     | show path in status bar                                                         |
 | `?`         | help overlay                                                                    |
@@ -123,9 +125,59 @@ When the terminal width is ≥ 120 columns and the sidebar is open (default ON, 
 
 `Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the focused panel. The focused panel's border turns cyan.
 
-## Lazygit integration
+## Configurable launchers (`l` git_tui · `R` review) — issue #75
 
-Press `l` to suspend the gwm TUI and open [`lazygit`](https://github.com/jesseduffield/lazygit) fullscreen on the selected worktree (`lazygit -p <path>`). Quitting lazygit restores the gwm TUI exactly where you left it. If `lazygit` is not on `$PATH`, the status bar reports it and the TUI keeps running.
+Two TUI keybindings share the same mini-API: take a `command` template from `.gwm.toml`, substitute placeholders, split with `shell-words`, and exec it with `cwd = <selected-worktree>`.
+
+| Key | Section     | Default                       | Placeholders                          | Default `fullscreen` |
+|:----|:------------|:------------------------------|:--------------------------------------|:---------------------|
+| `l` | `[git_tui]` | `lazygit -p {path}`           | `{path}`                              | `true`               |
+| `R` | `[review]`  | _(inert until configured)_    | `{base} {head} {path} {diff}`         | `false`              |
+
+`fullscreen = true` suspends the gwm TUI for a TUI-style takeover (same recipe as the pre-issue-#75 `l` → lazygit flow); `fullscreen = false` runs the command in the background, captures stderr's first line, and lands it on the status bar. The `{diff}` placeholder is **lazy** — gwm only shells out to `git diff {base}..{head}` (into a tempfile) when the template references it.
+
+### `[review]` base resolution chain (for `{base}`)
+
+1. `branch.<name>.merge` (the branch's upstream, if any).
+2. `branch.<name>.gwm-base` (recorded by `gwm create` so the parent ref survives `git push -u`).
+3. `[review].default_base` from `.gwm.toml`.
+4. `"dev"` (gwm's project convention).
+5. `"main"` (universal git default).
+
+### `[review].tool` built-in presets
+
+Sugar over `command + fullscreen`. Setting both `command` and `tool` makes `command` win (the TUI surfaces the shadow on next render).
+
+| `tool = "X"` | Resolves to                                              | `fullscreen` default |
+|:-------------|:---------------------------------------------------------|:---------------------|
+| `lumen`      | `lumen diff {base}..{head}`                              | true (TUI)           |
+| `claude`     | `claude --print 'review the diff {base}..{head}'`        | false                |
+| `codex`      | `codex review {base}..{head}`                            | false                |
+| `aider`      | `aider --message 'review {base}..{head}'`                | true (TUI)           |
+| `gh`         | `gh pr view --web`                                       | false                |
+
+### Worked snippets
+
+```toml
+# Switch the `l` key to gitui.
+[git_tui]
+command = "gitui -d {path}"
+
+# Review with lumen (TUI), skip when nothing to review.
+[review]
+tool = "lumen"
+skip_when_no_changes = true
+# default_base = "dev"   # optional pin overriding the auto chain
+
+# Or a free-form shell line — `command` always wins over `tool`.
+[review]
+command = "my-review-bot --diff-file {diff} --owner kbrdn1"
+fullscreen = false
+```
+
+### `gwm doctor` integration
+
+A configured `[review]` / `[git_tui]` binary that is not on `$PATH` surfaces as **Warning** (exit code `1`), never **Failed** (exit code `2`) — both launchers are opt-in, so a CI pre-commit hook gated on `gwm doctor` keeps passing when the only red flag is a missing local-only tool.
 
 ## `.gwm.toml` schema
 
