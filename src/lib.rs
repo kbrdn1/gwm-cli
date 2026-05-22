@@ -11,6 +11,7 @@ pub mod error;
 pub mod github;
 pub mod labels;
 pub mod launcher;
+pub mod milestones;
 pub mod multiplexer;
 pub mod naming;
 pub mod tui;
