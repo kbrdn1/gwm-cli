@@ -415,6 +415,181 @@ fn label_delete_argv_carries_name_repo_and_yes() {
   assert!(argv.join(" ").contains("--repo kbrdn1/gwm-cli"));
 }
 
+// --- Milestones: gh api …/milestones contract (issue #82) --------------
+
+#[test]
+fn parse_milestones_json_returns_remote_milestones() {
+  // Mirror of `gh api repos/:owner/:repo/milestones?state=all` — an
+  // array of objects with `number`, `title`, `state`, optional
+  // `description` and `due_on`.
+  let json = r#"[
+    {"number": 1, "title": "v0.7.0", "state": "open", "description": "Configurability sprint", "due_on": "2026-07-15T23:59:59Z"},
+    {"number": 2, "title": "v0.6.0", "state": "closed", "description": "", "due_on": null},
+    {"number": 3, "title": "Backlog", "state": "open"}
+  ]"#;
+  let milestones = github::parse_milestones_json(json).unwrap();
+  assert_eq!(milestones.len(), 3);
+
+  assert_eq!(milestones[0].number, 1);
+  assert_eq!(milestones[0].title, "v0.7.0");
+  assert_eq!(milestones[0].state, gwm::milestones::MilestoneState::Open);
+  assert_eq!(milestones[0].description.as_deref(), Some("Configurability sprint"));
+  assert_eq!(milestones[0].due_on.as_deref(), Some("2026-07-15T23:59:59Z"));
+
+  assert_eq!(milestones[1].state, gwm::milestones::MilestoneState::Closed);
+  // Empty description round-trips as Some("") — milestones diff
+  // collapses it to None on its own (same as labels).
+  assert_eq!(milestones[1].description.as_deref(), Some(""));
+  // `due_on: null` reads as None.
+  assert_eq!(milestones[1].due_on, None);
+
+  assert_eq!(milestones[2].title, "Backlog");
+  assert_eq!(milestones[2].description, None);
+  assert_eq!(milestones[2].due_on, None);
+}
+
+#[test]
+fn parse_milestones_json_handles_empty_array() {
+  let json = r#"[]"#;
+  let milestones = github::parse_milestones_json(json).unwrap();
+  assert!(milestones.is_empty());
+}
+
+#[test]
+fn parse_milestones_json_rejects_unknown_state() {
+  // GitHub only emits `open` / `closed`; anything else means the
+  // contract changed under us and we want to know loud.
+  let json = r#"[{"number": 1, "title": "x", "state": "draft"}]"#;
+  let err = github::parse_milestones_json(json).unwrap_err();
+  let msg = err.to_string();
+  assert!(msg.contains("draft") || msg.contains("state"), "should mention state: {}", msg);
+}
+
+#[test]
+fn parse_milestones_json_rejects_malformed_payload() {
+  let err = github::parse_milestones_json("not json").unwrap_err();
+  let msg = err.to_string();
+  assert!(msg.contains("milestones"), "should mention milestones: {}", msg);
+}
+
+// --- Argv contract for gh api milestones ---------------------------------
+
+#[test]
+fn milestone_list_argv_uses_repos_endpoint_with_state_all() {
+  // `gh api repos/<slug>/milestones?state=all&per_page=100` — `state=all`
+  // is the key bit: without it, closed milestones disappear from the
+  // diff and `gwm milestones push --prune` thinks they're already
+  // gone.
+  let argv = github::milestone_list_argv("kbrdn1/gwm-cli");
+  let joined = argv.join(" ");
+  assert!(argv.contains(&"api".to_string()), "expected 'api', got {:?}", argv);
+  assert!(
+    joined.contains("repos/kbrdn1/gwm-cli/milestones"),
+    "expected milestones endpoint, got {}",
+    joined
+  );
+  assert!(joined.contains("state=all"), "expected state=all, got {}", joined);
+}
+
+#[test]
+fn milestone_create_argv_uses_post_with_title_and_state() {
+  use gwm::milestones::{MilestoneSpec, MilestoneState};
+  let spec = MilestoneSpec {
+    title: "v0.7.0".into(),
+    description: Some("Configurability sprint".into()),
+    due_on: Some("2026-07-15T23:59:59Z".into()),
+    state: MilestoneState::Open,
+  };
+  let argv = github::milestone_create_argv("kbrdn1/gwm-cli", &spec);
+  let joined = argv.join(" ");
+  assert!(argv.contains(&"api".to_string()));
+  assert!(argv.contains(&"-X".to_string()));
+  assert!(argv.contains(&"POST".to_string()));
+  assert!(
+    joined.contains("repos/kbrdn1/gwm-cli/milestones"),
+    "expected milestones endpoint, got {}",
+    joined
+  );
+  // `-f title=…` is gh's form-encoded body syntax. The flag must
+  // appear exactly once per field.
+  assert!(joined.contains("title=v0.7.0"), "missing title=…: {}", joined);
+  assert!(
+    joined.contains("description=Configurability sprint"),
+    "missing description=…: {}",
+    joined
+  );
+  assert!(
+    joined.contains("due_on=2026-07-15T23:59:59Z"),
+    "missing due_on=…: {}",
+    joined
+  );
+  assert!(joined.contains("state=open"), "missing state=…: {}", joined);
+}
+
+#[test]
+fn milestone_create_argv_omits_description_and_due_on_when_absent() {
+  // Same defensive contract as label_create: skip the flag entirely
+  // rather than send empty, so the remote isn't wiped of a value the
+  // user didn't intend to touch.
+  use gwm::milestones::{MilestoneSpec, MilestoneState};
+  let spec = MilestoneSpec {
+    title: "Backlog".into(),
+    description: None,
+    due_on: None,
+    state: MilestoneState::Open,
+  };
+  let argv = github::milestone_create_argv("kbrdn1/gwm-cli", &spec);
+  let joined = argv.join(" ");
+  assert!(
+    !joined.contains("description="),
+    "no description= flag when desc absent, got {}",
+    joined
+  );
+  assert!(
+    !joined.contains("due_on="),
+    "no due_on= flag when due_on absent, got {}",
+    joined
+  );
+  // title and state still present (state always known).
+  assert!(joined.contains("title=Backlog"));
+  assert!(joined.contains("state=open"));
+}
+
+#[test]
+fn milestone_update_argv_uses_patch_with_number_in_path() {
+  use gwm::milestones::{MilestoneSpec, MilestoneState};
+  let spec = MilestoneSpec {
+    title: "v0.7.0".into(),
+    description: None,
+    due_on: Some("2026-07-15T23:59:59Z".into()),
+    state: MilestoneState::Closed,
+  };
+  let argv = github::milestone_update_argv("kbrdn1/gwm-cli", 42, &spec);
+  let joined = argv.join(" ");
+  assert!(argv.contains(&"-X".to_string()));
+  assert!(argv.contains(&"PATCH".to_string()));
+  assert!(
+    joined.contains("repos/kbrdn1/gwm-cli/milestones/42"),
+    "expected number in path, got {}",
+    joined
+  );
+  assert!(joined.contains("state=closed"));
+  assert!(joined.contains("due_on=2026-07-15T23:59:59Z"));
+}
+
+#[test]
+fn milestone_delete_argv_uses_delete_with_number_in_path() {
+  let argv = github::milestone_delete_argv("kbrdn1/gwm-cli", 7);
+  let joined = argv.join(" ");
+  assert!(argv.contains(&"-X".to_string()));
+  assert!(argv.contains(&"DELETE".to_string()));
+  assert!(
+    joined.contains("repos/kbrdn1/gwm-cli/milestones/7"),
+    "expected number in path, got {}",
+    joined
+  );
+}
+
 #[test]
 fn branch_link_summary_renders_human_readable() {
   let link = BranchLink {
