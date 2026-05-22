@@ -1668,6 +1668,76 @@ run  = "echo would-have-run"
 }
 
 #[test]
+fn create_skips_trust_gate_when_bootstrap_surface_is_empty() {
+  // A `.gwm.toml` that declares nothing executable (no copies, no
+  // guards, no no_symlinks, no commands) carries no RCE risk —
+  // prompting for trust in that case would just train the user to
+  // mash `y`. Verify the gate is a silent no-op when the config has
+  // only `[worktree]`.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+      base = base.path().display(),
+    ),
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  // No --allow-bootstrap, no env bypass, no ledger entry, no tty —
+  // the gate would normally abort. With an empty bootstrap surface
+  // it must short-circuit and let the create proceed.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["create", "feat", "13", "empty-surface"])
+    .assert()
+    .success();
+
+  // Ledger MUST stay untouched — the skip doesn't record anything.
+  assert!(
+    !ledger.exists(),
+    "empty-surface short-circuit must not write to the ledger"
+  );
+}
+
+#[test]
+fn allow_bootstrap_succeeds_even_when_ledger_is_malformed() {
+  // The whole point of `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1`
+  // is to be the unconditional CI escape hatch. A malformed
+  // trust.toml on the CI host must NOT make the bypass fail — the
+  // Allow check has to short-circuit before the ledger is touched.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  std::fs::write(&ledger, b"this is not valid toml @@@@").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "broken-ledger", "--no-bootstrap"])
+    .assert()
+    .success();
+}
+
+#[test]
 fn deny_bootstrap_aborts_even_when_trusted() {
   // `--deny-bootstrap` is the forensic mode: even if the ledger
   // says the config is trusted, refuse to run bootstrap. Asserts

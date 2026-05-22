@@ -1396,7 +1396,10 @@ fn cmd_trust_list() -> Result<()> {
   for e in &ledger.entries {
     // First 12 chars of the sha256 is plenty for a visual diff; the
     // full digest still ships in the toml file for forensic use.
-    let short_sha = &e.config_sha[..e.config_sha.len().min(12)];
+    // Truncate by chars (not bytes) so a hand-edited ledger with a
+    // multi-byte `config_sha` (corrupt but parseable TOML) renders
+    // instead of panicking on a UTF-8 boundary.
+    let short_sha: String = e.config_sha.chars().take(12).collect();
     println!(
       "  {:<ow$}  {}  trusted_at {}  by {}",
       e.origin,
@@ -1470,12 +1473,40 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
     Err(e) => return Err(e.into()),
   };
   let sha = trust::hash_config(&bytes);
+  // sha is always ASCII hex (lowercase) — `.chars().take(12)` and a
+  // byte slice would be equivalent here, but the chars form keeps
+  // the rendering robust against any future hash format change.
+  let short_sha: String = sha.chars().take(12).collect();
 
   if mode == TrustMode::Deny {
-    return Err(GwmError::Other(
-      "--deny-bootstrap: refusing to run .gwm.toml bootstrap (config hash:".to_string()
-        + &format!(" {})", &sha[..sha.len().min(12)]),
-    ));
+    return Err(GwmError::Other(format!(
+      "--deny-bootstrap: refusing to run .gwm.toml bootstrap (config hash: {})",
+      short_sha
+    )));
+  }
+
+  // UX: skip the gate entirely when the config declares no bootstrap
+  // surface (no copies / guards / no_symlinks / commands). There is
+  // nothing to execute, so prompting would add friction without
+  // improving safety — and habituating the user to mash `y` is the
+  // exact failure mode the ledger is meant to avoid. Malformed TOML
+  // falls through to the normal gate (defence in depth — a broken
+  // parser must not open a bypass).
+  if let Ok(body_str) = std::str::from_utf8(&bytes) {
+    if let Ok(cfg) = toml::from_str::<Config>(body_str) {
+      let bs = &cfg.bootstrap;
+      if bs.copy.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() && bs.command.is_empty() {
+        return Ok(());
+      }
+    }
+  }
+
+  // Short-circuit Allow BEFORE touching the ledger file. A malformed
+  // / unreadable trust.toml must not make `--allow-bootstrap` (or
+  // `GWM_ALLOW_BOOTSTRAP=1` in CI) fail — the whole point of the
+  // bypass is to keep CI runners going even on misconfigured hosts.
+  if mode == TrustMode::Allow {
+    return Ok(());
   }
 
   let origin = resolve_origin_key(repo, workdir);
@@ -1483,13 +1514,6 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
   let mut ledger = TrustLedger::load(&ledger_path)?;
 
   if ledger.lookup(&origin, &sha) {
-    return Ok(());
-  }
-
-  if mode == TrustMode::Allow {
-    // Explicit opt-in by the caller (flag or env var). Don't record —
-    // CI bypasses must NOT pollute the local ledger of whoever ends up
-    // running an interactive `gwm` from the same machine later.
     return Ok(());
   }
 
