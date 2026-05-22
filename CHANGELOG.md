@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet — next entries land here once a new feature / fix / chore is merged into `dev`._
+### Added
+
+- ✨ `[[branch_types]]` block in `.gwm.toml` overrides the built-in allowed branch types. Absent or empty block ⇒ historical defaults (`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`); present ⇒ only the listed types are accepted by `gwm create`, the TUI create picker and `BranchSpec::validate()`. `gwm types` prints the resolved list with a `(source: built-in defaults | .gwm.toml)` footer and aligns columns on the longest name. Invalid-type errors now enumerate the repo-local allowed list verbatim instead of leaking the hardcoded set. (#80)
 
 ## Past releases
 
