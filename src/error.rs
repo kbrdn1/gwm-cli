@@ -5,8 +5,8 @@ pub type Result<T> = std::result::Result<T, GwmError>;
 /// Which side of a `gwm link` / `gwm open` pair is missing on a branch.
 /// Carried by [`GwmError::LinkMissing`] so the user sees whether the
 /// issue or the PR slot is empty — both share the same git-config
-/// shape (`branch.<name>.gwm-issue` / `gwm-pr`) so the error message
-/// must spell out which one was queried.
+/// shape (`branch.<name>.gwm-issue` / `branch.<name>.gwm-pr`) so the
+/// error message must spell out which one was queried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkKind {
   Issue,
