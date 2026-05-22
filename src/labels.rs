@@ -155,14 +155,80 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 
 // --- Resolve LabelConfig → LabelSpec -------------------------------------
 
+/// Reject label names that would either pass through to `gh label
+/// create` as a flag or violate GitHub's own naming rules (issue #100).
+///
+/// The argv path matters most here: `gh label create <name>` takes the
+/// name positionally, so a value like `"--repo"` or `"-h"` is parsed by
+/// gh's flag splitter before the create call ever materialises. With
+/// `-h` the create call silently no-ops (gh prints its help banner and
+/// exits 0); with `--repo other/repo` the call retargets to a
+/// different repository entirely. Validation at the source closes the
+/// vector without depending on whether gh's parser ever grows a `--`
+/// separator.
+///
+/// Empty strings, leading `-`, embedded `,` (GitHub uses `,` as the
+/// list separator in label query strings), and ASCII control characters
+/// (newline / tab / etc., which break the `gh label list` JSON round-trip)
+/// are rejected. Spaces and unicode are explicitly allowed — GitHub
+/// permits them and they are common in real-world label sets.
+///
+/// The returned error message is unscoped (no `"labels:"` prefix);
+/// callers compose their own context — `Config::validate_labels`
+/// prepends `labels[<i>]:`, `resolve_labels` prepends `labels:`,
+/// the prune path prepends `labels (remote):`. Keeping the scope
+/// at the call site avoids the double-prefix the Copilot review on
+/// PR #121 flagged ("config error: labels[0]: config error: labels:
+/// …").
+pub fn validate_label_name(name: &str) -> Result<()> {
+  if name.is_empty() {
+    return Err(GwmError::Config(
+      "entry has empty `name` — GitHub label names must be non-empty".into(),
+    ));
+  }
+  if name.starts_with('-') {
+    return Err(GwmError::Config(format!(
+      "name {:?} starts with '-' — would be parsed as a flag by `gh label create`; \
+       rename or remove the leading dash (issue #100)",
+      name
+    )));
+  }
+  if name.contains(',') {
+    return Err(GwmError::Config(format!(
+      "name {:?} contains ',' — GitHub uses comma as a label-list separator; rename without commas",
+      name
+    )));
+  }
+  if let Some(bad) = name.chars().find(|c| c.is_ascii_control()) {
+    return Err(GwmError::Config(format!(
+      "name {:?} contains ASCII control character {:?} — rename without control characters",
+      name, bad
+    )));
+  }
+  Ok(())
+}
+
 /// Materialise a list of declared `[[labels]]` entries into concrete
 /// `LabelSpec` values. Declared colours win; missing colours fall
 /// back to `deterministic_color(name)` unless `random` is set, in
 /// which case `random_color()` is used.
+///
+/// Validates each `name` through [`validate_label_name`] as the
+/// in-module defence-in-depth on top of `Config::validate_labels` at
+/// load time — keeps the contract enforced even when a `LabelConfig`
+/// is constructed in tests or via a future programmatic API that
+/// bypasses the loader.
 pub fn resolve_labels(declared: &[LabelConfig], random: bool) -> Result<Vec<LabelSpec>> {
   declared
     .iter()
     .map(|l| {
+      validate_label_name(&l.name).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("labels: {}", inner))
+      })?;
       let color = match &l.color {
         Some(c) => {
           normalize_color(c).map_err(|e| GwmError::Config(format!("label '{}' has invalid color: {}", l.name, e)))?

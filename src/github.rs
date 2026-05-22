@@ -506,7 +506,28 @@ pub fn push_label(slug: &str, spec: &LabelSpec) -> Result<()> {
 /// Delete one label on the remote via `gh label delete --yes`. Used
 /// by `gwm labels push --prune` for labels declared on the remote but
 /// not in `.gwm.toml`.
+///
+/// Validates `name` through [`crate::labels::validate_label_name`]
+/// BEFORE shelling out (issue #100). The argv-injection vector that
+/// motivates `validate_label_name` for declared labels (config side)
+/// applies equally to the prune path: `gh label delete <name>` takes
+/// the name positionally, so a remote label whose name starts with
+/// `-` (planted by an attacker who can edit the upstream label set,
+/// or by an unrelated tool predating the validator) would be parsed
+/// as a flag — `-h` no-ops the delete with a help banner, `--repo
+/// other/repo` retargets the operation. We refuse the prune with a
+/// scoped error instead of running the risky argv.
 pub fn delete_label(slug: &str, name: &str) -> Result<()> {
+  crate::labels::validate_label_name(name).map_err(|e| {
+    let inner = match e {
+      GwmError::Config(msg) => msg,
+      other => other.to_string(),
+    };
+    GwmError::Config(format!(
+      "labels (remote): {} — refusing to delete via `gh label delete`",
+      inner
+    ))
+  })?;
   let argv = label_delete_argv(slug, name);
   let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
   run_gh(&args)?;
