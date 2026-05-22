@@ -368,11 +368,20 @@ impl Config {
   /// to be filtered by.
   ///
   /// The compiled regexes are deliberately discarded here: the goal
-  /// of this validator is to fail fast at load time. Re-compilation
-  /// at evaluation time is now infallible (the same input has just
-  /// compiled successfully) and is left in place rather than caching
-  /// `Vec<Regex>` on the `Guard` struct, which would force serde
-  /// gymnastics for a struct that round-trips through TOML.
+  /// of this validator is to fail fast at load time, and caching a
+  /// `Vec<Regex>` on the `Guard` struct would force `#[serde(skip)]`
+  /// gymnastics on a type that round-trips through TOML.
+  ///
+  /// **Trust boundary**: `Config::load_for_repo` is the single
+  /// chokepoint this validator protects. `bootstrap::guard_match`
+  /// still wraps the per-row `Regex::new` in `if let Ok(re) = …`, so
+  /// a `Config` value constructed programmatically (a test fixture,
+  /// a fuzz harness, a future API that bypasses the loader) can
+  /// still hit the legacy fail-open path. Closing that residual gap
+  /// — either by lifting the compiled regexes onto `Guard` or by
+  /// surfacing the runtime compile error as a `StepStatus::Failed`
+  /// — pairs with the `naming.rs` regex re-compilation refactor and
+  /// is tracked separately, not in this PR.
   fn validate_bootstrap_guards(&self) -> Result<()> {
     for g in &self.bootstrap.guard {
       for pat in &g.deny_patterns {
