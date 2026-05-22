@@ -253,15 +253,74 @@ fn version_flag() {
 
 #[test]
 fn types_lists_branch_types() {
+  // Outside any repo (the temp cwd of `assert_cmd` is typically not a
+  // git repo on CI runners) `gwm types` must still list the built-in
+  // defaults and surface the `built-in defaults` footer so users can
+  // tell they're not looking at a `.gwm.toml` override.
+  let dir = tempfile::TempDir::new().unwrap();
   let mut cmd = Command::cargo_bin("gwm").unwrap();
-  cmd.arg("types");
+  cmd.current_dir(dir.path()).arg("types");
   cmd
     .assert()
     .success()
     .stdout(predicate::str::contains("feat"))
     .stdout(predicate::str::contains("fix"))
     .stdout(predicate::str::contains("hotfix"))
-    .stdout(predicate::str::contains("chore"));
+    .stdout(predicate::str::contains("chore"))
+    .stdout(predicate::str::contains("(source: built-in defaults)"));
+}
+
+#[test]
+fn types_lists_configured_branch_types_from_dot_gwm_toml() {
+  // When `.gwm.toml` carries a `[[branch_types]]` block, `gwm types`
+  // must reflect the override verbatim and update its source footer.
+  // The legacy entries that aren't in the override must NOT bleed
+  // through (e.g. `hotfix` is part of the built-in defaults but is
+  // intentionally absent from this repo's list).
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[branch_types]]
+name = "feat"
+description = "Feature"
+
+[[branch_types]]
+name = "migration"
+description = "Database migration"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains("migration"))
+    .stdout(predicate::str::contains("Database migration"))
+    .stdout(predicate::str::contains("(source: .gwm.toml)"))
+    .stdout(predicate::str::contains("hotfix").not());
+}
+
+#[test]
+fn types_inside_bare_repo_falls_back_to_built_in_defaults() {
+  // Bare repos have no `workdir()`, so there's no place to look for a
+  // `.gwm.toml`. Regression: previously `cmd_types` would propagate a
+  // misleading `NotInGitRepo` error here even though `discover_repo`
+  // succeeded. The fallback is identical to the "outside any repo"
+  // branch — the built-in defaults with a `(source: built-in
+  // defaults)` footer.
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init_bare(dir.path()).expect("init bare repo");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains("hotfix"))
+    .stdout(predicate::str::contains("(source: built-in defaults)"));
 }
 
 #[test]

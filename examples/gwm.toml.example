@@ -95,6 +95,30 @@ name = "full local build"
 run = "./scripts/full-build.sh"
 when = "glob_exists:src/**/*.rs && !env_set:CI"
 
+# --- branch types (issue #80) -----------------------------------------------
+# Per-repo override of the allowed branch types. Absent (default) ⇒ the
+# built-in list is used: feat, fix, hotfix, docs, test, refactor, chore,
+# perf, ci, build. Present ⇒ only the listed types are accepted by
+# `gwm create` / TUI create / `BranchSpec::validate()`. `gwm types`
+# prints the resolved set with a footer noting the source
+# (`(source: built-in defaults)` vs `(source: .gwm.toml)`).
+#
+# An empty array (`branch_types = []`) is treated as absent — the
+# built-in list is restored so an accidental wipe doesn't lock you out
+# of `gwm create`.
+#
+# [[branch_types]]
+# name = "feat"
+# description = "New feature implementation"
+#
+# [[branch_types]]
+# name = "fix"
+# description = "Bug fix"
+#
+# [[branch_types]]
+# name = "migration"
+# description = "Database migration"
+
 # --- doctor knobs -----------------------------------------------------------
 # Trunk branches `gwm doctor`'s orphan-branch check treats as merge
 # destinations. A gwm-style branch fully reachable from one of these is

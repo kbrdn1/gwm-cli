@@ -27,6 +27,13 @@ pub struct Config {
   /// push time when omitted.
   #[serde(default)]
   pub labels: Vec<LabelConfig>,
+  /// `[[branch_types]]` — per-repo override of the allowed branch types.
+  /// Empty (the default) means the built-in list from `naming::BRANCH_TYPES`
+  /// is used, keeping zero-friction for existing repos. See
+  /// [`Config::resolved_branch_types`] for the single lookup site shared
+  /// by `BranchSpec::validate`, `gwm types` and the TUI create picker.
+  #[serde(rename = "branch_types", default)]
+  pub branch_types: Vec<BranchType>,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -43,6 +50,47 @@ pub struct LabelConfig {
   /// config load for unrelated subcommands.
   #[serde(default)]
   pub color: Option<String>,
+}
+
+/// One entry of the `[[branch_types]]` table in `.gwm.toml`. The struct
+/// is also produced by [`crate::naming::default_branch_types`] when the
+/// config block is absent, so both the configured and built-in flavours
+/// share the same shape downstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchType {
+  pub name: String,
+  pub description: String,
+}
+
+/// Origin of the resolved branch-type list — surfaced verbatim under
+/// `gwm types` so users can tell at a glance whether they're looking at
+/// their `.gwm.toml` override or the built-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchTypesSource {
+  /// No `[[branch_types]]` block in `.gwm.toml` (or it's empty) — the
+  /// built-in list from `naming::BRANCH_TYPES` is in effect.
+  Default,
+  /// At least one `[[branch_types]]` entry was loaded from `.gwm.toml`.
+  Config,
+}
+
+impl BranchTypesSource {
+  /// Human-readable label rendered as the footer of `gwm types`.
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Default => "built-in defaults",
+      Self::Config => ".gwm.toml",
+    }
+  }
+}
+
+/// Pair returned by [`Config::resolved_branch_types`] — the list to feed
+/// into validation / display, plus the [`BranchTypesSource`] that
+/// produced it.
+#[derive(Debug, Clone)]
+pub struct ResolvedBranchTypes {
+  pub types: Vec<BranchType>,
+  pub source: BranchTypesSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,7 +322,43 @@ impl Config {
     }
     let raw = std::fs::read_to_string(&path)?;
     let cfg: Config = toml::from_str(&raw)?;
+    cfg.validate_branch_types()?;
     Ok(cfg)
+  }
+
+  /// Validate `[[branch_types]]` entries on load so a malformed config
+  /// surfaces a clear error at startup instead of failing downstream in
+  /// `parse_branch` / git itself with a cryptic message. Rules:
+  ///   - `name` must be non-empty
+  ///   - `name` must match `^[a-z]+$` (the regex `parse_branch` uses
+  ///     for the type segment of a gwm-style branch name)
+  ///   - `name`s must be unique across the table — duplicates would
+  ///     silently override each other under `serde`'s `Vec` decoding
+  ///     and make the resolved list non-deterministic
+  fn validate_branch_types(&self) -> Result<()> {
+    let name_re = regex::Regex::new(r"^[a-z]+$").expect("static regex compiles");
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for entry in &self.branch_types {
+      if entry.name.is_empty() {
+        return Err(GwmError::Config(
+          "branch_types: entry has empty `name`; use a lowercase ASCII alpha token (e.g. \"feat\")".into(),
+        ));
+      }
+      if !name_re.is_match(&entry.name) {
+        return Err(GwmError::Config(format!(
+          "branch_types: invalid `name = \"{}\"`; must match ^[a-z]+$ to be a valid branch-prefix \
+           (lowercase letters only, no digits, no dashes — git refs and `parse_branch` rely on this)",
+          entry.name
+        )));
+      }
+      if !seen.insert(entry.name.as_str()) {
+        return Err(GwmError::Config(format!(
+          "branch_types: duplicate entry for `name = \"{}\"` — each branch type must be declared at most once",
+          entry.name
+        )));
+      }
+    }
+    Ok(())
   }
 
   /// Write a default config to the given repo root.
@@ -290,6 +374,26 @@ impl Config {
 
   pub fn guard_by_name(&self, name: &str) -> Option<&Guard> {
     self.bootstrap.guard.iter().find(|g| g.name == name)
+  }
+
+  /// Single lookup site for the allowed branch types. Returns the
+  /// `[[branch_types]]` block from `.gwm.toml` when present, falling
+  /// back to [`crate::naming::default_branch_types`] otherwise. Used
+  /// by `BranchSpec::validate`, `gwm types`, the TUI create picker
+  /// (and, future-pending, the pre-commit hook) so the list stays
+  /// consistent across surfaces.
+  pub fn resolved_branch_types(&self) -> ResolvedBranchTypes {
+    if self.branch_types.is_empty() {
+      ResolvedBranchTypes {
+        types: crate::naming::default_branch_types(),
+        source: BranchTypesSource::Default,
+      }
+    } else {
+      ResolvedBranchTypes {
+        types: self.branch_types.clone(),
+        source: BranchTypesSource::Config,
+      }
+    }
   }
 }
 

@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Colour resolution: when `color` is omitted, gwm derives a deterministic pastel from an FNV-1a hash of the name, so the same label gets the same colour across repos. Hex normalisation accepts `#D73A4A` and round-trips to `d73a4a`.
   - Without a `[[labels]]` block in `.gwm.toml`, both subcommands are no-ops (`0 labels declared, nothing to push`) and never shell out to `gh` — safe to run in repos that haven't opted in.
   - Requires `gh` on `$PATH` (already a soft dependency of `gwm status`).
+- ✨ `[[branch_types]]` block in `.gwm.toml` overrides the built-in allowed branch types. Absent or empty block ⇒ historical defaults (`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`); present ⇒ only the listed types are accepted by `gwm create`, the TUI create picker and `BranchSpec::validate()`. `gwm types` prints the resolved list with a `(source: built-in defaults | .gwm.toml)` footer and aligns columns on the longest name. Invalid-type errors now enumerate the repo-local allowed list verbatim instead of leaking the hardcoded set. Entries are validated at load time: `name` must be non-empty, match `^[a-z]+$`, and be unique. (#80)
 
 ## Past releases
 
