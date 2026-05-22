@@ -706,6 +706,7 @@ dependencies = [
  "dirs",
  "git2",
  "glob",
+ "libc",
  "nucleo-matcher",
  "predicates",
  "ratatui",
