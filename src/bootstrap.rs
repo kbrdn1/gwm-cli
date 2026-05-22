@@ -52,17 +52,21 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     let src = ctx.main_repo.join(&step.from);
     let dst = ctx.worktree.join(&step.to);
 
-    // Defence in depth (issue #93): refuse to interact with a symlink
-    // at the destination, period. `Path::exists()` follows symlinks, so
-    // a dangling symlink slips past the "already populated" skip below
-    // and lets `fs::copy` write through the symlink to its target —
-    // outside the worktree. `symlink_metadata` inspects the entry
-    // itself; a symlink (broken or live) at dst aborts the step. This
-    // covers symlinks NOT declared in `[[bootstrap.no_symlink]]`, and
-    // also closes the TOCTOU window between the no-symlink pass and
-    // this loop.
-    if let Ok(meta) = std::fs::symlink_metadata(&dst) {
-      if meta.file_type().is_symlink() {
+    // Single stat on `dst` (issue #93): `symlink_metadata` does NOT
+    // follow symlinks (unlike `Path::exists`), and reusing one result
+    // for every branch below avoids the TOCTOU window of a second stat.
+    //
+    //   Ok(symlink)     → Failed (defence in depth — symlinks at a
+    //                     declared copy dst are suspicious enough to
+    //                     surface, even when [[bootstrap.no_symlink]]
+    //                     didn't list them)
+    //   Ok(other)       → Skipped (regular file or directory already
+    //                     populated — leave the user's edits alone)
+    //   Err(NotFound)   → fall through to the copy / fallback chain
+    //   Err(other)      → Failed (permission / IO error masking the
+    //                     filesystem state — never silently swallow)
+    match std::fs::symlink_metadata(&dst) {
+      Ok(meta) if meta.file_type().is_symlink() => {
         report.steps.push(StepResult {
           label,
           status: StepStatus::Failed,
@@ -73,15 +77,27 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
         });
         continue;
       }
-    }
-
-    if dst.exists() {
-      report.steps.push(StepResult {
-        label,
-        status: StepStatus::Skipped,
-        detail: "destination already exists, leaving it alone".into(),
-      });
-      continue;
+      Ok(_) => {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Skipped,
+          detail: "destination already exists, leaving it alone".into(),
+        });
+        continue;
+      }
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+      Err(e) => {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Failed,
+          detail: format!(
+            "failed to stat destination {}: {} — refusing to proceed with unknown filesystem state",
+            dst.display(),
+            e
+          ),
+        });
+        continue;
+      }
     }
 
     if !src.exists() {
