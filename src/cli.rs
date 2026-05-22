@@ -1,5 +1,5 @@
 use crate::bootstrap::{self, BootstrapCtx, StepStatus};
-use crate::config::{Config, CONFIG_FILE};
+use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
@@ -9,7 +9,7 @@ use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
 use crate::naming::BranchSpec;
-use crate::trust::{self, TrustLedger};
+use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
@@ -379,17 +379,22 @@ pub enum MilestonesAction {
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-  // Without a subcommand, we hand off to the TUI.
-  let Some(cmd) = cli.command else {
-    return crate::tui::run();
-  };
+  // Resolve the trust mode once at dispatch time so every handler
+  // that gates bootstrap sees the same value — CLI subcommands AND
+  // the TUI alike, both honour the same flags. `--deny-bootstrap`
+  // wins over `--allow-bootstrap` if both are passed (clap's
+  // `conflicts_with` already rejects this combination at parse time
+  // — the explicit ordering inside `trust::resolve_mode` is defence
+  // in depth).
+  let mode = trust::resolve_mode(cli.allow_bootstrap, cli.deny_bootstrap);
 
-  // Resolve the trust mode once at dispatch time so every handler that
-  // gates bootstrap sees the same value. `--deny-bootstrap` wins over
-  // `--allow-bootstrap` if both are passed (clap's `conflicts_with`
-  // already rejects this combination at parse time — the explicit
-  // ordering here is defence in depth).
-  let mode = resolve_trust_mode(cli.allow_bootstrap, cli.deny_bootstrap);
+  // Without a subcommand, we hand off to the TUI — but with the
+  // resolved mode threaded through so the TUI's bootstrap call
+  // sites (`submit_create`, `bootstrap_selected`) take the same
+  // trust decision as `gwm create` / `gwm bootstrap`.
+  let Some(cmd) = cli.command else {
+    return crate::tui::run(mode);
+  };
 
   match cmd {
     Command::Init => cmd_init(),
@@ -426,47 +431,6 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Labels { action } => cmd_labels(action),
     Command::Milestones { action } => cmd_milestones(action),
     Command::Trust { action } => cmd_trust(action),
-  }
-}
-
-/// Trust mode resolved from CLI flags and env. Threaded through the
-/// `cmd_create` / `cmd_bootstrap` handlers so the same decision applies
-/// to every code path that may run `bootstrap::run`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrustMode {
-  /// Default: prompt the user (or fail if stdin isn't a tty).
-  Prompt,
-  /// `--allow-bootstrap` or `GWM_ALLOW_BOOTSTRAP=1` — skip the prompt,
-  /// treat as trusted for this invocation. Does NOT record the entry
-  /// in the ledger (CI bypasses shouldn't pollute the local ledger
-  /// of whoever's running the runner image).
-  Allow,
-  /// `--deny-bootstrap` — refuse to run bootstrap even if already
-  /// trusted. For forensic / first-look inspection of a hostile repo.
-  Deny,
-}
-
-fn resolve_trust_mode(allow_flag: bool, deny_flag: bool) -> TrustMode {
-  if deny_flag {
-    return TrustMode::Deny;
-  }
-  if allow_flag || env_truthy("GWM_ALLOW_BOOTSTRAP") {
-    return TrustMode::Allow;
-  }
-  TrustMode::Prompt
-}
-
-/// Truthy env semantics: any non-empty value other than `0`, `false`,
-/// or `no` (case-insensitive) counts as true. Documented here as the
-/// source of truth — gwm has no shared env-bool helper yet, so this
-/// fn is the canonical reference for `GWM_*` flag-style env vars.
-fn env_truthy(key: &str) -> bool {
-  match std::env::var(key) {
-    Ok(v) => {
-      let v = v.trim().to_ascii_lowercase();
-      !v.is_empty() && v != "0" && v != "false" && v != "no"
-    }
-    Err(_) => false,
   }
 }
 
@@ -1467,112 +1431,64 @@ fn cmd_trust_show() -> Result<()> {
 /// the drift-detection half of the feature even when the threat model
 /// is weaker.
 fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -> Result<()> {
-  let cfg_path = workdir.join(CONFIG_FILE);
-  let bytes = match std::fs::read(&cfg_path) {
-    Ok(b) => b,
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-    Err(e) => return Err(e.into()),
-  };
-  let sha = trust::hash_config(&bytes);
-  // sha is always ASCII hex (lowercase) — `.chars().take(12)` and a
-  // byte slice would be equivalent here, but the chars form keeps
-  // the rendering robust against any future hash format change.
-  let short_sha: String = sha.chars().take(12).collect();
+  let origin = origin_url_for_repo(repo);
+  let origin_key = trust::resolve_origin_key(origin.as_deref(), workdir);
 
-  if mode == TrustMode::Deny {
-    return Err(GwmError::Other(format!(
-      "--deny-bootstrap: refusing to run .gwm.toml bootstrap (config hash: {})",
-      short_sha
-    )));
-  }
-
-  // UX: skip the gate entirely when the config declares no bootstrap
-  // surface (no copies / guards / no_symlinks / commands). There is
-  // nothing to execute, so prompting would add friction without
-  // improving safety — and habituating the user to mash `y` is the
-  // exact failure mode the ledger is meant to avoid. Malformed TOML
-  // falls through to the normal gate (defence in depth — a broken
-  // parser must not open a bypass).
-  if let Ok(body_str) = std::str::from_utf8(&bytes) {
-    if let Ok(cfg) = toml::from_str::<Config>(body_str) {
-      let bs = &cfg.bootstrap;
-      if bs.copy.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() && bs.command.is_empty() {
-        return Ok(());
+  match trust::evaluate(workdir, &origin_key, mode)? {
+    TrustOutcome::Proceed => Ok(()),
+    TrustOutcome::Refuse { message } => Err(GwmError::Other(message)),
+    TrustOutcome::Prompt {
+      cfg_path,
+      body,
+      sha,
+      origin,
+      mut ledger,
+      ledger_path,
+    } => {
+      // Refuse cleanly if stdin isn't a tty rather than hanging on a
+      // read that will never see input — this is the case that makes
+      // `--allow-bootstrap` actually load-bearing in CI.
+      use std::io::IsTerminal;
+      if !std::io::stdin().is_terminal() {
+        return Err(GwmError::Other(format!(
+          ".gwm.toml at {} is not in the trust ledger and stdin is not interactive — \
+           pass --allow-bootstrap (or set GWM_ALLOW_BOOTSTRAP=1) to bypass, \
+           or run interactively to approve",
+          cfg_path.display()
+        )));
       }
+
+      let granted = prompt_user(&cfg_path, &body, &origin, &sha)?;
+      if !granted {
+        return Err(GwmError::Other(format!(
+          "trust prompt declined for {} — aborting bootstrap",
+          cfg_path.display()
+        )));
+      }
+
+      ledger.record(&origin, &sha, &trust::current_actor());
+      ledger.save(&ledger_path)?;
+      println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
+      Ok(())
     }
   }
-
-  // Short-circuit Allow BEFORE touching the ledger file. A malformed
-  // / unreadable trust.toml must not make `--allow-bootstrap` (or
-  // `GWM_ALLOW_BOOTSTRAP=1` in CI) fail — the whole point of the
-  // bypass is to keep CI runners going even on misconfigured hosts.
-  if mode == TrustMode::Allow {
-    return Ok(());
-  }
-
-  let origin = resolve_origin_key(repo, workdir);
-  let ledger_path = trust::default_ledger_path()?;
-  let mut ledger = TrustLedger::load(&ledger_path)?;
-
-  if ledger.lookup(&origin, &sha) {
-    return Ok(());
-  }
-
-  // Need to prompt. Refuse cleanly if stdin isn't a tty rather than
-  // hanging on a read that will never see input — this is the case
-  // that makes `--allow-bootstrap` actually load-bearing in CI.
-  use std::io::IsTerminal;
-  if !std::io::stdin().is_terminal() {
-    return Err(GwmError::Other(format!(
-      ".gwm.toml at {} is not in the trust ledger and stdin is not interactive — \
-       pass --allow-bootstrap (or set GWM_ALLOW_BOOTSTRAP=1) to bypass, \
-       or run interactively to approve",
-      cfg_path.display()
-    )));
-  }
-
-  let granted = prompt_user(&cfg_path, &bytes, &origin, &sha, repo)?;
-  if !granted {
-    return Err(GwmError::Other(format!(
-      "trust prompt declined for {} — aborting bootstrap",
-      cfg_path.display()
-    )));
-  }
-
-  ledger.record(&origin, &sha, &trust::current_actor());
-  ledger.save(&ledger_path)?;
-  println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
-  Ok(())
 }
 
-/// Resolve the trust-ledger key for the current repo: prefer the
-/// `origin` remote URL (the hostile-clone threat axis), fall back to
-/// the canonicalised workdir path (purely-local repos with no remote
-/// still benefit from drift detection).
-fn resolve_origin_key(repo: Option<&Repository>, workdir: &Path) -> String {
-  if let Some(r) = repo {
-    if let Ok(remote) = r.find_remote("origin") {
-      if let Some(url) = remote.url() {
-        return url.to_string();
-      }
-    }
-  }
-  // `canonicalize` may fail on a path that just got created (rare for
-  // workdir, but possible during tests). Fall back to the path as-is
-  // — losing the canonical form only weakens the per-machine key, the
-  // hash still catches drift.
-  workdir
-    .canonicalize()
-    .unwrap_or_else(|_| workdir.to_path_buf())
-    .display()
-    .to_string()
+/// Pull the `origin` remote URL out of a Repository handle, if there
+/// is one. Returns `None` for repos with no `origin` remote — caller
+/// (or `trust::resolve_origin_key`) falls back to the canonical
+/// workdir path in that case.
+fn origin_url_for_repo(repo: Option<&Repository>) -> Option<String> {
+  let r = repo?;
+  let remote = r.find_remote("origin").ok()?;
+  remote.url().map(|s| s.to_string())
 }
 
 /// Interactive y/N/show loop. Prints a one-shot summary of the
 /// bootstrap surface (copy targets, guards, command lines, no-symlink
 /// declarations) so the user has the relevant signal before answering.
 /// `show` re-prints the raw `.gwm.toml`.
-fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str, repo: Option<&Repository>) -> Result<bool> {
+fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result<bool> {
   use std::io::{BufRead, Write};
 
   let body = String::from_utf8_lossy(bytes);
@@ -1585,7 +1501,6 @@ fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str, repo: Opt
   println!("     path   : {}", cfg_path.display());
   println!("     origin : {}", origin);
   println!("     hash   : {}", sha);
-  let _ = repo; // currently unused beyond `resolve_origin_key`; kept for future signing extension.
   if let Some(cfg) = parsed.as_ref() {
     print_bootstrap_summary(cfg);
   } else {

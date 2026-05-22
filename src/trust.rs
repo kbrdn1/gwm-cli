@@ -21,6 +21,7 @@
 //! (`gwm trust show` prints the active path) and version-controlled
 //! per-machine if a team wants to share trust decisions explicitly.
 
+use crate::config::{Config, CONFIG_FILE};
 use crate::error::{GwmError, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,170 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use tempfile::Builder;
+
+/// Trust gating mode resolved at the CLI / TUI entrypoint and threaded
+/// through every code path that may invoke `bootstrap::run`. Moved
+/// here (from `src/cli.rs`) so the TUI can take the same decision
+/// without duplicating the resolution logic — see [`evaluate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustMode {
+  /// Default: load the ledger, prompt the user on miss, abort on
+  /// non-tty.
+  Prompt,
+  /// `--allow-bootstrap` or `GWM_ALLOW_BOOTSTRAP=1` — skip the prompt
+  /// without touching the ledger. CI bypasses must NOT pollute the
+  /// local ledger of whoever ends up running an interactive `gwm`
+  /// from the same machine later.
+  Allow,
+  /// `--deny-bootstrap` — refuse to run bootstrap even if already
+  /// trusted. For forensic / first-look inspection of a hostile repo.
+  Deny,
+}
+
+/// Resolve a [`TrustMode`] from CLI flags + env. Both `--allow-bootstrap`
+/// and `--deny-bootstrap` map onto this — `conflicts_with` at the clap
+/// level guarantees they aren't both set, the explicit ordering here is
+/// defence in depth.
+pub fn resolve_mode(allow_flag: bool, deny_flag: bool) -> TrustMode {
+  if deny_flag {
+    return TrustMode::Deny;
+  }
+  if allow_flag || env_truthy("GWM_ALLOW_BOOTSTRAP") {
+    return TrustMode::Allow;
+  }
+  TrustMode::Prompt
+}
+
+/// Truthy env semantics: any non-empty value other than `0`, `false`,
+/// or `no` (case-insensitive) counts as true. Documented here as the
+/// source of truth — gwm has no shared env-bool helper yet, so this
+/// fn is the canonical reference for `GWM_*` flag-style env vars.
+pub fn env_truthy(key: &str) -> bool {
+  match std::env::var(key) {
+    Ok(v) => {
+      let v = v.trim().to_ascii_lowercase();
+      !v.is_empty() && v != "0" && v != "false" && v != "no"
+    }
+    Err(_) => false,
+  }
+}
+
+/// Resolve the trust-ledger key for the current repo: prefer the
+/// `origin` remote URL (the hostile-clone threat axis), fall back to
+/// the canonicalised workdir path (purely-local repos with no remote
+/// still benefit from the drift-detection half of the feature).
+///
+/// Takes `origin_url: Option<&str>` rather than a `git2::Repository`
+/// so this module stays git2-free — every caller already holds a
+/// Repository and extracts the URL on their side in three lines.
+pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
+  if let Some(url) = origin_url {
+    if !url.is_empty() {
+      return url.to_string();
+    }
+  }
+  workdir
+    .canonicalize()
+    .unwrap_or_else(|_| workdir.to_path_buf())
+    .display()
+    .to_string()
+}
+
+/// Outcome of a trust gate evaluation. The caller (CLI or TUI) decides
+/// what to do with each variant — CLI prompts on `Prompt`, TUI refuses
+/// with a helpful message because the alternate-screen mode can't host
+/// a stdin read without a full modal view (deferred follow-up).
+#[derive(Debug)]
+pub enum TrustOutcome {
+  /// Cleared to invoke `bootstrap::run`: trusted entry hit, empty
+  /// surface, no `.gwm.toml`, or `TrustMode::Allow`.
+  Proceed,
+  /// Refuse outright. `message` is the user-facing reason; render it
+  /// verbatim in stderr (CLI) or status bar (TUI). Used for `Deny`
+  /// mode by `evaluate`; the TUI also synthesises a `Refuse` from a
+  /// `Prompt` outcome since it can't prompt today.
+  Refuse { message: String },
+  /// Caller must obtain user approval interactively. On approval the
+  /// caller records into `ledger`, then saves to `ledger_path`. The
+  /// `body` and `sha` are passed back so the prompt can display a
+  /// summary without re-reading the file.
+  Prompt {
+    cfg_path: PathBuf,
+    body: Vec<u8>,
+    sha: String,
+    origin: String,
+    ledger: TrustLedger,
+    ledger_path: PathBuf,
+  },
+}
+
+/// Silent gate evaluation. Reads `.gwm.toml`, hashes it, applies the
+/// short-circuits in this order:
+///
+///   1. No `.gwm.toml` → `Proceed` (nothing to execute).
+///   2. `TrustMode::Deny` → `Refuse` (forensic mode).
+///   3. Empty bootstrap surface → `Proceed` (UX, see comment in
+///      [`trust_or_prompt`]).
+///   4. `TrustMode::Allow` → `Proceed` BEFORE touching the ledger
+///      (malformed ledger must not break the CI bypass).
+///   5. Ledger hit on `(origin, sha)` → `Proceed`.
+///   6. Otherwise → `Prompt` (caller decides whether to actually
+///      prompt or refuse).
+///
+/// This is the single source of truth shared by `cli::trust_or_prompt`
+/// and the TUI gate — keeps the security policy in one place.
+pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOutcome> {
+  let cfg_path = workdir.join(CONFIG_FILE);
+  let bytes = match fs::read(&cfg_path) {
+    Ok(b) => b,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(TrustOutcome::Proceed),
+    Err(e) => return Err(e.into()),
+  };
+  let sha = hash_config(&bytes);
+
+  if mode == TrustMode::Deny {
+    let short_sha: String = sha.chars().take(12).collect();
+    return Ok(TrustOutcome::Refuse {
+      message: format!(
+        "--deny-bootstrap: refusing to run .gwm.toml bootstrap (config hash: {})",
+        short_sha
+      ),
+    });
+  }
+
+  // Empty surface short-circuit (defence-in-depth fallthrough on
+  // parse error — a broken parser must not open a bypass).
+  if let Ok(body_str) = std::str::from_utf8(&bytes) {
+    if let Ok(cfg) = toml::from_str::<Config>(body_str) {
+      let bs = &cfg.bootstrap;
+      if bs.copy.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() && bs.command.is_empty() {
+        return Ok(TrustOutcome::Proceed);
+      }
+    }
+  }
+
+  // Allow short-circuit before any ledger I/O so a malformed
+  // trust.toml never breaks `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1`.
+  if mode == TrustMode::Allow {
+    return Ok(TrustOutcome::Proceed);
+  }
+
+  let ledger_path = default_ledger_path()?;
+  let ledger = TrustLedger::load(&ledger_path)?;
+
+  if ledger.lookup(origin, &sha) {
+    return Ok(TrustOutcome::Proceed);
+  }
+
+  Ok(TrustOutcome::Prompt {
+    cfg_path,
+    body: bytes,
+    sha,
+    origin: origin.to_string(),
+    ledger,
+    ledger_path,
+  })
+}
 
 /// On-disk ledger schema. `serde` defaults make adding new optional
 /// fields backward-compatible: older binaries still parse newer files,
