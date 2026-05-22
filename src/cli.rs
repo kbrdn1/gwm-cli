@@ -3,6 +3,7 @@ use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use crate::labels::{self, LabelDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
@@ -217,6 +218,55 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
+  /// Manage the declarative GitHub label set from `.gwm.toml` (issue #81).
+  ///
+  /// Declares the desired label set under `[[labels]]` in `.gwm.toml`,
+  /// then pushes it to the upstream `origin` remote via `gh label
+  /// create --force`. Without a `[[labels]]` block, both subcommands
+  /// are no-ops (`0 labels declared, nothing to push`).
+  Labels {
+    #[command(subcommand)]
+    action: LabelsAction,
+  },
+}
+
+/// Subcommands of `gwm labels`. The split is intentional: `list` is
+/// read-only and safe to run in CI; `push` mutates the remote and
+/// therefore gets `--dry-run` / `--prune` flags of its own.
+#[derive(Debug, Subcommand)]
+pub enum LabelsAction {
+  /// Print the declared label set plus the diff against the upstream remote.
+  ///
+  /// Each line is one of: `+ create`, `~ update (color/desc change)`,
+  /// `= match`, `- extra-on-remote`. Without a `[[labels]]` block in
+  /// `.gwm.toml`, prints `0 labels declared` and exits 0 without
+  /// shelling out to `gh`.
+  List,
+  /// Apply the diff: create new labels and update mismatched ones on
+  /// the upstream remote.
+  ///
+  /// `--dry-run` prints the plan without mutating the remote (it
+  /// still reads the remote via `gh label list` to compute the
+  /// diff; only create / update / delete calls are skipped).
+  /// `--prune` opt-in deletes labels on remote that aren't declared in
+  /// config (off by default — destructive). `--random-colors` picks a
+  /// random pastel for labels with no `color` field instead of the
+  /// default deterministic hash.
+  Push {
+    /// Print the plan without mutating the remote. Still reads remote
+    /// labels via `gh label list` to compute the diff — only the
+    /// create / update / delete calls are skipped.
+    #[arg(long)]
+    dry_run: bool,
+    /// Delete remote labels that aren't declared in `.gwm.toml`.
+    /// Destructive — off by default.
+    #[arg(long)]
+    prune: bool,
+    /// Generate a random pastel for labels with no `color` field
+    /// (overrides the default deterministic-hash colour).
+    #[arg(long)]
+    random_colors: bool,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -257,6 +307,7 @@ pub fn run(cli: Cli) -> Result<()> {
       print_url,
     } => cmd_open(target, worktree, print_url),
     Command::Status { worktree, json } => cmd_status(worktree, json),
+    Command::Labels { action } => cmd_labels(action),
   }
 }
 
@@ -880,6 +931,133 @@ fn print_status_json(
     },
   );
   println!("{}", serde_json::Value::Object(obj));
+}
+
+// ---- Labels commands (issue #81) ----------------------------------------
+
+fn cmd_labels(action: LabelsAction) -> Result<()> {
+  match action {
+    LabelsAction::List => cmd_labels_list(),
+    LabelsAction::Push {
+      dry_run,
+      prune,
+      random_colors,
+    } => cmd_labels_push(dry_run, prune, random_colors),
+  }
+}
+
+fn cmd_labels_list() -> Result<()> {
+  let config = load_labels_config()?;
+  if config.labels.is_empty() {
+    println!("0 labels declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  // Resolve (and validate colours) before touching the network, so a
+  // typo in `.gwm.toml` surfaces "label 'bug' has invalid color: …"
+  // rather than the unrelated "no origin remote" error.
+  let declared = labels::resolve_labels(&config.labels, false)?;
+  let slug = labels_slug()?;
+  let remote = github::fetch_remote_labels(&slug)?;
+  let diff = labels::diff_labels(&declared, &remote);
+  print_labels_diff(&slug, &declared, &diff);
+  Ok(())
+}
+
+fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()> {
+  let config = load_labels_config()?;
+  if config.labels.is_empty() {
+    println!("0 labels declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  let declared = labels::resolve_labels(&config.labels, random_colors)?;
+  let slug = labels_slug()?;
+  let remote = github::fetch_remote_labels(&slug)?;
+  let diff = labels::diff_labels(&declared, &remote);
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+
+  if dry_run {
+    print_labels_diff(&slug, &declared, &diff);
+    let pruned = if prune { n_extra } else { 0 };
+    println!(
+      "would create {}, update {}, leave {} untouched, prune {}, ignore {} extra-on-remote",
+      n_create,
+      n_update,
+      n_match,
+      pruned,
+      n_extra.saturating_sub(pruned),
+    );
+    return Ok(());
+  }
+
+  for spec in &diff.to_create {
+    github::push_label(&slug, spec)?;
+    println!("✓ created {}", spec.name);
+  }
+  for upd in &diff.to_update {
+    github::push_label(&slug, &upd.spec)?;
+    println!("✓ updated {}", upd.spec.name);
+  }
+  if prune {
+    for remote_label in &diff.extra_on_remote {
+      github::delete_label(&slug, &remote_label.name)?;
+      println!("✗ pruned {}", remote_label.name);
+    }
+  } else if !diff.extra_on_remote.is_empty() {
+    println!(
+      "{} label(s) on remote not in config — pass --prune to delete",
+      diff.extra_on_remote.len()
+    );
+  }
+  println!("{} label(s) untouched", n_match);
+  Ok(())
+}
+
+/// Open the repo and parse `.gwm.toml`. Shared by `labels list /
+/// push`; both surface a uniform "not inside a git repository" error
+/// before they touch network or config-resolve logic.
+fn load_labels_config() -> Result<Config> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  Config::load_for_repo(&workdir)
+}
+
+/// Resolve the `origin` remote slug. Called *after* `resolve_labels`
+/// in both subcommands so a config typo (bad colour) surfaces with
+/// the offending label name rather than the unrelated "no origin
+/// remote" error.
+fn labels_slug() -> Result<String> {
+  let repo = worktree::discover_repo(None)?;
+  github::repo_slug(&repo)
+}
+
+fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) {
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+  println!(
+    "declared in .gwm.toml: {} labels — diff against {}:",
+    declared.len(),
+    slug
+  );
+  for spec in &diff.to_create {
+    println!("  + {:<20} (will create — color #{})", spec.name, spec.color);
+  }
+  for upd in &diff.to_update {
+    let detail = match (&upd.previous_color, &upd.previous_description) {
+      (Some(old), _) => format!("color #{} → #{}", old, upd.spec.color),
+      (None, Some(_)) => "description changed".into(),
+      _ => "diff".into(),
+    };
+    println!("  ~ {:<20} ({})", upd.spec.name, detail);
+  }
+  for spec in &diff.matching {
+    println!("  = {:<20} (match)", spec.name);
+  }
+  for remote in &diff.extra_on_remote {
+    println!("  - {:<20} (on remote, not in config)", remote.name);
+  }
+  println!(
+    "summary: {} create · {} update · {} match · {} extra-on-remote",
+    n_create, n_update, n_match, n_extra
+  );
 }
 
 pub fn shell_init_script(shell: InitShell) -> &'static str {

@@ -9,6 +9,7 @@ pub mod config;
 pub mod doctor;
 pub mod error;
 pub mod github;
+pub mod labels;
 pub mod launcher;
 pub mod multiplexer;
 pub mod naming;
