@@ -174,6 +174,44 @@ fn guard_seed_from_example_substitutes() {
   assert!(report.steps.iter().any(|s| s.status == StepStatus::Warning));
 }
 
+// Issue #96: end-to-end scenario from the bug report — an invalid
+// `deny_patterns` entry must abort at `Config::load_for_repo`, never
+// reach `bootstrap::run`. Previously the invalid regex was silently
+// dropped at bootstrap time, leaving the guard fail-open against a
+// `.env` containing the denied substring.
+#[test]
+fn guard_with_only_invalid_patterns_aborts_at_load_not_at_bootstrap() {
+  use gwm::config::CONFIG_FILE;
+  let main = TempDir::new().unwrap();
+  std::fs::write(main.path().join(".env"), "AWS_SECRET_ACCESS_KEY=AKIA...").unwrap();
+  std::fs::write(
+    main.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.copy]]
+from = ".env"
+to   = ".env"
+required = false
+guards   = ["no-secrets"]
+
+[[bootstrap.guard]]
+name          = "no-secrets"
+deny_patterns = ["[+", "AWS_SECRET_ACCESS_KEY"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  // The fail-open scenario the issue documents: bootstrap MUST NOT run
+  // at all because the config cannot be loaded with a broken pattern.
+  let err = Config::load_for_repo(main.path())
+    .expect_err("invalid deny_pattern must fail at config load, never silently degrade");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("no-secrets") && msg.contains("[+"),
+    "error must name guard + pattern, got: {}",
+    msg
+  );
+}
+
 #[test]
 fn guard_does_not_trip_on_safe_content() {
   let (main, wt, mut cfg) = dirs();

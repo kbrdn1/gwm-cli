@@ -1162,3 +1162,119 @@ content = "X=1"
   .unwrap();
   Config::load_for_repo(dir.path()).expect("benign relative paths must load");
 }
+
+// --- Issue #96: guard deny_patterns must compile at load time ---------------
+//
+// Historically `bootstrap.rs::guard_match` wrapped `Regex::new(pat)` in
+// `if let Ok(re) = …`, silently dropping invalid patterns. A guard whose
+// only deny pattern failed to compile became fail-open: the file copied
+// through as if no rule existed. The contract of `[[bootstrap.guard]]`
+// is a refusal mechanism — a silently broken refusal is strictly worse
+// than no refusal, because the user believes they are protected. Reject
+// invalid patterns at `Config::load_for_repo` so bootstrap never runs
+// against a partially broken guard.
+
+#[test]
+fn load_rejects_invalid_deny_pattern_in_guard() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "no-secrets"
+deny_patterns = ["[+", "AWS_SECRET_ACCESS_KEY"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid deny_patterns must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("no-secrets"),
+    "error must name the offending guard, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("[+"),
+    "error must quote the offending pattern, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("deny_pattern") || msg.contains("regex"),
+    "error must explain WHY (regex/deny_pattern), got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_rejects_invalid_deny_pattern_when_only_pattern_in_guard() {
+  // Even when the *only* pattern is invalid, the guard must fail at
+  // load — never silently degrade into a "guard with no patterns",
+  // which would be fail-open under any input.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "broken"
+deny_patterns = ["*foo"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid sole deny pattern must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("broken") && msg.contains("*foo"),
+    "error must name guard + pattern, got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_accepts_valid_deny_patterns() {
+  // Positive control: every well-formed pattern continues to load.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "no-aws"
+deny_patterns = ["amazonaws\\.com", "AKIA[0-9A-Z]{16}", "(?i)aws_secret"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).expect("valid patterns must load");
+  assert_eq!(cfg.bootstrap.guard.len(), 1);
+  assert_eq!(cfg.bootstrap.guard[0].deny_patterns.len(), 3);
+}
+
+#[test]
+fn load_rejects_invalid_deny_pattern_in_second_guard() {
+  // The validator must walk every guard, not just the first one. A
+  // bad pattern in guard #2 must still surface at load.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "guard-one"
+deny_patterns = ["amazonaws\\.com"]
+on_match      = "abort"
+
+[[bootstrap.guard]]
+name          = "guard-two"
+deny_patterns = ["[unclosed"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid pattern in second guard must be rejected");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("guard-two") && msg.contains("[unclosed"),
+    "error must name the offending guard + pattern, got: {}",
+    msg
+  );
+}
