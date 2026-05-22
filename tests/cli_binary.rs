@@ -37,7 +37,101 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  link "))
     .stdout(predicate::str::contains("  unlink "))
     .stdout(predicate::str::contains("  open "))
-    .stdout(predicate::str::contains("  status "));
+    .stdout(predicate::str::contains("  status "))
+    // Issue #81: declarative GitHub labels.
+    .stdout(predicate::str::contains("  labels "));
+}
+
+// --- labels (issue #81) -------------------------------------------------
+
+#[test]
+fn labels_help_lists_list_and_push() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["labels", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("list"))
+    .stdout(predicate::str::contains("push"));
+}
+
+#[test]
+fn labels_list_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn labels_list_with_no_declared_labels_is_a_no_op() {
+  // The no-op fast path: no `[[labels]]` in .gwm.toml ⇒ don't shell
+  // out to `gh`, just print a single line and exit 0. The test
+  // doesn't need `gh` on PATH to pass — that's the whole point.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 labels declared"));
+}
+
+#[test]
+fn labels_push_with_no_declared_labels_is_a_no_op() {
+  // Same fast path as `list`. Push must not call `gh` when there's
+  // nothing to push — that would surface `gh: not found` to users
+  // who haven't yet configured `[[labels]]` and tried the command.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "push"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 labels declared"));
+}
+
+#[test]
+fn labels_push_dry_run_with_no_declared_labels_succeeds() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "push", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 labels declared"));
+}
+
+#[test]
+fn labels_list_surfaces_invalid_color_with_label_name() {
+  // A typo in `color` must be caught at resolve time with the label
+  // name in the error message — otherwise the user has to grep their
+  // config to find which entry is broken.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[labels]]
+name = "bug"
+color = "not-a-hex"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("bug"))
+    .stderr(predicate::str::contains("not-a-hex"));
 }
 
 #[test]
