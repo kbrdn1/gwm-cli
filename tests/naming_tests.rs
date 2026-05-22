@@ -2,6 +2,20 @@ use gwm::config::{BranchType, WorktreeConfig};
 use gwm::naming::{default_branch_types, kebab, parse_branch, BranchSpec, BRANCH_TYPES};
 
 #[test]
+fn naming_regexes_compile_at_first_use() {
+  // Issue #97. The three regexes in `src/naming.rs` are lifted to
+  // module statics via `LazyLock`. The `expect("static <NAME> compiles")`
+  // inside each `LazyLock::new` makes a developer-introduced regex typo
+  // surface AT THIS TEST instead of in an unrelated downstream call
+  // site (which historically used `Regex::new(...).unwrap()` per call
+  // and would have shifted the blast radius to the user). Each line
+  // below forces the init path for one of the three statics — a panic
+  // here is a developer bug in `naming.rs`, not a user error.
+  let _ = BranchSpec::new("feat", "1", "x"); // ISSUE_RE + DESC_RE via validate
+  let _ = parse_branch("feat/#1-x"); // BRANCH_RE via parse_branch
+}
+
+#[test]
 fn kebab_normalizes() {
   assert_eq!(kebab("Hello World"), "hello-world");
   assert_eq!(kebab("Foo_BAR  baz"), "foo-bar-baz");

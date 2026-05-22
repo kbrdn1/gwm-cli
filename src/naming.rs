@@ -1,6 +1,26 @@
 use crate::config::{expand_placeholders, BranchType, WorktreeConfig};
 use crate::error::{GwmError, Result};
 use regex::Regex;
+use std::sync::LazyLock;
+
+/// Compile-time literal regexes lifted to module statics so each branch
+/// validation / parse runs at ~50ns instead of recompiling the pattern
+/// per call (issue #97). `LazyLock::new` defers the work until the
+/// first access; `expect` is acceptable here because the input is a
+/// hard-coded literal — a regex-compile failure would be a developer
+/// bug caught by the test suite at first use, not a user-facing error
+/// path the CLAUDE.md "no unwrap on user paths" rule targets.
+///
+/// `ISSUE_RE` pins the digits-only contract on issue numbers (no
+/// scientific notation, no hex, no leading zeros stripped). `DESC_RE`
+/// matches the post-`kebab` shape — leading alphanumeric, then a tail
+/// of alphanumeric / dash. `BRANCH_RE` captures the three segments of
+/// a gwm-style branch (`<type>/#<issue>-<desc>`) in one pass.
+static ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\d+$").expect("static ISSUE_RE compiles"));
+static DESC_RE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"^[a-z0-9][a-z0-9-]*$").expect("static DESC_RE compiles"));
+static BRANCH_RE: LazyLock<Regex> =
+  LazyLock::new(|| Regex::new(r"^([a-z]+)/#(\d+)-([a-z0-9-]+)$").expect("static BRANCH_RE compiles"));
 
 /// Built-in branch types — the fallback when `.gwm.toml` carries no
 /// `[[branch_types]]` block. Kept as a `&[(&str, &str)]` const so the
@@ -86,10 +106,10 @@ impl BranchSpec {
         allowed: names,
       });
     }
-    if !Regex::new(r"^\d+$").unwrap().is_match(&self.issue) {
+    if !ISSUE_RE.is_match(&self.issue) {
       return Err(GwmError::InvalidIssue(self.issue.clone()));
     }
-    if !Regex::new(r"^[a-z0-9][a-z0-9-]*$").unwrap().is_match(&self.desc) {
+    if !DESC_RE.is_match(&self.desc) {
       return Err(GwmError::InvalidDescription(self.desc.clone()));
     }
     Ok(())
@@ -124,8 +144,7 @@ impl BranchSpec {
 
 /// Try to recover a BranchSpec from a free-form branch name like `feat/#123-my-desc`.
 pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
-  let re = Regex::new(r"^([a-z]+)/#(\d+)-([a-z0-9-]+)$").ok()?;
-  let cap = re.captures(branch)?;
+  let cap = BRANCH_RE.captures(branch)?;
   Some(BranchSpec {
     type_: cap.get(1)?.as_str().to_string(),
     issue: cap.get(2)?.as_str().to_string(),
