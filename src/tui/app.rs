@@ -1,4 +1,5 @@
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+use super::state::create_form::CreateForm;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -89,13 +90,6 @@ pub enum GitHubFetchState<T> {
   Error(String),
 }
 
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Field {
-  Type,
-  Issue,
-  Desc,
-}
-
 pub struct App {
   pub repo: Repository,
   pub repo_name: String,
@@ -108,10 +102,9 @@ pub struct App {
   pub delete_branch_on_remove: bool,
 
   // Create form state
-  pub create_field: Field,
-  pub create_type_index: usize,
-  pub create_issue: String,
-  pub create_desc: String,
+  /// Create-worktree overlay state (extracted per #123). Holds field
+  /// focus, type index, and the issue/slug input buffers.
+  pub create_form: CreateForm,
   /// Branch types displayed in the create-form picker. Resolved once at
   /// startup from [`Config::resolved_branch_types`] so the picker
   /// honours any `[[branch_types]]` override in `.gwm.toml` without
@@ -217,10 +210,7 @@ impl App {
       view: View::List,
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
-      create_field: Field::Type,
-      create_type_index: 0,
-      create_issue: String::new(),
-      create_desc: String::new(),
+      create_form: CreateForm::new(),
       branch_types,
       report: None,
       sidebar_open: true,
@@ -623,77 +613,44 @@ impl App {
 
   pub fn enter_create(&mut self) {
     self.view = View::Create;
-    self.create_field = Field::Type;
-    self.create_type_index = 0;
-    self.create_issue.clear();
-    self.create_desc.clear();
+    self.create_form.reset();
     self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
   }
 
   pub fn create_next_field(&mut self) {
-    self.create_field = match self.create_field {
-      Field::Type => Field::Issue,
-      Field::Issue => Field::Desc,
-      Field::Desc => Field::Type,
-    };
+    self.create_form.next_field();
   }
 
   pub fn create_prev_field(&mut self) {
-    self.create_field = match self.create_field {
-      Field::Type => Field::Desc,
-      Field::Issue => Field::Type,
-      Field::Desc => Field::Issue,
-    };
+    self.create_form.prev_field();
   }
 
   pub fn create_next_type(&mut self) {
-    if self.branch_types.is_empty() {
-      return;
-    }
-    self.create_type_index = (self.create_type_index + 1) % self.branch_types.len();
+    self.create_form.next_type(self.branch_types.len());
   }
 
   pub fn create_prev_type(&mut self) {
-    if self.branch_types.is_empty() {
-      return;
-    }
-    if self.create_type_index == 0 {
-      self.create_type_index = self.branch_types.len() - 1;
-    } else {
-      self.create_type_index -= 1;
-    }
+    self.create_form.prev_type(self.branch_types.len());
   }
 
   pub fn create_push_char(&mut self, c: char) {
-    match self.create_field {
-      Field::Issue if c.is_ascii_digit() => self.create_issue.push(c),
-      Field::Desc => self.create_desc.push(c),
-      _ => {}
-    }
+    self.create_form.push_char(c);
   }
 
   pub fn create_pop_char(&mut self) {
-    match self.create_field {
-      Field::Issue => {
-        self.create_issue.pop();
-      }
-      Field::Desc => {
-        self.create_desc.pop();
-      }
-      _ => {}
-    }
+    self.create_form.pop_char();
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
     let type_ = self
       .branch_types
-      .get(self.create_type_index)
+      .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
     let spec = BranchSpec::new_with_types(
       type_,
-      self.create_issue.clone(),
-      self.create_desc.clone(),
+      self.create_form.issue.clone(),
+      self.create_form.desc.clone(),
       &self.branch_types,
     )?;
     let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
