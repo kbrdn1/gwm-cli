@@ -2,6 +2,7 @@ use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::link_prompt::LinkPrompt;
+use super::state::sidebar::SidebarState;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -111,19 +112,17 @@ pub struct App {
   // Bootstrap report
   pub report: Option<BootstrapReport>,
 
-  // Sidebar (git preview) state
-  pub sidebar_open: bool,
-  pub sidebar_focused: bool,
-  pub sidebar_scroll: u16,
-  /// Cache of the rendered sidebar sections, keyed by the selected worktree
-  /// path. Prevents re-shelling `git log` / `git status` on every TUI redraw
-  /// — they only run when the selection actually changes (or on explicit
-  /// refresh).
-  pub sidebar_cache: Option<(PathBuf, super::ui::SidebarSections)>,
-  /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
-  /// Keeps scrolling clamped to the rendered content height so the user can't
-  /// scroll the panel entirely off-screen.
-  pub sidebar_max_scroll: u16,
+  /// Sidebar (git preview) panel state (extracted per #127). Owns the
+  /// visibility / focus flags, the scroll offset + max bound, and the
+  /// cached pre-rendered sections keyed by the selected worktree's
+  /// path. The cache prevents re-shelling `git log` / `git status` on
+  /// every TUI redraw — they only run when the selection actually
+  /// changes (via [`SidebarState::on_navigation`]) or on explicit
+  /// refresh ([`SidebarState::invalidate`]). The renderer publishes
+  /// `sidebar.max_scroll` every frame against the actual rendered
+  /// Recent Commits height; [`SidebarState::scroll_down`] clamps
+  /// against it.
+  pub sidebar: SidebarState,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   pub pending_g: bool,
@@ -210,11 +209,7 @@ impl App {
       create_form: CreateForm::new(),
       branch_types,
       report: None,
-      sidebar_open: true,
-      sidebar_focused: false,
-      sidebar_scroll: 0,
-      sidebar_cache: None,
-      sidebar_max_scroll: 0,
+      sidebar: SidebarState::new(),
       pending_g: false,
       filter: FilterState::new(),
       picker_mode: false,
@@ -307,14 +302,17 @@ impl App {
   }
 
   /// Drop the cached sidebar content. Call on any change that may have altered
-  /// what the sidebar shows: worktree list refresh, selection change, etc.
+  /// what the sidebar shows: worktree list refresh, filter narrowing, etc.
+  /// Pure delegate over [`SidebarState::invalidate`]; navigation-driven
+  /// invalidation goes through [`Self::on_navigation`] which also resets
+  /// the scroll offset.
   pub fn invalidate_sidebar_cache(&mut self) {
-    self.sidebar_cache = None;
+    self.sidebar.invalidate();
   }
 
   pub fn next(&mut self) {
     // Route navigation to the sidebar when it's focused; otherwise move the list.
-    if self.sidebar_open && self.sidebar_focused {
+    if self.sidebar.open && self.sidebar.focused {
       self.sidebar_scroll_down();
       return;
     }
@@ -327,13 +325,13 @@ impl App {
       None => 0,
     };
     self.list_state.select(Some(i));
-    self.sidebar_scroll = 0;
+    self.sidebar.scroll = 0;
     self.invalidate_sidebar_cache();
     self.refresh_link();
   }
 
   pub fn prev(&mut self) {
-    if self.sidebar_open && self.sidebar_focused {
+    if self.sidebar.open && self.sidebar.focused {
       self.sidebar_scroll_up();
       return;
     }
@@ -346,7 +344,7 @@ impl App {
       Some(i) => i - 1,
     };
     self.list_state.select(Some(i));
-    self.sidebar_scroll = 0;
+    self.sidebar.scroll = 0;
     self.invalidate_sidebar_cache();
     self.refresh_link();
   }
@@ -357,7 +355,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(0));
-      self.sidebar_scroll = 0;
+      self.sidebar.scroll = 0;
       self.invalidate_sidebar_cache();
       self.refresh_link();
     }
@@ -367,7 +365,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(len - 1));
-      self.sidebar_scroll = 0;
+      self.sidebar.scroll = 0;
       self.invalidate_sidebar_cache();
       self.refresh_link();
     }
@@ -390,12 +388,8 @@ impl App {
   // ---- Sidebar ------------------------------------------------------------
 
   pub fn toggle_sidebar(&mut self) {
-    self.sidebar_open = !self.sidebar_open;
-    if !self.sidebar_open {
-      // Hidden sidebar can't be focused.
-      self.sidebar_focused = false;
-    }
-    self.status = if self.sidebar_open {
+    self.sidebar.toggle_open();
+    self.status = if self.sidebar.open {
       "sidebar shown".into()
     } else {
       "sidebar hidden".into()
@@ -403,21 +397,15 @@ impl App {
   }
 
   pub fn toggle_focus(&mut self) {
-    if !self.sidebar_open {
-      return;
-    }
-    self.sidebar_focused = !self.sidebar_focused;
+    self.sidebar.toggle_focus();
   }
 
   pub fn sidebar_scroll_down(&mut self) {
-    // Clamp to the last-known content max so scrolling stops at the bottom
-    // instead of running off-screen. The renderer keeps `sidebar_max_scroll`
-    // up to date with the visible content height.
-    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1).min(self.sidebar_max_scroll);
+    self.sidebar.scroll_down();
   }
 
   pub fn sidebar_scroll_up(&mut self) {
-    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+    self.sidebar.scroll_up();
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -800,7 +788,7 @@ impl App {
   /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
     self.filter.open();
-    self.sidebar_focused = false;
+    self.sidebar.focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
   }
