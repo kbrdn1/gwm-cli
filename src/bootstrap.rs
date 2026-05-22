@@ -1,6 +1,7 @@
 use crate::config::{BootstrapConfig, CommandStep, Config, CopyStep, Guard, NoSymlink};
 use crate::error::{GwmError, Result};
 use regex::Regex;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -34,8 +35,13 @@ pub fn run(ctx: &BootstrapCtx<'_>) -> Result<BootstrapReport> {
   let mut report = BootstrapReport { steps: Vec::new() };
   let bs = &ctx.config.bootstrap;
 
-  run_copies(ctx, bs, &mut report);
+  // Order matters (issue #93): `run_no_symlinks` strips any declared
+  // symlinked targets BEFORE `run_copies` opens them for writing.
+  // Reversed, an attacker-planted symlink at a copy destination
+  // redirects the `fs::copy` write outside the worktree — a write-
+  // anywhere primitive triggered by `gwm bootstrap` alone.
   run_no_symlinks(ctx, bs, &mut report);
+  run_copies(ctx, bs, &mut report);
   run_commands(ctx, bs, &mut report);
 
   Ok(report)
@@ -47,13 +53,52 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     let src = ctx.main_repo.join(&step.from);
     let dst = ctx.worktree.join(&step.to);
 
-    if dst.exists() {
-      report.steps.push(StepResult {
-        label,
-        status: StepStatus::Skipped,
-        detail: "destination already exists, leaving it alone".into(),
-      });
-      continue;
+    // Single stat on `dst` (issue #93): `symlink_metadata` does NOT
+    // follow symlinks (unlike `Path::exists`), and reusing one result
+    // for every branch below avoids the TOCTOU window of a second stat.
+    //
+    //   Ok(symlink)     → Failed (defence in depth — symlinks at a
+    //                     declared copy dst are suspicious enough to
+    //                     surface, even when [[bootstrap.no_symlink]]
+    //                     didn't list them)
+    //   Ok(other)       → Skipped (regular file or directory already
+    //                     populated — leave the user's edits alone)
+    //   Err(NotFound)   → fall through to the copy / fallback chain
+    //   Err(other)      → Failed (permission / IO error masking the
+    //                     filesystem state — never silently swallow)
+    match std::fs::symlink_metadata(&dst) {
+      Ok(meta) if meta.file_type().is_symlink() => {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Failed,
+          detail: format!(
+            "refusing to copy: destination {} is a symlink — would redirect the write outside the worktree (issue #93)",
+            dst.display()
+          ),
+        });
+        continue;
+      }
+      Ok(_) => {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Skipped,
+          detail: "destination already exists, leaving it alone".into(),
+        });
+        continue;
+      }
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+      Err(e) => {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Failed,
+          detail: format!(
+            "failed to stat destination {}: {} — refusing to proceed with unknown filesystem state",
+            dst.display(),
+            e
+          ),
+        });
+        continue;
+      }
     }
 
     if !src.exists() {
@@ -82,8 +127,8 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
       continue;
     }
 
-    match std::fs::copy(&src, &dst) {
-      Ok(_) => report.steps.push(StepResult {
+    match copy_no_follow(&src, &dst) {
+      Ok(()) => report.steps.push(StepResult {
         label,
         status: StepStatus::Ok,
         detail: format!("copied from {}", src.display()),
@@ -104,8 +149,8 @@ fn resolve_missing(step: &CopyStep, bs: &BootstrapConfig, dst: &Path) -> Option<
       // Find a fallback content keyed by the `to` file basename or step.fallback alias.
       let key = key_from_to(&step.to);
       let fb = bs.fallback.get(&key)?;
-      match std::fs::write(dst, &fb.content) {
-        Ok(_) => Some(StepResult {
+      match write_no_follow(dst, fb.content.as_bytes()) {
+        Ok(()) => Some(StepResult {
           label: String::new(),
           status: StepStatus::Warning,
           detail: format!("source missing — wrote inline fallback to {}", dst.display()),
@@ -162,7 +207,7 @@ fn handle_guard_match(
       let example_rel = guard.example_file.as_deref().unwrap_or(".env.example");
       let example_src = ctx.main_repo.join(example_rel);
       if example_src.exists() {
-        match std::fs::copy(&example_src, dst) {
+        match copy_no_follow(&example_src, dst) {
           Ok(_) => report.steps.push(StepResult {
             label: label.into(),
             status: StepStatus::Warning,
@@ -485,4 +530,67 @@ fn trailing_lines(s: &str, n: usize) -> String {
   let lines: Vec<&str> = s.lines().collect();
   let start = lines.len().saturating_sub(n);
   lines[start..].join("\n")
+}
+
+// --------------------------------------------------------------------------
+// TOCTOU-safe write primitives (issue #93 follow-up)
+// --------------------------------------------------------------------------
+//
+// The `symlink_metadata` guard at the top of `run_copies` closes the
+// "symlink already exists at copy time" attack vector, but a small
+// race window remained between the stat and the subsequent `fs::copy`
+// (or `fs::write` in the inline-fallback path): an attacker with
+// concurrent write access to the worktree could plant a symlink in
+// the µs after the stat, redirecting the write through `O_CREAT |
+// O_TRUNC` (both of which follow symlinks). These helpers close that
+// window by opening `dst` with `O_NOFOLLOW | O_CREAT | O_EXCL` so
+// that:
+//
+//   - A symlink at `dst` causes `open()` to fail with `ELOOP`.
+//   - Any other entry (regular file, dir, FIFO) causes `EEXIST` —
+//     `create_new(true)` maps to `O_EXCL` on unix and `CREATE_NEW`
+//     on Windows.
+//   - On a fresh `dst`, the file is created and truncated atomically
+//     under the same fd handed to `write_all`.
+//
+// On non-unix platforms `O_NOFOLLOW` is unavailable in `std`; the
+// `create_new(true)` half still holds, and the bug class flagged on
+// #93 is unix-only anyway (Windows symlinks require admin and aren't
+// the realistic attack surface for `gwm bootstrap`).
+
+/// Copy the contents of `src` into `dst` as a fresh regular file,
+/// refusing to follow any symlink at `dst`. `src` permissions are
+/// preserved on unix.
+///
+/// Returns the standard `io::Result` so callers can format the errno
+/// into their step report without losing the error kind. The `dst`
+/// is opened with `O_NOFOLLOW | O_CREAT | O_EXCL` on unix; a symlink
+/// (broken or live) at `dst` triggers `ELOOP`, anything else
+/// pre-existing triggers `EEXIST`.
+pub fn copy_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+  let mut buf = Vec::new();
+  std::fs::File::open(src)?.read_to_end(&mut buf)?;
+  #[cfg(unix)]
+  let src_perms = std::fs::metadata(src)?.permissions();
+  write_no_follow(dst, &buf)?;
+  #[cfg(unix)]
+  std::fs::set_permissions(dst, src_perms)?;
+  Ok(())
+}
+
+/// Companion to [`copy_no_follow`] for callers that already hold the
+/// payload in memory (e.g. the inline-fallback branch in
+/// [`resolve_missing`]). Same TOCTOU-closing semantics: `dst` must
+/// not exist and must not be a symlink, or `open()` fails.
+pub fn write_no_follow(dst: &Path, bytes: &[u8]) -> std::io::Result<()> {
+  let mut opts = std::fs::OpenOptions::new();
+  opts.write(true).create_new(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    opts.custom_flags(libc::O_NOFOLLOW);
+  }
+  let mut f = opts.open(dst)?;
+  f.write_all(bytes)?;
+  Ok(())
 }

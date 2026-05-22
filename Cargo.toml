@@ -39,6 +39,12 @@ nucleo-matcher = "0.3"
 shell-words = "1"
 tempfile = "3"
 
+# Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
+# primitives (issue #93). Already pulled in transitively by git2 /
+# dirs / cc, declared here for explicit use in `src/bootstrap.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
