@@ -1,6 +1,7 @@
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
+use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
@@ -15,6 +16,13 @@ use git2::Repository;
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+// Re-export the GitHub fetch state enum at its historical path
+// (`tui::app::GitHubFetchState`) so callers that imported it from
+// `tui::app` (or via `tui::GitHubFetchState` before the new
+// `state::github_fetch` re-export landed) keep compiling. The owning
+// module is now `tui::state::github_fetch` — see #128.
+pub use super::state::github_fetch::GitHubFetchState;
 
 /// Spawnable launcher plan handed to the event loop by
 /// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
@@ -78,15 +86,6 @@ pub enum OpenTarget {
 /// (`gwm::tui::LinkPromptStage`) keeps compiling without callers
 /// learning the new module path.
 pub use super::state::link_prompt::LinkPromptStage;
-
-/// State of a background GitHub fetch (issue or PR).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitHubFetchState<T> {
-  Idle,
-  Loading,
-  Loaded(T),
-  Error(String),
-}
 
 pub struct App {
   pub repo: Repository,
@@ -157,12 +156,17 @@ pub struct App {
   pub confirm: ConfirmModal,
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
-  /// Cached link for the currently selected worktree's branch.
-  link: BranchLink,
-  /// Repo slug parsed from `origin` (None when no GitHub remote).
-  link_slug: Option<String>,
-  issue_state: GitHubFetchState<IssueStatus>,
-  pr_state: GitHubFetchState<PrStatus>,
+  /// GitHub fetch state slice — owns the cached link for the currently
+  /// selected worktree's branch, the repo slug parsed from `origin`,
+  /// and the per-target `gh issue view` / `gh pr view` fetch state
+  /// (extracted per #128, part 6/6 of the `App` god-struct
+  /// decomposition #102). The orchestrator methods below
+  /// (`refresh_link`, `refresh_github_status`,
+  /// `apply_issue_fetch_result`, `apply_pr_fetch_result`) are thin
+  /// wrappers that compose the status-bar copy + drive the actual
+  /// `gh` shell-outs; the pure state machine lives on
+  /// `GitHubFetch`.
+  pub github: GitHubFetch,
   /// Two-stage issue/PR link prompt state (extracted per #126). Owns
   /// the stage + target + digit buffer; the orchestrator wraps the
   /// transitions to update the status bar and shell out to
@@ -216,10 +220,7 @@ impl App {
       picker_result: None,
       picker_should_exit: false,
       confirm: ConfirmModal::new(),
-      link: BranchLink::empty(),
-      link_slug: None,
-      issue_state: GitHubFetchState::Idle,
-      pr_state: GitHubFetchState::Idle,
+      github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
     };
@@ -974,59 +975,77 @@ impl App {
   /// Re-read the link for the currently selected worktree's branch. Also
   /// re-resolves the repo slug from the origin remote, and resets any
   /// previously cached GitHub fetch state since it would refer to a
-  /// different (issue, pr) tuple now.
+  /// different (issue, pr) tuple now. Delegates to
+  /// [`GitHubFetch::refresh_link`] for the pure state mutation; the
+  /// branch resolution still lives here because it depends on
+  /// `App`'s `selected()` + `repo.head()` fallback.
   pub fn refresh_link(&mut self) {
-    self.link = self.read_selected_link().unwrap_or_else(BranchLink::empty);
-    self.link_slug = github::repo_slug(&self.repo).ok();
-    self.issue_state = GitHubFetchState::Idle;
-    self.pr_state = GitHubFetchState::Idle;
+    let branch = self.selected_branch_name();
+    self.github.refresh_link(&self.repo, branch.as_deref());
   }
 
-  fn read_selected_link(&self) -> Option<BranchLink> {
-    let branch = self
+  fn selected_branch_name(&self) -> Option<String> {
+    self
       .selected()
       .and_then(|w| w.branch.clone())
-      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))?;
-    github::read_link(&self.repo, &branch).ok()
+      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
   }
 
   pub fn current_link(&self) -> &BranchLink {
-    &self.link
+    &self.github.link
   }
 
   pub fn current_slug(&self) -> Option<&str> {
-    self.link_slug.as_deref()
+    self.github.link_slug.as_deref()
   }
 
   pub fn issue_fetch_state(&self) -> &GitHubFetchState<IssueStatus> {
-    &self.issue_state
+    &self.github.issue_state
   }
 
   pub fn pr_fetch_state(&self) -> &GitHubFetchState<PrStatus> {
-    &self.pr_state
+    &self.github.pr_state
   }
 
   /// Drive the issue/PR fetch synchronously. Called from the event loop
-  /// when the user presses `R`. Sets states to `Loading` first so the UI
-  /// can flag the in-flight state, then runs the fetches.
+  /// when the user presses `F` (refresh GitHub status). Routes through
+  /// the [`GitHubFetch`] dedupe layer: `request(key)` claims the
+  /// per-target inflight slot and flips `*_state = Loading`, the
+  /// shell-out runs, `complete_{issue,pr}` clears the slot and
+  /// stamps the result.
+  ///
+  /// This call path is the explicit user-initiated refresh, so it
+  /// flushes the cache via [`GitHubFetch::invalidate`] first — the
+  /// user just asked for fresh data, a `HitCache` short-circuit here
+  /// would be a bug. The inflight slot is still claimed via
+  /// `request`, so any concurrent visit-driven `request` for the
+  /// same key dedupes correctly (load-bearing payoff of #128).
   pub fn refresh_github_status(&mut self) {
-    if self.link.issue.is_none() && self.link.pr.is_none() {
+    use super::state::github_fetch::{FetchAction, FetchKey};
+
+    if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = "nothing linked — press L to link an issue or PR".into();
       return;
     }
-    let Some(slug) = self.link_slug.clone() else {
+    let Some(slug) = self.github.link_slug.clone() else {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };
-    if let Some(n) = self.link.issue {
-      self.issue_state = GitHubFetchState::Loading;
-      let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
-      self.apply_issue_fetch_result(r);
+    // Explicit user-initiated refresh: flush the cache before the
+    // request loop so `request` returns `Spawn` instead of `HitCache`
+    // for previously-loaded keys.
+    self.github.invalidate();
+    if let Some(n) = self.github.link.issue {
+      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
+        let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
+        self.github.complete_issue(n, r);
+      }
     }
-    if let Some(n) = self.link.pr {
-      self.pr_state = GitHubFetchState::Loading;
-      let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
-      self.apply_pr_fetch_result(r);
+    if let Some(n) = self.github.link.pr {
+      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
+        let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
+        self.github.complete_pr(n, r);
+      }
     }
     self.report_github_refresh_status();
   }
@@ -1036,8 +1055,8 @@ impl App {
   /// that always printing "refreshed" misled users when one of the
   /// fetches had failed.
   pub fn report_github_refresh_status(&mut self) {
-    let issue_err = matches!(self.issue_state, GitHubFetchState::Error(_));
-    let pr_err = matches!(self.pr_state, GitHubFetchState::Error(_));
+    let issue_err = matches!(self.github.issue_state, GitHubFetchState::Error(_));
+    let pr_err = matches!(self.github.pr_state, GitHubFetchState::Error(_));
     self.status = match (issue_err, pr_err) {
       (false, false) => "github status refreshed".into(),
       (true, false) => format!(
@@ -1054,31 +1073,25 @@ impl App {
   }
 
   fn issue_error_message(&self) -> Option<String> {
-    match &self.issue_state {
+    match &self.github.issue_state {
       GitHubFetchState::Error(e) => Some(e.clone()),
       _ => None,
     }
   }
 
   fn pr_error_message(&self) -> Option<String> {
-    match &self.pr_state {
+    match &self.github.pr_state {
       GitHubFetchState::Error(e) => Some(e.clone()),
       _ => None,
     }
   }
 
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
-    self.issue_state = match r {
-      Ok(s) => GitHubFetchState::Loaded(s),
-      Err(e) => GitHubFetchState::Error(e),
-    };
+    self.github.apply_issue_result(r);
   }
 
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
-    self.pr_state = match r {
-      Ok(s) => GitHubFetchState::Loaded(s),
-      Err(e) => GitHubFetchState::Error(e),
-    };
+    self.github.apply_pr_result(r);
   }
 
   // ---- Open menu ----------------------------------------------------------
@@ -1098,19 +1111,19 @@ impl App {
   /// when the link is missing (the status bar carries the explanation).
   pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
     self.view = View::List;
-    let Some(slug) = self.link_slug.clone() else {
+    let Some(slug) = self.github.link_slug.clone() else {
       self.status = "no GitHub remote — cannot build URL".into();
       return None;
     };
     let url = match target {
-      LinkTarget::Issue => match self.link.issue {
+      LinkTarget::Issue => match self.github.link.issue {
         Some(n) => github::issue_url(&slug, n),
         None => {
           self.status = "no issue linked — press L to link one".into();
           return None;
         }
       },
-      LinkTarget::Pr => match self.link.pr {
+      LinkTarget::Pr => match self.github.link.pr {
         Some(n) => github::pr_url(&slug, n),
         None => {
           self.status = "no PR linked — press L to link one".into();
