@@ -1121,12 +1121,8 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
     print_labels_diff(&slug, &declared, &diff);
     let pruned = if prune { n_extra } else { 0 };
     println!(
-      "would create {}, update {}, leave {} untouched, prune {}, ignore {} extra-on-remote",
-      n_create,
-      n_update,
-      n_match,
-      pruned,
-      n_extra.saturating_sub(pruned),
+      "{}",
+      labels::diff_dry_run_line(n_create, n_update, n_match, n_extra, pruned)
     );
     return Ok(());
   }
@@ -1196,10 +1192,7 @@ fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDif
   for remote in &diff.extra_on_remote {
     println!("  - {:<20} (on remote, not in config)", remote.name);
   }
-  println!(
-    "summary: {} create · {} update · {} match · {} extra-on-remote",
-    n_create, n_update, n_match, n_extra
-  );
+  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
 }
 
 // ---- Milestones commands (issue #82) ------------------------------------
@@ -1244,12 +1237,8 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
     print_milestones_diff(&slug, &declared, &diff);
     let pruned = if prune { n_extra } else { 0 };
     println!(
-      "would create {}, update {}, leave {} untouched, prune {}, ignore {} extra-on-remote",
-      n_create,
-      n_update,
-      n_match,
-      pruned,
-      n_extra.saturating_sub(pruned),
+      "{}",
+      labels::diff_dry_run_line(n_create, n_update, n_match, n_extra, pruned)
     );
     return Ok(());
   }
@@ -1326,10 +1315,7 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
   for remote in &diff.extra_on_remote {
     println!("  - {:<20} (#{} on remote, not in config)", remote.title, remote.number);
   }
-  println!(
-    "summary: {} create · {} update · {} match · {} extra-on-remote",
-    n_create, n_update, n_match, n_extra
-  );
+  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
 }
 
 // ---- Trust ledger commands (issue #95) ----------------------------------

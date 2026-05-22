@@ -375,3 +375,29 @@ fn diff_summary_counts_match_buckets() {
   assert_eq!(m, 3);
   assert_eq!(x, 1);
 }
+
+// ---- Issue #106: generic summary_line helper ----------------------------
+//
+// `LabelDiff` and `MilestoneDiff` are structurally identical for the
+// purposes of the one-line summaries printed by `gwm labels push` /
+// `gwm milestones push`. The helper below pins the canonical shape so
+// `cli.rs` can call a single function from two sites.
+
+#[test]
+fn diff_summary_line_renders_canonical_shape() {
+  use gwm::labels::diff_summary_line;
+  let s = diff_summary_line(2, 1, 3, 1);
+  assert_eq!(s, "summary: 2 create · 1 update · 3 match · 1 extra-on-remote");
+}
+
+#[test]
+fn diff_dry_run_line_uses_label_kind_for_grammar() {
+  use gwm::labels::diff_dry_run_line;
+  // Caller picks the noun ("label" or "milestone") so the helper
+  // can be shared across modules without losing the singular noun.
+  let s = diff_dry_run_line(2, 1, 3, 1, 0);
+  assert_eq!(
+    s,
+    "would create 2, update 1, leave 3 untouched, prune 0, ignore 1 extra-on-remote"
+  );
+}
