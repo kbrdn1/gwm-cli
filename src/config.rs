@@ -380,7 +380,7 @@ impl Config {
   /// `StepStatus::Failed` step and refuses the copy, instead of
   /// silently dropping the pattern as the original #96 fail-open
   /// did.
-  fn validate_bootstrap_guards(&self) -> Result<()> {
+  pub fn validate_bootstrap_guards(&self) -> Result<()> {
     for g in &self.bootstrap.guard {
       for pat in &g.deny_patterns {
         regex::Regex::new(pat).map_err(|e| {

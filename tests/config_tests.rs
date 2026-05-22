@@ -1251,6 +1251,40 @@ on_match      = "abort"
 }
 
 #[test]
+fn validate_bootstrap_guards_directly_rejects_invalid_pattern_without_load_for_repo() {
+  // Direct unit test on the helper, called against a `Config` value
+  // built in code without ever touching `Config::load_for_repo`.
+  // Locks in the helper's contract independently of the loader, so a
+  // future refactor that removes the call site from `load_for_repo`
+  // doesn't go unnoticed by only the integration suite.
+  use gwm::config::{BootstrapConfig, Guard};
+  let mut cfg = Config::default();
+  cfg.bootstrap = BootstrapConfig {
+    guard: vec![Guard {
+      name: "direct-test".into(),
+      deny_patterns: vec!["(unclosed-group".into()],
+      on_match: "abort".into(),
+      example_file: None,
+    }],
+    ..Default::default()
+  };
+  let err = cfg
+    .validate_bootstrap_guards()
+    .expect_err("direct call on hand-built Config with invalid pattern must Err");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("direct-test") && msg.contains("(unclosed-group"),
+    "error must name guard + pattern, got: {}",
+    msg
+  );
+
+  // Positive control: clear the bad pattern and the same helper must
+  // accept the Config, even with a non-trivial pattern set.
+  cfg.bootstrap.guard[0].deny_patterns = vec!["AKIA[0-9A-Z]{16}".into(), "(?i)secret".into()];
+  cfg.validate_bootstrap_guards().expect("valid patterns must pass direct validation");
+}
+
+#[test]
 fn load_rejects_invalid_deny_pattern_in_second_guard() {
   // The validator must walk every guard, not just the first one. A
   // bad pattern in guard #2 must still surface at load.
