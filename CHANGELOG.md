@@ -10,7 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet — next entries land here once a new feature / fix / chore is merged into `dev`._
+### Added
+
+- **Declarative GitHub labels** ([#81](https://github.com/kbrdn1/gwm-cli/issues/81)). New `[[labels]]` table in `.gwm.toml` declares the desired GitHub label set (name + optional description / color), plus a new subcommand:
+  - `gwm labels list` — print the resolved set and the diff against the `origin` remote (`+ create`, `~ update`, `= match`, `- extra-on-remote`).
+  - `gwm labels push` — apply the diff via `gh label create --force`. `--dry-run` shows the plan without contacting the remote; `--prune` opt-in deletes labels on the remote that aren't declared in config (destructive, off by default); `--random-colors` picks a random pastel for labels with no `color` field instead of the default deterministic-hash colour.
+  - Colour resolution: when `color` is omitted, gwm derives a deterministic pastel from an FNV-1a hash of the name, so the same label gets the same colour across repos. Hex normalisation accepts `#D73A4A` and round-trips to `d73a4a`.
+  - Without a `[[labels]]` block in `.gwm.toml`, both subcommands are no-ops (`0 labels declared, nothing to push`) and never shell out to `gh` — safe to run in repos that haven't opted in.
+  - Requires `gh` on `$PATH` (already a soft dependency of `gwm status`).
 
 ## Past releases
 

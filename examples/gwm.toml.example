@@ -180,3 +180,45 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # mode = "shell"
 # shell_cmd = ""        # leave empty to read $SHELL
 # editor_cmd = "hx"     # example: Helix
+
+# --- declarative GitHub labels (issue #81) ----------------------------------
+# Each `[[labels]]` entry declares a GitHub label that `gwm labels push` will
+# create or update on the `origin` remote via `gh label create --force`.
+#
+# Fields:
+#   name        — required. The GitHub label name. Whitespace is preserved
+#                 verbatim (e.g. "good first issue"); use `name = "…"`, not a
+#                 bare key.
+#   description — optional. Empty / absent means "leave the description
+#                 untouched on the remote".
+#   color       — optional. 6-hex lowercase (no leading `#` — `#d73a4a` is
+#                 accepted and normalised). When omitted, gwm picks a
+#                 deterministic pastel from a hash of the name so the same
+#                 label gets the same colour across repos. `--random-colors`
+#                 overrides this to a random pastel per push.
+#
+# Workflow:
+#   gwm labels list       — print the resolved set + the diff against remote
+#                           (`+ create`, `~ update`, `= match`, `- extra`).
+#   gwm labels push       — apply the diff (create + update).
+#   gwm labels push --dry-run  — same as list, but with an explicit summary
+#                                line ("would create 2, update 1, …").
+#   gwm labels push --prune    — also delete labels on the remote that are
+#                                NOT in `[[labels]]`. Destructive, off by
+#                                default.
+#
+# Requires `gh` on $PATH (the same soft dependency as `gwm status`).
+#
+# [[labels]]
+# name = "bug"
+# description = "Something isn't working"
+# color = "d73a4a"
+#
+# [[labels]]
+# name = "enhancement"
+# description = "New feature or request"
+#
+# [[labels]]
+# name = "good first issue"
+# description = "Good for newcomers"
+# color = "7057ff"
