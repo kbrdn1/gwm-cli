@@ -34,10 +34,13 @@
 use crate::tui::ui::SidebarSections;
 use std::path::PathBuf;
 
-/// Pure sidebar state. `Default` matches the previous `App::new_at`
-/// initialisation verbatim (open + unfocused + zero scroll + cold cache)
-/// so the extraction is observably a no-op for the renderer.
-#[derive(Debug, Default)]
+/// Pure sidebar state. Use [`Self::new`] (or the [`Default`] impl below)
+/// to get the initial state that matches the previous `App::new_at`
+/// behaviour (open + unfocused + zero scroll + cold cache) — the
+/// `#[derive(Default)]` Copilot would normally synthesise here would
+/// set `open = false`, which contradicts both the doc above and
+/// `new()`. The hand-written `Default` keeps the contract single-sourced.
+#[derive(Debug)]
 pub struct SidebarState {
   /// `true` when the sidebar is visible. The renderer additionally
   /// hides it on narrow terminals (`area.width < SIDEBAR_MIN_WIDTH`)
@@ -64,6 +67,12 @@ pub struct SidebarState {
   /// and filter narrowing (`App::filter_push_char` /
   /// `filter_pop_char`).
   pub cache: Option<(PathBuf, SidebarSections)>,
+}
+
+impl Default for SidebarState {
+  fn default() -> Self {
+    Self::new()
+  }
 }
 
 impl SidebarState {

@@ -331,20 +331,21 @@ fn refresh_invalidates_sidebar_cache() {
 }
 
 #[test]
-fn on_navigation_collapses_the_scroll_invalidate_link_triple() {
+fn on_navigation_resets_scroll_and_invalidates_sidebar_cache() {
   // Pre-extraction, `next`, `prev`, `first`, `last` each repeated the
   // verbatim triple `sidebar_scroll = 0; invalidate_sidebar_cache();
-  // refresh_link();`. Issue #127 collapses the first two into
-  // `SidebarState::on_navigation` and the whole triple into
-  // `App::on_navigation`, so the next time a navigation method needs
-  // the reset, it goes through this single entry point.
+  // refresh_link();`. Issue #127 collapses the first two pieces into
+  // `SidebarState::on_navigation` and pairs them with `refresh_link()`
+  // inside `App::on_navigation`, so the next time a navigation method
+  // needs the reset, it goes through this single entry point.
   //
-  // Asserts the observable contract: scroll back to 0, cache dropped,
-  // and `link` re-resolved (we can only prove the call ran by
-  // observing the cache flush — `refresh_link()` rebuilds the link
-  // off the selected worktree, and we don't have a GitHub remote in
-  // the test fixture, so the link stays `BranchLink::empty()` either
-  // way; the cache flush is the load-bearing observable).
+  // This integration test asserts the two observable pieces from this
+  // fixture: scroll resets to 0, cache drops. `refresh_link()` also
+  // runs (it's wired into `App::on_navigation`) but can't be observed
+  // here — the test repo has no GitHub remote, so the link stays
+  // `BranchLink::empty()` whether `refresh_link()` ran or not. The
+  // unit tests for `SidebarState::on_navigation` cover the sub-struct
+  // half of the contract in isolation.
   let (_dir, mut app) = make_app();
   app.sidebar.scroll = 7;
   app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
