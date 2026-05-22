@@ -6,6 +6,7 @@ mod common;
 use assert_cmd::Command;
 use common::init_repo;
 use predicates::prelude::*;
+use std::path::Path;
 
 #[test]
 fn help_prints_subcommands() {
@@ -925,4 +926,399 @@ fn status_on_branch_with_no_link_reports_no_link() {
     .assert()
     .success()
     .stdout(predicate::str::contains("no link"));
+}
+
+// --------------------------------------------------------------------------
+// Issue #101 — E2E tests for the mutating subcommands (init / create / remove)
+// --------------------------------------------------------------------------
+//
+// `cli_binary.rs` historically asserted only `--help` output and a handful
+// of read-only error paths. The three subcommands that mutate state on
+// disk (`init`, `create`, `remove`) had no end-to-end coverage, which let
+// orchestration-layer regressions (e.g. issues #98 and #99) slip through
+// unit-test review. The block below is the canonical CI signal for the
+// CLI surface of those subcommands.
+//
+// Worktree-creating tests pin `[worktree].base` to a `tempfile::TempDir`
+// so the test runner never writes under `~/cc-worktree/...`. The branch
+// pattern is left at its default (`{type}/#{issue}-{desc}`) to exercise
+// the production naming pipeline.
+
+// --- init ---------------------------------------------------------------
+
+#[test]
+fn init_writes_gwm_toml_with_expected_sections() {
+  // The default `.gwm.toml` shipped by `gwm init` is sourced from
+  // `examples/gwm.toml.example`. Asserting on the exact contents would
+  // couple the test to the example file character-for-character; we pin
+  // the structural markers a user (and the rest of the codebase) relies
+  // on: a `[worktree]` block with the documented placeholders, a
+  // `[[bootstrap.copy]]` entry, and a `[[bootstrap.guard]]` entry. The
+  // stdout line names the written path so users discover where it landed.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+  assert!(!cfg_path.exists(), "precondition: no .gwm.toml in fresh repo");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("init")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(".gwm.toml"));
+
+  assert!(cfg_path.exists(), "gwm init must write .gwm.toml on disk");
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(body.contains("[worktree]"), "missing [worktree] section");
+  assert!(
+    body.contains("base = ") && body.contains("{home}") && body.contains("{repo}"),
+    "missing documented placeholders in [worktree].base"
+  );
+  assert!(
+    body.contains("[[bootstrap.copy]]"),
+    "missing [[bootstrap.copy]] template"
+  );
+  assert!(
+    body.contains("[[bootstrap.guard]]"),
+    "missing [[bootstrap.guard]] template"
+  );
+}
+
+#[test]
+fn init_refuses_to_overwrite_existing_gwm_toml() {
+  // Idempotency contract: a second `gwm init` on a repo that already
+  // carries a `.gwm.toml` must bail out instead of silently clobbering
+  // user edits. The error must name the file so the user knows what to
+  // remove if they truly want to start over.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+  std::fs::write(&cfg_path, "# user edits\n[worktree]\nbase = \"/custom\"\n").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("init")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(".gwm.toml"));
+
+  // Original contents must survive the failed init.
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(
+    body.contains("# user edits"),
+    "failed gwm init must not modify the existing .gwm.toml"
+  );
+}
+
+#[test]
+fn init_outside_git_repo_fails() {
+  // `cmd_init` calls `discover_repo` first — the standard `NotInGitRepo`
+  // error wins so the user is steered to `git init` before configuring.
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("init")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- create -------------------------------------------------------------
+
+/// Write a `.gwm.toml` that redirects `[worktree].base` into the test's
+/// own `TempDir`. Returns the resolved base path so the test can assert
+/// on the created worktree directory directly. Bootstrap is left empty
+/// by default so `gwm create` runs in its minimal shape; tests that
+/// need bootstrap behaviour layer a second `.gwm.toml` write on top.
+fn write_test_config(repo_root: &Path, base: &Path) {
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = base.display(),
+  );
+  std::fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+#[test]
+fn create_adds_worktree_dir_and_branch_at_head() {
+  // The full happy path through `cmd_create`:
+  //   1. The dirname rendered from `[worktree].path_pattern` lands on disk
+  //      under the configured `[worktree].base`.
+  //   2. The branch rendered from `[worktree].branch_pattern` is created
+  //      as a local ref pointing at the seed commit (`init_repo`'s HEAD).
+  //   3. `branch.<name>.gwm-base` is recorded as the parent's short name
+  //      (the launcher fallback chain depends on it — issue #75).
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+  let head_oid = repo.head().unwrap().target().unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "42", "tui-search"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#42-tui-search"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  let wt_dir = base.path().join("feat-42-tui-search");
+  assert!(wt_dir.exists(), "worktree dir must exist on disk");
+  assert!(wt_dir.join(".git").exists(), "worktree must carry a .git pointer");
+
+  let branch = repo
+    .find_branch("feat/#42-tui-search", git2::BranchType::Local)
+    .expect("branch must be created");
+  let branch_oid = branch.into_reference().target().unwrap();
+  assert_eq!(branch_oid, head_oid, "fresh branch must point at the main HEAD commit");
+
+  let cfg = repo.config().unwrap();
+  let recorded_base = cfg.get_string("branch.feat/#42-tui-search.gwm-base").unwrap();
+  assert_eq!(
+    recorded_base, "main",
+    "gwm create must record the parent ref for the launcher fallback chain"
+  );
+}
+
+#[test]
+fn create_runs_bootstrap_by_default() {
+  // A `[[bootstrap.copy]]` step lands its destination file inside the
+  // freshly-created worktree iff bootstrap actually ran. The source file
+  // lives in the main repo's workdir; we pin a unique marker string so a
+  // false positive (e.g. a cargo lock file collision) can't pass the
+  // assertion by accident.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let marker = "GWM_E2E_BOOTSTRAP_MARKER_v1";
+  std::fs::write(dir.path().join("seed.env"), marker).unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.copy]]
+from = "seed.env"
+to = "seed.env"
+required = true
+"#,
+    base = base.path().display(),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "7", "bootstrap-on"])
+    .assert()
+    .success();
+
+  let copied = base.path().join("feat-7-bootstrap-on").join("seed.env");
+  assert!(copied.exists(), "bootstrap copy step did not run");
+  let body = std::fs::read_to_string(&copied).unwrap();
+  assert!(
+    body.contains(marker),
+    "bootstrap copy must duplicate the source file content"
+  );
+}
+
+#[test]
+fn create_skips_bootstrap_with_no_bootstrap_flag() {
+  // Same scaffolding as the previous test, but `--no-bootstrap` must
+  // short-circuit `bootstrap::run` BEFORE the copy step. The worktree
+  // directory still appears (the branch + worktree are created first),
+  // but `seed.env` is absent inside it. The stdout breadcrumb that
+  // `cmd_create` prints when it skips makes the intent observable.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  std::fs::write(dir.path().join("seed.env"), "marker").unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.copy]]
+from = "seed.env"
+to = "seed.env"
+required = true
+"#,
+    base = base.path().display(),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "8", "bootstrap-off", "--no-bootstrap"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped bootstrap"));
+
+  let wt_dir = base.path().join("feat-8-bootstrap-off");
+  assert!(wt_dir.exists(), "worktree dir must still be created");
+  assert!(
+    !wt_dir.join("seed.env").exists(),
+    "--no-bootstrap must prevent the copy step from running"
+  );
+}
+
+#[test]
+fn create_rejects_unknown_branch_type() {
+  // `BranchSpec::validate` rejects branch types outside the built-in /
+  // configured allow-list before any filesystem operation. We must see
+  // the failure surface on stderr with the offending value so the user
+  // can grep their command history without re-running.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "blarg", "9", "nope"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("blarg"));
+
+  assert!(
+    !base.path().join("blarg-9-nope").exists(),
+    "no worktree dir may be created when branch-type validation fails"
+  );
+}
+
+#[test]
+fn create_rejects_non_digit_issue() {
+  // Issue must be digits-only — `abc` is rejected by `BranchSpec::new`.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "abc", "thing"])
+    .assert()
+    .failure();
+}
+
+#[test]
+fn create_subcommand_outside_git_repo_fails() {
+  // The repo-bound contract: outside any git repo the standard
+  // `NotInGitRepo` error wins, no worktree is touched. Named with the
+  // `_subcommand_` infix to avoid colliding with the historical
+  // `create_outside_git_repo_fails` test (line ~327) that — despite the
+  // name — actually exercises `gwm list`.
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "1", "x"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- remove -------------------------------------------------------------
+
+#[test]
+fn remove_deletes_worktree_dir_and_keeps_branch_by_default() {
+  // Without `--delete-branch`, `gwm remove` is the inverse of `gwm
+  // create` for the on-disk directory only: the worktree dir disappears
+  // (and so does its admin entry under `.git/worktrees/`), but the
+  // local branch survives so the user can re-create the worktree from
+  // it later. Stdout names the dir for visual confirmation.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "10", "remove-me"])
+    .assert()
+    .success();
+  let wt_dir = base.path().join("feat-10-remove-me");
+  assert!(wt_dir.exists());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "remove-me"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("removed"));
+
+  assert!(!wt_dir.exists(), "remove must delete the worktree directory");
+  assert!(
+    repo.find_branch("feat/#10-remove-me", git2::BranchType::Local).is_ok(),
+    "remove without --delete-branch must keep the local branch"
+  );
+}
+
+#[test]
+fn remove_with_delete_branch_drops_branch() {
+  // The `--delete-branch` flag drops the local branch in the same
+  // command. The stdout breadcrumb names both the worktree dir and the
+  // branch so two destructive operations are surfaced explicitly.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "11", "drop-branch"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "drop-branch", "--delete-branch"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("branch"))
+    .stdout(predicate::str::contains("deleted"));
+
+  assert!(
+    repo
+      .find_branch("feat/#11-drop-branch", git2::BranchType::Local)
+      .is_err(),
+    "--delete-branch must remove the local branch ref"
+  );
+}
+
+#[test]
+fn remove_unknown_pattern_fails() {
+  // Fuzzy lookup must error loudly when nothing matches — silently
+  // doing nothing would mask a user typo and leave them wondering why
+  // their worktree is still around.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "ghost"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn remove_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
 }
