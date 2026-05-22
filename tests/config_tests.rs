@@ -953,3 +953,179 @@ description = "Work in progress"
   let names: Vec<_> = cfg.branch_types.iter().map(|t| t.name.as_str()).collect();
   assert_eq!(names, vec!["feat", "migration", "wip"]);
 }
+
+// --------------------------------------------------------------------------
+// Issue #94 — bootstrap path-traversal closure: load-time validation.
+// --------------------------------------------------------------------------
+//
+// `CopyStep.to`, `Guard.example_file`, and `FallbackContent.target` are
+// joined onto `ctx.worktree` / `ctx.main_repo` and passed to `fs::copy` /
+// `write_no_follow`. A `..` segment or an absolute path slips past `join`
+// and lands outside the worktree tree — write-anywhere primitive on
+// `step.to`, read-anywhere primitive on `example_file`. Reject both at
+// config-load so the violation surfaces with the TOML key in the error
+// rather than mid-bootstrap.
+
+#[test]
+fn load_rejects_traversal_in_copy_to() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.copy]]
+from = "Cargo.toml"
+to   = "../../OWNED"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("traversal must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("bootstrap.copy") && msg.contains("to"),
+    "error must name the offending field, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("..") || msg.contains("traversal") || msg.contains("outside"),
+    "error must explain WHY (../traversal/outside), got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_rejects_absolute_path_in_copy_to() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.copy]]
+from = ".env"
+to   = "/etc/passwd"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("absolute path must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("bootstrap.copy") && msg.contains("to"),
+    "error must name the offending field, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("absolute") || msg.contains("/etc/passwd"),
+    "error must explain absolute path rejection, got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_rejects_traversal_in_guard_example_file() {
+  // The example_file is joined onto ctx.main_repo and read to seed the
+  // worktree dst when a guard trips. `../sensitive` reads files outside
+  // the main repo — info-leak primitive — and must be rejected.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name           = "leaky"
+deny_patterns  = ["amazonaws"]
+on_match       = "seed-from-example"
+example_file   = "../../../etc/passwd"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("traversal in example_file must be rejected");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("guard") && msg.contains("example_file"),
+    "error must name the offending field, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("..") || msg.contains("traversal") || msg.contains("outside"),
+    "error must explain WHY, got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_rejects_absolute_path_in_guard_example_file() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name           = "leaky"
+deny_patterns  = ["amazonaws"]
+on_match       = "seed-from-example"
+example_file   = "/etc/shadow"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("absolute example_file must be rejected");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("guard") && msg.contains("example_file"),
+    "error must name the offending field, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("absolute") || msg.contains("/etc/shadow"),
+    "error must explain absolute path rejection, got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_rejects_traversal_in_fallback_target() {
+  // FallbackContent.target is declarative today (the runtime uses the
+  // joined dst from CopyStep.to instead), but a `..` segment there
+  // still misrepresents intent and is rejected for consistency with
+  // the other two fields.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[bootstrap.fallback.env_testing]
+target  = "../../OWNED"
+content = "FOO=bar"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("traversal in fallback.target must be rejected");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("fallback") && msg.contains("target"),
+    "error must name the offending field, got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_accepts_benign_relative_paths_in_bootstrap_fields() {
+  // Positive control: a fully relative path with no `..` and no
+  // leading slash must continue to load. This is the canonical shape
+  // documented in `examples/gwm.toml.example`.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.copy]]
+from = ".env"
+to   = "config/local.env"
+
+[[bootstrap.guard]]
+name          = "no-aws"
+deny_patterns = ["amazonaws\\.com"]
+on_match      = "seed-from-example"
+example_file  = "config/local.env.example"
+
+[bootstrap.fallback.env_testing]
+target  = "config/local.env"
+content = "X=1"
+"#,
+  )
+  .unwrap();
+  Config::load_for_repo(dir.path()).expect("benign relative paths must load");
+}
