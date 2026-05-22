@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- ♻️ **`naming.rs` regexes are now module-level `LazyLock<Regex>` statics** ([#97](https://github.com/kbrdn1/gwm-cli/issues/97)). The three patterns powering `BranchSpec::validate_against` and `parse_branch` (`^\d+$` for issue numbers, `^[a-z0-9][a-z0-9-]*$` for kebab-shaped descriptions, `^([a-z]+)/#(\d+)-([a-z0-9-]+)$` for the full branch shape) used to recompile per call via `Regex::new(...).unwrap()` / `.ok()?`. The TUI sidebar refresh and `gwm doctor` both call `parse_branch` once per worktree — O(N) wasted compilations on a busy repo. The static-lift drops the per-call cost from ~5µs to ~50ns. Compile-time literals can take `expect("static <NAME> compiles")`: a regex-compile failure on a hard-coded pattern is a developer bug caught by the new `naming_regexes_compile_at_first_use` test, not a user-facing error. CLAUDE.md "no `unwrap` on user-facing paths" rule respected — three `.unwrap()` call sites removed.
+
 ### Added
 
 - **Declarative GitHub labels** ([#81](https://github.com/kbrdn1/gwm-cli/issues/81)). New `[[labels]]` table in `.gwm.toml` declares the desired GitHub label set (name + optional description / color), plus a new subcommand:
