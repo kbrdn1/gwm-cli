@@ -53,6 +53,20 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     let src = ctx.main_repo.join(&step.from);
     let dst = ctx.worktree.join(&step.to);
 
+    // Runtime defence-in-depth (issue #94): `Config::load_for_repo`
+    // rejects `..` / absolute paths in `step.to` at load time, but
+    // callers can hand `bootstrap::run` a `Config` value built by
+    // hand (test harnesses, future programmatic embeds). Re-check
+    // here that `dst` resolves under the worktree before any write.
+    if let Err(e) = ensure_within(ctx.worktree, &dst) {
+      report.steps.push(StepResult {
+        label,
+        status: StepStatus::Failed,
+        detail: format!("destination outside worktree: {}", e),
+      });
+      continue;
+    }
+
     // Single stat on `dst` (issue #93): `symlink_metadata` does NOT
     // follow symlinks (unlike `Path::exists`), and reusing one result
     // for every branch below avoids the TOCTOU window of a second stat.
@@ -206,6 +220,22 @@ fn handle_guard_match(
     "seed-from-example" => {
       let example_rel = guard.example_file.as_deref().unwrap_or(".env.example");
       let example_src = ctx.main_repo.join(example_rel);
+      // Runtime defence-in-depth (issue #94): refuse to read an
+      // example_file that resolves outside `ctx.main_repo`. Mirrors
+      // the dst-side check in `run_copies`; the `Config` loader
+      // rejects this at load time, this branch covers hand-built
+      // configs.
+      if let Err(e) = ensure_within(ctx.main_repo, &example_src) {
+        report.steps.push(StepResult {
+          label: label.into(),
+          status: StepStatus::Failed,
+          detail: format!(
+            "guard '{}' example_file outside main repo: {} (traversal rejected, issue #94)",
+            guard.name, e
+          ),
+        });
+        return;
+      }
       if example_src.exists() {
         match copy_no_follow(&example_src, dst) {
           Ok(_) => report.steps.push(StepResult {
@@ -575,6 +605,49 @@ pub fn copy_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
   write_no_follow(dst, &buf)?;
   #[cfg(unix)]
   std::fs::set_permissions(dst, src_perms)?;
+  Ok(())
+}
+
+/// Verify that `path` resolves to a location inside `base` (issue
+/// #94). Both `path` and `base` may contain symlinks; both are
+/// canonicalized so the check operates on real on-disk identities.
+///
+/// `path` typically does NOT exist yet (it's a freshly-computed copy
+/// destination), so we canonicalize the deepest existing ancestor
+/// and check that the canonical ancestor still falls under
+/// `base.canonicalize()`. This catches `..` traversal, absolute
+/// paths, and symlinks in intermediate components that redirect
+/// outside `base`.
+///
+/// Returns `Err` with `ErrorKind::InvalidInput` when the path
+/// escapes `base`; surrounding code surfaces the error verbatim
+/// in the step report so the user knows which field went wrong.
+fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
+  let base_canon = base.canonicalize()?;
+  let mut anc: &Path = path;
+  let canon_anc = loop {
+    if let Ok(c) = anc.canonicalize() {
+      break c;
+    }
+    match anc.parent() {
+      Some(p) if !p.as_os_str().is_empty() => anc = p,
+      _ => {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          format!("cannot resolve any ancestor of {:?}", path),
+        ));
+      }
+    }
+  };
+  if !canon_anc.starts_with(&base_canon) {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::InvalidInput,
+      format!(
+        "{:?} resolves outside {:?} — '..' traversal or absolute path rejected (issue #94)",
+        path, base_canon
+      ),
+    ));
+  }
   Ok(())
 }
 
