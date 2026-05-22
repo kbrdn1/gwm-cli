@@ -422,8 +422,9 @@ fn add_silently_attaches_to_pre_existing_stale_branch() {
   let (_dir, repo) = init_repo();
   let sig = Signature::now("gwm-test", "gwm@test").unwrap();
 
-  // Create a "stale" branch ahead of main, then move HEAD forward so the
-  // branch and HEAD point at different commits.
+  // Pin a "stale" branch at the current main commit, then advance main
+  // by one commit so the branch ends up BEHIND HEAD. The point is just
+  // to make HEAD and the branch tip resolve to different OIDs.
   let main_oid = repo.head().unwrap().target().unwrap();
   let main_commit = repo.find_commit(main_oid).unwrap();
   let stale_branch = repo.branch("feat/#99-stale", &main_commit, false).unwrap();

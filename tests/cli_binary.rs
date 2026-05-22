@@ -1027,8 +1027,9 @@ fn init_outside_git_repo_fails() {
 // --- create -------------------------------------------------------------
 
 /// Write a `.gwm.toml` that redirects `[worktree].base` into the test's
-/// own `TempDir`. Returns the resolved base path so the test can assert
-/// on the created worktree directory directly. Bootstrap is left empty
+/// own `TempDir`. The caller already owns the `base` path (it's the
+/// `TempDir` they passed in), so the test asserts on `base.join(...)`
+/// directly — this helper has no return value. Bootstrap is left empty
 /// by default so `gwm create` runs in its minimal shape; tests that
 /// need bootstrap behaviour layer a second `.gwm.toml` write on top.
 fn write_test_config(repo_root: &Path, base: &Path) {
