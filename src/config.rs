@@ -27,6 +27,13 @@ pub struct Config {
   /// push time when omitted.
   #[serde(default)]
   pub labels: Vec<LabelConfig>,
+  /// `[[milestones]]` table — declarative GitHub milestone set pushed
+  /// via `gwm milestones push`. Issue #82. Same opt-in / no-op shape
+  /// as `labels`. `due_on` accepts both `YYYY-MM-DD` (the milestones
+  /// module materialises end-of-day UTC) and full RFC3339; `state`
+  /// defaults to `"open"` when omitted.
+  #[serde(default)]
+  pub milestones: Vec<MilestoneConfig>,
   /// `[[branch_types]]` — per-repo override of the allowed branch types.
   /// Empty (the default) means the built-in list from `naming::BRANCH_TYPES`
   /// is used, keeping zero-friction for existing repos. See
@@ -50,6 +57,25 @@ pub struct LabelConfig {
   /// config load for unrelated subcommands.
   #[serde(default)]
   pub color: Option<String>,
+}
+
+/// One `[[milestones]]` entry. `title` is the GitHub key (unique per
+/// repo). `description`, `due_on`, and `state` are optional; the
+/// milestones module validates `due_on` (YYYY-MM-DD or RFC3339) and
+/// `state` (`"open"` | `"closed"`) at push time so a typo doesn't
+/// break unrelated subcommands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MilestoneConfig {
+  pub title: String,
+  #[serde(default)]
+  pub description: Option<String>,
+  /// Due date. Accepted forms: `YYYY-MM-DD` (treated as end-of-day
+  /// UTC at push time) or full RFC3339 (`2026-07-15T17:00:00Z`).
+  #[serde(default)]
+  pub due_on: Option<String>,
+  /// `"open"` (default) or `"closed"`. Validated at push time.
+  #[serde(default)]
+  pub state: Option<String>,
 }
 
 /// One entry of the `[[branch_types]]` table in `.gwm.toml`. The struct

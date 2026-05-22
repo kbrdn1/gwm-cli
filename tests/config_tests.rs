@@ -97,6 +97,101 @@ branch_pattern = "{type}/#{issue}-{desc}"
   assert!(cfg.labels.is_empty());
 }
 
+// --- Milestones section (issue #82) -------------------------------------
+
+#[test]
+fn milestones_default_is_empty() {
+  // Absent `[[milestones]]` block must resolve to an empty vec. Same
+  // "0 milestones declared, nothing to push" contract as labels.
+  let cfg = Config::default();
+  assert!(cfg.milestones.is_empty());
+}
+
+#[test]
+fn milestones_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[milestones]]
+title = "v0.7.0"
+description = "Configurability sprint"
+due_on = "2026-07-15"
+state = "open"
+
+[[milestones]]
+title = "v0.8.0"
+due_on = "2026-10-01T17:00:00Z"
+
+[[milestones]]
+title = "v0.6.0"
+state = "closed"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.milestones.len(), 3);
+
+  assert_eq!(cfg.milestones[0].title, "v0.7.0");
+  assert_eq!(cfg.milestones[0].description.as_deref(), Some("Configurability sprint"));
+  assert_eq!(cfg.milestones[0].due_on.as_deref(), Some("2026-07-15"));
+  assert_eq!(cfg.milestones[0].state.as_deref(), Some("open"));
+
+  assert_eq!(cfg.milestones[1].title, "v0.8.0");
+  assert_eq!(cfg.milestones[1].description, None);
+  // RFC3339 form round-trips verbatim — normalisation is the milestones
+  // module's job, not the config loader's.
+  assert_eq!(cfg.milestones[1].due_on.as_deref(), Some("2026-10-01T17:00:00Z"));
+  assert_eq!(cfg.milestones[1].state, None);
+
+  assert_eq!(cfg.milestones[2].title, "v0.6.0");
+  assert_eq!(cfg.milestones[2].state.as_deref(), Some("closed"));
+}
+
+#[test]
+fn milestones_section_minimal_only_title_is_valid() {
+  // `title` is the sole required field. `description`, `due_on`, and
+  // `state` are all optional; the module defaults `state` to "open"
+  // and leaves the others as None.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[milestones]]
+title = "Backlog"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.milestones.len(), 1);
+  assert_eq!(cfg.milestones[0].title, "Backlog");
+  assert_eq!(cfg.milestones[0].description, None);
+  assert_eq!(cfg.milestones[0].due_on, None);
+  assert_eq!(cfg.milestones[0].state, None);
+}
+
+#[test]
+fn milestones_section_absent_keeps_empty_vec() {
+  // Backwards-compatibility: a config with only `[worktree]` (no
+  // `[[milestones]]`) must resolve to an empty list.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[worktree]
+base = "/tmp/wt/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert!(cfg.milestones.is_empty());
+}
+
 #[test]
 fn defaults_are_sane() {
   let cfg = Config::default();

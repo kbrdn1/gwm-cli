@@ -10,6 +10,7 @@
 
 use crate::error::{GwmError, Result};
 use crate::labels::{LabelSpec, RemoteLabel};
+use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
@@ -507,6 +508,176 @@ pub fn push_label(slug: &str, spec: &LabelSpec) -> Result<()> {
 /// not in `.gwm.toml`.
 pub fn delete_label(slug: &str, name: &str) -> Result<()> {
   let argv = label_delete_argv(slug, name);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+// ---- Milestones (issue #82) ---------------------------------------------
+
+const MILESTONE_PER_PAGE: &str = "100";
+
+#[derive(Deserialize)]
+struct RawMilestone {
+  number: u64,
+  title: String,
+  /// Always present in the documented schema. Like `RawLabel2.color`
+  /// for labels, we deliberately do NOT mark this `#[serde(default)]`:
+  /// a contract change would surface as a hard parse error rather than
+  /// silently flagging every remote milestone as a state mismatch.
+  state: String,
+  #[serde(default)]
+  description: Option<String>,
+  #[serde(default)]
+  due_on: Option<String>,
+}
+
+/// Parse the JSON returned by `gh api repos/:owner/:repo/milestones?state=all`.
+/// Exposed publicly so unit tests can cover the contract without
+/// shelling out. The `state` field is mapped to the strict
+/// `MilestoneState` enum — an unknown value is a hard error rather
+/// than a silent third state on the diff side.
+pub fn parse_milestones_json(s: &str) -> Result<Vec<RemoteMilestone>> {
+  let raw: Vec<RawMilestone> =
+    serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse milestones json: {}", e)))?;
+  raw
+    .into_iter()
+    .map(|r| {
+      let state = match r.state.as_str() {
+        "open" => MilestoneState::Open,
+        "closed" => MilestoneState::Closed,
+        other => {
+          return Err(GwmError::Other(format!(
+            "milestone '{}' has unknown state '{}': expected 'open' or 'closed'",
+            r.title, other
+          )))
+        }
+      };
+      Ok(RemoteMilestone {
+        number: r.number,
+        title: r.title,
+        description: r.description,
+        due_on: r.due_on,
+        state,
+      })
+    })
+    .collect()
+}
+
+/// Argv for `gh api --paginate repos/<slug>/milestones?state=all&per_page=100`.
+///
+/// Two contract bits worth pinning:
+/// - `state=all` — without it, the default endpoint only lists `open`
+///   milestones and `gwm milestones push --prune` would silently
+///   leave closed ones in place.
+/// - `--paginate` — GitHub caps `per_page` at 100. Without paginating
+///   we'd diff against a truncated remote set for repos with more
+///   than 100 milestones, leading to bogus `create` rows and a
+///   dangerously confusing `--prune` (Copilot review on PR #92).
+pub fn milestone_list_argv(slug: &str) -> Vec<String> {
+  vec![
+    "api".into(),
+    "--paginate".into(),
+    format!("repos/{}/milestones?state=all&per_page={}", slug, MILESTONE_PER_PAGE),
+  ]
+}
+
+/// Argv for `gh api -X POST repos/<slug>/milestones -f title=… [-f
+/// description=…] [-f due_on=…] -f state=…`. Each optional field is
+/// omitted entirely when absent — `gh` would otherwise wipe the
+/// existing remote value.
+pub fn milestone_create_argv(slug: &str, spec: &MilestoneSpec) -> Vec<String> {
+  let mut argv = vec![
+    "api".into(),
+    "-X".into(),
+    "POST".into(),
+    format!("repos/{}/milestones", slug),
+    "-f".into(),
+    format!("title={}", spec.title),
+    "-f".into(),
+    format!("state={}", spec.state.as_str()),
+  ];
+  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("description={}", desc));
+  }
+  if let Some(due) = spec.due_on.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("due_on={}", due));
+  }
+  argv
+}
+
+/// Argv for `gh api -X PATCH repos/<slug>/milestones/<number> -f …`.
+/// Same omission rules as `milestone_create_argv`: absent optionals
+/// are skipped so the remote value isn't wiped.
+pub fn milestone_update_argv(slug: &str, number: u64, spec: &MilestoneSpec) -> Vec<String> {
+  let mut argv = vec![
+    "api".into(),
+    "-X".into(),
+    "PATCH".into(),
+    format!("repos/{}/milestones/{}", slug, number),
+    "-f".into(),
+    format!("title={}", spec.title),
+    "-f".into(),
+    format!("state={}", spec.state.as_str()),
+  ];
+  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("description={}", desc));
+  }
+  if let Some(due) = spec.due_on.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("due_on={}", due));
+  }
+  argv
+}
+
+/// Argv for `gh api -X DELETE repos/<slug>/milestones/<number>`.
+/// `gh api -X DELETE` is non-interactive by construction (no TTY
+/// confirm), so there's no `--yes` equivalent to add.
+pub fn milestone_delete_argv(slug: &str, number: u64) -> Vec<String> {
+  vec![
+    "api".into(),
+    "-X".into(),
+    "DELETE".into(),
+    format!("repos/{}/milestones/{}", slug, number),
+  ]
+}
+
+/// Run `gh api repos/<slug>/milestones?state=all` and parse the
+/// result. Returns an empty vec when the remote has no milestones.
+pub fn fetch_remote_milestones(slug: &str) -> Result<Vec<RemoteMilestone>> {
+  let argv = milestone_list_argv(slug);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  let stdout = run_gh(&args)?;
+  parse_milestones_json(&stdout)
+}
+
+/// Create one milestone upstream via `gh api -X POST`. Returns
+/// `Ok(())` — the caller already has the spec; we don't bother
+/// parsing the response back into a `RemoteMilestone`.
+pub fn create_milestone(slug: &str, spec: &MilestoneSpec) -> Result<()> {
+  let argv = milestone_create_argv(slug, spec);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Update one milestone upstream via `gh api -X PATCH`. `number` is
+/// the GitHub-issued identifier carried through `MilestoneUpdate`.
+pub fn update_milestone(slug: &str, number: u64, spec: &MilestoneSpec) -> Result<()> {
+  let argv = milestone_update_argv(slug, number, spec);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Delete one milestone on the remote via `gh api -X DELETE`. Used
+/// by `gwm milestones push --prune` for milestones declared on the
+/// remote but not in `.gwm.toml`.
+pub fn delete_milestone(slug: &str, number: u64) -> Result<()> {
+  let argv = milestone_delete_argv(slug, number);
   let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
   run_gh(&args)?;
   Ok(())

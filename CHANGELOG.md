@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Without a `[[labels]]` block in `.gwm.toml`, both subcommands are no-ops (`0 labels declared, nothing to push`) and never shell out to `gh` — safe to run in repos that haven't opted in.
   - Requires `gh` on `$PATH` (already a soft dependency of `gwm status`).
 - ✨ `[[branch_types]]` block in `.gwm.toml` overrides the built-in allowed branch types. Absent or empty block ⇒ historical defaults (`feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`); present ⇒ only the listed types are accepted by `gwm create`, the TUI create picker and `BranchSpec::validate()`. `gwm types` prints the resolved list with a `(source: built-in defaults | .gwm.toml)` footer and aligns columns on the longest name. Invalid-type errors now enumerate the repo-local allowed list verbatim instead of leaking the hardcoded set. Entries are validated at load time: `name` must be non-empty, match `^[a-z]+$`, and be unique. (#80)
+- **Declarative GitHub milestones** ([#82](https://github.com/kbrdn1/gwm-cli/issues/82)). New `[[milestones]]` table in `.gwm.toml` declares the desired GitHub milestone set (title + optional description / `due_on` / `state`), plus a new subcommand mirroring `gwm labels`:
+  - `gwm milestones list` — print the resolved set and the diff against the `origin` remote (`+ create`, `~ update`, `= match`, `- extra-on-remote`).
+  - `gwm milestones push` — apply the diff via `gh api repos/:owner/:repo/milestones` (POST for new entries, PATCH for updates). No native `gh milestone` subcommand exists, so we shell out to the REST API directly. `--dry-run` shows the plan without mutating the remote; `--prune` opt-in deletes milestones on the remote that aren't declared in config (destructive, off by default).
+  - `due_on` accepts both `YYYY-MM-DD` (materialised as end-of-day UTC, common-sense "due Friday" semantic) and full RFC3339 (`2026-07-15T17:00:00Z`, canonicalised to UTC `Z` so non-UTC offsets don't flip-flop the diff); `state` defaults to `"open"`, opt in to `"closed"` for archived sprints.
+  - Without a `[[milestones]]` block in `.gwm.toml`, both subcommands are no-ops (`0 milestones declared, nothing to push`) and never shell out to `gh` — same safe-by-default contract as labels.
+  - Requires `gh` on `$PATH`.
 
 ## Past releases
 

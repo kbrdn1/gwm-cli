@@ -246,3 +246,48 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # name = "good first issue"
 # description = "Good for newcomers"
 # color = "7057ff"
+
+# --- declarative GitHub milestones (issue #82) ------------------------------
+# Each `[[milestones]]` entry declares a GitHub milestone that `gwm
+# milestones push` will create or update on the `origin` remote via the
+# GitHub REST API (no native `gh milestone` subcommand exists).
+#
+# Fields:
+#   title       — required. The GitHub milestone title (unique per repo).
+#   description — optional. Empty / absent means "leave the description
+#                 untouched on the remote".
+#   due_on      — optional. Accepts `YYYY-MM-DD` (materialised as
+#                 23:59:59 UTC of that day — "due Friday" closes at end
+#                 of day, not midnight) or full RFC3339
+#                 (`2026-07-15T17:00:00Z`). Absent means no due date.
+#   state       — optional. `"open"` (default) or `"closed"`. Use
+#                 `"closed"` to archive a milestone declaratively.
+#
+# Workflow:
+#   gwm milestones list       — print the resolved set + the diff against
+#                               remote (`+ create`, `~ update`, `= match`,
+#                               `- extra`).
+#   gwm milestones push       — apply the diff (create + update).
+#   gwm milestones push --dry-run  — same as list, but with an explicit
+#                                    summary line ("would create 2,
+#                                    update 1, …").
+#   gwm milestones push --prune    — also delete milestones on the remote
+#                                    that are NOT in `[[milestones]]`.
+#                                    Destructive, off by default.
+#
+# Requires `gh` on $PATH (same soft dependency as `gwm labels` / `gwm
+# status`).
+#
+# [[milestones]]
+# title = "v0.7.0"
+# description = "Configurability sprint"
+# due_on = "2026-07-15"
+# state = "open"
+#
+# [[milestones]]
+# title = "v0.8.0"
+# due_on = "2026-10-01T17:00:00Z"
+#
+# [[milestones]]
+# title = "v0.6.0"
+# state = "closed"

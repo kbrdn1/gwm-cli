@@ -39,7 +39,9 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  open "))
     .stdout(predicate::str::contains("  status "))
     // Issue #81: declarative GitHub labels.
-    .stdout(predicate::str::contains("  labels "));
+    .stdout(predicate::str::contains("  labels "))
+    // Issue #82: declarative GitHub milestones.
+    .stdout(predicate::str::contains("  milestones "));
 }
 
 // --- labels (issue #81) -------------------------------------------------
@@ -132,6 +134,118 @@ color = "not-a-hex"
     .failure()
     .stderr(predicate::str::contains("bug"))
     .stderr(predicate::str::contains("not-a-hex"));
+}
+
+// --- milestones (issue #82) ---------------------------------------------
+
+#[test]
+fn milestones_help_lists_list_and_push() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["milestones", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("list"))
+    .stdout(predicate::str::contains("push"));
+}
+
+#[test]
+fn milestones_list_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn milestones_list_with_no_declared_is_a_no_op() {
+  // No `[[milestones]]` in .gwm.toml ⇒ don't shell out to `gh`. The
+  // test passes without `gh` on PATH — that's the whole point of the
+  // fast path.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 milestones declared"));
+}
+
+#[test]
+fn milestones_push_with_no_declared_is_a_no_op() {
+  // Same fast path as `list`. Push must not call `gh` when there's
+  // nothing to push.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "push"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 milestones declared"));
+}
+
+#[test]
+fn milestones_push_dry_run_with_no_declared_succeeds() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "push", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 milestones declared"));
+}
+
+#[test]
+fn milestones_list_surfaces_invalid_due_on_with_title() {
+  // A typo in `due_on` must be caught at resolve time with the
+  // milestone title in the error message — otherwise the user has to
+  // grep their config to find the offending entry.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[milestones]]
+title = "v0.7.0"
+due_on = "not-a-date"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("v0.7.0"));
+}
+
+#[test]
+fn milestones_list_surfaces_invalid_state_with_title() {
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[milestones]]
+title = "v0.7.0"
+state = "draft"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("v0.7.0"))
+    .stderr(predicate::str::contains("draft"));
 }
 
 #[test]
