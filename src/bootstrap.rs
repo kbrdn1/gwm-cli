@@ -643,7 +643,7 @@ fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
     return Err(std::io::Error::new(
       std::io::ErrorKind::InvalidInput,
       format!(
-        "{:?} resolves outside {:?} — '..' traversal or absolute path rejected (issue #94)",
+        "{:?} resolves outside {:?} — '..' traversal, absolute path, or symlinked intermediate component rejected (issue #94)",
         path, base_canon
       ),
     ));

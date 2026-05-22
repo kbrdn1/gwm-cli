@@ -1102,6 +1102,39 @@ content = "FOO=bar"
   );
 }
 
+// Issue #94 hardening surfaced by Copilot on PR #111: on Windows,
+// drive-relative inputs like `C:foo` are NOT absolute per
+// `Path::is_absolute()` but contain a `Component::Prefix` segment
+// that makes `PathBuf::join` discard the worktree base. Reject them
+// at load time. The test is gated to Windows because `Path::new` on
+// Unix never synthesises a `Prefix` component from such inputs.
+#[cfg(windows)]
+#[test]
+fn load_rejects_windows_drive_prefix_in_copy_to() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.copy]]
+from = ".env"
+to   = "C:foo"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("drive-prefixed path must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("bootstrap.copy") && msg.contains("to"),
+    "error must name the offending field, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("drive") || msg.contains("prefix") || msg.contains("C:foo"),
+    "error must explain Windows drive prefix rejection, got: {}",
+    msg
+  );
+}
+
 #[test]
 fn load_accepts_benign_relative_paths_in_bootstrap_fields() {
   // Positive control: a fully relative path with no `..` and no

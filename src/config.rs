@@ -544,9 +544,13 @@ fn default_skip_when_no_changes() -> bool {
   true
 }
 
-/// Reject empty strings, absolute paths and `..` traversal segments
-/// in bootstrap path fields (issue #94). The field name is woven into
-/// the error message so the user can pinpoint the offending TOML key.
+/// Reject empty strings, absolute paths, Windows drive prefixes and
+/// `..` traversal segments in bootstrap path fields (issue #94). The
+/// field name is woven into the error message so the user can
+/// pinpoint the offending TOML key. The wording stays neutral
+/// ("base directory") because callers use this helper for both
+/// `worktree`-relative (`copy.to`, `fallback.target`) and
+/// `main_repo`-relative (`guard.example_file`) fields.
 fn check_relative_no_traversal(value: &str, field: &str) -> Result<()> {
   if value.is_empty() {
     return Err(GwmError::Config(format!(
@@ -557,16 +561,29 @@ fn check_relative_no_traversal(value: &str, field: &str) -> Result<()> {
   let p = Path::new(value);
   if p.is_absolute() {
     return Err(GwmError::Config(format!(
-      "{}: {:?} is an absolute path — only relative paths under the worktree are allowed",
+      "{}: {:?} is an absolute path — only relative paths under the base directory are allowed",
       field, value
     )));
   }
+  // `Component::Prefix` covers Windows drive-relative paths like
+  // `C:foo` which are NOT absolute (per `Path::is_absolute`) yet
+  // make `PathBuf::join` drop the base. Unreachable on Unix, so
+  // this is a defence-in-depth rejection for Windows targets.
   for comp in p.components() {
-    if matches!(comp, std::path::Component::ParentDir) {
-      return Err(GwmError::Config(format!(
-        "{}: {:?} contains '..' traversal — only relative paths under the worktree are allowed",
-        field, value
-      )));
+    match comp {
+      std::path::Component::ParentDir => {
+        return Err(GwmError::Config(format!(
+          "{}: {:?} contains '..' traversal — only relative paths under the base directory are allowed",
+          field, value
+        )));
+      }
+      std::path::Component::Prefix(_) => {
+        return Err(GwmError::Config(format!(
+          "{}: {:?} contains a Windows drive prefix — only relative paths under the base directory are allowed",
+          field, value
+        )));
+      }
+      _ => {}
     }
   }
   Ok(())
