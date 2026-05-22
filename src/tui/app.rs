@@ -1,5 +1,6 @@
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::CreateForm;
+use super::state::filter::{fuzzy_match_indices, FilterState};
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -9,10 +10,6 @@ use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
-use nucleo_matcher::{
-  pattern::{CaseMatching, Normalization, Pattern},
-  Config as NucleoConfig, Matcher, Utf32Str,
-};
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -131,13 +128,14 @@ pub struct App {
   // Vim motion buffer: armed by first `g`, completed by the second.
   pub pending_g: bool,
 
-  // Inline fuzzy filter on the worktree list (issue #21).
-  // `filter_active` is true while the user is typing in the filter bar (`/`).
-  // `filter_query` carries the current pattern; when non-empty, the list view
-  // shows only matching worktrees ranked by `nucleo_matcher`. Esc clears the
-  // query, Enter confirms (sticky filter, focus returns to the list).
-  pub filter_active: bool,
-  pub filter_query: String,
+  // Inline fuzzy filter on the worktree list (issue #21, extracted per
+  // #124 with memoisation closing #104). The sub-struct owns the buffer
+  // (`query`), the typing-bar flag (`active`), and a cached indices vec
+  // so the 3–5 `tui/ui.rs` call sites per render frame don't each rerun
+  // the `nucleo_matcher` pass. `App::refresh` calls
+  // `self.filter.invalidate()` to drop the cache when `worktrees`
+  // changes; a worktrees-length mismatch auto-invalidates too.
+  pub filter: FilterState,
 
   // Picker mode (issue #22): `gwm switch` runs the TUI as a stripped-down
   // picker. Create / delete / bootstrap keys are inert; Enter records the
@@ -219,8 +217,7 @@ impl App {
       sidebar_cache: None,
       sidebar_max_scroll: 0,
       pending_g: false,
-      filter_active: false,
-      filter_query: String::new(),
+      filter: FilterState::new(),
       picker_mode: false,
       picker_result: None,
       picker_should_exit: false,
@@ -292,13 +289,19 @@ impl App {
   pub fn new_picker_at(start: Option<&Path>) -> Result<Self> {
     let mut app = Self::new_at(start)?;
     app.picker_mode = true;
-    app.filter_active = true;
+    app.filter.open();
     app.status = "switch picker — type to filter · enter selects · esc cancels".into();
     Ok(app)
   }
 
   pub fn refresh(&mut self) -> Result<()> {
     self.worktrees = worktree::list(&self.repo)?;
+    // The cached fuzzy-match indices reference the previous worktrees
+    // vec; drop them so the next render recomputes against the fresh
+    // list. (A length-change auto-invalidates too, but a refresh that
+    // produces a same-length vec with different contents would not —
+    // so the explicit flush is the safe play.)
+    self.filter.invalidate();
     // `clamp_selection_to_filter` re-resolves the link cache for us.
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
@@ -539,8 +542,15 @@ impl App {
     // The visible list is the filtered subset, so the table state's index is
     // into `filtered_indices()`, not the raw `worktrees` vec. Resolving the
     // selection means hopping through the filter map.
+    //
+    // `selected` keeps its `&self` signature so callers holding a
+    // shared borrow (e.g. `ui.rs` render path, `copy_path_to_status`)
+    // don't have to upgrade. `snapshot_indices` reads the cache when
+    // it's warm (which the per-frame render path guarantees, since
+    // the table renderer calls `filtered_indices` first) and falls
+    // back to a fresh compute when it isn't.
     let i = self.list_state.selected()?;
-    let filtered = self.filtered_indices();
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
     let original = *filtered.get(i)?;
     self.worktrees.get(original)
   }
@@ -792,7 +802,7 @@ impl App {
   /// table". Leaving the sidebar focused would make `j` / `k` scroll it
   /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
-    self.filter_active = true;
+    self.filter.open();
     self.sidebar_focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
@@ -801,19 +811,18 @@ impl App {
   /// Close the filter bar but keep the query: `Enter` confirms the current
   /// match set and returns the cursor to list navigation.
   pub fn exit_filter_keep(&mut self) {
-    self.filter_active = false;
-    self.status = if self.filter_query.is_empty() {
+    self.filter.close_keep();
+    self.status = if self.filter.query.is_empty() {
       "press ? for help".into()
     } else {
-      format!("filter sticky: {}", self.filter_query)
+      format!("filter sticky: {}", self.filter.query)
     };
   }
 
   /// Close the filter bar and clear the query: `Esc` returns to the full list.
   pub fn exit_filter_cancel(&mut self) {
-    let had_query = !self.filter_query.is_empty();
-    self.filter_active = false;
-    self.filter_query.clear();
+    let had_query = !self.filter.query.is_empty();
+    self.filter.close_cancel();
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = if had_query {
@@ -824,13 +833,15 @@ impl App {
   }
 
   pub fn filter_push_char(&mut self, c: char) {
-    self.filter_query.push(c);
+    self.filter.push_char(c);
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
   }
 
   pub fn filter_pop_char(&mut self) {
-    if self.filter_query.pop().is_some() {
+    let before = self.filter.query.len();
+    self.filter.pop_char();
+    if self.filter.query.len() != before {
       self.clamp_selection_to_filter();
       self.invalidate_sidebar_cache();
     }
@@ -843,22 +854,19 @@ impl App {
   ///   ranks exact/substring/prefix matches above subsequence matches).
   ///
   /// Score ties are broken by original index so output is stable.
-  pub fn filtered_indices(&self) -> Vec<usize> {
-    if self.filter_query.is_empty() {
-      return (0..self.worktrees.len()).collect();
-    }
-    let pattern = Pattern::parse(self.filter_query.as_str(), CaseMatching::Smart, Normalization::Smart);
-    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
-    let mut buf: Vec<char> = Vec::new();
-    let mut scored: Vec<(u32, usize)> = Vec::with_capacity(self.worktrees.len());
-    for (i, w) in self.worktrees.iter().enumerate() {
-      let hay = Utf32Str::new(&w.name, &mut buf);
-      if let Some(score) = pattern.score(hay, &mut matcher) {
-        scored.push((score, i));
-      }
-    }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().map(|(_, i)| i).collect()
+  ///
+  /// Memoised on `FilterState` since #124 / #104: the per-frame render
+  /// path calls this 3–5× (table height, visible rows, title hint,
+  /// footer counter, selection resolver), but the result only changes
+  /// when the query OR the worktrees vec changes. The cache holds the
+  /// previous result and the worktrees length it was computed against;
+  /// any buffer mutation (`push_char` / `pop_char` / `set_query` /
+  /// `clear`), an explicit `filter.invalidate()`, or a length change
+  /// invalidates it. `App::refresh` calls `invalidate` after replacing
+  /// `worktrees` so a same-length-different-contents refresh is also
+  /// caught.
+  pub fn filtered_indices(&mut self) -> &[usize] {
+    self.filter.filtered_indices(&self.worktrees, fuzzy_match_indices)
   }
 
   /// Reposition the selection so it stays inside the current filtered subset.
