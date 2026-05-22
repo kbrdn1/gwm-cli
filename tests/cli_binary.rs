@@ -42,7 +42,9 @@ fn help_prints_subcommands() {
     // Issue #81: declarative GitHub labels.
     .stdout(predicate::str::contains("  labels "))
     // Issue #82: declarative GitHub milestones.
-    .stdout(predicate::str::contains("  milestones "));
+    .stdout(predicate::str::contains("  milestones "))
+    // Issue #95: TOFU trust ledger.
+    .stdout(predicate::str::contains("  trust "));
 }
 
 // --- labels (issue #81) -------------------------------------------------
@@ -1180,6 +1182,10 @@ fn create_adds_worktree_dir_and_branch_at_head() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    // Issue #95: this test writes a `.gwm.toml` and runs `gwm
+    // create` non-interactively, so the TOFU prompt would block.
+    // Setting GWM_ALLOW_BOOTSTRAP=1 is the documented CI bypass.
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "42", "tui-search"])
     .assert()
     .success()
@@ -1234,6 +1240,10 @@ required = true
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    // Issue #95: bypass the TOFU prompt — the test's whole point
+    // is to assert that bootstrap.copy actually runs, which is
+    // gated behind the trust check.
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
     .args(["create", "feat", "7", "bootstrap-on"])
     .assert()
     .success();
@@ -1372,6 +1382,7 @@ fn remove_deletes_worktree_dir_and_keeps_branch_by_default() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1") // issue #95: TOFU bypass for the setup step
     .args(["create", "feat", "10", "remove-me"])
     .assert()
     .success();
@@ -1405,6 +1416,7 @@ fn remove_with_delete_branch_drops_branch() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1") // issue #95: TOFU bypass for the setup step
     .args(["create", "feat", "11", "drop-branch"])
     .assert()
     .success();
@@ -1451,4 +1463,343 @@ fn remove_outside_git_repo_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- trust ledger (issue #95) -------------------------------------------
+
+#[test]
+fn trust_help_lists_list_revoke_show() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["trust", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("list"))
+    .stdout(predicate::str::contains("revoke"))
+    .stdout(predicate::str::contains("show"));
+}
+
+#[test]
+fn trust_list_empty_prints_zero_entries() {
+  // Point GWM_TRUST_LEDGER at a freshly-created tempdir so we don't
+  // clobber the user's real ~/.config/gwm/trust.toml and so the test
+  // is hermetic on CI runners that have an empty $HOME.
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 entries in trust ledger"));
+}
+
+#[test]
+fn trust_show_when_absent_says_so() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("absent.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("file does not exist yet"));
+}
+
+#[test]
+fn trust_revoke_no_matching_origin_is_a_no_op() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "revoke", "git@github.com:foo/bar.git"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 entries matched"));
+}
+
+#[test]
+fn trust_list_show_revoke_round_trip() {
+  // Seed the ledger manually (we can't easily exercise the prompt
+  // path from assert_cmd), then verify list → show → revoke all
+  // reflect the same entry.
+  use std::fs;
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  fs::write(
+    &ledger,
+    r#"[[entries]]
+origin = "git@github.com:kbrdn1/gwm-cli.git"
+config_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+trusted_at = "2026-05-22T10:00:00Z"
+trusted_by = "kylian@laptop"
+"#,
+  )
+  .unwrap();
+
+  // list ----------------------------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("git@github.com:kbrdn1/gwm-cli.git"))
+    // Short sha (first 12) is what list renders.
+    .stdout(predicate::str::contains("deadbeefdead"));
+
+  // show prints the raw toml -------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("kylian@laptop"));
+
+  // revoke removes it --------------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "revoke", "git@github.com:kbrdn1/gwm-cli.git"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓ revoked 1"));
+
+  // and list is empty again --------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 entries"));
+}
+
+#[test]
+fn allow_bootstrap_flag_is_global_and_documented() {
+  // `--allow-bootstrap` is the CI bypass; if it ever stops being a
+  // global flag (e.g. accidentally scoped to one subcommand), the
+  // `gwm bootstrap --allow-bootstrap` invocation in user scripts
+  // silently fails. Pin it down at the help level.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--allow-bootstrap"))
+    .stdout(predicate::str::contains("--deny-bootstrap"));
+}
+
+#[test]
+fn create_without_trust_in_non_interactive_aborts_cleanly() {
+  // Black-box the TOFU gate at the CLI boundary: a fresh repo with
+  // a `.gwm.toml` carrying any bootstrap surface, run from a
+  // non-tty (assert_cmd's piped stdin), no `--allow-bootstrap`, no
+  // ledger entry → must abort with a clear message rather than
+  // silently running the bootstrap commands.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo trapped"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    // No `GWM_ALLOW_BOOTSTRAP` env, no flag → must abort.
+    .args(["create", "feat", "42", "trapped"])
+    .assert()
+    .failure()
+    .stderr(
+      predicate::str::contains("not in the trust ledger").or(predicate::str::contains("stdin is not interactive")),
+    );
+}
+
+#[test]
+fn create_with_allow_bootstrap_flag_bypasses_the_prompt() {
+  // The `--allow-bootstrap` escape hatch is what makes scripted /
+  // CI usage workable; this asserts the FLAG (not the env var)
+  // actually short-circuits the trust gate. The env-var path is
+  // covered by other tests that set GWM_ALLOW_BOOTSTRAP=1 — here
+  // we exercise the clap-level wiring so a future refactor that
+  // accidentally scopes the flag to one subcommand breaks loudly.
+  //
+  // `--no-bootstrap` is added so we don't actually shell out to
+  // anything — the test is about the trust gate, not the bootstrap
+  // step itself.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    // No env-var bypass — the flag must do the work on its own.
+    // `--allow-bootstrap` is a clap `global = true` flag declared on
+    // `Cli`, so it MUST appear before the subcommand on the argv.
+    .args(["--allow-bootstrap", "create", "feat", "42", "trapped", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // The ledger MUST still be empty — Allow mode bypasses without
+  // recording, so the next interactive run on the same machine
+  // re-prompts. That's the "don't pollute the user's ledger from CI"
+  // contract.
+  assert!(
+    !ledger.exists()
+      || std::fs::read_to_string(&ledger).unwrap().contains("entries = []")
+      || std::fs::read_to_string(&ledger).unwrap().is_empty()
+  );
+}
+
+#[test]
+fn create_with_gwm_allow_bootstrap_env_bypasses_the_prompt() {
+  // Sibling of the previous test: same fixture, but exercise the
+  // `GWM_ALLOW_BOOTSTRAP=1` env-var bypass with no flag. This is
+  // the CI-runner code path — scripts can't always inject extra
+  // args, so the env-var path has to keep working independently.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "42", "env-trapped", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  assert!(
+    !ledger.exists()
+      || std::fs::read_to_string(&ledger).unwrap().contains("entries = []")
+      || std::fs::read_to_string(&ledger).unwrap().is_empty()
+  );
+}
+
+#[test]
+fn create_skips_trust_gate_when_bootstrap_surface_is_empty() {
+  // A `.gwm.toml` that declares nothing executable (no copies, no
+  // guards, no no_symlinks, no commands) carries no RCE risk —
+  // prompting for trust in that case would just train the user to
+  // mash `y`. Verify the gate is a silent no-op when the config has
+  // only `[worktree]`.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+      base = base.path().display(),
+    ),
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  // No --allow-bootstrap, no env bypass, no ledger entry, no tty —
+  // the gate would normally abort. With an empty bootstrap surface
+  // it must short-circuit and let the create proceed.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["create", "feat", "13", "empty-surface"])
+    .assert()
+    .success();
+
+  // Ledger MUST stay untouched — the skip doesn't record anything.
+  assert!(
+    !ledger.exists(),
+    "empty-surface short-circuit must not write to the ledger"
+  );
+}
+
+#[test]
+fn allow_bootstrap_succeeds_even_when_ledger_is_malformed() {
+  // The whole point of `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1`
+  // is to be the unconditional CI escape hatch. A malformed
+  // trust.toml on the CI host must NOT make the bypass fail — the
+  // Allow check has to short-circuit before the ledger is touched.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  std::fs::write(&ledger, b"this is not valid toml @@@@").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "broken-ledger", "--no-bootstrap"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn deny_bootstrap_aborts_even_when_trusted() {
+  // `--deny-bootstrap` is the forensic mode: even if the ledger
+  // says the config is trusted, refuse to run bootstrap. Asserts
+  // the precedence resolution in `resolve_trust_mode`.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["--deny-bootstrap", "bootstrap"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--deny-bootstrap"));
 }

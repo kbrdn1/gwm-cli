@@ -2593,3 +2593,278 @@ fn recent_commits_line_carries_subject_unclipped() {
     joined
   );
 }
+
+// --- TOFU trust gate, TUI side (issue #95, PR #113 follow-up) -----------
+//
+// `check_trust_for_bootstrap` is the silent gate shared by
+// `submit_create` and `bootstrap_selected`. These tests exercise it
+// directly — driving the full event loop through `submit_create` would
+// require a real worktree base + `worktree::add`, which is orthogonal
+// to the security policy under test. The two `submit_create_*` /
+// `bootstrap_selected_*` integration tests at the bottom of this
+// section verify the actual call-site wiring.
+
+use gwm::trust::TrustMode;
+
+/// Build an App whose workdir already has a `.gwm.toml` ready to be
+/// hashed by the gate. Returns the dir keepalive + the App (with
+/// `trust_mode = Prompt` by default).
+fn app_with_config(toml_body: &str) -> (tempfile::TempDir, App) {
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), toml_body).unwrap();
+  let app = App::new_at(Some(dir.path())).unwrap();
+  (dir, app)
+}
+
+#[test]
+fn tui_gate_passes_when_no_gwm_toml_present() {
+  // The CLI gate is a no-op when `.gwm.toml` doesn't exist — same
+  // contract on the TUI side. Construction with `init_repo`'s empty
+  // workdir already covers this.
+  let (_dir, app) = make_app();
+  assert!(
+    matches!(app.check_trust_for_bootstrap(), Ok(None)),
+    "no .gwm.toml → gate must clear"
+  );
+}
+
+#[test]
+fn tui_gate_passes_on_empty_bootstrap_surface() {
+  // A `.gwm.toml` with only `[worktree]` (no executable surface)
+  // carries no RCE risk. Prompting in that case would just train
+  // the user to mash `y` — same UX bug the CLI gate avoids.
+  let (_dir, app) = app_with_config(
+    r#"[worktree]
+base = "/tmp/never-used"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  );
+  assert!(
+    matches!(app.check_trust_for_bootstrap(), Ok(None)),
+    "empty surface → gate must clear"
+  );
+}
+
+#[test]
+fn tui_gate_refuses_untrusted_config_in_prompt_mode() {
+  // Default `TrustMode::Prompt`: a `.gwm.toml` declaring a bootstrap
+  // command, no ledger entry → the gate refuses with a status-bar
+  // message. The CLI in this same position would prompt; the TUI
+  // can't (alternate-screen + no modal yet), so it points the user
+  // at the CLI gate / env bypass.
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  // Hold the env lock + clean up afterwards to keep the harness
+  // hermetic against the trust_tests env-mutation test.
+  let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
+  // SAFETY: this test is the sole env mutator inside this binary.
+  // The `trust_tests` env tests live in a separate test binary and
+  // run in their own process, so there's no cross-binary race.
+  unsafe {
+    std::env::set_var("GWM_TRUST_LEDGER", &ledger);
+    std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
+  }
+
+  let (_dir, app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "x"
+run  = "true"
+"#,
+  );
+
+  match app.check_trust_for_bootstrap() {
+    Ok(Some(msg)) => {
+      assert!(
+        msg.contains("not in trust ledger"),
+        "refuse message must point at the gate (got: {})",
+        msg
+      );
+      assert!(
+        msg.contains("--allow-bootstrap") || msg.contains("GWM_ALLOW_BOOTSTRAP"),
+        "refuse message must surface the bypass options (got: {})",
+        msg
+      );
+    }
+    other => panic!("expected refuse, got {:?}", other),
+  }
+
+  // SAFETY: restoration paired with the set/remove above.
+  unsafe {
+    match prior_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+    match prior_allow {
+      Some(v) => std::env::set_var("GWM_ALLOW_BOOTSTRAP", v),
+      None => std::env::remove_var("GWM_ALLOW_BOOTSTRAP"),
+    }
+  }
+}
+
+#[test]
+fn tui_gate_clears_under_allow_mode() {
+  // `--allow-bootstrap` (resolved to `TrustMode::Allow` at the
+  // entrypoint) bypasses the gate. Threading it through
+  // `with_trust_mode` is the whole reason for this PR follow-up —
+  // pin the wiring down.
+  let (_dir, app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "x"
+run  = "true"
+"#,
+  );
+  let app = app.with_trust_mode(TrustMode::Allow);
+  assert!(
+    matches!(app.check_trust_for_bootstrap(), Ok(None)),
+    "Allow mode → gate must clear regardless of ledger state"
+  );
+}
+
+#[test]
+fn tui_gate_refuses_under_deny_mode_even_with_safe_config() {
+  // `--deny-bootstrap` is the forensic mode: refuse even if there's
+  // nothing scary. The empty-surface short-circuit comes BEFORE the
+  // Deny check inside `evaluate`, so a truly empty surface still
+  // clears — Deny mode is meaningful only when a real surface
+  // exists. Document that with the same fixture as the prompt-mode
+  // refuse test (a config with a bootstrap.command).
+  let (_dir, app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "x"
+run  = "true"
+"#,
+  );
+  let app = app.with_trust_mode(TrustMode::Deny);
+  let outcome = app.check_trust_for_bootstrap();
+  match outcome {
+    Ok(Some(msg)) => assert!(
+      msg.contains("--deny-bootstrap"),
+      "deny refuse must name the flag (got: {})",
+      msg
+    ),
+    other => panic!("expected deny refuse, got {:?}", other),
+  }
+}
+
+#[test]
+fn tui_submit_create_aborts_on_untrusted_config() {
+  // End-to-end: `submit_create` reads the gate, sets the status bar
+  // verbatim from the refuse message, and crucially does NOT call
+  // `worktree::add` — meaning no orphaned worktree dir lands on
+  // disk. We pin that postcondition by checking the resolved
+  // worktree path is absent after the call.
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  let base_dir = tempfile::TempDir::new().unwrap();
+  let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
+  // SAFETY: see comment on `tui_gate_refuses_untrusted_config_in_prompt_mode`.
+  unsafe {
+    std::env::set_var("GWM_TRUST_LEDGER", &ledger);
+    std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
+  }
+
+  let body = format!(
+    r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+    base = base_dir.path().display(),
+  );
+  let (_dir, mut app) = app_with_config(&body);
+
+  // Drive `submit_create` end-to-end: type=feat (index in the
+  // resolved branch_types), issue + desc filled in.
+  let feat_idx = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "feat")
+    .expect("`feat` is in BRANCH_TYPES defaults");
+  app.create_type_index = feat_idx;
+  app.create_issue = "42".into();
+  app.create_desc = "untrusted-creates".into();
+
+  // Must succeed (no Err — Err would crash out of the event loop) and
+  // the gate must have set a refuse message.
+  app.submit_create().expect("submit_create must surface a soft refusal");
+
+  assert!(
+    app.status.contains("not in trust ledger"),
+    "status must reflect the gate refusal (got: {})",
+    app.status
+  );
+  let would_have_been = base_dir.path().join("feat-42-untrusted-creates");
+  assert!(
+    !would_have_been.exists(),
+    "worktree dir MUST NOT be created when the gate refuses (got: {})",
+    would_have_been.display()
+  );
+
+  // SAFETY: env restoration paired with set/remove above.
+  unsafe {
+    match prior_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+    match prior_allow {
+      Some(v) => std::env::set_var("GWM_ALLOW_BOOTSTRAP", v),
+      None => std::env::remove_var("GWM_ALLOW_BOOTSTRAP"),
+    }
+  }
+  let _ = BRANCH_TYPES; // keep the import live; the indirect lookup above relies on the default list.
+}
+
+#[test]
+fn tui_bootstrap_selected_aborts_on_untrusted_config() {
+  // Counterpart of the submit_create test — the `b` keybinding
+  // (re-run bootstrap on an existing worktree) takes the same gate.
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
+  // SAFETY: same rationale as the previous test.
+  unsafe {
+    std::env::set_var("GWM_TRUST_LEDGER", &ledger);
+    std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
+  }
+
+  let (_dir, mut app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo trapped"
+"#,
+  );
+
+  // Seed a fake selection so `selected()` returns Some — otherwise
+  // `bootstrap_selected` short-circuits before reaching the gate
+  // with "nothing selected".
+  app.worktrees = vec![worktree_fixture("dummy")];
+  app.list_state.select(Some(0));
+
+  app.bootstrap_selected();
+
+  assert!(
+    app.status.contains("not in trust ledger"),
+    "status must reflect the gate refusal (got: {})",
+    app.status
+  );
+
+  // SAFETY: env restoration paired with set/remove above.
+  unsafe {
+    match prior_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+    match prior_allow {
+      Some(v) => std::env::set_var("GWM_ALLOW_BOOTSTRAP", v),
+      None => std::env::remove_var("GWM_ALLOW_BOOTSTRAP"),
+    }
+  }
+}

@@ -49,13 +49,18 @@ pub use ui::{
   tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
-pub fn run() -> Result<()> {
+pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config
   // load fails (e.g. not inside a git repo), the user's terminal stays in
   // its pristine cooked state. Addresses Copilot's PR #53 review — the
   // previous order left raw mode + alt-screen on when `App::new()?`
   // bubbled up.
-  let app = App::new()?;
+  //
+  // `trust_mode` is threaded down so the TUI's bootstrap call sites
+  // (`submit_create`, `bootstrap_selected`) take the same TOFU
+  // decision as `gwm create` / `gwm bootstrap` — closes the bypass
+  // flagged in PR #113 review (issue #95).
+  let app = App::new()?.with_trust_mode(trust_mode);
   let mut terminal = enter_terminal()?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;

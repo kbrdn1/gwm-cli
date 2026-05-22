@@ -38,6 +38,11 @@ glob = "0.3"
 nucleo-matcher = "0.3"
 shell-words = "1"
 tempfile = "3"
+# Issue #95: SHA-256 over the raw bytes of `.gwm.toml` for the TOFU
+# trust ledger. Whitespace-sensitive on purpose — `rm -rf /tmp/` and
+# `rm -rf /tmp /` are visually close but semantically different, so
+# we hash bytes, not parsed TOML.
+sha2 = "0.10"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /

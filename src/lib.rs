@@ -14,5 +14,6 @@ pub mod launcher;
 pub mod milestones;
 pub mod multiplexer;
 pub mod naming;
+pub mod trust;
 pub mod tui;
 pub mod worktree;
