@@ -413,9 +413,15 @@ fn copy_refuses_to_skip_through_symlink_to_existing_file() {
     StepStatus::Failed,
     "symlink at dst must be surfaced as Failed (not silently Skipped)"
   );
+  // Either guard layer is allowed to surface the failure: the #93
+  // symlink_metadata match (`symlink`) OR the #94 ensure_within
+  // canonicalize check (`outside`). When the symlink resolves to a
+  // sentinel outside the worktree, `ensure_within` (which runs first)
+  // intercepts with "resolves outside" before the match guard fires.
+  // Either Failed reason is valid defence-in-depth.
   assert!(
-    copy_step.detail.contains("symlink"),
-    "Failed detail must mention the symlink, got: {:?}",
+    copy_step.detail.contains("symlink") || copy_step.detail.contains("outside"),
+    "Failed detail must mention symlink (#93) or outside (#94), got: {:?}",
     copy_step.detail
   );
 }
@@ -602,4 +608,183 @@ fn copy_no_follow_refuses_symlink_at_destination_and_preserves_mode() {
   let mode = std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777;
   assert_eq!(mode, 0o640, "copy_no_follow must preserve src's unix mode");
   assert_eq!(std::fs::read_to_string(&dst).unwrap(), "PAYLOAD");
+}
+
+// --------------------------------------------------------------------------
+// Issue #94 — bootstrap path-traversal closure: runtime defence-in-depth.
+// --------------------------------------------------------------------------
+//
+// Even though `Config::load_for_repo` now rejects `..` segments and
+// absolute paths in `CopyStep.to` / `Guard.example_file` at load time,
+// `bootstrap::run` accepts a `Config` value that callers can construct
+// directly (e.g. the test harness below, or any future programmatic use
+// outside the `.gwm.toml` loader). To keep the write-anywhere primitive
+// closed regardless of how the `Config` arrives, `run_copies` and
+// `handle_guard_match` enforce a canonicalize + prefix-check on every
+// resolved dst before opening it. These tests exercise that runtime
+// guard by handing `bootstrap::run` a `Config` whose `to` is hostile.
+//
+// (The load-time path is covered in `tests/config_tests.rs`.)
+//
+// File-system note: we work with a tempdir-rooted worktree and assert
+// the parent of the worktree (the tempdir itself) stays untouched by
+// any failed step. Tests live on all platforms — `..` and absolute
+// paths are OS-independent attack vectors.
+
+#[test]
+fn run_copies_refuses_dotdot_in_to_when_bypassing_load_validation() {
+  // Bypass the load validator by hand-constructing the Config. Pre-fix,
+  // `worktree.join("../OWNED")` resolved to a path SIBLING of the
+  // worktree's parent (`tempdir/OWNED`) and `fs::copy` wrote there.
+  // Post-fix, the runtime canonicalize-check refuses the step before
+  // any open syscall.
+  //
+  // The worktree lives inside a dedicated outer TempDir so the
+  // `..` from the worktree resolves into a test-private dir that
+  // gets cleaned up at drop — avoids polluting the shared
+  // `$TMPDIR` root if the assertion happens to fail on a future
+  // regression.
+  let outer = TempDir::new().unwrap();
+  let wt_path = outer.path().join("wt");
+  std::fs::create_dir(&wt_path).unwrap();
+  let main = TempDir::new().unwrap();
+  let mut cfg = Config::default();
+  std::fs::write(main.path().join(".env"), "SECRET").unwrap();
+  let escape_target = outer.path().join("OWNED_BY_BUG_94");
+  assert!(!escape_target.exists(), "precondition: escape target must not exist");
+
+  cfg.bootstrap.copy.push(CopyStep {
+    from: ".env".into(),
+    to: "../OWNED_BY_BUG_94".into(),
+    required: true,
+    guards: vec![],
+    fallback: None,
+  });
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: &wt_path,
+    config: &cfg,
+  };
+  let report = bootstrap::run(&ctx).unwrap();
+
+  assert!(
+    !escape_target.exists(),
+    "the bug: bootstrap wrote outside the worktree at {}",
+    escape_target.display()
+  );
+  let copy_step = report
+    .steps
+    .iter()
+    .find(|s| s.label.starts_with("copy "))
+    .expect("a copy step must be reported");
+  assert_eq!(
+    copy_step.status,
+    StepStatus::Failed,
+    "traversal must be reported as Failed, got: {:?}",
+    copy_step
+  );
+  assert!(
+    copy_step.detail.contains("outside") || copy_step.detail.contains("traversal") || copy_step.detail.contains(".."),
+    "Failed detail must explain the traversal rejection, got: {:?}",
+    copy_step.detail
+  );
+}
+
+#[test]
+fn run_copies_refuses_absolute_to_when_bypassing_load_validation() {
+  // Absolute path variant. On unix, `worktree.join("/tmp/x")` returns
+  // "/tmp/x" verbatim (POSIX semantics — absolute on the right wins).
+  // The runtime guard must catch that just as it catches `..`.
+  let (main, wt, mut cfg) = dirs();
+  std::fs::write(main.path().join(".env"), "SECRET").unwrap();
+  let escape_root = TempDir::new().unwrap();
+  let escape_target = escape_root.path().join("OWNED_ABS_94");
+  assert!(!escape_target.exists());
+
+  cfg.bootstrap.copy.push(CopyStep {
+    from: ".env".into(),
+    to: escape_target.to_string_lossy().into_owned(),
+    required: true,
+    guards: vec![],
+    fallback: None,
+  });
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  let report = bootstrap::run(&ctx).unwrap();
+
+  assert!(
+    !escape_target.exists(),
+    "the bug: bootstrap wrote outside the worktree via absolute path"
+  );
+  let copy_step = report
+    .steps
+    .iter()
+    .find(|s| s.label.starts_with("copy "))
+    .expect("a copy step must be reported");
+  assert_eq!(
+    copy_step.status,
+    StepStatus::Failed,
+    "absolute path must be reported as Failed, got: {:?}",
+    copy_step
+  );
+}
+
+#[test]
+fn seed_from_example_refuses_dotdot_in_example_file() {
+  // The seed-from-example branch reads `Guard.example_file` joined
+  // onto ctx.main_repo. Pre-fix, `../sensitive` reads files outside
+  // the main repo (info-leak primitive). Post-fix, the runtime guard
+  // rejects the step before opening the source.
+  let (main, wt, mut cfg) = dirs();
+  // Plant a sensitive file OUTSIDE the main_repo to prove no read.
+  let sibling_dir = main.path().parent().expect("tempdir has a parent");
+  let sensitive = sibling_dir.join("SENSITIVE_OUTSIDE_MAIN");
+  std::fs::write(&sensitive, "SECRET_TOKEN_94").unwrap();
+  // Build a `.env` that trips the guard.
+  std::fs::write(main.path().join(".env"), "DB_HOST=db.rds.amazonaws.com").unwrap();
+
+  cfg.bootstrap.guard.push(Guard {
+    name: "no-aws".into(),
+    deny_patterns: vec!["amazonaws\\.com".into()],
+    on_match: "seed-from-example".into(),
+    example_file: Some("../SENSITIVE_OUTSIDE_MAIN".into()),
+  });
+  cfg.bootstrap.copy.push(CopyStep {
+    from: ".env".into(),
+    to: ".env".into(),
+    required: true,
+    guards: vec!["no-aws".into()],
+    fallback: None,
+  });
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  let report = bootstrap::run(&ctx).unwrap();
+
+  // Sensitive file must not have been read INTO the worktree dst.
+  let dst = wt.path().join(".env");
+  if dst.exists() {
+    let body = std::fs::read_to_string(&dst).unwrap();
+    assert!(
+      !body.contains("SECRET_TOKEN_94"),
+      "the bug: seed-from-example read sensitive content from outside main_repo into {}",
+      dst.display()
+    );
+  }
+  let copy_step = report
+    .steps
+    .iter()
+    .find(|s| s.label.starts_with("copy "))
+    .expect("a copy step must be reported");
+  assert_eq!(
+    copy_step.status,
+    StepStatus::Failed,
+    "traversal in example_file must surface as Failed, got: {:?}",
+    copy_step
+  );
 }

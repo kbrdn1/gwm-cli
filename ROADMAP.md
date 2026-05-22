@@ -91,6 +91,7 @@ A coherent batch of items that move hardcoded conventions and one-off shell scri
 Defensive features for a tool that performs destructive operations.
 
 - [#29](https://github.com/kbrdn1/gwm-cli/issues/29) — **`gwm undo` + `gwm history`** — operation journal at `$XDG_DATA_HOME/gwm/history.toml` with branch-OID recovery so a fat-finger `gwm remove --delete-branch` is recoverable beyond `git reflog`.
+- [#112](https://github.com/kbrdn1/gwm-cli/issues/112) — **`windows-latest` in CI matrix** — wire the existing `#[cfg(windows)]` regression test (`load_rejects_windows_drive_prefix_in_copy_to`, introduced by the #94 hardening) into the test job so the Windows-only path-traversal check actually runs. Today the matrix is `[ubuntu-latest, macos-latest]`; the Windows test compiles but never executes.
 
 ## TUI polish
 

@@ -349,7 +349,48 @@ impl Config {
     let raw = std::fs::read_to_string(&path)?;
     let cfg: Config = toml::from_str(&raw)?;
     cfg.validate_branch_types()?;
+    cfg.validate_bootstrap_paths()?;
     Ok(cfg)
+  }
+
+  /// Reject `..` components and absolute paths in bootstrap path
+  /// fields (issue #94). The runtime guard in `bootstrap::run_copies`
+  /// is the last line of defence; this check surfaces violations with
+  /// the TOML key in the error rather than failing mid-bootstrap.
+  ///
+  /// Three fields are validated:
+  ///   - `bootstrap.copy[].to` — write target inside the worktree
+  ///   - `bootstrap.guard[].example_file` — read source inside main repo
+  ///   - `bootstrap.fallback.<key>.target` — declarative today, but a
+  ///     `..` there still misrepresents intent and is rejected for
+  ///     consistency with the other two
+  ///
+  /// `bootstrap.copy[].from` is intentionally NOT validated here: it
+  /// is joined onto `ctx.main_repo` (the repo root that ships the
+  /// config), so traversal there is bounded by who can edit the
+  /// `.gwm.toml` itself — same trust boundary as for the rest of
+  /// the file.
+  ///
+  /// **Trust-boundary note (revisit with #95)**: once the TOFU prompt
+  /// on `.gwm.toml` lands, `.gwm.toml` may be sourced from a less
+  /// trusted location (e.g. a freshly cloned hostile main repo
+  /// during the first `gwm bootstrap`). At that point the `from`
+  /// trust assumption no longer holds and this validator should be
+  /// extended symmetrically — `check_relative_no_traversal` already
+  /// accepts an arbitrary field label and is ready for it.
+  fn validate_bootstrap_paths(&self) -> Result<()> {
+    for (i, c) in self.bootstrap.copy.iter().enumerate() {
+      check_relative_no_traversal(&c.to, &format!("bootstrap.copy[{}].to", i))?;
+    }
+    for (i, g) in self.bootstrap.guard.iter().enumerate() {
+      if let Some(ex) = &g.example_file {
+        check_relative_no_traversal(ex, &format!("bootstrap.guard[{}].example_file", i))?;
+      }
+    }
+    for (key, fb) in &self.bootstrap.fallback {
+      check_relative_no_traversal(&fb.target, &format!("bootstrap.fallback.{}.target", key))?;
+    }
+    Ok(())
   }
 
   /// Validate `[[branch_types]]` entries on load so a malformed config
@@ -509,6 +550,51 @@ impl Default for ReviewConfig {
 
 fn default_skip_when_no_changes() -> bool {
   true
+}
+
+/// Reject empty strings, absolute paths, Windows drive prefixes and
+/// `..` traversal segments in bootstrap path fields (issue #94). The
+/// field name is woven into the error message so the user can
+/// pinpoint the offending TOML key. The wording stays neutral
+/// ("base directory") because callers use this helper for both
+/// `worktree`-relative (`copy.to`, `fallback.target`) and
+/// `main_repo`-relative (`guard.example_file`) fields.
+fn check_relative_no_traversal(value: &str, field: &str) -> Result<()> {
+  if value.is_empty() {
+    return Err(GwmError::Config(format!(
+      "{}: empty path is not a valid bootstrap target",
+      field
+    )));
+  }
+  let p = Path::new(value);
+  if p.is_absolute() {
+    return Err(GwmError::Config(format!(
+      "{}: {:?} is an absolute path — only relative paths under the base directory are allowed",
+      field, value
+    )));
+  }
+  // `Component::Prefix` covers Windows drive-relative paths like
+  // `C:foo` which are NOT absolute (per `Path::is_absolute`) yet
+  // make `PathBuf::join` drop the base. Unreachable on Unix, so
+  // this is a defence-in-depth rejection for Windows targets.
+  for comp in p.components() {
+    match comp {
+      std::path::Component::ParentDir => {
+        return Err(GwmError::Config(format!(
+          "{}: {:?} contains '..' traversal — only relative paths under the base directory are allowed",
+          field, value
+        )));
+      }
+      std::path::Component::Prefix(_) => {
+        return Err(GwmError::Config(format!(
+          "{}: {:?} contains a Windows drive prefix — only relative paths under the base directory are allowed",
+          field, value
+        )));
+      }
+      _ => {}
+    }
+  }
+  Ok(())
 }
 
 impl ReviewConfig {
