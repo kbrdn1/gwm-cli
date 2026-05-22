@@ -2,12 +2,12 @@
 name = "gwm"
 version = "0.7.0-rc.1"
 edition = "2021"
-# MSRV pinned at 1.80 to match the `std::sync::LazyLock` use in
-# `src/naming.rs` (issue #97). CONTRIBUTING.md already documents this
-# floor ("stable channel, 1.80+ — verified on 1.89"); declaring it
-# here lets `cargo check --locked` enforce the contract and shows up
-# in crates.io metadata.
-rust-version = "1.80"
+# MSRV is the floor required by every use in the crate, not just the
+# newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
+# wants 1.80; `std::iter::repeat_n` (existing code in src/tui/ui.rs's
+# countdown bar) wants 1.82. The crate as a whole compiles at 1.82+,
+# so MSRV is set to the higher floor. CI's clippy MSRV lint enforces it.
+rust-version = "1.82"
 description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
 license = "MIT"
