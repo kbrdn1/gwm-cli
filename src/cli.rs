@@ -4,6 +4,7 @@ use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::labels::{self, LabelDiff};
+use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
@@ -228,6 +229,17 @@ pub enum Command {
     #[command(subcommand)]
     action: LabelsAction,
   },
+  /// Manage the declarative GitHub milestone set from `.gwm.toml` (issue #82).
+  ///
+  /// Declares the desired milestone set under `[[milestones]]` in
+  /// `.gwm.toml`, then pushes it to the upstream `origin` remote via
+  /// `gh api repos/:owner/:repo/milestones` (no native `gh milestone`
+  /// subcommand exists). Without a `[[milestones]]` block, both
+  /// subcommands are no-ops (`0 milestones declared, nothing to push`).
+  Milestones {
+    #[command(subcommand)]
+    action: MilestonesAction,
+  },
 }
 
 /// Subcommands of `gwm labels`. The split is intentional: `list` is
@@ -266,6 +278,39 @@ pub enum LabelsAction {
     /// (overrides the default deterministic-hash colour).
     #[arg(long)]
     random_colors: bool,
+  },
+}
+
+/// Subcommands of `gwm milestones`. Mirrors `LabelsAction`: `list` is
+/// read-only and safe to run in CI; `push` mutates the remote and
+/// therefore gets `--dry-run` / `--prune` flags of its own.
+#[derive(Debug, Subcommand)]
+pub enum MilestonesAction {
+  /// Print the declared milestone set plus the diff against the upstream remote.
+  ///
+  /// Each line is one of: `+ create`, `~ update (due/desc/state
+  /// change)`, `= match`, `- extra-on-remote`. Without a
+  /// `[[milestones]]` block in `.gwm.toml`, prints `0 milestones
+  /// declared` and exits 0 without shelling out to `gh`.
+  List,
+  /// Apply the diff: create new milestones and update mismatched ones
+  /// on the upstream remote.
+  ///
+  /// `--dry-run` prints the plan without mutating the remote (it
+  /// still reads the remote via `gh api …/milestones` to compute the
+  /// diff; only create / update / delete calls are skipped).
+  /// `--prune` opt-in deletes milestones on remote that aren't
+  /// declared in config (off by default — destructive).
+  Push {
+    /// Print the plan without mutating the remote. Still reads remote
+    /// milestones via `gh api` to compute the diff — only the
+    /// create / update / delete calls are skipped.
+    #[arg(long)]
+    dry_run: bool,
+    /// Delete remote milestones that aren't declared in `.gwm.toml`.
+    /// Destructive — off by default.
+    #[arg(long)]
+    prune: bool,
   },
 }
 
@@ -308,6 +353,7 @@ pub fn run(cli: Cli) -> Result<()> {
     } => cmd_open(target, worktree, print_url),
     Command::Status { worktree, json } => cmd_status(worktree, json),
     Command::Labels { action } => cmd_labels(action),
+    Command::Milestones { action } => cmd_milestones(action),
   }
 }
 
@@ -1031,6 +1077,147 @@ fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDif
   }
   for remote in &diff.extra_on_remote {
     println!("  - {:<20} (on remote, not in config)", remote.name);
+  }
+  println!(
+    "summary: {} create · {} update · {} match · {} extra-on-remote",
+    n_create, n_update, n_match, n_extra
+  );
+}
+
+// ---- Milestones commands (issue #82) ------------------------------------
+
+fn cmd_milestones(action: MilestonesAction) -> Result<()> {
+  match action {
+    MilestonesAction::List => cmd_milestones_list(),
+    MilestonesAction::Push { dry_run, prune } => cmd_milestones_push(dry_run, prune),
+  }
+}
+
+fn cmd_milestones_list() -> Result<()> {
+  let config = load_milestones_config()?;
+  if config.milestones.is_empty() {
+    println!("0 milestones declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  // Resolve (and validate due_on / state) before touching the network,
+  // so a typo in `.gwm.toml` surfaces "milestone 'v0.7.0' has invalid
+  // …" rather than the unrelated "no origin remote" error.
+  let declared = milestones::resolve_milestones(&config.milestones)?;
+  let slug = milestones_slug()?;
+  let remote = github::fetch_remote_milestones(&slug)?;
+  let diff = milestones::diff_milestones(&declared, &remote);
+  print_milestones_diff(&slug, &declared, &diff);
+  Ok(())
+}
+
+fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
+  let config = load_milestones_config()?;
+  if config.milestones.is_empty() {
+    println!("0 milestones declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  let declared = milestones::resolve_milestones(&config.milestones)?;
+  let slug = milestones_slug()?;
+  let remote = github::fetch_remote_milestones(&slug)?;
+  let diff = milestones::diff_milestones(&declared, &remote);
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+
+  if dry_run {
+    print_milestones_diff(&slug, &declared, &diff);
+    let pruned = if prune { n_extra } else { 0 };
+    println!(
+      "would create {}, update {}, leave {} untouched, prune {}, ignore {} extra-on-remote",
+      n_create,
+      n_update,
+      n_match,
+      pruned,
+      n_extra.saturating_sub(pruned),
+    );
+    return Ok(());
+  }
+
+  for spec in &diff.to_create {
+    github::create_milestone(&slug, spec)?;
+    println!("✓ created {}", spec.title);
+  }
+  for upd in &diff.to_update {
+    github::update_milestone(&slug, upd.number, &upd.spec)?;
+    println!("✓ updated {}", upd.spec.title);
+  }
+  if prune {
+    for remote_milestone in &diff.extra_on_remote {
+      github::delete_milestone(&slug, remote_milestone.number)?;
+      println!("✗ pruned {}", remote_milestone.title);
+    }
+  } else if !diff.extra_on_remote.is_empty() {
+    println!(
+      "{} milestone(s) on remote not in config — pass --prune to delete",
+      diff.extra_on_remote.len()
+    );
+  }
+  println!("{} milestone(s) untouched", n_match);
+  Ok(())
+}
+
+/// Open the repo and parse `.gwm.toml`. Shared by `milestones list /
+/// push`; both surface a uniform "not inside a git repository" error
+/// before they touch network or config-resolve logic.
+fn load_milestones_config() -> Result<Config> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  Config::load_for_repo(&workdir)
+}
+
+/// Resolve the `origin` remote slug. Called *after* `resolve_milestones`
+/// in both subcommands so a config typo (bad due_on / state) surfaces
+/// with the offending milestone title rather than the unrelated "no
+/// origin remote" error.
+fn milestones_slug() -> Result<String> {
+  let repo = worktree::discover_repo(None)?;
+  github::repo_slug(&repo)
+}
+
+fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) {
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+  println!(
+    "declared in .gwm.toml: {} milestones — diff against {}:",
+    declared.len(),
+    slug
+  );
+  for spec in &diff.to_create {
+    let due = spec.due_on.as_deref().unwrap_or("no due date");
+    println!(
+      "  + {:<20} (will create — state {}, due {})",
+      spec.title,
+      spec.state.as_str(),
+      due
+    );
+  }
+  for upd in &diff.to_update {
+    let detail = match (
+      &upd.previous_due_on,
+      &upd.previous_state,
+      &upd.previous_description,
+    ) {
+      (Some(old_due), _, _) => format!(
+        "due {} → {}",
+        old_due,
+        upd.spec.due_on.as_deref().unwrap_or("cleared")
+      ),
+      (None, Some(old_state), _) => format!("state {} → {}", old_state.as_str(), upd.spec.state.as_str()),
+      (None, None, Some(_)) => "description changed".into(),
+      _ => "diff".into(),
+    };
+    println!("  ~ {:<20} ({})", upd.spec.title, detail);
+  }
+  for spec in &diff.matching {
+    println!("  = {:<20} (match)", spec.title);
+  }
+  for remote in &diff.extra_on_remote {
+    println!(
+      "  - {:<20} (#{} on remote, not in config)",
+      remote.title, remote.number
+    );
   }
   println!(
     "summary: {} create · {} update · {} match · {} extra-on-remote",
