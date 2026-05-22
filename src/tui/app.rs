@@ -48,12 +48,12 @@ pub enum View {
   LinkPrompt,
 }
 
-/// Target of an open / link action.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LinkTarget {
-  Issue,
-  Pr,
-}
+// Target of an open / link action. Canonical definition lives in
+// [`crate::cli::LinkTarget`] (it carries the `clap::ValueEnum` derive
+// for the CLI surface); the TUI re-exports the same type so a value
+// crossing the cli/tui boundary doesn't need a manual conversion
+// (issue #106).
+pub use crate::cli::LinkTarget;
 
 /// Dispatch target for the `o` key (issue #73). Resolved by
 /// [`App::resolve_open_target`] from the current selection + the

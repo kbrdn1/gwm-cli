@@ -2868,3 +2868,25 @@ run  = "echo trapped"
     }
   }
 }
+
+// ---- Issue #106: LinkTarget canonical location --------------------------
+//
+// The `LinkTarget` enum was duplicated between `cli.rs` and
+// `tui/app.rs`. Both call sites should now resolve to the SAME type
+// (re-exported from a single module) so a value created on the CLI
+// boundary can be handed to a TUI function without an `as` cast or
+// a manual conversion.
+
+#[test]
+fn link_target_is_canonical_across_cli_and_tui() {
+  // If `cli::LinkTarget` and `tui::LinkTarget` are the same type,
+  // a value assigned from one accessor binds to the other without
+  // a conversion call.
+  let from_cli: gwm::cli::LinkTarget = gwm::cli::LinkTarget::Issue;
+  let from_tui: gwm::tui::LinkTarget = from_cli;
+  assert_eq!(from_tui, gwm::tui::LinkTarget::Issue);
+
+  let from_tui: gwm::tui::LinkTarget = gwm::tui::LinkTarget::Pr;
+  let from_cli: gwm::cli::LinkTarget = from_tui;
+  assert_eq!(from_cli, gwm::cli::LinkTarget::Pr);
+}
