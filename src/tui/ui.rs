@@ -1,7 +1,6 @@
 use super::app::{App, Field, GitHubFetchState, LinkPromptStage, View};
 use crate::bootstrap::StepStatus;
 use crate::github::{IssueState, LinkSource, PrState};
-use crate::naming::BRANCH_TYPES;
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
   layout::{Constraint, Direction, Layout, Rect},
@@ -941,8 +940,11 @@ fn draw_create(f: &mut Frame, app: &App) {
     ])
     .split(area);
 
-  let type_str = BRANCH_TYPES[app.create_type_index].0;
-  let type_desc = BRANCH_TYPES[app.create_type_index].1;
+  let (type_str, type_desc) = app
+    .branch_types
+    .get(app.create_type_index)
+    .map(|t| (t.name.as_str(), t.description.as_str()))
+    .unwrap_or(("", "(no branch types configured)"));
 
   f.render_widget(
     field_input(

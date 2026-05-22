@@ -6,7 +6,7 @@ use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrSta
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::{BranchSpec, BRANCH_TYPES};
+use crate::naming::BranchSpec;
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
@@ -357,7 +357,8 @@ fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bo
   let repo_name = worktree::repo_name(&repo);
 
   let config = Config::load_for_repo(&workdir)?;
-  let spec = BranchSpec::new(branch_type, issue, desc)?;
+  let resolved_types = config.resolved_branch_types();
+  let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
   let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
   let target = spec.worktree_path(&config.worktree, &repo_name)?;
@@ -477,9 +478,27 @@ fn print_doctor_report(report: &doctor::DoctorReport) {
 }
 
 fn cmd_types() -> Result<()> {
-  for (t, d) in BRANCH_TYPES {
-    println!("  {:<10} {}", t, d);
+  // Resolve the active branch-type list. When invoked inside a repo we
+  // honour any `[[branch_types]]` override in `.gwm.toml`; outside of
+  // one we silently fall back to the built-in defaults so `gwm types`
+  // remains useful as a discovery command (used by `gwm` newcomers
+  // before they've initialised a config).
+  let resolved = match worktree::discover_repo(None) {
+    Ok(repo) => {
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+      Config::load_for_repo(&workdir)?.resolved_branch_types()
+    }
+    Err(_) => Config::default().resolved_branch_types(),
+  };
+
+  // Align the description column on the longest name so a custom list
+  // with a long entry (e.g. `migration`) still renders cleanly.
+  let width = resolved.types.iter().map(|t| t.name.len()).max().unwrap_or(0).max(8);
+  for t in &resolved.types {
+    println!("  {:<width$}  {}", t.name, t.description, width = width);
   }
+  println!();
+  println!("(source: {})", resolved.source.label());
   Ok(())
 }
 

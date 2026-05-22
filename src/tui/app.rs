@@ -1,9 +1,10 @@
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
+use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
-use crate::naming::{BranchSpec, BRANCH_TYPES};
+use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
 use nucleo_matcher::{
@@ -138,6 +139,11 @@ pub struct App {
   pub create_type_index: usize,
   pub create_issue: String,
   pub create_desc: String,
+  /// Branch types displayed in the create-form picker. Resolved once at
+  /// startup from [`Config::resolved_branch_types`] so the picker
+  /// honours any `[[branch_types]]` override in `.gwm.toml` without
+  /// re-reading the file on every key event.
+  pub branch_types: Vec<BranchType>,
 
   // Bootstrap report
   pub report: Option<BootstrapReport>,
@@ -214,6 +220,7 @@ impl App {
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_for_repo(&workdir)?;
+    let branch_types = config.resolved_branch_types().types;
     let worktrees = worktree::list(&repo)?;
     let mut state = TableState::default();
     if !worktrees.is_empty() {
@@ -233,6 +240,7 @@ impl App {
       create_type_index: 0,
       create_issue: String::new(),
       create_desc: String::new(),
+      branch_types,
       report: None,
       sidebar_open: true,
       sidebar_focused: false,
@@ -611,12 +619,18 @@ impl App {
   }
 
   pub fn create_next_type(&mut self) {
-    self.create_type_index = (self.create_type_index + 1) % BRANCH_TYPES.len();
+    if self.branch_types.is_empty() {
+      return;
+    }
+    self.create_type_index = (self.create_type_index + 1) % self.branch_types.len();
   }
 
   pub fn create_prev_type(&mut self) {
+    if self.branch_types.is_empty() {
+      return;
+    }
     if self.create_type_index == 0 {
-      self.create_type_index = BRANCH_TYPES.len() - 1;
+      self.create_type_index = self.branch_types.len() - 1;
     } else {
       self.create_type_index -= 1;
     }
@@ -643,8 +657,17 @@ impl App {
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
-    let type_ = BRANCH_TYPES[self.create_type_index].0.to_string();
-    let spec = BranchSpec::new(type_, self.create_issue.clone(), self.create_desc.clone())?;
+    let type_ = self
+      .branch_types
+      .get(self.create_type_index)
+      .map(|t| t.name.clone())
+      .unwrap_or_default();
+    let spec = BranchSpec::new_with_types(
+      type_,
+      self.create_issue.clone(),
+      self.create_desc.clone(),
+      &self.branch_types,
+    )?;
     let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
     let target = spec.worktree_path(&self.config.worktree, &self.repo_name)?;
