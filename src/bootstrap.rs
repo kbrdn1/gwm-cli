@@ -622,6 +622,16 @@ pub fn copy_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Returns `Err` with `ErrorKind::InvalidInput` when the path
 /// escapes `base`; surrounding code surfaces the error verbatim
 /// in the step report so the user knows which field went wrong.
+///
+/// **TOCTOU note**: a residual window exists between this ancestor
+/// canonicalization and the final write — an attacker who can plant
+/// a symlink at an intermediate component between the two would
+/// re-route the resolved path. That gap is closed by the
+/// `O_NOFOLLOW`-based writers from issue #93 (`copy_no_follow` /
+/// `write_no_follow`): even if the path mutates post-check, the
+/// final `open` returns `ELOOP` / `EEXIST` rather than writing
+/// through. `ensure_within` and the no-follow writers are
+/// complementary; neither alone is sufficient.
 fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
   let base_canon = base.canonicalize()?;
   let mut anc: &Path = path;

@@ -370,6 +370,14 @@ impl Config {
   /// config), so traversal there is bounded by who can edit the
   /// `.gwm.toml` itself — same trust boundary as for the rest of
   /// the file.
+  ///
+  /// **Trust-boundary note (revisit with #95)**: once the TOFU prompt
+  /// on `.gwm.toml` lands, `.gwm.toml` may be sourced from a less
+  /// trusted location (e.g. a freshly cloned hostile main repo
+  /// during the first `gwm bootstrap`). At that point the `from`
+  /// trust assumption no longer holds and this validator should be
+  /// extended symmetrically — `check_relative_no_traversal` already
+  /// accepts an arbitrary field label and is ready for it.
   fn validate_bootstrap_paths(&self) -> Result<()> {
     for (i, c) in self.bootstrap.copy.iter().enumerate() {
       check_relative_no_traversal(&c.to, &format!("bootstrap.copy[{}].to", i))?;
