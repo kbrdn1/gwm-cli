@@ -7,8 +7,11 @@
 //! `github::link_issue` / `github::link_pr` against `self.repo`) and the
 //! status-bar copy.
 //!
-//! `LinkTarget` is the cli-side enum re-exported from `tui::app` — this
-//! test imports it from `gwm::tui` to match the existing public surface.
+//! `LinkTarget` is imported from `gwm::tui` here, which currently
+//! resolves to the TUI-side definition in `src/tui/app.rs`. PR #132
+//! unifies the two `LinkTarget` enums against `cli::LinkTarget`;
+//! the import path stays valid after that merges (the re-export shape
+//! in `tui::app` is the same shape #132 installs).
 
 use gwm::tui::state::link_prompt::{LinkPrompt, LinkPromptStage};
 use gwm::tui::LinkTarget;

@@ -20,9 +20,12 @@
 //! orchestrator — this module only knows the buffer and the stage
 //! machine.
 //!
-//! Note: `LinkTarget` is the cli-side enum (`crate::cli::LinkTarget`),
-//! re-exported through `tui::app` — the same enum the open-menu picker
-//! uses. Don't redefine it here; PR #132 unified the variants.
+//! `LinkTarget` is imported from `tui::app` on this branch (which still
+//! holds the canonical TUI-side definition). PR #132 also dedupes
+//! `LinkTarget` against `cli::LinkTarget`, but that's a parallel branch
+//! off `dev` — once #132 merges, the import here will resolve through
+//! the re-export the dedupe pass installs in `tui::app`, so no further
+//! change is needed at the call site.
 
 use crate::tui::app::LinkTarget;
 
