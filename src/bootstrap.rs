@@ -34,8 +34,13 @@ pub fn run(ctx: &BootstrapCtx<'_>) -> Result<BootstrapReport> {
   let mut report = BootstrapReport { steps: Vec::new() };
   let bs = &ctx.config.bootstrap;
 
-  run_copies(ctx, bs, &mut report);
+  // Order matters (issue #93): `run_no_symlinks` strips any declared
+  // symlinked targets BEFORE `run_copies` opens them for writing.
+  // Reversed, an attacker-planted symlink at a copy destination
+  // redirects the `fs::copy` write outside the worktree — a write-
+  // anywhere primitive triggered by `gwm bootstrap` alone.
   run_no_symlinks(ctx, bs, &mut report);
+  run_copies(ctx, bs, &mut report);
   run_commands(ctx, bs, &mut report);
 
   Ok(report)
@@ -46,6 +51,29 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     let label = format!("copy {} -> {}", step.from, step.to);
     let src = ctx.main_repo.join(&step.from);
     let dst = ctx.worktree.join(&step.to);
+
+    // Defence in depth (issue #93): refuse to interact with a symlink
+    // at the destination, period. `Path::exists()` follows symlinks, so
+    // a dangling symlink slips past the "already populated" skip below
+    // and lets `fs::copy` write through the symlink to its target —
+    // outside the worktree. `symlink_metadata` inspects the entry
+    // itself; a symlink (broken or live) at dst aborts the step. This
+    // covers symlinks NOT declared in `[[bootstrap.no_symlink]]`, and
+    // also closes the TOCTOU window between the no-symlink pass and
+    // this loop.
+    if let Ok(meta) = std::fs::symlink_metadata(&dst) {
+      if meta.file_type().is_symlink() {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Failed,
+          detail: format!(
+            "refusing to copy: destination {} is a symlink — would redirect the write outside the worktree (issue #93)",
+            dst.display()
+          ),
+        });
+        continue;
+      }
+    }
 
     if dst.exists() {
       report.steps.push(StepResult {
