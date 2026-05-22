@@ -400,7 +400,9 @@ fn commit_with_time(workdir: &Path, repo: &Repository, ref_name: &str, message: 
 }
 
 // --------------------------------------------------------------------------
-// Issue #101 — characterization tests for the mutating worktree primitives.
+// Issue #99 — refuse/reuse contract for `worktree::add` on pre-existing
+// local branches. Issue #101 ships the E2E coverage; this block holds
+// the libgit2-level pair.
 // --------------------------------------------------------------------------
 //
 // These complement the CLI-level E2E tests in `tests/cli_binary.rs` by

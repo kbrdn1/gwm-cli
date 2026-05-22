@@ -194,7 +194,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   Ok(out)
 }
 
-/// Create a new worktree with a brand-new branch off of HEAD.
+/// Create a new worktree off of HEAD, attaching it either to a freshly
+/// created branch (the default) or — when `reuse_branch` is true — to a
+/// pre-existing local branch of the same name.
 ///
 /// Records the HEAD ref's short name into `branch.<branch_name>.gwm-base`
 /// so the review launcher (issue #75) can recover the original parent
