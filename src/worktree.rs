@@ -210,13 +210,28 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   Ok(out)
 }
 
-/// Create a new worktree with a brand-new branch off of HEAD.
+/// Create a new worktree off of HEAD, attaching it either to a freshly
+/// created branch (the default) or — when `reuse_branch` is true — to a
+/// pre-existing local branch of the same name.
 ///
 /// Records the HEAD ref's short name into `branch.<branch_name>.gwm-base`
 /// so the review launcher (issue #75) can recover the original parent
 /// ref later — even on branches without an upstream. The write is
 /// best-effort: a config-write error does not roll the worktree back.
-pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str) -> Result<PathBuf> {
+///
+/// `reuse_branch` gates the "branch already exists" path (issue #99). The
+/// historical default silently reused a stale branch at whatever commit
+/// it referenced, resurrecting `git log` state the user never asked for.
+/// The new default refuses with `GwmError::BranchExists`; pass `true`
+/// (`--reuse-branch` on the CLI) to opt back into the legacy behaviour
+/// when attaching to an existing branch is the intent.
+pub fn add(
+  repo: &Repository,
+  name: &str,
+  target_path: &Path,
+  branch_name: &str,
+  reuse_branch: bool,
+) -> Result<PathBuf> {
   // Refuse to clobber an existing directory.
   if target_path.exists() {
     return Err(GwmError::WorktreeExists(name.into(), target_path.display().to_string()));
@@ -234,7 +249,23 @@ pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str)
   let head_short = head_ref.shorthand().map(|s| s.to_string());
   let head_commit = head_ref.peel_to_commit()?;
   let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
-    Ok(b) => b,
+    Ok(b) => {
+      if !reuse_branch {
+        // Resolve the existing tip for the error message so the user
+        // sees *where* the stale ref is pointing and can decide between
+        // `--reuse-branch`, `git branch -D <name>`, or a different slug.
+        let oid = b
+          .get()
+          .target()
+          .map(|o| o.to_string())
+          .unwrap_or_else(|| "<unresolved>".into());
+        return Err(GwmError::BranchExists {
+          name: branch_name.into(),
+          oid,
+        });
+      }
+      b
+    }
     Err(_) => repo.branch(branch_name, &head_commit, false)?,
   };
   let reference = branch.into_reference();

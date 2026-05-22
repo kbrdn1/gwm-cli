@@ -675,7 +675,7 @@ impl App {
       return Ok(());
     }
 
-    let created = worktree::add(&self.repo, &dirname, &target, &branch)?;
+    let created = worktree::add(&self.repo, &dirname, &target, &branch, false)?;
 
     let ctx = BootstrapCtx {
       main_repo: &self.workdir,

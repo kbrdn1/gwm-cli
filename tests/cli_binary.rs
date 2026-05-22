@@ -1350,6 +1350,82 @@ fn create_rejects_non_digit_issue() {
 }
 
 #[test]
+fn create_refuses_stale_branch_without_reuse_flag() {
+  // Issue #99 E2E. A pre-existing local branch of the same name must
+  // surface `BranchExists` and refuse to create the worktree dir —
+  // protecting the user from silently landing on whatever commit the
+  // pre-existing ref points at. The error renders the stale tip's
+  // OID and the `--reuse-branch` opt-in so the message is
+  // self-explanatory.
+  //
+  // We pin the branch at the seed commit, THEN advance main by one
+  // commit so the branch tip diverges from HEAD — the textbook
+  // "stale" scenario from the issue. That divergence is what makes
+  // the silent reuse a foot-gun in the first place, and asserting
+  // the stale OID appears verbatim in stderr proves the error message
+  // is grep-able for the value the user would otherwise be silently
+  // attached to.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  let seed = repo.head().unwrap().peel_to_commit().unwrap();
+  let stale_branch = repo.branch("feat/#99-stale", &seed, false).unwrap();
+  let stale_oid = stale_branch.into_reference().target().unwrap().to_string();
+
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo
+    .commit(Some("HEAD"), &sig, &sig, "advance main", &tree, &[&seed])
+    .unwrap();
+  let new_head = repo.head().unwrap().target().unwrap().to_string();
+  assert_ne!(new_head, stale_oid, "precondition: HEAD must diverge from stale branch");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "stale"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("feat/#99-stale"))
+    .stderr(predicate::str::contains("--reuse-branch"))
+    .stderr(predicate::str::contains(stale_oid.as_str()));
+
+  assert!(
+    !base.path().join("feat-99-stale").exists(),
+    "no worktree dir may be created when the branch is refused"
+  );
+}
+
+#[test]
+fn create_reuses_stale_branch_with_flag() {
+  // Companion to `create_refuses_stale_branch_without_reuse_flag`: the
+  // `--reuse-branch` opt-in restores the legacy attach-to-existing
+  // behaviour, and the worktree directory does get created.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-stale", &head, false).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "stale", "--reuse-branch"])
+    .assert()
+    .success();
+
+  assert!(
+    base.path().join("feat-99-stale").exists(),
+    "with --reuse-branch the worktree dir must be created against the stale branch"
+  );
+}
+
+#[test]
 fn create_subcommand_outside_git_repo_fails() {
   // The repo-bound contract: outside any git repo the standard
   // `NotInGitRepo` error wins, no worktree is touched. Named with the
