@@ -331,6 +331,34 @@ fn parse_labels_json_rejects_malformed_payload() {
   assert!(msg.contains("labels"), "should mention labels: {}", msg);
 }
 
+#[test]
+fn parse_labels_json_normalises_uppercase_color() {
+  // GitHub sometimes serialises colours uppercase. The parsed
+  // `RemoteLabel.color` must already be lowercase 6-hex so callers
+  // (diff engine, printer) can rely on the invariant without re-
+  // normalising at each call site. Copilot review on PR #90.
+  let json = r#"[{"name": "bug", "color": "D73A4A", "description": "broken"}]"#;
+  let labels = github::parse_labels_json(json).unwrap();
+  assert_eq!(labels[0].color, "d73a4a");
+}
+
+#[test]
+fn parse_labels_json_rejects_missing_color_field() {
+  // Defensive contract check: gh's documented schema always carries
+  // a `color`. If a future version dropped the field, a silent
+  // `#[serde(default)]` would turn it into an empty string and the
+  // diff would flag every remote label as a colour mismatch. Better
+  // to fail loud at parse time. Copilot review on PR #90.
+  let json = r#"[{"name": "bug", "description": "broken"}]"#;
+  let err = github::parse_labels_json(json).unwrap_err();
+  let msg = err.to_string();
+  assert!(
+    msg.contains("color") || msg.contains("missing"),
+    "error should mention the missing color field: {}",
+    msg
+  );
+}
+
 // --- Argv contract for gh label commands --------------------------------
 
 #[test]

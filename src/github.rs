@@ -388,7 +388,12 @@ const LABEL_LIST_LIMIT: &str = "1000";
 #[derive(Deserialize)]
 struct RawLabel2 {
   name: String,
-  #[serde(default)]
+  /// `color` is a documented gh-CLI invariant — every label always
+  /// carries one. We deliberately do NOT mark this `#[serde(default)]`:
+  /// if a future gh contract change drops the field, we want a hard
+  /// parse error rather than a silent empty-string that would flag
+  /// every remote label as a colour mismatch in the diff. (Copilot
+  /// review on PR #90.)
   color: String,
   #[serde(default)]
   description: Option<String>,
@@ -396,9 +401,16 @@ struct RawLabel2 {
 
 /// Parse the JSON returned by `gh label list --json name,color,description`.
 /// Exposed publicly so unit tests can cover the contract without
-/// shelling out. Description is `Some("")` when GitHub returns the
-/// field as an empty string; the labels-diff module collapses empty
-/// strings to `None` on its own.
+/// shelling out. Two normalisations happen here so callers get a
+/// uniformly-shaped `RemoteLabel`:
+///
+/// - **`color`** is lowercased. GitHub serialises hex colours in
+///   either case; the diff engine expects the lowercase form, and
+///   normalising at the parse boundary means downstream code never
+///   has to think about it.
+/// - **`description`** is left as-is. An empty `""` from GitHub
+///   round-trips as `Some("")`; the labels-diff module collapses
+///   empty strings to `None` on its own.
 pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
   let raw: Vec<RawLabel2> =
     serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse labels json: {}", e)))?;
@@ -408,7 +420,7 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
       .map(|r| RemoteLabel {
         name: r.name,
         description: r.description,
-        color: r.color,
+        color: r.color.to_ascii_lowercase(),
       })
       .collect(),
   )
