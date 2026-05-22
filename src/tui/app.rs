@@ -1,6 +1,7 @@
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
+use super::state::link_prompt::LinkPrompt;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -71,12 +72,11 @@ pub enum OpenTarget {
   Finder { path: PathBuf },
 }
 
-/// Stage of the two-step link prompt.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LinkPromptStage {
-  ChooseTarget,
-  InputNumber,
-}
+/// Stage of the two-step link prompt. Re-export from the extracted
+/// `LinkPrompt` sub-struct (issue #126) so the existing public surface
+/// (`gwm::tui::LinkPromptStage`) keeps compiling without callers
+/// learning the new module path.
+pub use super::state::link_prompt::LinkPromptStage;
 
 /// State of a background GitHub fetch (issue or PR).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,12 +164,11 @@ pub struct App {
   link_slug: Option<String>,
   issue_state: GitHubFetchState<IssueStatus>,
   pr_state: GitHubFetchState<PrStatus>,
-  /// In `View::LinkPrompt`, which stage are we in.
-  link_prompt_stage: LinkPromptStage,
-  /// In `View::LinkPrompt::InputNumber`, the digits typed so far.
-  link_prompt_number: String,
-  /// In `View::LinkPrompt::InputNumber`, the chosen target.
-  link_prompt_target: Option<LinkTarget>,
+  /// Two-stage issue/PR link prompt state (extracted per #126). Owns
+  /// the stage + target + digit buffer; the orchestrator wraps the
+  /// transitions to update the status bar and shell out to
+  /// `github::link_{issue,pr}` on submit.
+  link_prompt: LinkPrompt,
 
   /// TOFU trust mode for this TUI session (issue #95). Resolved at
   /// the CLI entrypoint from `--allow-bootstrap` / `--deny-bootstrap`
@@ -226,9 +225,7 @@ impl App {
       link_slug: None,
       issue_state: GitHubFetchState::Idle,
       pr_state: GitHubFetchState::Idle,
-      link_prompt_stage: LinkPromptStage::ChooseTarget,
-      link_prompt_number: String::new(),
-      link_prompt_target: None,
+      link_prompt: LinkPrompt::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
     };
     out.refresh_link();
@@ -1128,38 +1125,38 @@ impl App {
   }
 
   // ---- Link prompt --------------------------------------------------------
+  //
+  // Pure state lives in `self.link_prompt` (`tui::state::link_prompt`,
+  // extracted per #126). The methods below are thin orchestrator
+  // wrappers: they update `self.view` / `self.status` / drive the
+  // `github::link_{issue,pr}` shell-out on submit, then delegate the
+  // buffer / stage transitions to `LinkPrompt`.
 
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
     self.status = "link: [i]ssue / [p]r · esc cancels".into();
   }
 
   pub fn link_prompt_cancel(&mut self) {
     self.view = View::List;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
   }
 
   pub fn link_prompt_stage(&self) -> LinkPromptStage {
-    self.link_prompt_stage
+    self.link_prompt.stage
   }
 
   pub fn link_prompt_number_input(&self) -> &str {
-    &self.link_prompt_number
+    &self.link_prompt.number
   }
 
   pub fn link_prompt_target(&self) -> Option<LinkTarget> {
-    self.link_prompt_target
+    self.link_prompt.target
   }
 
   pub fn link_prompt_choose(&mut self, target: LinkTarget) {
-    self.link_prompt_target = Some(target);
-    self.link_prompt_stage = LinkPromptStage::InputNumber;
-    self.link_prompt_number.clear();
+    self.link_prompt.commit_target(target);
     self.status = match target {
       LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
       LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
@@ -1167,24 +1164,21 @@ impl App {
   }
 
   pub fn link_prompt_push_char(&mut self, c: char) {
-    if self.link_prompt_stage == LinkPromptStage::InputNumber && c.is_ascii_digit() {
-      self.link_prompt_number.push(c);
-    }
+    self.link_prompt.push_char(c);
   }
 
   pub fn link_prompt_pop_char(&mut self) {
-    if self.link_prompt_stage == LinkPromptStage::InputNumber {
-      self.link_prompt_number.pop();
-    }
+    self.link_prompt.pop_char();
   }
 
   pub fn link_prompt_submit(&mut self) -> Result<()> {
-    let Some(target) = self.link_prompt_target else {
+    let Some(target) = self.link_prompt.target else {
       self.status = "no target chosen".into();
       return Ok(());
     };
     let n: u64 = self
-      .link_prompt_number
+      .link_prompt
+      .number
       .parse()
       .map_err(|_| GwmError::Other("number is empty or invalid".into()))?;
     let branch = self
@@ -1201,9 +1195,7 @@ impl App {
       LinkTarget::Pr => format!("linked PR #{} to {}", n, branch),
     };
     self.view = View::List;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
     self.refresh_link();
     Ok(())
   }
