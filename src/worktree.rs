@@ -27,6 +27,11 @@ pub struct WorktreeInfo {
   /// re-shelling `git config`. Empty link = no marker dot. See
   /// `tui/ui.rs::table_marker`.
   pub link: BranchLink,
+  /// Branch age relative to the trunk baseline, pre-computed at list
+  /// time so the TUI render path never opens a fresh `git2::Repository`
+  /// per row per frame (issue #103). `None` for trunk branches and for
+  /// worktrees whose repo can't be opened — the UI renders `-`.
+  pub age: Option<Duration>,
 }
 
 /// Cheap snapshot of "where are we vs. clean / upstream".
@@ -129,6 +134,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       .as_deref()
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
+    let age = branch.as_deref().and_then(|b| branch_age(repo, b));
     out.push(WorktreeInfo {
       name: workdir
         .file_name()
@@ -142,6 +148,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_prunable: false,
       status: compute_status(repo),
       link,
+      age,
     });
   }
 
@@ -155,14 +162,21 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
     let is_prunable = matches!(wt.is_prunable(None), Ok(p) if p);
 
-    // Open the worktree as a repo to read its HEAD + status.
-    let (branch, head, status) = match Repository::open(&path) {
+    // Open the worktree as a repo to read its HEAD + status + branch age.
+    // Issue #103: piggyback the age computation onto this existing open so
+    // the TUI render path no longer needs to call `Repository::open` per
+    // row per frame. Cost is the same revwalk we'd otherwise do per frame.
+    let (branch, head, status, age) = match Repository::open(&path) {
       Ok(sub) => {
         let head_ref = sub.head().ok();
         let b = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
         let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
         let s = compute_status(&sub);
-        (b, h, s)
+        // The trunk-baseline lookup must run against the main repo's
+        // branch table; the linked worktree's `sub` has the same refs DB
+        // either way (git2 shares the gitdir), so either handle works.
+        let a = b.as_deref().and_then(|name| branch_age(&sub, name));
+        (b, h, s, a)
       }
       Err(_) => (
         None,
@@ -171,6 +185,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
           unknown: true,
           ..Default::default()
         },
+        None,
       ),
     };
 
@@ -188,6 +203,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_prunable,
       status,
       link,
+      age,
     });
   }
 

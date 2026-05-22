@@ -537,3 +537,74 @@ fn remove_failed_filesystem_unlink_still_prunes_metadata() {
     "prune must run BEFORE remove_dir_all so a failed unlink cannot leave a phantom worktree"
   );
 }
+
+// --------------------------------------------------------------------------
+// Issue #103 — `WorktreeInfo.age` pre-computed at list time so the TUI
+// render loop no longer opens a fresh `git2::Repository` per row per frame.
+// --------------------------------------------------------------------------
+
+#[test]
+fn list_populates_age_on_feature_worktree() {
+  // Issue #103: the TUI used to call `branch_age_for(w)` per row per frame,
+  // which opened a `git2::Repository` and ran a revwalk every time. The fix
+  // moves that computation into `worktree::list()` so the render path becomes
+  // pure read-only struct field access. Asserting `WorktreeInfo.age` is
+  // populated by `list()` pins the new contract: the TUI is no longer
+  // permitted to open libgit2 handles on the render path.
+  let (dir, repo) = init_repo();
+
+  // Pin a `feat/#103-age` branch with one commit dated 2 days ago so the
+  // formatter has something stable to read.
+  let two_days_ago = chrono::Utc::now().timestamp() - 2 * 86_400;
+  let main_oid = repo.head().unwrap().target().unwrap();
+  let main_commit = repo.find_commit(main_oid).unwrap();
+  repo.branch("feat/#103-age", &main_commit, false).unwrap();
+  commit_with_time(
+    dir.path(),
+    &repo,
+    "refs/heads/feat/#103-age",
+    "branch-old",
+    two_days_ago,
+  );
+
+  // Attach a worktree on that branch and list.
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-103-age");
+  worktree::add(&repo, "feat-103-age", &target, "feat/#103-age").unwrap();
+
+  let trees = worktree::list(&repo).unwrap();
+  let feature = trees
+    .iter()
+    .find(|w| w.name == "feat-103-age")
+    .expect("feature worktree must appear in list");
+
+  let age = feature
+    .age
+    .expect("WorktreeInfo.age must be Some on a feature branch with divergence");
+  let drift = age.as_secs().abs_diff(2 * 86_400);
+  assert!(
+    drift < 300,
+    "expected ~2 days on the cached age field, got {}s (drift {}s)",
+    age.as_secs(),
+    drift
+  );
+}
+
+#[test]
+fn list_returns_none_age_for_main_worktree() {
+  // Trunk branches (`main` / `master` / `dev`) have no meaningful "branch
+  // age" — `worktree::list()` must surface `None` so the TUI renders `-`,
+  // matching the prior `branch_age_for` semantics.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let trees = worktree::list(&repo).unwrap();
+  let main = trees
+    .iter()
+    .find(|w| w.is_main)
+    .expect("main worktree must appear in list");
+  assert!(
+    main.age.is_none(),
+    "main worktree on a trunk branch must report age = None, got {:?}",
+    main.age
+  );
+}

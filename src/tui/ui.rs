@@ -469,25 +469,19 @@ fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
 }
 
 /// Render the "Created" line value: compact relative duration (`2d`,
-/// `3w`, `1M`, …) computed from the worktree's own repository handle, or
-/// `"-"` when the branch has no measurable age (trunk, detached HEAD, or
-/// repo open failure). The cost is one libgit2 revwalk on each sidebar
-/// rebuild — gated by `sidebar_cache` so it only runs on selection
-/// change, not every frame.
+/// `3w`, `1M`, …) read from the pre-computed `WorktreeInfo.age` field,
+/// or `"-"` when the branch has no measurable age (trunk, detached HEAD,
+/// repo open failure). Issue #103: previously this opened a fresh
+/// `git2::Repository` per row per frame; the libgit2 work now happens
+/// once at `worktree::list()` time.
 fn branch_age_label(w: &WorktreeInfo) -> String {
-  branch_age_for(w)
+  w.age
     .map(worktree::format_relative_duration)
     .unwrap_or_else(|| "-".into())
 }
 
 fn branch_age_color(w: &WorktreeInfo) -> Color {
-  branch_age_for(w).map(freshness_color).unwrap_or(Color::DarkGray)
-}
-
-fn branch_age_for(w: &WorktreeInfo) -> Option<Duration> {
-  let branch = w.branch.as_ref()?;
-  let repo = git2::Repository::open(&w.path).ok()?;
-  worktree::branch_age(&repo, branch)
+  w.age.map(freshness_color).unwrap_or(Color::DarkGray)
 }
 
 fn badges_line(w: &WorktreeInfo) -> Line<'static> {
@@ -746,15 +740,13 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
 
   // PR #74 follow-up: surface branch age right in the table so it stays
   // visible when the sidebar is hidden (<120 cols or `v` collapsed).
-  // `branch_age_for` opens the worktree's repo and runs the libgit2
-  // revwalk; per-frame cost is bounded by the number of visible rows
-  // (typically <20) so we re-resolve on every draw without caching.
-  // Colour stays uniform Gray — the saturated freshness palette
-  // (green/yellow/darkgray) reads as noise next to the more important
-  // BRANCH-status colour, so we keep it muted in the table and let the
-  // sidebar's `Created:` row carry the colour-coded signal.
-  let age = branch_age_for(w);
-  let age_label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+  // Issue #103: `w.age` is now pre-computed at `worktree::list()` time,
+  // so the table render path is pure field access — no libgit2 handle is
+  // opened per row per frame. Colour stays uniform Gray — the saturated
+  // freshness palette (green/yellow/darkgray) reads as noise next to the
+  // more important BRANCH-status colour, so we keep it muted in the table
+  // and let the sidebar's `Created:` row carry the colour-coded signal.
+  let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
   let age_cell = Cell::from(age_label).style(Style::default().fg(Color::DarkGray));
 
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
