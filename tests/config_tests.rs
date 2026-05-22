@@ -1,4 +1,6 @@
-use gwm::config::{expand_placeholders, review_tool_preset, Config, TuiOpenMode, WorktreeConfig, CONFIG_FILE};
+use gwm::config::{
+  expand_placeholders, review_tool_preset, BranchTypesSource, Config, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+};
 use tempfile::TempDir;
 
 #[test]
@@ -577,4 +579,84 @@ mode = "neovim"
   )
   .unwrap();
   assert!(Config::load_for_repo(dir.path()).is_err());
+}
+
+// ---- [[branch_types]] (issue #80) ------------------------------------------
+
+#[test]
+fn branch_types_absent_falls_back_to_built_in_defaults() {
+  // The zero-friction contract: a repo without `[[branch_types]]` in
+  // its `.gwm.toml` (or with no config at all) keeps the historical
+  // built-in list. The source must report `Default` so `gwm types` can
+  // surface a truthful footer.
+  let cfg = Config::default();
+  let resolved = cfg.resolved_branch_types();
+  assert_eq!(resolved.source, BranchTypesSource::Default);
+  assert!(
+    resolved.types.iter().any(|t| t.name == "feat"),
+    "default list must include the legacy `feat` entry"
+  );
+  assert!(
+    resolved.types.iter().any(|t| t.name == "hotfix"),
+    "default list must include `hotfix` (regression guard against partial defaults)"
+  );
+}
+
+#[test]
+fn branch_types_parsed_from_toml_replaces_defaults() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[branch_types]]
+name = "feat"
+description = "New feature implementation"
+
+[[branch_types]]
+name = "fix"
+description = "Bug fix"
+
+[[branch_types]]
+name = "migration"
+description = "Database migration"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let resolved = cfg.resolved_branch_types();
+  assert_eq!(resolved.source, BranchTypesSource::Config);
+  let names: Vec<_> = resolved.types.iter().map(|t| t.name.as_str()).collect();
+  assert_eq!(names, vec!["feat", "fix", "migration"]);
+  // Built-in entries that aren't in the config are dropped — the user's
+  // list is authoritative once they opt in.
+  assert!(!names.contains(&"hotfix"));
+  assert!(!names.contains(&"chore"));
+}
+
+#[test]
+fn branch_types_empty_block_treated_as_absent() {
+  // An empty TOML array (`branch_types = []`) is observationally
+  // identical to omitting the section — neither should replace the
+  // built-in defaults with an empty list (which would lock the user
+  // out of `gwm create`).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+branch_types = []
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let resolved = cfg.resolved_branch_types();
+  assert_eq!(resolved.source, BranchTypesSource::Default);
+  assert!(!resolved.types.is_empty());
+}
+
+#[test]
+fn branch_types_source_label_is_user_facing() {
+  // Footer strings rendered by `gwm types` — pin them so a label tweak
+  // shows up in code review instead of slipping through.
+  assert_eq!(BranchTypesSource::Default.label(), "built-in defaults");
+  assert_eq!(BranchTypesSource::Config.label(), ".gwm.toml");
 }
