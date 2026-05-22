@@ -350,7 +350,54 @@ impl Config {
     let cfg: Config = toml::from_str(&raw)?;
     cfg.validate_branch_types()?;
     cfg.validate_bootstrap_paths()?;
+    cfg.validate_bootstrap_guards()?;
     Ok(cfg)
+  }
+
+  /// Pre-compile every `[[bootstrap.guard]].deny_patterns` entry so a
+  /// malformed regex surfaces at config load instead of being silently
+  /// dropped at evaluation time (issue #96).
+  ///
+  /// Historically `bootstrap.rs::guard_match` wrapped `Regex::new(pat)`
+  /// in `if let Ok(re) = …`, which made a guard fail-open whenever one
+  /// of its patterns failed to compile: the bad pattern vanished and
+  /// the surviving patterns evaluated against the file as if nothing
+  /// was wrong. A refusal mechanism that silently refuses to refuse is
+  /// strictly worse than no mechanism — the user reads "guard passed"
+  /// and trusts a file that never went through the rule it was meant
+  /// to be filtered by.
+  ///
+  /// The compiled regexes are deliberately discarded here: the goal
+  /// of this validator is to fail fast at load time, and caching a
+  /// `Vec<Regex>` on the `Guard` struct would force `#[serde(skip)]`
+  /// gymnastics on a type that round-trips through TOML.
+  ///
+  /// **Trust boundary**: `Config::load_for_repo` is the primary
+  /// chokepoint this validator protects. `bootstrap::guard_match`
+  /// holds the matching defence-in-depth for `Config` values that
+  /// bypass the loader (test fixtures, programmatic constructors,
+  /// future APIs): a runtime `Regex::new` failure surfaces as a
+  /// `StepStatus::Failed` step and refuses the copy, instead of
+  /// silently dropping the pattern as the original #96 fail-open
+  /// did.
+  pub fn validate_bootstrap_guards(&self) -> Result<()> {
+    for (gi, g) in self.bootstrap.guard.iter().enumerate() {
+      for (pi, pat) in g.deny_patterns.iter().enumerate() {
+        regex::Regex::new(pat).map_err(|e| {
+          // Include the guard index AND the pattern index so a `.gwm.toml`
+          // with five guards × five patterns surfaces "bootstrap.guard[3].
+          // deny_patterns[1]" — the exact TOML coordinate — instead of
+          // forcing the user to grep for the pattern content. Mirrors the
+          // shape used by `validate_bootstrap_paths` (e.g.
+          // "bootstrap.copy[0].to").
+          GwmError::Config(format!(
+            "bootstrap.guard[{}].deny_patterns[{}] '{}': invalid pattern {:?} — regex: {}",
+            gi, pi, g.name, pat, e
+          ))
+        })?;
+      }
+    }
+    Ok(())
   }
 
   /// Reject `..` components and absolute paths in bootstrap path

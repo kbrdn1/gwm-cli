@@ -1162,3 +1162,165 @@ content = "X=1"
   .unwrap();
   Config::load_for_repo(dir.path()).expect("benign relative paths must load");
 }
+
+// --- Issue #96: guard deny_patterns must compile at load time ---------------
+//
+// Historically `bootstrap.rs::guard_match` wrapped `Regex::new(pat)` in
+// `if let Ok(re) = …`, silently dropping invalid patterns. A guard whose
+// only deny pattern failed to compile became fail-open: the file copied
+// through as if no rule existed. The contract of `[[bootstrap.guard]]`
+// is a refusal mechanism — a silently broken refusal is strictly worse
+// than no refusal, because the user believes they are protected. Reject
+// invalid patterns at `Config::load_for_repo` so bootstrap never runs
+// against a partially broken guard.
+
+#[test]
+fn load_rejects_invalid_deny_pattern_in_guard() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "no-secrets"
+deny_patterns = ["[+", "AWS_SECRET_ACCESS_KEY"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid deny_patterns must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("no-secrets"),
+    "error must name the offending guard, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("[+"),
+    "error must quote the offending pattern, got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("deny_pattern") || msg.contains("regex"),
+    "error must explain WHY (regex/deny_pattern), got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_rejects_invalid_deny_pattern_when_only_pattern_in_guard() {
+  // Even when the *only* pattern is invalid, the guard must fail at
+  // load — never silently degrade into a "guard with no patterns",
+  // which would be fail-open under any input.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "broken"
+deny_patterns = ["*foo"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid sole deny pattern must be rejected at load");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("broken") && msg.contains("*foo"),
+    "error must name guard + pattern, got: {}",
+    msg
+  );
+}
+
+#[test]
+fn load_accepts_valid_deny_patterns() {
+  // Positive control: every well-formed pattern continues to load.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "no-aws"
+deny_patterns = ["amazonaws\\.com", "AKIA[0-9A-Z]{16}", "(?i)aws_secret"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).expect("valid patterns must load");
+  assert_eq!(cfg.bootstrap.guard.len(), 1);
+  assert_eq!(cfg.bootstrap.guard[0].deny_patterns.len(), 3);
+}
+
+#[test]
+fn validate_bootstrap_guards_directly_rejects_invalid_pattern_without_load_for_repo() {
+  // Direct unit test on the helper, called against a `Config` value
+  // built in code without ever touching `Config::load_for_repo`.
+  // Locks in the helper's contract independently of the loader, so a
+  // future refactor that removes the call site from `load_for_repo`
+  // doesn't go unnoticed by only the integration suite.
+  use gwm::config::{BootstrapConfig, Guard};
+  let mut cfg = Config {
+    bootstrap: BootstrapConfig {
+      guard: vec![Guard {
+        name: "direct-test".into(),
+        deny_patterns: vec!["(unclosed-group".into()],
+        on_match: "abort".into(),
+        example_file: None,
+      }],
+      ..Default::default()
+    },
+    ..Default::default()
+  };
+  let err = cfg
+    .validate_bootstrap_guards()
+    .expect_err("direct call on hand-built Config with invalid pattern must Err");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("direct-test") && msg.contains("(unclosed-group"),
+    "error must name guard + pattern, got: {}",
+    msg
+  );
+
+  // Positive control: clear the bad pattern and the same helper must
+  // accept the Config, even with a non-trivial pattern set.
+  cfg.bootstrap.guard[0].deny_patterns = vec!["AKIA[0-9A-Z]{16}".into(), "(?i)secret".into()];
+  cfg
+    .validate_bootstrap_guards()
+    .expect("valid patterns must pass direct validation");
+}
+
+#[test]
+fn load_rejects_invalid_deny_pattern_in_second_guard() {
+  // The validator must walk every guard, not just the first one. A
+  // bad pattern in guard #2 must still surface at load.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[bootstrap.guard]]
+name          = "guard-one"
+deny_patterns = ["amazonaws\\.com"]
+on_match      = "abort"
+
+[[bootstrap.guard]]
+name          = "guard-two"
+deny_patterns = ["[unclosed"]
+on_match      = "abort"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid pattern in second guard must be rejected");
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("guard-two") && msg.contains("[unclosed"),
+    "error must name the offending guard + pattern, got: {}",
+    msg
+  );
+  // The error must also surface the TOML coordinates of the failing
+  // entry so the user can jump straight to `.gwm.toml` line without
+  // grepping for the pattern content (mirrors `bootstrap.copy[N].to`).
+  assert!(
+    msg.contains("bootstrap.guard[1]") && msg.contains("deny_patterns[0]"),
+    "error must locate the failing entry by index, got: {}",
+    msg
+  );
+}

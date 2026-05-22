@@ -136,9 +136,20 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     }
 
     // Run guards before copying.
-    if let Some(g) = guard_match(step, bs, &src) {
-      handle_guard_match(&g, &src, &dst, ctx, report, &label);
-      continue;
+    match guard_match(step, bs, &src) {
+      Ok(Some(g)) => {
+        handle_guard_match(&g, &src, &dst, ctx, report, &label);
+        continue;
+      }
+      Ok(None) => {}
+      Err(detail) => {
+        report.steps.push(StepResult {
+          label,
+          status: StepStatus::Failed,
+          detail,
+        });
+        continue;
+      }
     }
 
     match copy_no_follow(&src, &dst) {
@@ -190,22 +201,50 @@ fn key_from_to(to: &str) -> String {
   to.trim_start_matches('.').replace(['.', '-'], "_")
 }
 
-fn guard_match(step: &CopyStep, bs: &BootstrapConfig, src: &Path) -> Option<Guard> {
+/// Evaluate the configured guards against `src`'s contents.
+///
+/// Returns:
+///   - `Ok(Some(guard))` — a guard tripped on a denied pattern; the
+///     caller routes to `handle_guard_match` to apply `on_match`.
+///   - `Ok(None)` — no guard tripped; copy proceeds.
+///   - `Err(detail)` — a `deny_patterns` entry failed to compile.
+///     `Config::load_for_repo` is supposed to have caught this at
+///     load time (issue #96), so reaching this branch means the
+///     `Config` value came from a code path that bypassed the
+///     loader (test fixture, programmatic constructor, future API).
+///     Fail-closed: the caller reports a `Failed` step and the copy
+///     is refused, mirroring the abort path for a true match. A
+///     refusal mechanism whose pattern set is partially broken must
+///     never silently pass — see issue #96.
+fn guard_match(step: &CopyStep, bs: &BootstrapConfig, src: &Path) -> std::result::Result<Option<Guard>, String> {
   if step.guards.is_empty() {
-    return None;
+    return Ok(None);
   }
-  let content = std::fs::read_to_string(src).ok()?;
+  let Ok(content) = std::fs::read_to_string(src) else {
+    return Ok(None);
+  };
   for guard_name in &step.guards {
-    let guard = bs.guard.iter().find(|g| &g.name == guard_name)?;
+    let Some(guard) = bs.guard.iter().find(|g| &g.name == guard_name) else {
+      return Ok(None);
+    };
     for pat in &guard.deny_patterns {
-      if let Ok(re) = Regex::new(pat) {
-        if re.is_match(&content) {
-          return Some(guard.clone());
+      match Regex::new(pat) {
+        Ok(re) => {
+          if re.is_match(&content) {
+            return Ok(Some(guard.clone()));
+          }
+        }
+        Err(e) => {
+          return Err(format!(
+            "guard '{}' deny_pattern {:?} failed to compile at evaluation time — \
+             Config bypassed Config::load_for_repo (#96)? regex: {}",
+            guard.name, pat, e
+          ));
         }
       }
     }
   }
-  None
+  Ok(None)
 }
 
 fn handle_guard_match(
