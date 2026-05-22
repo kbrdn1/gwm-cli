@@ -208,6 +208,16 @@ pub struct App {
   link_prompt_number: String,
   /// In `View::LinkPrompt::InputNumber`, the chosen target.
   link_prompt_target: Option<LinkTarget>,
+
+  /// TOFU trust mode for this TUI session (issue #95). Resolved at
+  /// the CLI entrypoint from `--allow-bootstrap` / `--deny-bootstrap`
+  /// / `GWM_ALLOW_BOOTSTRAP=1` and threaded down via `tui::run(mode)`.
+  /// Used by `check_trust_for_bootstrap` to gate `submit_create` and
+  /// `bootstrap_selected` — same security policy as the CLI, no
+  /// bypass via the TUI. Default `Prompt` (preserves the safe
+  /// default when callers construct `App` directly, e.g. tests that
+  /// don't care about the gate).
+  pub trust_mode: crate::trust::TrustMode,
 }
 
 impl App {
@@ -261,9 +271,56 @@ impl App {
       link_prompt_stage: LinkPromptStage::ChooseTarget,
       link_prompt_number: String::new(),
       link_prompt_target: None,
+      trust_mode: crate::trust::TrustMode::Prompt,
     };
     out.refresh_link();
     Ok(out)
+  }
+
+  /// Builder-style setter for `trust_mode`. The TUI entrypoint
+  /// (`tui::run`) calls this after construction to thread through
+  /// the CLI flags / env resolution; tests can use it directly to
+  /// exercise each variant of the gate.
+  pub fn with_trust_mode(mut self, mode: crate::trust::TrustMode) -> Self {
+    self.trust_mode = mode;
+    self
+  }
+
+  /// Silent TOFU gate for the TUI's bootstrap call sites
+  /// (`submit_create`, `bootstrap_selected`). Returns:
+  ///
+  /// * `Ok(None)` — caller is cleared to invoke `bootstrap::run`.
+  /// * `Ok(Some(msg))` — caller MUST NOT run bootstrap; show `msg`
+  ///   to the user (e.g. assign to `self.status`). Untrusted
+  ///   configs and `TrustMode::Deny` both land here — the TUI
+  ///   alternate-screen can't host a stdin prompt today, so we
+  ///   refuse with a hint pointing the user at the CLI gate
+  ///   (`gwm bootstrap` from another terminal).
+  /// * `Err(e)` — ledger I/O / config read error propagated verbatim.
+  pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
+    use crate::trust::{self, TrustOutcome};
+
+    let origin_url = self
+      .repo
+      .find_remote("origin")
+      .ok()
+      .and_then(|r| r.url().map(String::from));
+    let origin = trust::resolve_origin_key(origin_url.as_deref(), &self.workdir);
+
+    match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
+      TrustOutcome::Proceed => Ok(None),
+      TrustOutcome::Refuse { message } => Ok(Some(message)),
+      TrustOutcome::Prompt { cfg_path, sha, .. } => {
+        let short_sha: String = sha.chars().take(12).collect();
+        Ok(Some(format!(
+          ".gwm.toml at {} not in trust ledger (hash {}) — \
+           run `gwm bootstrap` from a CLI in another terminal to approve, \
+           or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap",
+          cfg_path.display(),
+          short_sha
+        )))
+      }
+    }
   }
 
   /// Constructor for `gwm switch`: same App, but picker mode is on and the
@@ -672,6 +729,19 @@ impl App {
     let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
     let target = spec.worktree_path(&self.config.worktree, &self.repo_name)?;
 
+    // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
+    // creating the worktree on disk (issue #95). A refusal here
+    // leaves the user's disk state untouched — no orphaned
+    // worktree to clean up. Mirrors `cmd_create` in src/cli.rs.
+    if let Some(msg) = self.check_trust_for_bootstrap()? {
+      self.status = msg;
+      // Stay in the create form so the user can retry after
+      // approving the config via the CLI gate. Returning Ok here
+      // (rather than Err) keeps the event loop alive — an Err
+      // would print to stderr and tear down the alternate screen.
+      return Ok(());
+    }
+
     let created = worktree::add(&self.repo, &dirname, &target, &branch)?;
 
     let ctx = BootstrapCtx {
@@ -977,6 +1047,22 @@ impl App {
         return;
       }
     };
+
+    // Same TOFU gate as `submit_create` — pressing `b` to re-run
+    // bootstrap on an existing worktree is just as much an RCE
+    // primitive as creating a new one. Issue #95.
+    match self.check_trust_for_bootstrap() {
+      Ok(None) => {}
+      Ok(Some(msg)) => {
+        self.status = msg;
+        return;
+      }
+      Err(e) => {
+        self.status = format!("trust gate error: {}", e);
+        return;
+      }
+    }
+
     let ctx = BootstrapCtx {
       main_repo: &self.workdir,
       worktree: &path,
