@@ -1,5 +1,5 @@
 use crate::bootstrap::{self, BootstrapCtx, StepStatus};
-use crate::config::Config;
+use crate::config::{Config, CONFIG_FILE};
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
@@ -9,16 +9,34 @@ use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
 use crate::naming::BranchSpec;
+use crate::trust::{self, TrustLedger};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use git2::Repository;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "gwm", version, about = "git worktree manager (TUI + CLI)")]
 pub struct Cli {
+  /// Skip the TOFU trust prompt on `.gwm.toml` (issue #95).
+  ///
+  /// Equivalent to `GWM_ALLOW_BOOTSTRAP=1`. Use in non-interactive
+  /// environments (CI runners, scripted workflows) where there is no
+  /// human to answer the prompt. Off by default — the threat model is
+  /// arbitrary RCE via `[[bootstrap.command]]` lines from an untrusted
+  /// remote, so the safe default is "prompt".
+  #[arg(long, global = true)]
+  pub allow_bootstrap: bool,
+
+  /// Refuse to run `.gwm.toml` bootstrap regardless of trust state
+  /// (issue #95). Useful for forensic inspection of an unfamiliar
+  /// repo: `gwm bootstrap --deny-bootstrap` short-circuits the
+  /// execution path even if the ledger says trusted.
+  #[arg(long, global = true, conflicts_with = "allow_bootstrap")]
+  pub deny_bootstrap: bool,
+
   #[command(subcommand)]
   pub command: Option<Command>,
 }
@@ -240,6 +258,20 @@ pub enum Command {
     #[command(subcommand)]
     action: MilestonesAction,
   },
+  /// Manage the TOFU trust ledger for `.gwm.toml` files (issue #95).
+  ///
+  /// `gwm` runs `[[bootstrap.command]]` lines from `.gwm.toml` under
+  /// the user's privileges — equivalent to `curl … | sh` against the
+  /// repo author. The trust ledger at `~/.config/gwm/trust.toml`
+  /// (override via `$GWM_TRUST_LEDGER`) records the `(origin URL,
+  /// sha256 of .gwm.toml)` tuples the user has approved, so
+  /// subsequent runs skip the prompt. Hash drift (any byte changes
+  /// in `.gwm.toml`) re-prompts — see the module-level comment in
+  /// `src/trust.rs` for the threat model.
+  Trust {
+    #[command(subcommand)]
+    action: TrustAction,
+  },
 }
 
 /// Subcommands of `gwm labels`. The split is intentional: `list` is
@@ -281,6 +313,38 @@ pub enum LabelsAction {
   },
 }
 
+/// Subcommands of `gwm trust` (issue #95). All three are read-only or
+/// purely local — no network, no git mutation — so they're safe to
+/// surface in CI as inspection helpers.
+#[derive(Debug, Subcommand)]
+pub enum TrustAction {
+  /// List every recorded `(origin, hash)` pair in the active ledger.
+  ///
+  /// Empty ledger prints a single line and exits 0 — the no-op fast
+  /// path for fresh installs. The `trusted_at` timestamp is the
+  /// audit anchor; revoke entries whose age looks suspicious with
+  /// `gwm trust revoke <origin>`.
+  List,
+  /// Remove every entry whose `origin` matches verbatim. After revoke,
+  /// the next `gwm create` / `gwm bootstrap` against that repo
+  /// re-prompts — use this when you change machines, rotate
+  /// credentials, or no longer trust a previously approved repo.
+  Revoke {
+    /// Origin URL to revoke (must match the recorded form verbatim —
+    /// SSH and HTTPS flavours of the same GitHub repo are recorded as
+    /// distinct entries because they ARE distinct trust paths).
+    origin: String,
+  },
+  /// Print the active ledger path and its raw TOML contents.
+  ///
+  /// Honours `$GWM_TRUST_LEDGER` if set, falls back to
+  /// `$XDG_CONFIG_HOME/gwm/trust.toml` (or the platform-specific
+  /// equivalent). Useful when triaging "why is gwm re-prompting?"
+  /// situations — eyeball the recorded hash vs. what `sha256sum
+  /// .gwm.toml` produces.
+  Show,
+}
+
 /// Subcommands of `gwm milestones`. Mirrors `LabelsAction`: `list` is
 /// read-only and safe to run in CI; `push` mutates the remote and
 /// therefore gets `--dry-run` / `--prune` flags of its own.
@@ -320,6 +384,13 @@ pub fn run(cli: Cli) -> Result<()> {
     return crate::tui::run();
   };
 
+  // Resolve the trust mode once at dispatch time so every handler that
+  // gates bootstrap sees the same value. `--deny-bootstrap` wins over
+  // `--allow-bootstrap` if both are passed (clap's `conflicts_with`
+  // already rejects this combination at parse time — the explicit
+  // ordering here is defence in depth).
+  let mode = resolve_trust_mode(cli.allow_bootstrap, cli.deny_bootstrap);
+
   match cmd {
     Command::Init => cmd_init(),
     Command::List { format } => cmd_list(format),
@@ -328,10 +399,10 @@ pub fn run(cli: Cli) -> Result<()> {
       issue,
       desc,
       no_bootstrap,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap),
+    } => cmd_create(branch_type, issue, desc, no_bootstrap, mode),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
-    Command::Bootstrap { target } => cmd_bootstrap(target),
+    Command::Bootstrap { target } => cmd_bootstrap(target, mode),
     Command::Prune => cmd_prune(),
     Command::Doctor => cmd_doctor(),
     Command::Types => cmd_types(),
@@ -354,6 +425,47 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Status { worktree, json } => cmd_status(worktree, json),
     Command::Labels { action } => cmd_labels(action),
     Command::Milestones { action } => cmd_milestones(action),
+    Command::Trust { action } => cmd_trust(action),
+  }
+}
+
+/// Trust mode resolved from CLI flags and env. Threaded through the
+/// `cmd_create` / `cmd_bootstrap` handlers so the same decision applies
+/// to every code path that may run `bootstrap::run`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustMode {
+  /// Default: prompt the user (or fail if stdin isn't a tty).
+  Prompt,
+  /// `--allow-bootstrap` or `GWM_ALLOW_BOOTSTRAP=1` — skip the prompt,
+  /// treat as trusted for this invocation. Does NOT record the entry
+  /// in the ledger (CI bypasses shouldn't pollute the local ledger
+  /// of whoever's running the runner image).
+  Allow,
+  /// `--deny-bootstrap` — refuse to run bootstrap even if already
+  /// trusted. For forensic / first-look inspection of a hostile repo.
+  Deny,
+}
+
+fn resolve_trust_mode(allow_flag: bool, deny_flag: bool) -> TrustMode {
+  if deny_flag {
+    return TrustMode::Deny;
+  }
+  if allow_flag || env_truthy("GWM_ALLOW_BOOTSTRAP") {
+    return TrustMode::Allow;
+  }
+  TrustMode::Prompt
+}
+
+/// Truthy env semantics: any non-empty value other than `0`, `false`,
+/// or `no` (case-insensitive) counts as true. Matches the convention
+/// used elsewhere in the codebase (see `tui::env_bool`).
+fn env_truthy(key: &str) -> bool {
+  match std::env::var(key) {
+    Ok(v) => {
+      let v = v.trim().to_ascii_lowercase();
+      !v.is_empty() && v != "0" && v != "false" && v != "no"
+    }
+    Err(_) => false,
   }
 }
 
@@ -448,7 +560,13 @@ fn format_status_text(w: &worktree::WorktreeInfo) -> String {
   parts.join(" ")
 }
 
-fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bool) -> Result<()> {
+fn cmd_create(
+  branch_type: String,
+  issue: String,
+  desc: String,
+  no_bootstrap: bool,
+  trust_mode: TrustMode,
+) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let repo_name = worktree::repo_name(&repo);
@@ -459,6 +577,13 @@ fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bo
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
   let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
   let target = spec.worktree_path(&config.worktree, &repo_name)?;
+
+  // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
+  // creating the worktree — a deny / abort here leaves the user's
+  // disk state untouched (no orphaned worktree to clean up).
+  if !no_bootstrap {
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+  }
 
   println!("creating worktree:");
   println!("  branch : {}", branch);
@@ -503,7 +628,7 @@ fn cmd_path(pattern: String) -> Result<()> {
   Ok(())
 }
 
-fn cmd_bootstrap(target: Option<String>) -> Result<()> {
+fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let config = Config::load_for_repo(&workdir)?;
@@ -519,6 +644,8 @@ fn cmd_bootstrap(target: Option<String>) -> Result<()> {
     }
     None => std::env::current_dir()?,
   };
+
+  trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
 
   let ctx = BootstrapCtx {
     main_repo: &workdir,
@@ -1234,6 +1361,264 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
     "summary: {} create · {} update · {} match · {} extra-on-remote",
     n_create, n_update, n_match, n_extra
   );
+}
+
+// ---- Trust ledger commands (issue #95) ----------------------------------
+
+fn cmd_trust(action: TrustAction) -> Result<()> {
+  match action {
+    TrustAction::List => cmd_trust_list(),
+    TrustAction::Revoke { origin } => cmd_trust_revoke(origin),
+    TrustAction::Show => cmd_trust_show(),
+  }
+}
+
+fn cmd_trust_list() -> Result<()> {
+  let path = trust::default_ledger_path()?;
+  let ledger = TrustLedger::load(&path)?;
+  if ledger.entries.is_empty() {
+    println!("0 entries in trust ledger ({}).", path.display());
+    return Ok(());
+  }
+  println!("trust ledger: {}", path.display());
+  println!(
+    "  {} entr{} recorded:",
+    ledger.entries.len(),
+    if ledger.entries.len() == 1 { "y" } else { "ies" }
+  );
+  let origin_w = ledger
+    .entries
+    .iter()
+    .map(|e| e.origin.len())
+    .max()
+    .unwrap_or(6)
+    .clamp(6, 60);
+  for e in &ledger.entries {
+    // First 12 chars of the sha256 is plenty for a visual diff; the
+    // full digest still ships in the toml file for forensic use.
+    let short_sha = &e.config_sha[..e.config_sha.len().min(12)];
+    println!(
+      "  {:<ow$}  {}  trusted_at {}  by {}",
+      e.origin,
+      short_sha,
+      e.trusted_at.to_rfc3339(),
+      e.trusted_by,
+      ow = origin_w,
+    );
+  }
+  Ok(())
+}
+
+fn cmd_trust_revoke(origin: String) -> Result<()> {
+  let path = trust::default_ledger_path()?;
+  let mut ledger = TrustLedger::load(&path)?;
+  let removed = ledger.revoke(&origin);
+  if removed == 0 {
+    println!("0 entries matched origin {} (nothing to revoke).", origin);
+    return Ok(());
+  }
+  ledger.save(&path)?;
+  println!(
+    "✓ revoked {} entr{} for {}",
+    removed,
+    if removed == 1 { "y" } else { "ies" },
+    origin
+  );
+  Ok(())
+}
+
+fn cmd_trust_show() -> Result<()> {
+  let path = trust::default_ledger_path()?;
+  println!("ledger path: {}", path.display());
+  match std::fs::read_to_string(&path) {
+    Ok(body) => {
+      println!("---");
+      print!("{}", body);
+      if !body.ends_with('\n') {
+        println!();
+      }
+    }
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      println!("(file does not exist yet — nothing has been trusted on this machine)");
+    }
+    Err(e) => return Err(e.into()),
+  }
+  Ok(())
+}
+
+/// TOFU gate called by `cmd_create` and `cmd_bootstrap` before any
+/// `bootstrap::run` invocation. The contract:
+///
+///   * Returns `Ok(())` when the caller is cleared to proceed.
+///   * Returns `Err(GwmError::Other(..))` when the user declined,
+///     `--deny-bootstrap` was passed, or stdin isn't interactive and
+///     no `--allow-bootstrap` bypass was provided.
+///   * No-ops silently when there is no `.gwm.toml` in the workdir
+///     (nothing for bootstrap to execute — no trust decision needed).
+///
+/// The `repo` is passed in so we can read `origin` from the existing
+/// `Repository` handle (already opened by every caller) without
+/// re-discovering it. Falls back to the canonical workdir path when
+/// there is no origin remote — local-only repos still benefit from
+/// the drift-detection half of the feature even when the threat model
+/// is weaker.
+fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -> Result<()> {
+  let cfg_path = workdir.join(CONFIG_FILE);
+  let bytes = match std::fs::read(&cfg_path) {
+    Ok(b) => b,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    Err(e) => return Err(e.into()),
+  };
+  let sha = trust::hash_config(&bytes);
+
+  if mode == TrustMode::Deny {
+    return Err(GwmError::Other(
+      "--deny-bootstrap: refusing to run .gwm.toml bootstrap (config hash:".to_string()
+        + &format!(" {})", &sha[..sha.len().min(12)]),
+    ));
+  }
+
+  let origin = resolve_origin_key(repo, workdir);
+  let ledger_path = trust::default_ledger_path()?;
+  let mut ledger = TrustLedger::load(&ledger_path)?;
+
+  if ledger.lookup(&origin, &sha) {
+    return Ok(());
+  }
+
+  if mode == TrustMode::Allow {
+    // Explicit opt-in by the caller (flag or env var). Don't record —
+    // CI bypasses must NOT pollute the local ledger of whoever ends up
+    // running an interactive `gwm` from the same machine later.
+    return Ok(());
+  }
+
+  // Need to prompt. Refuse cleanly if stdin isn't a tty rather than
+  // hanging on a read that will never see input — this is the case
+  // that makes `--allow-bootstrap` actually load-bearing in CI.
+  use std::io::IsTerminal;
+  if !std::io::stdin().is_terminal() {
+    return Err(GwmError::Other(format!(
+      ".gwm.toml at {} is not in the trust ledger and stdin is not interactive — \
+       pass --allow-bootstrap (or set GWM_ALLOW_BOOTSTRAP=1) to bypass, \
+       or run interactively to approve",
+      cfg_path.display()
+    )));
+  }
+
+  let granted = prompt_user(&cfg_path, &bytes, &origin, &sha, repo)?;
+  if !granted {
+    return Err(GwmError::Other(format!(
+      "trust prompt declined for {} — aborting bootstrap",
+      cfg_path.display()
+    )));
+  }
+
+  ledger.record(&origin, &sha, &trust::current_actor());
+  ledger.save(&ledger_path)?;
+  println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
+  Ok(())
+}
+
+/// Resolve the trust-ledger key for the current repo: prefer the
+/// `origin` remote URL (the hostile-clone threat axis), fall back to
+/// the canonicalised workdir path (purely-local repos with no remote
+/// still benefit from drift detection).
+fn resolve_origin_key(repo: Option<&Repository>, workdir: &Path) -> String {
+  if let Some(r) = repo {
+    if let Ok(remote) = r.find_remote("origin") {
+      if let Some(url) = remote.url() {
+        return url.to_string();
+      }
+    }
+  }
+  // `canonicalize` may fail on a path that just got created (rare for
+  // workdir, but possible during tests). Fall back to the path as-is
+  // — losing the canonical form only weakens the per-machine key, the
+  // hash still catches drift.
+  workdir
+    .canonicalize()
+    .unwrap_or_else(|_| workdir.to_path_buf())
+    .display()
+    .to_string()
+}
+
+/// Interactive y/N/show loop. Prints a one-shot summary of the
+/// bootstrap surface (copy targets, guards, command lines, no-symlink
+/// declarations) so the user has the relevant signal before answering.
+/// `show` re-prints the raw `.gwm.toml`.
+fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str, repo: Option<&Repository>) -> Result<bool> {
+  use std::io::{BufRead, Write};
+
+  let body = String::from_utf8_lossy(bytes);
+  let parsed: Option<Config> = toml::from_str(&body).ok();
+  let stdin = std::io::stdin();
+  let mut stdout = std::io::stdout();
+
+  println!();
+  println!("gwm: this repo's .gwm.toml has not been trusted yet.");
+  println!("     path   : {}", cfg_path.display());
+  println!("     origin : {}", origin);
+  println!("     hash   : {}", sha);
+  let _ = repo; // currently unused beyond `resolve_origin_key`; kept for future signing extension.
+  if let Some(cfg) = parsed.as_ref() {
+    print_bootstrap_summary(cfg);
+  } else {
+    println!("     (could not parse .gwm.toml for summary — see raw via `show` below)");
+  }
+  println!();
+
+  loop {
+    print!("Trust this .gwm.toml? [y/N/show]: ");
+    stdout.flush().ok();
+    let mut line = String::new();
+    let n = stdin.lock().read_line(&mut line)?;
+    if n == 0 {
+      // EOF without an answer — same conservative default as `N`.
+      return Ok(false);
+    }
+    match line.trim().to_ascii_lowercase().as_str() {
+      "y" | "yes" => return Ok(true),
+      "n" | "no" | "" => return Ok(false),
+      "show" | "s" => {
+        println!("---");
+        print!("{}", body);
+        if !body.ends_with('\n') {
+          println!();
+        }
+        println!("---");
+      }
+      other => {
+        println!("unrecognised answer '{}' — answer y, N, or show", other);
+      }
+    }
+  }
+}
+
+fn print_bootstrap_summary(cfg: &Config) {
+  let bs = &cfg.bootstrap;
+  if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
+    println!("     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)");
+    return;
+  }
+  println!("     bootstrap surface:");
+  for c in &bs.copy {
+    println!("       - copy   {} → {}", c.from, c.to);
+  }
+  for g in &bs.guard {
+    println!(
+      "       - guard  {} (on_match={}, deny={} pattern(s))",
+      g.name,
+      g.on_match,
+      g.deny_patterns.len()
+    );
+  }
+  for ns in &bs.no_symlink {
+    println!("       - no-symlink {}", ns.path);
+  }
+  for c in &bs.command {
+    println!("       - run    {} ({})", c.name, c.run);
+  }
 }
 
 pub fn shell_init_script(shell: InitShell) -> &'static str {
