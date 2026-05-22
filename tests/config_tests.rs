@@ -77,6 +77,42 @@ name = "wip"
 }
 
 #[test]
+fn labels_load_rejects_leading_dash_name_at_load_time() {
+  // Issue #100. A `[[labels]] name = "-h"` would be parsed by gh's
+  // flag splitter and silently no-op the create call. The validation
+  // runs in `Config::load_for_repo` so the user finds the offending
+  // entry index in the error rather than discovering it through the
+  // "0 created" mystery in the push report.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[worktree]
+base = "/tmp/wt/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+
+[[labels]]
+name = "-h"
+"#,
+  )
+  .unwrap();
+
+  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("labels[0]"),
+    "error must surface the offending entry index; got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("'-'") || msg.contains("- ") || msg.contains("\"-h\""),
+    "error must explain the leading-dash refusal; got: {}",
+    msg
+  );
+}
+
+#[test]
 fn labels_section_absent_keeps_empty_vec() {
   // Backwards-compatibility: a config defining only `[worktree]` (no
   // `[[labels]]`) must resolve to an empty list. Same contract as the

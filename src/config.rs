@@ -351,7 +351,20 @@ impl Config {
     cfg.validate_branch_types()?;
     cfg.validate_bootstrap_paths()?;
     cfg.validate_bootstrap_guards()?;
+    cfg.validate_labels()?;
     Ok(cfg)
+  }
+
+  /// Reject `[[labels]]` entries whose `name` would be parsed as a flag
+  /// by `gh label create` (or violate GitHub's naming rules). Delegates
+  /// per-entry validation to [`crate::labels::validate_label_name`]; the
+  /// error here prefixes the offending entry index so the user can
+  /// locate the TOML coordinate without grepping the file (issue #100).
+  fn validate_labels(&self) -> Result<()> {
+    for (i, l) in self.labels.iter().enumerate() {
+      crate::labels::validate_label_name(&l.name).map_err(|e| GwmError::Config(format!("labels[{}]: {}", i, e)))?;
+    }
+    Ok(())
   }
 
   /// Pre-compile every `[[bootstrap.guard]].deny_patterns` entry so a
