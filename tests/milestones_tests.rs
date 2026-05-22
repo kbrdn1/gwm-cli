@@ -22,11 +22,30 @@ fn normalize_due_on_accepts_short_date_form() {
 }
 
 #[test]
-fn normalize_due_on_passes_rfc3339_through() {
-  // Full RFC3339 round-trips verbatim — users who already type the
-  // long form (e.g. copy-pasted from GitHub) should get exactly what
-  // they wrote.
+fn normalize_due_on_passes_canonical_z_form_through() {
+  // The canonical UTC form (`…Z`) round-trips verbatim — that's also
+  // the form GitHub returns for `due_on`, so a user who already typed
+  // the canonical form sees no surprise.
   let n = normalize_due_on("2026-07-15T17:00:00Z").unwrap();
+  assert_eq!(n, "2026-07-15T17:00:00Z");
+}
+
+#[test]
+fn normalize_due_on_canonicalises_offset_zero_to_z() {
+  // `+00:00` is semantically identical to `Z`, but GitHub serialises
+  // milestones with `Z`. Without canonicalisation the diff would
+  // surface a perpetual mismatch and `gwm milestones push` would
+  // issue no-op updates on every run (Copilot review on PR #92).
+  let n = normalize_due_on("2026-10-01T17:00:00+00:00").unwrap();
+  assert_eq!(n, "2026-10-01T17:00:00Z");
+}
+
+#[test]
+fn normalize_due_on_converts_non_utc_offset_to_utc() {
+  // A non-UTC offset must be shifted to the equivalent UTC instant
+  // before serialising as `…Z`. Otherwise the diff would flip-flop
+  // every run for users in non-UTC zones who type local time.
+  let n = normalize_due_on("2026-07-15T19:00:00+02:00").unwrap();
   assert_eq!(n, "2026-07-15T17:00:00Z");
 }
 

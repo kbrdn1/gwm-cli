@@ -13,7 +13,7 @@
 
 use crate::config::MilestoneConfig;
 use crate::error::{GwmError, Result};
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, NaiveDate, Utc};
 use std::collections::{HashMap, HashSet};
 
 /// A fully-resolved milestone declared by the user: same shape as
@@ -114,10 +114,13 @@ impl MilestoneDiff {
 // --- Date / state helpers -----------------------------------------------
 
 /// Accept either `YYYY-MM-DD` (materialised as 23:59:59 UTC of that
-/// day) or a full RFC3339 timestamp (passed through verbatim). The
+/// day) or a full RFC3339 timestamp (canonicalised to UTC `…Z`). The
 /// short form is the issue spec's "common-sense" semantic for a due
 /// date — "due Friday" should not close at midnight UTC and surprise
-/// the user.
+/// the user. Long forms with an offset are converted to the
+/// equivalent UTC instant before serialising, so the diff doesn't
+/// flip-flop against GitHub's canonical `…Z` representation (Copilot
+/// review on PR #92).
 pub fn normalize_due_on(s: &str) -> Result<String> {
   let trimmed = s.trim();
   if trimmed.is_empty() {
@@ -130,12 +133,14 @@ pub fn normalize_due_on(s: &str) -> Result<String> {
       .map_err(|e| GwmError::Config(format!("invalid due_on '{}': {}", trimmed, e)))?;
     return Ok(format!("{}T23:59:59Z", date.format("%Y-%m-%d")));
   }
-  // Long form: full RFC3339. Pass through verbatim — chrono validates
-  // the shape but we round-trip the user's original string so they
-  // see exactly what they typed in the diff output.
-  DateTime::parse_from_rfc3339(trimmed)
+  // Long form: full RFC3339. Convert any offset to UTC and emit `…Z`.
+  // GitHub serialises `due_on` as `…Z`; without canonicalisation a
+  // user-supplied `+00:00` (or `+02:00`) would surface as a perpetual
+  // mismatch in `diff_milestones` and `gwm milestones push` would
+  // issue no-op updates on every run.
+  let dt = DateTime::parse_from_rfc3339(trimmed)
     .map_err(|e| GwmError::Config(format!("invalid due_on '{}': {}", trimmed, e)))?;
-  Ok(trimmed.to_string())
+  Ok(dt.with_timezone(&Utc).format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }
 
 /// Strict lowercase parse — `open` or `closed`. GitHub stores the
