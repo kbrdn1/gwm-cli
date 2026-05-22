@@ -988,8 +988,11 @@ fn init_writes_gwm_toml_with_expected_sections() {
 fn init_refuses_to_overwrite_existing_gwm_toml() {
   // Idempotency contract: a second `gwm init` on a repo that already
   // carries a `.gwm.toml` must bail out instead of silently clobbering
-  // user edits. The error must name the file so the user knows what to
-  // remove if they truly want to start over.
+  // user edits. The error must name the file *and* explain why so the
+  // user knows what to remove if they truly want to start over. Pin
+  // the exact "already exists" wording from `Config::write_default`
+  // (src/config.rs) — a looser `.gwm.toml` contains-check would also
+  // pass on a success run since the success path prints the same path.
   let (dir, _repo) = init_repo();
   let cfg_path = dir.path().join(".gwm.toml");
   std::fs::write(&cfg_path, "# user edits\n[worktree]\nbase = \"/custom\"\n").unwrap();
@@ -1000,7 +1003,8 @@ fn init_refuses_to_overwrite_existing_gwm_toml() {
     .arg("init")
     .assert()
     .failure()
-    .stderr(predicate::str::contains(".gwm.toml"));
+    .stderr(predicate::str::contains(".gwm.toml"))
+    .stderr(predicate::str::contains("already exists"));
 
   // Original contents must survive the failed init.
   let body = std::fs::read_to_string(&cfg_path).unwrap();
@@ -1197,7 +1201,13 @@ fn create_rejects_unknown_branch_type() {
 
 #[test]
 fn create_rejects_non_digit_issue() {
-  // Issue must be digits-only — `abc` is rejected by `BranchSpec::new`.
+  // Issue must be digits-only — `abc` is rejected by `BranchSpec::new`
+  // before any filesystem op. As with the unknown-branch-type test,
+  // assert the no-side-effect invariant explicitly: the worktree dir
+  // that *would* have been written (`<base>/feat-abc-thing`) must not
+  // appear on disk. Otherwise a regression where validation runs
+  // post-`worktree::add` could still satisfy a bare `.failure()` check
+  // while leaving stray dirs behind.
   let (dir, _repo) = init_repo();
   let base = tempfile::TempDir::new().unwrap();
   write_test_config(dir.path(), base.path());
@@ -1208,6 +1218,11 @@ fn create_rejects_non_digit_issue() {
     .args(["create", "feat", "abc", "thing"])
     .assert()
     .failure();
+
+  assert!(
+    !base.path().join("feat-abc-thing").exists(),
+    "no worktree dir may be created when issue-number validation fails"
+  );
 }
 
 #[test]
