@@ -38,7 +38,7 @@ pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 pub fn draw(f: &mut Frame, app: &mut App) {
   // Filter bar is shown while the user is typing, AND while a sticky filter
   // remains in effect (so they can see what's filtering the list).
-  let filter_visible = app.filter_active || !app.filter_query.is_empty();
+  let filter_visible = app.filter.active || !app.filter.query.is_empty();
 
   let chunks = if filter_visible {
     Layout::default()
@@ -99,9 +99,9 @@ pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
 fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
   let mut spans = vec![
     Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    Span::raw(app.filter_query.as_str().to_string()),
+    Span::raw(app.filter.query.as_str().to_string()),
   ];
-  if app.filter_active {
+  if app.filter.active {
     spans.push(Span::styled(
       "█",
       Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
@@ -158,7 +158,13 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Filter-aware: the visible rows are the filtered subset (issue #21). When
   // there is no active filter, this is the identity over `app.worktrees`.
-  let filtered = app.filtered_indices();
+  // Borrow scoping: `filtered_indices` returns `&[usize]` rooted in
+  // `&mut app.filter`, which conflicts with the immutable `app.worktrees`
+  // read on the next line. Materialise the indices into an owned `Vec`
+  // so the mutable borrow ends. The expensive path (nucleo pass) stays
+  // memoised on `FilterState`; this per-frame clone is just a Vec<usize>
+  // of length ≤ worktrees.len().
+  let filtered: Vec<usize> = app.filtered_indices().to_vec();
   let visible: Vec<&WorktreeInfo> = filtered.iter().filter_map(|&i| app.worktrees.get(i)).collect();
 
   // Dynamic column widths derived from the visible subset so columns fit the
@@ -211,7 +217,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
   let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
 
-  let title = if app.filter_query.is_empty() {
+  let title = if app.filter.query.is_empty() {
     format!(" worktrees ({}) ", app.worktrees.len())
   } else {
     format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())

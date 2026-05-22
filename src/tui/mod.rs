@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 pub use app::{App, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
+pub use state::filter::{fuzzy_match_indices, FilterState};
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -141,7 +142,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       // When the inline filter bar is open, capture every key as filter input
       // so the user can type a query containing `q`, `?`, `/`, etc. The only
       // ways out are Enter (sticky filter) or Esc (clear filter).
-      View::List if app.filter_active => match key.code {
+      View::List if app.filter.active => match key.code {
         KeyCode::Esc => {
           // Picker contract (footer `esc:cancel`): Esc inside the filter
           // bar quits the picker, it doesn't merely clear the filter.
@@ -177,7 +178,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           // list is already in its plain state. Avoids the trap where a user
           // hits Esc expecting to clear /-filter and accidentally exits.
           KeyCode::Esc => {
-            if !app.filter_query.is_empty() {
+            if !app.filter.query.is_empty() {
               app.exit_filter_cancel();
             } else {
               break;
