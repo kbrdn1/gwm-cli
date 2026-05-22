@@ -26,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Without a `[[milestones]]` block in `.gwm.toml`, both subcommands are no-ops (`0 milestones declared, nothing to push`) and never shell out to `gh` — same safe-by-default contract as labels.
   - Requires `gh` on `$PATH`.
 
+### Changed
+
+- ♻️ **Split `GwmError::Other(String)` catch-all into typed variants** ([#105](https://github.com/kbrdn1/gwm-cli/issues/105)). The four highest-recurrence patterns flagged by `grep GwmError::Other src/` now have their own variants so callers (and downstream pattern-matchers) can introspect without string-sniffing:
+  - `UnbornHead { reason }` — `cli.rs::current_branch` when `repo.head()` fails (unborn / detached) or the shorthand can't be resolved (covers the two prior `Other("HEAD is unborn or detached")` / `Other("HEAD has no shorthand…")` sites). The `reason` field keeps the original message verbatim so user-facing output is unchanged.
+  - `GhJsonParse { kind, source }` — every `serde_json::from_str` site that consumes a `gh` CLI payload (`parse_issue_json`, `parse_pr_json`, `find_pr_for_branch`'s PR list, `parse_labels_json`, `parse_milestones_json`). `kind` is a `&'static str` ("issue" / "pr" / "pr list" / "labels" / "milestones") so a grep-friendly hint lands in `Display`; `source` is the underlying `serde_json::Error` for `#[source]` chaining.
+  - `LinkMissing { kind: LinkKind, branch }` — `cmd_open` when a branch has no recorded issue or PR link. `LinkKind` (a new public `enum Issue | Pr`) replaces the prior two `Other(format!("no issue/PR linked to branch '{}'"))` sites with a typed dispatch.
+  - The 6 `Other(format!("git log/status …"))` sites in `worktree.rs::git_log_with_author` / `git_log_oneline` / `git_status_short` now use the existing `CommandFailed(String)` variant, aligning them with the rest of the `gwm`-shells-out callers (issue, PR fetches, multiplexer spawn). The `Display` prefix changes from a bare message to `command failed: …`, which `tests/error_tests.rs` already pinned as the shared contract.
+  - Remaining `Other(String)` call sites (config-key parse failures, unknown `gh` enum states, ambiguous fuzzy patterns, trust-prompt refusals, TUI input validation, missing `origin` remote) stay as `Other` for now — they're heterogeneous enough that grouping them under one new variant would be a regression of the same shape.
+
 ### Security
 
 - 🔒 **Guard `deny_patterns` compile at load time, never fail-open silently** ([#96](https://github.com/kbrdn1/gwm-cli/issues/96)). Closes a refusal-mechanism bypass on `[[bootstrap.guard]]`: `bootstrap.rs::guard_match` wrapped `Regex::new(pat)` in `if let Ok(re) = …`, silently dropping every invalid pattern. A guard whose only deny pattern failed to compile collapsed into "no patterns at all" — a `.env` containing the substring the user expected to be denied passed through with a green "guard passed" message. A refusal mechanism that silently refuses to refuse is strictly worse than no mechanism, because the user reads the report and trusts a file that never went through the rule.
