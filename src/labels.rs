@@ -81,10 +81,11 @@ impl LabelDiff {
 
 // --- Colour helpers ------------------------------------------------------
 
-/// Validate that `s` is a 6-character hex string (no leading `#`,
-/// lowercase). Returns `Err` if the shape is wrong; the OK variant is
-/// the input verbatim — use `normalize_color` if you also want the
-/// canonical form.
+/// Shape check: `s` is 6 ASCII hex chars (either case, no leading
+/// `#`). Returns `Err` on length / non-hex inputs; the OK variant is
+/// the input verbatim — case is NOT enforced here. Call
+/// `normalize_color` if you also want the canonical lowercase form
+/// (`#D73A4A` → `d73a4a`).
 pub fn validate_color(s: &str) -> Result<&str> {
   if s.len() != 6 {
     return Err(GwmError::Config(format!(
@@ -187,14 +188,17 @@ pub fn resolve_labels(declared: &[LabelConfig], random: bool) -> Result<Vec<Labe
 
 /// Compute the diff between the user's declared label set and the
 /// labels currently on the upstream remote. Pure function — no I/O,
-/// no allocation beyond the returned `LabelDiff`.
+/// no observable side effects (allocates a transient `HashMap` and
+/// `HashSet` to index by name, plus the returned `LabelDiff`).
 ///
 /// Comparison rules:
 /// - **Name** is the unique key. Matching is byte-exact (including
 ///   whitespace), since GitHub treats `bug` and `Bug` as different.
-/// - **Color** is lowercased on both sides before comparing — GitHub
-///   serialises colours uppercase in some responses, and a config
-///   declaring `D73A4A` must not flag a remote `d73a4a` as a diff.
+/// - **Color** is lowercased on both sides before comparing — defence
+///   in depth on top of [`crate::github::parse_labels_json`], which
+///   already lowercases remote colours, so a manually-constructed
+///   `RemoteLabel` (e.g. from a test fixture) with uppercase hex
+///   doesn't slip through as a spurious "update".
 /// - **Description**: `None` and `Some("")` are equivalent (GitHub
 ///   stores them interchangeably).
 pub fn diff_labels(declared: &[LabelSpec], remote: &[RemoteLabel]) -> LabelDiff {
