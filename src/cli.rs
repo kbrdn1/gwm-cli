@@ -457,8 +457,9 @@ fn resolve_trust_mode(allow_flag: bool, deny_flag: bool) -> TrustMode {
 }
 
 /// Truthy env semantics: any non-empty value other than `0`, `false`,
-/// or `no` (case-insensitive) counts as true. Matches the convention
-/// used elsewhere in the codebase (see `tui::env_bool`).
+/// or `no` (case-insensitive) counts as true. Documented here as the
+/// source of truth — gwm has no shared env-bool helper yet, so this
+/// fn is the canonical reference for `GWM_*` flag-style env vars.
 fn env_truthy(key: &str) -> bool {
   match std::env::var(key) {
     Ok(v) => {

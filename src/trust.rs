@@ -127,11 +127,23 @@ impl TrustLedger {
       .any(|e| e.origin == origin && e.config_sha == config_sha)
   }
 
-  /// Record (or refresh) a trust grant. Idempotent on exact matches;
-  /// supersedes any prior entry for the same origin (drift case) so
-  /// the ledger stays bounded over a repo's lifetime — without this,
-  /// every `.gwm.toml` edit would leak a stale tuple that `gwm trust
-  /// list` would surface forever.
+  /// Record (or refresh) a trust grant. Always produces exactly one
+  /// entry per `origin`: any prior entry is dropped first, then a
+  /// fresh entry is pushed with `trusted_at = Utc::now()`. So:
+  ///
+  ///   * Re-recording the same `(origin, config_sha)` keeps a single
+  ///     entry but **refreshes the timestamp** — useful when a user
+  ///     explicitly re-confirms trust without editing the config.
+  ///   * Re-recording the same `origin` with a different
+  ///     `config_sha` supersedes the old hash (drift case), keeping
+  ///     the ledger bounded over a repo's lifetime — without this,
+  ///     every `.gwm.toml` edit would leak a stale tuple that
+  ///     `gwm trust list` would surface forever.
+  ///
+  /// In both cases `entries.len()` after a re-record is the same as
+  /// before; `record_is_idempotent_on_exact_match` and
+  /// `record_supersedes_drifted_hash_for_same_origin` pin both
+  /// halves down.
   pub fn record(&mut self, origin: &str, config_sha: &str, trusted_by: &str) {
     self.entries.retain(|e| e.origin != origin);
     self.entries.push(TrustEntry {
