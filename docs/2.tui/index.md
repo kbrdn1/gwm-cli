@@ -16,4 +16,4 @@ Bare `gwm` (no arguments) opens the ratatui interface on the current repo. From 
 - **[Configurable launchers](/tui/launchers)** — `[git_tui]` (`l`) and `[review]` (`R`), with `{base} {head} {path} {diff}` placeholders.
 - **[Open dispatch](/tui/open-dispatch)** — `[tui.open]` controls what `o` does (`shell` / `editor` / `finder`).
 
-The picker variant (`gwm switch`, alias `gwm s`) reuses the same TUI but disables create / delete / bootstrap, then prints the chosen worktree's path on stdout — meant to be `eval`d by the `gcd` shell wrapper.
+`n` (new worktree) and `b` (re-bootstrap) are gated by the [TOFU trust ledger](/configuration/trust-ledger) — an untrusted `.gwm.toml` lands a refuse message in the status bar rather than running bootstrap. The picker variant (`gwm switch`, alias `gwm s`) reuses the same TUI but disables create / delete / bootstrap, then prints the chosen worktree's path on stdout — meant to be `eval`d by the `gcd` shell wrapper.

@@ -20,7 +20,7 @@ Thanks for your interest in `gwm` — a Rust CLI / TUI for managing git worktree
 `gwm` is a single-binary Rust crate (`bin` + reusable `lib`):
 
 - **bin** `gwm` — entry point: dispatches to subcommands (CLI) or opens the TUI.
-- **lib** `gwm` — modules (`config`, `naming`, `worktree`, `bootstrap`, `cli`, `tui`, `error`) exposed publicly so integration tests in `tests/` can drive them directly.
+- **lib** `gwm` — modules (`config`, `naming`, `worktree`, `bootstrap`, `cli`, `tui`, `error`, `trust`, `doctor`, `github`, `labels`, `milestones`, `launcher`, `multiplexer`) exposed publicly so integration tests in `tests/` can drive them directly.
 
 It uses [`git2`](https://docs.rs/git2) (vendored libgit2) for worktree operations and [`ratatui`](https://docs.rs/ratatui) for the TUI.
 
@@ -43,6 +43,13 @@ gwm-cli/
 │   ├── naming.rs         # branch / path conventions
 │   ├── worktree.rs       # libgit2 worktree ops
 │   ├── bootstrap.rs      # copies / guards / shell hooks
+│   ├── trust.rs          # TOFU ledger gating bootstrap (issue #95)
+│   ├── doctor.rs         # 7 health checks for `gwm doctor`
+│   ├── github.rs         # gh shell-out + issue / PR linking
+│   ├── labels.rs         # declarative GitHub label set (issue #81)
+│   ├── milestones.rs     # declarative GitHub milestone set (issue #82)
+│   ├── launcher.rs       # `l` / `R` TUI launcher resolution (issue #75)
+│   ├── multiplexer.rs    # tmux / zellij window+split helpers
 │   ├── cli.rs            # clap subcommands
 │   └── tui/
 │       ├── mod.rs        # event loop
@@ -53,6 +60,7 @@ gwm-cli/
     ├── config_tests.rs
     ├── naming_tests.rs
     ├── bootstrap_tests.rs
+    ├── trust_tests.rs    # ledger load/save/lookup/record/revoke (issue #95)
     ├── worktree_integration.rs
     ├── tui_app_tests.rs
     └── cli_binary.rs     # assert_cmd end-to-end

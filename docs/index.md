@@ -13,6 +13,7 @@ Rust CLI + ratatui TUI to manage git worktrees across projects.
 - Branch convention `<type>/#<issue>-<description>` by default; overridable per repo.
 - Configurable launchers for the `l` (git TUI) and `R` (review) keybindings.
 - First-class GitHub issue / PR linking — branches matching the naming convention auto-link to their issue.
+- [TOFU trust ledger](/configuration/trust-ledger) on `.gwm.toml` — first `gwm create` / `gwm bootstrap` on a repo prompts before executing any `[[bootstrap.command]]` line. `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1` for CI bypass.
 
 ## documentation map
 

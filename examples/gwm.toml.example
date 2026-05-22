@@ -1,5 +1,17 @@
 # gwm config — copy this to your repo root as `.gwm.toml`
 # placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+#
+# === TOFU trust gate (issue #95) ===========================================
+# The first `gwm create` / `gwm bootstrap` against this file opens a
+# one-shot trust prompt that summarises the bootstrap surface (copies,
+# guards, no-symlinks, commands) and records the (origin URL, sha256)
+# pair in `~/.config/gwm/trust.toml` on approval. Any byte change to this
+# file re-prompts (whitespace matters — `rm -rf /tmp/` and
+# `rm -rf /tmp /` differ by one byte and behave catastrophically
+# differently). CI runners bypass the prompt with `--allow-bootstrap` or
+# `GWM_ALLOW_BOOTSTRAP=1`. Forensic mode: `--deny-bootstrap` refuses
+# even when trusted. Manage entries with `gwm trust list / revoke / show`.
+# Full threat model: https://github.com/kbrdn1/gwm-cli/blob/main/src/trust.rs
 
 [worktree]
 base = "{home}/cc-worktree/{repo}"
