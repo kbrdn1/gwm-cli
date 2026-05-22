@@ -20,7 +20,21 @@
 //! `tests/cli_binary.rs::trust_*` for the end-to-end coverage.
 
 use gwm::trust::{hash_config, TrustLedger};
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
+
+/// Process-global lock guarding every test that mutates `std::env`.
+/// Rust 1.86+ marks `set_var` / `remove_var` as `unsafe` because the
+/// underlying libc calls aren't thread-safe; without this lock, two
+/// env-mutating tests running in parallel under `cargo test`'s default
+/// thread pool can race and trigger UB. All test fns that touch env
+/// vars in this file MUST take this lock before any `set_var` /
+/// `remove_var`. (Yes, this serialises those specific tests — there's
+/// currently one, and `serial_test` would be overkill for one site.)
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 #[test]
 fn hash_config_is_stable_and_distinguishes_whitespace() {
@@ -196,21 +210,30 @@ fn default_path_honours_gwm_trust_ledger_env_override() {
   // The env override is the testability hook used by `gwm trust *`
   // assert_cmd tests so they don't have to clobber the user's real
   // ~/.config/gwm/trust.toml.
+  //
+  // Hold the process-wide env lock for the whole test body so a
+  // parallel env-mutating test cannot interleave `set_var` /
+  // `remove_var` calls with ours — Rust 1.86+ marks both as
+  // `unsafe` specifically because libc's env table isn't thread-
+  // safe. Poisoning is fine to ignore: a panic in another env test
+  // is unrelated to our state, and we're going to overwrite the
+  // variable anyway.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
   let dir = TempDir::new().unwrap();
   let override_path = dir.path().join("custom-trust.toml");
 
-  // SAFETY: `std::env::set_var` is `unsafe` in Rust 1.86+ because env
-  // mutation isn't thread-safe. We run with --test-threads here
-  // implicitly via the lock below, and we restore the prior value to
-  // keep the harness consistent.
   let prior = std::env::var("GWM_TRUST_LEDGER").ok();
-  // SAFETY: scoped env mutation in a test process; we restore prior
-  // value before returning.
+  // SAFETY: env mutation is guarded by `env_lock()` above, so no
+  // other test in this binary is mutating env concurrently. We
+  // restore the prior value (or remove the var) before dropping
+  // the lock to keep the harness consistent for any later test.
   unsafe { std::env::set_var("GWM_TRUST_LEDGER", &override_path) };
   let resolved = gwm::trust::default_ledger_path().expect("env override resolves");
   assert_eq!(resolved, override_path);
 
-  // SAFETY: restoration step paired with the set_var above.
+  // SAFETY: restoration step paired with the set_var above, still
+  // under the env_lock guard.
   unsafe {
     match prior {
       Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
