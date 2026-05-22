@@ -210,6 +210,26 @@ description = "Database migration"
 }
 
 #[test]
+fn types_inside_bare_repo_falls_back_to_built_in_defaults() {
+  // Bare repos have no `workdir()`, so there's no place to look for a
+  // `.gwm.toml`. Regression: previously `cmd_types` would propagate a
+  // misleading `NotInGitRepo` error here even though `discover_repo`
+  // succeeded. The fallback is identical to the "outside any repo"
+  // branch — the built-in defaults with a `(source: built-in
+  // defaults)` footer.
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init_bare(dir.path()).expect("init bare repo");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains("hotfix"))
+    .stdout(predicate::str::contains("(source: built-in defaults)"));
+}
+
+#[test]
 fn create_outside_git_repo_fails() {
   let dir = tempfile::TempDir::new().unwrap();
   let mut cmd = Command::cargo_bin("gwm").unwrap();

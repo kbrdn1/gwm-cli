@@ -478,16 +478,19 @@ fn print_doctor_report(report: &doctor::DoctorReport) {
 }
 
 fn cmd_types() -> Result<()> {
-  // Resolve the active branch-type list. When invoked inside a repo we
-  // honour any `[[branch_types]]` override in `.gwm.toml`; outside of
-  // one we silently fall back to the built-in defaults so `gwm types`
-  // remains useful as a discovery command (used by `gwm` newcomers
-  // before they've initialised a config).
+  // Resolve the active branch-type list. When invoked inside a repo
+  // with a workdir we honour any `[[branch_types]]` override in
+  // `.gwm.toml`; outside of one — or inside a bare repo where
+  // `repo.workdir()` is `None` and there's no place to look for
+  // `.gwm.toml` — we silently fall back to the built-in defaults so
+  // `gwm types` remains useful as a discovery command (used by `gwm`
+  // newcomers before they've initialised a config, and from CI inspect
+  // commands that point at bare clones).
   let resolved = match worktree::discover_repo(None) {
-    Ok(repo) => {
-      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-      Config::load_for_repo(&workdir)?.resolved_branch_types()
-    }
+    Ok(repo) => match repo.workdir().map(|w| w.to_path_buf()) {
+      Some(workdir) => Config::load_for_repo(&workdir)?.resolved_branch_types(),
+      None => Config::default().resolved_branch_types(),
+    },
     Err(_) => Config::default().resolved_branch_types(),
   };
 
