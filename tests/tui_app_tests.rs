@@ -25,6 +25,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
@@ -1789,6 +1790,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
       unknown: false,
     },
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
@@ -2142,6 +2144,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
