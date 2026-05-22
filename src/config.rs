@@ -381,12 +381,18 @@ impl Config {
   /// silently dropping the pattern as the original #96 fail-open
   /// did.
   pub fn validate_bootstrap_guards(&self) -> Result<()> {
-    for g in &self.bootstrap.guard {
-      for pat in &g.deny_patterns {
+    for (gi, g) in self.bootstrap.guard.iter().enumerate() {
+      for (pi, pat) in g.deny_patterns.iter().enumerate() {
         regex::Regex::new(pat).map_err(|e| {
+          // Include the guard index AND the pattern index so a `.gwm.toml`
+          // with five guards × five patterns surfaces "bootstrap.guard[3].
+          // deny_patterns[1]" — the exact TOML coordinate — instead of
+          // forcing the user to grep for the pattern content. Mirrors the
+          // shape used by `validate_bootstrap_paths` (e.g.
+          // "bootstrap.copy[0].to").
           GwmError::Config(format!(
-            "bootstrap.guard '{}': invalid deny_pattern {:?} — regex: {}",
-            g.name, pat, e
+            "bootstrap.guard[{}].deny_patterns[{}] '{}': invalid pattern {:?} — regex: {}",
+            gi, pi, g.name, pat, e
           ))
         })?;
       }

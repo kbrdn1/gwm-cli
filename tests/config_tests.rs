@@ -1258,14 +1258,16 @@ fn validate_bootstrap_guards_directly_rejects_invalid_pattern_without_load_for_r
   // future refactor that removes the call site from `load_for_repo`
   // doesn't go unnoticed by only the integration suite.
   use gwm::config::{BootstrapConfig, Guard};
-  let mut cfg = Config::default();
-  cfg.bootstrap = BootstrapConfig {
-    guard: vec![Guard {
-      name: "direct-test".into(),
-      deny_patterns: vec!["(unclosed-group".into()],
-      on_match: "abort".into(),
-      example_file: None,
-    }],
+  let mut cfg = Config {
+    bootstrap: BootstrapConfig {
+      guard: vec![Guard {
+        name: "direct-test".into(),
+        deny_patterns: vec!["(unclosed-group".into()],
+        on_match: "abort".into(),
+        example_file: None,
+      }],
+      ..Default::default()
+    },
     ..Default::default()
   };
   let err = cfg
@@ -1281,7 +1283,9 @@ fn validate_bootstrap_guards_directly_rejects_invalid_pattern_without_load_for_r
   // Positive control: clear the bad pattern and the same helper must
   // accept the Config, even with a non-trivial pattern set.
   cfg.bootstrap.guard[0].deny_patterns = vec!["AKIA[0-9A-Z]{16}".into(), "(?i)secret".into()];
-  cfg.validate_bootstrap_guards().expect("valid patterns must pass direct validation");
+  cfg
+    .validate_bootstrap_guards()
+    .expect("valid patterns must pass direct validation");
 }
 
 #[test]
@@ -1309,6 +1313,14 @@ on_match      = "abort"
   assert!(
     msg.contains("guard-two") && msg.contains("[unclosed"),
     "error must name the offending guard + pattern, got: {}",
+    msg
+  );
+  // The error must also surface the TOML coordinates of the failing
+  // entry so the user can jump straight to `.gwm.toml` line without
+  // grepping for the pattern content (mirrors `bootstrap.copy[N].to`).
+  assert!(
+    msg.contains("bootstrap.guard[1]") && msg.contains("deny_patterns[0]"),
+    "error must locate the failing entry by index, got: {}",
     msg
   );
 }
