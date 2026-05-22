@@ -310,6 +310,23 @@ impl App {
     self.sidebar.invalidate();
   }
 
+  /// Selection-change reaction: drop the sidebar's scroll back to the
+  /// top, invalidate its cached preview, and resolve the link cache
+  /// against the freshly selected worktree. Collapses the verbatim
+  /// `sidebar.scroll = 0; invalidate_sidebar_cache(); refresh_link();`
+  /// triple that was repeated across `next`, `prev`, `first`, `last`
+  /// pre-extraction (issue #127, part of #102). The first two pieces
+  /// live on [`SidebarState::on_navigation`]; the link refresh is
+  /// orchestrator-shaped (it touches `self.link` / `self.link_slug` /
+  /// `self.issue_state` / `self.pr_state` via [`Self::refresh_link`])
+  /// so it stays here. Every navigation entry point now goes through
+  /// this single call so the triple cannot drift back into duplicated
+  /// literals.
+  pub fn on_navigation(&mut self) {
+    self.sidebar.on_navigation();
+    self.refresh_link();
+  }
+
   pub fn next(&mut self) {
     // Route navigation to the sidebar when it's focused; otherwise move the list.
     if self.sidebar.open && self.sidebar.focused {
@@ -325,9 +342,7 @@ impl App {
       None => 0,
     };
     self.list_state.select(Some(i));
-    self.sidebar.scroll = 0;
-    self.invalidate_sidebar_cache();
-    self.refresh_link();
+    self.on_navigation();
   }
 
   pub fn prev(&mut self) {
@@ -344,9 +359,7 @@ impl App {
       Some(i) => i - 1,
     };
     self.list_state.select(Some(i));
-    self.sidebar.scroll = 0;
-    self.invalidate_sidebar_cache();
-    self.refresh_link();
+    self.on_navigation();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------
@@ -355,9 +368,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(0));
-      self.sidebar.scroll = 0;
-      self.invalidate_sidebar_cache();
-      self.refresh_link();
+      self.on_navigation();
     }
   }
 
@@ -365,9 +376,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(len - 1));
-      self.sidebar.scroll = 0;
-      self.invalidate_sidebar_cache();
-      self.refresh_link();
+      self.on_navigation();
     }
   }
 

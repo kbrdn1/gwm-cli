@@ -330,6 +330,34 @@ fn refresh_invalidates_sidebar_cache() {
   assert!(app.sidebar.cache.is_none());
 }
 
+#[test]
+fn on_navigation_collapses_the_scroll_invalidate_link_triple() {
+  // Pre-extraction, `next`, `prev`, `first`, `last` each repeated the
+  // verbatim triple `sidebar_scroll = 0; invalidate_sidebar_cache();
+  // refresh_link();`. Issue #127 collapses the first two into
+  // `SidebarState::on_navigation` and the whole triple into
+  // `App::on_navigation`, so the next time a navigation method needs
+  // the reset, it goes through this single entry point.
+  //
+  // Asserts the observable contract: scroll back to 0, cache dropped,
+  // and `link` re-resolved (we can only prove the call ran by
+  // observing the cache flush — `refresh_link()` rebuilds the link
+  // off the selected worktree, and we don't have a GitHub remote in
+  // the test fixture, so the link stays `BranchLink::empty()` either
+  // way; the cache flush is the load-bearing observable).
+  let (_dir, mut app) = make_app();
+  app.sidebar.scroll = 7;
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+
+  app.on_navigation();
+
+  assert_eq!(app.sidebar.scroll, 0, "on_navigation must reset scroll to 0");
+  assert!(
+    app.sidebar.cache.is_none(),
+    "on_navigation must drop the cached sidebar sections"
+  );
+}
+
 // ---- fuzzy filter (issue #21) -------------------------------------------
 
 #[test]
