@@ -1,4 +1,4 @@
-use crate::bootstrap::{self, BootstrapCtx, StepStatus};
+use crate::bootstrap::{self, BootstrapCtx};
 use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
@@ -1650,12 +1650,7 @@ fn print_report(report: &bootstrap::BootstrapReport) {
   println!();
   println!("bootstrap report:");
   for s in &report.steps {
-    let sigil = match s.status {
-      StepStatus::Ok => "✓",
-      StepStatus::Skipped => "·",
-      StepStatus::Warning => "!",
-      StepStatus::Failed => "✗",
-    };
+    let sigil = s.status.sigil();
     println!("  {} {}", sigil, s.label);
     if !s.detail.is_empty() {
       for line in s.detail.lines() {

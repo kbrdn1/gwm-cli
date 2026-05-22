@@ -17,12 +17,83 @@ pub struct StepResult {
   pub detail: String,
 }
 
+impl StepResult {
+  /// `Ok` with an empty `detail` — the most common shape (the step
+  /// label alone says everything the user needs).
+  pub fn ok(label: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Ok,
+      detail: String::new(),
+    }
+  }
+
+  /// `Ok` with an explanatory `detail` line (e.g. "copied from
+  /// <src>"). Kept as a distinct constructor rather than overloading
+  /// `ok(label, detail)` so the "no detail by default" semantics of
+  /// `ok` stay unambiguous at the call sites.
+  pub fn ok_with_detail(label: impl Into<String>, detail: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Ok,
+      detail: detail.into(),
+    }
+  }
+
+  /// `Skipped` with the reason the step was bypassed (e.g.
+  /// "destination already exists", "when condition false").
+  pub fn skipped(label: impl Into<String>, reason: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Skipped,
+      detail: reason.into(),
+    }
+  }
+
+  /// `Warning` with the user-visible message. Used by guards
+  /// substituting from `.env.example` and the no-symlink remediation
+  /// path — the step proceeded but the user should know what changed.
+  pub fn warning(label: impl Into<String>, message: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Warning,
+      detail: message.into(),
+    }
+  }
+
+  /// `Failed` with the user-visible error detail. The detail SHOULD
+  /// include enough context for the user to fix the problem without
+  /// re-running with extra verbosity (filename, errno, guard name).
+  pub fn failed(label: impl Into<String>, message: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Failed,
+      detail: message.into(),
+    }
+  }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepStatus {
   Ok,
   Skipped,
   Warning,
   Failed,
+}
+
+impl StepStatus {
+  /// Canonical single-character glyph for each variant. Used by both
+  /// `cli::print_report` (plain stdout) and `tui::ui::render_bootstrap`
+  /// (styled `Span`); centralising the mapping here keeps the two
+  /// renderers in lock-step (issue #106).
+  pub fn sigil(&self) -> &'static str {
+    match self {
+      StepStatus::Ok => "✓",
+      StepStatus::Skipped => "·",
+      StepStatus::Warning => "!",
+      StepStatus::Failed => "✗",
+    }
+  }
 }
 
 pub struct BootstrapCtx<'a> {
@@ -59,11 +130,10 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     // hand (test harnesses, future programmatic embeds). Re-check
     // here that `dst` resolves under the worktree before any write.
     if let Err(e) = ensure_within(ctx.worktree, &dst) {
-      report.steps.push(StepResult {
+      report.steps.push(StepResult::failed(
         label,
-        status: StepStatus::Failed,
-        detail: format!("destination outside worktree: {}", e),
-      });
+        format!("destination outside worktree: {}", e),
+      ));
       continue;
     }
 
@@ -82,35 +152,32 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     //                     filesystem state — never silently swallow)
     match std::fs::symlink_metadata(&dst) {
       Ok(meta) if meta.file_type().is_symlink() => {
-        report.steps.push(StepResult {
+        report.steps.push(StepResult::failed(
           label,
-          status: StepStatus::Failed,
-          detail: format!(
+          format!(
             "refusing to copy: destination {} is a symlink — would redirect the write outside the worktree (issue #93)",
             dst.display()
           ),
-        });
+        ));
         continue;
       }
       Ok(_) => {
-        report.steps.push(StepResult {
+        report.steps.push(StepResult::skipped(
           label,
-          status: StepStatus::Skipped,
-          detail: "destination already exists, leaving it alone".into(),
-        });
+          "destination already exists, leaving it alone",
+        ));
         continue;
       }
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
       Err(e) => {
-        report.steps.push(StepResult {
+        report.steps.push(StepResult::failed(
           label,
-          status: StepStatus::Failed,
-          detail: format!(
+          format!(
             "failed to stat destination {}: {} — refusing to proceed with unknown filesystem state",
             dst.display(),
             e
           ),
-        });
+        ));
         continue;
       }
     }
@@ -119,17 +186,11 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
       match resolve_missing(step, bs, &dst) {
         Some(res) => report.steps.push(StepResult { label, ..res }),
         None => {
-          let status = if step.required {
-            StepStatus::Failed
+          if step.required {
+            report.steps.push(StepResult::failed(label, "required source missing"));
           } else {
-            StepStatus::Skipped
-          };
-          let detail = if step.required {
-            "required source missing".into()
-          } else {
-            "optional source missing".into()
-          };
-          report.steps.push(StepResult { label, status, detail });
+            report.steps.push(StepResult::skipped(label, "optional source missing"));
+          }
         }
       }
       continue;
@@ -143,26 +204,19 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
       }
       Ok(None) => {}
       Err(detail) => {
-        report.steps.push(StepResult {
-          label,
-          status: StepStatus::Failed,
-          detail,
-        });
+        report.steps.push(StepResult::failed(label, detail));
         continue;
       }
     }
 
     match copy_no_follow(&src, &dst) {
-      Ok(()) => report.steps.push(StepResult {
+      Ok(()) => report.steps.push(StepResult::ok_with_detail(
         label,
-        status: StepStatus::Ok,
-        detail: format!("copied from {}", src.display()),
-      }),
-      Err(e) => report.steps.push(StepResult {
-        label,
-        status: StepStatus::Failed,
-        detail: format!("copy failed: {}", e),
-      }),
+        format!("copied from {}", src.display()),
+      )),
+      Err(e) => report
+        .steps
+        .push(StepResult::failed(label, format!("copy failed: {}", e))),
     }
   }
 }
@@ -175,23 +229,14 @@ fn resolve_missing(step: &CopyStep, bs: &BootstrapConfig, dst: &Path) -> Option<
       let key = key_from_to(&step.to);
       let fb = bs.fallback.get(&key)?;
       match write_no_follow(dst, fb.content.as_bytes()) {
-        Ok(()) => Some(StepResult {
-          label: String::new(),
-          status: StepStatus::Warning,
-          detail: format!("source missing — wrote inline fallback to {}", dst.display()),
-        }),
-        Err(e) => Some(StepResult {
-          label: String::new(),
-          status: StepStatus::Failed,
-          detail: format!("inline fallback write failed: {}", e),
-        }),
+        Ok(()) => Some(StepResult::warning(
+          "",
+          format!("source missing — wrote inline fallback to {}", dst.display()),
+        )),
+        Err(e) => Some(StepResult::failed("", format!("inline fallback write failed: {}", e))),
       }
     }
-    "abort" => Some(StepResult {
-      label: String::new(),
-      status: StepStatus::Failed,
-      detail: "source missing and fallback=abort".into(),
-    }),
+    "abort" => Some(StepResult::failed("", "source missing and fallback=abort")),
     _ => None,
   }
 }
@@ -265,54 +310,49 @@ fn handle_guard_match(
       // rejects this at load time, this branch covers hand-built
       // configs.
       if let Err(e) = ensure_within(ctx.main_repo, &example_src) {
-        report.steps.push(StepResult {
-          label: label.into(),
-          status: StepStatus::Failed,
-          detail: format!(
+        report.steps.push(StepResult::failed(
+          label,
+          format!(
             "guard '{}' example_file outside main repo: {} (traversal rejected, issue #94)",
             guard.name, e
           ),
-        });
+        ));
         return;
       }
       if example_src.exists() {
         match copy_no_follow(&example_src, dst) {
-          Ok(_) => report.steps.push(StepResult {
-            label: label.into(),
-            status: StepStatus::Warning,
-            detail: format!(
+          Ok(_) => report.steps.push(StepResult::warning(
+            label,
+            format!(
               "guard '{}' tripped on {} — seeded {} from {} (edit before use)",
               guard.name,
               src.display(),
               dst.display(),
               example_src.display()
             ),
-          }),
-          Err(e) => report.steps.push(StepResult {
-            label: label.into(),
-            status: StepStatus::Failed,
-            detail: format!("guard '{}' seed-from-example failed: {}", guard.name, e),
-          }),
+          )),
+          Err(e) => report.steps.push(StepResult::failed(
+            label,
+            format!("guard '{}' seed-from-example failed: {}", guard.name, e),
+          )),
         }
       } else {
-        report.steps.push(StepResult {
-          label: label.into(),
-          status: StepStatus::Failed,
-          detail: format!(
+        report.steps.push(StepResult::failed(
+          label,
+          format!(
             "guard '{}' tripped and no example_file {} available",
             guard.name,
             example_src.display()
           ),
-        });
+        ));
       }
     }
     _ => {
       // abort
-      report.steps.push(StepResult {
-        label: label.into(),
-        status: StepStatus::Failed,
-        detail: format!("guard '{}' tripped on {} — abort", guard.name, src.display()),
-      });
+      report.steps.push(StepResult::failed(
+        label,
+        format!("guard '{}' tripped on {} — abort", guard.name, src.display()),
+      ));
     }
   }
 }
@@ -337,32 +377,24 @@ fn run_no_symlinks(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bo
 
 fn handle_no_symlink(label: &str, target: &Path, report: &mut BootstrapReport) {
   if !target.exists() && !target.is_symlink() {
-    report.steps.push(StepResult {
-      label: label.into(),
-      status: StepStatus::Skipped,
-      detail: "not present".into(),
-    });
+    report.steps.push(StepResult::skipped(label, "not present"));
     return;
   }
   if target.is_symlink() {
     match std::fs::remove_file(target) {
-      Ok(_) => report.steps.push(StepResult {
-        label: label.into(),
-        status: StepStatus::Warning,
-        detail: format!("removed symlink {}", target.display()),
-      }),
-      Err(e) => report.steps.push(StepResult {
-        label: label.into(),
-        status: StepStatus::Failed,
-        detail: format!("failed to remove symlink {}: {}", target.display(), e),
-      }),
+      Ok(_) => report.steps.push(StepResult::warning(
+        label,
+        format!("removed symlink {}", target.display()),
+      )),
+      Err(e) => report.steps.push(StepResult::failed(
+        label,
+        format!("failed to remove symlink {}: {}", target.display(), e),
+      )),
     }
   } else {
-    report.steps.push(StepResult {
-      label: label.into(),
-      status: StepStatus::Ok,
-      detail: "real directory, ok".to_string(),
-    });
+    report
+      .steps
+      .push(StepResult::ok_with_detail(label, "real directory, ok"));
   }
 }
 
@@ -371,25 +403,17 @@ fn run_commands(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Boots
     let label = format!("run {}", step.name);
     if let Some(ref guard) = step.when {
       if !evaluate_when(guard, ctx.worktree) {
-        report.steps.push(StepResult {
-          label,
-          status: StepStatus::Skipped,
-          detail: format!("when condition '{}' false", guard),
-        });
+        report
+          .steps
+          .push(StepResult::skipped(label, format!("when condition '{}' false", guard)));
         continue;
       }
     }
     match exec_shell(step, ctx.worktree) {
-      Ok(output) => report.steps.push(StepResult {
-        label,
-        status: StepStatus::Ok,
-        detail: trailing_lines(&output, 3),
-      }),
-      Err(e) => report.steps.push(StepResult {
-        label,
-        status: StepStatus::Failed,
-        detail: e.to_string(),
-      }),
+      Ok(output) => report
+        .steps
+        .push(StepResult::ok_with_detail(label, trailing_lines(&output, 3))),
+      Err(e) => report.steps.push(StepResult::failed(label, e.to_string())),
     }
   }
 }
