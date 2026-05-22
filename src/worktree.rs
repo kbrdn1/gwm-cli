@@ -249,15 +249,19 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
     Err(_) => None,
   };
 
+  // Prune admin files (.git/worktrees/<name>) FIRST so a subsequent
+  // filesystem failure cannot leave a "phantom worktree" (issue #98):
+  // directory gone but `repo.worktrees()` still listing the name. The
+  // reverse ordering forced users into a manual `gwm prune` recovery
+  // after any partial failure.
+  let mut opts = WorktreePruneOptions::new();
+  opts.valid(true).locked(true).working_tree(true);
+  wt.prune(Some(&mut opts))?;
+
   // Physical removal — git2's prune does NOT delete the work tree directory itself.
   if path.exists() {
     std::fs::remove_dir_all(&path)?;
   }
-
-  // Force prune (admin files in .git/worktrees/<name>).
-  let mut opts = WorktreePruneOptions::new();
-  opts.valid(true).locked(true).working_tree(true);
-  wt.prune(Some(&mut opts))?;
 
   if delete_branch {
     if let Some(b) = branch_name {
