@@ -120,7 +120,7 @@ fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
 /// and user preference. Sidebar is hidden on narrow terminals to keep the
 /// worktree table readable.
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
-  let show_sidebar = app.sidebar_open && area.width >= SIDEBAR_MIN_WIDTH;
+  let show_sidebar = app.sidebar.open && area.width >= SIDEBAR_MIN_WIDTH;
   if show_sidebar {
     let split = Layout::default()
       .direction(Direction::Horizontal)
@@ -130,7 +130,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     draw_sidebar(f, split[1], app);
   } else {
     // Sidebar not rendered → no scrollable surface → no max scroll to track.
-    app.sidebar_max_scroll = 0;
+    app.sidebar.max_scroll = 0;
     draw_list(f, area, app);
   }
 }
@@ -214,7 +214,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Fill(1),
   ];
 
-  let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
+  let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
 
   let title = if app.filter.query.is_empty() {
@@ -245,7 +245,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
-  let border_color = if app.sidebar_focused {
+  let border_color = if app.sidebar.focused {
     Color::Cyan
   } else {
     Color::DarkGray
@@ -259,14 +259,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // invalidating the expensive git-preview cache underneath.
   let sections = match app.selected().cloned() {
     Some(w) => {
-      let needs_refresh = match &app.sidebar_cache {
+      let needs_refresh = match &app.sidebar.cache {
         Some((p, _)) => *p != w.path,
         None => true,
       };
       if needs_refresh {
-        app.sidebar_cache = Some((w.path.clone(), build_sidebar_sections(&w)));
+        app.sidebar.cache = Some((w.path.clone(), build_sidebar_sections(&w)));
       }
-      let mut cached = app.sidebar_cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
+      let mut cached = app.sidebar.cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
       let mut worktree = vec![sidebar_header_line(&w, app)];
       worktree.append(&mut cached.worktree);
       SidebarSections {
@@ -325,14 +325,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let commits_area = chunks[3];
   let commits_visible = commits_area.height.saturating_sub(2);
   let commits_len = sections.recent_commits.len() as u16;
-  app.sidebar_max_scroll = commits_len.saturating_sub(commits_visible);
-  if app.sidebar_scroll > app.sidebar_max_scroll {
-    app.sidebar_scroll = app.sidebar_max_scroll;
+  app.sidebar.max_scroll = commits_len.saturating_sub(commits_visible);
+  if app.sidebar.scroll > app.sidebar.max_scroll {
+    app.sidebar.scroll = app.sidebar.max_scroll;
   }
   let footer = if commits_len == 0 {
     None
   } else {
-    let bottom = app.sidebar_scroll.saturating_add(commits_visible).min(commits_len);
+    let bottom = app.sidebar.scroll.saturating_add(commits_visible).min(commits_len);
     Some(format!(" {} of {} ", bottom, commits_len))
   };
   render_section(
@@ -341,7 +341,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     " Recent Commits ",
     sections.recent_commits,
     border_color,
-    app.sidebar_scroll,
+    app.sidebar.scroll,
     footer,
   );
 }

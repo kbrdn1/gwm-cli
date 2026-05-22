@@ -172,31 +172,31 @@ fn refresh_keeps_selection_in_bounds() {
 fn sidebar_open_by_default() {
   let (_dir, app) = make_app();
   assert!(
-    app.sidebar_open,
+    app.sidebar.open,
     "sidebar should default to open (will be hidden when narrow)"
   );
-  assert!(!app.sidebar_focused, "focus defaults to the worktree list");
+  assert!(!app.sidebar.focused, "focus defaults to the worktree list");
 }
 
 #[test]
 fn toggle_sidebar_flips_open_flag() {
   let (_dir, mut app) = make_app();
-  let before = app.sidebar_open;
+  let before = app.sidebar.open;
   app.toggle_sidebar();
-  assert_eq!(app.sidebar_open, !before);
+  assert_eq!(app.sidebar.open, !before);
   app.toggle_sidebar();
-  assert_eq!(app.sidebar_open, before);
+  assert_eq!(app.sidebar.open, before);
 }
 
 #[test]
 fn toggle_sidebar_when_closed_resets_focus_to_list() {
   let (_dir, mut app) = make_app();
-  app.sidebar_focused = true;
-  app.sidebar_open = true;
+  app.sidebar.focused = true;
+  app.sidebar.open = true;
   app.toggle_sidebar(); // close
-  assert!(!app.sidebar_open);
+  assert!(!app.sidebar.open);
   assert!(
-    !app.sidebar_focused,
+    !app.sidebar.focused,
     "closing the sidebar must drop focus back to the list"
   );
 }
@@ -204,15 +204,15 @@ fn toggle_sidebar_when_closed_resets_focus_to_list() {
 #[test]
 fn toggle_focus_only_works_when_sidebar_open() {
   let (_dir, mut app) = make_app();
-  app.sidebar_open = false;
+  app.sidebar.open = false;
   app.toggle_focus();
-  assert!(!app.sidebar_focused, "focus cannot move to a hidden sidebar");
+  assert!(!app.sidebar.focused, "focus cannot move to a hidden sidebar");
 
-  app.sidebar_open = true;
+  app.sidebar.open = true;
   app.toggle_focus();
-  assert!(app.sidebar_focused);
+  assert!(app.sidebar.focused);
   app.toggle_focus();
-  assert!(!app.sidebar_focused);
+  assert!(!app.sidebar.focused);
 }
 
 #[test]
@@ -257,30 +257,30 @@ fn pending_g_resets_on_other_key() {
 #[test]
 fn sidebar_scroll_clamps_to_zero() {
   let (_dir, mut app) = make_app();
-  assert_eq!(app.sidebar_scroll, 0);
+  assert_eq!(app.sidebar.scroll, 0);
   app.sidebar_scroll_up();
-  assert_eq!(app.sidebar_scroll, 0, "scrolling up from 0 stays at 0");
+  assert_eq!(app.sidebar.scroll, 0, "scrolling up from 0 stays at 0");
 
   // The renderer normally publishes a max bound; simulate enough room for scroll.
-  app.sidebar_max_scroll = 5;
+  app.sidebar.max_scroll = 5;
   app.sidebar_scroll_down();
-  assert_eq!(app.sidebar_scroll, 1);
+  assert_eq!(app.sidebar.scroll, 1);
   app.sidebar_scroll_up();
-  assert_eq!(app.sidebar_scroll, 0);
+  assert_eq!(app.sidebar.scroll, 0);
 }
 
 #[test]
 fn sidebar_scroll_clamps_at_max() {
-  // The renderer sets `sidebar_max_scroll`. Scrolling past it must stop there
+  // The renderer sets `sidebar.max_scroll`. Scrolling past it must stop there
   // so the user can't push the panel content entirely off-screen.
   let (_dir, mut app) = make_app();
-  app.sidebar_max_scroll = 3;
+  app.sidebar.max_scroll = 3;
   app.sidebar_scroll_down();
   app.sidebar_scroll_down();
   app.sidebar_scroll_down();
-  assert_eq!(app.sidebar_scroll, 3);
+  assert_eq!(app.sidebar.scroll, 3);
   app.sidebar_scroll_down();
-  assert_eq!(app.sidebar_scroll, 3, "scrolling beyond max must clamp");
+  assert_eq!(app.sidebar.scroll, 3, "scrolling beyond max must clamp");
 }
 
 #[test]
@@ -288,9 +288,9 @@ fn focus_routes_navigation_to_sidebar() {
   // When sidebar is focused, next()/prev() should NOT move the list selection.
   let (_dir, mut app) = make_app();
   app.list_state.select(Some(0));
-  app.sidebar_open = true;
-  app.sidebar_focused = true;
-  app.sidebar_max_scroll = 5; // pretend the renderer has populated this
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
+  app.sidebar.max_scroll = 5; // pretend the renderer has populated this
 
   app.next();
   assert_eq!(
@@ -299,13 +299,13 @@ fn focus_routes_navigation_to_sidebar() {
     "list must stay put when sidebar has focus"
   );
   assert!(
-    app.sidebar_scroll >= 1,
+    app.sidebar.scroll >= 1,
     "next() must scroll the sidebar when it has focus"
   );
 
   app.prev();
   assert_eq!(app.list_state.selected(), Some(0));
-  assert_eq!(app.sidebar_scroll, 0, "prev() scrolled back up");
+  assert_eq!(app.sidebar.scroll, 0, "prev() scrolled back up");
 }
 
 #[test]
@@ -313,21 +313,50 @@ fn next_prev_invalidate_sidebar_cache() {
   // Moving selection must drop any cached sidebar content so the new
   // worktree's preview is recomputed on the next frame.
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.next();
-  assert!(app.sidebar_cache.is_none(), "next() must invalidate the sidebar cache");
+  assert!(app.sidebar.cache.is_none(), "next() must invalidate the sidebar cache");
 
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.prev();
-  assert!(app.sidebar_cache.is_none(), "prev() must invalidate the sidebar cache");
+  assert!(app.sidebar.cache.is_none(), "prev() must invalidate the sidebar cache");
 }
 
 #[test]
 fn refresh_invalidates_sidebar_cache() {
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.refresh().unwrap();
-  assert!(app.sidebar_cache.is_none());
+  assert!(app.sidebar.cache.is_none());
+}
+
+#[test]
+fn on_navigation_resets_scroll_and_invalidates_sidebar_cache() {
+  // Pre-extraction, `next`, `prev`, `first`, `last` each repeated the
+  // verbatim triple `sidebar_scroll = 0; invalidate_sidebar_cache();
+  // refresh_link();`. Issue #127 collapses the first two pieces into
+  // `SidebarState::on_navigation` and pairs them with `refresh_link()`
+  // inside `App::on_navigation`, so the next time a navigation method
+  // needs the reset, it goes through this single entry point.
+  //
+  // This integration test asserts the two observable pieces from this
+  // fixture: scroll resets to 0, cache drops. `refresh_link()` also
+  // runs (it's wired into `App::on_navigation`) but can't be observed
+  // here — the test repo has no GitHub remote, so the link stays
+  // `BranchLink::empty()` whether `refresh_link()` ran or not. The
+  // unit tests for `SidebarState::on_navigation` cover the sub-struct
+  // half of the contract in isolation.
+  let (_dir, mut app) = make_app();
+  app.sidebar.scroll = 7;
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+
+  app.on_navigation();
+
+  assert_eq!(app.sidebar.scroll, 0, "on_navigation must reset scroll to 0");
+  assert!(
+    app.sidebar.cache.is_none(),
+    "on_navigation must drop the cached sidebar sections"
+  );
 }
 
 // ---- fuzzy filter (issue #21) -------------------------------------------
@@ -364,12 +393,12 @@ fn enter_filter_drops_sidebar_focus() {
   // returns to the table" contract. Opening the filter bar must therefore
   // pre-emptively pull focus back to the list.
   let (_dir, mut app) = make_app();
-  app.sidebar_open = true;
-  app.sidebar_focused = true;
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
 
   app.enter_filter();
   assert!(
-    !app.sidebar_focused,
+    !app.sidebar.focused,
     "opening the filter bar must hand focus back to the list"
   );
 }
