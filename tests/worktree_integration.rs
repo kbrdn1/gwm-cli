@@ -398,3 +398,92 @@ fn commit_with_time(workdir: &Path, repo: &Repository, ref_name: &str, message: 
     .commit(Some(ref_name), &sig, &sig, message, &tree, &[&parent])
     .unwrap();
 }
+
+// --------------------------------------------------------------------------
+// Issue #101 — characterization tests for the mutating worktree primitives.
+// --------------------------------------------------------------------------
+//
+// These complement the CLI-level E2E tests in `tests/cli_binary.rs` by
+// pinning the libgit2-level contract of `worktree::add` / `worktree::remove`.
+// The first test below intentionally documents the *current* behaviour that
+// powers bug #99 — when issue #99 is fixed the contract changes and the
+// assertion must be updated. Pinning the buggy contract now means the fix
+// can't land silently: the test goes red and forces the reviewer to confirm
+// the new behaviour intentionally.
+
+#[test]
+fn add_silently_attaches_to_pre_existing_stale_branch() {
+  // Characterization test for #99. `worktree::add(repo, name, path, branch)`
+  // currently *reuses* a local branch of the same name when one already
+  // exists, attaching the new worktree to its existing tip rather than
+  // refusing the operation or moving the branch to HEAD. This is the
+  // observable contract today; a fix for #99 will introduce a `--reuse`
+  // flag (or similar) and turn this test red on purpose.
+  let (_dir, repo) = init_repo();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+
+  // Pin a "stale" branch at the current main commit, then advance main
+  // by one commit so the branch ends up BEHIND HEAD. The point is just
+  // to make HEAD and the branch tip resolve to different OIDs.
+  let main_oid = repo.head().unwrap().target().unwrap();
+  let main_commit = repo.find_commit(main_oid).unwrap();
+  let stale_branch = repo.branch("feat/#99-stale", &main_commit, false).unwrap();
+  let stale_oid = stale_branch.into_reference().target().unwrap();
+
+  // Advance main by one commit so HEAD != stale branch tip.
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  let new_head = repo
+    .commit(Some("HEAD"), &sig, &sig, "advance main", &tree, &[&main_commit])
+    .unwrap();
+  assert_ne!(new_head, stale_oid, "precondition: HEAD must diverge from stale branch");
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-99-stale");
+  worktree::add(&repo, "feat-99-stale", &target, "feat/#99-stale").unwrap();
+
+  // Documented buggy behaviour: the branch tip is unchanged (still at
+  // the stale commit), NOT moved to HEAD.
+  let resolved = repo
+    .find_branch("feat/#99-stale", git2::BranchType::Local)
+    .unwrap()
+    .into_reference()
+    .target()
+    .unwrap();
+  assert_eq!(
+    resolved, stale_oid,
+    "characterization for #99: stale branch tip is reused as-is; \
+     when #99 lands, update this assertion to reflect the fix"
+  );
+  assert!(target.exists(), "worktree dir must still appear on disk");
+}
+
+#[test]
+fn remove_prunes_admin_files_on_happy_path() {
+  // Companion characterization for #98 — the happy path. After `remove`
+  // succeeds, the admin directory under `.git/worktrees/<name>` must be
+  // gone so `find_worktree` can no longer resolve a phantom entry. This
+  // pins the post-condition that #98's fix must preserve (the fix
+  // reorders prune-before-rmdir; the post-condition itself doesn't
+  // change).
+  let (dir, _repo) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-98-prune");
+  worktree::add(&repo, "feat-98-prune", &target, "feat/#98-prune").unwrap();
+
+  let admin_dir = dir.path().join(".git").join("worktrees").join("feat-98-prune");
+  assert!(admin_dir.exists(), "precondition: admin entry exists after add");
+
+  worktree::remove(&repo, "feat-98-prune", false).unwrap();
+
+  assert!(!target.exists(), "remove must delete the worktree dir");
+  assert!(
+    !admin_dir.exists(),
+    "remove must also prune the admin entry under .git/worktrees/"
+  );
+  assert!(
+    repo.find_worktree("feat-98-prune").is_err(),
+    "libgit2 must no longer resolve the pruned worktree by name"
+  );
+}
