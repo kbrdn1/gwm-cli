@@ -26,7 +26,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::Builder;
 
 /// On-disk ledger schema. `serde` defaults make adding new optional
 /// fields backward-compatible: older binaries still parse newer files,
@@ -74,25 +76,43 @@ impl TrustLedger {
     }
   }
 
-  /// Persist the ledger atomically: serialise, write to a sibling
-  /// `.tmp` file, then rename(2). The rename is the atomic step on
-  /// POSIX; on Windows it is also a single syscall but with slightly
-  /// different semantics around open file handles. `fs::rename` on
-  /// the standard library papers over both.
+  /// Persist the ledger atomically: serialise, write to a uniquely-
+  /// named tmp file in the same directory, then rename(2). The
+  /// rename is the atomic step on POSIX; on Windows it is also a
+  /// single syscall but with slightly different semantics around
+  /// open file handles. `tempfile::NamedTempFile::persist` papers
+  /// over both.
+  ///
+  /// The tmp filename is randomised (`gwm-trust-<random>.tmp`) so
+  /// two `gwm` processes hitting `save` concurrently don't clobber
+  /// each other's intermediate write — pre-fix both raced on the
+  /// fixed name `trust.toml.tmp` and could corrupt the final
+  /// ledger if one process's rename interleaved with the other's
+  /// write.
   ///
   /// Parent directories are created on demand (`mkdir -p`) so the
   /// first ever write on a fresh machine succeeds without the user
   /// having to create `~/.config/gwm/` manually.
   pub fn save(&self, path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-      if !parent.as_os_str().is_empty() {
-        fs::create_dir_all(parent)?;
+    let parent = match path.parent() {
+      Some(p) if !p.as_os_str().is_empty() => {
+        fs::create_dir_all(p)?;
+        p.to_path_buf()
       }
-    }
+      // No parent (e.g. relative `trust.toml` in CWD) or empty
+      // parent → write the tmp file in `.`.
+      _ => PathBuf::from("."),
+    };
     let body = toml::to_string_pretty(self)?;
-    let tmp = path.with_extension("toml.tmp");
-    fs::write(&tmp, body)?;
-    fs::rename(&tmp, path)?;
+    let mut tmp = Builder::new()
+      .prefix("gwm-trust-")
+      .suffix(".tmp")
+      .tempfile_in(&parent)?;
+    tmp.write_all(body.as_bytes())?;
+    // `persist` does the atomic rename and consumes the handle so
+    // the tempfile crate's drop-cleanup is short-circuited — no
+    // sidecar `.tmp` survives a successful save.
+    tmp.persist(path).map_err(|e| GwmError::Io(e.error))?;
     Ok(())
   }
 
