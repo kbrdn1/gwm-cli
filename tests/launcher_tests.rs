@@ -223,6 +223,50 @@ fn resolve_base_empty_strings_in_config_are_ignored() {
   assert_eq!(base, "trunk", "empty merge must fall through to the next chain step");
 }
 
+#[test]
+fn resolve_base_skips_self_tracking_upstream() {
+  // Regression for #117. After the canonical `gwm create … && git push -u
+  // origin <branch>` workflow, git records `branch.<n>.merge =
+  // refs/heads/<same-branch>` because the local branch tracks its own
+  // remote-side copy. Returning the branch's own short name from priority-1
+  // makes `git rev-list --count <branch>..<branch> = 0`, so the launcher's
+  // `skip_when_no_changes` knob silently swallows the `R: review`
+  // keystroke — the user gets nothing, no error, no diff.
+  //
+  // The fix is to treat a merge value equal to the branch itself as
+  // "not a usable upstream" and fall through to the next chain step
+  // (gwm-base, then [review].default_base, then dev / main).
+  let (_dir, repo) = init_repo();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/x.merge", "refs/heads/feat/x").unwrap();
+  }
+  write_gwm_base(&repo, "feat/x", "release-1.x").unwrap();
+  let base = resolve_review_base(&repo, "feat/x", Some("trunk"));
+  assert_eq!(
+    base, "release-1.x",
+    "self-tracking upstream must be ignored — fall through to gwm-base"
+  );
+}
+
+#[test]
+fn resolve_base_skips_self_tracking_upstream_short_form() {
+  // Defensive: some git versions / manual edits drop the `refs/heads/`
+  // prefix, leaving the value as a bare branch name. The self-equality
+  // check must run on the stripped short form too, otherwise a bare
+  // `branch.feat/x.merge = feat/x` slips past the guard.
+  let (_dir, repo) = init_repo();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/x.merge", "feat/x").unwrap();
+  }
+  let base = resolve_review_base(&repo, "feat/x", Some("trunk"));
+  assert_eq!(
+    base, "trunk",
+    "bare self-tracking upstream must be ignored too — fall through to default_base"
+  );
+}
+
 // ---- count_commits_ahead ------------------------------------------------
 
 #[test]

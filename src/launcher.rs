@@ -153,7 +153,12 @@ fn materialise_diff(workdir: &Path, base: &str, head: &str) -> Result<tempfile::
 /// Resolve the review base for `branch` following the chain documented
 /// in issue #75:
 ///
-/// 1. `branch.<name>.merge` (the upstream tracking ref).
+/// 1. `branch.<name>.merge` (the upstream tracking ref) — except when it
+///    points at the branch itself (#117). After the canonical `git push
+///    -u origin <branch>` flow, git records `merge = refs/heads/<same-
+///    branch>`, which would make `git diff <branch>..<branch>` empty and
+///    silently swallow the `R: review` keystroke. Treat that case as
+///    "no usable upstream" and fall through.
 /// 2. `branch.<name>.gwm-base` — set by `gwm create` on the new branch
 ///    so the original parent is recoverable even without an upstream.
 /// 3. `[review].default_base` from `.gwm.toml`.
@@ -166,7 +171,9 @@ fn materialise_diff(workdir: &Path, base: &str, head: &str) -> Result<tempfile::
 /// so it must be a name git understands.
 pub fn resolve_review_base(repo: &Repository, branch: &str, default_base: Option<&str>) -> String {
   if let Some(upstream) = read_branch_merge(repo, branch) {
-    return upstream;
+    if upstream != branch {
+      return upstream;
+    }
   }
   if let Some(gwm_base) = read_branch_config(repo, branch, "gwm-base") {
     return gwm_base;
