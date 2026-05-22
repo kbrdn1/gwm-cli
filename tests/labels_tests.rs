@@ -391,10 +391,12 @@ fn diff_summary_line_renders_canonical_shape() {
 }
 
 #[test]
-fn diff_dry_run_line_uses_label_kind_for_grammar() {
+fn diff_dry_run_line_renders_counts_in_order() {
   use gwm::labels::diff_dry_run_line;
-  // Caller picks the noun ("label" or "milestone") so the helper
-  // can be shared across modules without losing the singular noun.
+  // The helper is noun-free — `cli::cmd_labels_push` / `cmd_milestones_push`
+  // wrap it with their own banner copy that names "label" vs "milestone"
+  // for grammar. This test pins the count shape: would create / update /
+  // leave untouched / prune / ignore extra-on-remote.
   let s = diff_dry_run_line(2, 1, 3, 1, 0);
   assert_eq!(
     s,
