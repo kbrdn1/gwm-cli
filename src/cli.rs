@@ -245,13 +245,17 @@ pub enum LabelsAction {
   /// Apply the diff: create new labels and update mismatched ones on
   /// the upstream remote.
   ///
-  /// `--dry-run` prints the plan without touching the remote.
+  /// `--dry-run` prints the plan without mutating the remote (it
+  /// still reads the remote via `gh label list` to compute the
+  /// diff; only create / update / delete calls are skipped).
   /// `--prune` opt-in deletes labels on remote that aren't declared in
   /// config (off by default — destructive). `--random-colors` picks a
   /// random pastel for labels with no `color` field instead of the
   /// default deterministic hash.
   Push {
-    /// Print the plan without contacting the remote.
+    /// Print the plan without mutating the remote. Still reads remote
+    /// labels via `gh label list` to compute the diff — only the
+    /// create / update / delete calls are skipped.
     #[arg(long)]
     dry_run: bool,
     /// Delete remote labels that aren't declared in `.gwm.toml`.
