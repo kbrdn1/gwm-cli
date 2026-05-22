@@ -1630,10 +1630,56 @@ run  = "echo trapped"
 #[test]
 fn create_with_allow_bootstrap_flag_bypasses_the_prompt() {
   // The `--allow-bootstrap` escape hatch is what makes scripted /
-  // CI usage workable; this asserts the flag actually short-circuits
-  // the trust gate. We intentionally use `--no-bootstrap` so we
-  // don't actually shell out to anything — the test is about the
-  // trust gate, not the bootstrap step itself.
+  // CI usage workable; this asserts the FLAG (not the env var)
+  // actually short-circuits the trust gate. The env-var path is
+  // covered by other tests that set GWM_ALLOW_BOOTSTRAP=1 — here
+  // we exercise the clap-level wiring so a future refactor that
+  // accidentally scopes the flag to one subcommand breaks loudly.
+  //
+  // `--no-bootstrap` is added so we don't actually shell out to
+  // anything — the test is about the trust gate, not the bootstrap
+  // step itself.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    // No env-var bypass — the flag must do the work on its own.
+    // `--allow-bootstrap` is a clap `global = true` flag declared on
+    // `Cli`, so it MUST appear before the subcommand on the argv.
+    .args(["--allow-bootstrap", "create", "feat", "42", "trapped", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // The ledger MUST still be empty — Allow mode bypasses without
+  // recording, so the next interactive run on the same machine
+  // re-prompts. That's the "don't pollute the user's ledger from CI"
+  // contract.
+  assert!(
+    !ledger.exists()
+      || std::fs::read_to_string(&ledger).unwrap().contains("entries = []")
+      || std::fs::read_to_string(&ledger).unwrap().is_empty()
+  );
+}
+
+#[test]
+fn create_with_gwm_allow_bootstrap_env_bypasses_the_prompt() {
+  // Sibling of the previous test: same fixture, but exercise the
+  // `GWM_ALLOW_BOOTSTRAP=1` env-var bypass with no flag. This is
+  // the CI-runner code path — scripts can't always inject extra
+  // args, so the env-var path has to keep working independently.
   let (dir, _repo) = init_repo();
   std::fs::write(
     dir.path().join(".gwm.toml"),
@@ -1652,14 +1698,10 @@ run  = "echo would-have-run"
     .current_dir(dir.path())
     .env("GWM_TRUST_LEDGER", &ledger)
     .env("GWM_ALLOW_BOOTSTRAP", "1")
-    .args(["create", "feat", "42", "trapped", "--no-bootstrap"])
+    .args(["create", "feat", "42", "env-trapped", "--no-bootstrap"])
     .assert()
     .success();
 
-  // The ledger MUST still be empty — Allow mode bypasses without
-  // recording, so the next interactive run on the same machine
-  // re-prompts. That's the "don't pollute the user's ledger from CI"
-  // contract.
   assert!(
     !ledger.exists()
       || std::fs::read_to_string(&ledger).unwrap().contains("entries = []")
