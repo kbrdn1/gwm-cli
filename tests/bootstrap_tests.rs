@@ -175,12 +175,14 @@ fn guard_seed_from_example_substitutes() {
 }
 
 // Issue #96: end-to-end scenario from the bug report — an invalid
-// `deny_patterns` entry must abort at `Config::load_for_repo`, never
-// reach `bootstrap::run`. Previously the invalid regex was silently
-// dropped at bootstrap time, leaving the guard fail-open against a
-// `.env` containing the denied substring.
+// `deny_patterns` entry mixed with a valid one must abort at
+// `Config::load_for_repo`, never reach `bootstrap::run`. The fixture
+// mirrors the original reproduction (`["[+", "AWS_SECRET_ACCESS_KEY"]`):
+// previously the invalid regex was silently dropped, leaving only the
+// valid pattern — which would have matched, BUT the contract is that
+// any malformed pattern is a hard load-time error, not a silent demotion.
 #[test]
-fn guard_with_only_invalid_patterns_aborts_at_load_not_at_bootstrap() {
+fn guard_with_invalid_pattern_alongside_valid_aborts_at_load_not_at_bootstrap() {
   use gwm::config::CONFIG_FILE;
   let main = TempDir::new().unwrap();
   std::fs::write(main.path().join(".env"), "AWS_SECRET_ACCESS_KEY=AKIA...").unwrap();
