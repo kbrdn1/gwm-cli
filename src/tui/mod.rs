@@ -25,6 +25,8 @@ pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::{fuzzy_match_indices, FilterState};
 pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
+pub use state::link_prompt::LinkPrompt;
+pub use state::sidebar::SidebarState;
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the

@@ -2,6 +2,8 @@ use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
+use super::state::link_prompt::LinkPrompt;
+use super::state::sidebar::SidebarState;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -79,12 +81,11 @@ pub enum OpenTarget {
   Finder { path: PathBuf },
 }
 
-/// Stage of the two-step link prompt.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LinkPromptStage {
-  ChooseTarget,
-  InputNumber,
-}
+/// Stage of the two-step link prompt. Re-export from the extracted
+/// `LinkPrompt` sub-struct (issue #126) so the existing public surface
+/// (`gwm::tui::LinkPromptStage`) keeps compiling without callers
+/// learning the new module path.
+pub use super::state::link_prompt::LinkPromptStage;
 
 pub struct App {
   pub repo: Repository,
@@ -110,19 +111,17 @@ pub struct App {
   // Bootstrap report
   pub report: Option<BootstrapReport>,
 
-  // Sidebar (git preview) state
-  pub sidebar_open: bool,
-  pub sidebar_focused: bool,
-  pub sidebar_scroll: u16,
-  /// Cache of the rendered sidebar sections, keyed by the selected worktree
-  /// path. Prevents re-shelling `git log` / `git status` on every TUI redraw
-  /// — they only run when the selection actually changes (or on explicit
-  /// refresh).
-  pub sidebar_cache: Option<(PathBuf, super::ui::SidebarSections)>,
-  /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
-  /// Keeps scrolling clamped to the rendered content height so the user can't
-  /// scroll the panel entirely off-screen.
-  pub sidebar_max_scroll: u16,
+  /// Sidebar (git preview) panel state (extracted per #127). Owns the
+  /// visibility / focus flags, the scroll offset + max bound, and the
+  /// cached pre-rendered sections keyed by the selected worktree's
+  /// path. The cache prevents re-shelling `git log` / `git status` on
+  /// every TUI redraw — they only run when the selection actually
+  /// changes (via [`SidebarState::on_navigation`]) or on explicit
+  /// refresh ([`SidebarState::invalidate`]). The renderer publishes
+  /// `sidebar.max_scroll` every frame against the actual rendered
+  /// Recent Commits height; [`SidebarState::scroll_down`] clamps
+  /// against it.
+  pub sidebar: SidebarState,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   pub pending_g: bool,
@@ -168,12 +167,11 @@ pub struct App {
   /// `gh` shell-outs; the pure state machine lives on
   /// `GitHubFetch`.
   pub github: GitHubFetch,
-  /// In `View::LinkPrompt`, which stage are we in.
-  link_prompt_stage: LinkPromptStage,
-  /// In `View::LinkPrompt::InputNumber`, the digits typed so far.
-  link_prompt_number: String,
-  /// In `View::LinkPrompt::InputNumber`, the chosen target.
-  link_prompt_target: Option<LinkTarget>,
+  /// Two-stage issue/PR link prompt state (extracted per #126). Owns
+  /// the stage + target + digit buffer; the orchestrator wraps the
+  /// transitions to update the status bar and shell out to
+  /// `github::link_{issue,pr}` on submit.
+  link_prompt: LinkPrompt,
 
   /// TOFU trust mode for this TUI session (issue #95). Resolved at
   /// the CLI entrypoint from `--allow-bootstrap` / `--deny-bootstrap`
@@ -215,11 +213,7 @@ impl App {
       create_form: CreateForm::new(),
       branch_types,
       report: None,
-      sidebar_open: true,
-      sidebar_focused: false,
-      sidebar_scroll: 0,
-      sidebar_cache: None,
-      sidebar_max_scroll: 0,
+      sidebar: SidebarState::new(),
       pending_g: false,
       filter: FilterState::new(),
       picker_mode: false,
@@ -227,9 +221,7 @@ impl App {
       picker_should_exit: false,
       confirm: ConfirmModal::new(),
       github: GitHubFetch::new(),
-      link_prompt_stage: LinkPromptStage::ChooseTarget,
-      link_prompt_number: String::new(),
-      link_prompt_target: None,
+      link_prompt: LinkPrompt::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
     };
     out.refresh_link();
@@ -311,14 +303,34 @@ impl App {
   }
 
   /// Drop the cached sidebar content. Call on any change that may have altered
-  /// what the sidebar shows: worktree list refresh, selection change, etc.
+  /// what the sidebar shows: worktree list refresh, filter narrowing, etc.
+  /// Pure delegate over [`SidebarState::invalidate`]; navigation-driven
+  /// invalidation goes through [`Self::on_navigation`] which also resets
+  /// the scroll offset.
   pub fn invalidate_sidebar_cache(&mut self) {
-    self.sidebar_cache = None;
+    self.sidebar.invalidate();
+  }
+
+  /// Selection-change reaction: drop the sidebar's scroll back to the
+  /// top, invalidate its cached preview, and resolve the link cache
+  /// against the freshly selected worktree. Collapses the verbatim
+  /// `sidebar.scroll = 0; invalidate_sidebar_cache(); refresh_link();`
+  /// triple that was repeated across `next`, `prev`, `first`, `last`
+  /// pre-extraction (issue #127, part of #102). The first two pieces
+  /// live on [`SidebarState::on_navigation`]; the link refresh is
+  /// orchestrator-shaped (it touches `self.link` / `self.link_slug` /
+  /// `self.issue_state` / `self.pr_state` via [`Self::refresh_link`])
+  /// so it stays here. Every navigation entry point now goes through
+  /// this single call so the triple cannot drift back into duplicated
+  /// literals.
+  pub fn on_navigation(&mut self) {
+    self.sidebar.on_navigation();
+    self.refresh_link();
   }
 
   pub fn next(&mut self) {
     // Route navigation to the sidebar when it's focused; otherwise move the list.
-    if self.sidebar_open && self.sidebar_focused {
+    if self.sidebar.open && self.sidebar.focused {
       self.sidebar_scroll_down();
       return;
     }
@@ -331,13 +343,11 @@ impl App {
       None => 0,
     };
     self.list_state.select(Some(i));
-    self.sidebar_scroll = 0;
-    self.invalidate_sidebar_cache();
-    self.refresh_link();
+    self.on_navigation();
   }
 
   pub fn prev(&mut self) {
-    if self.sidebar_open && self.sidebar_focused {
+    if self.sidebar.open && self.sidebar.focused {
       self.sidebar_scroll_up();
       return;
     }
@@ -350,9 +360,7 @@ impl App {
       Some(i) => i - 1,
     };
     self.list_state.select(Some(i));
-    self.sidebar_scroll = 0;
-    self.invalidate_sidebar_cache();
-    self.refresh_link();
+    self.on_navigation();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------
@@ -361,9 +369,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(0));
-      self.sidebar_scroll = 0;
-      self.invalidate_sidebar_cache();
-      self.refresh_link();
+      self.on_navigation();
     }
   }
 
@@ -371,9 +377,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(len - 1));
-      self.sidebar_scroll = 0;
-      self.invalidate_sidebar_cache();
-      self.refresh_link();
+      self.on_navigation();
     }
   }
 
@@ -394,12 +398,8 @@ impl App {
   // ---- Sidebar ------------------------------------------------------------
 
   pub fn toggle_sidebar(&mut self) {
-    self.sidebar_open = !self.sidebar_open;
-    if !self.sidebar_open {
-      // Hidden sidebar can't be focused.
-      self.sidebar_focused = false;
-    }
-    self.status = if self.sidebar_open {
+    self.sidebar.toggle_open();
+    self.status = if self.sidebar.open {
       "sidebar shown".into()
     } else {
       "sidebar hidden".into()
@@ -407,21 +407,15 @@ impl App {
   }
 
   pub fn toggle_focus(&mut self) {
-    if !self.sidebar_open {
-      return;
-    }
-    self.sidebar_focused = !self.sidebar_focused;
+    self.sidebar.toggle_focus();
   }
 
   pub fn sidebar_scroll_down(&mut self) {
-    // Clamp to the last-known content max so scrolling stops at the bottom
-    // instead of running off-screen. The renderer keeps `sidebar_max_scroll`
-    // up to date with the visible content height.
-    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1).min(self.sidebar_max_scroll);
+    self.sidebar.scroll_down();
   }
 
   pub fn sidebar_scroll_up(&mut self) {
-    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+    self.sidebar.scroll_up();
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -804,7 +798,7 @@ impl App {
   /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
     self.filter.open();
-    self.sidebar_focused = false;
+    self.sidebar.focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
   }
@@ -1141,38 +1135,38 @@ impl App {
   }
 
   // ---- Link prompt --------------------------------------------------------
+  //
+  // Pure state lives in `self.link_prompt` (`tui::state::link_prompt`,
+  // extracted per #126). The methods below are thin orchestrator
+  // wrappers: they update `self.view` / `self.status` / drive the
+  // `github::link_{issue,pr}` shell-out on submit, then delegate the
+  // buffer / stage transitions to `LinkPrompt`.
 
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
     self.status = "link: [i]ssue / [p]r · esc cancels".into();
   }
 
   pub fn link_prompt_cancel(&mut self) {
     self.view = View::List;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
   }
 
   pub fn link_prompt_stage(&self) -> LinkPromptStage {
-    self.link_prompt_stage
+    self.link_prompt.stage
   }
 
   pub fn link_prompt_number_input(&self) -> &str {
-    &self.link_prompt_number
+    &self.link_prompt.number
   }
 
   pub fn link_prompt_target(&self) -> Option<LinkTarget> {
-    self.link_prompt_target
+    self.link_prompt.target
   }
 
   pub fn link_prompt_choose(&mut self, target: LinkTarget) {
-    self.link_prompt_target = Some(target);
-    self.link_prompt_stage = LinkPromptStage::InputNumber;
-    self.link_prompt_number.clear();
+    self.link_prompt.commit_target(target);
     self.status = match target {
       LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
       LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
@@ -1180,24 +1174,21 @@ impl App {
   }
 
   pub fn link_prompt_push_char(&mut self, c: char) {
-    if self.link_prompt_stage == LinkPromptStage::InputNumber && c.is_ascii_digit() {
-      self.link_prompt_number.push(c);
-    }
+    self.link_prompt.push_char(c);
   }
 
   pub fn link_prompt_pop_char(&mut self) {
-    if self.link_prompt_stage == LinkPromptStage::InputNumber {
-      self.link_prompt_number.pop();
-    }
+    self.link_prompt.pop_char();
   }
 
   pub fn link_prompt_submit(&mut self) -> Result<()> {
-    let Some(target) = self.link_prompt_target else {
+    let Some(target) = self.link_prompt.target else {
       self.status = "no target chosen".into();
       return Ok(());
     };
     let n: u64 = self
-      .link_prompt_number
+      .link_prompt
+      .number
       .parse()
       .map_err(|_| GwmError::Other("number is empty or invalid".into()))?;
     let branch = self
@@ -1214,9 +1205,7 @@ impl App {
       LinkTarget::Pr => format!("linked PR #{} to {}", n, branch),
     };
     self.view = View::List;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
     self.refresh_link();
     Ok(())
   }

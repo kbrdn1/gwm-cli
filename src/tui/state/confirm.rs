@@ -64,6 +64,13 @@ impl ConfirmModal {
   /// confirm" (delete_branch_on_remove OFF, or confirm_countdown_secs = 0).
   pub fn press_y(&mut self, now: Instant, total: Duration) -> ConfirmKeyAction {
     if total.is_zero() {
+      // Defensive: if `started_at` was set by a prior code path that
+      // armed before checking `total` (or by the config flipping to
+      // `confirm_countdown_secs = 0` mid-modal), clear it so the
+      // invariant "classic mode is never armed" holds. Copilot review
+      // on PR #131 flagged this — without the clear, a future caller
+      // could leak armed state across a press_y that returns FireNow.
+      self.started_at = None;
       return ConfirmKeyAction::FireNow;
     }
     if self.started_at.is_some() {

@@ -5,8 +5,8 @@
 
 use gwm::config::LabelConfig;
 use gwm::labels::{
-  deterministic_color, diff_labels, normalize_color, resolve_labels, validate_color, LabelAction, LabelDiff, LabelSpec,
-  RemoteLabel,
+  deterministic_color, diff_labels, normalize_color, resolve_labels, validate_color, validate_label_name, LabelAction,
+  LabelDiff, LabelSpec, RemoteLabel,
 };
 
 // --- Deterministic colour hashing ---------------------------------------
@@ -272,6 +272,81 @@ fn diff_normalises_remote_color_case_before_compare() {
   let diff = diff_labels(&declared, &remote);
   assert_eq!(diff.matching.len(), 1);
   assert!(diff.to_update.is_empty());
+}
+
+// --- Issue #100: label-name argv-injection guards -----------------------
+
+#[test]
+fn validate_label_name_accepts_normal_names() {
+  // Spaces and unicode are GitHub-legal and common in real label sets
+  // ("good first issue", "🚀 ship-it"). The validator must not be
+  // overzealous and reject everything but `[a-z]+`.
+  assert!(validate_label_name("bug").is_ok());
+  assert!(validate_label_name("good first issue").is_ok());
+  assert!(validate_label_name("priority/p1").is_ok());
+  assert!(validate_label_name("🚀 ship-it").is_ok());
+}
+
+#[test]
+fn validate_label_name_rejects_leading_dash() {
+  // Issue #100. `gh label create -h` is parsed by gh's flag splitter
+  // BEFORE the create call materialises — `-h` prints help and exits
+  // 0. The push report would then claim "✓ created" for a label that
+  // never existed. Same shape for `--repo`, which retargets to a
+  // different repository entirely.
+  let err = validate_label_name("-h").unwrap_err();
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("'-'") || msg.contains("- "),
+    "error must mention the offending leading dash; got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("#100"),
+    "error must cite issue #100 so the user can find context; got: {}",
+    msg
+  );
+
+  // Same shape for `--repo`-style flags.
+  assert!(validate_label_name("--repo").is_err());
+  assert!(validate_label_name("-").is_err());
+}
+
+#[test]
+fn validate_label_name_rejects_empty() {
+  let err = validate_label_name("").unwrap_err();
+  assert!(format!("{}", err).contains("empty"));
+}
+
+#[test]
+fn validate_label_name_rejects_comma() {
+  // GitHub uses `,` as the label-list separator in query strings; a
+  // label whose name contains `,` would be split mid-name on filter
+  // operations. Reject at the source.
+  assert!(validate_label_name("foo,bar").is_err());
+}
+
+#[test]
+fn validate_label_name_rejects_ascii_control_chars() {
+  // A newline / tab in a label name breaks the `gh label list` JSON
+  // round-trip and produces confusing downstream parse errors.
+  assert!(validate_label_name("foo\nbar").is_err());
+  assert!(validate_label_name("foo\tbar").is_err());
+}
+
+#[test]
+fn resolve_labels_propagates_invalid_name_from_config() {
+  // Defence-in-depth: `Config::validate_labels` runs at load time, but
+  // `resolve_labels` is also reachable from a programmatic
+  // `LabelConfig` (test fixtures, future API). The same refusal must
+  // surface in both paths.
+  let declared = vec![LabelConfig {
+    name: "-h".into(),
+    description: None,
+    color: None,
+  }];
+  let err = resolve_labels(&declared, false).unwrap_err();
+  assert!(format!("{}", err).contains("'-h'") || format!("{}", err).contains("-h"));
 }
 
 #[test]

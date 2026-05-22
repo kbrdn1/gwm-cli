@@ -120,7 +120,7 @@ fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
 /// and user preference. Sidebar is hidden on narrow terminals to keep the
 /// worktree table readable.
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
-  let show_sidebar = app.sidebar_open && area.width >= SIDEBAR_MIN_WIDTH;
+  let show_sidebar = app.sidebar.open && area.width >= SIDEBAR_MIN_WIDTH;
   if show_sidebar {
     let split = Layout::default()
       .direction(Direction::Horizontal)
@@ -130,7 +130,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     draw_sidebar(f, split[1], app);
   } else {
     // Sidebar not rendered → no scrollable surface → no max scroll to track.
-    app.sidebar_max_scroll = 0;
+    app.sidebar.max_scroll = 0;
     draw_list(f, area, app);
   }
 }
@@ -214,7 +214,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Fill(1),
   ];
 
-  let list_has_focus = !(app.sidebar_open && app.sidebar_focused);
+  let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
 
   let title = if app.filter.query.is_empty() {
@@ -245,7 +245,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
-  let border_color = if app.sidebar_focused {
+  let border_color = if app.sidebar.focused {
     Color::Cyan
   } else {
     Color::DarkGray
@@ -259,14 +259,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // invalidating the expensive git-preview cache underneath.
   let sections = match app.selected().cloned() {
     Some(w) => {
-      let needs_refresh = match &app.sidebar_cache {
+      let needs_refresh = match &app.sidebar.cache {
         Some((p, _)) => *p != w.path,
         None => true,
       };
       if needs_refresh {
-        app.sidebar_cache = Some((w.path.clone(), build_sidebar_sections(&w)));
+        app.sidebar.cache = Some((w.path.clone(), build_sidebar_sections(&w)));
       }
-      let mut cached = app.sidebar_cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
+      let mut cached = app.sidebar.cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
       let mut worktree = vec![sidebar_header_line(&w, app)];
       worktree.append(&mut cached.worktree);
       SidebarSections {
@@ -325,14 +325,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let commits_area = chunks[3];
   let commits_visible = commits_area.height.saturating_sub(2);
   let commits_len = sections.recent_commits.len() as u16;
-  app.sidebar_max_scroll = commits_len.saturating_sub(commits_visible);
-  if app.sidebar_scroll > app.sidebar_max_scroll {
-    app.sidebar_scroll = app.sidebar_max_scroll;
+  app.sidebar.max_scroll = commits_len.saturating_sub(commits_visible);
+  if app.sidebar.scroll > app.sidebar.max_scroll {
+    app.sidebar.scroll = app.sidebar.max_scroll;
   }
   let footer = if commits_len == 0 {
     None
   } else {
-    let bottom = app.sidebar_scroll.saturating_add(commits_visible).min(commits_len);
+    let bottom = app.sidebar.scroll.saturating_add(commits_visible).min(commits_len);
     Some(format!(" {} of {} ", bottom, commits_len))
   };
   render_section(
@@ -341,7 +341,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     " Recent Commits ",
     sections.recent_commits,
     border_color,
-    app.sidebar_scroll,
+    app.sidebar.scroll,
     footer,
   );
 }
@@ -476,25 +476,19 @@ fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
 }
 
 /// Render the "Created" line value: compact relative duration (`2d`,
-/// `3w`, `1M`, …) computed from the worktree's own repository handle, or
-/// `"-"` when the branch has no measurable age (trunk, detached HEAD, or
-/// repo open failure). The cost is one libgit2 revwalk on each sidebar
-/// rebuild — gated by `sidebar_cache` so it only runs on selection
-/// change, not every frame.
+/// `3w`, `1M`, …) read from the pre-computed `WorktreeInfo.age` field,
+/// or `"-"` when the branch has no measurable age (trunk, detached HEAD,
+/// repo open failure). Issue #103: previously this opened a fresh
+/// `git2::Repository` per row per frame; the libgit2 work now happens
+/// once at `worktree::list()` time.
 fn branch_age_label(w: &WorktreeInfo) -> String {
-  branch_age_for(w)
+  w.age
     .map(worktree::format_relative_duration)
     .unwrap_or_else(|| "-".into())
 }
 
 fn branch_age_color(w: &WorktreeInfo) -> Color {
-  branch_age_for(w).map(freshness_color).unwrap_or(Color::DarkGray)
-}
-
-fn branch_age_for(w: &WorktreeInfo) -> Option<Duration> {
-  let branch = w.branch.as_ref()?;
-  let repo = git2::Repository::open(&w.path).ok()?;
-  worktree::branch_age(&repo, branch)
+  w.age.map(freshness_color).unwrap_or(Color::DarkGray)
 }
 
 fn badges_line(w: &WorktreeInfo) -> Line<'static> {
@@ -753,15 +747,13 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
 
   // PR #74 follow-up: surface branch age right in the table so it stays
   // visible when the sidebar is hidden (<120 cols or `v` collapsed).
-  // `branch_age_for` opens the worktree's repo and runs the libgit2
-  // revwalk; per-frame cost is bounded by the number of visible rows
-  // (typically <20) so we re-resolve on every draw without caching.
-  // Colour stays uniform Gray — the saturated freshness palette
-  // (green/yellow/darkgray) reads as noise next to the more important
-  // BRANCH-status colour, so we keep it muted in the table and let the
-  // sidebar's `Created:` row carry the colour-coded signal.
-  let age = branch_age_for(w);
-  let age_label = age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
+  // Issue #103: `w.age` is now pre-computed at `worktree::list()` time,
+  // so the table render path is pure field access — no libgit2 handle is
+  // opened per row per frame. Colour stays uniform Gray — the saturated
+  // freshness palette (green/yellow/darkgray) reads as noise next to the
+  // more important BRANCH-status colour, so we keep it muted in the table
+  // and let the sidebar's `Created:` row carry the colour-coded signal.
+  let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
   let age_cell = Cell::from(age_label).style(Style::default().fg(Color::DarkGray));
 
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));

@@ -620,3 +620,30 @@ fn branch_link_summary_renders_human_readable() {
   assert!(s.contains("#42"), "summary should mention issue #42: {}", s);
   assert!(s.contains("#61"), "summary should mention PR #61: {}", s);
 }
+
+// --- Issue #100: prune-path argv-injection guard ------------------------
+
+#[test]
+fn delete_label_refuses_dash_prefixed_remote_name_before_shelling_out() {
+  // Companion to the declared-side `validate_label_name` guard. The
+  // symmetric vector is the prune path: `gh label delete <name>`
+  // takes the name positionally, so a remote label whose name starts
+  // with `-` (planted by an attacker who controls the upstream label
+  // set, or by a tool that predates the validator) would be parsed
+  // as a flag — `-h` no-ops the delete with a help banner. The
+  // validator runs BEFORE the shell-out so `delete_label` refuses
+  // cleanly without ever invoking gh — meaning the test can rely on
+  // the early return without needing `gh` on PATH.
+  let err = github::delete_label("owner/repo", "-h").unwrap_err();
+  let msg = format!("{}", err);
+  assert!(
+    msg.contains("labels (remote)"),
+    "error must scope itself to the remote prune path; got: {}",
+    msg
+  );
+  assert!(
+    msg.contains("\"-h\"") || msg.contains("-h"),
+    "error must name the offending label; got: {}",
+    msg
+  );
+}

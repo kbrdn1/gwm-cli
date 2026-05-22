@@ -487,3 +487,124 @@ fn remove_prunes_admin_files_on_happy_path() {
     "libgit2 must no longer resolve the pruned worktree by name"
   );
 }
+
+#[test]
+#[cfg(unix)]
+fn remove_failed_filesystem_unlink_still_prunes_metadata() {
+  // Issue #98: `worktree::remove` must prune the admin metadata BEFORE
+  // calling `fs::remove_dir_all`. Otherwise, a mid-way filesystem failure
+  // leaves a "phantom worktree": directory gone, libgit2 metadata still
+  // listing the name. `gwm list` shows a ghost row and `gwm bootstrap`
+  // fails confusingly until the user runs `gwm prune` manually.
+  //
+  // We force `remove_dir_all` to fail by stripping `w` from the worktree's
+  // PARENT (the final `rmdir(target)` needs write on its parent). With the
+  // fix, prune ran first → the admin entry is already gone. With the
+  // buggy ordering, prune never runs → `find_worktree` still resolves
+  // the ghost name.
+  use std::os::unix::fs::PermissionsExt;
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-98-ghost");
+  worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost").unwrap();
+
+  // Capture the original mode so we can restore EXACTLY what TempDir
+  // gave us (mac defaults to 0o700, linux 0o755, umask-dependent on
+  // both). Hard-coding 0o755 in the restore would widen permissions
+  // on macOS, which is harmless for cleanup but a needless mutation —
+  // and would mask any future regression where `set_mode` itself
+  // misbehaves on a quirky tmpfs.
+  let original_mode = std::fs::metadata(wt_root.path()).unwrap().permissions().mode();
+  let mut parent_perms = std::fs::metadata(wt_root.path()).unwrap().permissions();
+  parent_perms.set_mode(0o555);
+  std::fs::set_permissions(wt_root.path(), parent_perms).unwrap();
+
+  let result = worktree::remove(&repo, "feat-98-ghost", false);
+
+  // Restore the exact original mode so tempdir cleanup succeeds even
+  // if the assertions below panic.
+  let mut restore = std::fs::metadata(wt_root.path()).unwrap().permissions();
+  restore.set_mode(original_mode);
+  std::fs::set_permissions(wt_root.path(), restore).unwrap();
+
+  assert!(
+    result.is_err(),
+    "remove must surface the filesystem failure as an error"
+  );
+  assert!(
+    repo.find_worktree("feat-98-ghost").is_err(),
+    "prune must run BEFORE remove_dir_all so a failed unlink cannot leave a phantom worktree"
+  );
+}
+
+// --------------------------------------------------------------------------
+// Issue #103 — `WorktreeInfo.age` pre-computed at list time so the TUI
+// render loop no longer opens a fresh `git2::Repository` per row per frame.
+// --------------------------------------------------------------------------
+
+#[test]
+fn list_populates_age_on_feature_worktree() {
+  // Issue #103: the TUI used to call `branch_age_for(w)` per row per frame,
+  // which opened a `git2::Repository` and ran a revwalk every time. The fix
+  // moves that computation into `worktree::list()` so the render path becomes
+  // pure read-only struct field access. Asserting `WorktreeInfo.age` is
+  // populated by `list()` pins the new contract: the TUI is no longer
+  // permitted to open libgit2 handles on the render path.
+  let (dir, repo) = init_repo();
+
+  // Pin a `feat/#103-age` branch with one commit dated 2 days ago so the
+  // formatter has something stable to read.
+  let two_days_ago = chrono::Utc::now().timestamp() - 2 * 86_400;
+  let main_oid = repo.head().unwrap().target().unwrap();
+  let main_commit = repo.find_commit(main_oid).unwrap();
+  repo.branch("feat/#103-age", &main_commit, false).unwrap();
+  commit_with_time(
+    dir.path(),
+    &repo,
+    "refs/heads/feat/#103-age",
+    "branch-old",
+    two_days_ago,
+  );
+
+  // Attach a worktree on that branch and list.
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-103-age");
+  worktree::add(&repo, "feat-103-age", &target, "feat/#103-age").unwrap();
+
+  let trees = worktree::list(&repo).unwrap();
+  let feature = trees
+    .iter()
+    .find(|w| w.name == "feat-103-age")
+    .expect("feature worktree must appear in list");
+
+  let age = feature
+    .age
+    .expect("WorktreeInfo.age must be Some on a feature branch with divergence");
+  let drift = age.as_secs().abs_diff(2 * 86_400);
+  assert!(
+    drift < 300,
+    "expected ~2 days on the cached age field, got {}s (drift {}s)",
+    age.as_secs(),
+    drift
+  );
+}
+
+#[test]
+fn list_returns_none_age_for_main_worktree() {
+  // Trunk branches (`main` / `master` / `dev`) have no meaningful "branch
+  // age" — `worktree::list()` must surface `None` so the TUI renders `-`,
+  // matching the prior `branch_age_for` semantics.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let trees = worktree::list(&repo).unwrap();
+  let main = trees
+    .iter()
+    .find(|w| w.is_main)
+    .expect("main worktree must appear in list");
+  assert!(
+    main.age.is_none(),
+    "main worktree on a trunk branch must report age = None, got {:?}",
+    main.age
+  );
+}

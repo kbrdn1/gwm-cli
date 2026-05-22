@@ -115,6 +115,37 @@ pub fn expand_command(template: &str, ctx: &LauncherContext<'_>) -> Result<Expan
   Ok(ExpandedCommand { argv, diff_file })
 }
 
+/// Build the argv tail (after `-C <workdir>`) for `git diff
+/// <base>..<head>` with the `--end-of-options` guard interposed
+/// (issue #100). Both `base` and `head` flow from user-controlled
+/// surfaces (`branch.<n>.merge`, `branch.<n>.gwm-base`,
+/// `[review].default_base`, branch names), so a value like
+/// `--upload-pack=/tmp/x` would otherwise be parsed as a git option
+/// (the CVE-2017-1000117 shape) on susceptible git versions. The
+/// `--end-of-options` separator forces every token after it to be
+/// treated as a positional ref — modern git mandates this defensive
+/// pattern even when its own argument parser would not be tricked
+/// today.
+///
+/// Public for unit-testing the contract; the wrappers
+/// `materialise_diff` and `count_commits_ahead` are the actual
+/// shell-out sites.
+pub fn git_diff_argv(base: &str, head: &str) -> Vec<String> {
+  vec!["diff".into(), "--end-of-options".into(), format!("{}..{}", base, head)]
+}
+
+/// Build the argv tail (after `-C <workdir>`) for `git rev-list
+/// --count <base>..<head>` with the same `--end-of-options` guard as
+/// [`git_diff_argv`] (issue #100).
+pub fn git_rev_list_count_argv(base: &str, head: &str) -> Vec<String> {
+  vec![
+    "rev-list".into(),
+    "--count".into(),
+    "--end-of-options".into(),
+    format!("{}..{}", base, head),
+  ]
+}
+
 /// Shell out to `git diff <base>..<head>` from `workdir`, write the
 /// output into a tempfile, and return the handle. The caller keeps
 /// the handle alive (the tempfile is unlinked on drop) so the consumer
@@ -127,7 +158,7 @@ fn materialise_diff(workdir: &Path, base: &str, head: &str) -> Result<tempfile::
   let output = Command::new("git")
     .arg("-C")
     .arg(workdir)
-    .args(["diff", &format!("{}..{}", base, head)])
+    .args(git_diff_argv(base, head))
     .output()
     .map_err(|e| GwmError::CommandFailed(format!("git diff failed to spawn: {}", e)))?;
   if !output.status.success() {
@@ -238,7 +269,7 @@ pub fn count_commits_ahead(workdir: &Path, base: &str, head: &str) -> u32 {
   let output = Command::new("git")
     .arg("-C")
     .arg(workdir)
-    .args(["rev-list", "--count", &format!("{}..{}", base, head)])
+    .args(git_rev_list_count_argv(base, head))
     .output();
   let Ok(out) = output else { return 0 };
   if !out.status.success() {

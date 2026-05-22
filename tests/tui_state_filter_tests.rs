@@ -38,6 +38,7 @@ fn wt(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
