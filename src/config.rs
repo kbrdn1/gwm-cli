@@ -372,16 +372,14 @@ impl Config {
   /// `Vec<Regex>` on the `Guard` struct would force `#[serde(skip)]`
   /// gymnastics on a type that round-trips through TOML.
   ///
-  /// **Trust boundary**: `Config::load_for_repo` is the single
+  /// **Trust boundary**: `Config::load_for_repo` is the primary
   /// chokepoint this validator protects. `bootstrap::guard_match`
-  /// still wraps the per-row `Regex::new` in `if let Ok(re) = …`, so
-  /// a `Config` value constructed programmatically (a test fixture,
-  /// a fuzz harness, a future API that bypasses the loader) can
-  /// still hit the legacy fail-open path. Closing that residual gap
-  /// — either by lifting the compiled regexes onto `Guard` or by
-  /// surfacing the runtime compile error as a `StepStatus::Failed`
-  /// — pairs with the `naming.rs` regex re-compilation refactor and
-  /// is tracked separately, not in this PR.
+  /// holds the matching defence-in-depth for `Config` values that
+  /// bypass the loader (test fixtures, programmatic constructors,
+  /// future APIs): a runtime `Regex::new` failure surfaces as a
+  /// `StepStatus::Failed` step and refuses the copy, instead of
+  /// silently dropping the pattern as the original #96 fail-open
+  /// did.
   fn validate_bootstrap_guards(&self) -> Result<()> {
     for g in &self.bootstrap.guard {
       for pat in &g.deny_patterns {

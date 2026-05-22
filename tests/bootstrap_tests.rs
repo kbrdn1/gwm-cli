@@ -174,43 +174,61 @@ fn guard_seed_from_example_substitutes() {
   assert!(report.steps.iter().any(|s| s.status == StepStatus::Warning));
 }
 
-// Issue #96: end-to-end scenario from the bug report — an invalid
-// `deny_patterns` entry mixed with a valid one must abort at
-// `Config::load_for_repo`, never reach `bootstrap::run`. The fixture
-// mirrors the original reproduction (`["[+", "AWS_SECRET_ACCESS_KEY"]`):
-// previously the invalid regex was silently dropped, leaving only the
-// valid pattern — which would have matched, BUT the contract is that
-// any malformed pattern is a hard load-time error, not a silent demotion.
+// Issue #96 — end-to-end fail-closed contract when the loader is
+// bypassed. `Config::load_for_repo` is the documented chokepoint for
+// `deny_patterns` validation, but a `Config` value can also be built
+// programmatically (test fixtures, fuzz harnesses, future APIs).
+// In that path `bootstrap::guard_match` is the last line of defence:
+// it MUST surface the compile error as a `Failed` step and refuse
+// the copy, rather than silently swallowing the error and letting
+// the file through (the original #96 fail-open). The load-time
+// abort case is covered by `tests/config_tests.rs` — this test
+// exercises the *runtime* defence-in-depth path that pairs with it.
 #[test]
-fn guard_with_invalid_pattern_alongside_valid_aborts_at_load_not_at_bootstrap() {
-  use gwm::config::CONFIG_FILE;
-  let main = TempDir::new().unwrap();
+fn guard_with_invalid_pattern_fails_closed_when_config_bypasses_load_for_repo() {
+  let (main, wt, mut cfg) = dirs();
   std::fs::write(main.path().join(".env"), "AWS_SECRET_ACCESS_KEY=AKIA...").unwrap();
-  std::fs::write(
-    main.path().join(CONFIG_FILE),
-    r#"
-[[bootstrap.copy]]
-from = ".env"
-to   = ".env"
-required = false
-guards   = ["no-secrets"]
-
-[[bootstrap.guard]]
-name          = "no-secrets"
-deny_patterns = ["[+", "AWS_SECRET_ACCESS_KEY"]
-on_match      = "abort"
-"#,
-  )
-  .unwrap();
-  // The fail-open scenario the issue documents: bootstrap MUST NOT run
-  // at all because the config cannot be loaded with a broken pattern.
-  let err = Config::load_for_repo(main.path())
-    .expect_err("invalid deny_pattern must fail at config load, never silently degrade");
-  let msg = format!("{}", err);
+  // Build the Config in code so `Config::validate_bootstrap_guards`
+  // never gets a chance to reject the invalid pattern. This is the
+  // exact path Copilot's PR #116 review flagged as residually
+  // fail-open.
+  cfg.bootstrap.guard.push(Guard {
+    name: "no-secrets".into(),
+    deny_patterns: vec!["[+".into()],
+    on_match: "abort".into(),
+    example_file: None,
+  });
+  cfg.bootstrap.copy.push(CopyStep {
+    from: ".env".into(),
+    to: ".env".into(),
+    required: false,
+    guards: vec!["no-secrets".into()],
+    fallback: None,
+  });
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  let report = bootstrap::run(&ctx).unwrap();
   assert!(
-    msg.contains("no-secrets") && msg.contains("[+"),
-    "error must name guard + pattern, got: {}",
-    msg
+    !wt.path().join(".env").exists(),
+    "copy must NOT proceed when a guard's pattern cannot compile (#96 fail-closed)"
+  );
+  let failed = report
+    .steps
+    .iter()
+    .find(|s| s.status == StepStatus::Failed)
+    .expect("run must report a Failed step for the broken guard");
+  assert!(
+    failed.detail.contains("no-secrets") && failed.detail.contains("[+"),
+    "Failed step detail must name guard + pattern, got: {}",
+    failed.detail
+  );
+  assert!(
+    failed.detail.contains("#96") || failed.detail.contains("load_for_repo"),
+    "Failed step detail must reference the issue / loader bypass, got: {}",
+    failed.detail
   );
 }
 
