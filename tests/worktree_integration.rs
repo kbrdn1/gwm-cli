@@ -487,3 +487,46 @@ fn remove_prunes_admin_files_on_happy_path() {
     "libgit2 must no longer resolve the pruned worktree by name"
   );
 }
+
+#[test]
+#[cfg(unix)]
+fn remove_failed_filesystem_unlink_still_prunes_metadata() {
+  // Issue #98: `worktree::remove` must prune the admin metadata BEFORE
+  // calling `fs::remove_dir_all`. Otherwise, a mid-way filesystem failure
+  // leaves a "phantom worktree": directory gone, libgit2 metadata still
+  // listing the name. `gwm list` shows a ghost row and `gwm bootstrap`
+  // fails confusingly until the user runs `gwm prune` manually.
+  //
+  // We force `remove_dir_all` to fail by stripping `w` from the worktree's
+  // PARENT (the final `rmdir(target)` needs write on its parent). With the
+  // fix, prune ran first → the admin entry is already gone. With the
+  // buggy ordering, prune never runs → `find_worktree` still resolves
+  // the ghost name.
+  use std::os::unix::fs::PermissionsExt;
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-98-ghost");
+  worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost").unwrap();
+
+  let mut parent_perms = std::fs::metadata(wt_root.path()).unwrap().permissions();
+  parent_perms.set_mode(0o555);
+  std::fs::set_permissions(wt_root.path(), parent_perms).unwrap();
+
+  let result = worktree::remove(&repo, "feat-98-ghost", false);
+
+  // Restore writability so tempdir cleanup succeeds even if the assertions
+  // below panic.
+  let mut restore = std::fs::metadata(wt_root.path()).unwrap().permissions();
+  restore.set_mode(0o755);
+  std::fs::set_permissions(wt_root.path(), restore).unwrap();
+
+  assert!(
+    result.is_err(),
+    "remove must surface the filesystem failure as an error"
+  );
+  assert!(
+    repo.find_worktree("feat-98-ghost").is_err(),
+    "prune must run BEFORE remove_dir_all so a failed unlink cannot leave a phantom worktree"
+  );
+}
