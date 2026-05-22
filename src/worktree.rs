@@ -327,9 +327,9 @@ pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
     .args(["log", "--format=%H%x00%aN%x00%P%x00%s", "-n"])
     .arg(n.to_string())
     .output()
-    .map_err(|e| GwmError::Other(format!("git log failed to spawn: {}", e)))?;
+    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
   if !output.status.success() {
-    return Err(GwmError::Other(format!(
+    return Err(GwmError::CommandFailed(format!(
       "git log exited {}: {}",
       output.status,
       String::from_utf8_lossy(&output.stderr).trim()
@@ -366,9 +366,9 @@ pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
     .args(["log", "--oneline", "-n"])
     .arg(n.to_string())
     .output()
-    .map_err(|e| GwmError::Other(format!("git log failed to spawn: {}", e)))?;
+    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
   if !output.status.success() {
-    return Err(GwmError::Other(format!(
+    return Err(GwmError::CommandFailed(format!(
       "git log exited {}: {}",
       output.status,
       String::from_utf8_lossy(&output.stderr).trim()
@@ -385,9 +385,9 @@ pub fn git_status_short(path: &Path) -> Result<String> {
     .arg(path)
     .args(["status", "--short"])
     .output()
-    .map_err(|e| GwmError::Other(format!("git status failed to spawn: {}", e)))?;
+    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
   if !output.status.success() {
-    return Err(GwmError::Other(format!(
+    return Err(GwmError::CommandFailed(format!(
       "git status exited {}: {}",
       output.status,
       String::from_utf8_lossy(&output.stderr).trim()

@@ -1,7 +1,7 @@
 use crate::bootstrap::{self, BootstrapCtx, StepStatus};
 use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
-use crate::error::{GwmError, Result};
+use crate::error::{GwmError, LinkKind, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::labels::{self, LabelDiff};
 use crate::milestones::{self, MilestoneDiff};
@@ -829,13 +829,15 @@ fn resolve_target_repo(worktree: Option<String>) -> Result<(Repository, String, 
 }
 
 fn current_branch(repo: &Repository) -> Result<String> {
-  let head = repo
-    .head()
-    .map_err(|_| GwmError::Other("HEAD is unborn or detached".into()))?;
+  let head = repo.head().map_err(|_| GwmError::UnbornHead {
+    reason: "HEAD is unborn or detached".into(),
+  })?;
   head
     .shorthand()
     .map(|s| s.to_string())
-    .ok_or_else(|| GwmError::Other("HEAD has no shorthand (detached?)".into()))
+    .ok_or_else(|| GwmError::UnbornHead {
+      reason: "HEAD has no shorthand (detached?)".into(),
+    })
 }
 
 fn cmd_link(target: LinkTarget, number: u64, worktree: Option<String>) -> Result<()> {
@@ -875,15 +877,17 @@ fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Re
 
   let url = match target {
     LinkTarget::Issue => {
-      let n = link
-        .issue
-        .ok_or_else(|| GwmError::Other(format!("no issue linked to branch '{}'", branch)))?;
+      let n = link.issue.ok_or_else(|| GwmError::LinkMissing {
+        kind: LinkKind::Issue,
+        branch: branch.clone(),
+      })?;
       github::issue_url(&slug, n)
     }
     LinkTarget::Pr => {
-      let n = link
-        .pr
-        .ok_or_else(|| GwmError::Other(format!("no PR linked to branch '{}'", branch)))?;
+      let n = link.pr.ok_or_else(|| GwmError::LinkMissing {
+        kind: LinkKind::Pr,
+        branch: branch.clone(),
+      })?;
       github::pr_url(&slug, n)
     }
   };
