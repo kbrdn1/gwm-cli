@@ -80,9 +80,9 @@ fn enter_create_initializes_form() {
   let (_dir, mut app) = make_app();
   app.enter_create();
   assert_eq!(app.view, View::Create);
-  assert_eq!(app.create_field, Field::Type);
-  assert!(app.create_issue.is_empty());
-  assert!(app.create_desc.is_empty());
+  assert_eq!(app.create_form.field, Field::Type);
+  assert!(app.create_form.issue.is_empty());
+  assert!(app.create_form.desc.is_empty());
 }
 
 #[test]
@@ -90,13 +90,13 @@ fn create_field_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
   app.create_next_field();
-  assert_eq!(app.create_field, Field::Issue);
+  assert_eq!(app.create_form.field, Field::Issue);
   app.create_next_field();
-  assert_eq!(app.create_field, Field::Desc);
+  assert_eq!(app.create_form.field, Field::Desc);
   app.create_next_field();
-  assert_eq!(app.create_field, Field::Type);
+  assert_eq!(app.create_form.field, Field::Type);
   app.create_prev_field();
-  assert_eq!(app.create_field, Field::Desc);
+  assert_eq!(app.create_form.field, Field::Desc);
 }
 
 #[test]
@@ -104,33 +104,33 @@ fn create_type_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
   app.create_prev_type();
-  assert_eq!(app.create_type_index, BRANCH_TYPES.len() - 1);
+  assert_eq!(app.create_form.type_index, BRANCH_TYPES.len() - 1);
   app.create_next_type();
-  assert_eq!(app.create_type_index, 0);
+  assert_eq!(app.create_form.type_index, 0);
 }
 
 #[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();
-  app.create_field = Field::Issue;
+  app.create_form.field = Field::Issue;
   for c in "12a3".chars() {
     app.create_push_char(c);
   }
-  assert_eq!(app.create_issue, "123");
+  assert_eq!(app.create_form.issue, "123");
 }
 
 #[test]
 fn create_push_accepts_desc_chars() {
   let (_dir, mut app) = make_app();
   app.enter_create();
-  app.create_field = Field::Desc;
+  app.create_form.field = Field::Desc;
   for c in "foo-bar".chars() {
     app.create_push_char(c);
   }
-  assert_eq!(app.create_desc, "foo-bar");
+  assert_eq!(app.create_form.desc, "foo-bar");
   app.create_pop_char();
-  assert_eq!(app.create_desc, "foo-ba");
+  assert_eq!(app.create_form.desc, "foo-ba");
 }
 
 #[test]
@@ -2790,9 +2790,9 @@ run  = "echo would-have-run"
     .iter()
     .position(|t| t.name == "feat")
     .expect("`feat` is in BRANCH_TYPES defaults");
-  app.create_type_index = feat_idx;
-  app.create_issue = "42".into();
-  app.create_desc = "untrusted-creates".into();
+  app.create_form.type_index = feat_idx;
+  app.create_form.issue = "42".into();
+  app.create_form.desc = "untrusted-creates".into();
 
   // Must succeed (no Err — Err would crash out of the event loop) and
   // the gate must have set a refuse message.

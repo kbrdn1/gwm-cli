@@ -1,4 +1,5 @@
-use super::app::{App, Field, GitHubFetchState, LinkPromptStage, View};
+use super::app::{App, GitHubFetchState, LinkPromptStage, View};
+use super::state::create_form::Field;
 use crate::bootstrap::StepStatus;
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
@@ -934,7 +935,7 @@ fn draw_create(f: &mut Frame, app: &App) {
 
   let (type_str, type_desc) = app
     .branch_types
-    .get(app.create_type_index)
+    .get(app.create_form.type_index)
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
@@ -942,22 +943,30 @@ fn draw_create(f: &mut Frame, app: &App) {
     field_input(
       "type (↑/↓)",
       &format!("{} — {}", type_str, type_desc),
-      app.create_field == Field::Type,
+      app.create_form.field == Field::Type,
     ),
     inner[0],
   );
   f.render_widget(
-    field_input("issue (digits)", &app.create_issue, app.create_field == Field::Issue),
+    field_input(
+      "issue (digits)",
+      &app.create_form.issue,
+      app.create_form.field == Field::Issue,
+    ),
     inner[1],
   );
   f.render_widget(
-    field_input("description (kebab)", &app.create_desc, app.create_field == Field::Desc),
+    field_input(
+      "description (kebab)",
+      &app.create_form.desc,
+      app.create_form.field == Field::Desc,
+    ),
     inner[2],
   );
 
   // Preview line
-  let branch = format!("{}/#{}-{}", type_str, app.create_issue, app.create_desc);
-  let dirname = format!("{}-{}-{}", type_str, app.create_issue, app.create_desc);
+  let branch = format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc);
+  let dirname = format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc);
   let preview = vec![
     Line::from(Span::styled("preview", Style::default().fg(Color::DarkGray))),
     Line::from(vec![
