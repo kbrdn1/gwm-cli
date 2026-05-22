@@ -350,7 +350,41 @@ impl Config {
     let cfg: Config = toml::from_str(&raw)?;
     cfg.validate_branch_types()?;
     cfg.validate_bootstrap_paths()?;
+    cfg.validate_bootstrap_guards()?;
     Ok(cfg)
+  }
+
+  /// Pre-compile every `[[bootstrap.guard]].deny_patterns` entry so a
+  /// malformed regex surfaces at config load instead of being silently
+  /// dropped at evaluation time (issue #96).
+  ///
+  /// Historically `bootstrap.rs::guard_match` wrapped `Regex::new(pat)`
+  /// in `if let Ok(re) = …`, which made a guard fail-open whenever one
+  /// of its patterns failed to compile: the bad pattern vanished and
+  /// the surviving patterns evaluated against the file as if nothing
+  /// was wrong. A refusal mechanism that silently refuses to refuse is
+  /// strictly worse than no mechanism — the user reads "guard passed"
+  /// and trusts a file that never went through the rule it was meant
+  /// to be filtered by.
+  ///
+  /// The compiled regexes are deliberately discarded here: the goal
+  /// of this validator is to fail fast at load time. Re-compilation
+  /// at evaluation time is now infallible (the same input has just
+  /// compiled successfully) and is left in place rather than caching
+  /// `Vec<Regex>` on the `Guard` struct, which would force serde
+  /// gymnastics for a struct that round-trips through TOML.
+  fn validate_bootstrap_guards(&self) -> Result<()> {
+    for g in &self.bootstrap.guard {
+      for pat in &g.deny_patterns {
+        regex::Regex::new(pat).map_err(|e| {
+          GwmError::Config(format!(
+            "bootstrap.guard '{}': invalid deny_pattern {:?} — regex: {}",
+            g.name, pat, e
+          ))
+        })?;
+      }
+    }
+    Ok(())
   }
 
   /// Reject `..` components and absolute paths in bootstrap path
