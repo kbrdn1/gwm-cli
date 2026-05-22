@@ -24,7 +24,7 @@ pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::{fuzzy_match_indices, FilterState};
-pub use state::github_fetch::{GitHubFetch, GitHubFetchState};
+pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the

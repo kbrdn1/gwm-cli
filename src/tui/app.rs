@@ -1014,10 +1014,21 @@ impl App {
   }
 
   /// Drive the issue/PR fetch synchronously. Called from the event loop
-  /// when the user presses `F` (refresh GitHub status). Sets states to
-  /// `Loading` first so the UI can flag the in-flight state, then
-  /// runs the fetches.
+  /// when the user presses `F` (refresh GitHub status). Routes through
+  /// the [`GitHubFetch`] dedupe layer: `request(key)` claims the
+  /// per-target inflight slot and flips `*_state = Loading`, the
+  /// shell-out runs, `complete_{issue,pr}` clears the slot and
+  /// stamps the result.
+  ///
+  /// This call path is the explicit user-initiated refresh, so it
+  /// flushes the cache via [`GitHubFetch::invalidate`] first — the
+  /// user just asked for fresh data, a `HitCache` short-circuit here
+  /// would be a bug. The inflight slot is still claimed via
+  /// `request`, so any concurrent visit-driven `request` for the
+  /// same key dedupes correctly (load-bearing payoff of #128).
   pub fn refresh_github_status(&mut self) {
+    use super::state::github_fetch::{FetchAction, FetchKey};
+
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = "nothing linked — press L to link an issue or PR".into();
       return;
@@ -1026,15 +1037,21 @@ impl App {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };
+    // Explicit user-initiated refresh: flush the cache before the
+    // request loop so `request` returns `Spawn` instead of `HitCache`
+    // for previously-loaded keys.
+    self.github.invalidate();
     if let Some(n) = self.github.link.issue {
-      self.github.issue_state = GitHubFetchState::Loading;
-      let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
-      self.apply_issue_fetch_result(r);
+      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
+        let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
+        self.github.complete_issue(n, r);
+      }
     }
     if let Some(n) = self.github.link.pr {
-      self.github.pr_state = GitHubFetchState::Loading;
-      let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
-      self.apply_pr_fetch_result(r);
+      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
+        let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
+        self.github.complete_pr(n, r);
+      }
     }
     self.report_github_refresh_status();
   }
