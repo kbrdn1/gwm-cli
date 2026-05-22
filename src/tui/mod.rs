@@ -6,6 +6,7 @@ mod app;
 /// actually depend on.
 #[doc(hidden)]
 pub mod commit_graph;
+pub mod state;
 mod ui;
 
 use crate::error::Result;
@@ -19,10 +20,8 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{
-  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget,
-  OpenTarget, View,
-};
+pub use app::{App, Field, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the

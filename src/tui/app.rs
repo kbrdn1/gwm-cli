@@ -1,3 +1,4 @@
+use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -32,34 +33,6 @@ pub struct LauncherPlan {
   /// `None` for the git_tui launcher. Surfaced so the status bar /
   /// caller can mention which ref was used.
   pub base: Option<String>,
-}
-
-/// Outcome of pressing `y` / Enter on the confirm overlay. The event loop
-/// in `super::run_app` matches on this to decide whether to fire the
-/// delete immediately or wait for the countdown tick.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum ConfirmKeyAction {
-  /// Classic modal (delete_branch OFF, or countdown_secs = 0). The caller
-  /// must invoke `confirm_delete` right away.
-  FireNow,
-  /// Countdown just got armed by this keystroke.
-  Armed,
-  /// Countdown was armed and got disarmed by this second keystroke.
-  Disarmed,
-}
-
-/// State of the safety countdown after a tick. Returned by
-/// `App::tick_confirm_countdown` so the event loop can branch without
-/// reaching into the App's internals.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum CountdownTickOutcome {
-  /// No countdown was running (modal closed, or classic confirm modal).
-  NotArmed,
-  /// Countdown is still running — the loop should keep drawing the bar.
-  Pending,
-  /// Countdown has elapsed; the caller must invoke `confirm_delete` and
-  /// clear the modal. The App has already reset its own timer state.
-  ReadyToFire,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -187,13 +160,11 @@ pub struct App {
   /// instead of being kicked out with exit code 1.
   pub picker_should_exit: bool,
 
-  /// Anchor for the confirm-overlay safety countdown (issue #30). When
-  /// `Some`, the modal renders a progress bar and the event loop ticks
-  /// it down before firing `confirm_delete`. `None` means the modal is
-  /// either closed, in classic mode (delete_branch OFF or
-  /// `confirm_countdown_secs = 0`), or armed-but-just-disarmed by a
-  /// second `y` press.
-  pub confirm_countdown_started_at: Option<Instant>,
+  /// Safety countdown state for the confirm overlay (issue #30, extracted
+  /// per #125). Holds the timer anchor and exposes the pure state-machine
+  /// API; this `App` keeps the side-effecting wrappers below that compose
+  /// the status messages and call `worktree::remove`.
+  pub confirm: ConfirmModal,
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
   /// Cached link for the currently selected worktree's branch.
@@ -263,7 +234,7 @@ impl App {
       picker_mode: false,
       picker_result: None,
       picker_should_exit: false,
-      confirm_countdown_started_at: None,
+      confirm: ConfirmModal::new(),
       link: BranchLink::empty(),
       link_slug: None,
       issue_state: GitHubFetchState::Idle,
@@ -769,7 +740,7 @@ impl App {
       return;
     }
     self.view = View::Confirm;
-    self.confirm_countdown_started_at = None;
+    self.confirm.reset();
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
@@ -780,17 +751,16 @@ impl App {
     worktree::remove(&self.repo, &name, self.delete_branch_on_remove)?;
     self.status = format!("removed {} ({})", name, label);
     self.view = View::List;
-    self.confirm_countdown_started_at = None;
+    self.confirm.reset();
     self.refresh()
   }
 
-  // ---- Confirm-overlay safety countdown (issue #30) -----------------------
+  // ---- Confirm-overlay safety countdown (issue #30, extracted per #125) ---
   //
   // The countdown only applies when `delete_branch_on_remove` is ON AND the
-  // configured `confirm_countdown_secs` is non-zero. In every other case
-  // the classic single-keystroke confirm is preserved. Methods here are
-  // pure (modulo `&mut self`) and take an explicit `Instant` so tests can
-  // step through the countdown without sleeping.
+  // configured `confirm_countdown_secs` is non-zero. The pure state lives
+  // on `self.confirm` (see `src/tui/state/confirm.rs`); the wrappers below
+  // own the side effects (status messages, view transitions).
 
   /// Total duration of the safety countdown for the current modal state.
   /// `Duration::ZERO` means "no countdown — classic modal".
@@ -809,92 +779,49 @@ impl App {
     self.confirm_countdown_total() > Duration::ZERO
   }
 
-  /// Handle a `y` / Enter press inside the confirm overlay.
-  ///
-  /// Returns the action the event loop should take next:
-  /// - `FireNow` — classic modal, the loop must call `confirm_delete()`.
-  /// - `Armed` — countdown started; the loop draws the progress bar and
-  ///   waits for the next tick.
-  /// - `Disarmed` — second `y` press cancelled the countdown; the loop
-  ///   stays in the modal (Esc / n closes it).
+  /// Handle a `y` / Enter press inside the confirm overlay. Delegates to
+  /// `ConfirmModal::press_y` and composes the status-bar message based on
+  /// the returned action.
   pub fn confirm_press_y(&mut self, now: Instant) -> ConfirmKeyAction {
-    if !self.confirm_is_countdown_mode() {
-      return ConfirmKeyAction::FireNow;
+    let total = self.confirm_countdown_total();
+    let action = self.confirm.press_y(now, total);
+    match action {
+      ConfirmKeyAction::FireNow => {}
+      ConfirmKeyAction::Disarmed => {
+        let secs = total.as_secs();
+        self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
+      }
+      ConfirmKeyAction::Armed => {
+        let secs = total.as_secs();
+        self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
+      }
     }
-    if self.confirm_countdown_started_at.is_some() {
-      self.confirm_countdown_started_at = None;
-      let secs = self.confirm_countdown_total().as_secs();
-      self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
-      ConfirmKeyAction::Disarmed
-    } else {
-      self.confirm_countdown_started_at = Some(now);
-      let secs = self.confirm_countdown_total().as_secs();
-      self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
-      ConfirmKeyAction::Armed
-    }
+    action
   }
 
   /// Handle the dismissal keys (`n` / `Esc`) inside the confirm overlay.
   /// Always disarms the countdown and returns to the list.
   pub fn confirm_dismiss(&mut self) {
-    self.confirm_countdown_started_at = None;
+    self.confirm.dismiss();
     self.view = View::List;
   }
 
   /// Tick the countdown forward. Called from the event loop on every
-  /// poll-timeout iteration (every 200ms). Returns `ReadyToFire` exactly
-  /// once when the timer crosses the total duration; the App's own
-  /// `confirm_countdown_started_at` is cleared at that point so a
-  /// re-entrant tick would return `NotArmed`.
+  /// poll-timeout iteration (every 200ms).
   pub fn tick_confirm_countdown(&mut self, now: Instant) -> CountdownTickOutcome {
-    let Some(started) = self.confirm_countdown_started_at else {
-      return CountdownTickOutcome::NotArmed;
-    };
-    let duration = self.confirm_countdown_total();
-    if duration.is_zero() {
-      // Defensive: if config changed mid-modal to 0s, treat as no-op.
-      self.confirm_countdown_started_at = None;
-      return CountdownTickOutcome::NotArmed;
-    }
-    if now.saturating_duration_since(started) < duration {
-      CountdownTickOutcome::Pending
-    } else {
-      self.confirm_countdown_started_at = None;
-      CountdownTickOutcome::ReadyToFire
-    }
+    self.confirm.tick(now, self.confirm_countdown_total())
   }
 
   /// Countdown progress in `[0.0, 1.0]`. `0.0` when not armed, `1.0` once
   /// elapsed. Used by the UI to draw the gauge.
   pub fn confirm_countdown_progress(&self, now: Instant) -> f64 {
-    let Some(started) = self.confirm_countdown_started_at else {
-      return 0.0;
-    };
-    let duration = self.confirm_countdown_total();
-    if duration.is_zero() {
-      return 0.0;
-    }
-    let elapsed = now.saturating_duration_since(started).as_secs_f64();
-    let total = duration.as_secs_f64();
-    (elapsed / total).min(1.0)
+    self.confirm.progress(now, self.confirm_countdown_total())
   }
 
   /// Seconds remaining (rounded up to the next whole second) for the UI
   /// label. `0` when not armed or when the countdown has elapsed.
   pub fn confirm_countdown_remaining_secs(&self, now: Instant) -> u64 {
-    let Some(started) = self.confirm_countdown_started_at else {
-      return 0;
-    };
-    let duration = self.confirm_countdown_total();
-    if duration.is_zero() {
-      return 0;
-    }
-    let remaining = duration.saturating_sub(now.saturating_duration_since(started));
-    if remaining.is_zero() {
-      return 0;
-    }
-    let extra = if remaining.subsec_nanos() > 0 { 1 } else { 0 };
-    remaining.as_secs() + extra
+    self.confirm.remaining_secs(now, self.confirm_countdown_total())
   }
 
   // ---- Fuzzy filter (issue #21) -------------------------------------------
