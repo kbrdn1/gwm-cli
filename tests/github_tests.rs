@@ -285,6 +285,108 @@ fn parse_pr_json_handles_missing_status_check_rollup() {
   assert_eq!(pr.state, PrState::Open);
 }
 
+// --- Labels: gh label list --json contract (issue #81) ------------------
+
+#[test]
+fn parse_labels_json_returns_remote_labels() {
+  // Mirror of `gh label list --json name,color,description --limit 1000`
+  // — a JSON array, even when there's only one entry.
+  let json = r#"[
+    {"name": "bug", "color": "d73a4a", "description": "Something isn't working"},
+    {"name": "enhancement", "color": "a2eeef", "description": ""},
+    {"name": "good first issue", "color": "7057ff", "description": "Good for newcomers"}
+  ]"#;
+  let labels = github::parse_labels_json(json).unwrap();
+  assert_eq!(labels.len(), 3);
+  assert_eq!(labels[0].name, "bug");
+  assert_eq!(labels[0].color, "d73a4a");
+  assert_eq!(labels[0].description.as_deref(), Some("Something isn't working"));
+  // Empty description must round-trip as `Some("")` — the labels diff
+  // module normalises empty == None on its own.
+  assert_eq!(labels[1].description.as_deref(), Some(""));
+  // Whitespace in name preserved verbatim.
+  assert_eq!(labels[2].name, "good first issue");
+}
+
+#[test]
+fn parse_labels_json_handles_empty_array() {
+  let json = r#"[]"#;
+  let labels = github::parse_labels_json(json).unwrap();
+  assert!(labels.is_empty());
+}
+
+#[test]
+fn parse_labels_json_tolerates_missing_description_field() {
+  // gh sometimes returns the field as absent rather than empty.
+  let json = r#"[{"name": "wip", "color": "ededed"}]"#;
+  let labels = github::parse_labels_json(json).unwrap();
+  assert_eq!(labels[0].name, "wip");
+  assert_eq!(labels[0].description, None);
+}
+
+#[test]
+fn parse_labels_json_rejects_malformed_payload() {
+  let err = github::parse_labels_json("not json").unwrap_err();
+  let msg = err.to_string();
+  assert!(msg.contains("labels"), "should mention labels: {}", msg);
+}
+
+// --- Argv contract for gh label commands --------------------------------
+
+#[test]
+fn label_create_argv_carries_name_color_description_and_force() {
+  // We don't shell out in tests, but the argv builder is the contract
+  // surface: name, --color, --description (when present), --force.
+  use gwm::labels::LabelSpec;
+  let spec = LabelSpec {
+    name: "good first issue".into(),
+    description: Some("Good for newcomers".into()),
+    color: "7057ff".into(),
+  };
+  let argv = github::label_create_argv("kbrdn1/gwm-cli", &spec);
+  // Order is not asserted strictly, but the elements must be present.
+  let joined = argv.join(" ");
+  assert!(argv.contains(&"label".to_string()));
+  assert!(argv.contains(&"create".to_string()));
+  assert!(argv.contains(&"good first issue".to_string()));
+  assert!(argv.contains(&"--force".to_string()));
+  assert!(joined.contains("--color 7057ff"), "color flag missing in {}", joined);
+  assert!(
+    joined.contains("--description Good for newcomers"),
+    "description flag missing in {}",
+    joined
+  );
+  assert!(joined.contains("--repo kbrdn1/gwm-cli"));
+}
+
+#[test]
+fn label_create_argv_omits_description_when_absent() {
+  use gwm::labels::LabelSpec;
+  let spec = LabelSpec {
+    name: "wip".into(),
+    description: None,
+    color: "ededed".into(),
+  };
+  let argv = github::label_create_argv("kbrdn1/gwm-cli", &spec);
+  assert!(
+    !argv.iter().any(|a| a == "--description"),
+    "no --description flag when desc absent, got {:?}",
+    argv
+  );
+}
+
+#[test]
+fn label_delete_argv_carries_name_repo_and_yes() {
+  let argv = github::label_delete_argv("kbrdn1/gwm-cli", "wontfix");
+  assert!(argv.contains(&"label".to_string()));
+  assert!(argv.contains(&"delete".to_string()));
+  assert!(argv.contains(&"wontfix".to_string()));
+  // --yes skips the destructive-confirm prompt; without it `gh` blocks
+  // on a TTY read and gwm hangs.
+  assert!(argv.contains(&"--yes".to_string()));
+  assert!(argv.join(" ").contains("--repo kbrdn1/gwm-cli"));
+}
+
 #[test]
 fn branch_link_summary_renders_human_readable() {
   let link = BranchLink {
