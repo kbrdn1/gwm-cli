@@ -509,16 +509,23 @@ fn remove_failed_filesystem_unlink_still_prunes_metadata() {
   let target = wt_root.path().join("feat-98-ghost");
   worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost").unwrap();
 
+  // Capture the original mode so we can restore EXACTLY what TempDir
+  // gave us (mac defaults to 0o700, linux 0o755, umask-dependent on
+  // both). Hard-coding 0o755 in the restore would widen permissions
+  // on macOS, which is harmless for cleanup but a needless mutation —
+  // and would mask any future regression where `set_mode` itself
+  // misbehaves on a quirky tmpfs.
+  let original_mode = std::fs::metadata(wt_root.path()).unwrap().permissions().mode();
   let mut parent_perms = std::fs::metadata(wt_root.path()).unwrap().permissions();
   parent_perms.set_mode(0o555);
   std::fs::set_permissions(wt_root.path(), parent_perms).unwrap();
 
   let result = worktree::remove(&repo, "feat-98-ghost", false);
 
-  // Restore writability so tempdir cleanup succeeds even if the assertions
-  // below panic.
+  // Restore the exact original mode so tempdir cleanup succeeds even
+  // if the assertions below panic.
   let mut restore = std::fs::metadata(wt_root.path()).unwrap().permissions();
-  restore.set_mode(0o755);
+  restore.set_mode(original_mode);
   std::fs::set_permissions(wt_root.path(), restore).unwrap();
 
   assert!(
