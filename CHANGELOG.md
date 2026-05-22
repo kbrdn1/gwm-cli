@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Without a `[[milestones]]` block in `.gwm.toml`, both subcommands are no-ops (`0 milestones declared, nothing to push`) and never shell out to `gh` — same safe-by-default contract as labels.
   - Requires `gh` on `$PATH`.
 
+### Security
+
+- 🔒 **`bootstrap` refuses to copy through symlinks at the destination** ([#93](https://github.com/kbrdn1/gwm-cli/issues/93)). Two changes that together close a write-anywhere primitive triggered by `gwm bootstrap` on an attacker-controlled checkout:
+  - **Reorder**: `run_no_symlinks` now runs **before** `run_copies` in `bootstrap::run`. The previous ordering let a target declared in both `[[bootstrap.no_symlink]]` and `[[bootstrap.copy]]` be touched by the copy pass first — either silently skipping through a live symlink or writing through a dangling one before the no-symlink pass got a chance to strip it.
+  - **Defence in depth in `run_copies`**: a new `symlink_metadata` check at the top of the loop refuses any step whose destination is a symlink (broken or live), regardless of whether the user declared `[[bootstrap.no_symlink]]` for it. Closes two failure modes the reorder alone doesn't: symlinks not declared in `[[no_symlink]]` (planted by manual migration, editor plugins, or an attacker), and the TOCTOU window between the no-symlink pass and the copy loop.
+  - Observable contract change: a copy step whose destination is a symlink now reports `Failed` with a message naming the path and referencing #93. Pre-fix, the live-symlink case was a silent `Skipped` and the broken-symlink case was a `Failed` from `fs::copy` errno. No CLI surface or `.gwm.toml` schema change.
+
 ### Tests
 
 - ✅ E2E coverage for the mutating subcommands (#101). `tests/cli_binary.rs` now exercises `gwm init` (default body shape, idempotency refusal on existing `.gwm.toml`, repo-bound contract), `gwm create` (worktree dir + branch creation at HEAD, `branch.<name>.gwm-base` recorded for the launcher fallback chain, `[[bootstrap.copy]]` runs by default but is skipped under `--no-bootstrap`, validation rejects unknown branch types and non-digit issue numbers), and `gwm remove` (deletes the worktree dir, `--delete-branch` drops the local branch, unknown patterns fail loudly). All worktree-creating tests pin `[worktree].base` to a `tempfile::TempDir` so the CI runner never writes under `~/cc-worktree/...`.
