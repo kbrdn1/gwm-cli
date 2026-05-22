@@ -462,7 +462,11 @@ fn parse_milestones_json_rejects_unknown_state() {
   let json = r#"[{"number": 1, "title": "x", "state": "draft"}]"#;
   let err = github::parse_milestones_json(json).unwrap_err();
   let msg = err.to_string();
-  assert!(msg.contains("draft") || msg.contains("state"), "should mention state: {}", msg);
+  assert!(
+    msg.contains("draft") || msg.contains("state"),
+    "should mention state: {}",
+    msg
+  );
 }
 
 #[test]

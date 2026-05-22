@@ -163,8 +163,9 @@ pub fn resolve_milestones(declared: &[MilestoneConfig]) -> Result<Vec<MilestoneS
     .iter()
     .map(|m| {
       let state = match &m.state {
-        Some(s) => parse_state(s)
-          .map_err(|e| GwmError::Config(format!("milestone '{}' has invalid state: {}", m.title, e)))?,
+        Some(s) => {
+          parse_state(s).map_err(|e| GwmError::Config(format!("milestone '{}' has invalid state: {}", m.title, e)))?
+        }
         None => MilestoneState::Open,
       };
       let due_on = match &m.due_on {

@@ -168,7 +168,13 @@ fn spec(title: &str, due: Option<&str>, desc: Option<&str>, state: MilestoneStat
   }
 }
 
-fn rmilestone(number: u64, title: &str, due: Option<&str>, desc: Option<&str>, state: MilestoneState) -> RemoteMilestone {
+fn rmilestone(
+  number: u64,
+  title: &str,
+  due: Option<&str>,
+  desc: Option<&str>,
+  state: MilestoneState,
+) -> RemoteMilestone {
   RemoteMilestone {
     number,
     title: title.into(),
@@ -192,7 +198,12 @@ fn diff_empty_declared_yields_only_extras() {
 
 #[test]
 fn diff_declared_not_on_remote_yields_create() {
-  let declared = vec![spec("v0.7.0", Some("2026-07-15T23:59:59Z"), Some("sprint"), MilestoneState::Open)];
+  let declared = vec![spec(
+    "v0.7.0",
+    Some("2026-07-15T23:59:59Z"),
+    Some("sprint"),
+    MilestoneState::Open,
+  )];
   let remote = vec![];
   let diff = diff_milestones(&declared, &remote);
   assert_eq!(diff.to_create.len(), 1);
@@ -208,14 +219,23 @@ fn diff_due_on_mismatch_yields_update_carrying_number() {
   // milestone number; the diff has to carry it through so the push
   // step doesn't re-fetch.
   let declared = vec![spec("v0.7.0", Some("2026-07-15T23:59:59Z"), None, MilestoneState::Open)];
-  let remote = vec![rmilestone(42, "v0.7.0", Some("2026-07-01T23:59:59Z"), None, MilestoneState::Open)];
+  let remote = vec![rmilestone(
+    42,
+    "v0.7.0",
+    Some("2026-07-01T23:59:59Z"),
+    None,
+    MilestoneState::Open,
+  )];
   let diff = diff_milestones(&declared, &remote);
   assert!(diff.to_create.is_empty());
   assert_eq!(diff.to_update.len(), 1);
   assert_eq!(diff.to_update[0].action, MilestoneAction::Update);
   assert_eq!(diff.to_update[0].number, 42);
   assert_eq!(diff.to_update[0].spec.due_on.as_deref(), Some("2026-07-15T23:59:59Z"));
-  assert_eq!(diff.to_update[0].previous_due_on.as_deref(), Some("2026-07-01T23:59:59Z"));
+  assert_eq!(
+    diff.to_update[0].previous_due_on.as_deref(),
+    Some("2026-07-01T23:59:59Z")
+  );
 }
 
 #[test]
@@ -239,7 +259,12 @@ fn diff_description_mismatch_yields_update() {
 
 #[test]
 fn diff_full_match_yields_matching() {
-  let declared = vec![spec("v0.7.0", Some("2026-07-15T23:59:59Z"), Some("sprint"), MilestoneState::Open)];
+  let declared = vec![spec(
+    "v0.7.0",
+    Some("2026-07-15T23:59:59Z"),
+    Some("sprint"),
+    MilestoneState::Open,
+  )];
   let remote = vec![rmilestone(
     9,
     "v0.7.0",

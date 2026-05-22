@@ -1194,16 +1194,8 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
     );
   }
   for upd in &diff.to_update {
-    let detail = match (
-      &upd.previous_due_on,
-      &upd.previous_state,
-      &upd.previous_description,
-    ) {
-      (Some(old_due), _, _) => format!(
-        "due {} → {}",
-        old_due,
-        upd.spec.due_on.as_deref().unwrap_or("cleared")
-      ),
+    let detail = match (&upd.previous_due_on, &upd.previous_state, &upd.previous_description) {
+      (Some(old_due), _, _) => format!("due {} → {}", old_due, upd.spec.due_on.as_deref().unwrap_or("cleared")),
       (None, Some(old_state), _) => format!("state {} → {}", old_state.as_str(), upd.spec.state.as_str()),
       (None, None, Some(_)) => "description changed".into(),
       _ => "diff".into(),
@@ -1214,10 +1206,7 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
     println!("  = {:<20} (match)", spec.title);
   }
   for remote in &diff.extra_on_remote {
-    println!(
-      "  - {:<20} (#{} on remote, not in config)",
-      remote.title, remote.number
-    );
+    println!("  - {:<20} (#{} on remote, not in config)", remote.title, remote.number);
   }
   println!(
     "summary: {} create · {} update · {} match · {} extra-on-remote",
