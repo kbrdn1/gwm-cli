@@ -1,7 +1,11 @@
-use crate::config::{expand_placeholders, WorktreeConfig};
+use crate::config::{expand_placeholders, BranchType, WorktreeConfig};
 use crate::error::{GwmError, Result};
 use regex::Regex;
 
+/// Built-in branch types — the fallback when `.gwm.toml` carries no
+/// `[[branch_types]]` block. Kept as a `&[(&str, &str)]` const so the
+/// static string table stays compile-time and zero-alloc; the runtime
+/// view is materialised on demand via [`default_branch_types`].
 pub const BRANCH_TYPES: &[(&str, &str)] = &[
   ("feat", "New feature implementation"),
   ("fix", "Bug fix"),
@@ -15,6 +19,20 @@ pub const BRANCH_TYPES: &[(&str, &str)] = &[
   ("build", "Build system changes"),
 ];
 
+/// Runtime view of [`BRANCH_TYPES`] as a `Vec<BranchType>`. Used by
+/// [`crate::config::Config::resolved_branch_types`] when no override
+/// is configured, and by [`BranchSpec::validate`] / [`BranchSpec::new`]
+/// to keep the legacy "no config = built-in defaults" contract.
+pub fn default_branch_types() -> Vec<BranchType> {
+  BRANCH_TYPES
+    .iter()
+    .map(|(name, desc)| BranchType {
+      name: (*name).into(),
+      description: (*desc).into(),
+    })
+    .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct BranchSpec {
   pub type_: String,
@@ -23,19 +41,50 @@ pub struct BranchSpec {
 }
 
 impl BranchSpec {
+  /// Construct a [`BranchSpec`] validated against the built-in branch
+  /// types. Kept for callers (tests, internal helpers) that don't have
+  /// a [`crate::config::Config`] in scope; production code paths
+  /// (`gwm create`, TUI create) should use [`Self::new_with_types`]
+  /// with the resolved list so per-repo overrides are honoured.
   pub fn new(type_: impl Into<String>, issue: impl Into<String>, desc: impl Into<String>) -> Result<Self> {
+    Self::new_with_types(type_, issue, desc, &default_branch_types())
+  }
+
+  /// Construct a [`BranchSpec`] validated against the supplied list of
+  /// allowed branch types — typically the output of
+  /// [`crate::config::Config::resolved_branch_types`].
+  pub fn new_with_types(
+    type_: impl Into<String>,
+    issue: impl Into<String>,
+    desc: impl Into<String>,
+    allowed: &[BranchType],
+  ) -> Result<Self> {
     let s = Self {
       type_: type_.into(),
       issue: issue.into(),
       desc: kebab(&desc.into()),
     };
-    s.validate()?;
+    s.validate_against(allowed)?;
     Ok(s)
   }
 
+  /// Validate against the built-in branch types. Convenience wrapper
+  /// around [`Self::validate_against`] for legacy call sites.
   pub fn validate(&self) -> Result<()> {
-    if !BRANCH_TYPES.iter().any(|(t, _)| *t == self.type_) {
-      return Err(GwmError::InvalidBranchType(self.type_.clone()));
+    self.validate_against(&default_branch_types())
+  }
+
+  /// Validate against the supplied list of allowed branch types. The
+  /// error message produced when the type is rejected enumerates the
+  /// allowed names so the TUI status bar / CLI stderr always shows the
+  /// repo-local truth (built-in or `.gwm.toml`-driven).
+  pub fn validate_against(&self, allowed: &[BranchType]) -> Result<()> {
+    if !allowed.iter().any(|t| t.name == self.type_) {
+      let names = allowed.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join(", ");
+      return Err(GwmError::InvalidBranchType {
+        got: self.type_.clone(),
+        allowed: names,
+      });
     }
     if !Regex::new(r"^\d+$").unwrap().is_match(&self.issue) {
       return Err(GwmError::InvalidIssue(self.issue.clone()));

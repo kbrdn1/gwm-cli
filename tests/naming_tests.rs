@@ -1,5 +1,5 @@
-use gwm::config::WorktreeConfig;
-use gwm::naming::{kebab, parse_branch, BranchSpec, BRANCH_TYPES};
+use gwm::config::{BranchType, WorktreeConfig};
+use gwm::naming::{default_branch_types, kebab, parse_branch, BranchSpec, BRANCH_TYPES};
 
 #[test]
 fn kebab_normalizes() {
@@ -70,6 +70,63 @@ fn renders_paths() {
   assert_eq!(spec.worktree_dirname(&cfg, "myrepo").unwrap(), "feat-10-x");
   let p = spec.worktree_path(&cfg, "myrepo").unwrap();
   assert!(p.to_string_lossy().ends_with("/cc-worktree/myrepo/feat-10-x"));
+}
+
+#[test]
+fn default_branch_types_matches_const_table() {
+  let runtime = default_branch_types();
+  assert_eq!(runtime.len(), BRANCH_TYPES.len());
+  for ((cname, cdesc), bt) in BRANCH_TYPES.iter().zip(runtime.iter()) {
+    assert_eq!(*cname, bt.name);
+    assert_eq!(*cdesc, bt.description);
+  }
+}
+
+#[test]
+fn new_with_custom_types_rejects_default_built_in() {
+  let custom = vec![BranchType {
+    name: "migration".into(),
+    description: "Database migration".into(),
+  }];
+  // `feat` is a built-in default but is NOT in the custom override.
+  let err = BranchSpec::new_with_types("feat", "1", "x", &custom).unwrap_err();
+  let msg = format!("{}", err);
+  assert!(msg.contains("invalid branch type 'feat'"), "got: {msg}");
+  assert!(
+    msg.contains("migration"),
+    "error must list the allowed types — got: {msg}"
+  );
+  assert!(
+    !msg.contains("feat, fix"),
+    "error must not leak the built-in default list — got: {msg}"
+  );
+}
+
+#[test]
+fn new_with_custom_types_accepts_listed_name() {
+  let custom = vec![
+    BranchType {
+      name: "feat".into(),
+      description: "Feature".into(),
+    },
+    BranchType {
+      name: "migration".into(),
+      description: "Database migration".into(),
+    },
+  ];
+  let spec = BranchSpec::new_with_types("migration", "42", "users-table", &custom).expect("ok");
+  assert_eq!(spec.type_, "migration");
+}
+
+#[test]
+fn invalid_type_error_lists_allowed_names_from_defaults() {
+  let err = BranchSpec::new("nope", "1", "x").unwrap_err();
+  let msg = format!("{}", err);
+  // Every built-in name must be enumerated so the user knows what's
+  // accepted in this repo without having to re-read the docs.
+  for (name, _) in BRANCH_TYPES {
+    assert!(msg.contains(name), "expected {name} in error message, got: {msg}");
+  }
 }
 
 #[test]

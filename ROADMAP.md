@@ -62,6 +62,29 @@ Small, well-scoped items with high daily-usage payoff. Likely picks for the next
 - [#24](https://github.com/kbrdn1/gwm-cli/issues/24) — **`gwm sync`** — fetch + rebase (or merge) the selected worktree's branch against its upstream, with conflict detection.
 - [#27](https://github.com/kbrdn1/gwm-cli/issues/27) — **`cargo-binstall` support** via `[package.metadata.binstall]` so `cargo binstall gwm` pulls the prebuilt archive instead of compiling from source.
 - [#31](https://github.com/kbrdn1/gwm-cli/issues/31) — **`--dry-run` on `gwm remove` and `gwm prune`** — show the resolved target / planned actions, no side effects. Pairs nicely with the safety stance of [#29](https://github.com/kbrdn1/gwm-cli/issues/29) below.
+- [#86](https://github.com/kbrdn1/gwm-cli/issues/86) — **`[aliases]` in `.gwm.toml`** — git-config-style aliases (`wip = "create feat 0 wip"`, `ll = "list --format names"`), plus a user-level `~/.config/gwm/aliases.toml` fallback. Lowest-cost item on the configurability axis (pre-clap argv expansion).
+
+## Configurability
+
+A coherent batch of items that move hardcoded conventions and one-off shell scripts into `.gwm.toml`. Theme: every team-portable convention should live in the config that's already checked in, not in tribal knowledge.
+
+### Repo conventions
+
+- [#80](https://github.com/kbrdn1/gwm-cli/issues/80) — **`[[branch_types]]` configurable** — promote the hardcoded `BRANCH_TYPES` const (`src/naming.rs:5`) to a `.gwm.toml` block. `gwm types` reads from config when present, defaults otherwise. Validation in `BranchSpec::validate()` follows.
+- [#85](https://github.com/kbrdn1/gwm-cli/issues/85) — **`[gitmoji]` mapping** — `branch_type → emoji` table with sensible defaults; new `gwm commit-prefix` subcommand prints the resolved prefix for the current branch; opt-in `commit-msg` hook auto-prepends it. Pairs naturally with `[[branch_types]]`.
+
+### GitHub publish (declarative repo state)
+
+- [#81](https://github.com/kbrdn1/gwm-cli/issues/81) — **`[[labels]]` + `gwm labels push`** — declare labels in `.gwm.toml` (with optional `color`, deterministic pastel hash when absent), publish to the remote via `gh label create --force`. `--dry-run` and `--prune` for the destructive bits. Same plumbing extracted to `src/github_publish.rs` for #82 to reuse.
+- [#82](https://github.com/kbrdn1/gwm-cli/issues/82) — **`[[milestones]]` + `gwm milestones push`** — same pattern as labels, for milestones (REST API since `gh milestone` doesn't exist natively).
+- [#83](https://github.com/kbrdn1/gwm-cli/issues/83) — **`[issue_template]` defaults** — map branch types to `.github/ISSUE_TEMPLATE/*.yml` templates with per-type defaults (surface, title prefix, labels). New `gwm new <type> <desc>` creates the issue *and* the worktree in one go.
+- [#84](https://github.com/kbrdn1/gwm-cli/issues/84) — **`[pr_template]` per branch type** — body templates with placeholders (`{commits}` is the killer feature). New `gwm pr [--draft]` subcommand. Shared template renderer with #83 (`src/templating.rs`).
+
+### Lifecycle & control surface
+
+- [#88](https://github.com/kbrdn1/gwm-cli/issues/88) — **`[hooks.*]` lifecycle hooks** — six phases (`pre_create`, `post_create`, `pre_bootstrap`, `post_bootstrap`, `pre_remove`, `post_remove`) with `on_fail = "abort" | "warn" | "ignore"`. Existing `[[bootstrap.command]]` aliased to `[[hooks.post_create]]` for compat.
+- [#89](https://github.com/kbrdn1/gwm-cli/issues/89) — **`gwm config get/set/list/validate/path/edit`** — git-config-style CLI over `.gwm.toml` with `toml_edit` for comment-preserving round-tripping. Includes dot-path notation (`worktree.base`) and array-table indexing (`labels[+].name = "bug"`).
+- [#87](https://github.com/kbrdn1/gwm-cli/issues/87) — **`[tui.keys]` keymap** — remap any TUI action through `.gwm.toml`, chord support (`g g`), with `gwm tui keys` introspection. Sits alongside themes (#33) and command palette (#32) as the "TUI personalisation" trio.
 
 ## Safety & UX
 
