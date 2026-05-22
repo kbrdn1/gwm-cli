@@ -25,8 +25,8 @@ pub enum GwmError {
   #[error("shell expand error: {0}")]
   ShellExpand(#[from] shellexpand::LookupError<std::env::VarError>),
 
-  #[error("invalid branch type '{0}' (allowed: feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build)")]
-  InvalidBranchType(String),
+  #[error("invalid branch type '{got}' (allowed: {allowed})")]
+  InvalidBranchType { got: String, allowed: String },
 
   #[error("invalid issue number '{0}' (digits only)")]
   InvalidIssue(String),
