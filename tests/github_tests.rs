@@ -480,10 +480,10 @@ fn parse_milestones_json_rejects_malformed_payload() {
 
 #[test]
 fn milestone_list_argv_uses_repos_endpoint_with_state_all() {
-  // `gh api repos/<slug>/milestones?state=all&per_page=100` — `state=all`
-  // is the key bit: without it, closed milestones disappear from the
-  // diff and `gwm milestones push --prune` thinks they're already
-  // gone.
+  // `gh api --paginate repos/<slug>/milestones?state=all&per_page=100`
+  // — `state=all` is the key bit: without it, closed milestones
+  // disappear from the diff and `gwm milestones push --prune` thinks
+  // they're already gone.
   let argv = github::milestone_list_argv("kbrdn1/gwm-cli");
   let joined = argv.join(" ");
   assert!(argv.contains(&"api".to_string()), "expected 'api', got {:?}", argv);
@@ -493,6 +493,20 @@ fn milestone_list_argv_uses_repos_endpoint_with_state_all() {
     joined
   );
   assert!(joined.contains("state=all"), "expected state=all, got {}", joined);
+}
+
+#[test]
+fn milestone_list_argv_uses_paginate_for_repos_with_many_milestones() {
+  // GitHub's milestones list endpoint caps `per_page` at 100. Without
+  // `--paginate`, repos with more than 100 milestones would diff
+  // against a truncated remote set, leading to bogus creates and a
+  // dangerously confusing `--prune` (Copilot review on PR #92).
+  let argv = github::milestone_list_argv("kbrdn1/gwm-cli");
+  assert!(
+    argv.contains(&"--paginate".to_string()),
+    "expected --paginate flag, got {:?}",
+    argv
+  );
 }
 
 #[test]

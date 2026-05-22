@@ -564,13 +564,20 @@ pub fn parse_milestones_json(s: &str) -> Result<Vec<RemoteMilestone>> {
     .collect()
 }
 
-/// Argv for `gh api repos/<slug>/milestones?state=all&per_page=100`.
-/// `state=all` is the key contract bit: the default endpoint only
-/// lists `open` milestones, which would make `gwm milestones push
-/// --prune` silently leave closed ones in place.
+/// Argv for `gh api --paginate repos/<slug>/milestones?state=all&per_page=100`.
+///
+/// Two contract bits worth pinning:
+/// - `state=all` — without it, the default endpoint only lists `open`
+///   milestones and `gwm milestones push --prune` would silently
+///   leave closed ones in place.
+/// - `--paginate` — GitHub caps `per_page` at 100. Without paginating
+///   we'd diff against a truncated remote set for repos with more
+///   than 100 milestones, leading to bogus `create` rows and a
+///   dangerously confusing `--prune` (Copilot review on PR #92).
 pub fn milestone_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),
+    "--paginate".into(),
     format!("repos/{}/milestones?state=all&per_page={}", slug, MILESTONE_PER_PAGE),
   ]
 }
