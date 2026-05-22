@@ -298,7 +298,43 @@ impl Config {
     }
     let raw = std::fs::read_to_string(&path)?;
     let cfg: Config = toml::from_str(&raw)?;
+    cfg.validate_branch_types()?;
     Ok(cfg)
+  }
+
+  /// Validate `[[branch_types]]` entries on load so a malformed config
+  /// surfaces a clear error at startup instead of failing downstream in
+  /// `parse_branch` / git itself with a cryptic message. Rules:
+  ///   - `name` must be non-empty
+  ///   - `name` must match `^[a-z]+$` (the regex `parse_branch` uses
+  ///     for the type segment of a gwm-style branch name)
+  ///   - `name`s must be unique across the table — duplicates would
+  ///     silently override each other under `serde`'s `Vec` decoding
+  ///     and make the resolved list non-deterministic
+  fn validate_branch_types(&self) -> Result<()> {
+    let name_re = regex::Regex::new(r"^[a-z]+$").expect("static regex compiles");
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for entry in &self.branch_types {
+      if entry.name.is_empty() {
+        return Err(GwmError::Config(
+          "branch_types: entry has empty `name`; use a lowercase ASCII alpha token (e.g. \"feat\")".into(),
+        ));
+      }
+      if !name_re.is_match(&entry.name) {
+        return Err(GwmError::Config(format!(
+          "branch_types: invalid `name = \"{}\"`; must match ^[a-z]+$ to be a valid branch-prefix \
+           (lowercase letters only, no digits, no dashes — git refs and `parse_branch` rely on this)",
+          entry.name
+        )));
+      }
+      if !seen.insert(entry.name.as_str()) {
+        return Err(GwmError::Config(format!(
+          "branch_types: duplicate entry for `name = \"{}\"` — each branch type must be declared at most once",
+          entry.name
+        )));
+      }
+    }
+    Ok(())
   }
 
   /// Write a default config to the given repo root.

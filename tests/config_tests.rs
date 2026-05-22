@@ -660,3 +660,107 @@ fn branch_types_source_label_is_user_facing() {
   assert_eq!(BranchTypesSource::Default.label(), "built-in defaults");
   assert_eq!(BranchTypesSource::Config.label(), ".gwm.toml");
 }
+
+#[test]
+fn branch_types_empty_name_is_rejected_at_load() {
+  // An empty `name = ""` would silently produce a worktree on a branch
+  // called `/#123-foo` (no prefix) which git rejects with a cryptic
+  // error several layers down. Surface it as a config error early.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[branch_types]]
+name = ""
+description = "Whoops"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let msg = format!("{}", err);
+  assert!(msg.contains("branch_types"), "{msg}");
+  assert!(msg.contains("empty"), "{msg}");
+}
+
+#[test]
+fn branch_types_invalid_name_format_is_rejected_at_load() {
+  // `parse_branch` (the reverse mapping used by `gwm switch`, the TUI
+  // list, and every helper that recovers a `BranchSpec` from a free-
+  // form branch name) requires `^[a-z]+/#…$`. Anything that doesn't
+  // match the type segment regex must be rejected at load so the user
+  // sees one config-time error instead of a tangle of runtime
+  // failures across surfaces.
+  for bad in ["Feat", "feat-1", "wip task", "fix!", "1fix", ""].iter() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(
+      dir.path().join(CONFIG_FILE),
+      format!(
+        r#"
+[[branch_types]]
+name = "{}"
+description = "x"
+"#,
+        bad
+      ),
+    )
+    .unwrap();
+    assert!(
+      Config::load_for_repo(dir.path()).is_err(),
+      "name = {:?} must be rejected at load",
+      bad
+    );
+  }
+}
+
+#[test]
+fn branch_types_duplicate_name_is_rejected_at_load() {
+  // Two entries with the same name would non-deterministically
+  // override each other downstream (and the `gwm types` listing would
+  // confusingly print the same row twice). Fail fast at load.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[branch_types]]
+name = "feat"
+description = "Feature"
+
+[[branch_types]]
+name = "feat"
+description = "Different description for the same name"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let msg = format!("{}", err);
+  assert!(msg.contains("duplicate"), "{msg}");
+  assert!(msg.contains("feat"), "{msg}");
+}
+
+#[test]
+fn branch_types_valid_names_load_successfully() {
+  // Sanity: the validator must accept the canonical built-in names
+  // and a few realistic custom additions, otherwise it's too tight
+  // and the loosening of the rule would have to happen in a follow-up.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[branch_types]]
+name = "feat"
+description = "Feature"
+
+[[branch_types]]
+name = "migration"
+description = "Database migration"
+
+[[branch_types]]
+name = "wip"
+description = "Work in progress"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).expect("valid config must load");
+  let names: Vec<_> = cfg.branch_types.iter().map(|t| t.name.as_str()).collect();
+  assert_eq!(names, vec!["feat", "migration", "wip"]);
+}
