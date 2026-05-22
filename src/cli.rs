@@ -90,6 +90,12 @@ pub enum Command {
     /// Skip bootstrap after creation.
     #[arg(long)]
     no_bootstrap: bool,
+    /// Attach the new worktree to an already-existing local branch of the
+    /// same name instead of refusing (issue #99). Off by default — a
+    /// pre-existing branch ends `gwm create` with an error naming the
+    /// stale tip so the user can audit it.
+    #[arg(long)]
+    reuse_branch: bool,
   },
   /// Remove a worktree by fuzzy name match.
   Remove {
@@ -404,7 +410,8 @@ pub fn run(cli: Cli) -> Result<()> {
       issue,
       desc,
       no_bootstrap,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap, mode),
+      reuse_branch,
+    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, mode),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target, mode),
@@ -530,6 +537,7 @@ fn cmd_create(
   issue: String,
   desc: String,
   no_bootstrap: bool,
+  reuse_branch: bool,
   trust_mode: TrustMode,
 ) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
@@ -555,7 +563,7 @@ fn cmd_create(
   println!("  dir    : {}", dirname);
   println!("  path   : {}", target.display());
 
-  let created = worktree::add(&repo, &dirname, &target, &branch)?;
+  let created = worktree::add(&repo, &dirname, &target, &branch, reuse_branch)?;
   println!("✓ worktree created at {}", created.display());
 
   if no_bootstrap {

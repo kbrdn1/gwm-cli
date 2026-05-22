@@ -1350,6 +1350,62 @@ fn create_rejects_non_digit_issue() {
 }
 
 #[test]
+fn create_refuses_stale_branch_without_reuse_flag() {
+  // Issue #99 E2E. A pre-existing local branch of the same name must
+  // surface `BranchExists` and refuse to create the worktree dir —
+  // protecting the user from silently landing on whatever commit the
+  // stale branch points at. The error renders the stale OID and the
+  // `--reuse-branch` opt-in so the message is self-explanatory.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-stale", &head, false).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "stale"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("feat/#99-stale"))
+    .stderr(predicate::str::contains("--reuse-branch"));
+
+  assert!(
+    !base.path().join("feat-99-stale").exists(),
+    "no worktree dir may be created when the branch is refused"
+  );
+}
+
+#[test]
+fn create_reuses_stale_branch_with_flag() {
+  // Companion to `create_refuses_stale_branch_without_reuse_flag`: the
+  // `--reuse-branch` opt-in restores the legacy attach-to-existing
+  // behaviour, and the worktree directory does get created.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-stale", &head, false).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "stale", "--reuse-branch"])
+    .assert()
+    .success();
+
+  assert!(
+    base.path().join("feat-99-stale").exists(),
+    "with --reuse-branch the worktree dir must be created against the stale branch"
+  );
+}
+
+#[test]
 fn create_subcommand_outside_git_repo_fails() {
   // The repo-bound contract: outside any git repo the standard
   // `NotInGitRepo` error wins, no worktree is touched. Named with the
