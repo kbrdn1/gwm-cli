@@ -239,9 +239,7 @@ fn resolve_base_skips_self_tracking_upstream() {
   let (_dir, repo) = init_repo();
   {
     let mut cfg = repo.config().unwrap();
-    cfg
-      .set_str("branch.feat/x.merge", "refs/heads/feat/x")
-      .unwrap();
+    cfg.set_str("branch.feat/x.merge", "refs/heads/feat/x").unwrap();
   }
   write_gwm_base(&repo, "feat/x", "release-1.x").unwrap();
   let base = resolve_review_base(&repo, "feat/x", Some("trunk"));
