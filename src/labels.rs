@@ -172,28 +172,36 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 /// (newline / tab / etc., which break the `gh label list` JSON round-trip)
 /// are rejected. Spaces and unicode are explicitly allowed — GitHub
 /// permits them and they are common in real-world label sets.
+///
+/// The returned error message is unscoped (no `"labels:"` prefix);
+/// callers compose their own context — `Config::validate_labels`
+/// prepends `labels[<i>]:`, `resolve_labels` prepends `labels:`,
+/// the prune path prepends `labels (remote):`. Keeping the scope
+/// at the call site avoids the double-prefix the Copilot review on
+/// PR #121 flagged ("config error: labels[0]: config error: labels:
+/// …").
 pub fn validate_label_name(name: &str) -> Result<()> {
   if name.is_empty() {
     return Err(GwmError::Config(
-      "labels: entry has empty `name` — GitHub label names must be non-empty".into(),
+      "entry has empty `name` — GitHub label names must be non-empty".into(),
     ));
   }
   if name.starts_with('-') {
     return Err(GwmError::Config(format!(
-      "labels: name {:?} starts with '-' — would be parsed as a flag by `gh label create`; \
+      "name {:?} starts with '-' — would be parsed as a flag by `gh label create`; \
        rename or remove the leading dash (issue #100)",
       name
     )));
   }
   if name.contains(',') {
     return Err(GwmError::Config(format!(
-      "labels: name {:?} contains ',' — GitHub uses comma as a label-list separator; rename without commas",
+      "name {:?} contains ',' — GitHub uses comma as a label-list separator; rename without commas",
       name
     )));
   }
   if let Some(bad) = name.chars().find(|c| c.is_ascii_control()) {
     return Err(GwmError::Config(format!(
-      "labels: name {:?} contains ASCII control character {:?} — rename without control characters",
+      "name {:?} contains ASCII control character {:?} — rename without control characters",
       name, bad
     )));
   }
@@ -214,7 +222,13 @@ pub fn resolve_labels(declared: &[LabelConfig], random: bool) -> Result<Vec<Labe
   declared
     .iter()
     .map(|l| {
-      validate_label_name(&l.name)?;
+      validate_label_name(&l.name).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("labels: {}", inner))
+      })?;
       let color = match &l.color {
         Some(c) => {
           normalize_color(c).map_err(|e| GwmError::Config(format!("label '{}' has invalid color: {}", l.name, e)))?

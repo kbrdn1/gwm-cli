@@ -360,9 +360,21 @@ impl Config {
   /// per-entry validation to [`crate::labels::validate_label_name`]; the
   /// error here prefixes the offending entry index so the user can
   /// locate the TOML coordinate without grepping the file (issue #100).
+  ///
+  /// The inner error is unwrapped from its `GwmError::Config` wrapping
+  /// before being re-wrapped with the entry index — otherwise the
+  /// `Display` impl reads `config error: labels[<i>]: config error:
+  /// labels: …` with the prefix echoed twice, which is what the user
+  /// actually sees on stderr.
   fn validate_labels(&self) -> Result<()> {
     for (i, l) in self.labels.iter().enumerate() {
-      crate::labels::validate_label_name(&l.name).map_err(|e| GwmError::Config(format!("labels[{}]: {}", i, e)))?;
+      crate::labels::validate_label_name(&l.name).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("labels[{}]: {}", i, inner))
+      })?;
     }
     Ok(())
   }
