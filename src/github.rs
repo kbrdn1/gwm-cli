@@ -256,8 +256,10 @@ struct RawCheck {
 }
 
 pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
-  let raw: RawIssue =
-    serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse issue json: {}", e)))?;
+  let raw: RawIssue = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "issue",
+    source: e,
+  })?;
   let state = match raw.state.as_str() {
     "OPEN" | "open" => IssueState::Open,
     "CLOSED" | "closed" => IssueState::Closed,
@@ -274,7 +276,7 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
 }
 
 pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
-  let raw: RawPr = serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse PR json: {}", e)))?;
+  let raw: RawPr = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse { kind: "pr", source: e })?;
   let state = match (raw.state.as_str(), raw.is_draft) {
     ("MERGED" | "merged", _) => PrState::Merged,
     ("CLOSED" | "closed", _) => PrState::Closed,
@@ -351,8 +353,10 @@ pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
   struct PrRef {
     number: u64,
   }
-  let arr: Vec<PrRef> =
-    serde_json::from_str(&stdout).map_err(|e| GwmError::Other(format!("failed to parse pr list json: {}", e)))?;
+  let arr: Vec<PrRef> = serde_json::from_str(&stdout).map_err(|e| GwmError::GhJsonParse {
+    kind: "pr list",
+    source: e,
+  })?;
   Ok(arr.into_iter().next().map(|p| p.number))
 }
 
@@ -413,8 +417,10 @@ struct RawLabel2 {
 ///   round-trips as `Some("")`; the labels-diff module collapses
 ///   empty strings to `None` on its own.
 pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
-  let raw: Vec<RawLabel2> =
-    serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse labels json: {}", e)))?;
+  let raw: Vec<RawLabel2> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "labels",
+    source: e,
+  })?;
   Ok(
     raw
       .into_iter()
@@ -538,8 +544,10 @@ struct RawMilestone {
 /// `MilestoneState` enum — an unknown value is a hard error rather
 /// than a silent third state on the diff side.
 pub fn parse_milestones_json(s: &str) -> Result<Vec<RemoteMilestone>> {
-  let raw: Vec<RawMilestone> =
-    serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse milestones json: {}", e)))?;
+  let raw: Vec<RawMilestone> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "milestones",
+    source: e,
+  })?;
   raw
     .into_iter()
     .map(|r| {
