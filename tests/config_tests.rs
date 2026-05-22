@@ -1,6 +1,100 @@
 use gwm::config::{expand_placeholders, review_tool_preset, Config, TuiOpenMode, WorktreeConfig, CONFIG_FILE};
 use tempfile::TempDir;
 
+// --- Labels section (issue #81) -----------------------------------------
+
+#[test]
+fn labels_default_is_empty() {
+  // Absent `[[labels]]` block must resolve to an empty vec — never None or
+  // a placeholder set. This is the "0 labels declared, nothing to push"
+  // contract from the issue.
+  let cfg = Config::default();
+  assert!(cfg.labels.is_empty());
+}
+
+#[test]
+fn labels_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[labels]]
+name = "bug"
+description = "Something isn't working"
+color = "d73a4a"
+
+[[labels]]
+name = "enhancement"
+description = "New feature or request"
+
+[[labels]]
+name = "good first issue"
+description = "Good for newcomers"
+color = "7057ff"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.labels.len(), 3);
+
+  assert_eq!(cfg.labels[0].name, "bug");
+  assert_eq!(cfg.labels[0].description.as_deref(), Some("Something isn't working"));
+  assert_eq!(cfg.labels[0].color.as_deref(), Some("d73a4a"));
+
+  assert_eq!(cfg.labels[1].name, "enhancement");
+  // Omitted `color` reads as None — colour resolution happens later in the
+  // labels module via deterministic hashing.
+  assert_eq!(cfg.labels[1].color, None);
+
+  // Names with whitespace must round-trip verbatim (issue mentioned
+  // "good first issue" as the canary).
+  assert_eq!(cfg.labels[2].name, "good first issue");
+}
+
+#[test]
+fn labels_section_minimal_only_name_is_valid() {
+  // `name` is the sole required field. Both `description` and `color`
+  // are optional — gwm picks a deterministic colour and an empty
+  // description for the latter.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[[labels]]
+name = "wip"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.labels.len(), 1);
+  assert_eq!(cfg.labels[0].name, "wip");
+  assert_eq!(cfg.labels[0].description, None);
+  assert_eq!(cfg.labels[0].color, None);
+}
+
+#[test]
+fn labels_section_absent_keeps_empty_vec() {
+  // Backwards-compatibility: a config defining only `[worktree]` (no
+  // `[[labels]]`) must resolve to an empty list. Same contract as the
+  // doctor / tui sections.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[worktree]
+base = "/tmp/wt/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert!(cfg.labels.is_empty());
+}
+
 #[test]
 fn defaults_are_sane() {
   let cfg = Config::default();

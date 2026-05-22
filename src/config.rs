@@ -19,6 +19,30 @@ pub struct Config {
   pub git_tui: GitTuiConfig,
   #[serde(default)]
   pub review: ReviewConfig,
+  /// `[[labels]]` table — declarative GitHub label set pushed via
+  /// `gwm labels push`. Issue #81. Absent block resolves to an empty
+  /// vec, so `gwm labels push` is a no-op on configs that never opt in.
+  /// Whitespace in `name` is preserved verbatim (e.g. `"good first
+  /// issue"`); colour falls back to a deterministic pastel hash at
+  /// push time when omitted.
+  #[serde(default)]
+  pub labels: Vec<LabelConfig>,
+}
+
+/// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
+/// `description` and `color` are optional, with the colour resolved by
+/// the labels module at push time (deterministic pastel by default,
+/// overridable via `--random-colors`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelConfig {
+  pub name: String,
+  #[serde(default)]
+  pub description: Option<String>,
+  /// 6-character hex colour without a leading `#` (e.g. `"d73a4a"`).
+  /// Validation is deferred to push time so a typo doesn't break
+  /// config load for unrelated subcommands.
+  #[serde(default)]
+  pub color: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
