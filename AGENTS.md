@@ -1,6 +1,6 @@
 # gwm-cli — house rules for AI assistants
 
-This file is the project-level CLAUDE.md. Anything stated here OVERRIDES
+This file is the project-level AGENTS.md. Anything stated here OVERRIDES
 defaults and applies to every contribution made via an AI assistant in
 this repository.
 
