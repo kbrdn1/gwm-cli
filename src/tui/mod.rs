@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
-pub use state::filter::{fuzzy_match_indices, FilterState};
+pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
 pub use state::sidebar::SidebarState;
