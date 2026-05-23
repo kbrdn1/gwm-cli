@@ -1,5 +1,8 @@
-use std::{fs, path::Path, process::Command};
+use std::fs;
+#[cfg(unix)]
+use std::{path::Path, process::Command};
 
+#[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
 
 #[test]
@@ -252,12 +255,14 @@ fn rc_changelog_dupe_check_skips_first_rc_without_previous_notes() {
   );
 }
 
+#[cfg(unix)]
 fn write_release_files(root: &Path, changelog: &str, previous_rc: &str) {
   fs::create_dir_all(root.join("changelogs/pre-releases")).unwrap();
   fs::write(root.join("CHANGELOG.md"), changelog).unwrap();
   fs::write(root.join("changelogs/pre-releases/0.7.0-rc.2.md"), previous_rc).unwrap();
 }
 
+#[cfg(unix)]
 fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
   let script = std::env::current_dir().unwrap().join(CHECK_RC_DUPES);
   let test_script = root.join(CHECK_RC_DUPES);
