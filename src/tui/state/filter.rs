@@ -66,8 +66,12 @@ pub struct FilterState {
   /// (the close methods describe the sticky-vs-clear contract).
   pub active: bool,
   /// Live query buffer. Empty = no filter active; the visible list is
-  /// the identity over `App.worktrees`.
-  pub query: String,
+  /// the identity over `App.worktrees`. Private so the mutation
+  /// surface stays funnelled through `push_char` / `pop_char` /
+  /// `set_query` / `clear` (each of which maintains the cache-
+  /// invalidation contract); external readers go through
+  /// [`Self::query`].
+  query: String,
   /// Cached matched-indices vec from the last call to
   /// [`Self::filtered_indices`]. `None` = cold cache (must recompute).
   /// Any buffer mutation, explicit [`Self::invalidate`], or worktrees-
@@ -84,6 +88,15 @@ pub struct FilterState {
 impl FilterState {
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// Read access to the live query buffer. Returned as `&str` so the
+  /// caller can't grow / shrink the underlying `String` and bypass the
+  /// cache-invalidation contract on `push_char` / `pop_char` /
+  /// `set_query` / `clear`. Use `query().len()` if you need the byte
+  /// length and `query().is_empty()` for the "no filter" check.
+  pub fn query(&self) -> &str {
+    &self.query
   }
 
   /// Append a character to the query buffer and invalidate the cache.

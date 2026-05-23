@@ -807,16 +807,16 @@ impl App {
   /// match set and returns the cursor to list navigation.
   pub fn exit_filter_keep(&mut self) {
     self.filter.close_keep();
-    self.status = if self.filter.query.is_empty() {
+    self.status = if self.filter.query().is_empty() {
       "press ? for help".into()
     } else {
-      format!("filter sticky: {}", self.filter.query)
+      format!("filter sticky: {}", self.filter.query())
     };
   }
 
   /// Close the filter bar and clear the query: `Esc` returns to the full list.
   pub fn exit_filter_cancel(&mut self) {
-    let had_query = !self.filter.query.is_empty();
+    let had_query = !self.filter.query().is_empty();
     self.filter.close_cancel();
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
@@ -834,9 +834,9 @@ impl App {
   }
 
   pub fn filter_pop_char(&mut self) {
-    let before = self.filter.query.len();
+    let before = self.filter.query().len();
     self.filter.pop_char();
-    if self.filter.query.len() != before {
+    if self.filter.query().len() != before {
       self.clamp_selection_to_filter();
       self.invalidate_sidebar_cache();
     }
