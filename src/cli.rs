@@ -834,7 +834,9 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
     // already happened above — an ambiguous pattern surfaced via
     // `find_fuzzy` returns the same `Other(... ambiguous ...)` error
     // the destructive form raises, satisfying the spec's "same error
-    // contract" requirement.
+    // contract" requirement. The journal hook MUST NOT fire here —
+    // a preview that wrote to the journal would let the user "undo"
+    // something that never happened.
     worktree::remove_dry_run(&repo, &found.name)?;
     print!(
       "{}",
@@ -842,6 +844,44 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
     );
     return Ok(());
   }
+
+  // Issue #29: capture the branch OID via libgit2 BEFORE the
+  // destructive call so we can resurrect the branch on `gwm undo`.
+  // We swallow any journal IO failure with a stderr warning rather
+  // than blocking a destruction the user explicitly asked for —
+  // losing recoverability is unfortunate, but failing the remove
+  // because we can't write to `~/.local/share/gwm/history.toml` would
+  // be far more surprising. (Disk full, read-only FS, sandboxed
+  // CI runner without home dir, …)
+  let branch_oid = found.branch.as_deref().and_then(|b| {
+    repo
+      .find_branch(b, git2::BranchType::Local)
+      .ok()
+      .and_then(|br| br.into_reference().target())
+      .map(|o| o.to_string())
+  });
+  let repo_root = repo
+    .workdir()
+    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+    .unwrap_or_default();
+  let entry = OpEntry {
+    ts: chrono::Utc::now(),
+    kind: crate::history::OpKind::Remove,
+    worktree: found.name.clone(),
+    branch: found.branch.clone(),
+    branch_oid,
+    path: found.path.clone(),
+    deleted_branch: delete_branch,
+    repo_root,
+    undone: false,
+  };
+  if let Err(e) = history::record(entry) {
+    eprintln!(
+      "warning: failed to record undo journal entry: {} (continuing with the remove anyway)",
+      e
+    );
+  }
+
   worktree::remove(&repo, &found.name, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
