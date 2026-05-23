@@ -1907,12 +1907,14 @@ fn aliases_list_prints_built_in_section_outside_repo() {
     .args(["aliases", "list"])
     .assert()
     .success()
-    .stdout(predicate::str::contains("built-in"))
-    // Canonical built-in entries from `BUILT_IN_ALIASES`.
-    .stdout(predicate::str::contains("s"))
-    .stdout(predicate::str::contains("switch"))
-    .stdout(predicate::str::contains("cd"))
-    .stdout(predicate::str::contains("path"));
+    .stdout(predicate::str::contains("built-in:"))
+    // Canonical built-in entries from `BUILT_IN_ALIASES`. Assert the full
+    // formatted row (`  <name>  → <expansion>` with width-2 padding) rather
+    // than a loose `contains("s")` — the latter matched incidental letters
+    // in unrelated words (`aliases`, `built-ins`, …) and let the test pass
+    // even when the `s → switch` row was missing or malformed.
+    .stdout(predicate::str::contains("  s  → switch"))
+    .stdout(predicate::str::contains("  cd → path"));
 }
 
 #[test]
