@@ -19,6 +19,13 @@ env:
 jobs:
   build:
     name: build (${{ matrix.target }})
+    # Stable releases only. GitHub's `v*.*.*` tag glob also matches
+    # `v0.7.0-rc.3`, so keep the stable workflow from building artifacts for
+    # tags that belong to `pre-release.yml`.
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -101,6 +108,10 @@ jobs:
   release:
     name: github release
     needs: [build]
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -158,9 +169,9 @@ jobs:
     # `build` / `release` jobs (they archive `${{ github.ref_name }}`),
     # so the whole workflow is implicitly tag-scoped.
     if: |
-      !contains(github.ref_name, '-rc.') &&
-      !contains(github.ref_name, '-alpha.') &&
-      !contains(github.ref_name, '-beta.')
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
     # While HOMEBREW_TAP_TOKEN is being provisioned the first time, a missing
     # secret would fail this job. Keep it advisory so the GitHub release
     # still lands and the tap refresh can be re-driven manually via
