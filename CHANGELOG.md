@@ -10,12 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet — next entries land here once a new feature / fix / chore is merged into `dev`._
-
 ## Past releases
 
 In reverse chronological order:
 
+- [`0.7.0`](changelogs/0.7.0.md) — 2026-05-23
 - [`0.6.0`](changelogs/0.6.0.md) — 2026-05-21
 - [`0.5.0`](changelogs/0.5.0.md) — 2026-05-20
 - [`0.4.0`](changelogs/0.4.0.md) — 2026-05-19
@@ -27,6 +26,9 @@ In reverse chronological order:
 
 Per-RC notes covering only the delta against the previous RC (or against the previous stable, for `rc.1`):
 
+- [`0.7.0-rc.3`](changelogs/pre-releases/0.7.0-rc.3.md) — 2026-05-23
+- [`0.7.0-rc.2`](changelogs/pre-releases/0.7.0-rc.2.md) — 2026-05-23
+- [`0.7.0-rc.1`](changelogs/pre-releases/0.7.0-rc.1.md) — 2026-05-22
 - [`0.6.0-rc.1`](changelogs/pre-releases/0.6.0-rc.1.md) — 2026-05-20
 - [`0.5.0-rc.2`](changelogs/pre-releases/0.5.0-rc.2.md) — 2026-05-19
 - [`0.5.0-rc.1`](changelogs/pre-releases/0.5.0-rc.1.md) — 2026-05-19

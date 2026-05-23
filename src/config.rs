@@ -19,6 +19,104 @@ pub struct Config {
   pub git_tui: GitTuiConfig,
   #[serde(default)]
   pub review: ReviewConfig,
+  /// `[[labels]]` table — declarative GitHub label set pushed via
+  /// `gwm labels push`. Issue #81. Absent block resolves to an empty
+  /// vec, so `gwm labels push` is a no-op on configs that never opt in.
+  /// Whitespace in `name` is preserved verbatim (e.g. `"good first
+  /// issue"`); colour falls back to a deterministic pastel hash at
+  /// push time when omitted.
+  #[serde(default)]
+  pub labels: Vec<LabelConfig>,
+  /// `[[milestones]]` table — declarative GitHub milestone set pushed
+  /// via `gwm milestones push`. Issue #82. Same opt-in / no-op shape
+  /// as `labels`. `due_on` accepts both `YYYY-MM-DD` (the milestones
+  /// module materialises end-of-day UTC) and full RFC3339; `state`
+  /// defaults to `"open"` when omitted.
+  #[serde(default)]
+  pub milestones: Vec<MilestoneConfig>,
+  /// `[[branch_types]]` — per-repo override of the allowed branch types.
+  /// Empty (the default) means the built-in list from `naming::BRANCH_TYPES`
+  /// is used, keeping zero-friction for existing repos. See
+  /// [`Config::resolved_branch_types`] for the single lookup site shared
+  /// by `BranchSpec::validate`, `gwm types` and the TUI create picker.
+  #[serde(rename = "branch_types", default)]
+  pub branch_types: Vec<BranchType>,
+}
+
+/// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
+/// `description` and `color` are optional, with the colour resolved by
+/// the labels module at push time (deterministic pastel by default,
+/// overridable via `--random-colors`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelConfig {
+  pub name: String,
+  #[serde(default)]
+  pub description: Option<String>,
+  /// 6-character hex colour without a leading `#` (e.g. `"d73a4a"`).
+  /// Validation is deferred to push time so a typo doesn't break
+  /// config load for unrelated subcommands.
+  #[serde(default)]
+  pub color: Option<String>,
+}
+
+/// One `[[milestones]]` entry. `title` is the GitHub key (unique per
+/// repo). `description`, `due_on`, and `state` are optional; the
+/// milestones module validates `due_on` (YYYY-MM-DD or RFC3339) and
+/// `state` (`"open"` | `"closed"`) at push time so a typo doesn't
+/// break unrelated subcommands.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MilestoneConfig {
+  pub title: String,
+  #[serde(default)]
+  pub description: Option<String>,
+  /// Due date. Accepted forms: `YYYY-MM-DD` (treated as end-of-day
+  /// UTC at push time) or full RFC3339 (`2026-07-15T17:00:00Z`).
+  #[serde(default)]
+  pub due_on: Option<String>,
+  /// `"open"` (default) or `"closed"`. Validated at push time.
+  #[serde(default)]
+  pub state: Option<String>,
+}
+
+/// One entry of the `[[branch_types]]` table in `.gwm.toml`. The struct
+/// is also produced by [`crate::naming::default_branch_types`] when the
+/// config block is absent, so both the configured and built-in flavours
+/// share the same shape downstream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchType {
+  pub name: String,
+  pub description: String,
+}
+
+/// Origin of the resolved branch-type list — surfaced verbatim under
+/// `gwm types` so users can tell at a glance whether they're looking at
+/// their `.gwm.toml` override or the built-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchTypesSource {
+  /// No `[[branch_types]]` block in `.gwm.toml` (or it's empty) — the
+  /// built-in list from `naming::BRANCH_TYPES` is in effect.
+  Default,
+  /// At least one `[[branch_types]]` entry was loaded from `.gwm.toml`.
+  Config,
+}
+
+impl BranchTypesSource {
+  /// Human-readable label rendered as the footer of `gwm types`.
+  pub fn label(self) -> &'static str {
+    match self {
+      Self::Default => "built-in defaults",
+      Self::Config => ".gwm.toml",
+    }
+  }
+}
+
+/// Pair returned by [`Config::resolved_branch_types`] — the list to feed
+/// into validation / display, plus the [`BranchTypesSource`] that
+/// produced it.
+#[derive(Debug, Clone)]
+pub struct ResolvedBranchTypes {
+  pub types: Vec<BranchType>,
+  pub source: BranchTypesSource,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,7 +348,156 @@ impl Config {
     }
     let raw = std::fs::read_to_string(&path)?;
     let cfg: Config = toml::from_str(&raw)?;
+    cfg.validate_branch_types()?;
+    cfg.validate_bootstrap_paths()?;
+    cfg.validate_bootstrap_guards()?;
+    cfg.validate_labels()?;
     Ok(cfg)
+  }
+
+  /// Reject `[[labels]]` entries whose `name` would be parsed as a flag
+  /// by `gh label create` (or violate GitHub's naming rules). Delegates
+  /// per-entry validation to [`crate::labels::validate_label_name`]; the
+  /// error here prefixes the offending entry index so the user can
+  /// locate the TOML coordinate without grepping the file (issue #100).
+  ///
+  /// The inner error is unwrapped from its `GwmError::Config` wrapping
+  /// before being re-wrapped with the entry index — otherwise the
+  /// `Display` impl reads `config error: labels[<i>]: config error:
+  /// labels: …` with the prefix echoed twice, which is what the user
+  /// actually sees on stderr.
+  fn validate_labels(&self) -> Result<()> {
+    for (i, l) in self.labels.iter().enumerate() {
+      crate::labels::validate_label_name(&l.name).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("labels[{}]: {}", i, inner))
+      })?;
+    }
+    Ok(())
+  }
+
+  /// Pre-compile every `[[bootstrap.guard]].deny_patterns` entry so a
+  /// malformed regex surfaces at config load instead of being silently
+  /// dropped at evaluation time (issue #96).
+  ///
+  /// Historically `bootstrap.rs::guard_match` wrapped `Regex::new(pat)`
+  /// in `if let Ok(re) = …`, which made a guard fail-open whenever one
+  /// of its patterns failed to compile: the bad pattern vanished and
+  /// the surviving patterns evaluated against the file as if nothing
+  /// was wrong. A refusal mechanism that silently refuses to refuse is
+  /// strictly worse than no mechanism — the user reads "guard passed"
+  /// and trusts a file that never went through the rule it was meant
+  /// to be filtered by.
+  ///
+  /// The compiled regexes are deliberately discarded here: the goal
+  /// of this validator is to fail fast at load time, and caching a
+  /// `Vec<Regex>` on the `Guard` struct would force `#[serde(skip)]`
+  /// gymnastics on a type that round-trips through TOML.
+  ///
+  /// **Trust boundary**: `Config::load_for_repo` is the primary
+  /// chokepoint this validator protects. `bootstrap::guard_match`
+  /// holds the matching defence-in-depth for `Config` values that
+  /// bypass the loader (test fixtures, programmatic constructors,
+  /// future APIs): a runtime `Regex::new` failure surfaces as a
+  /// `StepStatus::Failed` step and refuses the copy, instead of
+  /// silently dropping the pattern as the original #96 fail-open
+  /// did.
+  pub fn validate_bootstrap_guards(&self) -> Result<()> {
+    for (gi, g) in self.bootstrap.guard.iter().enumerate() {
+      for (pi, pat) in g.deny_patterns.iter().enumerate() {
+        regex::Regex::new(pat).map_err(|e| {
+          // Include the guard index AND the pattern index so a `.gwm.toml`
+          // with five guards × five patterns surfaces "bootstrap.guard[3].
+          // deny_patterns[1]" — the exact TOML coordinate — instead of
+          // forcing the user to grep for the pattern content. Mirrors the
+          // shape used by `validate_bootstrap_paths` (e.g.
+          // "bootstrap.copy[0].to").
+          GwmError::Config(format!(
+            "bootstrap.guard[{}].deny_patterns[{}] '{}': invalid pattern {:?} — regex: {}",
+            gi, pi, g.name, pat, e
+          ))
+        })?;
+      }
+    }
+    Ok(())
+  }
+
+  /// Reject `..` components and absolute paths in bootstrap path
+  /// fields (issue #94). The runtime guard in `bootstrap::run_copies`
+  /// is the last line of defence; this check surfaces violations with
+  /// the TOML key in the error rather than failing mid-bootstrap.
+  ///
+  /// Three fields are validated:
+  ///   - `bootstrap.copy[].to` — write target inside the worktree
+  ///   - `bootstrap.guard[].example_file` — read source inside main repo
+  ///   - `bootstrap.fallback.<key>.target` — declarative today, but a
+  ///     `..` there still misrepresents intent and is rejected for
+  ///     consistency with the other two
+  ///
+  /// `bootstrap.copy[].from` is intentionally NOT validated here: it
+  /// is joined onto `ctx.main_repo` (the repo root that ships the
+  /// config), so traversal there is bounded by who can edit the
+  /// `.gwm.toml` itself — same trust boundary as for the rest of
+  /// the file.
+  ///
+  /// **Trust-boundary note (revisit with #95)**: once the TOFU prompt
+  /// on `.gwm.toml` lands, `.gwm.toml` may be sourced from a less
+  /// trusted location (e.g. a freshly cloned hostile main repo
+  /// during the first `gwm bootstrap`). At that point the `from`
+  /// trust assumption no longer holds and this validator should be
+  /// extended symmetrically — `check_relative_no_traversal` already
+  /// accepts an arbitrary field label and is ready for it.
+  fn validate_bootstrap_paths(&self) -> Result<()> {
+    for (i, c) in self.bootstrap.copy.iter().enumerate() {
+      check_relative_no_traversal(&c.to, &format!("bootstrap.copy[{}].to", i))?;
+    }
+    for (i, g) in self.bootstrap.guard.iter().enumerate() {
+      if let Some(ex) = &g.example_file {
+        check_relative_no_traversal(ex, &format!("bootstrap.guard[{}].example_file", i))?;
+      }
+    }
+    for (key, fb) in &self.bootstrap.fallback {
+      check_relative_no_traversal(&fb.target, &format!("bootstrap.fallback.{}.target", key))?;
+    }
+    Ok(())
+  }
+
+  /// Validate `[[branch_types]]` entries on load so a malformed config
+  /// surfaces a clear error at startup instead of failing downstream in
+  /// `parse_branch` / git itself with a cryptic message. Rules:
+  ///   - `name` must be non-empty
+  ///   - `name` must match `^[a-z]+$` (the regex `parse_branch` uses
+  ///     for the type segment of a gwm-style branch name)
+  ///   - `name`s must be unique across the table — duplicates would
+  ///     silently override each other under `serde`'s `Vec` decoding
+  ///     and make the resolved list non-deterministic
+  fn validate_branch_types(&self) -> Result<()> {
+    let name_re = regex::Regex::new(r"^[a-z]+$").expect("static regex compiles");
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for entry in &self.branch_types {
+      if entry.name.is_empty() {
+        return Err(GwmError::Config(
+          "branch_types: entry has empty `name`; use a lowercase ASCII alpha token (e.g. \"feat\")".into(),
+        ));
+      }
+      if !name_re.is_match(&entry.name) {
+        return Err(GwmError::Config(format!(
+          "branch_types: invalid `name = \"{}\"`; must match ^[a-z]+$ to be a valid branch-prefix \
+           (lowercase letters only, no digits, no dashes — git refs and `parse_branch` rely on this)",
+          entry.name
+        )));
+      }
+      if !seen.insert(entry.name.as_str()) {
+        return Err(GwmError::Config(format!(
+          "branch_types: duplicate entry for `name = \"{}\"` — each branch type must be declared at most once",
+          entry.name
+        )));
+      }
+    }
+    Ok(())
   }
 
   /// Write a default config to the given repo root.
@@ -266,6 +513,26 @@ impl Config {
 
   pub fn guard_by_name(&self, name: &str) -> Option<&Guard> {
     self.bootstrap.guard.iter().find(|g| g.name == name)
+  }
+
+  /// Single lookup site for the allowed branch types. Returns the
+  /// `[[branch_types]]` block from `.gwm.toml` when present, falling
+  /// back to [`crate::naming::default_branch_types`] otherwise. Used
+  /// by `BranchSpec::validate`, `gwm types`, the TUI create picker
+  /// (and, future-pending, the pre-commit hook) so the list stays
+  /// consistent across surfaces.
+  pub fn resolved_branch_types(&self) -> ResolvedBranchTypes {
+    if self.branch_types.is_empty() {
+      ResolvedBranchTypes {
+        types: crate::naming::default_branch_types(),
+        source: BranchTypesSource::Default,
+      }
+    } else {
+      ResolvedBranchTypes {
+        types: self.branch_types.clone(),
+        source: BranchTypesSource::Config,
+      }
+    }
   }
 }
 
@@ -355,6 +622,51 @@ impl Default for ReviewConfig {
 
 fn default_skip_when_no_changes() -> bool {
   true
+}
+
+/// Reject empty strings, absolute paths, Windows drive prefixes and
+/// `..` traversal segments in bootstrap path fields (issue #94). The
+/// field name is woven into the error message so the user can
+/// pinpoint the offending TOML key. The wording stays neutral
+/// ("base directory") because callers use this helper for both
+/// `worktree`-relative (`copy.to`, `fallback.target`) and
+/// `main_repo`-relative (`guard.example_file`) fields.
+fn check_relative_no_traversal(value: &str, field: &str) -> Result<()> {
+  if value.is_empty() {
+    return Err(GwmError::Config(format!(
+      "{}: empty path is not a valid bootstrap target",
+      field
+    )));
+  }
+  let p = Path::new(value);
+  if p.is_absolute() {
+    return Err(GwmError::Config(format!(
+      "{}: {:?} is an absolute path — only relative paths under the base directory are allowed",
+      field, value
+    )));
+  }
+  // `Component::Prefix` covers Windows drive-relative paths like
+  // `C:foo` which are NOT absolute (per `Path::is_absolute`) yet
+  // make `PathBuf::join` drop the base. Unreachable on Unix, so
+  // this is a defence-in-depth rejection for Windows targets.
+  for comp in p.components() {
+    match comp {
+      std::path::Component::ParentDir => {
+        return Err(GwmError::Config(format!(
+          "{}: {:?} contains '..' traversal — only relative paths under the base directory are allowed",
+          field, value
+        )));
+      }
+      std::path::Component::Prefix(_) => {
+        return Err(GwmError::Config(format!(
+          "{}: {:?} contains a Windows drive prefix — only relative paths under the base directory are allowed",
+          field, value
+        )));
+      }
+      _ => {}
+    }
+  }
+  Ok(())
 }
 
 impl ReviewConfig {

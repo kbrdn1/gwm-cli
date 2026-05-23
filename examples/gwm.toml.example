@@ -1,5 +1,17 @@
 # gwm config — copy this to your repo root as `.gwm.toml`
 # placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+#
+# === TOFU trust gate (issue #95) ===========================================
+# The first `gwm create` / `gwm bootstrap` against this file opens a
+# one-shot trust prompt that summarises the bootstrap surface (copies,
+# guards, no-symlinks, commands) and records the (origin URL, sha256)
+# pair in `~/.config/gwm/trust.toml` on approval. Any byte change to this
+# file re-prompts (whitespace matters — `rm -rf /tmp/` and
+# `rm -rf /tmp /` differ by one byte and behave catastrophically
+# differently). CI runners bypass the prompt with `--allow-bootstrap` or
+# `GWM_ALLOW_BOOTSTRAP=1`. Forensic mode: `--deny-bootstrap` refuses
+# even when trusted. Manage entries with `gwm trust list / revoke / show`.
+# Full threat model: https://github.com/kbrdn1/gwm-cli/blob/main/src/trust.rs
 
 [worktree]
 base = "{home}/cc-worktree/{repo}"
@@ -95,6 +107,30 @@ name = "full local build"
 run = "./scripts/full-build.sh"
 when = "glob_exists:src/**/*.rs && !env_set:CI"
 
+# --- branch types (issue #80) -----------------------------------------------
+# Per-repo override of the allowed branch types. Absent (default) ⇒ the
+# built-in list is used: feat, fix, hotfix, docs, test, refactor, chore,
+# perf, ci, build. Present ⇒ only the listed types are accepted by
+# `gwm create` / TUI create / `BranchSpec::validate()`. `gwm types`
+# prints the resolved set with a footer noting the source
+# (`(source: built-in defaults)` vs `(source: .gwm.toml)`).
+#
+# An empty array (`branch_types = []`) is treated as absent — the
+# built-in list is restored so an accidental wipe doesn't lock you out
+# of `gwm create`.
+#
+# [[branch_types]]
+# name = "feat"
+# description = "New feature implementation"
+#
+# [[branch_types]]
+# name = "fix"
+# description = "Bug fix"
+#
+# [[branch_types]]
+# name = "migration"
+# description = "Database migration"
+
 # --- doctor knobs -----------------------------------------------------------
 # Trunk branches `gwm doctor`'s orphan-branch check treats as merge
 # destinations. A gwm-style branch fully reachable from one of these is
@@ -180,3 +216,90 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # mode = "shell"
 # shell_cmd = ""        # leave empty to read $SHELL
 # editor_cmd = "hx"     # example: Helix
+
+# --- declarative GitHub labels (issue #81) ----------------------------------
+# Each `[[labels]]` entry declares a GitHub label that `gwm labels push` will
+# create or update on the `origin` remote via `gh label create --force`.
+#
+# Fields:
+#   name        — required. The GitHub label name. Whitespace is preserved
+#                 verbatim (e.g. "good first issue"); use `name = "…"`, not a
+#                 bare key.
+#   description — optional. Empty / absent means "leave the description
+#                 untouched on the remote".
+#   color       — optional. 6-hex lowercase (no leading `#` — `#d73a4a` is
+#                 accepted and normalised). When omitted, gwm picks a
+#                 deterministic pastel from a hash of the name so the same
+#                 label gets the same colour across repos. `--random-colors`
+#                 overrides this to a random pastel per push.
+#
+# Workflow:
+#   gwm labels list       — print the resolved set + the diff against remote
+#                           (`+ create`, `~ update`, `= match`, `- extra`).
+#   gwm labels push       — apply the diff (create + update).
+#   gwm labels push --dry-run  — same as list, but with an explicit summary
+#                                line ("would create 2, update 1, …").
+#   gwm labels push --prune    — also delete labels on the remote that are
+#                                NOT in `[[labels]]`. Destructive, off by
+#                                default.
+#
+# Requires `gh` on $PATH (the same soft dependency as `gwm status`).
+#
+# [[labels]]
+# name = "bug"
+# description = "Something isn't working"
+# color = "d73a4a"
+#
+# [[labels]]
+# name = "enhancement"
+# description = "New feature or request"
+#
+# [[labels]]
+# name = "good first issue"
+# description = "Good for newcomers"
+# color = "7057ff"
+
+# --- declarative GitHub milestones (issue #82) ------------------------------
+# Each `[[milestones]]` entry declares a GitHub milestone that `gwm
+# milestones push` will create or update on the `origin` remote via the
+# GitHub REST API (no native `gh milestone` subcommand exists).
+#
+# Fields:
+#   title       — required. The GitHub milestone title (unique per repo).
+#   description — optional. Empty / absent means "leave the description
+#                 untouched on the remote".
+#   due_on      — optional. Accepts `YYYY-MM-DD` (materialised as
+#                 23:59:59 UTC of that day — "due Friday" closes at end
+#                 of day, not midnight) or full RFC3339
+#                 (`2026-07-15T17:00:00Z`). Absent means no due date.
+#   state       — optional. `"open"` (default) or `"closed"`. Use
+#                 `"closed"` to archive a milestone declaratively.
+#
+# Workflow:
+#   gwm milestones list       — print the resolved set + the diff against
+#                               remote (`+ create`, `~ update`, `= match`,
+#                               `- extra`).
+#   gwm milestones push       — apply the diff (create + update).
+#   gwm milestones push --dry-run  — same as list, but with an explicit
+#                                    summary line ("would create 2,
+#                                    update 1, …").
+#   gwm milestones push --prune    — also delete milestones on the remote
+#                                    that are NOT in `[[milestones]]`.
+#                                    Destructive, off by default.
+#
+# Requires `gh` on $PATH (same soft dependency as `gwm labels` / `gwm
+# status`).
+#
+# [[milestones]]
+# title = "v0.7.0"
+# description = "Configurability sprint"
+# due_on = "2026-07-15"
+# state = "open"
+#
+# [[milestones]]
+# title = "v0.8.0"
+# due_on = "2026-10-01T17:00:00Z"
+#
+# [[milestones]]
+# title = "v0.6.0"
+# state = "closed"

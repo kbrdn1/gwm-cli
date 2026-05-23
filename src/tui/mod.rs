@@ -6,6 +6,7 @@ mod app;
 /// actually depend on.
 #[doc(hidden)]
 pub mod commit_graph;
+pub mod state;
 mod ui;
 
 use crate::error::Result;
@@ -19,10 +20,13 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{
-  App, ConfirmKeyAction, CountdownTickOutcome, Field, GitHubFetchState, LauncherPlan, LinkPromptStage, LinkTarget,
-  OpenTarget, View,
-};
+pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+pub use state::create_form::{CreateForm, Field};
+pub use state::filter::FilterState;
+pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
+pub use state::link_prompt::LinkPrompt;
+pub use state::sidebar::SidebarState;
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
 /// First entry that resolves on `$PATH` wins. Returned in the
@@ -49,13 +53,18 @@ pub use ui::{
   tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
-pub fn run() -> Result<()> {
+pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config
   // load fails (e.g. not inside a git repo), the user's terminal stays in
   // its pristine cooked state. Addresses Copilot's PR #53 review — the
   // previous order left raw mode + alt-screen on when `App::new()?`
   // bubbled up.
-  let app = App::new()?;
+  //
+  // `trust_mode` is threaded down so the TUI's bootstrap call sites
+  // (`submit_create`, `bootstrap_selected`) take the same TOFU
+  // decision as `gwm create` / `gwm bootstrap` — closes the bypass
+  // flagged in PR #113 review (issue #95).
+  let app = App::new()?.with_trust_mode(trust_mode);
   let mut terminal = enter_terminal()?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
@@ -136,7 +145,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       // When the inline filter bar is open, capture every key as filter input
       // so the user can type a query containing `q`, `?`, `/`, etc. The only
       // ways out are Enter (sticky filter) or Esc (clear filter).
-      View::List if app.filter_active => match key.code {
+      View::List if app.filter.active => match key.code {
         KeyCode::Esc => {
           // Picker contract (footer `esc:cancel`): Esc inside the filter
           // bar quits the picker, it doesn't merely clear the filter.
@@ -172,7 +181,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           // list is already in its plain state. Avoids the trap where a user
           // hits Esc expecting to clear /-filter and accidentally exits.
           KeyCode::Esc => {
-            if !app.filter_query.is_empty() {
+            if !app.filter.query().is_empty() {
               app.exit_filter_cancel();
             } else {
               break;
@@ -245,7 +254,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         KeyCode::Tab => app.create_next_field(),
         KeyCode::BackTab => app.create_prev_field(),
         KeyCode::Enter => {
-          if app.create_field == Field::Desc {
+          if app.create_form.field == Field::Desc {
             if let Err(e) = app.submit_create() {
               app.status = format!("error: {}", e);
             }
@@ -253,10 +262,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
             app.create_next_field();
           }
         }
-        KeyCode::Up if app.create_field == Field::Type => app.create_prev_type(),
-        KeyCode::Down if app.create_field == Field::Type => app.create_next_type(),
-        KeyCode::Char(c) if app.create_field != Field::Type => app.create_push_char(c),
-        KeyCode::Backspace if app.create_field != Field::Type => app.create_pop_char(),
+        KeyCode::Up if app.create_form.field == Field::Type => app.create_prev_type(),
+        KeyCode::Down if app.create_form.field == Field::Type => app.create_next_type(),
+        KeyCode::Char(c) if app.create_form.field != Field::Type => app.create_push_char(c),
+        KeyCode::Backspace if app.create_form.field != Field::Type => app.create_pop_char(),
         _ => {}
       },
       View::Confirm => match key.code {

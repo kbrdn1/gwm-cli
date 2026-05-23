@@ -1,22 +1,42 @@
-use crate::bootstrap::{self, BootstrapCtx, StepStatus};
+use crate::bootstrap::{self, BootstrapCtx};
 use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
-use crate::error::{GwmError, Result};
+use crate::error::{GwmError, LinkKind, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use crate::labels::{self, LabelDiff};
+use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::{BranchSpec, BRANCH_TYPES};
+use crate::naming::BranchSpec;
+use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
 use git2::Repository;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "gwm", version, about = "git worktree manager (TUI + CLI)")]
 pub struct Cli {
+  /// Skip the TOFU trust prompt on `.gwm.toml` (issue #95).
+  ///
+  /// Equivalent to `GWM_ALLOW_BOOTSTRAP=1`. Use in non-interactive
+  /// environments (CI runners, scripted workflows) where there is no
+  /// human to answer the prompt. Off by default — the threat model is
+  /// arbitrary RCE via `[[bootstrap.command]]` lines from an untrusted
+  /// remote, so the safe default is "prompt".
+  #[arg(long, global = true)]
+  pub allow_bootstrap: bool,
+
+  /// Refuse to run `.gwm.toml` bootstrap regardless of trust state
+  /// (issue #95). Useful for forensic inspection of an unfamiliar
+  /// repo: `gwm bootstrap --deny-bootstrap` short-circuits the
+  /// execution path even if the ledger says trusted.
+  #[arg(long, global = true, conflicts_with = "allow_bootstrap")]
+  pub deny_bootstrap: bool,
+
   #[command(subcommand)]
   pub command: Option<Command>,
 }
@@ -70,6 +90,12 @@ pub enum Command {
     /// Skip bootstrap after creation.
     #[arg(long)]
     no_bootstrap: bool,
+    /// Attach the new worktree to an already-existing local branch of the
+    /// same name instead of refusing (issue #99). Off by default — a
+    /// pre-existing branch ends `gwm create` with an error naming the
+    /// stale tip so the user can audit it.
+    #[arg(long)]
+    reuse_branch: bool,
   },
   /// Remove a worktree by fuzzy name match.
   Remove {
@@ -217,12 +243,163 @@ pub enum Command {
     #[arg(long)]
     json: bool,
   },
+  /// Manage the declarative GitHub label set from `.gwm.toml` (issue #81).
+  ///
+  /// Declares the desired label set under `[[labels]]` in `.gwm.toml`,
+  /// then pushes it to the upstream `origin` remote via `gh label
+  /// create --force`. Without a `[[labels]]` block, both subcommands
+  /// are no-ops (`0 labels declared, nothing to push`).
+  Labels {
+    #[command(subcommand)]
+    action: LabelsAction,
+  },
+  /// Manage the declarative GitHub milestone set from `.gwm.toml` (issue #82).
+  ///
+  /// Declares the desired milestone set under `[[milestones]]` in
+  /// `.gwm.toml`, then pushes it to the upstream `origin` remote via
+  /// `gh api repos/:owner/:repo/milestones` (no native `gh milestone`
+  /// subcommand exists). Without a `[[milestones]]` block, both
+  /// subcommands are no-ops (`0 milestones declared, nothing to push`).
+  Milestones {
+    #[command(subcommand)]
+    action: MilestonesAction,
+  },
+  /// Manage the TOFU trust ledger for `.gwm.toml` files (issue #95).
+  ///
+  /// `gwm` runs `[[bootstrap.command]]` lines from `.gwm.toml` under
+  /// the user's privileges — equivalent to `curl … | sh` against the
+  /// repo author. The trust ledger at `~/.config/gwm/trust.toml`
+  /// (override via `$GWM_TRUST_LEDGER`) records the `(origin URL,
+  /// sha256 of .gwm.toml)` tuples the user has approved, so
+  /// subsequent runs skip the prompt. Hash drift (any byte changes
+  /// in `.gwm.toml`) re-prompts — see the module-level comment in
+  /// `src/trust.rs` for the threat model.
+  Trust {
+    #[command(subcommand)]
+    action: TrustAction,
+  },
+}
+
+/// Subcommands of `gwm labels`. The split is intentional: `list` is
+/// read-only and safe to run in CI; `push` mutates the remote and
+/// therefore gets `--dry-run` / `--prune` flags of its own.
+#[derive(Debug, Subcommand)]
+pub enum LabelsAction {
+  /// Print the declared label set plus the diff against the upstream remote.
+  ///
+  /// Each line is one of: `+ create`, `~ update (color/desc change)`,
+  /// `= match`, `- extra-on-remote`. Without a `[[labels]]` block in
+  /// `.gwm.toml`, prints `0 labels declared` and exits 0 without
+  /// shelling out to `gh`.
+  List,
+  /// Apply the diff: create new labels and update mismatched ones on
+  /// the upstream remote.
+  ///
+  /// `--dry-run` prints the plan without mutating the remote (it
+  /// still reads the remote via `gh label list` to compute the
+  /// diff; only create / update / delete calls are skipped).
+  /// `--prune` opt-in deletes labels on remote that aren't declared in
+  /// config (off by default — destructive). `--random-colors` picks a
+  /// random pastel for labels with no `color` field instead of the
+  /// default deterministic hash.
+  Push {
+    /// Print the plan without mutating the remote. Still reads remote
+    /// labels via `gh label list` to compute the diff — only the
+    /// create / update / delete calls are skipped.
+    #[arg(long)]
+    dry_run: bool,
+    /// Delete remote labels that aren't declared in `.gwm.toml`.
+    /// Destructive — off by default.
+    #[arg(long)]
+    prune: bool,
+    /// Generate a random pastel for labels with no `color` field
+    /// (overrides the default deterministic-hash colour).
+    #[arg(long)]
+    random_colors: bool,
+  },
+}
+
+/// Subcommands of `gwm trust` (issue #95). All three are read-only or
+/// purely local — no network, no git mutation — so they're safe to
+/// surface in CI as inspection helpers.
+#[derive(Debug, Subcommand)]
+pub enum TrustAction {
+  /// List every recorded `(origin, hash)` pair in the active ledger.
+  ///
+  /// Empty ledger prints a single line and exits 0 — the no-op fast
+  /// path for fresh installs. The `trusted_at` timestamp is the
+  /// audit anchor; revoke entries whose age looks suspicious with
+  /// `gwm trust revoke <origin>`.
+  List,
+  /// Remove every entry whose `origin` matches verbatim. After revoke,
+  /// the next `gwm create` / `gwm bootstrap` against that repo
+  /// re-prompts — use this when you change machines, rotate
+  /// credentials, or no longer trust a previously approved repo.
+  Revoke {
+    /// Origin URL to revoke (must match the recorded form verbatim —
+    /// SSH and HTTPS flavours of the same GitHub repo are recorded as
+    /// distinct entries because they ARE distinct trust paths).
+    origin: String,
+  },
+  /// Print the active ledger path and its raw TOML contents.
+  ///
+  /// Honours `$GWM_TRUST_LEDGER` if set, falls back to
+  /// `$XDG_CONFIG_HOME/gwm/trust.toml` (or the platform-specific
+  /// equivalent). Useful when triaging "why is gwm re-prompting?"
+  /// situations — eyeball the recorded hash vs. what `sha256sum
+  /// .gwm.toml` produces.
+  Show,
+}
+
+/// Subcommands of `gwm milestones`. Mirrors `LabelsAction`: `list` is
+/// read-only and safe to run in CI; `push` mutates the remote and
+/// therefore gets `--dry-run` / `--prune` flags of its own.
+#[derive(Debug, Subcommand)]
+pub enum MilestonesAction {
+  /// Print the declared milestone set plus the diff against the upstream remote.
+  ///
+  /// Each line is one of: `+ create`, `~ update (due/desc/state
+  /// change)`, `= match`, `- extra-on-remote`. Without a
+  /// `[[milestones]]` block in `.gwm.toml`, prints `0 milestones
+  /// declared` and exits 0 without shelling out to `gh`.
+  List,
+  /// Apply the diff: create new milestones and update mismatched ones
+  /// on the upstream remote.
+  ///
+  /// `--dry-run` prints the plan without mutating the remote (it
+  /// still reads the remote via `gh api …/milestones` to compute the
+  /// diff; only create / update / delete calls are skipped).
+  /// `--prune` opt-in deletes milestones on remote that aren't
+  /// declared in config (off by default — destructive).
+  Push {
+    /// Print the plan without mutating the remote. Still reads remote
+    /// milestones via `gh api` to compute the diff — only the
+    /// create / update / delete calls are skipped.
+    #[arg(long)]
+    dry_run: bool,
+    /// Delete remote milestones that aren't declared in `.gwm.toml`.
+    /// Destructive — off by default.
+    #[arg(long)]
+    prune: bool,
+  },
 }
 
 pub fn run(cli: Cli) -> Result<()> {
-  // Without a subcommand, we hand off to the TUI.
+  // Resolve the trust mode once at dispatch time so every handler
+  // that gates bootstrap sees the same value — CLI subcommands AND
+  // the TUI alike, both honour the same flags. `--deny-bootstrap`
+  // wins over `--allow-bootstrap` if both are passed (clap's
+  // `conflicts_with` already rejects this combination at parse time
+  // — the explicit ordering inside `trust::resolve_mode` is defence
+  // in depth).
+  let mode = trust::resolve_mode(cli.allow_bootstrap, cli.deny_bootstrap);
+
+  // Without a subcommand, we hand off to the TUI — but with the
+  // resolved mode threaded through so the TUI's bootstrap call
+  // sites (`submit_create`, `bootstrap_selected`) take the same
+  // trust decision as `gwm create` / `gwm bootstrap`.
   let Some(cmd) = cli.command else {
-    return crate::tui::run();
+    return crate::tui::run(mode);
   };
 
   match cmd {
@@ -233,10 +410,11 @@ pub fn run(cli: Cli) -> Result<()> {
       issue,
       desc,
       no_bootstrap,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap),
+      reuse_branch,
+    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, mode),
     Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
     Command::Path { pattern } => cmd_path(pattern),
-    Command::Bootstrap { target } => cmd_bootstrap(target),
+    Command::Bootstrap { target } => cmd_bootstrap(target, mode),
     Command::Prune => cmd_prune(),
     Command::Doctor => cmd_doctor(),
     Command::Types => cmd_types(),
@@ -257,6 +435,9 @@ pub fn run(cli: Cli) -> Result<()> {
       print_url,
     } => cmd_open(target, worktree, print_url),
     Command::Status { worktree, json } => cmd_status(worktree, json),
+    Command::Labels { action } => cmd_labels(action),
+    Command::Milestones { action } => cmd_milestones(action),
+    Command::Trust { action } => cmd_trust(action),
   }
 }
 
@@ -351,23 +532,38 @@ fn format_status_text(w: &worktree::WorktreeInfo) -> String {
   parts.join(" ")
 }
 
-fn cmd_create(branch_type: String, issue: String, desc: String, no_bootstrap: bool) -> Result<()> {
+fn cmd_create(
+  branch_type: String,
+  issue: String,
+  desc: String,
+  no_bootstrap: bool,
+  reuse_branch: bool,
+  trust_mode: TrustMode,
+) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let repo_name = worktree::repo_name(&repo);
 
   let config = Config::load_for_repo(&workdir)?;
-  let spec = BranchSpec::new(branch_type, issue, desc)?;
+  let resolved_types = config.resolved_branch_types();
+  let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
   let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
   let target = spec.worktree_path(&config.worktree, &repo_name)?;
+
+  // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
+  // creating the worktree — a deny / abort here leaves the user's
+  // disk state untouched (no orphaned worktree to clean up).
+  if !no_bootstrap {
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+  }
 
   println!("creating worktree:");
   println!("  branch : {}", branch);
   println!("  dir    : {}", dirname);
   println!("  path   : {}", target.display());
 
-  let created = worktree::add(&repo, &dirname, &target, &branch)?;
+  let created = worktree::add(&repo, &dirname, &target, &branch, reuse_branch)?;
   println!("✓ worktree created at {}", created.display());
 
   if no_bootstrap {
@@ -405,7 +601,7 @@ fn cmd_path(pattern: String) -> Result<()> {
   Ok(())
 }
 
-fn cmd_bootstrap(target: Option<String>) -> Result<()> {
+fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let config = Config::load_for_repo(&workdir)?;
@@ -421,6 +617,8 @@ fn cmd_bootstrap(target: Option<String>) -> Result<()> {
     }
     None => std::env::current_dir()?,
   };
+
+  trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
 
   let ctx = BootstrapCtx {
     main_repo: &workdir,
@@ -477,9 +675,30 @@ fn print_doctor_report(report: &doctor::DoctorReport) {
 }
 
 fn cmd_types() -> Result<()> {
-  for (t, d) in BRANCH_TYPES {
-    println!("  {:<10} {}", t, d);
+  // Resolve the active branch-type list. When invoked inside a repo
+  // with a workdir we honour any `[[branch_types]]` override in
+  // `.gwm.toml`; outside of one — or inside a bare repo where
+  // `repo.workdir()` is `None` and there's no place to look for
+  // `.gwm.toml` — we silently fall back to the built-in defaults so
+  // `gwm types` remains useful as a discovery command (used by `gwm`
+  // newcomers before they've initialised a config, and from CI inspect
+  // commands that point at bare clones).
+  let resolved = match worktree::discover_repo(None) {
+    Ok(repo) => match repo.workdir().map(|w| w.to_path_buf()) {
+      Some(workdir) => Config::load_for_repo(&workdir)?.resolved_branch_types(),
+      None => Config::default().resolved_branch_types(),
+    },
+    Err(_) => Config::default().resolved_branch_types(),
+  };
+
+  // Align the description column on the longest name so a custom list
+  // with a long entry (e.g. `migration`) still renders cleanly.
+  let width = resolved.types.iter().map(|t| t.name.len()).max().unwrap_or(0).max(8);
+  for t in &resolved.types {
+    println!("  {:<width$}  {}", t.name, t.description, width = width);
   }
+  println!();
+  println!("(source: {})", resolved.source.label());
   Ok(())
 }
 
@@ -618,13 +837,15 @@ fn resolve_target_repo(worktree: Option<String>) -> Result<(Repository, String, 
 }
 
 fn current_branch(repo: &Repository) -> Result<String> {
-  let head = repo
-    .head()
-    .map_err(|_| GwmError::Other("HEAD is unborn or detached".into()))?;
+  let head = repo.head().map_err(|_| GwmError::UnbornHead {
+    reason: "HEAD is unborn or detached".into(),
+  })?;
   head
     .shorthand()
     .map(|s| s.to_string())
-    .ok_or_else(|| GwmError::Other("HEAD has no shorthand (detached?)".into()))
+    .ok_or_else(|| GwmError::UnbornHead {
+      reason: "HEAD has no shorthand (detached?)".into(),
+    })
 }
 
 fn cmd_link(target: LinkTarget, number: u64, worktree: Option<String>) -> Result<()> {
@@ -664,15 +885,17 @@ fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Re
 
   let url = match target {
     LinkTarget::Issue => {
-      let n = link
-        .issue
-        .ok_or_else(|| GwmError::Other(format!("no issue linked to branch '{}'", branch)))?;
+      let n = link.issue.ok_or_else(|| GwmError::LinkMissing {
+        kind: LinkKind::Issue,
+        branch: branch.clone(),
+      })?;
       github::issue_url(&slug, n)
     }
     LinkTarget::Pr => {
-      let n = link
-        .pr
-        .ok_or_else(|| GwmError::Other(format!("no PR linked to branch '{}'", branch)))?;
+      let n = link.pr.ok_or_else(|| GwmError::LinkMissing {
+        kind: LinkKind::Pr,
+        branch: branch.clone(),
+      })?;
       github::pr_url(&slug, n)
     }
   };
@@ -860,6 +1083,482 @@ fn print_status_json(
   println!("{}", serde_json::Value::Object(obj));
 }
 
+// ---- Labels commands (issue #81) ----------------------------------------
+
+fn cmd_labels(action: LabelsAction) -> Result<()> {
+  match action {
+    LabelsAction::List => cmd_labels_list(),
+    LabelsAction::Push {
+      dry_run,
+      prune,
+      random_colors,
+    } => cmd_labels_push(dry_run, prune, random_colors),
+  }
+}
+
+fn cmd_labels_list() -> Result<()> {
+  let config = load_labels_config()?;
+  if config.labels.is_empty() {
+    println!("0 labels declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  // Resolve (and validate colours) before touching the network, so a
+  // typo in `.gwm.toml` surfaces "label 'bug' has invalid color: …"
+  // rather than the unrelated "no origin remote" error.
+  let declared = labels::resolve_labels(&config.labels, false)?;
+  let slug = labels_slug()?;
+  let remote = github::fetch_remote_labels(&slug)?;
+  let diff = labels::diff_labels(&declared, &remote);
+  print_labels_diff(&slug, &declared, &diff);
+  Ok(())
+}
+
+fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()> {
+  let config = load_labels_config()?;
+  if config.labels.is_empty() {
+    println!("0 labels declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  let declared = labels::resolve_labels(&config.labels, random_colors)?;
+  let slug = labels_slug()?;
+  let remote = github::fetch_remote_labels(&slug)?;
+  let diff = labels::diff_labels(&declared, &remote);
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+
+  if dry_run {
+    print_labels_diff(&slug, &declared, &diff);
+    let pruned = if prune { n_extra } else { 0 };
+    println!(
+      "{}",
+      labels::diff_dry_run_line(n_create, n_update, n_match, n_extra, pruned)
+    );
+    return Ok(());
+  }
+
+  for spec in &diff.to_create {
+    github::push_label(&slug, spec)?;
+    println!("✓ created {}", spec.name);
+  }
+  for upd in &diff.to_update {
+    github::push_label(&slug, &upd.spec)?;
+    println!("✓ updated {}", upd.spec.name);
+  }
+  if prune {
+    for remote_label in &diff.extra_on_remote {
+      github::delete_label(&slug, &remote_label.name)?;
+      println!("✗ pruned {}", remote_label.name);
+    }
+  } else if !diff.extra_on_remote.is_empty() {
+    println!(
+      "{} label(s) on remote not in config — pass --prune to delete",
+      diff.extra_on_remote.len()
+    );
+  }
+  println!("{} label(s) untouched", n_match);
+  Ok(())
+}
+
+/// Open the repo and parse `.gwm.toml`. Shared by `labels list /
+/// push`; both surface a uniform "not inside a git repository" error
+/// before they touch network or config-resolve logic.
+fn load_labels_config() -> Result<Config> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  Config::load_for_repo(&workdir)
+}
+
+/// Resolve the `origin` remote slug. Called *after* `resolve_labels`
+/// in both subcommands so a config typo (bad colour) surfaces with
+/// the offending label name rather than the unrelated "no origin
+/// remote" error.
+fn labels_slug() -> Result<String> {
+  let repo = worktree::discover_repo(None)?;
+  github::repo_slug(&repo)
+}
+
+fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) {
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+  println!(
+    "declared in .gwm.toml: {} labels — diff against {}:",
+    declared.len(),
+    slug
+  );
+  for spec in &diff.to_create {
+    println!("  + {:<20} (will create — color #{})", spec.name, spec.color);
+  }
+  for upd in &diff.to_update {
+    let detail = match (&upd.previous_color, &upd.previous_description) {
+      (Some(old), _) => format!("color #{} → #{}", old, upd.spec.color),
+      (None, Some(_)) => "description changed".into(),
+      _ => "diff".into(),
+    };
+    println!("  ~ {:<20} ({})", upd.spec.name, detail);
+  }
+  for spec in &diff.matching {
+    println!("  = {:<20} (match)", spec.name);
+  }
+  for remote in &diff.extra_on_remote {
+    println!("  - {:<20} (on remote, not in config)", remote.name);
+  }
+  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+}
+
+// ---- Milestones commands (issue #82) ------------------------------------
+
+fn cmd_milestones(action: MilestonesAction) -> Result<()> {
+  match action {
+    MilestonesAction::List => cmd_milestones_list(),
+    MilestonesAction::Push { dry_run, prune } => cmd_milestones_push(dry_run, prune),
+  }
+}
+
+fn cmd_milestones_list() -> Result<()> {
+  let config = load_milestones_config()?;
+  if config.milestones.is_empty() {
+    println!("0 milestones declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  // Resolve (and validate due_on / state) before touching the network,
+  // so a typo in `.gwm.toml` surfaces "milestone 'v0.7.0' has invalid
+  // …" rather than the unrelated "no origin remote" error.
+  let declared = milestones::resolve_milestones(&config.milestones)?;
+  let slug = milestones_slug()?;
+  let remote = github::fetch_remote_milestones(&slug)?;
+  let diff = milestones::diff_milestones(&declared, &remote);
+  print_milestones_diff(&slug, &declared, &diff);
+  Ok(())
+}
+
+fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
+  let config = load_milestones_config()?;
+  if config.milestones.is_empty() {
+    println!("0 milestones declared in .gwm.toml — nothing to push.");
+    return Ok(());
+  }
+  let declared = milestones::resolve_milestones(&config.milestones)?;
+  let slug = milestones_slug()?;
+  let remote = github::fetch_remote_milestones(&slug)?;
+  let diff = milestones::diff_milestones(&declared, &remote);
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+
+  if dry_run {
+    print_milestones_diff(&slug, &declared, &diff);
+    let pruned = if prune { n_extra } else { 0 };
+    println!(
+      "{}",
+      labels::diff_dry_run_line(n_create, n_update, n_match, n_extra, pruned)
+    );
+    return Ok(());
+  }
+
+  for spec in &diff.to_create {
+    github::create_milestone(&slug, spec)?;
+    println!("✓ created {}", spec.title);
+  }
+  for upd in &diff.to_update {
+    github::update_milestone(&slug, upd.number, &upd.spec)?;
+    println!("✓ updated {}", upd.spec.title);
+  }
+  if prune {
+    for remote_milestone in &diff.extra_on_remote {
+      github::delete_milestone(&slug, remote_milestone.number)?;
+      println!("✗ pruned {}", remote_milestone.title);
+    }
+  } else if !diff.extra_on_remote.is_empty() {
+    println!(
+      "{} milestone(s) on remote not in config — pass --prune to delete",
+      diff.extra_on_remote.len()
+    );
+  }
+  println!("{} milestone(s) untouched", n_match);
+  Ok(())
+}
+
+/// Open the repo and parse `.gwm.toml`. Shared by `milestones list /
+/// push`; both surface a uniform "not inside a git repository" error
+/// before they touch network or config-resolve logic.
+fn load_milestones_config() -> Result<Config> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  Config::load_for_repo(&workdir)
+}
+
+/// Resolve the `origin` remote slug. Called *after* `resolve_milestones`
+/// in both subcommands so a config typo (bad due_on / state) surfaces
+/// with the offending milestone title rather than the unrelated "no
+/// origin remote" error.
+fn milestones_slug() -> Result<String> {
+  let repo = worktree::discover_repo(None)?;
+  github::repo_slug(&repo)
+}
+
+fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) {
+  let (n_create, n_update, n_match, n_extra) = diff.counts();
+  println!(
+    "declared in .gwm.toml: {} milestones — diff against {}:",
+    declared.len(),
+    slug
+  );
+  for spec in &diff.to_create {
+    let due = spec.due_on.as_deref().unwrap_or("no due date");
+    println!(
+      "  + {:<20} (will create — state {}, due {})",
+      spec.title,
+      spec.state.as_str(),
+      due
+    );
+  }
+  for upd in &diff.to_update {
+    let detail = match (&upd.previous_due_on, &upd.previous_state, &upd.previous_description) {
+      (Some(old_due), _, _) => format!("due {} → {}", old_due, upd.spec.due_on.as_deref().unwrap_or("cleared")),
+      (None, Some(old_state), _) => format!("state {} → {}", old_state.as_str(), upd.spec.state.as_str()),
+      (None, None, Some(_)) => "description changed".into(),
+      _ => "diff".into(),
+    };
+    println!("  ~ {:<20} ({})", upd.spec.title, detail);
+  }
+  for spec in &diff.matching {
+    println!("  = {:<20} (match)", spec.title);
+  }
+  for remote in &diff.extra_on_remote {
+    println!("  - {:<20} (#{} on remote, not in config)", remote.title, remote.number);
+  }
+  println!("{}", labels::diff_summary_line(n_create, n_update, n_match, n_extra));
+}
+
+// ---- Trust ledger commands (issue #95) ----------------------------------
+
+fn cmd_trust(action: TrustAction) -> Result<()> {
+  match action {
+    TrustAction::List => cmd_trust_list(),
+    TrustAction::Revoke { origin } => cmd_trust_revoke(origin),
+    TrustAction::Show => cmd_trust_show(),
+  }
+}
+
+fn cmd_trust_list() -> Result<()> {
+  let path = trust::default_ledger_path()?;
+  let ledger = TrustLedger::load(&path)?;
+  if ledger.entries.is_empty() {
+    println!("0 entries in trust ledger ({}).", path.display());
+    return Ok(());
+  }
+  println!("trust ledger: {}", path.display());
+  println!(
+    "  {} entr{} recorded:",
+    ledger.entries.len(),
+    if ledger.entries.len() == 1 { "y" } else { "ies" }
+  );
+  let origin_w = ledger
+    .entries
+    .iter()
+    .map(|e| e.origin.len())
+    .max()
+    .unwrap_or(6)
+    .clamp(6, 60);
+  for e in &ledger.entries {
+    // First 12 chars of the sha256 is plenty for a visual diff; the
+    // full digest still ships in the toml file for forensic use.
+    // Truncate by chars (not bytes) so a hand-edited ledger with a
+    // multi-byte `config_sha` (corrupt but parseable TOML) renders
+    // instead of panicking on a UTF-8 boundary.
+    let short_sha: String = e.config_sha.chars().take(12).collect();
+    println!(
+      "  {:<ow$}  {}  trusted_at {}  by {}",
+      e.origin,
+      short_sha,
+      e.trusted_at.to_rfc3339(),
+      e.trusted_by,
+      ow = origin_w,
+    );
+  }
+  Ok(())
+}
+
+fn cmd_trust_revoke(origin: String) -> Result<()> {
+  let path = trust::default_ledger_path()?;
+  let mut ledger = TrustLedger::load(&path)?;
+  let removed = ledger.revoke(&origin);
+  if removed == 0 {
+    println!("0 entries matched origin {} (nothing to revoke).", origin);
+    return Ok(());
+  }
+  ledger.save(&path)?;
+  println!(
+    "✓ revoked {} entr{} for {}",
+    removed,
+    if removed == 1 { "y" } else { "ies" },
+    origin
+  );
+  Ok(())
+}
+
+fn cmd_trust_show() -> Result<()> {
+  let path = trust::default_ledger_path()?;
+  println!("ledger path: {}", path.display());
+  match std::fs::read_to_string(&path) {
+    Ok(body) => {
+      println!("---");
+      print!("{}", body);
+      if !body.ends_with('\n') {
+        println!();
+      }
+    }
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      println!("(file does not exist yet — nothing has been trusted on this machine)");
+    }
+    Err(e) => return Err(e.into()),
+  }
+  Ok(())
+}
+
+/// TOFU gate called by `cmd_create` and `cmd_bootstrap` before any
+/// `bootstrap::run` invocation. The contract:
+///
+///   * Returns `Ok(())` when the caller is cleared to proceed.
+///   * Returns `Err(GwmError::Other(..))` when the user declined,
+///     `--deny-bootstrap` was passed, or stdin isn't interactive and
+///     no `--allow-bootstrap` bypass was provided.
+///   * No-ops silently when there is no `.gwm.toml` in the workdir
+///     (nothing for bootstrap to execute — no trust decision needed).
+///
+/// The `repo` is passed in so we can read `origin` from the existing
+/// `Repository` handle (already opened by every caller) without
+/// re-discovering it. Falls back to the canonical workdir path when
+/// there is no origin remote — local-only repos still benefit from
+/// the drift-detection half of the feature even when the threat model
+/// is weaker.
+fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -> Result<()> {
+  let origin = origin_url_for_repo(repo);
+  let origin_key = trust::resolve_origin_key(origin.as_deref(), workdir);
+
+  match trust::evaluate(workdir, &origin_key, mode)? {
+    TrustOutcome::Proceed => Ok(()),
+    TrustOutcome::Refuse { message } => Err(GwmError::Other(message)),
+    TrustOutcome::Prompt {
+      cfg_path,
+      body,
+      sha,
+      origin,
+      mut ledger,
+      ledger_path,
+    } => {
+      // Refuse cleanly if stdin isn't a tty rather than hanging on a
+      // read that will never see input — this is the case that makes
+      // `--allow-bootstrap` actually load-bearing in CI.
+      use std::io::IsTerminal;
+      if !std::io::stdin().is_terminal() {
+        return Err(GwmError::Other(format!(
+          ".gwm.toml at {} is not in the trust ledger and stdin is not interactive — \
+           pass --allow-bootstrap (or set GWM_ALLOW_BOOTSTRAP=1) to bypass, \
+           or run interactively to approve",
+          cfg_path.display()
+        )));
+      }
+
+      let granted = prompt_user(&cfg_path, &body, &origin, &sha)?;
+      if !granted {
+        return Err(GwmError::Other(format!(
+          "trust prompt declined for {} — aborting bootstrap",
+          cfg_path.display()
+        )));
+      }
+
+      ledger.record(&origin, &sha, &trust::current_actor());
+      ledger.save(&ledger_path)?;
+      println!("✓ recorded trust for {} in {}", origin, ledger_path.display());
+      Ok(())
+    }
+  }
+}
+
+/// Pull the `origin` remote URL out of a Repository handle, if there
+/// is one. Returns `None` for repos with no `origin` remote — caller
+/// (or `trust::resolve_origin_key`) falls back to the canonical
+/// workdir path in that case.
+fn origin_url_for_repo(repo: Option<&Repository>) -> Option<String> {
+  let r = repo?;
+  let remote = r.find_remote("origin").ok()?;
+  remote.url().map(|s| s.to_string())
+}
+
+/// Interactive y/N/show loop. Prints a one-shot summary of the
+/// bootstrap surface (copy targets, guards, command lines, no-symlink
+/// declarations) so the user has the relevant signal before answering.
+/// `show` re-prints the raw `.gwm.toml`.
+fn prompt_user(cfg_path: &Path, bytes: &[u8], origin: &str, sha: &str) -> Result<bool> {
+  use std::io::{BufRead, Write};
+
+  let body = String::from_utf8_lossy(bytes);
+  let parsed: Option<Config> = toml::from_str(&body).ok();
+  let stdin = std::io::stdin();
+  let mut stdout = std::io::stdout();
+
+  println!();
+  println!("gwm: this repo's .gwm.toml has not been trusted yet.");
+  println!("     path   : {}", cfg_path.display());
+  println!("     origin : {}", origin);
+  println!("     hash   : {}", sha);
+  if let Some(cfg) = parsed.as_ref() {
+    print_bootstrap_summary(cfg);
+  } else {
+    println!("     (could not parse .gwm.toml for summary — see raw via `show` below)");
+  }
+  println!();
+
+  loop {
+    print!("Trust this .gwm.toml? [y/N/show]: ");
+    stdout.flush().ok();
+    let mut line = String::new();
+    let n = stdin.lock().read_line(&mut line)?;
+    if n == 0 {
+      // EOF without an answer — same conservative default as `N`.
+      return Ok(false);
+    }
+    match line.trim().to_ascii_lowercase().as_str() {
+      "y" | "yes" => return Ok(true),
+      "n" | "no" | "" => return Ok(false),
+      "show" | "s" => {
+        println!("---");
+        print!("{}", body);
+        if !body.ends_with('\n') {
+          println!();
+        }
+        println!("---");
+      }
+      other => {
+        println!("unrecognised answer '{}' — answer y, N, or show", other);
+      }
+    }
+  }
+}
+
+fn print_bootstrap_summary(cfg: &Config) {
+  let bs = &cfg.bootstrap;
+  if bs.copy.is_empty() && bs.command.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() {
+    println!("     bootstrap surface: (empty — no copies/commands/guards/no_symlinks declared)");
+    return;
+  }
+  println!("     bootstrap surface:");
+  for c in &bs.copy {
+    println!("       - copy   {} → {}", c.from, c.to);
+  }
+  for g in &bs.guard {
+    println!(
+      "       - guard  {} (on_match={}, deny={} pattern(s))",
+      g.name,
+      g.on_match,
+      g.deny_patterns.len()
+    );
+  }
+  for ns in &bs.no_symlink {
+    println!("       - no-symlink {}", ns.path);
+  }
+  for c in &bs.command {
+    println!("       - run    {} ({})", c.name, c.run);
+  }
+}
+
 pub fn shell_init_script(shell: InitShell) -> &'static str {
   match shell {
     InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
@@ -945,12 +1644,7 @@ fn print_report(report: &bootstrap::BootstrapReport) {
   println!();
   println!("bootstrap report:");
   for s in &report.steps {
-    let sigil = match s.status {
-      StepStatus::Ok => "✓",
-      StepStatus::Skipped => "·",
-      StepStatus::Warning => "!",
-      StepStatus::Failed => "✗",
-    };
+    let sigil = s.status.sigil();
     println!("  {} {}", sigil, s.label);
     if !s.detail.is_empty() {
       for line in s.detail.lines() {

@@ -1,8 +1,10 @@
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Trunk branches treated as "merge destinations" when measuring how
@@ -11,6 +13,11 @@ use std::time::Duration;
 /// convention). Hardcoded here because `branch_age` is also reachable
 /// from contexts that don't carry a `Config` (CLI smoke paths).
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
+const RECENT_COMMITS_CACHE_MAX_ENTRIES: usize = 64;
+type RecentCommitCacheKey = (PathBuf, git2::Oid, usize);
+
+static RECENT_COMMITS_CACHE: LazyLock<Mutex<HashMap<RecentCommitCacheKey, Vec<CommitRow>>>> =
+  LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
@@ -27,6 +34,41 @@ pub struct WorktreeInfo {
   /// re-shelling `git config`. Empty link = no marker dot. See
   /// `tui/ui.rs::table_marker`.
   pub link: BranchLink,
+  /// Branch age relative to the trunk baseline, pre-computed at list
+  /// time so the TUI render path never opens a fresh `git2::Repository`
+  /// per row per frame (issue #103). `None` for trunk branches and for
+  /// worktrees whose repo can't be opened — the UI renders `-`.
+  pub age: Option<Duration>,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::parse_git_log_with_author_output;
+
+  #[test]
+  fn parse_git_log_error_includes_invalid_commit_oid_text() {
+    let err = parse_git_log_with_author_output("not-an-oid\u{0}Ada\u{0}\u{0}subject\n").unwrap_err();
+    let rendered = err.to_string();
+
+    assert!(
+      rendered.contains("not-an-oid"),
+      "invalid commit oid should be included in the error, got: {}",
+      rendered
+    );
+  }
+
+  #[test]
+  fn parse_git_log_error_includes_invalid_parent_oid_text() {
+    let raw = "0123456789abcdef0123456789abcdef01234567\u{0}Ada\u{0}bad-parent\u{0}subject\n";
+    let err = parse_git_log_with_author_output(raw).unwrap_err();
+    let rendered = err.to_string();
+
+    assert!(
+      rendered.contains("bad-parent"),
+      "invalid parent oid should be included in the error, got: {}",
+      rendered
+    );
+  }
 }
 
 /// Cheap snapshot of "where are we vs. clean / upstream".
@@ -129,6 +171,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       .as_deref()
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
+    let age = branch.as_deref().and_then(|b| branch_age(repo, b));
     out.push(WorktreeInfo {
       name: workdir
         .file_name()
@@ -142,6 +185,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_prunable: false,
       status: compute_status(repo),
       link,
+      age,
     });
   }
 
@@ -155,14 +199,21 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let is_locked = matches!(wt.is_locked(), Ok(git2::WorktreeLockStatus::Locked(_)));
     let is_prunable = matches!(wt.is_prunable(None), Ok(p) if p);
 
-    // Open the worktree as a repo to read its HEAD + status.
-    let (branch, head, status) = match Repository::open(&path) {
+    // Open the worktree as a repo to read its HEAD + status + branch age.
+    // Issue #103: piggyback the age computation onto this existing open so
+    // the TUI render path no longer needs to call `Repository::open` per
+    // row per frame. Cost is the same revwalk we'd otherwise do per frame.
+    let (branch, head, status, age) = match Repository::open(&path) {
       Ok(sub) => {
         let head_ref = sub.head().ok();
         let b = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
         let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
         let s = compute_status(&sub);
-        (b, h, s)
+        // The trunk-baseline lookup must run against the main repo's
+        // branch table; the linked worktree's `sub` has the same refs DB
+        // either way (git2 shares the gitdir), so either handle works.
+        let a = b.as_deref().and_then(|name| branch_age(&sub, name));
+        (b, h, s, a)
       }
       Err(_) => (
         None,
@@ -171,6 +222,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
           unknown: true,
           ..Default::default()
         },
+        None,
       ),
     };
 
@@ -188,19 +240,35 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_prunable,
       status,
       link,
+      age,
     });
   }
 
   Ok(out)
 }
 
-/// Create a new worktree with a brand-new branch off of HEAD.
+/// Create a new worktree off of HEAD, attaching it either to a freshly
+/// created branch (the default) or — when `reuse_branch` is true — to a
+/// pre-existing local branch of the same name.
 ///
 /// Records the HEAD ref's short name into `branch.<branch_name>.gwm-base`
 /// so the review launcher (issue #75) can recover the original parent
 /// ref later — even on branches without an upstream. The write is
 /// best-effort: a config-write error does not roll the worktree back.
-pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str) -> Result<PathBuf> {
+///
+/// `reuse_branch` gates the "branch already exists" path (issue #99). The
+/// historical default silently reused a stale branch at whatever commit
+/// it referenced, resurrecting `git log` state the user never asked for.
+/// The new default refuses with `GwmError::BranchExists`; pass `true`
+/// (`--reuse-branch` on the CLI) to opt back into the legacy behaviour
+/// when attaching to an existing branch is the intent.
+pub fn add(
+  repo: &Repository,
+  name: &str,
+  target_path: &Path,
+  branch_name: &str,
+  reuse_branch: bool,
+) -> Result<PathBuf> {
   // Refuse to clobber an existing directory.
   if target_path.exists() {
     return Err(GwmError::WorktreeExists(name.into(), target_path.display().to_string()));
@@ -218,7 +286,23 @@ pub fn add(repo: &Repository, name: &str, target_path: &Path, branch_name: &str)
   let head_short = head_ref.shorthand().map(|s| s.to_string());
   let head_commit = head_ref.peel_to_commit()?;
   let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
-    Ok(b) => b,
+    Ok(b) => {
+      if !reuse_branch {
+        // Resolve the existing tip for the error message so the user
+        // sees *where* the stale ref is pointing and can decide between
+        // `--reuse-branch`, `git branch -D <name>`, or a different slug.
+        let oid = b
+          .get()
+          .target()
+          .map(|o| o.to_string())
+          .unwrap_or_else(|| "<unresolved>".into());
+        return Err(GwmError::BranchExists {
+          name: branch_name.into(),
+          oid,
+        });
+      }
+      b
+    }
     Err(_) => repo.branch(branch_name, &head_commit, false)?,
   };
   let reference = branch.into_reference();
@@ -249,15 +333,19 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
     Err(_) => None,
   };
 
+  // Prune admin files (.git/worktrees/<name>) FIRST so a subsequent
+  // filesystem failure cannot leave a "phantom worktree" (issue #98):
+  // directory gone but `repo.worktrees()` still listing the name. The
+  // reverse ordering forced users into a manual `gwm prune` recovery
+  // after any partial failure.
+  let mut opts = WorktreePruneOptions::new();
+  opts.valid(true).locked(true).working_tree(true);
+  wt.prune(Some(&mut opts))?;
+
   // Physical removal — git2's prune does NOT delete the work tree directory itself.
   if path.exists() {
     std::fs::remove_dir_all(&path)?;
   }
-
-  // Force prune (admin files in .git/worktrees/<name>).
-  let mut opts = WorktreePruneOptions::new();
-  opts.valid(true).locked(true).working_tree(true);
-  wt.prune(Some(&mut opts))?;
 
   if delete_branch {
     if let Some(b) = branch_name {
@@ -294,55 +382,119 @@ pub fn prune(repo: &Repository) -> Result<usize> {
 
 /// A commit row pulled from `git log` for the Recent Commits sidebar block.
 /// Mirrors lazygit's columnar layout (hash + author + subject) so the
-/// renderer can lay out one commit per visual line. Hashes are full
-/// 40-char SHAs; the renderer trims them on display to a fixed length
-/// (the `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/ui.rs`, currently
-/// 8 chars, matching lazygit's `Gui.CommitHashLength` default). Not
+/// renderer can lay out one commit per visual line. Hashes are parsed
+/// into binary OIDs once, then formatted on display to a fixed length (the
+/// `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/ui.rs`, currently 8
+/// chars, matching lazygit's `Gui.CommitHashLength` default). Not
 /// user-configurable today — change the constant to retune.
 /// `parents.len() >= 2` flags a merge commit, which the renderer marks
 /// with `◎` instead of `○`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRow {
-  pub hash: String,
+  pub hash: git2::Oid,
   pub author: String,
-  pub parents: Vec<String>,
+  pub parents: Vec<git2::Oid>,
   pub subject: String,
 }
 
-/// Shell out to `git log --format='%H%x00%aN%x00%P%x00%s' -n <n>` inside
-/// `path` and parse the NUL-separated output into [`CommitRow`]s. The TUI
-/// sidebar uses this for the Recent Commits block — the NUL separator
-/// avoids ambiguity when a subject contains the usual ` `, `|`, or tab
-/// characters lazygit also relies on. The `%P` field carries the
-/// space-separated list of parent SHAs (empty for the seed commit, one for
-/// a normal commit, two-plus for a merge).
+/// Return recent commits for the sidebar using libgit2. This is the uncached
+/// compatibility entry point; the TUI should call [`recent_commits_cached`]
+/// so repeated sidebar rebuilds for the same branch tip are a hash lookup.
 pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["log", "--format=%H%x00%aN%x00%P%x00%s", "-n"])
-    .arg(n.to_string())
-    .output()
-    .map_err(|e| GwmError::Other(format!("git log failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::Other(format!(
-      "git log exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
+  let repo = Repository::open(path)?;
+  let tip = repo.head()?.target().ok_or_else(|| GwmError::UnbornHead {
+    reason: "HEAD does not point at a commit".into(),
+  })?;
+  recent_commits_revwalk(&repo, tip, n)
+}
+
+/// Return recent commits for one worktree, memoised by branch-tip OID and
+/// limit. `WorktreeInfo.head` is populated by [`list`], so normal TUI sidebar
+/// refreshes can hit the cache without reopening the repo. Fixtures and older
+/// callers with `head = None` fall back to opening the worktree once.
+pub fn recent_commits_cached(w: &WorktreeInfo, limit: usize) -> Result<Vec<CommitRow>> {
+  let tip = worktree_head_oid(w)?;
+  let key = (recent_commits_cache_repo_key(&w.path), tip, limit);
+  if let Some(rows) = recent_commits_cache().get(&key).cloned() {
+    return Ok(rows);
   }
-  let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+
+  let repo = Repository::open(&w.path)?;
+  let rows = recent_commits_revwalk(&repo, tip, limit)?;
+  let mut cache = recent_commits_cache();
+  if cache.len() >= RECENT_COMMITS_CACHE_MAX_ENTRIES {
+    if let Some(oldest_key) = cache.keys().next().cloned() {
+      cache.remove(&oldest_key);
+    }
+  }
+  cache.insert(key, rows.clone());
+  Ok(rows)
+}
+
+fn recent_commits_cache() -> MutexGuard<'static, HashMap<RecentCommitCacheKey, Vec<CommitRow>>> {
+  match RECENT_COMMITS_CACHE.lock() {
+    Ok(cache) => cache,
+    Err(poisoned) => poisoned.into_inner(),
+  }
+}
+
+fn recent_commits_cache_repo_key(path: &Path) -> PathBuf {
+  std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn worktree_head_oid(w: &WorktreeInfo) -> Result<git2::Oid> {
+  if let Some(head) = &w.head {
+    return git2::Oid::from_str(head)
+      .map_err(|e| GwmError::Other(format!("cached worktree head '{}' is not an oid: {}", head, e)));
+  }
+
+  let repo = Repository::open(&w.path)?;
+  let head_ref = repo.head()?;
+  head_ref.target().ok_or_else(|| GwmError::UnbornHead {
+    reason: "HEAD does not point at a commit".into(),
+  })
+}
+
+fn recent_commits_revwalk(repo: &Repository, tip: git2::Oid, limit: usize) -> Result<Vec<CommitRow>> {
+  let mut walker = repo.revwalk()?;
+  walker.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
+  walker.push(tip)?;
+
+  let mut rows = Vec::new();
+  for oid in walker.take(limit) {
+    let oid = oid?;
+    let commit = repo.find_commit(oid)?;
+    rows.push(CommitRow {
+      hash: oid,
+      author: commit.author().name().unwrap_or("").to_string(),
+      parents: commit.parent_ids().collect(),
+      subject: commit.summary().unwrap_or("").to_string(),
+    });
+  }
+  Ok(rows)
+}
+
+#[cfg(test)]
+fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
   let mut rows = Vec::new();
   for line in raw.lines() {
     let mut parts = line.splitn(4, '\u{0}');
-    let hash = parts.next().unwrap_or("").to_string();
+    let hash = parts.next().unwrap_or("");
     let author = parts.next().unwrap_or("").to_string();
     let parents_field = parts.next().unwrap_or("");
     let subject = parts.next().unwrap_or("").to_string();
     if hash.is_empty() {
       continue;
     }
-    let parents: Vec<String> = parents_field.split_whitespace().map(|s| s.to_string()).collect();
+    let hash = git2::Oid::from_str(hash)
+      .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid commit oid '{}': {}", hash, e)))?;
+    let parents: Vec<git2::Oid> = parents_field
+      .split_whitespace()
+      .map(|s| {
+        git2::Oid::from_str(s)
+          .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid parent oid '{}': {}", s, e)))
+      })
+      .collect::<Result<Vec<_>>>()?;
     rows.push(CommitRow {
       hash,
       author,
@@ -362,9 +514,9 @@ pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
     .args(["log", "--oneline", "-n"])
     .arg(n.to_string())
     .output()
-    .map_err(|e| GwmError::Other(format!("git log failed to spawn: {}", e)))?;
+    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
   if !output.status.success() {
-    return Err(GwmError::Other(format!(
+    return Err(GwmError::CommandFailed(format!(
       "git log exited {}: {}",
       output.status,
       String::from_utf8_lossy(&output.stderr).trim()
@@ -381,9 +533,9 @@ pub fn git_status_short(path: &Path) -> Result<String> {
     .arg(path)
     .args(["status", "--short"])
     .output()
-    .map_err(|e| GwmError::Other(format!("git status failed to spawn: {}", e)))?;
+    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
   if !output.status.success() {
-    return Err(GwmError::Other(format!(
+    return Err(GwmError::CommandFailed(format!(
       "git status exited {}: {}",
       output.status,
       String::from_utf8_lossy(&output.stderr).trim()

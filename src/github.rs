@@ -9,6 +9,8 @@
 //! cover the JSON contract without depending on a real `gh` binary.
 
 use crate::error::{GwmError, Result};
+use crate::labels::{LabelSpec, RemoteLabel};
+use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
@@ -254,8 +256,10 @@ struct RawCheck {
 }
 
 pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
-  let raw: RawIssue =
-    serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse issue json: {}", e)))?;
+  let raw: RawIssue = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "issue",
+    source: e,
+  })?;
   let state = match raw.state.as_str() {
     "OPEN" | "open" => IssueState::Open,
     "CLOSED" | "closed" => IssueState::Closed,
@@ -272,7 +276,7 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
 }
 
 pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
-  let raw: RawPr = serde_json::from_str(s).map_err(|e| GwmError::Other(format!("failed to parse PR json: {}", e)))?;
+  let raw: RawPr = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse { kind: "pr", source: e })?;
   let state = match (raw.state.as_str(), raw.is_draft) {
     ("MERGED" | "merged", _) => PrState::Merged,
     ("CLOSED" | "closed", _) => PrState::Closed,
@@ -349,8 +353,10 @@ pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
   struct PrRef {
     number: u64,
   }
-  let arr: Vec<PrRef> =
-    serde_json::from_str(&stdout).map_err(|e| GwmError::Other(format!("failed to parse pr list json: {}", e)))?;
+  let arr: Vec<PrRef> = serde_json::from_str(&stdout).map_err(|e| GwmError::GhJsonParse {
+    kind: "pr list",
+    source: e,
+  })?;
   Ok(arr.into_iter().next().map(|p| p.number))
 }
 
@@ -377,4 +383,331 @@ pub fn issue_url(slug: &str, number: u64) -> String {
 /// Build the canonical GitHub URL for a PR, given the repo slug.
 pub fn pr_url(slug: &str, number: u64) -> String {
   format!("https://github.com/{}/pull/{}", slug, number)
+}
+
+// ---- Labels (issue #81) -------------------------------------------------
+
+const LABEL_JSON_FIELDS: &str = "name,color,description";
+const LABEL_LIST_LIMIT: &str = "1000";
+
+#[derive(Deserialize)]
+struct RawLabel2 {
+  name: String,
+  /// `color` is a documented gh-CLI invariant — every label always
+  /// carries one. We deliberately do NOT mark this `#[serde(default)]`:
+  /// if a future gh contract change drops the field, we want a hard
+  /// parse error rather than a silent empty-string that would flag
+  /// every remote label as a colour mismatch in the diff. (Copilot
+  /// review on PR #90.)
+  color: String,
+  #[serde(default)]
+  description: Option<String>,
+}
+
+/// Parse the JSON returned by `gh label list --json name,color,description`.
+/// Exposed publicly so unit tests can cover the contract without
+/// shelling out. Two normalisations happen here so callers get a
+/// uniformly-shaped `RemoteLabel`:
+///
+/// - **`color`** is lowercased. GitHub serialises hex colours in
+///   either case; the diff engine expects the lowercase form, and
+///   normalising at the parse boundary means downstream code never
+///   has to think about it.
+/// - **`description`** is left as-is. An empty `""` from GitHub
+///   round-trips as `Some("")`; the labels-diff module collapses
+///   empty strings to `None` on its own.
+pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
+  let raw: Vec<RawLabel2> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "labels",
+    source: e,
+  })?;
+  Ok(
+    raw
+      .into_iter()
+      .map(|r| RemoteLabel {
+        name: r.name,
+        description: r.description,
+        color: r.color.to_ascii_lowercase(),
+      })
+      .collect(),
+  )
+}
+
+/// Argv for `gh label list --repo <slug> --json name,color,description --limit 1000`.
+/// Extracted so the test suite can pin the contract; callers should
+/// prefer `fetch_remote_labels` which actually shells out.
+pub fn label_list_argv(slug: &str) -> Vec<String> {
+  vec![
+    "label".into(),
+    "list".into(),
+    "--repo".into(),
+    slug.into(),
+    "--json".into(),
+    LABEL_JSON_FIELDS.into(),
+    "--limit".into(),
+    LABEL_LIST_LIMIT.into(),
+  ]
+}
+
+/// Argv for `gh label create <name> --color <hex> [--description <desc>] --force --repo <slug>`.
+/// The `--force` flag is the key contract bit: GitHub's CLI uses it
+/// to mean "create OR update", which is exactly what `gwm labels
+/// push` needs (no separate "edit" call). When `description` is
+/// `None` we omit the flag entirely rather than pass `""` — gh would
+/// otherwise wipe an existing description that the user didn't intend
+/// to touch.
+pub fn label_create_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
+  let mut argv = vec![
+    "label".into(),
+    "create".into(),
+    spec.name.clone(),
+    "--repo".into(),
+    slug.into(),
+    "--color".into(),
+    spec.color.clone(),
+    "--force".into(),
+  ];
+  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("--description".into());
+    argv.push(desc.clone());
+  }
+  argv
+}
+
+/// Argv for `gh label delete <name> --repo <slug> --yes`. The `--yes`
+/// flag bypasses the interactive confirm prompt; without it gh blocks
+/// on a TTY read and `gwm labels push --prune` hangs.
+pub fn label_delete_argv(slug: &str, name: &str) -> Vec<String> {
+  vec![
+    "label".into(),
+    "delete".into(),
+    name.into(),
+    "--repo".into(),
+    slug.into(),
+    "--yes".into(),
+  ]
+}
+
+/// Run `gh label list --repo <slug> --json …` and parse the result.
+/// Returns an empty vec when the remote has no labels (which is
+/// distinct from "gh not installed" — that surfaces as
+/// `CommandFailed`).
+pub fn fetch_remote_labels(slug: &str) -> Result<Vec<RemoteLabel>> {
+  let argv = label_list_argv(slug);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  let stdout = run_gh(&args)?;
+  parse_labels_json(&stdout)
+}
+
+/// Push one label upstream via `gh label create --force`. Returns
+/// `Ok(())` on success; the caller is responsible for tracking which
+/// label was created vs. updated (the diff already knows).
+pub fn push_label(slug: &str, spec: &LabelSpec) -> Result<()> {
+  let argv = label_create_argv(slug, spec);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Delete one label on the remote via `gh label delete --yes`. Used
+/// by `gwm labels push --prune` for labels declared on the remote but
+/// not in `.gwm.toml`.
+///
+/// Validates `name` through [`crate::labels::validate_label_name`]
+/// BEFORE shelling out (issue #100). The argv-injection vector that
+/// motivates `validate_label_name` for declared labels (config side)
+/// applies equally to the prune path: `gh label delete <name>` takes
+/// the name positionally, so a remote label whose name starts with
+/// `-` (planted by an attacker who can edit the upstream label set,
+/// or by an unrelated tool predating the validator) would be parsed
+/// as a flag — `-h` no-ops the delete with a help banner, `--repo
+/// other/repo` retargets the operation. We refuse the prune with a
+/// scoped error instead of running the risky argv.
+pub fn delete_label(slug: &str, name: &str) -> Result<()> {
+  crate::labels::validate_label_name(name).map_err(|e| {
+    let inner = match e {
+      GwmError::Config(msg) => msg,
+      other => other.to_string(),
+    };
+    GwmError::Config(format!(
+      "labels (remote): {} — refusing to delete via `gh label delete`",
+      inner
+    ))
+  })?;
+  let argv = label_delete_argv(slug, name);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+// ---- Milestones (issue #82) ---------------------------------------------
+
+const MILESTONE_PER_PAGE: &str = "100";
+
+#[derive(Deserialize)]
+struct RawMilestone {
+  number: u64,
+  title: String,
+  /// Always present in the documented schema. Like `RawLabel2.color`
+  /// for labels, we deliberately do NOT mark this `#[serde(default)]`:
+  /// a contract change would surface as a hard parse error rather than
+  /// silently flagging every remote milestone as a state mismatch.
+  state: String,
+  #[serde(default)]
+  description: Option<String>,
+  #[serde(default)]
+  due_on: Option<String>,
+}
+
+/// Parse the JSON returned by `gh api repos/:owner/:repo/milestones?state=all`.
+/// Exposed publicly so unit tests can cover the contract without
+/// shelling out. The `state` field is mapped to the strict
+/// `MilestoneState` enum — an unknown value is a hard error rather
+/// than a silent third state on the diff side.
+pub fn parse_milestones_json(s: &str) -> Result<Vec<RemoteMilestone>> {
+  let raw: Vec<RawMilestone> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "milestones",
+    source: e,
+  })?;
+  raw
+    .into_iter()
+    .map(|r| {
+      let state = match r.state.as_str() {
+        "open" => MilestoneState::Open,
+        "closed" => MilestoneState::Closed,
+        other => {
+          return Err(GwmError::Other(format!(
+            "milestone '{}' has unknown state '{}': expected 'open' or 'closed'",
+            r.title, other
+          )))
+        }
+      };
+      Ok(RemoteMilestone {
+        number: r.number,
+        title: r.title,
+        description: r.description,
+        due_on: r.due_on,
+        state,
+      })
+    })
+    .collect()
+}
+
+/// Argv for `gh api --paginate repos/<slug>/milestones?state=all&per_page=100`.
+///
+/// Two contract bits worth pinning:
+/// - `state=all` — without it, the default endpoint only lists `open`
+///   milestones and `gwm milestones push --prune` would silently
+///   leave closed ones in place.
+/// - `--paginate` — GitHub caps `per_page` at 100. Without paginating
+///   we'd diff against a truncated remote set for repos with more
+///   than 100 milestones, leading to bogus `create` rows and a
+///   dangerously confusing `--prune` (Copilot review on PR #92).
+pub fn milestone_list_argv(slug: &str) -> Vec<String> {
+  vec![
+    "api".into(),
+    "--paginate".into(),
+    format!("repos/{}/milestones?state=all&per_page={}", slug, MILESTONE_PER_PAGE),
+  ]
+}
+
+/// Argv for `gh api -X POST repos/<slug>/milestones -f title=… [-f
+/// description=…] [-f due_on=…] -f state=…`. Each optional field is
+/// omitted entirely when absent — `gh` would otherwise wipe the
+/// existing remote value.
+pub fn milestone_create_argv(slug: &str, spec: &MilestoneSpec) -> Vec<String> {
+  let mut argv = vec![
+    "api".into(),
+    "-X".into(),
+    "POST".into(),
+    format!("repos/{}/milestones", slug),
+    "-f".into(),
+    format!("title={}", spec.title),
+    "-f".into(),
+    format!("state={}", spec.state.as_str()),
+  ];
+  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("description={}", desc));
+  }
+  if let Some(due) = spec.due_on.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("due_on={}", due));
+  }
+  argv
+}
+
+/// Argv for `gh api -X PATCH repos/<slug>/milestones/<number> -f …`.
+/// Same omission rules as `milestone_create_argv`: absent optionals
+/// are skipped so the remote value isn't wiped.
+pub fn milestone_update_argv(slug: &str, number: u64, spec: &MilestoneSpec) -> Vec<String> {
+  let mut argv = vec![
+    "api".into(),
+    "-X".into(),
+    "PATCH".into(),
+    format!("repos/{}/milestones/{}", slug, number),
+    "-f".into(),
+    format!("title={}", spec.title),
+    "-f".into(),
+    format!("state={}", spec.state.as_str()),
+  ];
+  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("description={}", desc));
+  }
+  if let Some(due) = spec.due_on.as_ref().filter(|s| !s.is_empty()) {
+    argv.push("-f".into());
+    argv.push(format!("due_on={}", due));
+  }
+  argv
+}
+
+/// Argv for `gh api -X DELETE repos/<slug>/milestones/<number>`.
+/// `gh api -X DELETE` is non-interactive by construction (no TTY
+/// confirm), so there's no `--yes` equivalent to add.
+pub fn milestone_delete_argv(slug: &str, number: u64) -> Vec<String> {
+  vec![
+    "api".into(),
+    "-X".into(),
+    "DELETE".into(),
+    format!("repos/{}/milestones/{}", slug, number),
+  ]
+}
+
+/// Run `gh api repos/<slug>/milestones?state=all` and parse the
+/// result. Returns an empty vec when the remote has no milestones.
+pub fn fetch_remote_milestones(slug: &str) -> Result<Vec<RemoteMilestone>> {
+  let argv = milestone_list_argv(slug);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  let stdout = run_gh(&args)?;
+  parse_milestones_json(&stdout)
+}
+
+/// Create one milestone upstream via `gh api -X POST`. Returns
+/// `Ok(())` — the caller already has the spec; we don't bother
+/// parsing the response back into a `RemoteMilestone`.
+pub fn create_milestone(slug: &str, spec: &MilestoneSpec) -> Result<()> {
+  let argv = milestone_create_argv(slug, spec);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Update one milestone upstream via `gh api -X PATCH`. `number` is
+/// the GitHub-issued identifier carried through `MilestoneUpdate`.
+pub fn update_milestone(slug: &str, number: u64, spec: &MilestoneSpec) -> Result<()> {
+  let argv = milestone_update_argv(slug, number, spec);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Delete one milestone on the remote via `gh api -X DELETE`. Used
+/// by `gwm milestones push --prune` for milestones declared on the
+/// remote but not in `.gwm.toml`.
+pub fn delete_milestone(slug: &str, number: u64) -> Result<()> {
+  let argv = milestone_delete_argv(slug, number);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
 }

@@ -25,6 +25,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
@@ -79,9 +80,9 @@ fn enter_create_initializes_form() {
   let (_dir, mut app) = make_app();
   app.enter_create();
   assert_eq!(app.view, View::Create);
-  assert_eq!(app.create_field, Field::Type);
-  assert!(app.create_issue.is_empty());
-  assert!(app.create_desc.is_empty());
+  assert_eq!(app.create_form.field, Field::Type);
+  assert!(app.create_form.issue.is_empty());
+  assert!(app.create_form.desc.is_empty());
 }
 
 #[test]
@@ -89,13 +90,13 @@ fn create_field_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
   app.create_next_field();
-  assert_eq!(app.create_field, Field::Issue);
+  assert_eq!(app.create_form.field, Field::Issue);
   app.create_next_field();
-  assert_eq!(app.create_field, Field::Desc);
+  assert_eq!(app.create_form.field, Field::Desc);
   app.create_next_field();
-  assert_eq!(app.create_field, Field::Type);
+  assert_eq!(app.create_form.field, Field::Type);
   app.create_prev_field();
-  assert_eq!(app.create_field, Field::Desc);
+  assert_eq!(app.create_form.field, Field::Desc);
 }
 
 #[test]
@@ -103,33 +104,33 @@ fn create_type_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
   app.create_prev_type();
-  assert_eq!(app.create_type_index, BRANCH_TYPES.len() - 1);
+  assert_eq!(app.create_form.type_index, BRANCH_TYPES.len() - 1);
   app.create_next_type();
-  assert_eq!(app.create_type_index, 0);
+  assert_eq!(app.create_form.type_index, 0);
 }
 
 #[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();
-  app.create_field = Field::Issue;
+  app.create_form.field = Field::Issue;
   for c in "12a3".chars() {
     app.create_push_char(c);
   }
-  assert_eq!(app.create_issue, "123");
+  assert_eq!(app.create_form.issue, "123");
 }
 
 #[test]
 fn create_push_accepts_desc_chars() {
   let (_dir, mut app) = make_app();
   app.enter_create();
-  app.create_field = Field::Desc;
+  app.create_form.field = Field::Desc;
   for c in "foo-bar".chars() {
     app.create_push_char(c);
   }
-  assert_eq!(app.create_desc, "foo-bar");
+  assert_eq!(app.create_form.desc, "foo-bar");
   app.create_pop_char();
-  assert_eq!(app.create_desc, "foo-ba");
+  assert_eq!(app.create_form.desc, "foo-ba");
 }
 
 #[test]
@@ -171,31 +172,31 @@ fn refresh_keeps_selection_in_bounds() {
 fn sidebar_open_by_default() {
   let (_dir, app) = make_app();
   assert!(
-    app.sidebar_open,
+    app.sidebar.open,
     "sidebar should default to open (will be hidden when narrow)"
   );
-  assert!(!app.sidebar_focused, "focus defaults to the worktree list");
+  assert!(!app.sidebar.focused, "focus defaults to the worktree list");
 }
 
 #[test]
 fn toggle_sidebar_flips_open_flag() {
   let (_dir, mut app) = make_app();
-  let before = app.sidebar_open;
+  let before = app.sidebar.open;
   app.toggle_sidebar();
-  assert_eq!(app.sidebar_open, !before);
+  assert_eq!(app.sidebar.open, !before);
   app.toggle_sidebar();
-  assert_eq!(app.sidebar_open, before);
+  assert_eq!(app.sidebar.open, before);
 }
 
 #[test]
 fn toggle_sidebar_when_closed_resets_focus_to_list() {
   let (_dir, mut app) = make_app();
-  app.sidebar_focused = true;
-  app.sidebar_open = true;
+  app.sidebar.focused = true;
+  app.sidebar.open = true;
   app.toggle_sidebar(); // close
-  assert!(!app.sidebar_open);
+  assert!(!app.sidebar.open);
   assert!(
-    !app.sidebar_focused,
+    !app.sidebar.focused,
     "closing the sidebar must drop focus back to the list"
   );
 }
@@ -203,15 +204,15 @@ fn toggle_sidebar_when_closed_resets_focus_to_list() {
 #[test]
 fn toggle_focus_only_works_when_sidebar_open() {
   let (_dir, mut app) = make_app();
-  app.sidebar_open = false;
+  app.sidebar.open = false;
   app.toggle_focus();
-  assert!(!app.sidebar_focused, "focus cannot move to a hidden sidebar");
+  assert!(!app.sidebar.focused, "focus cannot move to a hidden sidebar");
 
-  app.sidebar_open = true;
+  app.sidebar.open = true;
   app.toggle_focus();
-  assert!(app.sidebar_focused);
+  assert!(app.sidebar.focused);
   app.toggle_focus();
-  assert!(!app.sidebar_focused);
+  assert!(!app.sidebar.focused);
 }
 
 #[test]
@@ -256,30 +257,30 @@ fn pending_g_resets_on_other_key() {
 #[test]
 fn sidebar_scroll_clamps_to_zero() {
   let (_dir, mut app) = make_app();
-  assert_eq!(app.sidebar_scroll, 0);
+  assert_eq!(app.sidebar.scroll, 0);
   app.sidebar_scroll_up();
-  assert_eq!(app.sidebar_scroll, 0, "scrolling up from 0 stays at 0");
+  assert_eq!(app.sidebar.scroll, 0, "scrolling up from 0 stays at 0");
 
   // The renderer normally publishes a max bound; simulate enough room for scroll.
-  app.sidebar_max_scroll = 5;
+  app.sidebar.max_scroll = 5;
   app.sidebar_scroll_down();
-  assert_eq!(app.sidebar_scroll, 1);
+  assert_eq!(app.sidebar.scroll, 1);
   app.sidebar_scroll_up();
-  assert_eq!(app.sidebar_scroll, 0);
+  assert_eq!(app.sidebar.scroll, 0);
 }
 
 #[test]
 fn sidebar_scroll_clamps_at_max() {
-  // The renderer sets `sidebar_max_scroll`. Scrolling past it must stop there
+  // The renderer sets `sidebar.max_scroll`. Scrolling past it must stop there
   // so the user can't push the panel content entirely off-screen.
   let (_dir, mut app) = make_app();
-  app.sidebar_max_scroll = 3;
+  app.sidebar.max_scroll = 3;
   app.sidebar_scroll_down();
   app.sidebar_scroll_down();
   app.sidebar_scroll_down();
-  assert_eq!(app.sidebar_scroll, 3);
+  assert_eq!(app.sidebar.scroll, 3);
   app.sidebar_scroll_down();
-  assert_eq!(app.sidebar_scroll, 3, "scrolling beyond max must clamp");
+  assert_eq!(app.sidebar.scroll, 3, "scrolling beyond max must clamp");
 }
 
 #[test]
@@ -287,9 +288,9 @@ fn focus_routes_navigation_to_sidebar() {
   // When sidebar is focused, next()/prev() should NOT move the list selection.
   let (_dir, mut app) = make_app();
   app.list_state.select(Some(0));
-  app.sidebar_open = true;
-  app.sidebar_focused = true;
-  app.sidebar_max_scroll = 5; // pretend the renderer has populated this
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
+  app.sidebar.max_scroll = 5; // pretend the renderer has populated this
 
   app.next();
   assert_eq!(
@@ -298,13 +299,13 @@ fn focus_routes_navigation_to_sidebar() {
     "list must stay put when sidebar has focus"
   );
   assert!(
-    app.sidebar_scroll >= 1,
+    app.sidebar.scroll >= 1,
     "next() must scroll the sidebar when it has focus"
   );
 
   app.prev();
   assert_eq!(app.list_state.selected(), Some(0));
-  assert_eq!(app.sidebar_scroll, 0, "prev() scrolled back up");
+  assert_eq!(app.sidebar.scroll, 0, "prev() scrolled back up");
 }
 
 #[test]
@@ -312,21 +313,50 @@ fn next_prev_invalidate_sidebar_cache() {
   // Moving selection must drop any cached sidebar content so the new
   // worktree's preview is recomputed on the next frame.
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.next();
-  assert!(app.sidebar_cache.is_none(), "next() must invalidate the sidebar cache");
+  assert!(app.sidebar.cache.is_none(), "next() must invalidate the sidebar cache");
 
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.prev();
-  assert!(app.sidebar_cache.is_none(), "prev() must invalidate the sidebar cache");
+  assert!(app.sidebar.cache.is_none(), "prev() must invalidate the sidebar cache");
 }
 
 #[test]
 fn refresh_invalidates_sidebar_cache() {
   let (_dir, mut app) = make_app();
-  app.sidebar_cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
   app.refresh().unwrap();
-  assert!(app.sidebar_cache.is_none());
+  assert!(app.sidebar.cache.is_none());
+}
+
+#[test]
+fn on_navigation_resets_scroll_and_invalidates_sidebar_cache() {
+  // Pre-extraction, `next`, `prev`, `first`, `last` each repeated the
+  // verbatim triple `sidebar_scroll = 0; invalidate_sidebar_cache();
+  // refresh_link();`. Issue #127 collapses the first two pieces into
+  // `SidebarState::on_navigation` and pairs them with `refresh_link()`
+  // inside `App::on_navigation`, so the next time a navigation method
+  // needs the reset, it goes through this single entry point.
+  //
+  // This integration test asserts the two observable pieces from this
+  // fixture: scroll resets to 0, cache drops. `refresh_link()` also
+  // runs (it's wired into `App::on_navigation`) but can't be observed
+  // here — the test repo has no GitHub remote, so the link stays
+  // `BranchLink::empty()` whether `refresh_link()` ran or not. The
+  // unit tests for `SidebarState::on_navigation` cover the sub-struct
+  // half of the contract in isolation.
+  let (_dir, mut app) = make_app();
+  app.sidebar.scroll = 7;
+  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+
+  app.on_navigation();
+
+  assert_eq!(app.sidebar.scroll, 0, "on_navigation must reset scroll to 0");
+  assert!(
+    app.sidebar.cache.is_none(),
+    "on_navigation must drop the cached sidebar sections"
+  );
 }
 
 // ---- fuzzy filter (issue #21) -------------------------------------------
@@ -334,8 +364,8 @@ fn refresh_invalidates_sidebar_cache() {
 #[test]
 fn filter_state_defaults_to_inactive_and_empty() {
   let (_dir, app) = make_app();
-  assert!(!app.filter_active, "filter must default to inactive");
-  assert!(app.filter_query.is_empty(), "filter query must default to empty");
+  assert!(!app.filter.active, "filter must default to inactive");
+  assert!(app.filter.query().is_empty(), "filter query must default to empty");
 }
 
 #[test]
@@ -345,7 +375,7 @@ fn enter_filter_activates_capture_and_disarms_gg() {
   assert!(app.pending_g);
 
   app.enter_filter();
-  assert!(app.filter_active);
+  assert!(app.filter.active);
   assert!(
     !app.pending_g,
     "opening the filter bar must drop any half-typed gg motion"
@@ -363,12 +393,12 @@ fn enter_filter_drops_sidebar_focus() {
   // returns to the table" contract. Opening the filter bar must therefore
   // pre-emptively pull focus back to the list.
   let (_dir, mut app) = make_app();
-  app.sidebar_open = true;
-  app.sidebar_focused = true;
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
 
   app.enter_filter();
   assert!(
-    !app.sidebar_focused,
+    !app.sidebar.focused,
     "opening the filter bar must hand focus back to the list"
   );
 }
@@ -378,10 +408,10 @@ fn enter_filter_preserves_existing_query() {
   // Hitting `/` on a sticky filter re-opens the bar so the user can refine
   // it; only Esc clears.
   let (_dir, mut app) = make_app();
-  app.filter_query = "auth".into();
+  app.filter.set_query("auth".into());
   app.enter_filter();
-  assert_eq!(app.filter_query, "auth");
-  assert!(app.filter_active);
+  assert_eq!(app.filter.query(), "auth");
+  assert!(app.filter.active);
 }
 
 #[test]
@@ -391,16 +421,16 @@ fn filter_push_char_appends_to_query() {
   for c in "tui".chars() {
     app.filter_push_char(c);
   }
-  assert_eq!(app.filter_query, "tui");
+  assert_eq!(app.filter.query(), "tui");
 }
 
 #[test]
 fn filter_pop_char_removes_last_char() {
   let (_dir, mut app) = make_app();
   app.enter_filter();
-  app.filter_query = "tuix".into();
+  app.filter.set_query("tuix".into());
   app.filter_pop_char();
-  assert_eq!(app.filter_query, "tui");
+  assert_eq!(app.filter.query(), "tui");
 }
 
 #[test]
@@ -408,8 +438,8 @@ fn filter_pop_char_on_empty_is_noop() {
   let (_dir, mut app) = make_app();
   app.enter_filter();
   app.filter_pop_char();
-  assert_eq!(app.filter_query, "");
-  assert!(app.filter_active, "popping an empty query must not exit filter mode");
+  assert_eq!(app.filter.query(), "");
+  assert!(app.filter.active, "popping an empty query must not exit filter mode");
 }
 
 #[test]
@@ -417,10 +447,10 @@ fn exit_filter_keep_disables_capture_keeps_query() {
   // Enter behaviour: filter sticks, navigation returns to the list.
   let (_dir, mut app) = make_app();
   app.enter_filter();
-  app.filter_query = "auth".into();
+  app.filter.set_query("auth".into());
   app.exit_filter_keep();
-  assert!(!app.filter_active);
-  assert_eq!(app.filter_query, "auth", "Enter must not wipe the query");
+  assert!(!app.filter.active);
+  assert_eq!(app.filter.query(), "auth", "Enter must not wipe the query");
 }
 
 #[test]
@@ -428,10 +458,10 @@ fn exit_filter_cancel_clears_query() {
   // Esc behaviour: full list back, query gone.
   let (_dir, mut app) = make_app();
   app.enter_filter();
-  app.filter_query = "auth".into();
+  app.filter.set_query("auth".into());
   app.exit_filter_cancel();
-  assert!(!app.filter_active);
-  assert!(app.filter_query.is_empty(), "Esc must clear the query");
+  assert!(!app.filter.active);
+  assert!(app.filter.query().is_empty(), "Esc must clear the query");
 }
 
 #[test]
@@ -442,7 +472,7 @@ fn filtered_indices_returns_all_when_query_empty() {
     worktree_fixture("beta"),
     worktree_fixture("gamma"),
   ];
-  let idx = app.filtered_indices();
+  let idx: Vec<usize> = app.filtered_indices().to_vec();
   assert_eq!(idx, vec![0, 1, 2], "empty query is the identity over worktrees");
 }
 
@@ -454,9 +484,9 @@ fn filtered_indices_keeps_only_matching_worktrees() {
     worktree_fixture("feat-2-cli-completions"),
     worktree_fixture("fix-3-locked-worktree"),
   ];
-  app.filter_query = "tui".into();
+  app.filter.set_query("tui".into());
 
-  let idx = app.filtered_indices();
+  let idx: Vec<usize> = app.filtered_indices().to_vec();
   let names: Vec<&str> = idx.iter().map(|&i| app.worktrees[i].name.as_str()).collect();
   assert_eq!(
     names,
@@ -478,7 +508,7 @@ fn filtered_indices_supports_subsequence_match() {
     worktree_fixture("a-foo-u-bar-t-baz-h-qux"),
     worktree_fixture("chore-1-bump-deps"),
   ];
-  app.filter_query = "auth".into();
+  app.filter.set_query("auth".into());
   // Sanity-guard the precondition: if a future refactor introduces an `auth`
   // substring into the fixture, the test would silently degrade to a
   // substring check again.
@@ -487,7 +517,7 @@ fn filtered_indices_supports_subsequence_match() {
     "fixture must not contain 'auth' as a substring or the test stops covering subsequence"
   );
 
-  let idx = app.filtered_indices();
+  let idx: Vec<usize> = app.filtered_indices().to_vec();
   assert_eq!(idx.len(), 1);
   assert_eq!(app.worktrees[idx[0]].name, "a-foo-u-bar-t-baz-h-qux");
 }
@@ -505,9 +535,9 @@ fn filtered_indices_ranks_substring_above_subsequence() {
     // direct substring of "auth"
     worktree_fixture("auth-service"),
   ];
-  app.filter_query = "auth".into();
+  app.filter.set_query("auth".into());
 
-  let idx = app.filtered_indices();
+  let idx: Vec<usize> = app.filtered_indices().to_vec();
   assert!(!idx.is_empty(), "at least the substring candidate must match");
   assert_eq!(
     app.worktrees[idx[0]].name, "auth-service",
@@ -519,7 +549,7 @@ fn filtered_indices_ranks_substring_above_subsequence() {
 fn filtered_indices_skips_when_no_match() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
-  app.filter_query = "zzzz".into();
+  app.filter.set_query("zzzz".into());
   assert!(app.filtered_indices().is_empty());
 }
 
@@ -533,7 +563,7 @@ fn selected_returns_filtered_worktree() {
     worktree_fixture("authentication"),
     worktree_fixture("beta"),
   ];
-  app.filter_query = "auth".into();
+  app.filter.set_query("auth".into());
   app.list_state.select(Some(0));
 
   let sel = app.selected().expect("filtered selection must resolve");
@@ -544,7 +574,7 @@ fn selected_returns_filtered_worktree() {
 fn selected_returns_none_when_filter_matches_nothing() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
-  app.filter_query = "zzzz".into();
+  app.filter.set_query("zzzz".into());
   app.list_state.select(Some(0));
   assert!(app.selected().is_none());
 }
@@ -557,7 +587,7 @@ fn next_navigates_within_filtered_subset_and_wraps() {
     worktree_fixture("foo-a"),
     worktree_fixture("foo-b"),
   ];
-  app.filter_query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(0));
 
   app.next();
@@ -578,7 +608,7 @@ fn prev_navigates_within_filtered_subset_and_wraps() {
     worktree_fixture("foo-a"),
     worktree_fixture("foo-b"),
   ];
-  app.filter_query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(0));
 
   app.prev();
@@ -595,7 +625,7 @@ fn first_and_last_jump_inside_filtered_subset() {
     worktree_fixture("foo-2"),
     worktree_fixture("gamma"),
   ];
-  app.filter_query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(1));
 
   app.first();
@@ -614,14 +644,14 @@ fn filter_push_clamps_selection_when_subset_shrinks() {
   // selection must clamp instead of dangling past the new end.
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("foo-bar"), worktree_fixture("foo-baz-xx")];
-  app.filter_query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(1));
 
   // Typing more reduces the match set to just "foo-bar".
   for c in "-bar".chars() {
     app.filter_push_char(c);
   }
-  let filtered = app.filtered_indices();
+  let filtered: Vec<usize> = app.filtered_indices().to_vec();
   assert_eq!(filtered.len(), 1, "only foo-bar should still match foo-bar");
   assert_eq!(
     app.list_state.selected(),
@@ -640,11 +670,11 @@ fn exit_filter_cancel_restores_full_list_selection() {
     worktree_fixture("foo"),
     worktree_fixture("beta"),
   ];
-  app.filter_query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(0));
 
   app.exit_filter_cancel();
-  assert!(app.filter_query.is_empty());
+  assert!(app.filter.query().is_empty());
   assert_eq!(app.filtered_indices(), vec![0, 1, 2]);
   // Selection from the filtered view (index 0) remains a valid index in the
   // full list (index 0). The clamp logic doesn't move it forward, only back.
@@ -682,7 +712,7 @@ fn new_picker_at_opens_filter_bar() {
   // narrow the list; opening the bar saves one keystroke.
   let (dir, _) = init_repo();
   let app = App::new_picker_at(Some(dir.path())).unwrap();
-  assert!(app.filter_active, "picker mode must open with the filter bar active");
+  assert!(app.filter.active, "picker mode must open with the filter bar active");
 }
 
 #[test]
@@ -890,10 +920,7 @@ fn confirm_press_y_in_classic_mode_fires_immediately() {
   // delete_branch OFF → classic flow
   let action = app.confirm_press_y(Instant::now());
   assert_eq!(action, ConfirmKeyAction::FireNow);
-  assert!(
-    app.confirm_countdown_started_at.is_none(),
-    "classic mode must never set the timer"
-  );
+  assert!(!app.confirm.is_armed(), "classic mode must never set the timer");
 }
 
 #[test]
@@ -903,7 +930,11 @@ fn confirm_press_y_in_countdown_mode_arms_the_timer() {
   let now = Instant::now();
   let action = app.confirm_press_y(now);
   assert_eq!(action, ConfirmKeyAction::Armed);
-  assert_eq!(app.confirm_countdown_started_at, Some(now));
+  assert!(app.confirm.is_armed());
+  // Anchor is exactly `now`: zero elapsed means progress is 0.0. This
+  // pins the anchor through the public API instead of reading the
+  // (now private since #131) raw `started_at` field.
+  assert_eq!(app.confirm.progress(now, app.confirm_countdown_total()), 0.0);
 }
 
 #[test]
@@ -915,7 +946,7 @@ fn confirm_press_y_a_second_time_disarms_the_timer() {
   let t1 = t0 + Duration::from_millis(500);
   let action = app.confirm_press_y(t1);
   assert_eq!(action, ConfirmKeyAction::Disarmed);
-  assert!(app.confirm_countdown_started_at.is_none());
+  assert!(!app.confirm.is_armed());
 }
 
 #[test]
@@ -924,13 +955,10 @@ fn confirm_dismiss_resets_timer_and_returns_to_list() {
   app.toggle_delete_branch();
   app.view = View::Confirm;
   app.confirm_press_y(Instant::now());
-  assert!(app.confirm_countdown_started_at.is_some());
+  assert!(app.confirm.is_armed());
   app.confirm_dismiss();
   assert_eq!(app.view, View::List);
-  assert!(
-    app.confirm_countdown_started_at.is_none(),
-    "Esc/n must always disarm the countdown"
-  );
+  assert!(!app.confirm.is_armed(), "Esc/n must always disarm the countdown");
 }
 
 #[test]
@@ -948,10 +976,7 @@ fn tick_before_duration_is_pending() {
   app.confirm_press_y(t0);
   let outcome = app.tick_confirm_countdown(t0 + Duration::from_millis(1500));
   assert_eq!(outcome, CountdownTickOutcome::Pending);
-  assert!(
-    app.confirm_countdown_started_at.is_some(),
-    "pending tick must not clear the timer"
-  );
+  assert!(app.confirm.is_armed(), "pending tick must not clear the timer");
 }
 
 #[test]
@@ -1188,13 +1213,18 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
+  // Post-#138 the cache is keyed by number; the App-level
+  // `*_fetch_state()` wrappers resolve via the current link, so they
+  // surface the linked issue (42 from the branch name) here. The PR
+  // (#61) isn't linked on this branch — read it via the keyed
+  // accessor on the underlying `GitHubFetch` directly.
   match app.issue_fetch_state() {
     GitHubFetchState::Loaded(_) => {}
-    other => panic!("expected Loaded, got {:?}", other),
+    other => panic!("expected Loaded for linked issue 42, got {:?}", other),
   }
-  match app.pr_fetch_state() {
+  match app.github.pr_fetch_state(61) {
     GitHubFetchState::Loaded(_) => {}
-    other => panic!("expected Loaded, got {:?}", other),
+    other => panic!("expected Loaded for stamped pr 61, got {:?}", other),
   }
 }
 
@@ -1789,6 +1819,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
       unknown: false,
     },
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
@@ -2142,6 +2173,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    age: None,
   }
 }
 
@@ -2169,6 +2201,60 @@ fn recent_commits_lines_returns_all_when_under_limit() {
     1,
     "init_repo has 1 commit, asking for 100 should still return 1, got {}",
     lines.len()
+  );
+}
+
+#[test]
+fn recent_commits_lines_reuses_cached_rows_for_unchanged_head() {
+  let (dir, repo) = init_repo();
+  add_commits(&repo, 3);
+  let mut w = worktree_pointing_at_dir(dir.path());
+  w.head = Some(repo.head().unwrap().target().unwrap().to_string());
+
+  let first = recent_commits_lines(&w, 4);
+  let first_text: Vec<String> = first
+    .iter()
+    .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+    .collect();
+  drop(repo);
+
+  std::fs::rename(dir.path().join(".git"), dir.path().join(".git.hidden")).unwrap();
+  let second = recent_commits_lines(&w, 4);
+  let second_text: Vec<String> = second
+    .iter()
+    .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
+    .collect();
+
+  assert_eq!(
+    second_text, first_text,
+    "unchanged head+limit should reuse cached recent commit rows instead of re-reading the repo"
+  );
+}
+
+#[test]
+fn recent_commits_cache_is_scoped_to_worktree_path() {
+  let (dir, repo) = init_repo();
+  let mut cached = worktree_pointing_at_dir(dir.path());
+  cached.head = Some(repo.head().unwrap().target().unwrap().to_string());
+
+  let first = recent_commits_lines(&cached, 1);
+  let first_text: String = first[0].spans.iter().map(|span| span.content.as_ref()).collect();
+
+  let other = tempfile::TempDir::new().unwrap();
+  let mut same_oid_different_path = worktree_pointing_at_dir(other.path());
+  same_oid_different_path.head = cached.head.clone();
+
+  let second = recent_commits_lines(&same_oid_different_path, 1);
+  let second_text: String = second[0].spans.iter().map(|span| span.content.as_ref()).collect();
+
+  assert!(
+    second_text.starts_with("! "),
+    "same OID in a different worktree path must miss the cache, got: {}",
+    second_text
+  );
+  assert_ne!(
+    second_text, first_text,
+    "recent commit cache must not leak rows across repositories that share an OID"
   );
 }
 
@@ -2449,7 +2535,7 @@ fn graph_pipe_set_first_commit_seeds_starts_pipe() {
   assert!(
     pipes[0]
       .iter()
-      .any(|p| p.kind == PipeKind::Starts && p.from_hash == "a"),
+      .any(|p| p.kind == PipeKind::Starts && p.from_hash == test_row("a", &[]).hash),
     "first row must contain a STARTS pipe whose from_hash is the commit itself, got {:?}",
     pipes[0]
   );
@@ -2500,11 +2586,13 @@ fn graph_row_width_is_deterministic_on_commit_list() {
 #[test]
 fn graph_render_pipe_set_handles_single_pipe_starts() {
   use gwm::tui::commit_graph::Pipe;
+  let from = test_row("a", &[]);
+  let to = test_row("b", &[]);
   let pipes = vec![Pipe {
     from_pos: 0,
     to_pos: 0,
-    from_hash: "a".into(),
-    to_hash: "b".into(),
+    from_hash: from.hash,
+    to_hash: to.hash,
     kind: PipeKind::Starts,
   }];
   let spans = render_pipe_set(&pipes);
@@ -2592,4 +2680,301 @@ fn recent_commits_line_carries_subject_unclipped() {
     "must not pre-emptively truncate with ellipsis: {:?}",
     joined
   );
+}
+
+// --- TOFU trust gate, TUI side (issue #95, PR #113 follow-up) -----------
+//
+// `check_trust_for_bootstrap` is the silent gate shared by
+// `submit_create` and `bootstrap_selected`. These tests exercise it
+// directly — driving the full event loop through `submit_create` would
+// require a real worktree base + `worktree::add`, which is orthogonal
+// to the security policy under test. The two `submit_create_*` /
+// `bootstrap_selected_*` integration tests at the bottom of this
+// section verify the actual call-site wiring.
+
+use gwm::trust::TrustMode;
+
+/// Build an App whose workdir already has a `.gwm.toml` ready to be
+/// hashed by the gate. Returns the dir keepalive + the App (with
+/// `trust_mode = Prompt` by default).
+fn app_with_config(toml_body: &str) -> (tempfile::TempDir, App) {
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), toml_body).unwrap();
+  let app = App::new_at(Some(dir.path())).unwrap();
+  (dir, app)
+}
+
+#[test]
+fn tui_gate_passes_when_no_gwm_toml_present() {
+  // The CLI gate is a no-op when `.gwm.toml` doesn't exist — same
+  // contract on the TUI side. Construction with `init_repo`'s empty
+  // workdir already covers this.
+  let (_dir, app) = make_app();
+  assert!(
+    matches!(app.check_trust_for_bootstrap(), Ok(None)),
+    "no .gwm.toml → gate must clear"
+  );
+}
+
+#[test]
+fn tui_gate_passes_on_empty_bootstrap_surface() {
+  // A `.gwm.toml` with only `[worktree]` (no executable surface)
+  // carries no RCE risk. Prompting in that case would just train
+  // the user to mash `y` — same UX bug the CLI gate avoids.
+  let (_dir, app) = app_with_config(
+    r#"[worktree]
+base = "/tmp/never-used"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  );
+  assert!(
+    matches!(app.check_trust_for_bootstrap(), Ok(None)),
+    "empty surface → gate must clear"
+  );
+}
+
+#[test]
+fn tui_gate_refuses_untrusted_config_in_prompt_mode() {
+  // Default `TrustMode::Prompt`: a `.gwm.toml` declaring a bootstrap
+  // command, no ledger entry → the gate refuses with a status-bar
+  // message. The CLI in this same position would prompt; the TUI
+  // can't (alternate-screen + no modal yet), so it points the user
+  // at the CLI gate / env bypass.
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  // Hold the env lock + clean up afterwards to keep the harness
+  // hermetic against the trust_tests env-mutation test.
+  let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
+  // SAFETY: this test is the sole env mutator inside this binary.
+  // The `trust_tests` env tests live in a separate test binary and
+  // run in their own process, so there's no cross-binary race.
+  unsafe {
+    std::env::set_var("GWM_TRUST_LEDGER", &ledger);
+    std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
+  }
+
+  let (_dir, app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "x"
+run  = "true"
+"#,
+  );
+
+  match app.check_trust_for_bootstrap() {
+    Ok(Some(msg)) => {
+      assert!(
+        msg.contains("not in trust ledger"),
+        "refuse message must point at the gate (got: {})",
+        msg
+      );
+      assert!(
+        msg.contains("--allow-bootstrap") || msg.contains("GWM_ALLOW_BOOTSTRAP"),
+        "refuse message must surface the bypass options (got: {})",
+        msg
+      );
+    }
+    other => panic!("expected refuse, got {:?}", other),
+  }
+
+  // SAFETY: restoration paired with the set/remove above.
+  unsafe {
+    match prior_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+    match prior_allow {
+      Some(v) => std::env::set_var("GWM_ALLOW_BOOTSTRAP", v),
+      None => std::env::remove_var("GWM_ALLOW_BOOTSTRAP"),
+    }
+  }
+}
+
+#[test]
+fn tui_gate_clears_under_allow_mode() {
+  // `--allow-bootstrap` (resolved to `TrustMode::Allow` at the
+  // entrypoint) bypasses the gate. Threading it through
+  // `with_trust_mode` is the whole reason for this PR follow-up —
+  // pin the wiring down.
+  let (_dir, app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "x"
+run  = "true"
+"#,
+  );
+  let app = app.with_trust_mode(TrustMode::Allow);
+  assert!(
+    matches!(app.check_trust_for_bootstrap(), Ok(None)),
+    "Allow mode → gate must clear regardless of ledger state"
+  );
+}
+
+#[test]
+fn tui_gate_refuses_under_deny_mode_even_with_safe_config() {
+  // `--deny-bootstrap` is the forensic mode: refuse even if there's
+  // nothing scary. The empty-surface short-circuit comes BEFORE the
+  // Deny check inside `evaluate`, so a truly empty surface still
+  // clears — Deny mode is meaningful only when a real surface
+  // exists. Document that with the same fixture as the prompt-mode
+  // refuse test (a config with a bootstrap.command).
+  let (_dir, app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "x"
+run  = "true"
+"#,
+  );
+  let app = app.with_trust_mode(TrustMode::Deny);
+  let outcome = app.check_trust_for_bootstrap();
+  match outcome {
+    Ok(Some(msg)) => assert!(
+      msg.contains("--deny-bootstrap"),
+      "deny refuse must name the flag (got: {})",
+      msg
+    ),
+    other => panic!("expected deny refuse, got {:?}", other),
+  }
+}
+
+#[test]
+fn tui_submit_create_aborts_on_untrusted_config() {
+  // End-to-end: `submit_create` reads the gate, sets the status bar
+  // verbatim from the refuse message, and crucially does NOT call
+  // `worktree::add` — meaning no orphaned worktree dir lands on
+  // disk. We pin that postcondition by checking the resolved
+  // worktree path is absent after the call.
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  let base_dir = tempfile::TempDir::new().unwrap();
+  let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
+  // SAFETY: see comment on `tui_gate_refuses_untrusted_config_in_prompt_mode`.
+  unsafe {
+    std::env::set_var("GWM_TRUST_LEDGER", &ledger);
+    std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
+  }
+
+  let body = format!(
+    r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+    base = base_dir.path().display(),
+  );
+  let (_dir, mut app) = app_with_config(&body);
+
+  // Drive `submit_create` end-to-end: type=feat (index in the
+  // resolved branch_types), issue + desc filled in.
+  let feat_idx = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "feat")
+    .expect("`feat` is in BRANCH_TYPES defaults");
+  app.create_form.type_index = feat_idx;
+  app.create_form.issue = "42".into();
+  app.create_form.desc = "untrusted-creates".into();
+
+  // Must succeed (no Err — Err would crash out of the event loop) and
+  // the gate must have set a refuse message.
+  app.submit_create().expect("submit_create must surface a soft refusal");
+
+  assert!(
+    app.status.contains("not in trust ledger"),
+    "status must reflect the gate refusal (got: {})",
+    app.status
+  );
+  let would_have_been = base_dir.path().join("feat-42-untrusted-creates");
+  assert!(
+    !would_have_been.exists(),
+    "worktree dir MUST NOT be created when the gate refuses (got: {})",
+    would_have_been.display()
+  );
+
+  // SAFETY: env restoration paired with set/remove above.
+  unsafe {
+    match prior_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+    match prior_allow {
+      Some(v) => std::env::set_var("GWM_ALLOW_BOOTSTRAP", v),
+      None => std::env::remove_var("GWM_ALLOW_BOOTSTRAP"),
+    }
+  }
+  let _ = BRANCH_TYPES; // keep the import live; the indirect lookup above relies on the default list.
+}
+
+#[test]
+fn tui_bootstrap_selected_aborts_on_untrusted_config() {
+  // Counterpart of the submit_create test — the `b` keybinding
+  // (re-run bootstrap on an existing worktree) takes the same gate.
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
+  let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
+  // SAFETY: same rationale as the previous test.
+  unsafe {
+    std::env::set_var("GWM_TRUST_LEDGER", &ledger);
+    std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
+  }
+
+  let (_dir, mut app) = app_with_config(
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo trapped"
+"#,
+  );
+
+  // Seed a fake selection so `selected()` returns Some — otherwise
+  // `bootstrap_selected` short-circuits before reaching the gate
+  // with "nothing selected".
+  app.worktrees = vec![worktree_fixture("dummy")];
+  app.list_state.select(Some(0));
+
+  app.bootstrap_selected();
+
+  assert!(
+    app.status.contains("not in trust ledger"),
+    "status must reflect the gate refusal (got: {})",
+    app.status
+  );
+
+  // SAFETY: env restoration paired with set/remove above.
+  unsafe {
+    match prior_ledger {
+      Some(v) => std::env::set_var("GWM_TRUST_LEDGER", v),
+      None => std::env::remove_var("GWM_TRUST_LEDGER"),
+    }
+    match prior_allow {
+      Some(v) => std::env::set_var("GWM_ALLOW_BOOTSTRAP", v),
+      None => std::env::remove_var("GWM_ALLOW_BOOTSTRAP"),
+    }
+  }
+}
+
+// ---- Issue #106: LinkTarget canonical location --------------------------
+//
+// The `LinkTarget` enum was duplicated between `cli.rs` and
+// `tui/app.rs`. Both call sites should now resolve to the SAME type
+// (re-exported from a single module) so a value created on the CLI
+// boundary can be handed to a TUI function without an `as` cast or
+// a manual conversion.
+
+#[test]
+fn link_target_is_canonical_across_cli_and_tui() {
+  // If `cli::LinkTarget` and `tui::LinkTarget` are the same type,
+  // a value assigned from one accessor binds to the other without
+  // a conversion call.
+  let from_cli: gwm::cli::LinkTarget = gwm::cli::LinkTarget::Issue;
+  let from_tui: gwm::tui::LinkTarget = from_cli;
+  assert_eq!(from_tui, gwm::tui::LinkTarget::Issue);
+
+  let from_tui: gwm::tui::LinkTarget = gwm::tui::LinkTarget::Pr;
+  let from_cli: gwm::cli::LinkTarget = from_tui;
+  assert_eq!(from_cli, gwm::cli::LinkTarget::Pr);
 }

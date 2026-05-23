@@ -1,18 +1,28 @@
+use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+use super::state::create_form::CreateForm;
+use super::state::filter::{fuzzy_match_indices, FilterState};
+use super::state::github_fetch::GitHubFetch;
+use super::state::link_prompt::LinkPrompt;
+use super::state::sidebar::SidebarState;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
+use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
-use crate::naming::{BranchSpec, BRANCH_TYPES};
+use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
 use git2::Repository;
-use nucleo_matcher::{
-  pattern::{CaseMatching, Normalization, Pattern},
-  Config as NucleoConfig, Matcher, Utf32Str,
-};
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+
+// Re-export the GitHub fetch state enum at its historical path
+// (`tui::app::GitHubFetchState`) so callers that imported it from
+// `tui::app` (or via `tui::GitHubFetchState` before the new
+// `state::github_fetch` re-export landed) keep compiling. The owning
+// module is now `tui::state::github_fetch` — see #128.
+pub use super::state::github_fetch::GitHubFetchState;
 
 /// Spawnable launcher plan handed to the event loop by
 /// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
@@ -33,34 +43,6 @@ pub struct LauncherPlan {
   pub base: Option<String>,
 }
 
-/// Outcome of pressing `y` / Enter on the confirm overlay. The event loop
-/// in `super::run_app` matches on this to decide whether to fire the
-/// delete immediately or wait for the countdown tick.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum ConfirmKeyAction {
-  /// Classic modal (delete_branch OFF, or countdown_secs = 0). The caller
-  /// must invoke `confirm_delete` right away.
-  FireNow,
-  /// Countdown just got armed by this keystroke.
-  Armed,
-  /// Countdown was armed and got disarmed by this second keystroke.
-  Disarmed,
-}
-
-/// State of the safety countdown after a tick. Returned by
-/// `App::tick_confirm_countdown` so the event loop can branch without
-/// reaching into the App's internals.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum CountdownTickOutcome {
-  /// No countdown was running (modal closed, or classic confirm modal).
-  NotArmed,
-  /// Countdown is still running — the loop should keep drawing the bar.
-  Pending,
-  /// Countdown has elapsed; the caller must invoke `confirm_delete` and
-  /// clear the modal. The App has already reset its own timer state.
-  ReadyToFire,
-}
-
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum View {
   List,
@@ -74,12 +56,12 @@ pub enum View {
   LinkPrompt,
 }
 
-/// Target of an open / link action.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LinkTarget {
-  Issue,
-  Pr,
-}
+/// Target of an open / link action. Canonical definition lives in
+/// `crate::cli::LinkTarget` (it carries the `clap::ValueEnum` derive
+/// for the CLI surface); the TUI re-exports the same type so a value
+/// crossing the cli/tui boundary doesn't need a manual conversion
+/// (issue #106).
+pub use crate::cli::LinkTarget;
 
 /// Dispatch target for the `o` key (issue #73). Resolved by
 /// [`App::resolve_open_target`] from the current selection + the
@@ -99,28 +81,11 @@ pub enum OpenTarget {
   Finder { path: PathBuf },
 }
 
-/// Stage of the two-step link prompt.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum LinkPromptStage {
-  ChooseTarget,
-  InputNumber,
-}
-
-/// State of a background GitHub fetch (issue or PR).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GitHubFetchState<T> {
-  Idle,
-  Loading,
-  Loaded(T),
-  Error(String),
-}
-
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum Field {
-  Type,
-  Issue,
-  Desc,
-}
+/// Stage of the two-step link prompt. Re-export from the extracted
+/// `LinkPrompt` sub-struct (issue #126) so the existing public surface
+/// (`gwm::tui::LinkPromptStage`) keeps compiling without callers
+/// learning the new module path.
+pub use super::state::link_prompt::LinkPromptStage;
 
 pub struct App {
   pub repo: Repository,
@@ -134,38 +99,41 @@ pub struct App {
   pub delete_branch_on_remove: bool,
 
   // Create form state
-  pub create_field: Field,
-  pub create_type_index: usize,
-  pub create_issue: String,
-  pub create_desc: String,
+  /// Create-worktree overlay state (extracted per #123). Holds field
+  /// focus, type index, and the issue/slug input buffers.
+  pub create_form: CreateForm,
+  /// Branch types displayed in the create-form picker. Resolved once at
+  /// startup from [`Config::resolved_branch_types`] so the picker
+  /// honours any `[[branch_types]]` override in `.gwm.toml` without
+  /// re-reading the file on every key event.
+  pub branch_types: Vec<BranchType>,
 
   // Bootstrap report
   pub report: Option<BootstrapReport>,
 
-  // Sidebar (git preview) state
-  pub sidebar_open: bool,
-  pub sidebar_focused: bool,
-  pub sidebar_scroll: u16,
-  /// Cache of the rendered sidebar sections, keyed by the selected worktree
-  /// path. Prevents re-shelling `git log` / `git status` on every TUI redraw
-  /// — they only run when the selection actually changes (or on explicit
-  /// refresh).
-  pub sidebar_cache: Option<(PathBuf, super::ui::SidebarSections)>,
-  /// Upper bound for `sidebar_scroll`, recomputed by the renderer each frame.
-  /// Keeps scrolling clamped to the rendered content height so the user can't
-  /// scroll the panel entirely off-screen.
-  pub sidebar_max_scroll: u16,
+  /// Sidebar (git preview) panel state (extracted per #127). Owns the
+  /// visibility / focus flags, the scroll offset + max bound, and the
+  /// cached pre-rendered sections keyed by the selected worktree's
+  /// path. The cache prevents re-shelling `git log` / `git status` on
+  /// every TUI redraw — they only run when the selection actually
+  /// changes (via [`SidebarState::on_navigation`]) or on explicit
+  /// refresh ([`SidebarState::invalidate`]). The renderer publishes
+  /// `sidebar.max_scroll` every frame against the actual rendered
+  /// Recent Commits height; [`SidebarState::scroll_down`] clamps
+  /// against it.
+  pub sidebar: SidebarState,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   pub pending_g: bool,
 
-  // Inline fuzzy filter on the worktree list (issue #21).
-  // `filter_active` is true while the user is typing in the filter bar (`/`).
-  // `filter_query` carries the current pattern; when non-empty, the list view
-  // shows only matching worktrees ranked by `nucleo_matcher`. Esc clears the
-  // query, Enter confirms (sticky filter, focus returns to the list).
-  pub filter_active: bool,
-  pub filter_query: String,
+  // Inline fuzzy filter on the worktree list (issue #21, extracted per
+  // #124 with memoisation closing #104). The sub-struct owns the buffer
+  // (`query`), the typing-bar flag (`active`), and a cached indices vec
+  // so the 3–5 `tui/ui.rs` call sites per render frame don't each rerun
+  // the `nucleo_matcher` pass. `App::refresh` calls
+  // `self.filter.invalidate()` to drop the cache when `worktrees`
+  // changes; a worktrees-length mismatch auto-invalidates too.
+  pub filter: FilterState,
 
   // Picker mode (issue #22): `gwm switch` runs the TUI as a stripped-down
   // picker. Create / delete / bootstrap keys are inert; Enter records the
@@ -181,27 +149,39 @@ pub struct App {
   /// instead of being kicked out with exit code 1.
   pub picker_should_exit: bool,
 
-  /// Anchor for the confirm-overlay safety countdown (issue #30). When
-  /// `Some`, the modal renders a progress bar and the event loop ticks
-  /// it down before firing `confirm_delete`. `None` means the modal is
-  /// either closed, in classic mode (delete_branch OFF or
-  /// `confirm_countdown_secs = 0`), or armed-but-just-disarmed by a
-  /// second `y` press.
-  pub confirm_countdown_started_at: Option<Instant>,
+  /// Safety countdown state for the confirm overlay (issue #30, extracted
+  /// per #125). Holds the timer anchor and exposes the pure state-machine
+  /// API; this `App` keeps the side-effecting wrappers below that compose
+  /// the status messages and call `worktree::remove`.
+  pub confirm: ConfirmModal,
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
-  /// Cached link for the currently selected worktree's branch.
-  link: BranchLink,
-  /// Repo slug parsed from `origin` (None when no GitHub remote).
-  link_slug: Option<String>,
-  issue_state: GitHubFetchState<IssueStatus>,
-  pr_state: GitHubFetchState<PrStatus>,
-  /// In `View::LinkPrompt`, which stage are we in.
-  link_prompt_stage: LinkPromptStage,
-  /// In `View::LinkPrompt::InputNumber`, the digits typed so far.
-  link_prompt_number: String,
-  /// In `View::LinkPrompt::InputNumber`, the chosen target.
-  link_prompt_target: Option<LinkTarget>,
+  /// GitHub fetch state slice — owns the cached link for the currently
+  /// selected worktree's branch, the repo slug parsed from `origin`,
+  /// and the per-target `gh issue view` / `gh pr view` fetch state
+  /// (extracted per #128, part 6/6 of the `App` god-struct
+  /// decomposition #102). The orchestrator methods below
+  /// (`refresh_link`, `refresh_github_status`,
+  /// `apply_issue_fetch_result`, `apply_pr_fetch_result`) are thin
+  /// wrappers that compose the status-bar copy + drive the actual
+  /// `gh` shell-outs; the pure state machine lives on
+  /// `GitHubFetch`.
+  pub github: GitHubFetch,
+  /// Two-stage issue/PR link prompt state (extracted per #126). Owns
+  /// the stage + target + digit buffer; the orchestrator wraps the
+  /// transitions to update the status bar and shell out to
+  /// `github::link_{issue,pr}` on submit.
+  link_prompt: LinkPrompt,
+
+  /// TOFU trust mode for this TUI session (issue #95). Resolved at
+  /// the CLI entrypoint from `--allow-bootstrap` / `--deny-bootstrap`
+  /// / `GWM_ALLOW_BOOTSTRAP=1` and threaded down via `tui::run(mode)`.
+  /// Used by `check_trust_for_bootstrap` to gate `submit_create` and
+  /// `bootstrap_selected` — same security policy as the CLI, no
+  /// bypass via the TUI. Default `Prompt` (preserves the safe
+  /// default when callers construct `App` directly, e.g. tests that
+  /// don't care about the gate).
+  pub trust_mode: crate::trust::TrustMode,
 }
 
 impl App {
@@ -214,6 +194,7 @@ impl App {
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_for_repo(&workdir)?;
+    let branch_types = config.resolved_branch_types().types;
     let worktrees = worktree::list(&repo)?;
     let mut state = TableState::default();
     if !worktrees.is_empty() {
@@ -229,33 +210,68 @@ impl App {
       view: View::List,
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
-      create_field: Field::Type,
-      create_type_index: 0,
-      create_issue: String::new(),
-      create_desc: String::new(),
+      create_form: CreateForm::new(),
+      branch_types,
       report: None,
-      sidebar_open: true,
-      sidebar_focused: false,
-      sidebar_scroll: 0,
-      sidebar_cache: None,
-      sidebar_max_scroll: 0,
+      sidebar: SidebarState::new(),
       pending_g: false,
-      filter_active: false,
-      filter_query: String::new(),
+      filter: FilterState::new(),
       picker_mode: false,
       picker_result: None,
       picker_should_exit: false,
-      confirm_countdown_started_at: None,
-      link: BranchLink::empty(),
-      link_slug: None,
-      issue_state: GitHubFetchState::Idle,
-      pr_state: GitHubFetchState::Idle,
-      link_prompt_stage: LinkPromptStage::ChooseTarget,
-      link_prompt_number: String::new(),
-      link_prompt_target: None,
+      confirm: ConfirmModal::new(),
+      github: GitHubFetch::new(),
+      link_prompt: LinkPrompt::new(),
+      trust_mode: crate::trust::TrustMode::Prompt,
     };
     out.refresh_link();
     Ok(out)
+  }
+
+  /// Builder-style setter for `trust_mode`. The TUI entrypoint
+  /// (`tui::run`) calls this after construction to thread through
+  /// the CLI flags / env resolution; tests can use it directly to
+  /// exercise each variant of the gate.
+  pub fn with_trust_mode(mut self, mode: crate::trust::TrustMode) -> Self {
+    self.trust_mode = mode;
+    self
+  }
+
+  /// Silent TOFU gate for the TUI's bootstrap call sites
+  /// (`submit_create`, `bootstrap_selected`). Returns:
+  ///
+  /// * `Ok(None)` — caller is cleared to invoke `bootstrap::run`.
+  /// * `Ok(Some(msg))` — caller MUST NOT run bootstrap; show `msg`
+  ///   to the user (e.g. assign to `self.status`). Untrusted
+  ///   configs and `TrustMode::Deny` both land here — the TUI
+  ///   alternate-screen can't host a stdin prompt today, so we
+  ///   refuse with a hint pointing the user at the CLI gate
+  ///   (`gwm bootstrap` from another terminal).
+  /// * `Err(e)` — ledger I/O / config read error propagated verbatim.
+  pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
+    use crate::trust::{self, TrustOutcome};
+
+    let origin_url = self
+      .repo
+      .find_remote("origin")
+      .ok()
+      .and_then(|r| r.url().map(String::from));
+    let origin = trust::resolve_origin_key(origin_url.as_deref(), &self.workdir);
+
+    match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
+      TrustOutcome::Proceed => Ok(None),
+      TrustOutcome::Refuse { message } => Ok(Some(message)),
+      TrustOutcome::Prompt { cfg_path, sha, .. } => {
+        let short_sha: String = sha.chars().take(12).collect();
+        Ok(Some(format!(
+          ".gwm.toml at {} not in trust ledger (hash {}) — \
+           run `gwm bootstrap` from a CLI in another terminal to approve, \
+           or relaunch with GWM_ALLOW_BOOTSTRAP=1 / --allow-bootstrap",
+          cfg_path.display(),
+          short_sha
+        )))
+      }
+    }
   }
 
   /// Constructor for `gwm switch`: same App, but picker mode is on and the
@@ -266,13 +282,19 @@ impl App {
   pub fn new_picker_at(start: Option<&Path>) -> Result<Self> {
     let mut app = Self::new_at(start)?;
     app.picker_mode = true;
-    app.filter_active = true;
+    app.filter.open();
     app.status = "switch picker — type to filter · enter selects · esc cancels".into();
     Ok(app)
   }
 
   pub fn refresh(&mut self) -> Result<()> {
     self.worktrees = worktree::list(&self.repo)?;
+    // The cached fuzzy-match indices reference the previous worktrees
+    // vec; drop them so the next render recomputes against the fresh
+    // list. (A length-change auto-invalidates too, but a refresh that
+    // produces a same-length vec with different contents would not —
+    // so the explicit flush is the safe play.)
+    self.filter.invalidate();
     // `clamp_selection_to_filter` re-resolves the link cache for us.
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
@@ -281,14 +303,34 @@ impl App {
   }
 
   /// Drop the cached sidebar content. Call on any change that may have altered
-  /// what the sidebar shows: worktree list refresh, selection change, etc.
+  /// what the sidebar shows: worktree list refresh, filter narrowing, etc.
+  /// Pure delegate over [`SidebarState::invalidate`]; navigation-driven
+  /// invalidation goes through [`Self::on_navigation`] which also resets
+  /// the scroll offset.
   pub fn invalidate_sidebar_cache(&mut self) {
-    self.sidebar_cache = None;
+    self.sidebar.invalidate();
+  }
+
+  /// Selection-change reaction: drop the sidebar's scroll back to the
+  /// top, invalidate its cached preview, and resolve the link cache
+  /// against the freshly selected worktree. Collapses the verbatim
+  /// `sidebar.scroll = 0; invalidate_sidebar_cache(); refresh_link();`
+  /// triple that was repeated across `next`, `prev`, `first`, `last`
+  /// pre-extraction (issue #127, part of #102). The first two pieces
+  /// live on [`SidebarState::on_navigation`]; the link refresh is
+  /// orchestrator-shaped (it touches `self.link` / `self.link_slug` /
+  /// `self.issue_state` / `self.pr_state` via [`Self::refresh_link`])
+  /// so it stays here. Every navigation entry point now goes through
+  /// this single call so the triple cannot drift back into duplicated
+  /// literals.
+  pub fn on_navigation(&mut self) {
+    self.sidebar.on_navigation();
+    self.refresh_link();
   }
 
   pub fn next(&mut self) {
     // Route navigation to the sidebar when it's focused; otherwise move the list.
-    if self.sidebar_open && self.sidebar_focused {
+    if self.sidebar.open && self.sidebar.focused {
       self.sidebar_scroll_down();
       return;
     }
@@ -301,13 +343,11 @@ impl App {
       None => 0,
     };
     self.list_state.select(Some(i));
-    self.sidebar_scroll = 0;
-    self.invalidate_sidebar_cache();
-    self.refresh_link();
+    self.on_navigation();
   }
 
   pub fn prev(&mut self) {
-    if self.sidebar_open && self.sidebar_focused {
+    if self.sidebar.open && self.sidebar.focused {
       self.sidebar_scroll_up();
       return;
     }
@@ -320,9 +360,7 @@ impl App {
       Some(i) => i - 1,
     };
     self.list_state.select(Some(i));
-    self.sidebar_scroll = 0;
-    self.invalidate_sidebar_cache();
-    self.refresh_link();
+    self.on_navigation();
   }
 
   // ---- Vim-style motions / list jumps -------------------------------------
@@ -331,9 +369,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(0));
-      self.sidebar_scroll = 0;
-      self.invalidate_sidebar_cache();
-      self.refresh_link();
+      self.on_navigation();
     }
   }
 
@@ -341,9 +377,7 @@ impl App {
     let len = self.filtered_indices().len();
     if len > 0 {
       self.list_state.select(Some(len - 1));
-      self.sidebar_scroll = 0;
-      self.invalidate_sidebar_cache();
-      self.refresh_link();
+      self.on_navigation();
     }
   }
 
@@ -364,12 +398,8 @@ impl App {
   // ---- Sidebar ------------------------------------------------------------
 
   pub fn toggle_sidebar(&mut self) {
-    self.sidebar_open = !self.sidebar_open;
-    if !self.sidebar_open {
-      // Hidden sidebar can't be focused.
-      self.sidebar_focused = false;
-    }
-    self.status = if self.sidebar_open {
+    self.sidebar.toggle_open();
+    self.status = if self.sidebar.open {
       "sidebar shown".into()
     } else {
       "sidebar hidden".into()
@@ -377,21 +407,15 @@ impl App {
   }
 
   pub fn toggle_focus(&mut self) {
-    if !self.sidebar_open {
-      return;
-    }
-    self.sidebar_focused = !self.sidebar_focused;
+    self.sidebar.toggle_focus();
   }
 
   pub fn sidebar_scroll_down(&mut self) {
-    // Clamp to the last-known content max so scrolling stops at the bottom
-    // instead of running off-screen. The renderer keeps `sidebar_max_scroll`
-    // up to date with the visible content height.
-    self.sidebar_scroll = self.sidebar_scroll.saturating_add(1).min(self.sidebar_max_scroll);
+    self.sidebar.scroll_down();
   }
 
   pub fn sidebar_scroll_up(&mut self) {
-    self.sidebar_scroll = self.sidebar_scroll.saturating_sub(1);
+    self.sidebar.scroll_up();
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -513,8 +537,15 @@ impl App {
     // The visible list is the filtered subset, so the table state's index is
     // into `filtered_indices()`, not the raw `worktrees` vec. Resolving the
     // selection means hopping through the filter map.
+    //
+    // `selected` keeps its `&self` signature so callers holding a
+    // shared borrow (e.g. `ui.rs` render path, `copy_path_to_status`)
+    // don't have to upgrade. `snapshot_indices` reads the cache when
+    // it's warm (which the per-frame render path guarantees, since
+    // the table renderer calls `filtered_indices` first) and falls
+    // back to a fresh compute when it isn't.
     let i = self.list_state.selected()?;
-    let filtered = self.filtered_indices();
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
     let original = *filtered.get(i)?;
     self.worktrees.get(original)
   }
@@ -587,69 +618,64 @@ impl App {
 
   pub fn enter_create(&mut self) {
     self.view = View::Create;
-    self.create_field = Field::Type;
-    self.create_type_index = 0;
-    self.create_issue.clear();
-    self.create_desc.clear();
+    self.create_form.reset();
     self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
   }
 
   pub fn create_next_field(&mut self) {
-    self.create_field = match self.create_field {
-      Field::Type => Field::Issue,
-      Field::Issue => Field::Desc,
-      Field::Desc => Field::Type,
-    };
+    self.create_form.next_field();
   }
 
   pub fn create_prev_field(&mut self) {
-    self.create_field = match self.create_field {
-      Field::Type => Field::Desc,
-      Field::Issue => Field::Type,
-      Field::Desc => Field::Issue,
-    };
+    self.create_form.prev_field();
   }
 
   pub fn create_next_type(&mut self) {
-    self.create_type_index = (self.create_type_index + 1) % BRANCH_TYPES.len();
+    self.create_form.next_type(self.branch_types.len());
   }
 
   pub fn create_prev_type(&mut self) {
-    if self.create_type_index == 0 {
-      self.create_type_index = BRANCH_TYPES.len() - 1;
-    } else {
-      self.create_type_index -= 1;
-    }
+    self.create_form.prev_type(self.branch_types.len());
   }
 
   pub fn create_push_char(&mut self, c: char) {
-    match self.create_field {
-      Field::Issue if c.is_ascii_digit() => self.create_issue.push(c),
-      Field::Desc => self.create_desc.push(c),
-      _ => {}
-    }
+    self.create_form.push_char(c);
   }
 
   pub fn create_pop_char(&mut self) {
-    match self.create_field {
-      Field::Issue => {
-        self.create_issue.pop();
-      }
-      Field::Desc => {
-        self.create_desc.pop();
-      }
-      _ => {}
-    }
+    self.create_form.pop_char();
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
-    let type_ = BRANCH_TYPES[self.create_type_index].0.to_string();
-    let spec = BranchSpec::new(type_, self.create_issue.clone(), self.create_desc.clone())?;
+    let type_ = self
+      .branch_types
+      .get(self.create_form.type_index)
+      .map(|t| t.name.clone())
+      .unwrap_or_default();
+    let spec = BranchSpec::new_with_types(
+      type_,
+      self.create_form.issue.clone(),
+      self.create_form.desc.clone(),
+      &self.branch_types,
+    )?;
     let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
     let target = spec.worktree_path(&self.config.worktree, &self.repo_name)?;
 
-    let created = worktree::add(&self.repo, &dirname, &target, &branch)?;
+    // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
+    // creating the worktree on disk (issue #95). A refusal here
+    // leaves the user's disk state untouched — no orphaned
+    // worktree to clean up. Mirrors `cmd_create` in src/cli.rs.
+    if let Some(msg) = self.check_trust_for_bootstrap()? {
+      self.status = msg;
+      // Stay in the create form so the user can retry after
+      // approving the config via the CLI gate. Returning Ok here
+      // (rather than Err) keeps the event loop alive — an Err
+      // would print to stderr and tear down the alternate screen.
+      return Ok(());
+    }
+
+    let created = worktree::add(&self.repo, &dirname, &target, &branch, false)?;
 
     let ctx = BootstrapCtx {
       main_repo: &self.workdir,
@@ -676,7 +702,7 @@ impl App {
       return;
     }
     self.view = View::Confirm;
-    self.confirm_countdown_started_at = None;
+    self.confirm.reset();
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
@@ -687,17 +713,16 @@ impl App {
     worktree::remove(&self.repo, &name, self.delete_branch_on_remove)?;
     self.status = format!("removed {} ({})", name, label);
     self.view = View::List;
-    self.confirm_countdown_started_at = None;
+    self.confirm.reset();
     self.refresh()
   }
 
-  // ---- Confirm-overlay safety countdown (issue #30) -----------------------
+  // ---- Confirm-overlay safety countdown (issue #30, extracted per #125) ---
   //
   // The countdown only applies when `delete_branch_on_remove` is ON AND the
-  // configured `confirm_countdown_secs` is non-zero. In every other case
-  // the classic single-keystroke confirm is preserved. Methods here are
-  // pure (modulo `&mut self`) and take an explicit `Instant` so tests can
-  // step through the countdown without sleeping.
+  // configured `confirm_countdown_secs` is non-zero. The pure state lives
+  // on `self.confirm` (see `src/tui/state/confirm.rs`); the wrappers below
+  // own the side effects (status messages, view transitions).
 
   /// Total duration of the safety countdown for the current modal state.
   /// `Duration::ZERO` means "no countdown — classic modal".
@@ -716,92 +741,49 @@ impl App {
     self.confirm_countdown_total() > Duration::ZERO
   }
 
-  /// Handle a `y` / Enter press inside the confirm overlay.
-  ///
-  /// Returns the action the event loop should take next:
-  /// - `FireNow` — classic modal, the loop must call `confirm_delete()`.
-  /// - `Armed` — countdown started; the loop draws the progress bar and
-  ///   waits for the next tick.
-  /// - `Disarmed` — second `y` press cancelled the countdown; the loop
-  ///   stays in the modal (Esc / n closes it).
+  /// Handle a `y` / Enter press inside the confirm overlay. Delegates to
+  /// `ConfirmModal::press_y` and composes the status-bar message based on
+  /// the returned action.
   pub fn confirm_press_y(&mut self, now: Instant) -> ConfirmKeyAction {
-    if !self.confirm_is_countdown_mode() {
-      return ConfirmKeyAction::FireNow;
+    let total = self.confirm_countdown_total();
+    let action = self.confirm.press_y(now, total);
+    match action {
+      ConfirmKeyAction::FireNow => {}
+      ConfirmKeyAction::Disarmed => {
+        let secs = total.as_secs();
+        self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
+      }
+      ConfirmKeyAction::Armed => {
+        let secs = total.as_secs();
+        self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
+      }
     }
-    if self.confirm_countdown_started_at.is_some() {
-      self.confirm_countdown_started_at = None;
-      let secs = self.confirm_countdown_total().as_secs();
-      self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
-      ConfirmKeyAction::Disarmed
-    } else {
-      self.confirm_countdown_started_at = Some(now);
-      let secs = self.confirm_countdown_total().as_secs();
-      self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
-      ConfirmKeyAction::Armed
-    }
+    action
   }
 
   /// Handle the dismissal keys (`n` / `Esc`) inside the confirm overlay.
   /// Always disarms the countdown and returns to the list.
   pub fn confirm_dismiss(&mut self) {
-    self.confirm_countdown_started_at = None;
+    self.confirm.dismiss();
     self.view = View::List;
   }
 
   /// Tick the countdown forward. Called from the event loop on every
-  /// poll-timeout iteration (every 200ms). Returns `ReadyToFire` exactly
-  /// once when the timer crosses the total duration; the App's own
-  /// `confirm_countdown_started_at` is cleared at that point so a
-  /// re-entrant tick would return `NotArmed`.
+  /// poll-timeout iteration (every 200ms).
   pub fn tick_confirm_countdown(&mut self, now: Instant) -> CountdownTickOutcome {
-    let Some(started) = self.confirm_countdown_started_at else {
-      return CountdownTickOutcome::NotArmed;
-    };
-    let duration = self.confirm_countdown_total();
-    if duration.is_zero() {
-      // Defensive: if config changed mid-modal to 0s, treat as no-op.
-      self.confirm_countdown_started_at = None;
-      return CountdownTickOutcome::NotArmed;
-    }
-    if now.saturating_duration_since(started) < duration {
-      CountdownTickOutcome::Pending
-    } else {
-      self.confirm_countdown_started_at = None;
-      CountdownTickOutcome::ReadyToFire
-    }
+    self.confirm.tick(now, self.confirm_countdown_total())
   }
 
   /// Countdown progress in `[0.0, 1.0]`. `0.0` when not armed, `1.0` once
   /// elapsed. Used by the UI to draw the gauge.
   pub fn confirm_countdown_progress(&self, now: Instant) -> f64 {
-    let Some(started) = self.confirm_countdown_started_at else {
-      return 0.0;
-    };
-    let duration = self.confirm_countdown_total();
-    if duration.is_zero() {
-      return 0.0;
-    }
-    let elapsed = now.saturating_duration_since(started).as_secs_f64();
-    let total = duration.as_secs_f64();
-    (elapsed / total).min(1.0)
+    self.confirm.progress(now, self.confirm_countdown_total())
   }
 
   /// Seconds remaining (rounded up to the next whole second) for the UI
   /// label. `0` when not armed or when the countdown has elapsed.
   pub fn confirm_countdown_remaining_secs(&self, now: Instant) -> u64 {
-    let Some(started) = self.confirm_countdown_started_at else {
-      return 0;
-    };
-    let duration = self.confirm_countdown_total();
-    if duration.is_zero() {
-      return 0;
-    }
-    let remaining = duration.saturating_sub(now.saturating_duration_since(started));
-    if remaining.is_zero() {
-      return 0;
-    }
-    let extra = if remaining.subsec_nanos() > 0 { 1 } else { 0 };
-    remaining.as_secs() + extra
+    self.confirm.remaining_secs(now, self.confirm_countdown_total())
   }
 
   // ---- Fuzzy filter (issue #21) -------------------------------------------
@@ -815,8 +797,8 @@ impl App {
   /// table". Leaving the sidebar focused would make `j` / `k` scroll it
   /// instead of walking the filtered worktrees after the filter sticks.
   pub fn enter_filter(&mut self) {
-    self.filter_active = true;
-    self.sidebar_focused = false;
+    self.filter.open();
+    self.sidebar.focused = false;
     self.cancel_pending_motion();
     self.status = "/ filter — type to narrow · enter confirms · esc clears".into();
   }
@@ -824,19 +806,18 @@ impl App {
   /// Close the filter bar but keep the query: `Enter` confirms the current
   /// match set and returns the cursor to list navigation.
   pub fn exit_filter_keep(&mut self) {
-    self.filter_active = false;
-    self.status = if self.filter_query.is_empty() {
+    self.filter.close_keep();
+    self.status = if self.filter.query().is_empty() {
       "press ? for help".into()
     } else {
-      format!("filter sticky: {}", self.filter_query)
+      format!("filter sticky: {}", self.filter.query())
     };
   }
 
   /// Close the filter bar and clear the query: `Esc` returns to the full list.
   pub fn exit_filter_cancel(&mut self) {
-    let had_query = !self.filter_query.is_empty();
-    self.filter_active = false;
-    self.filter_query.clear();
+    let had_query = !self.filter.query().is_empty();
+    self.filter.close_cancel();
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = if had_query {
@@ -847,13 +828,15 @@ impl App {
   }
 
   pub fn filter_push_char(&mut self, c: char) {
-    self.filter_query.push(c);
+    self.filter.push_char(c);
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
   }
 
   pub fn filter_pop_char(&mut self) {
-    if self.filter_query.pop().is_some() {
+    let before = self.filter.query().len();
+    self.filter.pop_char();
+    if self.filter.query().len() != before {
       self.clamp_selection_to_filter();
       self.invalidate_sidebar_cache();
     }
@@ -866,22 +849,19 @@ impl App {
   ///   ranks exact/substring/prefix matches above subsequence matches).
   ///
   /// Score ties are broken by original index so output is stable.
-  pub fn filtered_indices(&self) -> Vec<usize> {
-    if self.filter_query.is_empty() {
-      return (0..self.worktrees.len()).collect();
-    }
-    let pattern = Pattern::parse(self.filter_query.as_str(), CaseMatching::Smart, Normalization::Smart);
-    let mut matcher = Matcher::new(NucleoConfig::DEFAULT);
-    let mut buf: Vec<char> = Vec::new();
-    let mut scored: Vec<(u32, usize)> = Vec::with_capacity(self.worktrees.len());
-    for (i, w) in self.worktrees.iter().enumerate() {
-      let hay = Utf32Str::new(&w.name, &mut buf);
-      if let Some(score) = pattern.score(hay, &mut matcher) {
-        scored.push((score, i));
-      }
-    }
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    scored.into_iter().map(|(_, i)| i).collect()
+  ///
+  /// Memoised on `FilterState` since #124 / #104: the per-frame render
+  /// path calls this 3–5× (table height, visible rows, title hint,
+  /// footer counter, selection resolver), but the result only changes
+  /// when the query OR the worktrees vec changes. The cache holds the
+  /// previous result and the worktrees length it was computed against;
+  /// any buffer mutation (`push_char` / `pop_char` / `set_query` /
+  /// `clear`), an explicit `filter.invalidate()`, or a length change
+  /// invalidates it. `App::refresh` calls `invalidate` after replacing
+  /// `worktrees` so a same-length-different-contents refresh is also
+  /// caught.
+  pub fn filtered_indices(&mut self) -> &[usize] {
+    self.filter.filtered_indices(&self.worktrees, fuzzy_match_indices)
   }
 
   /// Reposition the selection so it stays inside the current filtered subset.
@@ -954,6 +934,22 @@ impl App {
         return;
       }
     };
+
+    // Same TOFU gate as `submit_create` — pressing `b` to re-run
+    // bootstrap on an existing worktree is just as much an RCE
+    // primitive as creating a new one. Issue #95.
+    match self.check_trust_for_bootstrap() {
+      Ok(None) => {}
+      Ok(Some(msg)) => {
+        self.status = msg;
+        return;
+      }
+      Err(e) => {
+        self.status = format!("trust gate error: {}", e);
+        return;
+      }
+    }
+
     let ctx = BootstrapCtx {
       main_repo: &self.workdir,
       worktree: &path,
@@ -979,59 +975,89 @@ impl App {
   /// Re-read the link for the currently selected worktree's branch. Also
   /// re-resolves the repo slug from the origin remote, and resets any
   /// previously cached GitHub fetch state since it would refer to a
-  /// different (issue, pr) tuple now.
+  /// different (issue, pr) tuple now. Delegates to
+  /// [`GitHubFetch::refresh_link`] for the pure state mutation; the
+  /// branch resolution still lives here because it depends on
+  /// `App`'s `selected()` + `repo.head()` fallback.
   pub fn refresh_link(&mut self) {
-    self.link = self.read_selected_link().unwrap_or_else(BranchLink::empty);
-    self.link_slug = github::repo_slug(&self.repo).ok();
-    self.issue_state = GitHubFetchState::Idle;
-    self.pr_state = GitHubFetchState::Idle;
+    let branch = self.selected_branch_name();
+    self.github.refresh_link(&self.repo, branch.as_deref());
   }
 
-  fn read_selected_link(&self) -> Option<BranchLink> {
-    let branch = self
+  fn selected_branch_name(&self) -> Option<String> {
+    self
       .selected()
       .and_then(|w| w.branch.clone())
-      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))?;
-    github::read_link(&self.repo, &branch).ok()
+      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
   }
 
   pub fn current_link(&self) -> &BranchLink {
-    &self.link
+    &self.github.link
   }
 
   pub fn current_slug(&self) -> Option<&str> {
-    self.link_slug.as_deref()
+    self.github.link_slug.as_deref()
   }
 
+  /// Read the cached issue fetch state for the *currently-linked*
+  /// issue. Returns `&GitHubFetchState::Idle` when no issue is linked
+  /// (or when the linked issue has never been fetched) — the cache is
+  /// per-number (post-#138), so reading "the" state means resolving
+  /// via `self.github.link.issue` first.
   pub fn issue_fetch_state(&self) -> &GitHubFetchState<IssueStatus> {
-    &self.issue_state
+    match self.github.link.issue {
+      Some(n) => self.github.issue_fetch_state(n),
+      None => &GitHubFetchState::Idle,
+    }
   }
 
+  /// PR-side counterpart to [`Self::issue_fetch_state`].
   pub fn pr_fetch_state(&self) -> &GitHubFetchState<PrStatus> {
-    &self.pr_state
+    match self.github.link.pr {
+      Some(n) => self.github.pr_fetch_state(n),
+      None => &GitHubFetchState::Idle,
+    }
   }
 
   /// Drive the issue/PR fetch synchronously. Called from the event loop
-  /// when the user presses `R`. Sets states to `Loading` first so the UI
-  /// can flag the in-flight state, then runs the fetches.
+  /// when the user presses `F` (refresh GitHub status). Routes through
+  /// the [`GitHubFetch`] dedupe layer: `request(key)` claims the
+  /// per-target inflight slot and flips `*_state = Loading`, the
+  /// shell-out runs, `complete_{issue,pr}` clears the slot and
+  /// stamps the result.
+  ///
+  /// This call path is the explicit user-initiated refresh, so it
+  /// flushes the cache via [`GitHubFetch::invalidate`] first — the
+  /// user just asked for fresh data, a `HitCache` short-circuit here
+  /// would be a bug. The inflight slot is still claimed via
+  /// `request`, so any concurrent visit-driven `request` for the
+  /// same key dedupes correctly (load-bearing payoff of #128).
   pub fn refresh_github_status(&mut self) {
-    if self.link.issue.is_none() && self.link.pr.is_none() {
+    use super::state::github_fetch::{FetchAction, FetchKey};
+
+    if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = "nothing linked — press L to link an issue or PR".into();
       return;
     }
-    let Some(slug) = self.link_slug.clone() else {
+    let Some(slug) = self.github.link_slug.clone() else {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };
-    if let Some(n) = self.link.issue {
-      self.issue_state = GitHubFetchState::Loading;
-      let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
-      self.apply_issue_fetch_result(r);
+    // Explicit user-initiated refresh: flush the cache before the
+    // request loop so `request` returns `Spawn` instead of `HitCache`
+    // for previously-loaded keys.
+    self.github.invalidate();
+    if let Some(n) = self.github.link.issue {
+      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
+        let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
+        self.github.complete_issue(n, r);
+      }
     }
-    if let Some(n) = self.link.pr {
-      self.pr_state = GitHubFetchState::Loading;
-      let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
-      self.apply_pr_fetch_result(r);
+    if let Some(n) = self.github.link.pr {
+      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
+        let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
+        self.github.complete_pr(n, r);
+      }
     }
     self.report_github_refresh_status();
   }
@@ -1041,8 +1067,8 @@ impl App {
   /// that always printing "refreshed" misled users when one of the
   /// fetches had failed.
   pub fn report_github_refresh_status(&mut self) {
-    let issue_err = matches!(self.issue_state, GitHubFetchState::Error(_));
-    let pr_err = matches!(self.pr_state, GitHubFetchState::Error(_));
+    let issue_err = matches!(self.issue_fetch_state(), GitHubFetchState::Error(_));
+    let pr_err = matches!(self.pr_fetch_state(), GitHubFetchState::Error(_));
     self.status = match (issue_err, pr_err) {
       (false, false) => "github status refreshed".into(),
       (true, false) => format!(
@@ -1059,31 +1085,25 @@ impl App {
   }
 
   fn issue_error_message(&self) -> Option<String> {
-    match &self.issue_state {
+    match self.issue_fetch_state() {
       GitHubFetchState::Error(e) => Some(e.clone()),
       _ => None,
     }
   }
 
   fn pr_error_message(&self) -> Option<String> {
-    match &self.pr_state {
+    match self.pr_fetch_state() {
       GitHubFetchState::Error(e) => Some(e.clone()),
       _ => None,
     }
   }
 
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
-    self.issue_state = match r {
-      Ok(s) => GitHubFetchState::Loaded(s),
-      Err(e) => GitHubFetchState::Error(e),
-    };
+    self.github.apply_issue_result(r);
   }
 
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
-    self.pr_state = match r {
-      Ok(s) => GitHubFetchState::Loaded(s),
-      Err(e) => GitHubFetchState::Error(e),
-    };
+    self.github.apply_pr_result(r);
   }
 
   // ---- Open menu ----------------------------------------------------------
@@ -1103,19 +1123,19 @@ impl App {
   /// when the link is missing (the status bar carries the explanation).
   pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
     self.view = View::List;
-    let Some(slug) = self.link_slug.clone() else {
+    let Some(slug) = self.github.link_slug.clone() else {
       self.status = "no GitHub remote — cannot build URL".into();
       return None;
     };
     let url = match target {
-      LinkTarget::Issue => match self.link.issue {
+      LinkTarget::Issue => match self.github.link.issue {
         Some(n) => github::issue_url(&slug, n),
         None => {
           self.status = "no issue linked — press L to link one".into();
           return None;
         }
       },
-      LinkTarget::Pr => match self.link.pr {
+      LinkTarget::Pr => match self.github.link.pr {
         Some(n) => github::pr_url(&slug, n),
         None => {
           self.status = "no PR linked — press L to link one".into();
@@ -1127,38 +1147,38 @@ impl App {
   }
 
   // ---- Link prompt --------------------------------------------------------
+  //
+  // Pure state lives in `self.link_prompt` (`tui::state::link_prompt`,
+  // extracted per #126). The methods below are thin orchestrator
+  // wrappers: they update `self.view` / `self.status` / drive the
+  // `github::link_{issue,pr}` shell-out on submit, then delegate the
+  // buffer / stage transitions to `LinkPrompt`.
 
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
     self.status = "link: [i]ssue / [p]r · esc cancels".into();
   }
 
   pub fn link_prompt_cancel(&mut self) {
     self.view = View::List;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
   }
 
   pub fn link_prompt_stage(&self) -> LinkPromptStage {
-    self.link_prompt_stage
+    self.link_prompt.stage
   }
 
   pub fn link_prompt_number_input(&self) -> &str {
-    &self.link_prompt_number
+    &self.link_prompt.number
   }
 
   pub fn link_prompt_target(&self) -> Option<LinkTarget> {
-    self.link_prompt_target
+    self.link_prompt.target
   }
 
   pub fn link_prompt_choose(&mut self, target: LinkTarget) {
-    self.link_prompt_target = Some(target);
-    self.link_prompt_stage = LinkPromptStage::InputNumber;
-    self.link_prompt_number.clear();
+    self.link_prompt.commit_target(target);
     self.status = match target {
       LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
       LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
@@ -1166,24 +1186,21 @@ impl App {
   }
 
   pub fn link_prompt_push_char(&mut self, c: char) {
-    if self.link_prompt_stage == LinkPromptStage::InputNumber && c.is_ascii_digit() {
-      self.link_prompt_number.push(c);
-    }
+    self.link_prompt.push_char(c);
   }
 
   pub fn link_prompt_pop_char(&mut self) {
-    if self.link_prompt_stage == LinkPromptStage::InputNumber {
-      self.link_prompt_number.pop();
-    }
+    self.link_prompt.pop_char();
   }
 
   pub fn link_prompt_submit(&mut self) -> Result<()> {
-    let Some(target) = self.link_prompt_target else {
+    let Some(target) = self.link_prompt.target else {
       self.status = "no target chosen".into();
       return Ok(());
     };
     let n: u64 = self
-      .link_prompt_number
+      .link_prompt
+      .number
       .parse()
       .map_err(|_| GwmError::Other("number is empty or invalid".into()))?;
     let branch = self
@@ -1200,9 +1217,7 @@ impl App {
       LinkTarget::Pr => format!("linked PR #{} to {}", n, branch),
     };
     self.view = View::List;
-    self.link_prompt_stage = LinkPromptStage::ChooseTarget;
-    self.link_prompt_target = None;
-    self.link_prompt_number.clear();
+    self.link_prompt.reset();
     self.refresh_link();
     Ok(())
   }

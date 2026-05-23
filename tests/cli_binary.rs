@@ -6,6 +6,7 @@ mod common;
 use assert_cmd::Command;
 use common::init_repo;
 use predicates::prelude::*;
+use std::path::Path;
 
 #[test]
 fn help_prints_subcommands() {
@@ -37,7 +38,217 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  link "))
     .stdout(predicate::str::contains("  unlink "))
     .stdout(predicate::str::contains("  open "))
-    .stdout(predicate::str::contains("  status "));
+    .stdout(predicate::str::contains("  status "))
+    // Issue #81: declarative GitHub labels.
+    .stdout(predicate::str::contains("  labels "))
+    // Issue #82: declarative GitHub milestones.
+    .stdout(predicate::str::contains("  milestones "))
+    // Issue #95: TOFU trust ledger.
+    .stdout(predicate::str::contains("  trust "));
+}
+
+// --- labels (issue #81) -------------------------------------------------
+
+#[test]
+fn labels_help_lists_list_and_push() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["labels", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("list"))
+    .stdout(predicate::str::contains("push"));
+}
+
+#[test]
+fn labels_list_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn labels_list_with_no_declared_labels_is_a_no_op() {
+  // The no-op fast path: no `[[labels]]` in .gwm.toml ⇒ don't shell
+  // out to `gh`, just print a single line and exit 0. The test
+  // doesn't need `gh` on PATH to pass — that's the whole point.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 labels declared"));
+}
+
+#[test]
+fn labels_push_with_no_declared_labels_is_a_no_op() {
+  // Same fast path as `list`. Push must not call `gh` when there's
+  // nothing to push — that would surface `gh: not found` to users
+  // who haven't yet configured `[[labels]]` and tried the command.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "push"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 labels declared"));
+}
+
+#[test]
+fn labels_push_dry_run_with_no_declared_labels_succeeds() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "push", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 labels declared"));
+}
+
+#[test]
+fn labels_list_surfaces_invalid_color_with_label_name() {
+  // A typo in `color` must be caught at resolve time with the label
+  // name in the error message — otherwise the user has to grep their
+  // config to find which entry is broken.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[labels]]
+name = "bug"
+color = "not-a-hex"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["labels", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("bug"))
+    .stderr(predicate::str::contains("not-a-hex"));
+}
+
+// --- milestones (issue #82) ---------------------------------------------
+
+#[test]
+fn milestones_help_lists_list_and_push() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["milestones", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("list"))
+    .stdout(predicate::str::contains("push"));
+}
+
+#[test]
+fn milestones_list_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn milestones_list_with_no_declared_is_a_no_op() {
+  // No `[[milestones]]` in .gwm.toml ⇒ don't shell out to `gh`. The
+  // test passes without `gh` on PATH — that's the whole point of the
+  // fast path.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 milestones declared"));
+}
+
+#[test]
+fn milestones_push_with_no_declared_is_a_no_op() {
+  // Same fast path as `list`. Push must not call `gh` when there's
+  // nothing to push.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "push"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 milestones declared"));
+}
+
+#[test]
+fn milestones_push_dry_run_with_no_declared_succeeds() {
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "push", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 milestones declared"));
+}
+
+#[test]
+fn milestones_list_surfaces_invalid_due_on_with_title() {
+  // A typo in `due_on` must be caught at resolve time with the
+  // milestone title in the error message — otherwise the user has to
+  // grep their config to find the offending entry.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[milestones]]
+title = "v0.7.0"
+due_on = "not-a-date"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("v0.7.0"));
+}
+
+#[test]
+fn milestones_list_surfaces_invalid_state_with_title() {
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[milestones]]
+title = "v0.7.0"
+state = "draft"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["milestones", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("v0.7.0"))
+    .stderr(predicate::str::contains("draft"));
 }
 
 #[test]
@@ -159,15 +370,74 @@ fn version_flag() {
 
 #[test]
 fn types_lists_branch_types() {
+  // Outside any repo (the temp cwd of `assert_cmd` is typically not a
+  // git repo on CI runners) `gwm types` must still list the built-in
+  // defaults and surface the `built-in defaults` footer so users can
+  // tell they're not looking at a `.gwm.toml` override.
+  let dir = tempfile::TempDir::new().unwrap();
   let mut cmd = Command::cargo_bin("gwm").unwrap();
-  cmd.arg("types");
+  cmd.current_dir(dir.path()).arg("types");
   cmd
     .assert()
     .success()
     .stdout(predicate::str::contains("feat"))
     .stdout(predicate::str::contains("fix"))
     .stdout(predicate::str::contains("hotfix"))
-    .stdout(predicate::str::contains("chore"));
+    .stdout(predicate::str::contains("chore"))
+    .stdout(predicate::str::contains("(source: built-in defaults)"));
+}
+
+#[test]
+fn types_lists_configured_branch_types_from_dot_gwm_toml() {
+  // When `.gwm.toml` carries a `[[branch_types]]` block, `gwm types`
+  // must reflect the override verbatim and update its source footer.
+  // The legacy entries that aren't in the override must NOT bleed
+  // through (e.g. `hotfix` is part of the built-in defaults but is
+  // intentionally absent from this repo's list).
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[[branch_types]]
+name = "feat"
+description = "Feature"
+
+[[branch_types]]
+name = "migration"
+description = "Database migration"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains("migration"))
+    .stdout(predicate::str::contains("Database migration"))
+    .stdout(predicate::str::contains("(source: .gwm.toml)"))
+    .stdout(predicate::str::contains("hotfix").not());
+}
+
+#[test]
+fn types_inside_bare_repo_falls_back_to_built_in_defaults() {
+  // Bare repos have no `workdir()`, so there's no place to look for a
+  // `.gwm.toml`. Regression: previously `cmd_types` would propagate a
+  // misleading `NotInGitRepo` error here even though `discover_repo`
+  // succeeded. The fallback is identical to the "outside any repo"
+  // branch — the built-in defaults with a `(source: built-in
+  // defaults)` footer.
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init_bare(dir.path()).expect("init bare repo");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains("hotfix"))
+    .stdout(predicate::str::contains("(source: built-in defaults)"));
 }
 
 #[test]
@@ -772,4 +1042,840 @@ fn status_on_branch_with_no_link_reports_no_link() {
     .assert()
     .success()
     .stdout(predicate::str::contains("no link"));
+}
+
+// --------------------------------------------------------------------------
+// Issue #101 — E2E tests for the mutating subcommands (init / create / remove)
+// --------------------------------------------------------------------------
+//
+// `cli_binary.rs` historically asserted only `--help` output and a handful
+// of read-only error paths. The three subcommands that mutate state on
+// disk (`init`, `create`, `remove`) had no end-to-end coverage, which let
+// orchestration-layer regressions (e.g. issues #98 and #99) slip through
+// unit-test review. The block below is the canonical CI signal for the
+// CLI surface of those subcommands.
+//
+// Worktree-creating tests pin `[worktree].base` to a `tempfile::TempDir`
+// so the test runner never writes under `~/cc-worktree/...`. The branch
+// pattern is left at its default (`{type}/#{issue}-{desc}`) to exercise
+// the production naming pipeline.
+
+// --- init ---------------------------------------------------------------
+
+#[test]
+fn init_writes_gwm_toml_with_expected_sections() {
+  // The default `.gwm.toml` shipped by `gwm init` is sourced from
+  // `examples/gwm.toml.example`. Asserting on the exact contents would
+  // couple the test to the example file character-for-character; we pin
+  // the structural markers a user (and the rest of the codebase) relies
+  // on: a `[worktree]` block with the documented placeholders, a
+  // `[[bootstrap.copy]]` entry, and a `[[bootstrap.guard]]` entry. The
+  // stdout line names the written path so users discover where it landed.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+  assert!(!cfg_path.exists(), "precondition: no .gwm.toml in fresh repo");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("init")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(".gwm.toml"));
+
+  assert!(cfg_path.exists(), "gwm init must write .gwm.toml on disk");
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(body.contains("[worktree]"), "missing [worktree] section");
+  assert!(
+    body.contains("base = ") && body.contains("{home}") && body.contains("{repo}"),
+    "missing documented placeholders in [worktree].base"
+  );
+  assert!(
+    body.contains("[[bootstrap.copy]]"),
+    "missing [[bootstrap.copy]] template"
+  );
+  assert!(
+    body.contains("[[bootstrap.guard]]"),
+    "missing [[bootstrap.guard]] template"
+  );
+}
+
+#[test]
+fn init_refuses_to_overwrite_existing_gwm_toml() {
+  // Idempotency contract: a second `gwm init` on a repo that already
+  // carries a `.gwm.toml` must bail out instead of silently clobbering
+  // user edits. The error must name the file *and* explain why so the
+  // user knows what to remove if they truly want to start over. Pin
+  // the exact "already exists" wording from `Config::write_default`
+  // (src/config.rs) — a looser `.gwm.toml` contains-check would also
+  // pass on a success run since the success path prints the same path.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+  std::fs::write(&cfg_path, "# user edits\n[worktree]\nbase = \"/custom\"\n").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("init")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(".gwm.toml"))
+    .stderr(predicate::str::contains("already exists"));
+
+  // Original contents must survive the failed init.
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(
+    body.contains("# user edits"),
+    "failed gwm init must not modify the existing .gwm.toml"
+  );
+}
+
+#[test]
+fn init_outside_git_repo_fails() {
+  // `cmd_init` calls `discover_repo` first — the standard `NotInGitRepo`
+  // error wins so the user is steered to `git init` before configuring.
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .arg("init")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- create -------------------------------------------------------------
+
+/// Write a `.gwm.toml` that redirects `[worktree].base` into the test's
+/// own `TempDir`. The caller already owns the `base` path (it's the
+/// `TempDir` they passed in), so the test asserts on `base.join(...)`
+/// directly — this helper has no return value. Bootstrap is left empty
+/// by default so `gwm create` runs in its minimal shape; tests that
+/// need bootstrap behaviour layer a second `.gwm.toml` write on top.
+fn write_test_config(repo_root: &Path, base: &Path) {
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = base.display(),
+  );
+  std::fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+#[test]
+fn create_adds_worktree_dir_and_branch_at_head() {
+  // The full happy path through `cmd_create`:
+  //   1. The dirname rendered from `[worktree].path_pattern` lands on disk
+  //      under the configured `[worktree].base`.
+  //   2. The branch rendered from `[worktree].branch_pattern` is created
+  //      as a local ref pointing at the seed commit (`init_repo`'s HEAD).
+  //   3. `branch.<name>.gwm-base` is recorded as the parent's short name
+  //      (the launcher fallback chain depends on it — issue #75).
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+  let head_oid = repo.head().unwrap().target().unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    // Issue #95: this test writes a `.gwm.toml` and runs `gwm
+    // create` non-interactively, so the TOFU prompt would block.
+    // Setting GWM_ALLOW_BOOTSTRAP=1 is the documented CI bypass.
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "42", "tui-search"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#42-tui-search"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  let wt_dir = base.path().join("feat-42-tui-search");
+  assert!(wt_dir.exists(), "worktree dir must exist on disk");
+  assert!(wt_dir.join(".git").exists(), "worktree must carry a .git pointer");
+
+  let branch = repo
+    .find_branch("feat/#42-tui-search", git2::BranchType::Local)
+    .expect("branch must be created");
+  let branch_oid = branch.into_reference().target().unwrap();
+  assert_eq!(branch_oid, head_oid, "fresh branch must point at the main HEAD commit");
+
+  let cfg = repo.config().unwrap();
+  let recorded_base = cfg.get_string("branch.feat/#42-tui-search.gwm-base").unwrap();
+  assert_eq!(
+    recorded_base, "main",
+    "gwm create must record the parent ref for the launcher fallback chain"
+  );
+}
+
+#[test]
+fn create_runs_bootstrap_by_default() {
+  // A `[[bootstrap.copy]]` step lands its destination file inside the
+  // freshly-created worktree iff bootstrap actually ran. The source file
+  // lives in the main repo's workdir; we pin a unique marker string so a
+  // false positive (e.g. a cargo lock file collision) can't pass the
+  // assertion by accident.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let marker = "GWM_E2E_BOOTSTRAP_MARKER_v1";
+  std::fs::write(dir.path().join("seed.env"), marker).unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.copy]]
+from = "seed.env"
+to = "seed.env"
+required = true
+"#,
+    base = base.path().display(),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    // Issue #95: bypass the TOFU prompt — the test's whole point
+    // is to assert that bootstrap.copy actually runs, which is
+    // gated behind the trust check.
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "7", "bootstrap-on"])
+    .assert()
+    .success();
+
+  let copied = base.path().join("feat-7-bootstrap-on").join("seed.env");
+  assert!(copied.exists(), "bootstrap copy step did not run");
+  let body = std::fs::read_to_string(&copied).unwrap();
+  assert!(
+    body.contains(marker),
+    "bootstrap copy must duplicate the source file content"
+  );
+}
+
+#[test]
+fn create_skips_bootstrap_with_no_bootstrap_flag() {
+  // Same scaffolding as the previous test, but `--no-bootstrap` must
+  // short-circuit `bootstrap::run` BEFORE the copy step. The worktree
+  // directory still appears (the branch + worktree are created first),
+  // but `seed.env` is absent inside it. The stdout breadcrumb that
+  // `cmd_create` prints when it skips makes the intent observable.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  std::fs::write(dir.path().join("seed.env"), "marker").unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.copy]]
+from = "seed.env"
+to = "seed.env"
+required = true
+"#,
+    base = base.path().display(),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "8", "bootstrap-off", "--no-bootstrap"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped bootstrap"));
+
+  let wt_dir = base.path().join("feat-8-bootstrap-off");
+  assert!(wt_dir.exists(), "worktree dir must still be created");
+  assert!(
+    !wt_dir.join("seed.env").exists(),
+    "--no-bootstrap must prevent the copy step from running"
+  );
+}
+
+#[test]
+fn create_rejects_unknown_branch_type() {
+  // `BranchSpec::validate` rejects branch types outside the built-in /
+  // configured allow-list before any filesystem operation. We must see
+  // the failure surface on stderr with the offending value so the user
+  // can grep their command history without re-running.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "blarg", "9", "nope"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("blarg"));
+
+  assert!(
+    !base.path().join("blarg-9-nope").exists(),
+    "no worktree dir may be created when branch-type validation fails"
+  );
+}
+
+#[test]
+fn create_rejects_non_digit_issue() {
+  // Issue must be digits-only — `abc` is rejected by `BranchSpec::new`
+  // before any filesystem op. As with the unknown-branch-type test,
+  // assert the no-side-effect invariant explicitly: the worktree dir
+  // that *would* have been written (`<base>/feat-abc-thing`) must not
+  // appear on disk. Otherwise a regression where validation runs
+  // post-`worktree::add` could still satisfy a bare `.failure()` check
+  // while leaving stray dirs behind.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "abc", "thing"])
+    .assert()
+    .failure();
+
+  assert!(
+    !base.path().join("feat-abc-thing").exists(),
+    "no worktree dir may be created when issue-number validation fails"
+  );
+}
+
+#[test]
+fn create_refuses_stale_branch_without_reuse_flag() {
+  // Issue #99 E2E. A pre-existing local branch of the same name must
+  // surface `BranchExists` and refuse to create the worktree dir —
+  // protecting the user from silently landing on whatever commit the
+  // pre-existing ref points at. The error renders the stale tip's
+  // OID and the `--reuse-branch` opt-in so the message is
+  // self-explanatory.
+  //
+  // We pin the branch at the seed commit, THEN advance main by one
+  // commit so the branch tip diverges from HEAD — the textbook
+  // "stale" scenario from the issue. That divergence is what makes
+  // the silent reuse a foot-gun in the first place, and asserting
+  // the stale OID appears verbatim in stderr proves the error message
+  // is grep-able for the value the user would otherwise be silently
+  // attached to.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  let seed = repo.head().unwrap().peel_to_commit().unwrap();
+  let stale_branch = repo.branch("feat/#99-stale", &seed, false).unwrap();
+  let stale_oid = stale_branch.into_reference().target().unwrap().to_string();
+
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo
+    .commit(Some("HEAD"), &sig, &sig, "advance main", &tree, &[&seed])
+    .unwrap();
+  let new_head = repo.head().unwrap().target().unwrap().to_string();
+  assert_ne!(new_head, stale_oid, "precondition: HEAD must diverge from stale branch");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "stale"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("feat/#99-stale"))
+    .stderr(predicate::str::contains("--reuse-branch"))
+    .stderr(predicate::str::contains(stale_oid.as_str()));
+
+  assert!(
+    !base.path().join("feat-99-stale").exists(),
+    "no worktree dir may be created when the branch is refused"
+  );
+}
+
+#[test]
+fn create_reuses_stale_branch_with_flag() {
+  // Companion to `create_refuses_stale_branch_without_reuse_flag`: the
+  // `--reuse-branch` opt-in restores the legacy attach-to-existing
+  // behaviour, and the worktree directory does get created.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#99-stale", &head, false).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "stale", "--reuse-branch"])
+    .assert()
+    .success();
+
+  assert!(
+    base.path().join("feat-99-stale").exists(),
+    "with --reuse-branch the worktree dir must be created against the stale branch"
+  );
+}
+
+#[test]
+fn create_subcommand_outside_git_repo_fails() {
+  // The repo-bound contract: outside any git repo the standard
+  // `NotInGitRepo` error wins, no worktree is touched. Named with the
+  // `_subcommand_` infix to avoid colliding with the historical
+  // `create_outside_git_repo_fails` test (line ~327) that — despite the
+  // name — actually exercises `gwm list`.
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "1", "x"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- remove -------------------------------------------------------------
+
+#[test]
+fn remove_deletes_worktree_dir_and_keeps_branch_by_default() {
+  // Without `--delete-branch`, `gwm remove` is the inverse of `gwm
+  // create` for the on-disk directory only: the worktree dir disappears
+  // (and so does its admin entry under `.git/worktrees/`), but the
+  // local branch survives so the user can re-create the worktree from
+  // it later. Stdout names the dir for visual confirmation.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1") // issue #95: TOFU bypass for the setup step
+    .args(["create", "feat", "10", "remove-me"])
+    .assert()
+    .success();
+  let wt_dir = base.path().join("feat-10-remove-me");
+  assert!(wt_dir.exists());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "remove-me"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("removed"));
+
+  assert!(!wt_dir.exists(), "remove must delete the worktree directory");
+  assert!(
+    repo.find_branch("feat/#10-remove-me", git2::BranchType::Local).is_ok(),
+    "remove without --delete-branch must keep the local branch"
+  );
+}
+
+#[test]
+fn remove_with_delete_branch_drops_branch() {
+  // The `--delete-branch` flag drops the local branch in the same
+  // command. The stdout breadcrumb names both the worktree dir and the
+  // branch so two destructive operations are surfaced explicitly.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1") // issue #95: TOFU bypass for the setup step
+    .args(["create", "feat", "11", "drop-branch"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "drop-branch", "--delete-branch"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("branch"))
+    .stdout(predicate::str::contains("deleted"));
+
+  assert!(
+    repo
+      .find_branch("feat/#11-drop-branch", git2::BranchType::Local)
+      .is_err(),
+    "--delete-branch must remove the local branch ref"
+  );
+}
+
+#[test]
+fn remove_unknown_pattern_fails() {
+  // Fuzzy lookup must error loudly when nothing matches — silently
+  // doing nothing would mask a user typo and leave them wondering why
+  // their worktree is still around.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "ghost"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not found"));
+}
+
+#[test]
+fn remove_outside_git_repo_fails() {
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "anything"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- trust ledger (issue #95) -------------------------------------------
+
+#[test]
+fn trust_help_lists_list_revoke_show() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["trust", "--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("list"))
+    .stdout(predicate::str::contains("revoke"))
+    .stdout(predicate::str::contains("show"));
+}
+
+#[test]
+fn trust_list_empty_prints_zero_entries() {
+  // Point GWM_TRUST_LEDGER at a freshly-created tempdir so we don't
+  // clobber the user's real ~/.config/gwm/trust.toml and so the test
+  // is hermetic on CI runners that have an empty $HOME.
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 entries in trust ledger"));
+}
+
+#[test]
+fn trust_show_when_absent_says_so() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("absent.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("file does not exist yet"));
+}
+
+#[test]
+fn trust_revoke_no_matching_origin_is_a_no_op() {
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "revoke", "git@github.com:foo/bar.git"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 entries matched"));
+}
+
+#[test]
+fn trust_list_show_revoke_round_trip() {
+  // Seed the ledger manually (we can't easily exercise the prompt
+  // path from assert_cmd), then verify list → show → revoke all
+  // reflect the same entry.
+  use std::fs;
+  let dir = tempfile::TempDir::new().unwrap();
+  let ledger = dir.path().join("trust.toml");
+  fs::write(
+    &ledger,
+    r#"[[entries]]
+origin = "git@github.com:kbrdn1/gwm-cli.git"
+config_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+trusted_at = "2026-05-22T10:00:00Z"
+trusted_by = "kylian@laptop"
+"#,
+  )
+  .unwrap();
+
+  // list ----------------------------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("git@github.com:kbrdn1/gwm-cli.git"))
+    // Short sha (first 12) is what list renders.
+    .stdout(predicate::str::contains("deadbeefdead"));
+
+  // show prints the raw toml -------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "show"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("kylian@laptop"));
+
+  // revoke removes it --------------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "revoke", "git@github.com:kbrdn1/gwm-cli.git"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓ revoked 1"));
+
+  // and list is empty again --------------------------------------
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["trust", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 entries"));
+}
+
+#[test]
+fn allow_bootstrap_flag_is_global_and_documented() {
+  // `--allow-bootstrap` is the CI bypass; if it ever stops being a
+  // global flag (e.g. accidentally scoped to one subcommand), the
+  // `gwm bootstrap --allow-bootstrap` invocation in user scripts
+  // silently fails. Pin it down at the help level.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["--help"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--allow-bootstrap"))
+    .stdout(predicate::str::contains("--deny-bootstrap"));
+}
+
+#[test]
+fn create_without_trust_in_non_interactive_aborts_cleanly() {
+  // Black-box the TOFU gate at the CLI boundary: a fresh repo with
+  // a `.gwm.toml` carrying any bootstrap surface, run from a
+  // non-tty (assert_cmd's piped stdin), no `--allow-bootstrap`, no
+  // ledger entry → must abort with a clear message rather than
+  // silently running the bootstrap commands.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo trapped"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    // No `GWM_ALLOW_BOOTSTRAP` env, no flag → must abort.
+    .args(["create", "feat", "42", "trapped"])
+    .assert()
+    .failure()
+    .stderr(
+      predicate::str::contains("not in the trust ledger").or(predicate::str::contains("stdin is not interactive")),
+    );
+}
+
+#[test]
+fn create_with_allow_bootstrap_flag_bypasses_the_prompt() {
+  // The `--allow-bootstrap` escape hatch is what makes scripted /
+  // CI usage workable; this asserts the FLAG (not the env var)
+  // actually short-circuits the trust gate. The env-var path is
+  // covered by other tests that set GWM_ALLOW_BOOTSTRAP=1 — here
+  // we exercise the clap-level wiring so a future refactor that
+  // accidentally scopes the flag to one subcommand breaks loudly.
+  //
+  // `--no-bootstrap` is added so we don't actually shell out to
+  // anything — the test is about the trust gate, not the bootstrap
+  // step itself.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    // No env-var bypass — the flag must do the work on its own.
+    // `--allow-bootstrap` is a clap `global = true` flag declared on
+    // `Cli`, so it MUST appear before the subcommand on the argv.
+    .args(["--allow-bootstrap", "create", "feat", "42", "trapped", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // The ledger MUST still be empty — Allow mode bypasses without
+  // recording, so the next interactive run on the same machine
+  // re-prompts. That's the "don't pollute the user's ledger from CI"
+  // contract.
+  assert!(
+    !ledger.exists()
+      || std::fs::read_to_string(&ledger).unwrap().contains("entries = []")
+      || std::fs::read_to_string(&ledger).unwrap().is_empty()
+  );
+}
+
+#[test]
+fn create_with_gwm_allow_bootstrap_env_bypasses_the_prompt() {
+  // Sibling of the previous test: same fixture, but exercise the
+  // `GWM_ALLOW_BOOTSTRAP=1` env-var bypass with no flag. This is
+  // the CI-runner code path — scripts can't always inject extra
+  // args, so the env-var path has to keep working independently.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"[[bootstrap.command]]
+name = "echo"
+run  = "echo would-have-run"
+"#,
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "42", "env-trapped", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  assert!(
+    !ledger.exists()
+      || std::fs::read_to_string(&ledger).unwrap().contains("entries = []")
+      || std::fs::read_to_string(&ledger).unwrap().is_empty()
+  );
+}
+
+#[test]
+fn create_skips_trust_gate_when_bootstrap_surface_is_empty() {
+  // A `.gwm.toml` that declares nothing executable (no copies, no
+  // guards, no no_symlinks, no commands) carries no RCE risk —
+  // prompting for trust in that case would just train the user to
+  // mash `y`. Verify the gate is a silent no-op when the config has
+  // only `[worktree]`.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    format!(
+      r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+      base = base.path().display(),
+    ),
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  // No --allow-bootstrap, no env bypass, no ledger entry, no tty —
+  // the gate would normally abort. With an empty bootstrap surface
+  // it must short-circuit and let the create proceed.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["create", "feat", "13", "empty-surface"])
+    .assert()
+    .success();
+
+  // Ledger MUST stay untouched — the skip doesn't record anything.
+  assert!(
+    !ledger.exists(),
+    "empty-surface short-circuit must not write to the ledger"
+  );
+}
+
+#[test]
+fn allow_bootstrap_succeeds_even_when_ledger_is_malformed() {
+  // The whole point of `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1`
+  // is to be the unconditional CI escape hatch. A malformed
+  // trust.toml on the CI host must NOT make the bypass fail — the
+  // Allow check has to short-circuit before the ledger is touched.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+  std::fs::write(&ledger, b"this is not valid toml @@@@").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "99", "broken-ledger", "--no-bootstrap"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn deny_bootstrap_aborts_even_when_trusted() {
+  // `--deny-bootstrap` is the forensic mode: even if the ledger
+  // says the config is trusted, refuse to run bootstrap. Asserts
+  // the precedence resolution in `resolve_trust_mode`.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[[bootstrap.command]]\nname = \"x\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .args(["--deny-bootstrap", "bootstrap"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--deny-bootstrap"));
 }

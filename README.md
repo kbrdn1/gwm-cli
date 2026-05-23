@@ -41,6 +41,7 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 - **Configurable launchers** — drive the TUI's `l` (git TUI) and `R` (review) keybindings through `[git_tui]` and `[review]` sections in `.gwm.toml`.
 - **GitHub issue / PR linking** — branches matching `<type>/#<N>-<slug>` auto-link to their issue; live status surfaces in the TUI sidebar via `gh`.
 - **Safety guards** — deny-list regexes on copied files (the original "no AWS RDS in `.env`" incident, generalised), plus a confirm-overlay countdown when destructive branch-deletion is armed.
+- **TOFU trust ledger on `.gwm.toml`** ([#95](https://github.com/kbrdn1/gwm-cli/issues/95)) — first `gwm create` / `gwm bootstrap` against a repo prints the bootstrap surface (copies, guards, commands) and prompts before running anything. Recorded in `~/.config/gwm/trust.toml` keyed on `(origin URL, sha256 of .gwm.toml)`; any byte change re-prompts. CI bypass: `--allow-bootstrap` or `GWM_ALLOW_BOOTSTRAP=1`. Manage with `gwm trust list / revoke / show`.
 
 ## documentation
 

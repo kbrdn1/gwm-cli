@@ -1,7 +1,13 @@
 [package]
 name = "gwm"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
+# MSRV is the floor required by every use in the crate, not just the
+# newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
+# wants 1.80; `std::iter::repeat_n` (existing code in src/tui/ui.rs's
+# countdown bar) wants 1.82. The crate as a whole compiles at 1.82+,
+# so MSRV is set to the higher floor. CI's clippy MSRV lint enforces it.
+rust-version = "1.82"
 description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
 license = "MIT"
@@ -38,10 +44,30 @@ glob = "0.3"
 nucleo-matcher = "0.3"
 shell-words = "1"
 tempfile = "3"
+# Issue #95: SHA-256 over the raw bytes of `.gwm.toml` for the TOFU
+# trust ledger. Whitespace-sensitive on purpose — `rm -rf /tmp/` and
+# `rm -rf /tmp /` are visually close but semantically different, so
+# we hash bytes, not parsed TOML.
+sha2 = "0.10"
+
+# Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
+# primitives (issue #93). Already pulled in transitively by git2 /
+# dirs / cc, declared here for explicit use in `src/bootstrap.rs`.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
+criterion = "0.5"
 predicates = "3"
+
+[[bench]]
+name = "commit_graph"
+harness = false
+
+[[bench]]
+name = "sidebar_recent_commits"
+harness = false
 
 [profile.release]
 opt-level = 3

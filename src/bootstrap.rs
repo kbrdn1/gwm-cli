@@ -1,6 +1,7 @@
 use crate::config::{BootstrapConfig, CommandStep, Config, CopyStep, Guard, NoSymlink};
 use crate::error::{GwmError, Result};
 use regex::Regex;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -16,12 +17,83 @@ pub struct StepResult {
   pub detail: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+impl StepResult {
+  /// `Ok` with an empty `detail` — the most common shape (the step
+  /// label alone says everything the user needs).
+  pub fn ok(label: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Ok,
+      detail: String::new(),
+    }
+  }
+
+  /// `Ok` with an explanatory `detail` line (e.g. "copied from
+  /// <src>"). Kept as a distinct constructor rather than overloading
+  /// `ok(label, detail)` so the "no detail by default" semantics of
+  /// `ok` stay unambiguous at the call sites.
+  pub fn ok_with_detail(label: impl Into<String>, detail: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Ok,
+      detail: detail.into(),
+    }
+  }
+
+  /// `Skipped` with the reason the step was bypassed (e.g.
+  /// "destination already exists", "when condition false").
+  pub fn skipped(label: impl Into<String>, reason: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Skipped,
+      detail: reason.into(),
+    }
+  }
+
+  /// `Warning` with the user-visible message. Used by guards
+  /// substituting from `.env.example` and the no-symlink remediation
+  /// path — the step proceeded but the user should know what changed.
+  pub fn warning(label: impl Into<String>, message: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Warning,
+      detail: message.into(),
+    }
+  }
+
+  /// `Failed` with the user-visible error detail. The detail SHOULD
+  /// include enough context for the user to fix the problem without
+  /// re-running with extra verbosity (filename, errno, guard name).
+  pub fn failed(label: impl Into<String>, message: impl Into<String>) -> Self {
+    Self {
+      label: label.into(),
+      status: StepStatus::Failed,
+      detail: message.into(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepStatus {
   Ok,
   Skipped,
   Warning,
   Failed,
+}
+
+impl StepStatus {
+  /// Canonical single-character glyph for each variant. Used by both
+  /// `cli::print_report` (plain stdout) and `tui::ui::render_bootstrap`
+  /// (styled `Span`); centralising the mapping here keeps the two
+  /// renderers in lock-step (issue #106).
+  pub fn sigil(&self) -> &'static str {
+    match self {
+      StepStatus::Ok => "✓",
+      StepStatus::Skipped => "·",
+      StepStatus::Warning => "!",
+      StepStatus::Failed => "✗",
+    }
+  }
 }
 
 pub struct BootstrapCtx<'a> {
@@ -34,8 +106,13 @@ pub fn run(ctx: &BootstrapCtx<'_>) -> Result<BootstrapReport> {
   let mut report = BootstrapReport { steps: Vec::new() };
   let bs = &ctx.config.bootstrap;
 
-  run_copies(ctx, bs, &mut report);
+  // Order matters (issue #93): `run_no_symlinks` strips any declared
+  // symlinked targets BEFORE `run_copies` opens them for writing.
+  // Reversed, an attacker-planted symlink at a copy destination
+  // redirects the `fs::copy` write outside the worktree — a write-
+  // anywhere primitive triggered by `gwm bootstrap` alone.
   run_no_symlinks(ctx, bs, &mut report);
+  run_copies(ctx, bs, &mut report);
   run_commands(ctx, bs, &mut report);
 
   Ok(report)
@@ -47,52 +124,99 @@ fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bootstr
     let src = ctx.main_repo.join(&step.from);
     let dst = ctx.worktree.join(&step.to);
 
-    if dst.exists() {
-      report.steps.push(StepResult {
+    // Runtime defence-in-depth (issue #94): `Config::load_for_repo`
+    // rejects `..` / absolute paths in `step.to` at load time, but
+    // callers can hand `bootstrap::run` a `Config` value built by
+    // hand (test harnesses, future programmatic embeds). Re-check
+    // here that `dst` resolves under the worktree before any write.
+    if let Err(e) = ensure_within(ctx.worktree, &dst) {
+      report.steps.push(StepResult::failed(
         label,
-        status: StepStatus::Skipped,
-        detail: "destination already exists, leaving it alone".into(),
-      });
+        format!("destination outside worktree: {}", e),
+      ));
       continue;
+    }
+
+    // Single stat on `dst` (issue #93): `symlink_metadata` does NOT
+    // follow symlinks (unlike `Path::exists`), and reusing one result
+    // for every branch below avoids the TOCTOU window of a second stat.
+    //
+    //   Ok(symlink)     → Failed (defence in depth — symlinks at a
+    //                     declared copy dst are suspicious enough to
+    //                     surface, even when [[bootstrap.no_symlink]]
+    //                     didn't list them)
+    //   Ok(other)       → Skipped (regular file or directory already
+    //                     populated — leave the user's edits alone)
+    //   Err(NotFound)   → fall through to the copy / fallback chain
+    //   Err(other)      → Failed (permission / IO error masking the
+    //                     filesystem state — never silently swallow)
+    match std::fs::symlink_metadata(&dst) {
+      Ok(meta) if meta.file_type().is_symlink() => {
+        report.steps.push(StepResult::failed(
+          label,
+          format!(
+            "refusing to copy: destination {} is a symlink — would redirect the write outside the worktree (issue #93)",
+            dst.display()
+          ),
+        ));
+        continue;
+      }
+      Ok(_) => {
+        report.steps.push(StepResult::skipped(
+          label,
+          "destination already exists, leaving it alone",
+        ));
+        continue;
+      }
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+      Err(e) => {
+        report.steps.push(StepResult::failed(
+          label,
+          format!(
+            "failed to stat destination {}: {} — refusing to proceed with unknown filesystem state",
+            dst.display(),
+            e
+          ),
+        ));
+        continue;
+      }
     }
 
     if !src.exists() {
       match resolve_missing(step, bs, &dst) {
         Some(res) => report.steps.push(StepResult { label, ..res }),
         None => {
-          let status = if step.required {
-            StepStatus::Failed
+          if step.required {
+            report.steps.push(StepResult::failed(label, "required source missing"));
           } else {
-            StepStatus::Skipped
-          };
-          let detail = if step.required {
-            "required source missing".into()
-          } else {
-            "optional source missing".into()
-          };
-          report.steps.push(StepResult { label, status, detail });
+            report.steps.push(StepResult::skipped(label, "optional source missing"));
+          }
         }
       }
       continue;
     }
 
     // Run guards before copying.
-    if let Some(g) = guard_match(step, bs, &src) {
-      handle_guard_match(&g, &src, &dst, ctx, report, &label);
-      continue;
+    match guard_match(step, bs, &src) {
+      Ok(Some(g)) => {
+        handle_guard_match(&g, &src, &dst, ctx, report, &label);
+        continue;
+      }
+      Ok(None) => {}
+      Err(detail) => {
+        report.steps.push(StepResult::failed(label, detail));
+        continue;
+      }
     }
 
-    match std::fs::copy(&src, &dst) {
-      Ok(_) => report.steps.push(StepResult {
+    match copy_no_follow(&src, &dst) {
+      Ok(()) => report.steps.push(StepResult::ok_with_detail(
         label,
-        status: StepStatus::Ok,
-        detail: format!("copied from {}", src.display()),
-      }),
-      Err(e) => report.steps.push(StepResult {
-        label,
-        status: StepStatus::Failed,
-        detail: format!("copy failed: {}", e),
-      }),
+        format!("copied from {}", src.display()),
+      )),
+      Err(e) => report
+        .steps
+        .push(StepResult::failed(label, format!("copy failed: {}", e))),
     }
   }
 }
@@ -104,24 +228,15 @@ fn resolve_missing(step: &CopyStep, bs: &BootstrapConfig, dst: &Path) -> Option<
       // Find a fallback content keyed by the `to` file basename or step.fallback alias.
       let key = key_from_to(&step.to);
       let fb = bs.fallback.get(&key)?;
-      match std::fs::write(dst, &fb.content) {
-        Ok(_) => Some(StepResult {
-          label: String::new(),
-          status: StepStatus::Warning,
-          detail: format!("source missing — wrote inline fallback to {}", dst.display()),
-        }),
-        Err(e) => Some(StepResult {
-          label: String::new(),
-          status: StepStatus::Failed,
-          detail: format!("inline fallback write failed: {}", e),
-        }),
+      match write_no_follow(dst, fb.content.as_bytes()) {
+        Ok(()) => Some(StepResult::warning(
+          "",
+          format!("source missing — wrote inline fallback to {}", dst.display()),
+        )),
+        Err(e) => Some(StepResult::failed("", format!("inline fallback write failed: {}", e))),
       }
     }
-    "abort" => Some(StepResult {
-      label: String::new(),
-      status: StepStatus::Failed,
-      detail: "source missing and fallback=abort".into(),
-    }),
+    "abort" => Some(StepResult::failed("", "source missing and fallback=abort")),
     _ => None,
   }
 }
@@ -131,22 +246,50 @@ fn key_from_to(to: &str) -> String {
   to.trim_start_matches('.').replace(['.', '-'], "_")
 }
 
-fn guard_match(step: &CopyStep, bs: &BootstrapConfig, src: &Path) -> Option<Guard> {
+/// Evaluate the configured guards against `src`'s contents.
+///
+/// Returns:
+///   - `Ok(Some(guard))` — a guard tripped on a denied pattern; the
+///     caller routes to `handle_guard_match` to apply `on_match`.
+///   - `Ok(None)` — no guard tripped; copy proceeds.
+///   - `Err(detail)` — a `deny_patterns` entry failed to compile.
+///     `Config::load_for_repo` is supposed to have caught this at
+///     load time (issue #96), so reaching this branch means the
+///     `Config` value came from a code path that bypassed the
+///     loader (test fixture, programmatic constructor, future API).
+///     Fail-closed: the caller reports a `Failed` step and the copy
+///     is refused, mirroring the abort path for a true match. A
+///     refusal mechanism whose pattern set is partially broken must
+///     never silently pass — see issue #96.
+fn guard_match(step: &CopyStep, bs: &BootstrapConfig, src: &Path) -> std::result::Result<Option<Guard>, String> {
   if step.guards.is_empty() {
-    return None;
+    return Ok(None);
   }
-  let content = std::fs::read_to_string(src).ok()?;
+  let Ok(content) = std::fs::read_to_string(src) else {
+    return Ok(None);
+  };
   for guard_name in &step.guards {
-    let guard = bs.guard.iter().find(|g| &g.name == guard_name)?;
+    let Some(guard) = bs.guard.iter().find(|g| &g.name == guard_name) else {
+      return Ok(None);
+    };
     for pat in &guard.deny_patterns {
-      if let Ok(re) = Regex::new(pat) {
-        if re.is_match(&content) {
-          return Some(guard.clone());
+      match Regex::new(pat) {
+        Ok(re) => {
+          if re.is_match(&content) {
+            return Ok(Some(guard.clone()));
+          }
+        }
+        Err(e) => {
+          return Err(format!(
+            "guard '{}' deny_pattern {:?} failed to compile at evaluation time — \
+             Config bypassed Config::load_for_repo (#96)? regex: {}",
+            guard.name, pat, e
+          ));
         }
       }
     }
   }
-  None
+  Ok(None)
 }
 
 fn handle_guard_match(
@@ -161,44 +304,55 @@ fn handle_guard_match(
     "seed-from-example" => {
       let example_rel = guard.example_file.as_deref().unwrap_or(".env.example");
       let example_src = ctx.main_repo.join(example_rel);
+      // Runtime defence-in-depth (issue #94): refuse to read an
+      // example_file that resolves outside `ctx.main_repo`. Mirrors
+      // the dst-side check in `run_copies`; the `Config` loader
+      // rejects this at load time, this branch covers hand-built
+      // configs.
+      if let Err(e) = ensure_within(ctx.main_repo, &example_src) {
+        report.steps.push(StepResult::failed(
+          label,
+          format!(
+            "guard '{}' example_file outside main repo: {} (traversal rejected, issue #94)",
+            guard.name, e
+          ),
+        ));
+        return;
+      }
       if example_src.exists() {
-        match std::fs::copy(&example_src, dst) {
-          Ok(_) => report.steps.push(StepResult {
-            label: label.into(),
-            status: StepStatus::Warning,
-            detail: format!(
+        match copy_no_follow(&example_src, dst) {
+          Ok(_) => report.steps.push(StepResult::warning(
+            label,
+            format!(
               "guard '{}' tripped on {} — seeded {} from {} (edit before use)",
               guard.name,
               src.display(),
               dst.display(),
               example_src.display()
             ),
-          }),
-          Err(e) => report.steps.push(StepResult {
-            label: label.into(),
-            status: StepStatus::Failed,
-            detail: format!("guard '{}' seed-from-example failed: {}", guard.name, e),
-          }),
+          )),
+          Err(e) => report.steps.push(StepResult::failed(
+            label,
+            format!("guard '{}' seed-from-example failed: {}", guard.name, e),
+          )),
         }
       } else {
-        report.steps.push(StepResult {
-          label: label.into(),
-          status: StepStatus::Failed,
-          detail: format!(
+        report.steps.push(StepResult::failed(
+          label,
+          format!(
             "guard '{}' tripped and no example_file {} available",
             guard.name,
             example_src.display()
           ),
-        });
+        ));
       }
     }
     _ => {
       // abort
-      report.steps.push(StepResult {
-        label: label.into(),
-        status: StepStatus::Failed,
-        detail: format!("guard '{}' tripped on {} — abort", guard.name, src.display()),
-      });
+      report.steps.push(StepResult::failed(
+        label,
+        format!("guard '{}' tripped on {} — abort", guard.name, src.display()),
+      ));
     }
   }
 }
@@ -223,32 +377,24 @@ fn run_no_symlinks(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Bo
 
 fn handle_no_symlink(label: &str, target: &Path, report: &mut BootstrapReport) {
   if !target.exists() && !target.is_symlink() {
-    report.steps.push(StepResult {
-      label: label.into(),
-      status: StepStatus::Skipped,
-      detail: "not present".into(),
-    });
+    report.steps.push(StepResult::skipped(label, "not present"));
     return;
   }
   if target.is_symlink() {
     match std::fs::remove_file(target) {
-      Ok(_) => report.steps.push(StepResult {
-        label: label.into(),
-        status: StepStatus::Warning,
-        detail: format!("removed symlink {}", target.display()),
-      }),
-      Err(e) => report.steps.push(StepResult {
-        label: label.into(),
-        status: StepStatus::Failed,
-        detail: format!("failed to remove symlink {}: {}", target.display(), e),
-      }),
+      Ok(_) => report.steps.push(StepResult::warning(
+        label,
+        format!("removed symlink {}", target.display()),
+      )),
+      Err(e) => report.steps.push(StepResult::failed(
+        label,
+        format!("failed to remove symlink {}: {}", target.display(), e),
+      )),
     }
   } else {
-    report.steps.push(StepResult {
-      label: label.into(),
-      status: StepStatus::Ok,
-      detail: "real directory, ok".to_string(),
-    });
+    report
+      .steps
+      .push(StepResult::ok_with_detail(label, "real directory, ok"));
   }
 }
 
@@ -257,25 +403,17 @@ fn run_commands(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut Boots
     let label = format!("run {}", step.name);
     if let Some(ref guard) = step.when {
       if !evaluate_when(guard, ctx.worktree) {
-        report.steps.push(StepResult {
-          label,
-          status: StepStatus::Skipped,
-          detail: format!("when condition '{}' false", guard),
-        });
+        report
+          .steps
+          .push(StepResult::skipped(label, format!("when condition '{}' false", guard)));
         continue;
       }
     }
     match exec_shell(step, ctx.worktree) {
-      Ok(output) => report.steps.push(StepResult {
-        label,
-        status: StepStatus::Ok,
-        detail: trailing_lines(&output, 3),
-      }),
-      Err(e) => report.steps.push(StepResult {
-        label,
-        status: StepStatus::Failed,
-        detail: e.to_string(),
-      }),
+      Ok(output) => report
+        .steps
+        .push(StepResult::ok_with_detail(label, trailing_lines(&output, 3))),
+      Err(e) => report.steps.push(StepResult::failed(label, e.to_string())),
     }
   }
 }
@@ -485,4 +623,120 @@ fn trailing_lines(s: &str, n: usize) -> String {
   let lines: Vec<&str> = s.lines().collect();
   let start = lines.len().saturating_sub(n);
   lines[start..].join("\n")
+}
+
+// --------------------------------------------------------------------------
+// TOCTOU-safe write primitives (issue #93 follow-up)
+// --------------------------------------------------------------------------
+//
+// The `symlink_metadata` guard at the top of `run_copies` closes the
+// "symlink already exists at copy time" attack vector, but a small
+// race window remained between the stat and the subsequent `fs::copy`
+// (or `fs::write` in the inline-fallback path): an attacker with
+// concurrent write access to the worktree could plant a symlink in
+// the µs after the stat, redirecting the write through `O_CREAT |
+// O_TRUNC` (both of which follow symlinks). These helpers close that
+// window by opening `dst` with `O_NOFOLLOW | O_CREAT | O_EXCL` so
+// that:
+//
+//   - A symlink at `dst` causes `open()` to fail with `ELOOP`.
+//   - Any other entry (regular file, dir, FIFO) causes `EEXIST` —
+//     `create_new(true)` maps to `O_EXCL` on unix and `CREATE_NEW`
+//     on Windows.
+//   - On a fresh `dst`, the file is created and truncated atomically
+//     under the same fd handed to `write_all`.
+//
+// On non-unix platforms `O_NOFOLLOW` is unavailable in `std`; the
+// `create_new(true)` half still holds, and the bug class flagged on
+// #93 is unix-only anyway (Windows symlinks require admin and aren't
+// the realistic attack surface for `gwm bootstrap`).
+
+/// Copy the contents of `src` into `dst` as a fresh regular file,
+/// refusing to follow any symlink at `dst`. `src` permissions are
+/// preserved on unix.
+///
+/// Returns the standard `io::Result` so callers can format the errno
+/// into their step report without losing the error kind. The `dst`
+/// is opened with `O_NOFOLLOW | O_CREAT | O_EXCL` on unix; a symlink
+/// (broken or live) at `dst` triggers `ELOOP`, anything else
+/// pre-existing triggers `EEXIST`.
+pub fn copy_no_follow(src: &Path, dst: &Path) -> std::io::Result<()> {
+  let mut buf = Vec::new();
+  std::fs::File::open(src)?.read_to_end(&mut buf)?;
+  #[cfg(unix)]
+  let src_perms = std::fs::metadata(src)?.permissions();
+  write_no_follow(dst, &buf)?;
+  #[cfg(unix)]
+  std::fs::set_permissions(dst, src_perms)?;
+  Ok(())
+}
+
+/// Verify that `path` resolves to a location inside `base` (issue
+/// #94). Both `path` and `base` may contain symlinks; both are
+/// canonicalized so the check operates on real on-disk identities.
+///
+/// `path` typically does NOT exist yet (it's a freshly-computed copy
+/// destination), so we canonicalize the deepest existing ancestor
+/// and check that the canonical ancestor still falls under
+/// `base.canonicalize()`. This catches `..` traversal, absolute
+/// paths, and symlinks in intermediate components that redirect
+/// outside `base`.
+///
+/// Returns `Err` with `ErrorKind::InvalidInput` when the path
+/// escapes `base`; surrounding code surfaces the error verbatim
+/// in the step report so the user knows which field went wrong.
+///
+/// **TOCTOU note**: a residual window exists between this ancestor
+/// canonicalization and the final write — an attacker who can plant
+/// a symlink at an intermediate component between the two would
+/// re-route the resolved path. That gap is closed by the
+/// `O_NOFOLLOW`-based writers from issue #93 (`copy_no_follow` /
+/// `write_no_follow`): even if the path mutates post-check, the
+/// final `open` returns `ELOOP` / `EEXIST` rather than writing
+/// through. `ensure_within` and the no-follow writers are
+/// complementary; neither alone is sufficient.
+fn ensure_within(base: &Path, path: &Path) -> std::io::Result<()> {
+  let base_canon = base.canonicalize()?;
+  let mut anc: &Path = path;
+  let canon_anc = loop {
+    if let Ok(c) = anc.canonicalize() {
+      break c;
+    }
+    match anc.parent() {
+      Some(p) if !p.as_os_str().is_empty() => anc = p,
+      _ => {
+        return Err(std::io::Error::new(
+          std::io::ErrorKind::InvalidInput,
+          format!("cannot resolve any ancestor of {:?}", path),
+        ));
+      }
+    }
+  };
+  if !canon_anc.starts_with(&base_canon) {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::InvalidInput,
+      format!(
+        "{:?} resolves outside {:?} — '..' traversal, absolute path, or symlinked intermediate component rejected (issue #94)",
+        path, base_canon
+      ),
+    ));
+  }
+  Ok(())
+}
+
+/// Companion to [`copy_no_follow`] for callers that already hold the
+/// payload in memory (e.g. the inline-fallback branch in
+/// [`resolve_missing`]). Same TOCTOU-closing semantics: `dst` must
+/// not exist and must not be a symlink, or `open()` fails.
+pub fn write_no_follow(dst: &Path, bytes: &[u8]) -> std::io::Result<()> {
+  let mut opts = std::fs::OpenOptions::new();
+  opts.write(true).create_new(true);
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::OpenOptionsExt;
+    opts.custom_flags(libc::O_NOFOLLOW);
+  }
+  let mut f = opts.open(dst)?;
+  f.write_all(bytes)?;
+  Ok(())
 }

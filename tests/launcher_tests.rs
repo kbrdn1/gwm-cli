@@ -7,8 +7,8 @@ mod common;
 use common::init_repo;
 use gwm::config::ResolvedLauncher;
 use gwm::launcher::{
-  count_commits_ahead, expand_command, locate_binary, missing_binary_for, resolve_review_base, write_gwm_base,
-  LauncherContext,
+  count_commits_ahead, expand_command, git_diff_argv, git_rev_list_count_argv, locate_binary, missing_binary_for,
+  resolve_review_base, write_gwm_base, LauncherContext,
 };
 use std::path::Path;
 
@@ -223,6 +223,50 @@ fn resolve_base_empty_strings_in_config_are_ignored() {
   assert_eq!(base, "trunk", "empty merge must fall through to the next chain step");
 }
 
+#[test]
+fn resolve_base_skips_self_tracking_upstream() {
+  // Regression for #117. After the canonical `gwm create … && git push -u
+  // origin <branch>` workflow, git records `branch.<n>.merge =
+  // refs/heads/<same-branch>` because the local branch tracks its own
+  // remote-side copy. Returning the branch's own short name from priority-1
+  // makes `git rev-list --count <branch>..<branch> = 0`, so the launcher's
+  // `skip_when_no_changes` knob silently swallows the `R: review`
+  // keystroke — the user gets nothing, no error, no diff.
+  //
+  // The fix is to treat a merge value equal to the branch itself as
+  // "not a usable upstream" and fall through to the next chain step
+  // (gwm-base, then [review].default_base, then dev / main).
+  let (_dir, repo) = init_repo();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/x.merge", "refs/heads/feat/x").unwrap();
+  }
+  write_gwm_base(&repo, "feat/x", "release-1.x").unwrap();
+  let base = resolve_review_base(&repo, "feat/x", Some("trunk"));
+  assert_eq!(
+    base, "release-1.x",
+    "self-tracking upstream must be ignored — fall through to gwm-base"
+  );
+}
+
+#[test]
+fn resolve_base_skips_self_tracking_upstream_short_form() {
+  // Defensive: some git versions / manual edits drop the `refs/heads/`
+  // prefix, leaving the value as a bare branch name. The self-equality
+  // check must run on the stripped short form too, otherwise a bare
+  // `branch.feat/x.merge = feat/x` slips past the guard.
+  let (_dir, repo) = init_repo();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/x.merge", "feat/x").unwrap();
+  }
+  let base = resolve_review_base(&repo, "feat/x", Some("trunk"));
+  assert_eq!(
+    base, "trunk",
+    "bare self-tracking upstream must be ignored too — fall through to default_base"
+  );
+}
+
 // ---- count_commits_ahead ------------------------------------------------
 
 #[test]
@@ -280,4 +324,62 @@ fn locate_binary_finds_resolved_argv0() {
   let c = ctx(Path::new("/tmp"), None, None);
   let cmd = expand_command("sh -c 'echo hi'", &c).unwrap();
   assert!(locate_binary(&cmd).is_some());
+}
+
+// --- Issue #100: --end-of-options guards before user-derived refs -------
+
+#[test]
+fn git_diff_argv_inserts_end_of_options_before_refspec() {
+  // Issue #100 / CVE-2017-1000117 shape. `base` and `head` come from
+  // user-controlled surfaces (`branch.<n>.merge`, `[review].default_base`,
+  // branch names). Without `--end-of-options` a value like
+  // `--upload-pack=/tmp/x` would be re-parsed as a git option. The
+  // separator MUST appear before the refspec token so every following
+  // arg is treated as positional.
+  let argv = git_diff_argv("dev", "feat/#1-x");
+  assert_eq!(argv, vec!["diff", "--end-of-options", "dev..feat/#1-x"]);
+
+  let sep_idx = argv.iter().position(|a| a == "--end-of-options").unwrap();
+  let refspec_idx = argv.iter().position(|a| a.contains("..")).unwrap();
+  assert!(
+    sep_idx < refspec_idx,
+    "--end-of-options must precede the refspec; argv: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn git_diff_argv_keeps_separator_first_for_dash_prefixed_base() {
+  // The whole point of the guard: a malicious base value like
+  // `--upload-pack=/tmp/x` ends up after `--end-of-options` so git
+  // treats it as a ref name (which will fail to resolve, surfacing as
+  // a clean error) instead of executing the option.
+  let argv = git_diff_argv("--upload-pack=/tmp/x", "HEAD");
+  assert_eq!(argv[0], "diff");
+  assert_eq!(argv[1], "--end-of-options");
+  assert!(
+    argv[2].starts_with("--upload-pack=/tmp/x.."),
+    "malicious base must land as a positional ref after the separator; argv: {:?}",
+    argv
+  );
+}
+
+#[test]
+fn git_rev_list_count_argv_inserts_end_of_options_before_refspec() {
+  let argv = git_rev_list_count_argv("dev", "HEAD");
+  assert_eq!(argv, vec!["rev-list", "--count", "--end-of-options", "dev..HEAD"]);
+}
+
+#[test]
+fn count_commits_ahead_treats_dash_prefixed_base_as_ref_not_flag() {
+  // End-to-end smoke: pass a base that looks like a flag and prove the
+  // shell-out doesn't drift to "git --version → 0 (parse error)" by
+  // mistake. With the guard git tries to resolve the value as a ref,
+  // fails to find it, exits non-zero, and `count_commits_ahead`
+  // coalesces to 0. The argv-level tests above pin the actual
+  // contract; this guards against future refactors that forget to
+  // re-thread the helper.
+  let (dir, _) = init_repo();
+  let n = count_commits_ahead(dir.path(), "--version", "HEAD");
+  assert_eq!(n, 0, "dash-prefixed base must never let git happily print a banner");
 }

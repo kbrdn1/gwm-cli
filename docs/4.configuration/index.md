@@ -13,5 +13,6 @@ gwm reads `.gwm.toml` from the repo root. Without a config, it falls back to sen
 - **[Bootstrap pipeline](/configuration/bootstrap)** — execution order: copies → guards → fallbacks → no-symlink check → commands.
 - **[Regex guards](/configuration/guards)** — deny-list patterns on copied files (the original "no AWS RDS in `.env`" incident).
 - **[`when` predicates](/configuration/when-predicates)** — `file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`, with `!`, `&&`, `||` composition.
+- **[TOFU trust ledger](/configuration/trust-ledger)** — the gate that fires before the bootstrap pipeline (issue #95). Threat model, CLI surface (`gwm trust list / revoke / show`), TUI behaviour, ledger format, CI bypass.
 
 Run `gwm init` in a fresh repo to write a default `.gwm.toml`. For the full annotated example with every field commented, see [`examples/gwm.toml.example`](https://github.com/kbrdn1/gwm-cli/blob/main/examples/gwm.toml.example) in the repo.
