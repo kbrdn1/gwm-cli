@@ -159,6 +159,18 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #   gwm types --gitmoji                  → branch types + emoji columns
 #   gwm hooks install commit-msg         → opt-in auto-prepend on `git commit`
 #
+# `--unicode` normalisation of overrides:
+#   With `feat = ":rocket:"`:
+#     gwm commit-prefix --branch feat/#1-x           → ":rocket: feat(#1):"
+#     gwm commit-prefix --branch feat/#1-x --unicode → "🚀 feat(#1):"
+#   With `feat = ":foo:"` (shortcode unknown to gwm's built-in table):
+#     gwm commit-prefix --branch feat/#1-x --unicode → ":foo: feat(#1):"
+#   Unknown shortcodes fall through verbatim — no panic, no
+#   `:question:` substitution. The known-shortcode set covers the ten
+#   built-in mappings plus the most commonly-swapped Gitmoji entries
+#   (`:rocket:`, `:fire:`, `:lock:`, `:art:`, `:lipstick:`, `:hammer:`,
+#   `:bookmark:`, …).
+#
 # [gitmoji]
 # feat = ":rocket:"            # team uses 🚀 for new features instead of ✨
 # migration = ":truck:"        # custom branch type — emoji wins on `gwm types --gitmoji`

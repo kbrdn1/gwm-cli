@@ -45,6 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   defaults are baked into the binary). Custom branch types are
   supported — `migration = ":truck:"` round-trips through `gwm types
   --gitmoji`.
+- Under `--unicode`, `gwm commit-prefix` and the unicode column of
+  `gwm types --gitmoji` now normalise known `:shortcode:` overrides
+  (e.g. `feat = ":rocket:"` → `🚀 feat(#1):` instead of
+  `:rocket: feat(#1):`). The known-shortcode set extends to the most
+  commonly-swapped Gitmoji entries (`:rocket:`, `:fire:`, `:lock:`,
+  `:art:`, `:lipstick:`, `:hammer:`, `:bookmark:`, …). Unknown
+  shortcodes fall through verbatim — no panic, no substitution.
+  (#85)
 
 ### Fixed
 
