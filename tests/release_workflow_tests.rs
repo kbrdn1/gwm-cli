@@ -69,6 +69,29 @@ fn prerelease_workflow_does_not_match_stable_tags() {
 }
 
 #[test]
+fn ci_test_matrix_runs_on_windows_latest() {
+  let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+  let test_job = workflow
+    .split("  test:")
+    .nth(1)
+    .and_then(|tail| tail.split("\n  hook-smoke:").next())
+    .expect("ci.yml must contain a test job before hook-smoke");
+
+  assert!(
+    test_job.contains("os: [ubuntu-latest, macos-latest, windows-latest]"),
+    "ci.yml test matrix must include windows-latest"
+  );
+  assert!(
+    test_job.contains("run: cargo build --verbose"),
+    "windows-latest must run the same cargo build step as the other test matrix rows"
+  );
+  assert!(
+    test_job.contains("run: cargo test --verbose"),
+    "windows-latest must run the same cargo test step as the other test matrix rows"
+  );
+}
+
+#[test]
 fn prerelease_workflow_checks_unreleased_against_previous_rc_before_publish() {
   let workflow = fs::read_to_string(".github/workflows/pre-release.yml").unwrap();
   let check_pos = workflow
