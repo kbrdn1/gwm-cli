@@ -120,6 +120,37 @@ fn progress_caps_at_one_after_total() {
 }
 
 #[test]
+fn is_armed_returns_true_after_first_press_y_and_false_after_second() {
+  // Pins the public `is_armed()` accessor (encapsulation polish on top
+  // of #125 — Copilot review on PR #131 flagged `pub started_at` as
+  // leaking internal timer state). Exercises the armed → disarmed
+  // transition through the public surface so callers never need to
+  // peek at the `Option<Instant>` directly.
+  let mut modal = ConfirmModal::new();
+  let total = Duration::from_secs(3);
+  assert!(
+    !modal.is_armed(),
+    "freshly constructed modal must not be armed"
+  );
+
+  let t0 = Instant::now();
+  let action = modal.press_y(t0, total);
+  assert_eq!(action, ConfirmKeyAction::Armed);
+  assert!(
+    modal.is_armed(),
+    "is_armed() must return true after the first press_y in countdown mode"
+  );
+
+  let t1 = t0 + Duration::from_millis(500);
+  let action = modal.press_y(t1, total);
+  assert_eq!(action, ConfirmKeyAction::Disarmed);
+  assert!(
+    !modal.is_armed(),
+    "is_armed() must return false after the second press_y disarms the countdown"
+  );
+}
+
+#[test]
 fn remaining_secs_rounds_up_to_next_whole_second() {
   // The UI label reads remaining_secs as the countdown number; rounding
   // up matches the visual contract "still seeing 2s on the label means
