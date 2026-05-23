@@ -105,6 +105,13 @@ pub enum Command {
     /// Also delete the branch.
     #[arg(long)]
     delete_branch: bool,
+    /// Print the resolved worktree (name + path + branch + would-delete-branch
+    /// flag) without touching anything. Exit code 0. If the pattern is
+    /// ambiguous, the same non-zero candidate-list error fires as in the
+    /// destructive form — `--dry-run` only suppresses *destruction*, not
+    /// resolution failures. Issue #31.
+    #[arg(long)]
+    dry_run: bool,
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   ///
@@ -118,7 +125,14 @@ pub enum Command {
     target: Option<String>,
   },
   /// Prune stale worktree references (admin files without a working dir).
-  Prune,
+  Prune {
+    /// List the prunable worktrees (name + path + reason) without
+    /// touching the admin entries. Exit code 0. Useful for piping into
+    /// a confirmation script before running the destructive form.
+    /// Issue #31.
+    #[arg(long)]
+    dry_run: bool,
+  },
   /// Diagnose the gwm setup (config, env, worktree state).
   ///
   /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
@@ -519,10 +533,14 @@ pub fn run(cli: Cli) -> Result<()> {
       no_bootstrap,
       reuse_branch,
     } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, mode),
-    Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
+    Command::Remove {
+      pattern,
+      delete_branch,
+      dry_run,
+    } => cmd_remove(pattern, delete_branch, dry_run),
     Command::Path { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target, mode),
-    Command::Prune => cmd_prune(),
+    Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Doctor => cmd_doctor(),
     Command::Types { gitmoji } => cmd_types(gitmoji),
     Command::CommitPrefix { branch, unicode } => cmd_commit_prefix(branch, unicode),
@@ -691,9 +709,105 @@ fn cmd_create(
   Ok(())
 }
 
-fn cmd_remove(pattern: String, delete_branch: bool) -> Result<()> {
+/// Render the would-do plan for `gwm remove --dry-run` (issue #31).
+/// Extracted from `cmd_remove` so the formatter is unit-testable
+/// without spinning up a real worktree. Pure function: takes the
+/// resolved name + path + branch, returns a multi-line string
+/// (trailing newline included).
+///
+/// `delete_branch` only adds "(would be deleted)" when there *is* a
+/// branch to delete — a detached HEAD worktree with
+/// `--delete-branch` reports "(no branch to delete)" instead, mirror-
+/// ing `worktree::remove`'s actual behaviour (it only drops a branch
+/// when one is resolvable).
+pub fn format_remove_plan(name: &str, path: &Path, branch: Option<&str>, delete_branch: bool) -> String {
+  use std::fmt::Write;
+  let mut out = String::new();
+  let _ = writeln!(out, "would remove:");
+  let _ = writeln!(out, "  name:   {}", name);
+  let _ = writeln!(out, "  path:   {}", path.display());
+  match (branch, delete_branch) {
+    (Some(b), true) => {
+      let _ = writeln!(out, "  branch: {} (would be deleted)", b);
+    }
+    (Some(b), false) => {
+      let _ = writeln!(out, "  branch: {}", b);
+    }
+    (None, true) => {
+      // Detached HEAD worktree: `worktree::remove` only drops a
+      // branch when one is resolvable, so the dry-run must not
+      // claim a deletion that will never happen. The clarifying
+      // rider tells the user why `--delete-branch` is a no-op
+      // here without forcing them to re-read the docs.
+      let _ = writeln!(out, "  branch: - (no branch to delete)");
+    }
+    (None, false) => {
+      let _ = writeln!(out, "  branch: -");
+    }
+  }
+  out
+}
+
+/// Render the would-do plan for `gwm prune --dry-run` (issue #31).
+/// Extracted from `cmd_prune` so the formatter is unit-testable on
+/// arbitrary `PrunableEntry` fixtures (non-ASCII names / paths
+/// without needing a real repo). Pure function: trailing newline
+/// included; empty input still emits the canonical
+/// "0 worktree(s) to prune" line so piped consumers get a stable
+/// signal instead of empty stdout.
+///
+/// Column widths are computed in Unicode characters
+/// (`.chars().count()`), not bytes (`.len()`), so non-ASCII paths
+/// stay aligned in a fixed-width terminal.
+pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
+  use std::fmt::Write;
+  let mut out = String::new();
+  if entries.is_empty() {
+    let _ = writeln!(out, "0 worktree(s) to prune");
+    return out;
+  }
+  // Widths in Unicode characters, not bytes — non-ASCII names or
+  // paths would otherwise drift the reason column right by the
+  // (byte_len - char_count) delta. Rust's `{:<width$}` format spec
+  // pads to a *character* count, so feeding it `.len()` is the bug
+  // Copilot flagged on PR #154.
+  let name_w = entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(4);
+  let path_w = entries
+    .iter()
+    .map(|e| e.path.display().to_string().chars().count())
+    .max()
+    .unwrap_or(4);
+  let _ = writeln!(out, "would prune {} worktree(s):", entries.len());
+  for entry in entries {
+    let _ = writeln!(
+      out,
+      "  {:<nw$}  {:<pw$}  ({})",
+      entry.name,
+      entry.path.display(),
+      entry.reason,
+      nw = name_w,
+      pw = path_w,
+    );
+  }
+  out
+}
+
+fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let found = worktree::find_fuzzy(&repo, &pattern)?;
+  if dry_run {
+    // Issue #31: print the would-remove plan and exit. Resolution
+    // already happened above — an ambiguous pattern surfaced via
+    // `find_fuzzy` returns the same `Other(... ambiguous ...)` error
+    // the destructive form raises, satisfying the spec's "same error
+    // contract" requirement.
+    worktree::remove_dry_run(&repo, &found.name)?;
+    print!(
+      "{}",
+      format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
+    );
+    return Ok(());
+  }
   worktree::remove(&repo, &found.name, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
@@ -740,8 +854,17 @@ fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
   Ok(())
 }
 
-fn cmd_prune() -> Result<()> {
+fn cmd_prune(dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+  if dry_run {
+    // Issue #31: enumerate prunable worktrees (name + path + reason)
+    // and render the plan through the shared formatter. Empty input
+    // still emits "0 worktree(s) to prune" so piped consumers always
+    // get a stable signal.
+    let plan = worktree::prunable_worktrees(&repo)?;
+    print!("{}", format_prune_plan(&plan));
+    return Ok(());
+  }
   let n = worktree::prune(&repo)?;
   println!("pruned {} stale worktree(s)", n);
   Ok(())
