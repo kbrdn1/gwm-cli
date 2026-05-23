@@ -597,7 +597,8 @@ pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>
 }
 
 fn commit_row_line(row: worktree::CommitRow, graph: Vec<Span<'static>>) -> Line<'static> {
-  let short_hash: String = row.hash.to_string().chars().take(COMMIT_HASH_DISPLAY_LEN).collect();
+  let mut short_hash = row.hash.to_string();
+  short_hash.truncate(COMMIT_HASH_DISPLAY_LEN);
   let initials = author_initials(&row.author);
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + graph.len());
   spans.push(Span::styled(short_hash, Style::default().fg(Color::Yellow)));

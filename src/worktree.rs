@@ -34,6 +34,36 @@ pub struct WorktreeInfo {
   pub age: Option<Duration>,
 }
 
+#[cfg(test)]
+mod tests {
+  use super::parse_git_log_with_author_output;
+
+  #[test]
+  fn parse_git_log_error_includes_invalid_commit_oid_text() {
+    let err = parse_git_log_with_author_output("not-an-oid\u{0}Ada\u{0}\u{0}subject\n").unwrap_err();
+    let rendered = err.to_string();
+
+    assert!(
+      rendered.contains("not-an-oid"),
+      "invalid commit oid should be included in the error, got: {}",
+      rendered
+    );
+  }
+
+  #[test]
+  fn parse_git_log_error_includes_invalid_parent_oid_text() {
+    let raw = "0123456789abcdef0123456789abcdef01234567\u{0}Ada\u{0}bad-parent\u{0}subject\n";
+    let err = parse_git_log_with_author_output(raw).unwrap_err();
+    let rendered = err.to_string();
+
+    assert!(
+      rendered.contains("bad-parent"),
+      "invalid parent oid should be included in the error, got: {}",
+      rendered
+    );
+  }
+}
+
 /// Cheap snapshot of "where are we vs. clean / upstream".
 #[derive(Debug, Clone, Default)]
 pub struct BranchStatus {
@@ -383,6 +413,10 @@ pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
     )));
   }
   let raw = String::from_utf8_lossy(&output.stdout).into_owned();
+  parse_git_log_with_author_output(&raw)
+}
+
+fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
   let mut rows = Vec::new();
   for line in raw.lines() {
     let mut parts = line.splitn(4, '\u{0}');
@@ -394,12 +428,12 @@ pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
       continue;
     }
     let hash = git2::Oid::from_str(hash)
-      .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid commit oid: {}", e)))?;
+      .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid commit oid '{}': {}", hash, e)))?;
     let parents: Vec<git2::Oid> = parents_field
       .split_whitespace()
       .map(|s| {
         git2::Oid::from_str(s)
-          .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid parent oid: {}", e)))
+          .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid parent oid '{}': {}", s, e)))
       })
       .collect::<Result<Vec<_>>>()?;
     rows.push(CommitRow {
