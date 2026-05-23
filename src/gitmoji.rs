@@ -147,15 +147,19 @@ pub fn resolve_prefix(map: &GitmojiMap, branch: &BranchSpec, unicode: bool) -> S
   format!("{} {}(#{}):", emoji, branch.type_, branch.issue)
 }
 
-/// Map a `:shortcode:` to its unicode character. Only the entries
-/// shipped in the built-in table + `:question:` are supported — a
-/// shortcode the user invented for their own branch type (e.g. `:fire:`
-/// for `chore-remove`) round-trips verbatim, which is the right
-/// behaviour: rendering an arbitrary user string under `--unicode`
-/// would require a 3000-entry table or a heavy dep, and shortcodes
-/// remain valid commit-message decoration anyway.
+/// Map a `:shortcode:` to its unicode character. Covers the ten
+/// built-in defaults plus a curated set of the most commonly-used
+/// Gitmoji shortcodes (the ones a team `[gitmoji]` override is
+/// statistically likely to swap to — `:rocket:`, `:fire:`, `:lock:`,
+/// `:art:`, `:lipstick:`, …). Anything outside the table round-trips
+/// verbatim: rendering an arbitrary user string under `--unicode`
+/// would require the full 3000-entry Gitmoji set (a heavy dep) and
+/// shortcodes remain valid commit-message decoration anyway. The
+/// `:question:` fallback covers the unknown-branch-type path inside
+/// [`resolve_prefix`].
 pub fn shortcode_to_unicode(shortcode: &str) -> &str {
   match shortcode {
+    // Built-in default mappings (mirror DEFAULT_GITMOJI).
     ":sparkles:" => "✨",
     ":bug:" => "🐛",
     ":ambulance:" => "🚑",
@@ -167,6 +171,59 @@ pub fn shortcode_to_unicode(shortcode: &str) -> &str {
     ":construction_worker:" => "👷",
     ":package:" => "📦",
     ":question:" => "❓",
+    // Curated extension — common Gitmoji shortcodes teams swap in
+    // via `[gitmoji]` overrides. The list is intentionally not the
+    // full Gitmoji set (~3000 entries); it covers the ones witnessed
+    // in OSS `.gwm.toml`/`.commitlintrc` configs.
+    ":rocket:" => "🚀",
+    ":tada:" => "🎉",
+    ":boom:" => "💥",
+    ":fire:" => "🔥",
+    ":lock:" => "🔒",
+    ":closed_lock_with_key:" => "🔐",
+    ":key:" => "🔑",
+    ":art:" => "🎨",
+    ":lipstick:" => "💄",
+    ":hammer:" => "🔨",
+    ":wastebasket:" => "🗑",
+    ":truck:" => "🚚",
+    ":bookmark:" => "🔖",
+    ":pencil2:" => "✏",
+    ":pushpin:" => "📌",
+    ":green_heart:" => "💚",
+    ":rotating_light:" => "🚨",
+    ":construction:" => "🚧",
+    ":heavy_plus_sign:" => "➕",
+    ":heavy_minus_sign:" => "➖",
+    ":arrow_up:" => "⬆",
+    ":arrow_down:" => "⬇",
+    ":lock_with_ink_pen:" => "🔏",
+    ":mag:" => "🔍",
+    ":bulb:" => "💡",
+    ":poop:" => "💩",
+    ":rewind:" => "⏪",
+    ":twisted_rightwards_arrows:" => "🔀",
+    ":alien:" => "👽",
+    ":seedling:" => "🌱",
+    ":triangular_flag_on_post:" => "🚩",
+    ":bento:" => "🍱",
+    ":busts_in_silhouette:" => "👥",
+    ":children_crossing:" => "🚸",
+    ":building_construction:" => "🏗",
+    ":iphone:" => "📱",
+    ":clown_face:" => "🤡",
+    ":egg:" => "🥚",
+    ":see_no_evil:" => "🙈",
+    ":camera_flash:" => "📸",
+    ":coffin:" => "⚰",
+    ":test_tube:" => "🧪",
+    ":necktie:" => "👔",
+    ":stethoscope:" => "🩺",
+    ":bricks:" => "🧱",
+    ":technologist:" => "🧑‍💻",
+    ":money_with_wings:" => "💸",
+    ":thread:" => "🧵",
+    ":safety_vest:" => "🦺",
     other => other,
   }
 }
