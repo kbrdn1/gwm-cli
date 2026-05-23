@@ -1,5 +1,7 @@
 use gwm::bootstrap::{self, BootstrapCtx, StepResult, StepStatus};
-use gwm::config::{CommandStep, Config, CopyStep, FallbackContent, Guard, NoSymlink};
+#[cfg(unix)]
+use gwm::config::NoSymlink;
+use gwm::config::{CommandStep, Config, CopyStep, FallbackContent, Guard};
 use std::collections::HashMap;
 use tempfile::TempDir;
 
