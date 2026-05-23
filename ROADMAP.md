@@ -64,6 +64,9 @@ For reference (each linked to its closing PR):
 | [#138](https://github.com/kbrdn1/gwm-cli/issues/138) | v0.7.0-rc.3 | `GitHubFetch` cache keyed by issue/PR number; late results dropped after `invalidate()` |
 | [#131](https://github.com/kbrdn1/gwm-cli/pull/131) / [#134](https://github.com/kbrdn1/gwm-cli/pull/134) | v0.7.0-rc.3 | TUI state encapsulation polish for `ConfirmModal` and `FilterState` |
 | [#107](https://github.com/kbrdn1/gwm-cli/issues/107) / [#108](https://github.com/kbrdn1/gwm-cli/issues/108) | v0.7.0 | Measured P3 TUI sidebar perf: cached libgit2 Recent Commits and `Oid` commit graph pipes |
+| [#146](https://github.com/kbrdn1/gwm-cli/issues/146) / [#147](https://github.com/kbrdn1/gwm-cli/issues/147) / [#112](https://github.com/kbrdn1/gwm-cli/issues/112) | v0.8.0-rc.1 | Release hardening: `gh`-CLI publish + workflow token, pre-release `[Unreleased]` dupe guard, Windows in the test matrix |
+| [#86](https://github.com/kbrdn1/gwm-cli/issues/86) / [#85](https://github.com/kbrdn1/gwm-cli/issues/85) | v0.8.0-rc.1 | CLI aliases (`[aliases]` in `.gwm.toml` + user fallback, pre-clap expansion), gitmoji mapping + `gwm commit-prefix` + opt-in `commit-msg` hook |
+| [#31](https://github.com/kbrdn1/gwm-cli/issues/31) / [#29](https://github.com/kbrdn1/gwm-cli/issues/29) | v0.8.0-rc.2 | Safety daily: `--dry-run` on `gwm remove` / `gwm prune`, `gwm undo` + `gwm history` operation journal at `$XDG_DATA_HOME/gwm/history.toml` |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -73,24 +76,10 @@ Small, well-scoped items with high daily-usage payoff. Likely picks for the next
 
 - [#24](https://github.com/kbrdn1/gwm-cli/issues/24) — **`gwm sync`** — fetch + rebase (or merge) the selected worktree's branch against its upstream, with conflict detection.
 - [#27](https://github.com/kbrdn1/gwm-cli/issues/27) — **`cargo-binstall` support** via `[package.metadata.binstall]` so `cargo binstall gwm` pulls the prebuilt archive instead of compiling from source.
-- [#31](https://github.com/kbrdn1/gwm-cli/issues/31) — **`--dry-run` on `gwm remove` and `gwm prune`** — show the resolved target / planned actions, no side effects. Pairs nicely with the safety stance of [#29](https://github.com/kbrdn1/gwm-cli/issues/29) below.
-- [#86](https://github.com/kbrdn1/gwm-cli/issues/86) — **`[aliases]` in `.gwm.toml`** — git-config-style aliases (`wip = "create feat 0 wip"`, `ll = "list --format names"`), plus a user-level `~/.config/gwm/aliases.toml` fallback. Lowest-cost item on the configurability axis (pre-clap argv expansion).
-
-## Release hardening
-
-The stable v0.7.0 release was successful, but three gaps should be closed before the next tag — two release-process gaps and one CI-coverage blind spot.
-
-- [#146](https://github.com/kbrdn1/gwm-cli/issues/146) — **Make `release.yml` publish reliably**. Replace or fix the failing `softprops/action-gh-release@v3` publish step so stable releases do not need manual recovery.
-- [#147](https://github.com/kbrdn1/gwm-cli/issues/147) — **Guard pre-release changelog hygiene**. Compare root `[Unreleased]` against the previous RC changelog and fail on duplicate issue/PR references or repeated bullets.
-- [#112](https://github.com/kbrdn1/gwm-cli/issues/112) — **Add Windows CI coverage**. This closes a platform-specific blind spot in the path traversal hardening tests.
 
 ## Configurability
 
 A coherent batch of items that move hardcoded conventions and one-off shell scripts into `.gwm.toml`. Theme: every team-portable convention should live in the config that's already checked in, not in tribal knowledge.
-
-### Repo conventions
-
-- [#85](https://github.com/kbrdn1/gwm-cli/issues/85) — **`[gitmoji]` mapping** — `branch_type → emoji` table with sensible defaults; new `gwm commit-prefix` subcommand prints the resolved prefix for the current branch; opt-in `commit-msg` hook auto-prepends it. Pairs naturally with `[[branch_types]]`.
 
 ### GitHub publish (declarative repo state)
 
@@ -102,12 +91,6 @@ A coherent batch of items that move hardcoded conventions and one-off shell scri
 - [#88](https://github.com/kbrdn1/gwm-cli/issues/88) — **`[hooks.*]` lifecycle hooks** — six phases (`pre_create`, `post_create`, `pre_bootstrap`, `post_bootstrap`, `pre_remove`, `post_remove`) with `on_fail = "abort" | "warn" | "ignore"`. Existing `[[bootstrap.command]]` aliased to `[[hooks.post_create]]` for compat.
 - [#89](https://github.com/kbrdn1/gwm-cli/issues/89) — **`gwm config get/set/list/validate/path/edit`** — git-config-style CLI over `.gwm.toml` with `toml_edit` for comment-preserving round-tripping. Includes dot-path notation (`worktree.base`) and array-table indexing (`labels[+].name = "bug"`).
 - [#87](https://github.com/kbrdn1/gwm-cli/issues/87) — **`[tui.keys]` keymap** — remap any TUI action through `.gwm.toml`, chord support (`g g`), with `gwm tui keys` introspection. Sits alongside themes (#33) and command palette (#32) as the "TUI personalisation" trio.
-
-## Safety & UX
-
-Defensive features for a tool that performs destructive operations.
-
-- [#29](https://github.com/kbrdn1/gwm-cli/issues/29) — **`gwm undo` + `gwm history`** — operation journal at `$XDG_DATA_HOME/gwm/history.toml` with branch-OID recovery so a fat-finger `gwm remove --delete-branch` is recoverable beyond `git reflog`.
 
 ## TUI polish
 
