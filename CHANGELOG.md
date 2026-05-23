@@ -26,6 +26,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shell alias for shell semantics. New `gwm aliases list`
   subcommand prints the resolved chain grouped by source, with
   shadowed user entries flagged inline.
+- **Gitmoji mapping + `gwm commit-prefix` + opt-in `commit-msg` hook**
+  (issue #85). The repo's Gitmoji + Conventional Commits convention is
+  now first-class. Three new surfaces:
+  - `gwm commit-prefix [--branch <name>] [--unicode]` prints the
+    canonical commit prefix (e.g. `:sparkles: feat(#41):` or
+    `✨ feat(#41):`) — handy for shell prompts, AI assistants, and
+    scripted commit composition.
+  - `gwm types --gitmoji` extends the existing branch-type list with
+    two more columns (unicode emoji + `:shortcode:`).
+  - `gwm hooks install commit-msg [--force]` installs an opt-in
+    `.git/hooks/commit-msg` that auto-prepends the resolved prefix
+    when the user's commit message doesn't already start with one.
+    Non-destructive by default (refuses to overwrite a pre-existing
+    hook without `--force`).
+- New `[gitmoji]` block in `.gwm.toml` lets teams override individual
+  shortcodes without redeclaring the whole table (the ten built-in
+  defaults are baked into the binary). Custom branch types are
+  supported — `migration = ":truck:"` round-trips through `gwm types
+  --gitmoji`.
 
 ### Fixed
 
