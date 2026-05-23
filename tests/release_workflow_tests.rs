@@ -256,5 +256,10 @@ fn write_release_files(root: &Path, changelog: &str, previous_rc: &str) {
 
 fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
   let script = std::env::current_dir().unwrap().join(CHECK_RC_DUPES);
-  Command::new(script).arg(tag).current_dir(root).output().unwrap()
+  Command::new("bash")
+    .arg(script)
+    .arg(tag)
+    .current_dir(root)
+    .output()
+    .unwrap()
 }
