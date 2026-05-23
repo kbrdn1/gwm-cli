@@ -365,7 +365,7 @@ fn on_navigation_resets_scroll_and_invalidates_sidebar_cache() {
 fn filter_state_defaults_to_inactive_and_empty() {
   let (_dir, app) = make_app();
   assert!(!app.filter.active, "filter must default to inactive");
-  assert!(app.filter.query.is_empty(), "filter query must default to empty");
+  assert!(app.filter.query().is_empty(), "filter query must default to empty");
 }
 
 #[test]
@@ -408,9 +408,9 @@ fn enter_filter_preserves_existing_query() {
   // Hitting `/` on a sticky filter re-opens the bar so the user can refine
   // it; only Esc clears.
   let (_dir, mut app) = make_app();
-  app.filter.query = "auth".into();
+  app.filter.set_query("auth".into());
   app.enter_filter();
-  assert_eq!(app.filter.query, "auth");
+  assert_eq!(app.filter.query(), "auth");
   assert!(app.filter.active);
 }
 
@@ -421,16 +421,16 @@ fn filter_push_char_appends_to_query() {
   for c in "tui".chars() {
     app.filter_push_char(c);
   }
-  assert_eq!(app.filter.query, "tui");
+  assert_eq!(app.filter.query(), "tui");
 }
 
 #[test]
 fn filter_pop_char_removes_last_char() {
   let (_dir, mut app) = make_app();
   app.enter_filter();
-  app.filter.query = "tuix".into();
+  app.filter.set_query("tuix".into());
   app.filter_pop_char();
-  assert_eq!(app.filter.query, "tui");
+  assert_eq!(app.filter.query(), "tui");
 }
 
 #[test]
@@ -438,7 +438,7 @@ fn filter_pop_char_on_empty_is_noop() {
   let (_dir, mut app) = make_app();
   app.enter_filter();
   app.filter_pop_char();
-  assert_eq!(app.filter.query, "");
+  assert_eq!(app.filter.query(), "");
   assert!(app.filter.active, "popping an empty query must not exit filter mode");
 }
 
@@ -447,10 +447,10 @@ fn exit_filter_keep_disables_capture_keeps_query() {
   // Enter behaviour: filter sticks, navigation returns to the list.
   let (_dir, mut app) = make_app();
   app.enter_filter();
-  app.filter.query = "auth".into();
+  app.filter.set_query("auth".into());
   app.exit_filter_keep();
   assert!(!app.filter.active);
-  assert_eq!(app.filter.query, "auth", "Enter must not wipe the query");
+  assert_eq!(app.filter.query(), "auth", "Enter must not wipe the query");
 }
 
 #[test]
@@ -458,10 +458,10 @@ fn exit_filter_cancel_clears_query() {
   // Esc behaviour: full list back, query gone.
   let (_dir, mut app) = make_app();
   app.enter_filter();
-  app.filter.query = "auth".into();
+  app.filter.set_query("auth".into());
   app.exit_filter_cancel();
   assert!(!app.filter.active);
-  assert!(app.filter.query.is_empty(), "Esc must clear the query");
+  assert!(app.filter.query().is_empty(), "Esc must clear the query");
 }
 
 #[test]
@@ -484,7 +484,7 @@ fn filtered_indices_keeps_only_matching_worktrees() {
     worktree_fixture("feat-2-cli-completions"),
     worktree_fixture("fix-3-locked-worktree"),
   ];
-  app.filter.query = "tui".into();
+  app.filter.set_query("tui".into());
 
   let idx: Vec<usize> = app.filtered_indices().to_vec();
   let names: Vec<&str> = idx.iter().map(|&i| app.worktrees[i].name.as_str()).collect();
@@ -508,7 +508,7 @@ fn filtered_indices_supports_subsequence_match() {
     worktree_fixture("a-foo-u-bar-t-baz-h-qux"),
     worktree_fixture("chore-1-bump-deps"),
   ];
-  app.filter.query = "auth".into();
+  app.filter.set_query("auth".into());
   // Sanity-guard the precondition: if a future refactor introduces an `auth`
   // substring into the fixture, the test would silently degrade to a
   // substring check again.
@@ -535,7 +535,7 @@ fn filtered_indices_ranks_substring_above_subsequence() {
     // direct substring of "auth"
     worktree_fixture("auth-service"),
   ];
-  app.filter.query = "auth".into();
+  app.filter.set_query("auth".into());
 
   let idx: Vec<usize> = app.filtered_indices().to_vec();
   assert!(!idx.is_empty(), "at least the substring candidate must match");
@@ -549,7 +549,7 @@ fn filtered_indices_ranks_substring_above_subsequence() {
 fn filtered_indices_skips_when_no_match() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
-  app.filter.query = "zzzz".into();
+  app.filter.set_query("zzzz".into());
   assert!(app.filtered_indices().is_empty());
 }
 
@@ -563,7 +563,7 @@ fn selected_returns_filtered_worktree() {
     worktree_fixture("authentication"),
     worktree_fixture("beta"),
   ];
-  app.filter.query = "auth".into();
+  app.filter.set_query("auth".into());
   app.list_state.select(Some(0));
 
   let sel = app.selected().expect("filtered selection must resolve");
@@ -574,7 +574,7 @@ fn selected_returns_filtered_worktree() {
 fn selected_returns_none_when_filter_matches_nothing() {
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
-  app.filter.query = "zzzz".into();
+  app.filter.set_query("zzzz".into());
   app.list_state.select(Some(0));
   assert!(app.selected().is_none());
 }
@@ -587,7 +587,7 @@ fn next_navigates_within_filtered_subset_and_wraps() {
     worktree_fixture("foo-a"),
     worktree_fixture("foo-b"),
   ];
-  app.filter.query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(0));
 
   app.next();
@@ -608,7 +608,7 @@ fn prev_navigates_within_filtered_subset_and_wraps() {
     worktree_fixture("foo-a"),
     worktree_fixture("foo-b"),
   ];
-  app.filter.query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(0));
 
   app.prev();
@@ -625,7 +625,7 @@ fn first_and_last_jump_inside_filtered_subset() {
     worktree_fixture("foo-2"),
     worktree_fixture("gamma"),
   ];
-  app.filter.query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(1));
 
   app.first();
@@ -644,7 +644,7 @@ fn filter_push_clamps_selection_when_subset_shrinks() {
   // selection must clamp instead of dangling past the new end.
   let (_dir, mut app) = make_app();
   app.worktrees = vec![worktree_fixture("foo-bar"), worktree_fixture("foo-baz-xx")];
-  app.filter.query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(1));
 
   // Typing more reduces the match set to just "foo-bar".
@@ -670,11 +670,11 @@ fn exit_filter_cancel_restores_full_list_selection() {
     worktree_fixture("foo"),
     worktree_fixture("beta"),
   ];
-  app.filter.query = "foo".into();
+  app.filter.set_query("foo".into());
   app.list_state.select(Some(0));
 
   app.exit_filter_cancel();
-  assert!(app.filter.query.is_empty());
+  assert!(app.filter.query().is_empty());
   assert_eq!(app.filtered_indices(), vec![0, 1, 2]);
   // Selection from the filtered view (index 0) remains a valid index in the
   // full list (index 0). The clamp logic doesn't move it forward, only back.

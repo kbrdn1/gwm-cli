@@ -181,7 +181,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           // list is already in its plain state. Avoids the trap where a user
           // hits Esc expecting to clear /-filter and accidentally exits.
           KeyCode::Esc => {
-            if !app.filter.query.is_empty() {
+            if !app.filter.query().is_empty() {
               app.exit_filter_cancel();
             } else {
               break;

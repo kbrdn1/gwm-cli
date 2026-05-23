@@ -48,7 +48,7 @@ fn wt(name: &str) -> WorktreeInfo {
 fn default_state_is_inactive_empty_buffer() {
   let f = FilterState::new();
   assert!(!f.active);
-  assert!(f.query.is_empty());
+  assert!(f.query().is_empty());
 }
 
 #[test]
@@ -57,7 +57,7 @@ fn push_char_appends_to_buffer() {
   for c in "tui".chars() {
     f.push_char(c);
   }
-  assert_eq!(f.query, "tui");
+  assert_eq!(f.query(), "tui");
 }
 
 #[test]
@@ -65,14 +65,14 @@ fn pop_char_removes_last_character() {
   let mut f = FilterState::new();
   f.set_query("tuix".into());
   f.pop_char();
-  assert_eq!(f.query, "tui");
+  assert_eq!(f.query(), "tui");
 }
 
 #[test]
 fn pop_char_on_empty_is_noop() {
   let mut f = FilterState::new();
   f.pop_char();
-  assert!(f.query.is_empty());
+  assert!(f.query().is_empty());
 }
 
 #[test]
@@ -98,7 +98,11 @@ fn open_sets_active_preserves_query() {
   f.set_query("auth".into());
   f.open();
   assert!(f.active);
-  assert_eq!(f.query, "auth", "open must preserve the existing query for refinement");
+  assert_eq!(
+    f.query(),
+    "auth",
+    "open must preserve the existing query for refinement"
+  );
 }
 
 #[test]
@@ -108,7 +112,7 @@ fn close_keep_disables_active_keeps_query() {
   f.set_query("auth".into());
   f.close_keep();
   assert!(!f.active);
-  assert_eq!(f.query, "auth", "close_keep (Enter) is the sticky-filter path");
+  assert_eq!(f.query(), "auth", "close_keep (Enter) is the sticky-filter path");
 }
 
 #[test]
@@ -118,7 +122,7 @@ fn close_cancel_clears_buffer_and_disables_active() {
   f.set_query("auth".into());
   f.close_cancel();
   assert!(!f.active);
-  assert!(f.query.is_empty(), "close_cancel (Esc) is the clear-everything path");
+  assert!(f.query().is_empty(), "close_cancel (Esc) is the clear-everything path");
 }
 
 #[test]
@@ -128,7 +132,7 @@ fn clear_drops_buffer_and_active() {
   f.set_query("auth".into());
   f.clear();
   assert!(!f.active);
-  assert!(f.query.is_empty());
+  assert!(f.query().is_empty());
 }
 
 // ---- Memoisation contract --------------------------------------------------

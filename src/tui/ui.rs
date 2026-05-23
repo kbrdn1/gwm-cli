@@ -38,7 +38,7 @@ pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 pub fn draw(f: &mut Frame, app: &mut App) {
   // Filter bar is shown while the user is typing, AND while a sticky filter
   // remains in effect (so they can see what's filtering the list).
-  let filter_visible = app.filter.active || !app.filter.query.is_empty();
+  let filter_visible = app.filter.active || !app.filter.query().is_empty();
 
   let chunks = if filter_visible {
     Layout::default()
@@ -99,7 +99,7 @@ pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
 fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
   let mut spans = vec![
     Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    Span::raw(app.filter.query.as_str().to_string()),
+    Span::raw(app.filter.query().to_string()),
   ];
   if app.filter.active {
     spans.push(Span::styled(
@@ -217,7 +217,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
 
-  let title = if app.filter.query.is_empty() {
+  let title = if app.filter.query().is_empty() {
     format!(" worktrees ({}) ", app.worktrees.len())
   } else {
     format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
