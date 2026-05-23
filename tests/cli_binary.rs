@@ -1798,6 +1798,172 @@ fn remove_outside_git_repo_fails() {
     .stderr(predicate::str::contains("not inside a git repository"));
 }
 
+// --- remove --dry-run / prune --dry-run (issue #31) ---------------------
+
+#[test]
+fn remove_dry_run_prints_plan_and_keeps_worktree_intact() {
+  // Issue #31 contract for `gwm remove --dry-run`: resolve the pattern,
+  // print the would-remove plan (name + path + branch), exit 0, do NOT
+  // touch the worktree directory or the local branch. The user can pipe
+  // the output into a confirmation script.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "31", "preview"])
+    .assert()
+    .success();
+  let wt_dir = base.path().join("feat-31-preview");
+  assert!(wt_dir.exists());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "preview", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("would remove"))
+    .stdout(predicate::str::contains("feat-31-preview"))
+    .stdout(predicate::str::contains("feat/#31-preview"));
+
+  assert!(wt_dir.exists(), "--dry-run must not delete the worktree directory");
+  assert!(
+    repo.find_branch("feat/#31-preview", git2::BranchType::Local).is_ok(),
+    "--dry-run must not delete the local branch"
+  );
+}
+
+#[test]
+fn remove_dry_run_with_delete_branch_flags_branch_deletion() {
+  // When `--delete-branch` is combined with `--dry-run`, the plan must
+  // surface that the branch would be deleted — without actually
+  // dropping it. The user sees a single line that mirrors the live
+  // command's would-do trail.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "32", "preview-drop"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "preview-drop", "--delete-branch", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("would be deleted"));
+
+  assert!(
+    repo
+      .find_branch("feat/#32-preview-drop", git2::BranchType::Local)
+      .is_ok(),
+    "--dry-run --delete-branch must not delete the local branch"
+  );
+}
+
+#[test]
+fn remove_dry_run_on_ambiguous_pattern_still_fails() {
+  // Spec: an ambiguous pattern under `--dry-run` exits non-zero with the
+  // candidate list — same error contract as the regular failure mode.
+  // `--dry-run` only suppresses *destruction*, not resolution failures.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "33", "ambiguous-one"])
+    .assert()
+    .success();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "34", "ambiguous-two"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "ambiguous", "--dry-run"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("ambiguous"));
+}
+
+#[test]
+fn prune_dry_run_prints_plan_without_pruning() {
+  // Issue #31 contract for `gwm prune --dry-run`: walk the worktree
+  // list, detect prunable entries, print each (name + path + reason),
+  // exit 0, and leave the admin entries in place. The follow-up
+  // (non-dry-run) `gwm prune` is the destructive sibling.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "35", "stale"])
+    .assert()
+    .success();
+  let wt_dir = base.path().join("feat-35-stale");
+  assert!(wt_dir.exists());
+
+  // Simulate a "working dir missing" prunable: delete the worktree
+  // directory on disk WITHOUT going through `gwm remove`, so the admin
+  // entry under `.git/worktrees/<name>` stays around and libgit2 flags
+  // the worktree as prunable.
+  std::fs::remove_dir_all(&wt_dir).unwrap();
+
+  let admin_dir = dir.path().join(".git").join("worktrees").join("feat-35-stale");
+  assert!(admin_dir.exists(), "precondition: admin entry must still exist");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["prune", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("would prune"))
+    .stdout(predicate::str::contains("feat-35-stale"));
+
+  assert!(admin_dir.exists(), "--dry-run must not remove the prunable admin entry");
+  assert!(
+    repo.find_worktree("feat-35-stale").is_ok(),
+    "--dry-run must leave libgit2's worktree list untouched"
+  );
+}
+
+#[test]
+fn prune_dry_run_reports_no_candidates_when_clean() {
+  // Empty case: a clean repo has nothing to prune. The command exits 0
+  // with a friendly "0 worktree(s) to prune" so scripts that pipe the
+  // output get a stable signal instead of an empty stdout.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["prune", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 worktree"));
+}
+
 // --- trust ledger (issue #95) -------------------------------------------
 
 #[test]
