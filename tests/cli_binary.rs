@@ -2591,6 +2591,11 @@ fn binary_tolerates_non_utf8_argv() {
 /// char hex string the journal accepts verbatim — `gwm history` is a
 /// read-only listing so it never resolves the OID against the object
 /// DB, which means we don't need to seed a matching commit.
+///
+/// `repo_root` is escaped via `toml_basic_string` because Windows
+/// paths (`\\?\C:\...`) contain backslashes that TOML treats as
+/// escape sequences; without the escape the parser fails with
+/// "missing escaped value, expected b, e, f, n, r, \\, …".
 fn write_seed_history(path: &Path, repo_root: &Path, worktree: &str, branch: &str) {
   let body = format!(
     r#"[[op]]
@@ -2603,7 +2608,7 @@ path = "/tmp/cc-worktree/{worktree}"
 deleted_branch = false
 repo_root = "{repo_root}"
 "#,
-    repo_root = repo_root.display(),
+    repo_root = toml_basic_string(repo_root),
   );
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent).unwrap();
@@ -2668,6 +2673,8 @@ fn history_filters_to_current_repo_by_default() {
 
   // Seed two ops: one for the current repo, one for a fake "other-repo"
   // path. Only the first should surface in the default listing.
+  // `toml_basic_string` escapes the repo path for TOML — Windows
+  // canonical paths (`\\?\C:\…`) would otherwise break the parser.
   let body = format!(
     r#"[[op]]
 ts = "2026-05-19T08:42:11Z"
@@ -2689,7 +2696,7 @@ path = "/tmp/cc-worktree/feat-elsewhere-bar"
 deleted_branch = false
 repo_root = "/nonexistent/other-repo"
 "#,
-    repo_root = repo_root.display(),
+    repo_root = toml_basic_string(&repo_root),
   );
   if let Some(parent) = history_file.parent() {
     std::fs::create_dir_all(parent).unwrap();
@@ -2938,6 +2945,8 @@ fn history_all_flag_surfaces_every_repo() {
   let tmp = tempfile::TempDir::new().unwrap();
   let history_file = tmp.path().join("history.toml");
 
+  // `toml_basic_string` escapes the repo path for TOML so this seed
+  // parses on Windows (canonical paths there start with `\\?\C:\…`).
   let body = format!(
     r#"[[op]]
 ts = "2026-05-19T08:42:11Z"
@@ -2959,7 +2968,7 @@ path = "/tmp/cc-worktree/feat-elsewhere-bar"
 deleted_branch = false
 repo_root = "/nonexistent/other-repo"
 "#,
-    repo_root = repo_root.display(),
+    repo_root = toml_basic_string(&repo_root),
   );
   std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
   std::fs::write(&history_file, body).unwrap();

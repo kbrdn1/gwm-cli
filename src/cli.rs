@@ -2199,7 +2199,7 @@ fn cmd_history(limit: usize, all: bool) -> Result<()> {
   };
 
   // Newest first — the user just ran an op, they expect it on top.
-  rows.sort_by(|a, b| b.ts.cmp(&a.ts));
+  rows.sort_by_key(|e| std::cmp::Reverse(e.ts));
   rows.truncate(limit);
 
   if rows.is_empty() {
