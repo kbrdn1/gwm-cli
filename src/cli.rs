@@ -856,12 +856,30 @@ fn cmd_types(gitmoji_flag: bool) -> Result<()> {
 /// assistants, and the bundled `commit-msg` hook.
 fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<()> {
   // Two resolution paths: an explicit `--branch <name>` (no repo
-  // required — useful for scripted contexts) and the implicit
-  // "use HEAD" branch (requires a repo). Both go through
-  // `parse_branch` so the prefix shape stays canonical regardless of
-  // entry point.
+  // *required* — useful for scripted contexts outside a repo) and
+  // the implicit "use HEAD" branch (requires a repo). Both go
+  // through `parse_branch` so the prefix shape stays canonical
+  // regardless of entry point.
+  //
+  // For BOTH paths we still attempt repo discovery so the workdir
+  // handle is fed into `gitmoji::load` — this is what makes
+  // per-repo `.gwm.toml` `[gitmoji]` overrides apply uniformly to
+  // `gwm commit-prefix` (no flag, --branch, or whatever the
+  // installed commit-msg hook ends up calling). Discovery failures
+  // are silently downgraded to "no workdir" so the `--branch` form
+  // still works outside a git checkout — that's the whole point of
+  // the explicit-branch entry point.
   let (workdir, branch_name) = match branch_override {
-    Some(name) => (None, name),
+    Some(name) => {
+      // Best-effort discovery: outside a repo the user passed
+      // `--branch` precisely because there's no HEAD to read; we
+      // must not fail here. Inside a repo we want the workdir so
+      // `.gwm.toml` overrides apply.
+      let workdir = worktree::discover_repo(None)
+        .ok()
+        .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+      (workdir, name)
+    }
     None => {
       let repo = worktree::discover_repo(None)?;
       let wd = repo.workdir().map(|w| w.to_path_buf());
