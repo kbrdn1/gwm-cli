@@ -1,8 +1,10 @@
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{LazyLock, Mutex};
 use std::time::Duration;
 
 /// Trunk branches treated as "merge destinations" when measuring how
@@ -11,6 +13,10 @@ use std::time::Duration;
 /// convention). Hardcoded here because `branch_age` is also reachable
 /// from contexts that don't carry a `Config` (CLI smoke paths).
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
+type RecentCommitCacheKey = (git2::Oid, usize);
+
+static RECENT_COMMITS_CACHE: LazyLock<Mutex<HashMap<RecentCommitCacheKey, Vec<CommitRow>>>> =
+  LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
@@ -390,32 +396,75 @@ pub struct CommitRow {
   pub subject: String,
 }
 
-/// Shell out to `git log --format='%H%x00%aN%x00%P%x00%s' -n <n>` inside
-/// `path` and parse the NUL-separated output into [`CommitRow`]s. The TUI
-/// sidebar uses this for the Recent Commits block — the NUL separator
-/// avoids ambiguity when a subject contains the usual ` `, `|`, or tab
-/// characters lazygit also relies on. The `%P` field carries the
-/// space-separated list of parent SHAs (empty for the seed commit, one for
-/// a normal commit, two-plus for a merge).
+/// Return recent commits for the sidebar using libgit2. This is the uncached
+/// compatibility entry point; the TUI should call [`recent_commits_cached`]
+/// so repeated sidebar rebuilds for the same branch tip are a hash lookup.
 pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["log", "--format=%H%x00%aN%x00%P%x00%s", "-n"])
-    .arg(n.to_string())
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git log exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  let raw = String::from_utf8_lossy(&output.stdout).into_owned();
-  parse_git_log_with_author_output(&raw)
+  let repo = Repository::open(path)?;
+  let tip = repo.head()?.target().ok_or_else(|| GwmError::UnbornHead {
+    reason: "HEAD does not point at a commit".into(),
+  })?;
+  recent_commits_revwalk(&repo, tip, n)
 }
 
+/// Return recent commits for one worktree, memoised by branch-tip OID and
+/// limit. `WorktreeInfo.head` is populated by [`list`], so normal TUI sidebar
+/// refreshes can hit the cache without reopening the repo. Fixtures and older
+/// callers with `head = None` fall back to opening the worktree once.
+pub fn recent_commits_cached(w: &WorktreeInfo, limit: usize) -> Result<Vec<CommitRow>> {
+  let tip = worktree_head_oid(w)?;
+  let key = (tip, limit);
+  if let Some(rows) = RECENT_COMMITS_CACHE
+    .lock()
+    .expect("recent commits cache poisoned")
+    .get(&key)
+    .cloned()
+  {
+    return Ok(rows);
+  }
+
+  let repo = Repository::open(&w.path)?;
+  let rows = recent_commits_revwalk(&repo, tip, limit)?;
+  RECENT_COMMITS_CACHE
+    .lock()
+    .expect("recent commits cache poisoned")
+    .insert(key, rows.clone());
+  Ok(rows)
+}
+
+fn worktree_head_oid(w: &WorktreeInfo) -> Result<git2::Oid> {
+  if let Some(head) = &w.head {
+    return git2::Oid::from_str(head)
+      .map_err(|e| GwmError::CommandFailed(format!("cached worktree head '{}' is not an oid: {}", head, e)));
+  }
+
+  let repo = Repository::open(&w.path)?;
+  let head_ref = repo.head()?;
+  head_ref.target().ok_or_else(|| GwmError::UnbornHead {
+    reason: "HEAD does not point at a commit".into(),
+  })
+}
+
+fn recent_commits_revwalk(repo: &Repository, tip: git2::Oid, limit: usize) -> Result<Vec<CommitRow>> {
+  let mut walker = repo.revwalk()?;
+  walker.set_sorting(git2::Sort::TIME | git2::Sort::TOPOLOGICAL)?;
+  walker.push(tip)?;
+
+  let mut rows = Vec::new();
+  for oid in walker.take(limit) {
+    let oid = oid?;
+    let commit = repo.find_commit(oid)?;
+    rows.push(CommitRow {
+      hash: oid,
+      author: commit.author().name().unwrap_or("").to_string(),
+      parents: commit.parent_ids().collect(),
+      subject: commit.summary().unwrap_or("").to_string(),
+    });
+  }
+  Ok(rows)
+}
+
+#[cfg(test)]
 fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
   let mut rows = Vec::new();
   for line in raw.lines() {

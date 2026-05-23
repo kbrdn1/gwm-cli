@@ -576,7 +576,7 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
 pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
-  match worktree::git_log_with_author(&w.path, limit) {
+  match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
       let graphs = super::commit_graph::render_commits(&rows);
       rows
