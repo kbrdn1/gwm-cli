@@ -2828,6 +2828,107 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 }
 
 #[test]
+fn undo_recreates_branch_and_worktree_after_remove() {
+  // The full round-trip contract: create → remove → undo. After
+  // `gwm undo`, the worktree dir must exist again AND the local
+  // branch must resolve. The journal entry must be consumed.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  // 1. Create.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "29", "undo-rt", "--no-bootstrap"])
+    .assert()
+    .success();
+  let wt_path = base.path().join("feat-29-undo-rt");
+  assert!(wt_path.exists(), "create must produce the worktree dir");
+
+  // 2. Remove (with --delete-branch so we exercise the harder
+  //    resurrection path).
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-29-undo-rt", "--delete-branch"])
+    .assert()
+    .success();
+  assert!(!wt_path.exists(), "remove must drop the worktree dir");
+
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.find_branch("feat/#29-undo-rt", git2::BranchType::Local).is_err(),
+    "remove --delete-branch must drop the local branch"
+  );
+
+  // 3. Undo. The branch must come back at the same OID, and the
+  //    worktree dir must reappear.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("recreated branch"))
+    .stdout(predicate::str::contains("re-added worktree"));
+
+  assert!(wt_path.exists(), "undo must restore the worktree dir");
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.find_branch("feat/#29-undo-rt", git2::BranchType::Local).is_ok(),
+    "undo must recreate the local branch"
+  );
+
+  // 4. The journal entry is consumed — a second undo errors with
+  //    "nothing to undo".
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("nothing to undo"));
+}
+
+#[test]
+fn undo_with_empty_journal_errors_clearly() {
+  // A clean install with no recorded operations: `gwm undo` must
+  // exit non-zero with a clear "nothing to undo" message — silent
+  // success would mislead users into thinking the previous op was
+  // already undone.
+  let (dir, _) = init_repo();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("nothing to undo"));
+}
+
+#[test]
 fn history_all_flag_surfaces_every_repo() {
   // `--all` opt-out from the per-repo filter: useful for power users
   // grepping the journal for forensic purposes. Both entries must
