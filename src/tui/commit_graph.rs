@@ -27,16 +27,17 @@
 //! - **No selected-commit override** — lazygit highlights the pipes
 //!   originating from the cursor; our sidebar's selection lives on the
 //!   *worktree* list, not on a specific commit.
-//! - **No empty-tree sentinel** — lazygit targets a synthetic
+//! - **Zero OID empty-tree sentinel** — lazygit targets a synthetic
 //!   `EmptyTreeCommitHash` from the first commit's `Starts` pipe so
-//!   `○` doesn't look orphaned. gwm uses an empty string for the
-//!   first parent of a root commit; the rendered cell is still a
+//!   `○` doesn't look orphaned. gwm uses `0000000000000000000000000000000000000000`
+//!   for the first parent of a root commit; the rendered cell is still a
 //!   plain `○` because the seeded sentinel pipe from row 0 terminates
 //!   on it. The trivial commit-on-commit `Terminates` (where
 //!   `from_pos == to_pos == commit_pos`) is skipped in
 //!   [`render_pipe_set`] so it doesn't overwrite the node glyph.
 
 use crate::worktree::CommitRow;
+use git2::Oid;
 use ratatui::{
   style::{Color, Modifier, Style},
   text::Span,
@@ -60,8 +61,8 @@ pub enum PipeKind {
 pub struct Pipe {
   pub from_pos: i16,
   pub to_pos: i16,
-  pub from_hash: String,
-  pub to_hash: String,
+  pub from_hash: Oid,
+  pub to_hash: Oid,
   pub kind: PipeKind,
 }
 
@@ -147,10 +148,12 @@ pub fn box_drawing_chars(up: bool, down: bool, left: bool, right: bool) -> (char
   }
 }
 
-/// Seed sentinel hash used by lazygit for the pipe that ends on the
-/// very first commit (`graph.go:36`). The actual value is opaque — it
-/// just must never equal any real SHA-1.
-const START_HASH: &str = "__GWM_GRAPH_START__";
+/// Seed sentinel hash used for the pipe that ends on the very first
+/// commit. Zero OID is outside normal `git log` output and keeps pipe
+/// comparisons allocation-free.
+fn start_hash() -> Oid {
+  Oid::zero()
+}
 
 /// Walk `commits` once, producing the per-row pipe sets. This is the
 /// Rust translation of lazygit's `GetPipeSets` (`graph.go:60-69`).
@@ -161,8 +164,8 @@ pub fn build_pipe_sets(commits: &[CommitRow]) -> Vec<Vec<Pipe>> {
   let mut pipes = vec![Pipe {
     from_pos: 0,
     to_pos: 0,
-    from_hash: START_HASH.to_string(),
-    to_hash: commits[0].hash.clone(),
+    from_hash: start_hash(),
+    to_hash: commits[0].hash,
     kind: PipeKind::Starts,
   }];
   let mut out = Vec::with_capacity(commits.len());
@@ -196,11 +199,11 @@ fn get_next_pipes(prev_pipes: &[Pipe], commit: &CommitRow) -> Vec<Pipe> {
 
   // Emit the STARTS pipe for the *first* parent (or empty-tree sentinel
   // when this is the root commit).
-  let first_parent = commit.parents.first().cloned().unwrap_or_else(|| String::from(""));
+  let first_parent = commit.parents.first().copied().unwrap_or_else(start_hash);
   new_pipes.push(Pipe {
     from_pos: pos,
     to_pos: pos,
-    from_hash: commit.hash.clone(),
+    from_hash: commit.hash,
     to_hash: first_parent,
     kind: PipeKind::Starts,
   });
@@ -249,8 +252,8 @@ fn get_next_pipes(prev_pipes: &[Pipe], commit: &CommitRow) -> Vec<Pipe> {
       new_pipes.push(Pipe {
         from_pos: pipe.to_pos,
         to_pos: pos,
-        from_hash: pipe.from_hash.clone(),
-        to_hash: pipe.to_hash.clone(),
+        from_hash: pipe.from_hash,
+        to_hash: pipe.to_hash,
         kind: PipeKind::Terminates,
       });
       traverse(&mut taken_spots, &mut traversed_spots, pipe.to_pos, pos);
@@ -260,8 +263,8 @@ fn get_next_pipes(prev_pipes: &[Pipe], commit: &CommitRow) -> Vec<Pipe> {
       new_pipes.push(Pipe {
         from_pos: pipe.to_pos,
         to_pos: avail,
-        from_hash: pipe.from_hash.clone(),
-        to_hash: pipe.to_hash.clone(),
+        from_hash: pipe.from_hash,
+        to_hash: pipe.to_hash,
         kind: PipeKind::Continues,
       });
       traverse(&mut taken_spots, &mut traversed_spots, pipe.to_pos, avail);
@@ -275,8 +278,8 @@ fn get_next_pipes(prev_pipes: &[Pipe], commit: &CommitRow) -> Vec<Pipe> {
       new_pipes.push(Pipe {
         from_pos: pos,
         to_pos: avail,
-        from_hash: commit.hash.clone(),
-        to_hash: parent.clone(),
+        from_hash: commit.hash,
+        to_hash: *parent,
         kind: PipeKind::Starts,
       });
       taken_spots.insert(avail);
@@ -299,8 +302,8 @@ fn get_next_pipes(prev_pipes: &[Pipe], commit: &CommitRow) -> Vec<Pipe> {
       new_pipes.push(Pipe {
         from_pos: pipe.to_pos,
         to_pos: last,
-        from_hash: pipe.from_hash.clone(),
-        to_hash: pipe.to_hash.clone(),
+        from_hash: pipe.from_hash,
+        to_hash: pipe.to_hash,
         kind: PipeKind::Continues,
       });
       traverse(&mut taken_spots, &mut traversed_spots, pipe.to_pos, last);
@@ -436,10 +439,18 @@ pub fn render_commits(commits: &[CommitRow]) -> Vec<Vec<Span<'static>>> {
 /// minimum data the graph algorithm needs.
 #[doc(hidden)]
 pub fn test_row(hash: &str, parents: &[&str]) -> CommitRow {
+  fn oid(label: &str) -> Oid {
+    if label.len() == 40 {
+      return Oid::from_str(label).expect("test hash must be valid hex");
+    }
+    let padded = format!("{:0>40}", label);
+    Oid::from_str(&padded).expect("test hash label must be valid hex")
+  }
+
   CommitRow {
-    hash: hash.into(),
+    hash: oid(hash),
     author: String::new(),
-    parents: parents.iter().map(|s| s.to_string()).collect(),
+    parents: parents.iter().map(|s| oid(s)).collect(),
     subject: String::new(),
   }
 }

@@ -2481,7 +2481,7 @@ fn graph_pipe_set_first_commit_seeds_starts_pipe() {
   assert!(
     pipes[0]
       .iter()
-      .any(|p| p.kind == PipeKind::Starts && p.from_hash == "a"),
+      .any(|p| p.kind == PipeKind::Starts && p.from_hash == test_row("a", &[]).hash),
     "first row must contain a STARTS pipe whose from_hash is the commit itself, got {:?}",
     pipes[0]
   );
@@ -2532,11 +2532,13 @@ fn graph_row_width_is_deterministic_on_commit_list() {
 #[test]
 fn graph_render_pipe_set_handles_single_pipe_starts() {
   use gwm::tui::commit_graph::Pipe;
+  let from = test_row("a", &[]);
+  let to = test_row("b", &[]);
   let pipes = vec![Pipe {
     from_pos: 0,
     to_pos: 0,
-    from_hash: "a".into(),
-    to_hash: "b".into(),
+    from_hash: from.hash,
+    to_hash: to.hash,
     kind: PipeKind::Starts,
   }];
   let spans = render_pipe_set(&pipes);
