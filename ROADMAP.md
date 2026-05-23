@@ -4,14 +4,16 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v0.6.0
+## Current state — v0.7.0
 
-The 0.6.x line ships:
+The 0.7.x line ships:
 
 - **Native worktree ops via libgit2 (vendored)** — single binary, no `gwq` / `git` CLI dependency.
 - **CLI + ratatui TUI** — `gwm <subcommand>` for scripts, `gwm` alone opens the interactive interface.
-- **Per-repo `.gwm.toml`** — branch / path conventions, file copies, regex guards (`abort` or `seed-from-example`), shell hooks gated by `when:` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`, with `!`, `&&`, `||` composition), no-symlink invariants.
+- **Per-repo `.gwm.toml`** — branch / path conventions, configurable branch types, declarative GitHub labels / milestones, file copies, regex guards (`abort` or `seed-from-example`), shell hooks gated by `when:` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`, with `!`, `&&`, `||` composition), no-symlink invariants.
+- **Bootstrap hardening for hostile clones** — TOFU trust ledger on `.gwm.toml`, `--allow-bootstrap` / `--deny-bootstrap`, path-traversal rejection, symlink-safe copy/write primitives, load-time regex validation for deny patterns.
 - **Lazygit-style details sidebar** — four bordered subsections (Worktree / Issue · PR / Working Tree / Recent Commits), status-coloured branch names, header status dot tracking linked PR / issue state, 300-commit Recent Commits buffer with the full topology renderer (`○ ◎ │ ╮ ╭ ╯ ╰ ┴ ┬ ─`).
+- **Measured TUI sidebar perf pass** — branch age is cached on `WorktreeInfo`, `filtered_indices` is memoised on `FilterState`, Recent Commits uses a cached libgit2 revwalk keyed by `(worktree path, head OID, limit)`, and commit-graph pipes store `git2::Oid` instead of heap-allocated hash strings.
 - **Configurable launchers** — `[git_tui]` drives `l` (default `lazygit -p {path}`), `[review]` drives `R` (presets: `lumen` / `claude` / `codex` / `aider` / `gh`, plus free-form `command =`). Placeholders `{base} {head} {path} {diff}` with lazy diff materialisation.
 - **GitHub issue / PR linking** — branches matching `<type>/#<N>-<slug>` auto-link to their issue; CLI `link / unlink / open / status` for explicit overrides; live state surfaces in the TUI sidebar via `gh`.
 - **`[tui.open]` dispatch** — `o` key now spawns `$SHELL` in the worktree by default; opt back to OS file manager via `mode = "finder"`.
@@ -23,12 +25,13 @@ The 0.6.x line ships:
 - **Multiplexer integration** — `gwm tmux <pattern> [-p]` and `gwm zellij <pattern> [-p]` open the worktree in a new window / pane / tab; refuse to spawn outside an active session.
 - **`gwm doctor`** — 7 checks (parses / guard refs / `when` predicates / external binaries / prunable / orphan branches / base writable), exit codes `0/1/2` for CI.
 - **Confirm-overlay countdown** — safety countdown on the delete-confirm overlay when `p` (delete-branch-on-remove) is armed; duration tunable via `[tui].confirm_countdown_secs` (0..=5, clamped).
-- **Release pipeline** — `release.yml` on `vX.Y.Z` tags, `pre-release.yml` on `-rc.N` / `-alpha.N` / `-beta.N` tags, 5-target build matrix (Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64), automatic Homebrew tap update on stable releases, Nix flake at the repo root.
-- **433 tests** — 15 integration files + colocated unit tests covering config, naming, bootstrap, doctor, github linking, launcher, multiplexer, homebrew formula, pre-commit hook, TUI state, worktree (libgit2 integration), and CLI end-to-end.
+- **State-sliced TUI internals** — `tui::app::App` is decomposed into `tui/state/{create_form,filter,confirm,link_prompt,sidebar,github_fetch}.rs`, with dedicated tests for each state slice.
+- **Release pipeline** — `release.yml` on `vX.Y.Z` tags, `pre-release.yml` on `-rc.N` / `-alpha.N` / `-beta.N` tags, 5-target build matrix (Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64), GitHub Release assets, Homebrew tap update job on stable releases, Nix flake at the repo root. Publish reliability follow-up: [#146](https://github.com/kbrdn1/gwm-cli/issues/146).
+- **600+ tests** — integration and state-machine tests covering config, naming, bootstrap, doctor, GitHub linking, launcher, multiplexer, homebrew formula, pre-commit hook, TUI state slices, worktree libgit2 integration, release workflow guards, and CLI end-to-end.
 
-See [`changelogs/0.6.0.md`](changelogs/0.6.0.md) for the full v0.6.0 release notes, and [`changelogs/`](changelogs/) for the per-version archive.
+See [`changelogs/0.7.0.md`](changelogs/0.7.0.md) for the full v0.7.0 release notes, and [`changelogs/`](changelogs/) for the per-version archive.
 
-## Shipped — pre-v0.6.0
+## Shipped highlights
 
 For reference (each linked to its closing PR):
 
@@ -52,6 +55,15 @@ For reference (each linked to its closing PR):
 | [#73](https://github.com/kbrdn1/gwm-cli/issues/73) ([PR #74](https://github.com/kbrdn1/gwm-cli/pull/74)) | v0.6.0 | Lazygit-style sidebar facelift (`Created` row, status colours, `[tui.open]`, `y: yank`) |
 | [#75](https://github.com/kbrdn1/gwm-cli/issues/75) ([PR #76](https://github.com/kbrdn1/gwm-cli/pull/76)) | v0.6.0 | Configurable launchers (`[git_tui]` + `[review]`) — keymap reshuffle `r/R → f/F`, new `R` |
 | [#77](https://github.com/kbrdn1/gwm-cli/issues/77) | v0.6.0 | Docs restructure into `docs/` tree (Nuxt Content conventions) + README shrunk to landing |
+| [#80](https://github.com/kbrdn1/gwm-cli/issues/80) / [#81](https://github.com/kbrdn1/gwm-cli/issues/81) / [#82](https://github.com/kbrdn1/gwm-cli/issues/82) | v0.7.0-rc.1 | Configurable branch types, declarative GitHub labels, declarative GitHub milestones |
+| [#93](https://github.com/kbrdn1/gwm-cli/issues/93) / [#94](https://github.com/kbrdn1/gwm-cli/issues/94) / [#95](https://github.com/kbrdn1/gwm-cli/issues/95) / [#96](https://github.com/kbrdn1/gwm-cli/issues/96) | v0.7.0-rc.1 | Bootstrap hardening: symlink-safe copies, path traversal rejection, TOFU trust ledger, guard regex load validation |
+| [#97](https://github.com/kbrdn1/gwm-cli/issues/97) / [#98](https://github.com/kbrdn1/gwm-cli/issues/98) / [#99](https://github.com/kbrdn1/gwm-cli/issues/99) / [#100](https://github.com/kbrdn1/gwm-cli/issues/100) / [#101](https://github.com/kbrdn1/gwm-cli/issues/101) | v0.7.0-rc.2 | Static regex lifting, worktree removal ordering fix, stale-branch refusal, argv-injection guards, E2E create/remove/init tests |
+| [#102](https://github.com/kbrdn1/gwm-cli/issues/102) / [#123](https://github.com/kbrdn1/gwm-cli/issues/123) / [#124](https://github.com/kbrdn1/gwm-cli/issues/124) / [#125](https://github.com/kbrdn1/gwm-cli/issues/125) / [#126](https://github.com/kbrdn1/gwm-cli/issues/126) / [#127](https://github.com/kbrdn1/gwm-cli/issues/127) / [#128](https://github.com/kbrdn1/gwm-cli/issues/128) | v0.7.0-rc.2 | `tui::app::App` decomposed into focused `tui/state/` sub-structs |
+| [#103](https://github.com/kbrdn1/gwm-cli/issues/103) / [#104](https://github.com/kbrdn1/gwm-cli/issues/104) | v0.7.0-rc.2 | TUI render-loop perf: cached branch age and memoised `filtered_indices` |
+| [#105](https://github.com/kbrdn1/gwm-cli/issues/105) / [#106](https://github.com/kbrdn1/gwm-cli/issues/106) | v0.7.0-rc.2 | Typed error variants and shared constructors/render helpers |
+| [#138](https://github.com/kbrdn1/gwm-cli/issues/138) | v0.7.0-rc.3 | `GitHubFetch` cache keyed by issue/PR number; late results dropped after `invalidate()` |
+| [#131](https://github.com/kbrdn1/gwm-cli/pull/131) / [#134](https://github.com/kbrdn1/gwm-cli/pull/134) | v0.7.0-rc.3 | TUI state encapsulation polish for `ConfirmModal` and `FilterState` |
+| [#107](https://github.com/kbrdn1/gwm-cli/issues/107) / [#108](https://github.com/kbrdn1/gwm-cli/issues/108) | v0.7.0 | Measured P3 TUI sidebar perf: cached libgit2 Recent Commits and `Oid` commit graph pipes |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -64,19 +76,24 @@ Small, well-scoped items with high daily-usage payoff. Likely picks for the next
 - [#31](https://github.com/kbrdn1/gwm-cli/issues/31) — **`--dry-run` on `gwm remove` and `gwm prune`** — show the resolved target / planned actions, no side effects. Pairs nicely with the safety stance of [#29](https://github.com/kbrdn1/gwm-cli/issues/29) below.
 - [#86](https://github.com/kbrdn1/gwm-cli/issues/86) — **`[aliases]` in `.gwm.toml`** — git-config-style aliases (`wip = "create feat 0 wip"`, `ll = "list --format names"`), plus a user-level `~/.config/gwm/aliases.toml` fallback. Lowest-cost item on the configurability axis (pre-clap argv expansion).
 
+## Release hardening
+
+The stable v0.7.0 release was successful, but three gaps should be closed before the next tag — two release-process gaps and one CI-coverage blind spot.
+
+- [#146](https://github.com/kbrdn1/gwm-cli/issues/146) — **Make `release.yml` publish reliably**. Replace or fix the failing `softprops/action-gh-release@v3` publish step so stable releases do not need manual recovery.
+- [#147](https://github.com/kbrdn1/gwm-cli/issues/147) — **Guard pre-release changelog hygiene**. Compare root `[Unreleased]` against the previous RC changelog and fail on duplicate issue/PR references or repeated bullets.
+- [#112](https://github.com/kbrdn1/gwm-cli/issues/112) — **Add Windows CI coverage**. This closes a platform-specific blind spot in the path traversal hardening tests.
+
 ## Configurability
 
 A coherent batch of items that move hardcoded conventions and one-off shell scripts into `.gwm.toml`. Theme: every team-portable convention should live in the config that's already checked in, not in tribal knowledge.
 
 ### Repo conventions
 
-- [#80](https://github.com/kbrdn1/gwm-cli/issues/80) — **`[[branch_types]]` configurable** — promote the hardcoded `BRANCH_TYPES` const (`src/naming.rs:5`) to a `.gwm.toml` block. `gwm types` reads from config when present, defaults otherwise. Validation in `BranchSpec::validate()` follows.
 - [#85](https://github.com/kbrdn1/gwm-cli/issues/85) — **`[gitmoji]` mapping** — `branch_type → emoji` table with sensible defaults; new `gwm commit-prefix` subcommand prints the resolved prefix for the current branch; opt-in `commit-msg` hook auto-prepends it. Pairs naturally with `[[branch_types]]`.
 
 ### GitHub publish (declarative repo state)
 
-- [#81](https://github.com/kbrdn1/gwm-cli/issues/81) — **`[[labels]]` + `gwm labels push`** — declare labels in `.gwm.toml` (with optional `color`, deterministic pastel hash when absent), publish to the remote via `gh label create --force`. `--dry-run` and `--prune` for the destructive bits. Same plumbing extracted to `src/github_publish.rs` for #82 to reuse.
-- [#82](https://github.com/kbrdn1/gwm-cli/issues/82) — **`[[milestones]]` + `gwm milestones push`** — same pattern as labels, for milestones (REST API since `gh milestone` doesn't exist natively).
 - [#83](https://github.com/kbrdn1/gwm-cli/issues/83) — **`[issue_template]` defaults** — map branch types to `.github/ISSUE_TEMPLATE/*.yml` templates with per-type defaults (surface, title prefix, labels). New `gwm new <type> <desc>` creates the issue *and* the worktree in one go.
 - [#84](https://github.com/kbrdn1/gwm-cli/issues/84) — **`[pr_template]` per branch type** — body templates with placeholders (`{commits}` is the killer feature). New `gwm pr [--draft]` subcommand. Shared template renderer with #83 (`src/templating.rs`).
 
@@ -91,7 +108,6 @@ A coherent batch of items that move hardcoded conventions and one-off shell scri
 Defensive features for a tool that performs destructive operations.
 
 - [#29](https://github.com/kbrdn1/gwm-cli/issues/29) — **`gwm undo` + `gwm history`** — operation journal at `$XDG_DATA_HOME/gwm/history.toml` with branch-OID recovery so a fat-finger `gwm remove --delete-branch` is recoverable beyond `git reflog`.
-- [#112](https://github.com/kbrdn1/gwm-cli/issues/112) — **`windows-latest` in CI matrix** — wire the existing `#[cfg(windows)]` regression test (`load_rejects_windows_drive_prefix_in_copy_to`, introduced by the #94 hardening) into the test job so the Windows-only path-traversal check actually runs. Today the matrix is `[ubuntu-latest, macos-latest]`; the Windows test compiles but never executes.
 
 ## TUI polish
 
