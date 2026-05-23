@@ -49,7 +49,10 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  aliases "))
     // Issue #85: gitmoji commit-prefix + commit-msg hook installer.
     .stdout(predicate::str::contains("  commit-prefix "))
-    .stdout(predicate::str::contains("  hooks "));
+    .stdout(predicate::str::contains("  hooks "))
+    // Issue #29: operation journal + undo + history.
+    .stdout(predicate::str::contains("  undo "))
+    .stdout(predicate::str::contains("  history "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -2579,4 +2582,174 @@ fn binary_tolerates_non_utf8_argv() {
     "binary panicked instead of gracefully handling non-UTF-8 argv: {}",
     stderr
   );
+}
+
+// --- Issue #29: gwm history + gwm undo --------------------------------------
+
+/// Seed a journal file at `path` with a single recorded `remove` op
+/// rooted at `repo_root` (canonical form). The OID is a synthetic 40-
+/// char hex string the journal accepts verbatim — `gwm history` is a
+/// read-only listing so it never resolves the OID against the object
+/// DB, which means we don't need to seed a matching commit.
+fn write_seed_history(path: &Path, repo_root: &Path, worktree: &str, branch: &str) {
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "{worktree}"
+branch = "{branch}"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/{worktree}"
+deleted_branch = false
+repo_root = "{repo_root}"
+"#,
+    repo_root = repo_root.display(),
+  );
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(path, body).unwrap();
+}
+
+#[test]
+fn history_empty_journal_reports_no_ops() {
+  // Empty case: a fresh repo with no recorded operations must print
+  // a clear "no operations recorded" line and exit 0. Scripted callers
+  // (e.g. `gwm history | head -n1`) need a stable signal — silent
+  // stdout would force them to also check `$?` to disambiguate.
+  let (dir, _) = init_repo();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no operations recorded"));
+}
+
+#[test]
+fn history_lists_recorded_remove_op() {
+  // Happy path: a seeded journal with one `remove` op produces a
+  // single-row listing carrying the worktree name. The exact
+  // column shape is intentionally flexible — we pin only the
+  // load-bearing tokens (kind = `remove`, worktree name) so the
+  // formatter can evolve without test churn.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+  write_seed_history(&history_file, &repo_root, "feat-29-foo", "feat/#29-foo");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("remove"))
+    .stdout(predicate::str::contains("feat-29-foo"));
+}
+
+#[test]
+fn history_filters_to_current_repo_by_default() {
+  // Two ops recorded against two different repos. From inside
+  // repo A, `gwm history` must surface ONLY the entry whose
+  // `repo_root` matches the current repo — the per-repo
+  // separation contract.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // Seed two ops: one for the current repo, one for a fake "other-repo"
+  // path. Only the first should surface in the default listing.
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-here-foo"
+branch = "feat/#1-here"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-here-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+
+[[op]]
+ts = "2026-05-19T09:00:00Z"
+kind = "remove"
+worktree = "feat-elsewhere-bar"
+branch = "feat/#2-elsewhere"
+branch_oid = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1"
+path = "/tmp/cc-worktree/feat-elsewhere-bar"
+deleted_branch = false
+repo_root = "/nonexistent/other-repo"
+"#,
+    repo_root = repo_root.display(),
+  );
+  if let Some(parent) = history_file.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-here-foo"))
+    .stdout(predicate::str::contains("feat-elsewhere-bar").not());
+}
+
+#[test]
+fn history_all_flag_surfaces_every_repo() {
+  // `--all` opt-out from the per-repo filter: useful for power users
+  // grepping the journal for forensic purposes. Both entries must
+  // appear in the listing.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-here-foo"
+branch = "feat/#1-here"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-here-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+
+[[op]]
+ts = "2026-05-19T09:00:00Z"
+kind = "remove"
+worktree = "feat-elsewhere-bar"
+branch = "feat/#2-elsewhere"
+branch_oid = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1"
+path = "/tmp/cc-worktree/feat-elsewhere-bar"
+deleted_branch = false
+repo_root = "/nonexistent/other-repo"
+"#,
+    repo_root = repo_root.display(),
+  );
+  std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["history", "--all"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-here-foo"))
+    .stdout(predicate::str::contains("feat-elsewhere-bar"));
 }
