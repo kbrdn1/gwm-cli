@@ -93,6 +93,28 @@ fn commit_prefix_for_fix_branch_uses_bug_emoji() {
 }
 
 #[test]
+fn commit_prefix_with_explicit_branch_honours_repo_gitmoji_overrides() {
+  // Regression guard: `--branch <name>` is a scripted entry point —
+  // shell prompts, AI assistants, the installed commit-msg hook —
+  // but if it bypasses `.gwm.toml`'s `[gitmoji]` block the renderer
+  // contradicts itself between `gwm types --gitmoji` (which loads
+  // the config) and `gwm commit-prefix --branch …` (which used not
+  // to). The two surfaces MUST agree.
+  let (dir, _repo) = init_repo();
+  let cfg = "[gitmoji]\nfeat = \":rocket:\"\n";
+  std::fs::write(dir.path().join(".gwm.toml"), cfg).expect("seed .gwm.toml");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":rocket: feat(#41):"));
+}
+
+#[test]
 fn commit_prefix_on_non_gwm_branch_reports_error() {
   // `gwm commit-prefix --branch random` doesn't match the
   // `<type>/#<N>-<slug>` regex — the contract is "fail loudly with a

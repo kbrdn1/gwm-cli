@@ -5,6 +5,7 @@
 //! one, and stays out of the way otherwise.
 
 use gwm::hooks::{commit_msg_script, install_commit_msg};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 /// Initialise a fresh git repo with a worktree on `feat/#42-demo`. The
@@ -156,5 +157,124 @@ fn commit_msg_script_skips_when_prefix_already_present() {
   assert!(
     script.contains("grep") || script.contains("case "),
     "script must include a guard for already-prefixed messages"
+  );
+}
+
+#[test]
+fn commit_msg_script_does_not_use_unguarded_set_e() {
+  // Stated goal of the hook (see module docs): "never block a commit
+  // because the hook itself broke". `set -e` aborts the script on any
+  // non-zero exit — including transient `mktemp` / `mv` failures from
+  // a full /tmp, a noexec mount, etc. — which would in turn abort
+  // `git commit`. We accept `set -u` (unset variables are a real bug
+  // we want to surface), but `set -eu` together violates the contract.
+  let script = commit_msg_script();
+  assert!(
+    !script.contains("set -eu") && !script.contains("set -e\n") && !script.contains("set -e "),
+    "script must not enable `set -e`: a failing fs op would abort `git commit`. Found: {:?}",
+    script
+  );
+}
+
+#[test]
+fn commit_msg_script_skips_leading_comment_lines() {
+  // Doc says the script inspects the "first non-empty line" — git's
+  // own commit-message template puts `# Please enter the commit
+  // message…` comments at the top, and `git commit -v` adds a diff
+  // dump prefixed with `#`. The script must therefore find the first
+  // line that is neither empty nor a `#`-comment when deciding
+  // whether the message is already prefixed (and when prepending).
+  let script = commit_msg_script();
+  assert!(
+    script.contains("first non-empty non-comment")
+      || script.contains("skip leading empty / comment lines")
+      || script.contains("grep -nvE '^([[:space:]]*#|[[:space:]]*$)'"),
+    "script must explicitly skip leading empty / `#`-prefixed lines when locating the user's first real line; got: {}",
+    script
+  );
+}
+
+#[test]
+fn install_commit_msg_resolves_linked_worktree_gitdir() {
+  // `gwm`'s primary use case IS linked worktrees: `gwm create feat 42
+  // demo` materialises one at `<root>/feat-42-demo` whose `.git` is a
+  // *file* (`gitdir: <main>/.git/worktrees/feat-42-demo`), not a
+  // directory. Installing into `<worktree>/.git/hooks/commit-msg`
+  // would either fail (write into a file) or — worse — install at the
+  // wrong location. The installer must follow the `.git` pointer and
+  // land the hook under the worktree's actual gitdir.
+  let main = tempfile::TempDir::new().expect("main tempdir");
+  let repo = git2::Repository::init(main.path()).expect("init main repo");
+  // Need one commit so a linked worktree can attach.
+  {
+    let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
+    let tree_id = {
+      let mut idx = repo.index().expect("index");
+      let tree_oid = idx.write_tree().expect("write tree");
+      tree_oid
+    };
+    let tree = repo.find_tree(tree_id).expect("find tree");
+    repo
+      .commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+      .expect("seed commit");
+  }
+  let wt_path = main.path().join("wt-demo");
+  let wt = repo
+    .worktree("wt-demo", &wt_path, None)
+    .expect("create linked worktree");
+
+  let hook_path = install_commit_msg(&wt_path, false).expect("install in linked worktree");
+  assert!(
+    hook_path.exists(),
+    "hook must be installed at the resolved gitdir, got {}",
+    hook_path.display()
+  );
+  // The hook MUST live under the linked worktree's admin dir, not
+  // under `<worktree>/.git/hooks/` (which doesn't exist as a real
+  // directory for linked worktrees).
+  let expected_admin = wt.path().join("hooks").join("commit-msg");
+  assert_eq!(
+    hook_path, expected_admin,
+    "expected hook at {}, got {}",
+    expected_admin.display(),
+    hook_path.display()
+  );
+}
+
+#[test]
+fn install_commit_msg_honours_core_hookspath() {
+  // Git supports `core.hooksPath` to relocate the entire hooks dir
+  // (this repo recommends `git config core.hooksPath .githooks`).
+  // When set, writing into `.git/hooks/commit-msg` is dead code: git
+  // never runs it. The installer must resolve the effective hooks
+  // directory via the repo config and install there.
+  let dir = init_repo_on_feat_branch();
+  let custom_hooks = dir.path().join(".githooks");
+  std::fs::create_dir_all(&custom_hooks).expect("custom hooks dir");
+  // Persist `core.hooksPath` into the repo config so a fresh
+  // `Repository::open` sees it.
+  let repo = git2::Repository::open(dir.path()).expect("reopen repo");
+  let mut cfg = repo.config().expect("config");
+  cfg
+    .set_str("core.hooksPath", ".githooks")
+    .expect("set core.hooksPath");
+  drop(cfg);
+  drop(repo);
+
+  let hook_path = install_commit_msg(dir.path(), false).expect("install honouring core.hooksPath");
+  assert!(
+    hook_path.starts_with(&custom_hooks),
+    "expected hook under {} (core.hooksPath target), got {}",
+    custom_hooks.display(),
+    hook_path.display()
+  );
+  // The legacy `.git/hooks/commit-msg` MUST NOT be created — leaving
+  // a stale file there is misleading (the user would think the hook
+  // is installed when git is actually reading from .githooks/).
+  let legacy = dir.path().join(".git").join("hooks").join("commit-msg");
+  assert!(
+    !legacy.exists(),
+    "installer must not write into .git/hooks/ when core.hooksPath is set; found stale {}",
+    legacy.display()
   );
 }
