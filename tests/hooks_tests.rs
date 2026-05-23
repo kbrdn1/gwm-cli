@@ -202,7 +202,10 @@ fn install_commit_msg_resolves_linked_worktree_gitdir() {
   // directory. Installing into `<worktree>/.git/hooks/commit-msg`
   // would either fail (write into a file) or — worse — install at the
   // wrong location. The installer must follow the `.git` pointer and
-  // land the hook under the worktree's actual gitdir.
+  // land the hook under the worktree's actual gitdir (which, for a
+  // linked worktree, is `<main>/.git/worktrees/<name>/hooks/` — that's
+  // where git itself looks for `commit-msg` when this worktree is
+  // active).
   let main = tempfile::TempDir::new().expect("main tempdir");
   let repo = git2::Repository::init(main.path()).expect("init main repo");
   // Need one commit so a linked worktree can attach.
@@ -210,8 +213,7 @@ fn install_commit_msg_resolves_linked_worktree_gitdir() {
     let sig = git2::Signature::now("Test", "test@example.com").expect("sig");
     let tree_id = {
       let mut idx = repo.index().expect("index");
-      let tree_oid = idx.write_tree().expect("write tree");
-      tree_oid
+      idx.write_tree().expect("write tree")
     };
     let tree = repo.find_tree(tree_id).expect("find tree");
     repo
@@ -229,16 +231,35 @@ fn install_commit_msg_resolves_linked_worktree_gitdir() {
     "hook must be installed at the resolved gitdir, got {}",
     hook_path.display()
   );
-  // The hook MUST live under the linked worktree's admin dir, not
-  // under `<worktree>/.git/hooks/` (which doesn't exist as a real
-  // directory for linked worktrees).
-  let expected_admin = wt.path().join("hooks").join("commit-msg");
-  assert_eq!(
-    hook_path, expected_admin,
-    "expected hook at {}, got {}",
-    expected_admin.display(),
-    hook_path.display()
+  // The hook MUST live under the linked worktree's *admin* directory
+  // — `<main>/.git/worktrees/wt-demo/hooks/commit-msg` — not under
+  // `<worktree>/.git/hooks/` (the latter would treat `.git` as a
+  // directory, which fails on a linked worktree where `.git` is a
+  // file pointer). Assert by structural shape rather than equality
+  // because macOS canonicalizes `/var/folders/…` to
+  // `/private/var/folders/…` and the two halves of the comparison
+  // wouldn't share a common prefix without canonicalize on both
+  // sides.
+  let canon_got = std::fs::canonicalize(&hook_path).expect("canonicalize got");
+  assert!(
+    canon_got.ends_with(".git/worktrees/wt-demo/hooks/commit-msg"),
+    "hook must land in the linked worktree's admin dir; got {}",
+    canon_got.display()
   );
+  // Also ensure the installer did NOT fabricate `<worktree>/.git` as
+  // a directory — for a linked worktree it is and must remain a file
+  // pointing at the admin dir.
+  let dotgit = wt_path.join(".git");
+  assert!(
+    dotgit.is_file(),
+    "linked worktree `.git` must remain a pointer file, got {:?}",
+    std::fs::metadata(&dotgit).map(|m| m.file_type())
+  );
+  // Keep `wt` alive until here so its drop doesn't run while we still
+  // read the admin directory above. Touching its path is a cheap
+  // way to silence the unused-variable warning without `_` (we want
+  // it to drop *after* assertions, not be optimised out).
+  let _ = wt.path();
 }
 
 #[test]
@@ -262,11 +283,16 @@ fn install_commit_msg_honours_core_hookspath() {
   drop(repo);
 
   let hook_path = install_commit_msg(dir.path(), false).expect("install honouring core.hooksPath");
+  // Canonicalize because macOS resolves `/var/folders/…` to
+  // `/private/var/folders/…`, which would make a literal `starts_with`
+  // false-negative even though both paths refer to the same dir.
+  let canon_hook = std::fs::canonicalize(&hook_path).expect("canonicalize hook");
+  let canon_custom = std::fs::canonicalize(&custom_hooks).expect("canonicalize custom hooks dir");
   assert!(
-    hook_path.starts_with(&custom_hooks),
+    canon_hook.starts_with(&canon_custom),
     "expected hook under {} (core.hooksPath target), got {}",
-    custom_hooks.display(),
-    hook_path.display()
+    canon_custom.display(),
+    canon_hook.display()
   );
   // The legacy `.git/hooks/commit-msg` MUST NOT be created — leaving
   // a stale file there is misleading (the user would think the hook
