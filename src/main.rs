@@ -1,5 +1,6 @@
 use clap::Parser;
 use gwm::{aliases, cli};
+use std::ffi::OsString;
 
 fn main() {
   // Issue #86: expand CLI aliases BEFORE clap parses argv. We need
@@ -14,7 +15,15 @@ fn main() {
   // by `Config::load_for_repo` in `cmd_doctor` (`.unwrap_or_default()`),
   // and it matches the issue's "no breaking change" promise:
   // absence of `[aliases]` ⇒ aliasing disabled, full stop.
-  let argv: Vec<String> = std::env::args().collect();
+  //
+  // argv is read as `OsString` via `std::env::args_os()` — `args()`
+  // panics on any non-UTF-8 argv entry, which is a regression vs.
+  // clap's default `args_os` handling and could abort the binary on
+  // a perfectly valid OS argv. The alias expansion path only attempts
+  // UTF-8 decoding on the alias-slot token (alias keys are `String`
+  // by construction); non-UTF-8 tokens flow through untouched and
+  // clap reports the unknown subcommand verbatim.
+  let argv: Vec<OsString> = std::env::args_os().collect();
   let expanded = match expand_aliases(argv.clone()) {
     Ok(v) => v,
     Err(e) => {
@@ -44,10 +53,10 @@ fn main() {
 /// every other repo-bound subcommand. Outside a repo we still load
 /// the user-level file so `gwm wip` works even when the user is
 /// not in a git tree (matching git's own `[alias]` behaviour).
-fn expand_aliases(argv: Vec<String>) -> Result<Vec<String>, gwm::error::GwmError> {
+fn expand_aliases(argv: Vec<OsString>) -> Result<Vec<OsString>, gwm::error::GwmError> {
   let repo_workdir = gwm::worktree::discover_repo(None)
     .ok()
     .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
   let resolved = aliases::load(repo_workdir.as_deref(), None)?;
-  Ok(aliases::expand_argv(argv, &resolved))
+  Ok(aliases::expand_argv_os(argv, &resolved))
 }

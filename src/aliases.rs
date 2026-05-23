@@ -224,6 +224,82 @@ pub fn expand_argv(argv: Vec<String>, aliases: &ResolvedAliases) -> Vec<String> 
   out
 }
 
+/// `OsString` counterpart of [`expand_argv`] — accepts the raw
+/// `std::env::args_os()` slice without forcing a UTF-8 round-trip on
+/// every token.
+///
+/// Why this matters: `std::env::args()` panics on the first non-UTF-8
+/// argv entry (Linux/macOS allow arbitrary bytes in argv). Clap parses
+/// `OsString` natively via `args_os`, and the panic in `main` was a
+/// regression vs. that default. We mirror the `expand_argv` logic on
+/// `OsString` and only attempt UTF-8 conversion on the alias-slot
+/// token — if it is not valid UTF-8 it cannot match an alias name
+/// (alias keys are `String` by construction in `ResolvedAliases`), so
+/// the argv is returned unchanged and clap surfaces the unknown
+/// subcommand verbatim.
+///
+/// Flag detection is byte-level: a leading `b'-'` is unambiguous in
+/// every valid argv encoding (the byte is ASCII, so it cannot appear
+/// mid-UTF-8-sequence), which means we can scan past flags without
+/// decoding them.
+pub fn expand_argv_os(argv: Vec<std::ffi::OsString>, aliases: &ResolvedAliases) -> Vec<std::ffi::OsString> {
+  if argv.len() < 2 {
+    return argv;
+  }
+  // First non-flag token from index 1. Use the underlying bytes for
+  // the leading-dash check so we don't reject argv with a non-UTF-8
+  // tail; on Unix this is `as_bytes`, on Windows the encoded form is
+  // WTF-8 and the same ASCII-byte invariant holds for the leading
+  // dash check we do here.
+  let alias_idx = argv.iter().enumerate().skip(1).find_map(|(i, tok)| {
+    let is_flag = first_byte_is_dash(tok);
+    if is_flag {
+      None
+    } else {
+      Some(i)
+    }
+  });
+  let Some(alias_idx) = alias_idx else {
+    return argv;
+  };
+
+  // Only valid UTF-8 can match an alias key. Non-UTF-8 tokens cannot
+  // be alias names (the key type is `String`), so we return the argv
+  // unchanged and let clap surface the unknown subcommand verbatim.
+  let Some(alias_name) = argv[alias_idx].to_str() else {
+    return argv;
+  };
+
+  let Some(expansion) = aliases.lookup(alias_name) else {
+    return argv;
+  };
+
+  let Ok(expanded_tokens) = shell_words::split(&expansion) else {
+    // Pathological case: load() should have rejected this. See
+    // `expand_argv` for the rationale — refuse partial substitution.
+    return argv;
+  };
+
+  let mut out = Vec::with_capacity(argv.len() + expanded_tokens.len());
+  out.extend_from_slice(&argv[..alias_idx]);
+  out.extend(expanded_tokens.into_iter().map(std::ffi::OsString::from));
+  out.extend_from_slice(&argv[alias_idx + 1..]);
+  out
+}
+
+/// Inspect the first byte of an `OsStr` to decide whether the token
+/// is a flag (leading `-`). The byte is examined in the platform's
+/// native argv encoding — ASCII bytes survive both UTF-8 (Unix) and
+/// WTF-8 (Windows) round-trips intact, so a simple `as_encoded_bytes`
+/// check is correct on both targets.
+fn first_byte_is_dash(token: &std::ffi::OsStr) -> bool {
+  // `OsStr::as_encoded_bytes` is stable since 1.74 and exposes the
+  // platform-native encoding. We only check the first byte against
+  // ASCII `-` which is identical in UTF-8 and WTF-8, so this is safe
+  // without ever decoding the rest of the token.
+  token.as_encoded_bytes().first() == Some(&b'-')
+}
+
 /// Default location of the user-level alias file. Mirrors the
 /// trust-ledger pattern (`~/.config/gwm/trust.toml`): honour
 /// `$XDG_CONFIG_HOME` first, fall back to `dirs::config_dir()` —

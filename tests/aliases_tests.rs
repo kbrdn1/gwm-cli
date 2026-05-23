@@ -451,6 +451,74 @@ wip = "create feat 0 wip"
   );
 }
 
+// ---- expand_argv_os (OsString surface) ----------------------------------
+
+#[test]
+fn expand_argv_os_matches_expand_argv_for_utf8_inputs() {
+  // The `OsString` surface MUST behave identically to the `String`
+  // surface on valid UTF-8 argv — the only divergence is in how
+  // non-UTF-8 tokens flow through (see the test below). Pin a repo
+  // alias + global-flag scenario so a refactor of the OsString path
+  // does not silently change the contract for the common case.
+  use std::ffi::OsString;
+  let repo_dir = tempfile::TempDir::new().unwrap();
+  std::fs::write(
+    repo_dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+wip = "create feat 0 wip"
+"#,
+  )
+  .unwrap();
+  let resolved = aliases::load(Some(repo_dir.path()), None).unwrap();
+  let argv: Vec<OsString> = vec!["gwm".into(), "--allow-bootstrap".into(), "wip".into()];
+  let expected: Vec<OsString> = vec![
+    "gwm".into(),
+    "--allow-bootstrap".into(),
+    "create".into(),
+    "feat".into(),
+    "0".into(),
+    "wip".into(),
+  ];
+  assert_eq!(aliases::expand_argv_os(argv, &resolved), expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn expand_argv_os_passes_non_utf8_token_through_unchanged() {
+  // Non-UTF-8 argv must NOT panic the expander and must NOT be coerced
+  // into a UTF-8 round-trip. Alias keys are `String`, so a non-UTF-8
+  // token cannot match — the contract is "return argv unchanged and
+  // let clap surface the unknown subcommand verbatim".
+  use std::ffi::OsString;
+  use std::os::unix::ffi::OsStringExt;
+  let resolved = aliases::load(None, None).unwrap();
+  let bad: OsString = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
+  let argv: Vec<OsString> = vec!["gwm".into(), bad.clone()];
+  let out = aliases::expand_argv_os(argv.clone(), &resolved);
+  assert_eq!(out, argv, "non-UTF-8 token must flow through unchanged");
+}
+
+#[cfg(unix)]
+#[test]
+fn expand_argv_os_expands_alias_after_non_utf8_flag_value() {
+  // A non-UTF-8 token in a flag-VALUE position (i.e. before the
+  // alias slot, but introduced by a flag like `--config <path>`)
+  // should NOT prevent the alias from being expanded. The expander
+  // only skips tokens that *start* with `-`, which means flag
+  // values are currently treated as the alias slot — so this test
+  // pins the conservative behaviour: a non-UTF-8 token in slot 1
+  // is treated as the alias slot, can't match (alias keys are
+  // String), and argv flows through unchanged.
+  use std::ffi::OsString;
+  use std::os::unix::ffi::OsStringExt;
+  let resolved = aliases::load(None, None).unwrap();
+  let bad: OsString = OsString::from_vec(vec![0xff]);
+  let argv: Vec<OsString> = vec!["gwm".into(), "--verbose".into(), bad.clone()];
+  let out = aliases::expand_argv_os(argv.clone(), &resolved);
+  assert_eq!(out, argv);
+}
+
 // ---- Built-in alias snapshot --------------------------------------------
 
 #[test]

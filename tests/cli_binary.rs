@@ -2110,3 +2110,52 @@ types = "list"
     .failure()
     .stderr(predicate::str::contains("types"));
 }
+
+// --- argv robustness (issue #86 — Copilot follow-up) --------------------
+
+#[cfg(unix)]
+#[test]
+fn binary_tolerates_non_utf8_argv() {
+  // `std::env::args()` panics if any argv entry is non-UTF-8, which is
+  // a regression vs. clap's default `args_os` handling. The binary
+  // must NOT abort the process on a perfectly valid OS argv just
+  // because someone passed bytes that don't decode as UTF-8.
+  //
+  // We don't care about the exit code per se — the contract is "no
+  // panic, no SIGABRT". clap may legitimately reject the unknown
+  // subcommand and exit non-zero (UsageError = 2), which is fine.
+  // What we forbid is the process aborting before clap even sees
+  // the args.
+  use std::ffi::OsString;
+  use std::os::unix::ffi::OsStringExt;
+
+  let dir = tempfile::TempDir::new().unwrap();
+  let invalid_utf8: OsString = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
+
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .arg(&invalid_utf8)
+    .output()
+    .expect("binary must launch");
+
+  // Reject SIGABRT / SIGSEGV / SIGILL — anything that indicates the
+  // process died on a signal rather than exited normally. On Unix,
+  // signal deaths surface as `status.code() == None` from `assert_cmd`.
+  assert!(
+    output.status.code().is_some(),
+    "binary died on a signal (likely a panic abort) when given non-UTF-8 argv; stderr={:?}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  // Belt-and-suspenders: the stderr should not contain the libstd panic
+  // banner for invalid UTF-8 in argv.
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    !stderr.contains("invalid utf-8") && !stderr.contains("panicked at"),
+    "binary panicked instead of gracefully handling non-UTF-8 argv: {}",
+    stderr
+  );
+}
