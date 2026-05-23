@@ -131,6 +131,50 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # name = "migration"
 # description = "Database migration"
 
+# --- gitmoji mapping (issue #85) --------------------------------------------
+# Per-repo override of the built-in `branch_type → :shortcode:` table used
+# by `gwm commit-prefix`, `gwm types --gitmoji`, and the bundled
+# `commit-msg` hook (`gwm hooks install commit-msg`). Absent (default) ⇒
+# the built-in table is used:
+#
+#   feat     → :sparkles:               ✨
+#   fix      → :bug:                    🐛
+#   hotfix   → :ambulance:              🚑
+#   docs     → :memo:                   📝
+#   test     → :white_check_mark:       ✅
+#   refactor → :recycle:                ♻
+#   chore    → :wrench:                 🔧
+#   perf     → :zap:                    ⚡
+#   ci       → :construction_worker:    👷
+#   build    → :package:                📦
+#
+# `[gitmoji]` is **additive** — overriding one entry doesn't wipe the
+# other nine. You can also map custom branch types (e.g. `migration`)
+# without redeclaring the built-ins.
+#
+# Surface:
+#   gwm commit-prefix                    → ":sparkles: feat(#41):"  (HEAD)
+#   gwm commit-prefix --unicode          → "✨ feat(#41):"
+#   gwm commit-prefix --branch feat/#7-x → ":sparkles: feat(#7):"   (named)
+#   gwm types --gitmoji                  → branch types + emoji columns
+#   gwm hooks install commit-msg         → opt-in auto-prepend on `git commit`
+#
+# `--unicode` normalisation of overrides:
+#   With `feat = ":rocket:"`:
+#     gwm commit-prefix --branch feat/#1-x           → ":rocket: feat(#1):"
+#     gwm commit-prefix --branch feat/#1-x --unicode → "🚀 feat(#1):"
+#   With `feat = ":foo:"` (shortcode unknown to gwm's built-in table):
+#     gwm commit-prefix --branch feat/#1-x --unicode → ":foo: feat(#1):"
+#   Unknown shortcodes fall through verbatim — no panic, no
+#   `:question:` substitution. The known-shortcode set covers the ten
+#   built-in mappings plus the most commonly-swapped Gitmoji entries
+#   (`:rocket:`, `:fire:`, `:lock:`, `:art:`, `:lipstick:`, `:hammer:`,
+#   `:bookmark:`, …).
+#
+# [gitmoji]
+# feat = ":rocket:"            # team uses 🚀 for new features instead of ✨
+# migration = ":truck:"        # custom branch type — emoji wins on `gwm types --gitmoji`
+
 # --- doctor knobs -----------------------------------------------------------
 # Trunk branches `gwm doctor`'s orphan-branch check treats as merge
 # destinations. A gwm-style branch fully reachable from one of these is

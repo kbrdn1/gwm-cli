@@ -3,12 +3,14 @@ use crate::config::Config;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use crate::gitmoji;
+use crate::hooks;
 use crate::labels::{self, LabelDiff};
 use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::BranchSpec;
+use crate::naming::{parse_branch, BranchSpec};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -123,7 +125,49 @@ pub enum Command {
   /// suitable for CI / pre-commit hooks.
   Doctor,
   /// List the supported branch types.
-  Types,
+  ///
+  /// Pass `--gitmoji` to extend the output with two more columns: the
+  /// resolved emoji (unicode) and its `:shortcode:` form (issue #85).
+  /// The shortcode mapping is the built-in default plus any per-repo
+  /// overrides under `[gitmoji]` in `.gwm.toml`.
+  Types {
+    /// Show the resolved emoji + shortcode for each branch type
+    /// (issue #85). Without the flag, only `name` + `description`
+    /// are printed — matches the pre-#85 surface.
+    #[arg(long)]
+    gitmoji: bool,
+  },
+  /// Print the Gitmoji + Conventional Commits prefix for the current
+  /// (or named) branch (issue #85).
+  ///
+  /// Output shape: `:sparkles: feat(#41):` — the canonical commit
+  /// prefix used across this repo (see CONTRIBUTING.md §Commits).
+  /// `--unicode` substitutes the shortcode for the real emoji
+  /// character (e.g. `✨` instead of `:sparkles:`); useful for shell
+  /// prompts and the bundled `commit-msg` hook.
+  ///
+  /// Without `--branch`, reads the current branch from HEAD via
+  /// libgit2 — requires the CWD to be inside a git repo.
+  CommitPrefix {
+    /// Branch name to resolve (e.g. `feat/#41-tui-search`). When
+    /// omitted, defaults to HEAD of the current repo.
+    #[arg(long)]
+    branch: Option<String>,
+    /// Emit the real emoji character (`✨`) instead of the
+    /// shortcode form (`:sparkles:`).
+    #[arg(long)]
+    unicode: bool,
+  },
+  /// Manage git hooks installed by `gwm` (issue #85).
+  ///
+  /// Currently exposes a single hook: `commit-msg`, which
+  /// auto-prepends the resolved Gitmoji + Conventional Commits
+  /// prefix when the commit message doesn't already start with one.
+  /// Hooks are **opt-in** — `gwm` never installs them implicitly.
+  Hooks {
+    #[command(subcommand)]
+    action: HooksAction,
+  },
   /// Generate a shell completion script on stdout.
   ///
   /// Install (zsh):  `gwm completions zsh > $fpath[1]/_gwm`
@@ -309,6 +353,40 @@ pub enum AliasesAction {
   List,
 }
 
+/// Subcommands of `gwm hooks` (issue #85). The split anticipates
+/// future hook variants (`pre-push`, `pre-commit`); for now only
+/// `install commit-msg` is wired up, which is the directly-load-bearing
+/// surface for the auto-prefix workflow.
+#[derive(Debug, Subcommand)]
+pub enum HooksAction {
+  /// Install a hook into `.git/hooks/`. Refuses to overwrite an
+  /// existing hook unless `--force` is passed, so a pre-existing
+  /// husky / commitlint / pre-commit installation is preserved by
+  /// default.
+  Install {
+    /// Which hook to install. Today only `commit-msg` is supported.
+    #[arg(value_enum)]
+    hook: HookKind,
+    /// Replace an existing hook of the same name. Without `--force`,
+    /// the command exits non-zero with the path of the conflicting
+    /// hook so the user can decide.
+    #[arg(long)]
+    force: bool,
+  },
+}
+
+/// Discriminator for `gwm hooks install <kind>`. A `ValueEnum` (rather
+/// than a free-form string) so clap rejects typos at parse time
+/// (`gwm hooks install commit-msge` → "invalid value … expected one
+/// of: commit-msg") rather than letting the installer fail with a
+/// less-actionable error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookKind {
+  /// Auto-prepend the Gitmoji + Conventional Commits prefix when
+  /// the user's commit message doesn't already start with one.
+  CommitMsg,
+}
+
 /// Subcommands of `gwm labels`. The split is intentional: `list` is
 /// read-only and safe to run in CI; `push` mutates the remote and
 /// therefore gets `--dry-run` / `--prune` flags of its own.
@@ -446,7 +524,9 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Bootstrap { target } => cmd_bootstrap(target, mode),
     Command::Prune => cmd_prune(),
     Command::Doctor => cmd_doctor(),
-    Command::Types => cmd_types(),
+    Command::Types { gitmoji } => cmd_types(gitmoji),
+    Command::CommitPrefix { branch, unicode } => cmd_commit_prefix(branch, unicode),
+    Command::Hooks { action } => cmd_hooks(action),
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
     Command::Switch => cmd_switch(),
@@ -704,7 +784,7 @@ fn print_doctor_report(report: &doctor::DoctorReport) {
   }
 }
 
-fn cmd_types() -> Result<()> {
+fn cmd_types(gitmoji_flag: bool) -> Result<()> {
   // Resolve the active branch-type list. When invoked inside a repo
   // with a workdir we honour any `[[branch_types]]` override in
   // `.gwm.toml`; outside of one — or inside a bare repo where
@@ -713,22 +793,135 @@ fn cmd_types() -> Result<()> {
   // `gwm types` remains useful as a discovery command (used by `gwm`
   // newcomers before they've initialised a config, and from CI inspect
   // commands that point at bare clones).
-  let resolved = match worktree::discover_repo(None) {
-    Ok(repo) => match repo.workdir().map(|w| w.to_path_buf()) {
-      Some(workdir) => Config::load_for_repo(&workdir)?.resolved_branch_types(),
-      None => Config::default().resolved_branch_types(),
-    },
-    Err(_) => Config::default().resolved_branch_types(),
+  let workdir = match worktree::discover_repo(None) {
+    Ok(repo) => repo.workdir().map(|w| w.to_path_buf()),
+    Err(_) => None,
+  };
+  let resolved = match &workdir {
+    Some(w) => Config::load_for_repo(w)?.resolved_branch_types(),
+    None => Config::default().resolved_branch_types(),
+  };
+
+  // Resolve the gitmoji map only when the caller asked for it — the
+  // default `gwm types` output stays a stable two-column shape every
+  // scripted parser of the pre-#85 surface depended on.
+  let gitmoji_map = if gitmoji_flag {
+    Some(gitmoji::load(workdir.as_deref())?)
+  } else {
+    None
   };
 
   // Align the description column on the longest name so a custom list
   // with a long entry (e.g. `migration`) still renders cleanly.
   let width = resolved.types.iter().map(|t| t.name.len()).max().unwrap_or(0).max(8);
+  // When the gitmoji columns are active, align the shortcode column on
+  // the widest shortcode (`:white_check_mark:`, currently 18 chars) so
+  // the description column doesn't drift between rows.
+  let sc_width = match &gitmoji_map {
+    Some(map) => map.iter().map(|(_, sc)| sc.len()).max().unwrap_or(0).max(10),
+    None => 0,
+  };
+
   for t in &resolved.types {
-    println!("  {:<width$}  {}", t.name, t.description, width = width);
+    match &gitmoji_map {
+      Some(map) => {
+        // Two extra columns: unicode glyph (1 cell wide, padded for
+        // BMP code points; emoji ZWJ sequences would break alignment
+        // but our built-in set is all single-glyph) + shortcode.
+        let shortcode = map.get(&t.name).unwrap_or(":question:");
+        let unicode = gitmoji::shortcode_to_unicode(shortcode);
+        println!(
+          "  {:<width$}  {}  {:<sw$}  {}",
+          t.name,
+          unicode,
+          shortcode,
+          t.description,
+          width = width,
+          sw = sc_width,
+        );
+      }
+      None => {
+        println!("  {:<width$}  {}", t.name, t.description, width = width);
+      }
+    }
   }
   println!();
   println!("(source: {})", resolved.source.label());
+  Ok(())
+}
+
+/// `gwm commit-prefix [--branch <name>] [--unicode]` (issue #85).
+/// Renders `:sparkles: feat(#41):` (or `✨ feat(#41):` with `--unicode`)
+/// for the supplied branch or HEAD. Useful for shell prompts, AI
+/// assistants, and the bundled `commit-msg` hook.
+fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<()> {
+  // Two resolution paths: an explicit `--branch <name>` (no repo
+  // *required* — useful for scripted contexts outside a repo) and
+  // the implicit "use HEAD" branch (requires a repo). Both go
+  // through `parse_branch` so the prefix shape stays canonical
+  // regardless of entry point.
+  //
+  // For BOTH paths we still attempt repo discovery so the workdir
+  // handle is fed into `gitmoji::load` — this is what makes
+  // per-repo `.gwm.toml` `[gitmoji]` overrides apply uniformly to
+  // `gwm commit-prefix` (no flag, --branch, or whatever the
+  // installed commit-msg hook ends up calling). Discovery failures
+  // are silently downgraded to "no workdir" so the `--branch` form
+  // still works outside a git checkout — that's the whole point of
+  // the explicit-branch entry point.
+  let (workdir, branch_name) = match branch_override {
+    Some(name) => {
+      // Best-effort discovery: outside a repo the user passed
+      // `--branch` precisely because there's no HEAD to read; we
+      // must not fail here. Inside a repo we want the workdir so
+      // `.gwm.toml` overrides apply.
+      let workdir = worktree::discover_repo(None)
+        .ok()
+        .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+      (workdir, name)
+    }
+    None => {
+      let repo = worktree::discover_repo(None)?;
+      let wd = repo.workdir().map(|w| w.to_path_buf());
+      let name = current_branch(&repo)?;
+      (wd, name)
+    }
+  };
+
+  let spec = parse_branch(&branch_name).ok_or_else(|| {
+    GwmError::Other(format!(
+      "branch '{}' does not follow the gwm convention <type>/#<issue>-<slug> — \
+       cannot derive a commit prefix from it",
+      branch_name
+    ))
+  })?;
+
+  let map = gitmoji::load(workdir.as_deref())?;
+  let prefix = gitmoji::resolve_prefix(&map, &spec, unicode);
+  println!("{}", prefix);
+  Ok(())
+}
+
+/// `gwm hooks <action>` (issue #85). Currently only `install
+/// commit-msg` is wired up; the subcommand layer is shaped so future
+/// hooks (`pre-push`, `pre-commit`) drop in without breaking the
+/// existing CLI surface.
+fn cmd_hooks(action: HooksAction) -> Result<()> {
+  match action {
+    HooksAction::Install { hook, force } => cmd_hooks_install(hook, force),
+  }
+}
+
+fn cmd_hooks_install(hook: HookKind, force: bool) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  match hook {
+    HookKind::CommitMsg => {
+      let path = hooks::install_commit_msg(&workdir, force)?;
+      println!("✓ installed {}", path.display());
+      println!("  (auto-prepends gitmoji+type prefix when missing)");
+    }
+  }
   Ok(())
 }
 

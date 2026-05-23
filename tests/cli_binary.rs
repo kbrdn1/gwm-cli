@@ -46,7 +46,250 @@ fn help_prints_subcommands() {
     // Issue #95: TOFU trust ledger.
     .stdout(predicate::str::contains("  trust "))
     // Issue #86: CLI aliases (`gwm aliases list`).
-    .stdout(predicate::str::contains("  aliases "));
+    .stdout(predicate::str::contains("  aliases "))
+    // Issue #85: gitmoji commit-prefix + commit-msg hook installer.
+    .stdout(predicate::str::contains("  commit-prefix "))
+    .stdout(predicate::str::contains("  hooks "));
+}
+
+// --- gitmoji (issue #85) ------------------------------------------------
+
+#[test]
+fn commit_prefix_resolves_branch_to_shortcode_form() {
+  // The canonical contract: `gwm commit-prefix --branch feat/#41-foo`
+  // prints `:sparkles: feat(#41):` — the prefix every commit in this
+  // repo starts with. The shortcode form is the default (matches
+  // most commit hooks and tooling that lint emoji on raw text).
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "feat/#41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":sparkles: feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_unicode_emits_real_emoji() {
+  // The `--unicode` flag swaps `:sparkles:` for ✨ — meant for shell
+  // prompts and the commit-msg hook (which wants the final byte
+  // sequence in the message body, not the shortcode form).
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "feat/#41-foo", "--unicode"]);
+  cmd.assert().success().stdout(predicate::str::contains("✨ feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_for_fix_branch_uses_bug_emoji() {
+  // Second branch type to pin: `fix/#10-bar` ↔ `:bug:` ↔ 🐛. The two
+  // most-used emojis in the history both need an end-to-end test
+  // so a future refactor that breaks one trips a binary-level
+  // assertion.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "fix/#10-bar"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":bug: fix(#10):"));
+}
+
+#[test]
+fn commit_prefix_with_explicit_branch_honours_repo_gitmoji_overrides() {
+  // Regression guard: `--branch <name>` is a scripted entry point —
+  // shell prompts, AI assistants, the installed commit-msg hook —
+  // but if it bypasses `.gwm.toml`'s `[gitmoji]` block the renderer
+  // contradicts itself between `gwm types --gitmoji` (which loads
+  // the config) and `gwm commit-prefix --branch …` (which used not
+  // to). The two surfaces MUST agree.
+  let (dir, _repo) = init_repo();
+  let cfg = "[gitmoji]\nfeat = \":rocket:\"\n";
+  std::fs::write(dir.path().join(".gwm.toml"), cfg).expect("seed .gwm.toml");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":rocket: feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_on_non_gwm_branch_reports_error() {
+  // `gwm commit-prefix --branch random` doesn't match the
+  // `<type>/#<N>-<slug>` regex — the contract is "fail loudly with a
+  // pointer to the convention" rather than silently rendering a
+  // bogus prefix. The user typed `--branch <name>` explicitly, so
+  // there's no auto-fallback to CWD to fall back to.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "random"]);
+  cmd.assert().failure().stderr(predicate::str::contains("random"));
+}
+
+#[test]
+fn commit_prefix_unicode_normalizes_known_shortcode_override() {
+  // The UX guarantee from the PR #152 follow-up: under `--unicode`,
+  // a `.gwm.toml` override that supplied a known `:shortcode:` (like
+  // `:rocket:`) must render as the unicode glyph (🚀), not the
+  // shortcode literal. Asymmetry between this surface and
+  // `gwm types --gitmoji`'s unicode column was the original bug.
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
+  cmd.assert().success().stdout(predicate::str::contains("🚀 feat(#1):"));
+}
+
+#[test]
+fn commit_prefix_unicode_leaves_unknown_shortcode_override_verbatim() {
+  // Graceful degradation for shortcodes the built-in table doesn't
+  // know about. `:foo:` is not in `shortcode_to_unicode`, so under
+  // `--unicode` we keep the value verbatim — the surface must remain
+  // usable on any user configuration without falling back to
+  // `:question:`/❓ (which would hide the user's intent).
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":foo:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":foo: feat(#1):"));
+}
+
+#[test]
+fn types_gitmoji_normalizes_known_shortcode_override_in_unicode_column() {
+  // Symmetry with `gwm commit-prefix --unicode`: the `gwm types
+  // --gitmoji` unicode column must show the GLYPH for a known
+  // shortcode override (not the shortcode literal). The shortcode
+  // column still shows the literal `:rocket:` so both forms remain
+  // greppable on the same row.
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
+  let assert = cmd.assert().success();
+  let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+  // Find the `feat` row and check both columns on it. A per-row
+  // assertion (rather than two independent `contains(...)` checks)
+  // catches the regression where the glyph appears on some unrelated
+  // row but `feat` still shows `:rocket:` in the unicode column.
+  let feat_row = stdout
+    .lines()
+    .find(|l| l.trim_start().starts_with("feat "))
+    .expect("feat row must be present in `gwm types --gitmoji` output");
+  assert!(
+    feat_row.contains("🚀"),
+    "feat unicode column must be normalised to 🚀, got: {feat_row:?}"
+  );
+  assert!(
+    feat_row.contains(":rocket:"),
+    "feat shortcode column must still be :rocket:, got: {feat_row:?}"
+  );
+}
+
+#[test]
+fn types_with_gitmoji_flag_includes_emoji_columns() {
+  // `gwm types --gitmoji` extends the existing per-type list with
+  // two more columns: the unicode emoji and the shortcode form. The
+  // shortcode is asserted via `:sparkles:` (textual, deterministic);
+  // the unicode column is asserted via the ✨ character.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains(":sparkles:"))
+    .stdout(predicate::str::contains("✨"))
+    .stdout(predicate::str::contains(":bug:"))
+    .stdout(predicate::str::contains("🐛"));
+}
+
+#[test]
+fn types_without_gitmoji_flag_does_not_include_emoji_columns() {
+  // Backwards compatibility: `gwm types` (no flag) must NOT spill
+  // shortcodes into its output — every scripted parser of the
+  // pre-#85 surface depends on the two-column layout.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains(":sparkles:").not())
+    .stdout(predicate::str::contains("✨").not());
+}
+
+#[test]
+fn hooks_install_commit_msg_creates_executable_hook() {
+  // `gwm hooks install commit-msg` writes `.git/hooks/commit-msg` and
+  // exits 0. We assert on the resulting file (not the stdout
+  // message), so the test is robust to cosmetic copy changes.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
+  cmd.assert().success();
+
+  let hook = dir.path().join(".git").join("hooks").join("commit-msg");
+  assert!(hook.exists(), "commit-msg hook must exist after `gwm hooks install`");
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&hook).expect("stat hook").permissions().mode();
+    assert!(mode & 0o100 != 0, "hook must be executable by owner");
+  }
+}
+
+#[test]
+fn hooks_install_commit_msg_refuses_existing_hook_without_force() {
+  // Idempotent-safe contract: a pre-existing `commit-msg` (husky,
+  // commitlint, …) is left intact and the command exits non-zero
+  // with a clear pointer to `--force`.
+  let (dir, _repo) = init_repo();
+  let hooks_dir = dir.path().join(".git").join("hooks");
+  std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+  let hook_path = hooks_dir.join("commit-msg");
+  std::fs::write(&hook_path, "#!/bin/sh\necho 'pre-existing hook'\n").expect("seed hook");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
+  cmd.assert().failure().stderr(predicate::str::contains("--force"));
+
+  let body = std::fs::read_to_string(&hook_path).expect("read seeded hook");
+  assert!(
+    body.contains("pre-existing hook"),
+    "seeded hook must not be overwritten on the refusal path"
+  );
+}
+
+#[test]
+fn hooks_install_commit_msg_force_overwrites() {
+  // The escape hatch.
+  let (dir, _repo) = init_repo();
+  let hooks_dir = dir.path().join(".git").join("hooks");
+  std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+  let hook_path = hooks_dir.join("commit-msg");
+  std::fs::write(&hook_path, "#!/bin/sh\necho 'old'\n").expect("seed hook");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["hooks", "install", "commit-msg", "--force"]);
+  cmd.assert().success();
+
+  let body = std::fs::read_to_string(&hook_path).expect("read installed hook");
+  assert!(
+    body.contains("gwm commit-msg hook"),
+    "installed hook must carry the gwm marker; got {:?}",
+    body
+  );
 }
 
 // --- labels (issue #81) -------------------------------------------------
