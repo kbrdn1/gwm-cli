@@ -2708,6 +2708,126 @@ repo_root = "/nonexistent/other-repo"
 }
 
 #[test]
+fn remove_records_journal_entry_before_destruction() {
+  // Issue #29: `gwm remove <name>` must write a journal entry naming
+  // the doomed worktree + branch + OID BEFORE the destructive call
+  // runs. Without this hook `gwm undo` has nothing to replay. The
+  // assertion is intentionally loose on the exact TOML shape — we
+  // pin only that the journal file exists, is non-empty, and
+  // contains the worktree name we asked to remove.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  // Seed a worktree the test will then remove.
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "29", "doomed", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // No journal entry should exist yet — `gwm create` does NOT hook
+  // the journal (only destructive ops do).
+  assert!(
+    !history_file.exists() || std::fs::read_to_string(&history_file).unwrap().trim().is_empty(),
+    "create must not record a journal entry"
+  );
+
+  // Now remove it — the journal must capture the op.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-29-doomed"])
+    .assert()
+    .success();
+
+  assert!(
+    history_file.exists(),
+    "remove must create the journal file at {}",
+    history_file.display()
+  );
+  let body = std::fs::read_to_string(&history_file).unwrap();
+  assert!(
+    body.contains("feat-29-doomed"),
+    "journal must record the removed worktree name; got:\n{}",
+    body
+  );
+  assert!(
+    body.contains("kind = \"remove\""),
+    "journal must record kind = remove; got:\n{}",
+    body
+  );
+  assert!(
+    body.contains("feat/#29-doomed"),
+    "journal must record the branch name; got:\n{}",
+    body
+  );
+}
+
+#[test]
+fn remove_dry_run_does_not_record_journal_entry() {
+  // The dry-run flag (issue #31) gives the user a preview without
+  // touching state. The journal hook MUST gate on the destructive
+  // path only — a `--dry-run` invocation that wrote to the journal
+  // would let the user "undo" something that never happened.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "31", "preview", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // dry-run must not write to the journal.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-31-preview", "--dry-run"])
+    .assert()
+    .success();
+
+  assert!(
+    !history_file.exists() || std::fs::read_to_string(&history_file).unwrap().trim().is_empty(),
+    "remove --dry-run must NOT write to the journal; got: {:?}",
+    std::fs::read_to_string(&history_file).ok()
+  );
+}
+
+#[test]
 fn history_all_flag_surfaces_every_repo() {
   // `--all` opt-out from the per-repo filter: useful for power users
   // grepping the journal for forensic purposes. Both entries must
