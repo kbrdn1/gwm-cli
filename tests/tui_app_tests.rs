@@ -2232,6 +2232,33 @@ fn recent_commits_lines_reuses_cached_rows_for_unchanged_head() {
 }
 
 #[test]
+fn recent_commits_cache_is_scoped_to_worktree_path() {
+  let (dir, repo) = init_repo();
+  let mut cached = worktree_pointing_at_dir(dir.path());
+  cached.head = Some(repo.head().unwrap().target().unwrap().to_string());
+
+  let first = recent_commits_lines(&cached, 1);
+  let first_text: String = first[0].spans.iter().map(|span| span.content.as_ref()).collect();
+
+  let other = tempfile::TempDir::new().unwrap();
+  let mut same_oid_different_path = worktree_pointing_at_dir(other.path());
+  same_oid_different_path.head = cached.head.clone();
+
+  let second = recent_commits_lines(&same_oid_different_path, 1);
+  let second_text: String = second[0].spans.iter().map(|span| span.content.as_ref()).collect();
+
+  assert!(
+    second_text.starts_with("! "),
+    "same OID in a different worktree path must miss the cache, got: {}",
+    second_text
+  );
+  assert_ne!(
+    second_text, first_text,
+    "recent commit cache must not leak rows across repositories that share an OID"
+  );
+}
+
+#[test]
 #[allow(clippy::assertions_on_constants)] // intentional const pin
 fn recent_commits_default_limit_fills_modern_terminal_heights() {
   // Regression: the previous hardcoded limit of 10 left the bottom of tall

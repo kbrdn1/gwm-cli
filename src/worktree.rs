@@ -4,7 +4,7 @@ use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePr
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::Duration;
 
 /// Trunk branches treated as "merge destinations" when measuring how
@@ -13,7 +13,8 @@ use std::time::Duration;
 /// convention). Hardcoded here because `branch_age` is also reachable
 /// from contexts that don't carry a `Config` (CLI smoke paths).
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
-type RecentCommitCacheKey = (git2::Oid, usize);
+const RECENT_COMMITS_CACHE_MAX_ENTRIES: usize = 64;
+type RecentCommitCacheKey = (PathBuf, git2::Oid, usize);
 
 static RECENT_COMMITS_CACHE: LazyLock<Mutex<HashMap<RecentCommitCacheKey, Vec<CommitRow>>>> =
   LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -413,29 +414,38 @@ pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
 /// callers with `head = None` fall back to opening the worktree once.
 pub fn recent_commits_cached(w: &WorktreeInfo, limit: usize) -> Result<Vec<CommitRow>> {
   let tip = worktree_head_oid(w)?;
-  let key = (tip, limit);
-  if let Some(rows) = RECENT_COMMITS_CACHE
-    .lock()
-    .expect("recent commits cache poisoned")
-    .get(&key)
-    .cloned()
-  {
+  let key = (recent_commits_cache_repo_key(&w.path), tip, limit);
+  if let Some(rows) = recent_commits_cache().get(&key).cloned() {
     return Ok(rows);
   }
 
   let repo = Repository::open(&w.path)?;
   let rows = recent_commits_revwalk(&repo, tip, limit)?;
-  RECENT_COMMITS_CACHE
-    .lock()
-    .expect("recent commits cache poisoned")
-    .insert(key, rows.clone());
+  let mut cache = recent_commits_cache();
+  if cache.len() >= RECENT_COMMITS_CACHE_MAX_ENTRIES {
+    if let Some(oldest_key) = cache.keys().next().cloned() {
+      cache.remove(&oldest_key);
+    }
+  }
+  cache.insert(key, rows.clone());
   Ok(rows)
+}
+
+fn recent_commits_cache() -> MutexGuard<'static, HashMap<RecentCommitCacheKey, Vec<CommitRow>>> {
+  match RECENT_COMMITS_CACHE.lock() {
+    Ok(cache) => cache,
+    Err(poisoned) => poisoned.into_inner(),
+  }
+}
+
+fn recent_commits_cache_repo_key(path: &Path) -> PathBuf {
+  std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn worktree_head_oid(w: &WorktreeInfo) -> Result<git2::Oid> {
   if let Some(head) = &w.head {
     return git2::Oid::from_str(head)
-      .map_err(|e| GwmError::CommandFailed(format!("cached worktree head '{}' is not an oid: {}", head, e)));
+      .map_err(|e| GwmError::Other(format!("cached worktree head '{}' is not an oid: {}", head, e)));
   }
 
   let repo = Repository::open(&w.path)?;

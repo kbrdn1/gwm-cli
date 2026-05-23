@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - ⚡ TUI sidebar commit graph pipes now carry `git2::Oid` values instead of heap-allocated hash strings, cutting the 300-row graph render benchmark by about 47% and keeping `Pipe` allocation-free. Closes [#108](https://github.com/kbrdn1/gwm-cli/issues/108).
-- ⚡ Recent Commits in the TUI sidebar now uses a libgit2 revwalk cached by `(head OID, limit)` instead of shelling out to `git log` on repeated sidebar rebuilds, cutting the 300-row sidebar benchmark by about 99%. Closes [#107](https://github.com/kbrdn1/gwm-cli/issues/107).
+- ⚡ Recent Commits in the TUI sidebar now use a libgit2 revwalk cached by `(worktree path, head OID, limit)` instead of shelling out to `git log` on repeated sidebar rebuilds, cutting the 300-row sidebar benchmark by about 99%. Closes [#107](https://github.com/kbrdn1/gwm-cli/issues/107).
 
 ## Past releases
 
