@@ -276,9 +276,7 @@ fn install_commit_msg_honours_core_hookspath() {
   // `Repository::open` sees it.
   let repo = git2::Repository::open(dir.path()).expect("reopen repo");
   let mut cfg = repo.config().expect("config");
-  cfg
-    .set_str("core.hooksPath", ".githooks")
-    .expect("set core.hooksPath");
+  cfg.set_str("core.hooksPath", ".githooks").expect("set core.hooksPath");
   drop(cfg);
   drop(repo);
 
