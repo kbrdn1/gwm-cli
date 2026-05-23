@@ -1218,13 +1218,18 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
+  // Post-#138 the cache is keyed by number; the App-level
+  // `*_fetch_state()` wrappers resolve via the current link, so they
+  // surface the linked issue (42 from the branch name) here. The PR
+  // (#61) isn't linked on this branch — read it via the keyed
+  // accessor on the underlying `GitHubFetch` directly.
   match app.issue_fetch_state() {
     GitHubFetchState::Loaded(_) => {}
-    other => panic!("expected Loaded, got {:?}", other),
+    other => panic!("expected Loaded for linked issue 42, got {:?}", other),
   }
-  match app.pr_fetch_state() {
+  match app.github.pr_fetch_state(61) {
     GitHubFetchState::Loaded(_) => {}
-    other => panic!("expected Loaded, got {:?}", other),
+    other => panic!("expected Loaded for stamped pr 61, got {:?}", other),
   }
 }
 

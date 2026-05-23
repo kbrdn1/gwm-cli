@@ -55,10 +55,11 @@ fn request_on_cold_cache_returns_spawn_for_issue() {
   let mut gh = GitHubFetch::new();
   let action = gh.request(FetchKey::Issue(42));
   assert!(matches!(action, FetchAction::Spawn(FetchKey::Issue(42))));
-  // And the per-target `*_state` flips to `Loading` so the UI can paint
-  // an in-flight badge — same contract the pre-extraction
-  // `refresh_github_status` used.
-  assert!(matches!(gh.issue_state, GitHubFetchState::Loading));
+  // And the per-key entry flips to `Loading` so the UI can paint an
+  // in-flight badge — same contract the pre-extraction
+  // `refresh_github_status` used; post-#138 it's read via the keyed
+  // accessor instead of a per-target field.
+  assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Loading));
 }
 
 #[test]
@@ -66,7 +67,7 @@ fn request_on_cold_cache_returns_spawn_for_pr() {
   let mut gh = GitHubFetch::new();
   let action = gh.request(FetchKey::Pr(7));
   assert!(matches!(action, FetchAction::Spawn(FetchKey::Pr(7))));
-  assert!(matches!(gh.pr_state, GitHubFetchState::Loading));
+  assert!(matches!(gh.pr_fetch_state(7), GitHubFetchState::Loading));
 }
 
 // ---- Dedupe: second request while inflight returns AlreadyInflight --------
@@ -109,8 +110,8 @@ fn after_complete_request_returns_hit_cache_for_issue() {
     "expected HitCache after successful complete, got {:?}",
     action
   );
-  // And the loaded state is observable via `issue_state`.
-  assert!(matches!(gh.issue_state, GitHubFetchState::Loaded(_)));
+  // And the loaded state is observable via the keyed accessor.
+  assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Loaded(_)));
 }
 
 #[test]
@@ -120,7 +121,7 @@ fn after_complete_request_returns_hit_cache_for_pr() {
   gh.complete_pr(7, Ok(sample_pr(7)));
   let action = gh.request(FetchKey::Pr(7));
   assert!(matches!(action, FetchAction::HitCache));
-  assert!(matches!(gh.pr_state, GitHubFetchState::Loaded(_)));
+  assert!(matches!(gh.pr_fetch_state(7), GitHubFetchState::Loaded(_)));
 }
 
 #[test]
@@ -134,7 +135,7 @@ fn after_errored_complete_request_returns_hit_cache() {
   gh.complete_issue(42, Err("gh: connection refused".into()));
   let action = gh.request(FetchKey::Issue(42));
   assert!(matches!(action, FetchAction::HitCache));
-  assert!(matches!(gh.issue_state, GitHubFetchState::Error(_)));
+  assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Error(_)));
 }
 
 // ---- Different keys (Issue 42 vs PR 42) don't collide ---------------------
