@@ -29,12 +29,16 @@ if [ ! -f "$previous_rc" ]; then
   exit 1
 fi
 
-unreleased_bullets="$(mktemp)"
-previous_bullets="$(mktemp)"
-unreleased_refs="$(mktemp)"
-previous_refs="$(mktemp)"
-duplicate_bullets="$(mktemp)"
-duplicate_refs="$(mktemp)"
+temp_file() {
+  mktemp "${TMPDIR:-/tmp}/gwm-rc-dupes.XXXXXX"
+}
+
+unreleased_bullets="$(temp_file)"
+previous_bullets="$(temp_file)"
+unreleased_refs="$(temp_file)"
+previous_refs="$(temp_file)"
+duplicate_bullets="$(temp_file)"
+duplicate_refs="$(temp_file)"
 trap 'rm -f "$unreleased_bullets" "$previous_bullets" "$unreleased_refs" "$previous_refs" "$duplicate_bullets" "$duplicate_refs"' EXIT
 
 awk '
