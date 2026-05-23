@@ -27,6 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subcommand prints the resolved chain grouped by source, with
   shadowed user entries flagged inline.
 
+### Fixed
+
+- Pre-release publishing now fails before upload when root `[Unreleased]` repeats bullets or issue references already shipped in the immediately previous RC notes. (#147)
+- Stable GitHub Releases now publish through the GitHub CLI with the workflow token and clobberable asset uploads, avoiding the `softprops/action-gh-release` bad-credentials failure seen on v0.7.0. (#146)
+
 ## Past releases
 
 In reverse chronological order:

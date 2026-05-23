@@ -167,6 +167,10 @@ jobs:
           fi
           echo "path=${CHANGELOG_PATH}" >> "$GITHUB_OUTPUT"
 
+      - name: check unreleased changelog against previous rc
+        shell: bash
+        run: ./.github/scripts/check-rc-changelog-dupes.sh "${{ steps.tag.outputs.name }}"
+
       - name: publish pre-release
         uses: softprops/action-gh-release@v3
         with:
