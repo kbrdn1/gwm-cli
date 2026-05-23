@@ -138,6 +138,96 @@ fn resolve_prefix_unknown_type_falls_back_to_question_mark() {
 }
 
 #[test]
+fn resolve_prefix_normalizes_known_shortcode_override_when_unicode_requested() {
+  // The UX bug we're fixing (PR #152 follow-up): a `.gwm.toml` override
+  // like `feat = ":rocket:"` produced `:rocket: feat(#1):` even under
+  // `--unicode`, because the renderer passed the override value through
+  // `shortcode_to_unicode()` verbatim and the helper used to return
+  // unknown inputs unchanged. With Option A (the validated UX choice),
+  // a KNOWN shortcode in the override table must be normalised to its
+  // unicode glyph when `--unicode` is set, so `gwm commit-prefix
+  // --unicode` mirrors the asymmetry-free contract of `gwm types
+  // --gitmoji`'s unicode column.
+  let dir = tempfile::TempDir::new().expect("tempdir");
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[gitmoji]
+feat = ":rocket:"
+"#,
+  )
+  .expect("write .gwm.toml");
+  let map = load(Some(dir.path())).expect("load with override");
+  let spec = BranchSpec::new("feat", "1", "x").expect("valid branch");
+  assert_eq!(resolve_prefix(&map, &spec, true), "🚀 feat(#1):");
+}
+
+#[test]
+fn resolve_prefix_keeps_unknown_shortcode_override_verbatim_when_unicode_requested() {
+  // The graceful-degradation half of Option A: if the user picks a
+  // shortcode the built-in `shortcode_to_unicode` table doesn't know
+  // (e.g. `:foo:`), `--unicode` must NOT panic, NOT error out, NOT
+  // substitute `:question:` — it must leave the value as-is. The
+  // prefix surface must remain usable on any user configuration.
+  let dir = tempfile::TempDir::new().expect("tempdir");
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[gitmoji]
+feat = ":foo:"
+"#,
+  )
+  .expect("write .gwm.toml");
+  let map = load(Some(dir.path())).expect("load with unknown override");
+  let spec = BranchSpec::new("feat", "1", "x").expect("valid branch");
+  assert_eq!(resolve_prefix(&map, &spec, true), ":foo: feat(#1):");
+}
+
+#[test]
+fn resolve_prefix_keeps_unicode_override_verbatim_when_unicode_not_requested() {
+  // Counterpart to the above: a user who already wrote the literal
+  // unicode glyph in `.gwm.toml` (e.g. `feat = "🚀"`) gets that glyph
+  // back even without `--unicode`. There is no reverse table from
+  // unicode → shortcode, and the current contract is "verbatim" when
+  // `--unicode` is off, so this exercises the "no transformation"
+  // path for non-shortcode values.
+  let dir = tempfile::TempDir::new().expect("tempdir");
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[gitmoji]
+feat = "🚀"
+"#,
+  )
+  .expect("write .gwm.toml");
+  let map = load(Some(dir.path())).expect("load with unicode override");
+  let spec = BranchSpec::new("feat", "1", "x").expect("valid branch");
+  assert_eq!(resolve_prefix(&map, &spec, false), "🚀 feat(#1):");
+}
+
+#[test]
+fn resolve_prefix_keeps_shortcode_override_verbatim_when_unicode_not_requested() {
+  // Symmetry guard: the normalisation step is gated by `--unicode`.
+  // Without the flag, a shortcode override (even a known one) must
+  // round-trip verbatim — the no-flag form is what tooling that
+  // expects a `:shortcode:` literal (commit-msg linters, GitHub
+  // Markdown renderers) consumes. Regressing this would silently
+  // break those downstream consumers.
+  let dir = tempfile::TempDir::new().expect("tempdir");
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[gitmoji]
+feat = ":rocket:"
+"#,
+  )
+  .expect("write .gwm.toml");
+  let map = load(Some(dir.path())).expect("load with shortcode override");
+  let spec = BranchSpec::new("feat", "1", "x").expect("valid branch");
+  assert_eq!(resolve_prefix(&map, &spec, false), ":rocket: feat(#1):");
+}
+
+#[test]
 fn shortcode_to_unicode_covers_every_default_entry() {
   // Every shortcode shipped in the built-in table must have a unicode
   // mapping — otherwise `--unicode` silently falls back to the

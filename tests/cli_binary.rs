@@ -127,6 +127,72 @@ fn commit_prefix_on_non_gwm_branch_reports_error() {
 }
 
 #[test]
+fn commit_prefix_unicode_normalizes_known_shortcode_override() {
+  // The UX guarantee from the PR #152 follow-up: under `--unicode`,
+  // a `.gwm.toml` override that supplied a known `:shortcode:` (like
+  // `:rocket:`) must render as the unicode glyph (🚀), not the
+  // shortcode literal. Asymmetry between this surface and
+  // `gwm types --gitmoji`'s unicode column was the original bug.
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
+  cmd.assert().success().stdout(predicate::str::contains("🚀 feat(#1):"));
+}
+
+#[test]
+fn commit_prefix_unicode_leaves_unknown_shortcode_override_verbatim() {
+  // Graceful degradation for shortcodes the built-in table doesn't
+  // know about. `:foo:` is not in `shortcode_to_unicode`, so under
+  // `--unicode` we keep the value verbatim — the surface must remain
+  // usable on any user configuration without falling back to
+  // `:question:`/❓ (which would hide the user's intent).
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":foo:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":foo: feat(#1):"));
+}
+
+#[test]
+fn types_gitmoji_normalizes_known_shortcode_override_in_unicode_column() {
+  // Symmetry with `gwm commit-prefix --unicode`: the `gwm types
+  // --gitmoji` unicode column must show the GLYPH for a known
+  // shortcode override (not the shortcode literal). The shortcode
+  // column still shows the literal `:rocket:` so both forms remain
+  // greppable on the same row.
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
+  let assert = cmd.assert().success();
+  let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+  // Find the `feat` row and check both columns on it. A per-row
+  // assertion (rather than two independent `contains(...)` checks)
+  // catches the regression where the glyph appears on some unrelated
+  // row but `feat` still shows `:rocket:` in the unicode column.
+  let feat_row = stdout
+    .lines()
+    .find(|l| l.trim_start().starts_with("feat "))
+    .expect("feat row must be present in `gwm types --gitmoji` output");
+  assert!(
+    feat_row.contains("🚀"),
+    "feat unicode column must be normalised to 🚀, got: {feat_row:?}"
+  );
+  assert!(
+    feat_row.contains(":rocket:"),
+    "feat shortcode column must still be :rocket:, got: {feat_row:?}"
+  );
+}
+
+#[test]
 fn types_with_gitmoji_flag_includes_emoji_columns() {
   // `gwm types --gitmoji` extends the existing per-type list with
   // two more columns: the unicode emoji and the shortcode form. The
