@@ -546,7 +546,7 @@ fn remove_failed_filesystem_unlink_still_prunes_metadata() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-98-ghost");
-  worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost").unwrap();
+  worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost", false).unwrap();
 
   // Capture the original mode so we can restore EXACTLY what TempDir
   // gave us (mac defaults to 0o700, linux 0o755, umask-dependent on
@@ -606,10 +606,12 @@ fn list_populates_age_on_feature_worktree() {
     two_days_ago,
   );
 
-  // Attach a worktree on that branch and list.
+  // Attach a worktree on that branch and list. The branch was created
+  // above, so `reuse_branch=true` is required (the #99 stale-branch
+  // refusal would otherwise reject this `add`).
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-103-age");
-  worktree::add(&repo, "feat-103-age", &target, "feat/#103-age").unwrap();
+  worktree::add(&repo, "feat-103-age", &target, "feat/#103-age", true).unwrap();
 
   let trees = worktree::list(&repo).unwrap();
   let feature = trees

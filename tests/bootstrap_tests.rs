@@ -1,4 +1,4 @@
-use gwm::bootstrap::{self, BootstrapCtx, StepStatus};
+use gwm::bootstrap::{self, BootstrapCtx, StepResult, StepStatus};
 use gwm::config::{CommandStep, Config, CopyStep, FallbackContent, Guard, NoSymlink};
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -845,4 +845,78 @@ fn seed_from_example_refuses_dotdot_in_example_file() {
     "traversal in example_file must surface as Failed, got: {:?}",
     copy_step
   );
+}
+
+// ---- Issue #106: StepResult constructors --------------------------------
+//
+// The bootstrap module historically constructed `StepResult` via the
+// literal struct syntax in 25+ call sites. Each variant has a fixed
+// `status` and a stereotyped `detail` shape, so the constructors below
+// pin the contract: `ok` keeps `detail` empty by default, the others
+// require the caller to spell out the reason / message.
+
+#[test]
+fn step_result_ok_has_no_detail() {
+  let r = StepResult::ok("copy .env");
+  assert_eq!(r.label, "copy .env");
+  assert_eq!(r.status, StepStatus::Ok);
+  assert!(
+    r.detail.is_empty(),
+    "Ok constructor must default detail to empty, got {:?}",
+    r.detail
+  );
+}
+
+#[test]
+fn step_result_ok_with_detail_preserves_detail() {
+  let r = StepResult::ok_with_detail("copy .env", "copied from /repo/.env");
+  assert_eq!(r.status, StepStatus::Ok);
+  assert_eq!(r.detail, "copied from /repo/.env");
+}
+
+#[test]
+fn step_result_skipped_carries_reason() {
+  let r = StepResult::skipped("run direnv", "when condition false");
+  assert_eq!(r.status, StepStatus::Skipped);
+  assert_eq!(r.detail, "when condition false");
+}
+
+#[test]
+fn step_result_warning_carries_message() {
+  let r = StepResult::warning("no-symlink vendor", "removed symlink /tmp/vendor");
+  assert_eq!(r.status, StepStatus::Warning);
+  assert_eq!(r.detail, "removed symlink /tmp/vendor");
+}
+
+#[test]
+fn step_result_failed_carries_message() {
+  let r = StepResult::failed("copy .env", "source missing");
+  assert_eq!(r.status, StepStatus::Failed);
+  assert_eq!(r.detail, "source missing");
+}
+
+#[test]
+fn step_result_constructors_accept_owned_strings() {
+  // Migrated call sites use `format!(...)` and `String` values, so
+  // the constructors must accept `impl Into<String>` rather than
+  // forcing `&str`.
+  let label: String = "copy .env".into();
+  let detail: String = "source missing".into();
+  let r = StepResult::failed(label, detail);
+  assert_eq!(r.status, StepStatus::Failed);
+  assert_eq!(r.label, "copy .env");
+  assert_eq!(r.detail, "source missing");
+}
+
+#[test]
+fn step_status_sigil_is_canonical_across_renderers() {
+  // The TUI bootstrap report (`tui::ui::render_bootstrap`) and the
+  // CLI bootstrap report (`cli::print_report`) historically carried
+  // duplicated `match` blocks mapping each status to a sigil glyph.
+  // The helper below pins the canonical glyph so neither renderer
+  // can drift.
+  assert_eq!(StepStatus::Ok.sigil(), "✓");
+  assert_eq!(StepStatus::Skipped.sigil(), "·");
+  assert_eq!(StepStatus::Warning.sigil(), "!");
+  assert_eq!(StepStatus::Failed.sigil(), "✗");
 }

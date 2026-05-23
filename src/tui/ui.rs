@@ -1123,11 +1123,12 @@ fn draw_report(f: &mut Frame, app: &App) {
   let mut lines: Vec<Line> = Vec::new();
   if let Some(report) = &app.report {
     for step in &report.steps {
-      let (sigil, color) = match step.status {
-        StepStatus::Ok => ("✓", Color::Green),
-        StepStatus::Skipped => ("·", Color::DarkGray),
-        StepStatus::Warning => ("!", Color::Yellow),
-        StepStatus::Failed => ("✗", Color::Red),
+      let sigil = step.status.sigil();
+      let color = match step.status {
+        StepStatus::Ok => Color::Green,
+        StepStatus::Skipped => Color::DarkGray,
+        StepStatus::Warning => Color::Yellow,
+        StepStatus::Failed => Color::Red,
       };
       lines.push(Line::from(vec![
         Span::styled(

@@ -79,6 +79,41 @@ impl LabelDiff {
   }
 }
 
+// --- Diff summary helpers (issue #106) ----------------------------------
+//
+// `gwm labels push` and `gwm milestones push` both end on a
+// structurally identical one-line summary (`summary: N create · M
+// update · K match · X extra-on-remote`) and a dry-run preview line
+// (`would create N, update M, leave K untouched, prune P, ignore Q
+// extra-on-remote`). The helpers below give both call sites a single
+// formatter so the two surfaces stay in lock-step when the contract
+// evolves.
+
+/// Render the canonical `summary: N create · M update · K match · X
+/// extra-on-remote` line. Used by both `print_labels_diff` and
+/// `print_milestones_diff` in `cli.rs`.
+pub fn diff_summary_line(create: usize, update: usize, matching: usize, extra: usize) -> String {
+  format!(
+    "summary: {} create · {} update · {} match · {} extra-on-remote",
+    create, update, matching, extra
+  )
+}
+
+/// Render the canonical dry-run preview line for `labels push --dry-run`
+/// / `milestones push --dry-run`. `pruned` is `extra` when the caller
+/// passed `--prune`, otherwise `0` — keeping the arithmetic at the call
+/// site means the helper itself stays stateless.
+pub fn diff_dry_run_line(create: usize, update: usize, matching: usize, extra: usize, pruned: usize) -> String {
+  format!(
+    "would create {}, update {}, leave {} untouched, prune {}, ignore {} extra-on-remote",
+    create,
+    update,
+    matching,
+    pruned,
+    extra.saturating_sub(pruned),
+  )
+}
+
 // --- Colour helpers ------------------------------------------------------
 
 /// Shape check: `s` is 6 ASCII hex chars (either case, no leading
