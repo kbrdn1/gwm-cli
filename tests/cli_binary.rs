@@ -75,10 +75,7 @@ fn commit_prefix_unicode_emits_real_emoji() {
   // sequence in the message body, not the shortcode form).
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["commit-prefix", "--branch", "feat/#41-foo", "--unicode"]);
-  cmd
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("✨ feat(#41):"));
+  cmd.assert().success().stdout(predicate::str::contains("✨ feat(#41):"));
 }
 
 #[test]
@@ -104,10 +101,7 @@ fn commit_prefix_on_non_gwm_branch_reports_error() {
   // there's no auto-fallback to CWD to fall back to.
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["commit-prefix", "--branch", "random"]);
-  cmd
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("random"));
+  cmd.assert().failure().stderr(predicate::str::contains("random"));
 }
 
 #[test]
@@ -178,10 +172,7 @@ fn hooks_install_commit_msg_refuses_existing_hook_without_force() {
 
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
-  cmd
-    .assert()
-    .failure()
-    .stderr(predicate::str::contains("--force"));
+  cmd.assert().failure().stderr(predicate::str::contains("--force"));
 
   let body = std::fs::read_to_string(&hook_path).expect("read seeded hook");
   assert!(
