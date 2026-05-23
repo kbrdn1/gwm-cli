@@ -10,8 +10,9 @@
 /// Which input is currently focused inside the create overlay. Selected
 /// via Tab / Shift-Tab; the Type field is special — it's cycled via
 /// `next_type` / `prev_type` rather than typed into.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Field {
+  #[default]
   Type,
   Issue,
   Desc,
@@ -26,12 +27,6 @@ pub struct CreateForm {
   pub type_index: usize,
   pub issue: String,
   pub desc: String,
-}
-
-impl Default for Field {
-  fn default() -> Self {
-    Self::Type
-  }
 }
 
 impl CreateForm {

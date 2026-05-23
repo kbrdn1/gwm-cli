@@ -999,12 +999,24 @@ impl App {
     self.github.link_slug.as_deref()
   }
 
+  /// Read the cached issue fetch state for the *currently-linked*
+  /// issue. Returns `&GitHubFetchState::Idle` when no issue is linked
+  /// (or when the linked issue has never been fetched) — the cache is
+  /// per-number (post-#138), so reading "the" state means resolving
+  /// via `self.github.link.issue` first.
   pub fn issue_fetch_state(&self) -> &GitHubFetchState<IssueStatus> {
-    &self.github.issue_state
+    match self.github.link.issue {
+      Some(n) => self.github.issue_fetch_state(n),
+      None => &GitHubFetchState::Idle,
+    }
   }
 
+  /// PR-side counterpart to [`Self::issue_fetch_state`].
   pub fn pr_fetch_state(&self) -> &GitHubFetchState<PrStatus> {
-    &self.github.pr_state
+    match self.github.link.pr {
+      Some(n) => self.github.pr_fetch_state(n),
+      None => &GitHubFetchState::Idle,
+    }
   }
 
   /// Drive the issue/PR fetch synchronously. Called from the event loop
@@ -1055,8 +1067,8 @@ impl App {
   /// that always printing "refreshed" misled users when one of the
   /// fetches had failed.
   pub fn report_github_refresh_status(&mut self) {
-    let issue_err = matches!(self.github.issue_state, GitHubFetchState::Error(_));
-    let pr_err = matches!(self.github.pr_state, GitHubFetchState::Error(_));
+    let issue_err = matches!(self.issue_fetch_state(), GitHubFetchState::Error(_));
+    let pr_err = matches!(self.pr_fetch_state(), GitHubFetchState::Error(_));
     self.status = match (issue_err, pr_err) {
       (false, false) => "github status refreshed".into(),
       (true, false) => format!(
@@ -1073,14 +1085,14 @@ impl App {
   }
 
   fn issue_error_message(&self) -> Option<String> {
-    match &self.github.issue_state {
+    match self.issue_fetch_state() {
       GitHubFetchState::Error(e) => Some(e.clone()),
       _ => None,
     }
   }
 
   fn pr_error_message(&self) -> Option<String> {
-    match &self.github.pr_state {
+    match self.pr_fetch_state() {
       GitHubFetchState::Error(e) => Some(e.clone()),
       _ => None,
     }
