@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Pre-release publishing now fails before upload when root `[Unreleased]` repeats bullets or issue references already shipped in the immediately previous RC notes. (#147)
+
 ## Past releases
 
 In reverse chronological order:
