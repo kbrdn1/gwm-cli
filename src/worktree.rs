@@ -345,18 +345,18 @@ pub fn prune(repo: &Repository) -> Result<usize> {
 
 /// A commit row pulled from `git log` for the Recent Commits sidebar block.
 /// Mirrors lazygit's columnar layout (hash + author + subject) so the
-/// renderer can lay out one commit per visual line. Hashes are full
-/// 40-char SHAs; the renderer trims them on display to a fixed length
-/// (the `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/ui.rs`, currently
-/// 8 chars, matching lazygit's `Gui.CommitHashLength` default). Not
+/// renderer can lay out one commit per visual line. Hashes are parsed
+/// into binary OIDs once, then formatted on display to a fixed length (the
+/// `COMMIT_HASH_DISPLAY_LEN` constant in `src/tui/ui.rs`, currently 8
+/// chars, matching lazygit's `Gui.CommitHashLength` default). Not
 /// user-configurable today — change the constant to retune.
 /// `parents.len() >= 2` flags a merge commit, which the renderer marks
 /// with `◎` instead of `○`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitRow {
-  pub hash: String,
+  pub hash: git2::Oid,
   pub author: String,
-  pub parents: Vec<String>,
+  pub parents: Vec<git2::Oid>,
   pub subject: String,
 }
 
@@ -386,14 +386,22 @@ pub fn git_log_with_author(path: &Path, n: usize) -> Result<Vec<CommitRow>> {
   let mut rows = Vec::new();
   for line in raw.lines() {
     let mut parts = line.splitn(4, '\u{0}');
-    let hash = parts.next().unwrap_or("").to_string();
+    let hash = parts.next().unwrap_or("");
     let author = parts.next().unwrap_or("").to_string();
     let parents_field = parts.next().unwrap_or("");
     let subject = parts.next().unwrap_or("").to_string();
     if hash.is_empty() {
       continue;
     }
-    let parents: Vec<String> = parents_field.split_whitespace().map(|s| s.to_string()).collect();
+    let hash = git2::Oid::from_str(hash)
+      .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid commit oid: {}", e)))?;
+    let parents: Vec<git2::Oid> = parents_field
+      .split_whitespace()
+      .map(|s| {
+        git2::Oid::from_str(s)
+          .map_err(|e| GwmError::CommandFailed(format!("git log returned invalid parent oid: {}", e)))
+      })
+      .collect::<Result<Vec<_>>>()?;
     rows.push(CommitRow {
       hash,
       author,

@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_(no in-progress entries — last published: [`0.7.0-rc.3`](changelogs/pre-releases/0.7.0-rc.3.md))_
+- ⚡ TUI sidebar commit graph pipes now carry `git2::Oid` values instead of heap-allocated hash strings, cutting the 300-row graph render benchmark by about 47% and keeping `Pipe` allocation-free. Closes [#108](https://github.com/kbrdn1/gwm-cli/issues/108).
 
 ## Past releases
 
