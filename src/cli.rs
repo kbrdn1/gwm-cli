@@ -720,13 +720,32 @@ fn cmd_create(
 /// `--delete-branch` reports "(no branch to delete)" instead, mirror-
 /// ing `worktree::remove`'s actual behaviour (it only drops a branch
 /// when one is resolvable).
-pub fn format_remove_plan(
-  name: &str,
-  path: &Path,
-  branch: Option<&str>,
-  delete_branch: bool,
-) -> String {
-  String::new()
+pub fn format_remove_plan(name: &str, path: &Path, branch: Option<&str>, delete_branch: bool) -> String {
+  use std::fmt::Write;
+  let mut out = String::new();
+  let _ = writeln!(out, "would remove:");
+  let _ = writeln!(out, "  name:   {}", name);
+  let _ = writeln!(out, "  path:   {}", path.display());
+  match (branch, delete_branch) {
+    (Some(b), true) => {
+      let _ = writeln!(out, "  branch: {} (would be deleted)", b);
+    }
+    (Some(b), false) => {
+      let _ = writeln!(out, "  branch: {}", b);
+    }
+    (None, true) => {
+      // Detached HEAD worktree: `worktree::remove` only drops a
+      // branch when one is resolvable, so the dry-run must not
+      // claim a deletion that will never happen. The clarifying
+      // rider tells the user why `--delete-branch` is a no-op
+      // here without forcing them to re-read the docs.
+      let _ = writeln!(out, "  branch: - (no branch to delete)");
+    }
+    (None, false) => {
+      let _ = writeln!(out, "  branch: -");
+    }
+  }
+  out
 }
 
 /// Render the would-do plan for `gwm prune --dry-run` (issue #31).
@@ -741,7 +760,36 @@ pub fn format_remove_plan(
 /// (`.chars().count()`), not bytes (`.len()`), so non-ASCII paths
 /// stay aligned in a fixed-width terminal.
 pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
-  String::new()
+  use std::fmt::Write;
+  let mut out = String::new();
+  if entries.is_empty() {
+    let _ = writeln!(out, "0 worktree(s) to prune");
+    return out;
+  }
+  // Widths in Unicode characters, not bytes — non-ASCII names or
+  // paths would otherwise drift the reason column right by the
+  // (byte_len - char_count) delta. Rust's `{:<width$}` format spec
+  // pads to a *character* count, so feeding it `.len()` is the bug
+  // Copilot flagged on PR #154.
+  let name_w = entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(4);
+  let path_w = entries
+    .iter()
+    .map(|e| e.path.display().to_string().chars().count())
+    .max()
+    .unwrap_or(4);
+  let _ = writeln!(out, "would prune {} worktree(s):", entries.len());
+  for entry in entries {
+    let _ = writeln!(
+      out,
+      "  {:<nw$}  {:<pw$}  ({})",
+      entry.name,
+      entry.path.display(),
+      entry.reason,
+      nw = name_w,
+      pw = path_w,
+    );
+  }
+  out
 }
 
 fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()> {
@@ -754,15 +802,10 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
     // the destructive form raises, satisfying the spec's "same error
     // contract" requirement.
     worktree::remove_dry_run(&repo, &found.name)?;
-    let branch_display = found.branch.as_deref().unwrap_or("-");
-    println!("would remove:");
-    println!("  name:   {}", found.name);
-    println!("  path:   {}", found.path.display());
-    if delete_branch {
-      println!("  branch: {} (would be deleted)", branch_display);
-    } else {
-      println!("  branch: {}", branch_display);
-    }
+    print!(
+      "{}",
+      format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
+    );
     return Ok(());
   }
   worktree::remove(&repo, &found.name, delete_branch)?;
@@ -814,35 +857,12 @@ fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
 fn cmd_prune(dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   if dry_run {
-    // Issue #31: enumerate prunable worktrees (name + path + reason),
-    // print one row per entry plus a header that names the count so
-    // even the empty case has a stable signal for piped consumers.
+    // Issue #31: enumerate prunable worktrees (name + path + reason)
+    // and render the plan through the shared formatter. Empty input
+    // still emits "0 worktree(s) to prune" so piped consumers always
+    // get a stable signal.
     let plan = worktree::prunable_worktrees(&repo)?;
-    if plan.is_empty() {
-      println!("0 worktree(s) to prune");
-      return Ok(());
-    }
-    // Align the name + path columns on the widest observed value so
-    // human eyeballs can scan the plan. The reason column is fixed-length
-    // today ("working dir missing") but its width is still computed so a
-    // future libgit2 with richer reasons stays aligned without code change.
-    let name_w = plan.iter().map(|e| e.name.len()).max().unwrap_or(4);
-    let path_w = plan
-      .iter()
-      .map(|e| e.path.display().to_string().len())
-      .max()
-      .unwrap_or(4);
-    println!("would prune {} worktree(s):", plan.len());
-    for entry in &plan {
-      println!(
-        "  {:<nw$}  {:<pw$}  ({})",
-        entry.name,
-        entry.path.display(),
-        entry.reason,
-        nw = name_w,
-        pw = path_w,
-      );
-    }
+    print!("{}", format_prune_plan(&plan));
     return Ok(());
   }
   let n = worktree::prune(&repo)?;

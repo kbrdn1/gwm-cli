@@ -359,12 +359,13 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
 }
 
 /// One prunable worktree entry as surfaced by `gwm prune --dry-run`
-/// (issue #31). The `reason` is libgit2's prunable rationale rendered
-/// for humans — currently always "working dir missing" because
-/// `is_prunable(None)` only flags worktrees whose working tree has been
-/// removed out from under the admin entry. Captured as a struct field
-/// rather than hard-coded in the CLI so future libgit2 versions can
-/// expose richer reasons without breaking the CLI surface.
+/// (issue #31). The `reason` field is a human-readable rationale that
+/// is currently hard-coded to "working dir missing" — that is the only
+/// case `is_prunable(None)` flags today (working tree removed out from
+/// under the admin entry). Kept as a `String` rather than a literal
+/// in the CLI so future libgit2 versions can surface richer reasons
+/// (locked worktrees, broken HEAD, …) without breaking the CLI
+/// rendering contract.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrunableEntry {
   pub name: String,
@@ -374,9 +375,9 @@ pub struct PrunableEntry {
 
 /// Compute (without mutating) the list of worktree admin entries that
 /// `gwm prune` would drop. Used by `gwm prune --dry-run` (issue #31)
-/// and as the shared scanner for the real `prune` so the two surfaces
-/// can never drift on what "prunable" means. Output is sorted by name
-/// for deterministic stdout — scripted callers diff across runs.
+/// and consumed by [`prune`] so the dry-run preview and the destructive
+/// pass can never drift on what "prunable" means. Output is sorted by
+/// name for deterministic stdout — scripted callers diff across runs.
 pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
   let names = repo.worktrees()?;
   let mut out = Vec::new();
@@ -399,18 +400,17 @@ pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
 }
 
 /// Prune stale worktree admin entries (gwq cleanup equivalent).
+/// Consumes [`prunable_worktrees`] so what `--dry-run` shows is exactly
+/// what this destructive pass acts on — the two surfaces share the
+/// scanner, by construction.
 pub fn prune(repo: &Repository) -> Result<usize> {
-  let names = repo.worktrees()?;
+  let plan = prunable_worktrees(repo)?;
   let mut pruned = 0usize;
-  for name in names.iter().flatten() {
-    let wt = match repo.find_worktree(name) {
+  for entry in plan {
+    let wt = match repo.find_worktree(&entry.name) {
       Ok(w) => w,
       Err(_) => continue,
     };
-    let prunable = matches!(wt.is_prunable(None), Ok(p) if p);
-    if !prunable {
-      continue;
-    }
     let mut opts = WorktreePruneOptions::new();
     opts.valid(true).locked(true).working_tree(true);
     if wt.prune(Some(&mut opts)).is_ok() {

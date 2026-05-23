@@ -64,12 +64,7 @@ fn remove_plan_without_branch_and_no_delete_renders_dash_only() {
   // Detached HEAD worktree with no resolvable branch; the legacy
   // format prints `branch: -` and that pre-existing contract must be
   // preserved so scripts that grep the line keep working.
-  let out = format_remove_plan(
-    "detached",
-    Path::new("/tmp/wt/detached"),
-    None,
-    false,
-  );
+  let out = format_remove_plan("detached", Path::new("/tmp/wt/detached"), None, false);
 
   assert!(out.contains("branch: -"), "dash row missing: {out}");
   assert!(
@@ -90,12 +85,7 @@ fn remove_plan_without_branch_but_with_delete_flag_does_not_claim_deletion() {
   // branch when one is resolvable. The dry-run plan must mirror the
   // real behaviour exactly — print a clarifying rider so the user
   // sees why the destructive path would not delete anything.
-  let out = format_remove_plan(
-    "detached",
-    Path::new("/tmp/wt/detached"),
-    None,
-    true,
-  );
+  let out = format_remove_plan("detached", Path::new("/tmp/wt/detached"), None, true);
 
   assert!(
     !out.contains("would be deleted"),
