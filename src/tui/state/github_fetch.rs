@@ -13,8 +13,8 @@
 //!   by issue / PR number. Each entry is a [`GitHubFetchState`]: cold
 //!   entries are simply absent from the map (treated as `Idle` by
 //!   the accessors), `Loading` while a shell-out is inflight,
-//!   `Loaded(T)` on success, `Error(msg)` on failure. Per-key keys
-//!   matter: pre-#138 the cache was a single per-target slot, so
+//!   `Loaded(T)` on success, `Error(msg)` on failure. Per-key identity
+//!   matters: pre-#138 the cache was a single per-target slot, so
 //!   completing `Issue(42)` falsely "warmed" `Issue(43)` (the cache
 //!   identity ignored the number).
 //! - `inflight` — an internal `HashSet<FetchKey>` that is the
