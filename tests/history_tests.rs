@@ -17,13 +17,13 @@
 
 use chrono::{Duration, Utc};
 use gwm::history::{self, OpEntry, OpKind};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 /// Build a synthetic [`OpEntry`] for the given suffix. Timestamps
 /// default to `now()`; callers that need ordering override after the
 /// fact.
-fn entry(suffix: &str, repo_root: &PathBuf) -> OpEntry {
+fn entry(suffix: &str, repo_root: &Path) -> OpEntry {
   OpEntry {
     ts: Utc::now(),
     kind: OpKind::Remove,
@@ -32,7 +32,7 @@ fn entry(suffix: &str, repo_root: &PathBuf) -> OpEntry {
     branch_oid: Some("a1b2c3d4e5f60718293a4b5c6d7e8f9012345678".into()),
     path: PathBuf::from(format!("/tmp/cc-worktree/feat-{}-foo", suffix)),
     deleted_branch: false,
-    repo_root: repo_root.clone(),
+    repo_root: repo_root.to_path_buf(),
     undone: false,
   }
 }
@@ -198,26 +198,49 @@ fn pop_last_for_repo_removes_and_returns_entry() {
 }
 
 #[test]
-fn default_path_honours_gwm_history_file_env() {
-  // The override env var `GWM_HISTORY_FILE` mirrors `GWM_TRUST_LEDGER`
-  // in shape: when set and non-empty, it takes precedence over the
-  // XDG fallback. Pin it so tests can isolate from the user's home.
+fn default_path_resolution_order() {
+  // Combined into one test because `std::env::set_var` is process-global
+  // and parallel tests would race. Cargo runs each `#[test]` on a
+  // separate thread but in the same process, so two env-mutating tests
+  // would flake without serialisation. Folding the two cases into one
+  // sequential test makes the resolution-order contract testable without
+  // pulling in `serial_test` for one assertion.
+  //
+  // Resolution order under test:
+  //   1. `GWM_HISTORY_FILE` (testability hook + power-user override).
+  //   2. `XDG_DATA_HOME/gwm/history.toml`.
+  //
+  // The third fallback (`dirs::data_dir()`) depends on the platform
+  // home dir lookup and isn't safe to override mid-test — we trust the
+  // `dirs` crate for that one.
+
+  // Snapshot whatever the runner's env looked like so we restore it
+  // verbatim afterwards (CI runners can have either, neither, or both
+  // set; PR #43 hit a CI flake from a similar oversight in trust tests).
+  let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
+  let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
+
+  // (1) `GWM_HISTORY_FILE` wins when set and non-empty.
   std::env::set_var("GWM_HISTORY_FILE", "/tmp/explicit-gwm-history.toml");
   let path = history::default_journal_path().unwrap();
   assert_eq!(path, PathBuf::from("/tmp/explicit-gwm-history.toml"));
-  std::env::remove_var("GWM_HISTORY_FILE");
-}
 
-#[test]
-fn default_path_falls_back_to_xdg_data_home() {
-  // Without the override, the journal lives under
-  // `$XDG_DATA_HOME/gwm/history.toml`. We isolate via a per-test
-  // tempdir so this doesn't depend on the actual user's
-  // `$XDG_DATA_HOME` value.
+  // (2) Falls back to `$XDG_DATA_HOME/gwm/history.toml` when the override
+  // is unset.
   let tmp = TempDir::new().unwrap();
   std::env::remove_var("GWM_HISTORY_FILE");
   std::env::set_var("XDG_DATA_HOME", tmp.path());
   let path = history::default_journal_path().unwrap();
   assert_eq!(path, tmp.path().join("gwm").join("history.toml"));
-  std::env::remove_var("XDG_DATA_HOME");
+
+  // Restore the original env so unrelated tests in the same process
+  // aren't affected.
+  match prev_history {
+    Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+    None => std::env::remove_var("GWM_HISTORY_FILE"),
+  }
+  match prev_xdg {
+    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+    None => std::env::remove_var("XDG_DATA_HOME"),
+  }
 }
