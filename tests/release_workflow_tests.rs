@@ -110,6 +110,7 @@ fn prerelease_workflow_checks_unreleased_against_previous_rc_before_publish() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_fails_on_repeated_bullet() {
   let tmp = tempfile::tempdir().unwrap();
@@ -150,6 +151,7 @@ fn rc_changelog_dupe_check_fails_on_repeated_bullet() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_fails_on_repeated_issue_ref() {
   let tmp = tempfile::tempdir().unwrap();
@@ -185,6 +187,7 @@ fn rc_changelog_dupe_check_fails_on_repeated_issue_ref() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_allows_new_post_rc_delta() {
   let tmp = tempfile::tempdir().unwrap();
@@ -219,6 +222,7 @@ fn rc_changelog_dupe_check_allows_new_post_rc_delta() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_skips_first_rc_without_previous_notes() {
   let tmp = tempfile::tempdir().unwrap();
