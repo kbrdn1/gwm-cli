@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CLI aliases (`[aliases]` in `.gwm.toml` + user-level fallback)**
+  ([#86](https://github.com/kbrdn1/gwm-cli/issues/86)). `git config`
+  ships with `[alias]`; `gwm` now mirrors the shape. Declare an
+  alias under `[aliases]` in `.gwm.toml` (repo-level, follows the
+  repo across machines) or in `~/.config/gwm/aliases.toml`
+  (user-level fallback). `gwm <alias>` is expanded to argv tokens
+  BEFORE clap parses, so `wip = "create feat 0 wip"` makes `gwm
+  wip` behave as `gwm create feat 0 wip`. Resolution order:
+  built-in subcommands always win (`gwm list` can never be
+  shadowed), then repo, then user. Shell pipelines (`&&`, `|`,
+  `;`, backticks) in alias values are refused at load time — use a
+  shell alias for shell semantics. New `gwm aliases list`
+  subcommand prints the resolved chain grouped by source, with
+  shadowed user entries flagged inline.
+
 ## Past releases
 
 In reverse chronological order:

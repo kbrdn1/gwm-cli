@@ -303,3 +303,39 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [[milestones]]
 # title = "v0.6.0"
 # state = "closed"
+
+# --- CLI aliases (issue #86) ------------------------------------------------
+# Mirror of `git config`'s `[alias]` block. Each entry maps a short
+# name to an argv-substituted expansion run BEFORE clap parses, so
+# `gwm wip` becomes `gwm create feat 0 wip` for the dispatcher.
+#
+# Resolution order (highest precedence first):
+#   1. Built-in subcommands (`gwm list`, `gwm switch`, …) — never
+#      shadowable.
+#   2. `visible_alias` set on built-in subcommands (`s → switch`,
+#      `cd → path`) — also never shadowable.
+#   3. This `[aliases]` block (repo-level, follows the repo).
+#   4. `~/.config/gwm/aliases.toml` (user-level, lowest precedence).
+#
+# Rules:
+#   - Aliases are argv substitution only — `gwm <alias> <extra>` becomes
+#     `gwm <expansion> <extra>`. NO shell pipelines: values containing
+#     `&&`, `||`, `|`, `;`, or backticks are refused at load time. Use a
+#     shell alias if you need shell semantics (`alias gwmwip='gwm wip &&
+#     lazygit'`).
+#   - Names that shadow a built-in subcommand or visible alias are a
+#     hard config error surfaced at `Config::load_for_repo` time.
+#   - Single-pass expansion — `wip = "ll"` followed by `ll = "list
+#     --format names"` expands ONCE and then dispatches.
+#
+# Surface the resolved chain (built-in + repo + user, with shadowing
+# flagged inline) via:
+#
+#   gwm aliases list
+#
+# Example:
+#
+# [aliases]
+# wip    = "create feat 0 wip"
+# ll     = "list --format names"
+# sync   = "bootstrap"
