@@ -45,7 +45,14 @@ pub struct ConfirmModal {
   /// renders a progress bar and [`ConfirmModal::tick`] decrements it
   /// before returning `ReadyToFire`. `None` = modal closed, classic mode,
   /// or armed-but-just-disarmed by a second `y` press.
-  pub started_at: Option<Instant>,
+  ///
+  /// Private since #131 (encapsulation polish — Copilot review on PR
+  /// #131 flagged the prior `pub` exposure as leaking internal timer
+  /// state). External callers should use [`ConfirmModal::is_armed`] to
+  /// check whether the countdown is running and the
+  /// [`ConfirmModal::progress`] / [`ConfirmModal::remaining_secs`]
+  /// helpers for rendering.
+  started_at: Option<Instant>,
 }
 
 impl ConfirmModal {
@@ -57,6 +64,16 @@ impl ConfirmModal {
   /// Called by the orchestrator when the modal opens or dismisses.
   pub fn reset(&mut self) {
     self.started_at = None;
+  }
+
+  /// `true` when the safety countdown is currently running (between
+  /// [`ConfirmModal::press_y`] arming it and either a second `press_y`,
+  /// a [`ConfirmModal::dismiss`], or the [`ConfirmModal::tick`] that
+  /// crosses `total`). Replaces the prior `pub started_at.is_some()`
+  /// pattern so callers never reach for the raw `Option<Instant>`
+  /// (#131).
+  pub fn is_armed(&self) -> bool {
+    self.started_at.is_some()
   }
 
   /// Handle a `y` / Enter press. `total` is the configured countdown

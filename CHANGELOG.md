@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`tui::state::confirm`** — `ConfirmModal.started_at` is now private;
+  callers read armed-state through the new `is_armed() -> bool`
+  accessor instead of poking at the raw `Option<Instant>`.
+  Encapsulation polish from a Copilot review on PR #131 (the original
+  ConfirmModal extraction). The single external read site
+  (`src/tui/ui.rs` rendering the safety-countdown bar) was migrated;
+  no behaviour change. ([#131](https://github.com/kbrdn1/gwm-cli/issues/131))
+
 ### Fixed
 
 - 🐛 **`GitHubFetch` cache keyed by issue/PR number + drops late results after `invalidate()`** ([#138](https://github.com/kbrdn1/gwm-cli/issues/138)). Closes two correctness bugs flagged by Copilot review on #137 (the #128 extraction PR), both in the new `GitHubFetch` sub-struct:

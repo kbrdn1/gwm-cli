@@ -1038,7 +1038,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       if app.confirm_is_countdown_mode() {
         let now = Instant::now();
         let total_secs = app.confirm_countdown_total().as_secs();
-        if app.confirm.started_at.is_some() {
+        if app.confirm.is_armed() {
           lines.push(Line::from(countdown_bar(
             app.confirm_countdown_progress(now),
             app.confirm_countdown_remaining_secs(now),
