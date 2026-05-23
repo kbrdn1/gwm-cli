@@ -1,6 +1,6 @@
 use crate::error::{GwmError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = ".gwm.toml";
@@ -41,6 +41,18 @@ pub struct Config {
   /// by `BranchSpec::validate`, `gwm types` and the TUI create picker.
   #[serde(rename = "branch_types", default)]
   pub branch_types: Vec<BranchType>,
+  /// `[aliases]` table — repo-level CLI aliases expanded BEFORE clap
+  /// parses argv (issue #86). Maps alias name to argv-shell-tokenised
+  /// expansion (e.g. `wip = "create feat 0 wip"`). `BTreeMap` so the
+  /// ordering surfaced by `gwm aliases list` is deterministic.
+  ///
+  /// Absent block resolves to an empty map — aliasing disabled, no
+  /// behaviour change for repos that never opt in. Shadowing a
+  /// built-in subcommand or visible alias is a config error surfaced
+  /// at load time by [`crate::aliases::validate_aliases`]; same for
+  /// values containing shell pipeline metachars.
+  #[serde(default)]
+  pub aliases: BTreeMap<String, String>,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -352,7 +364,16 @@ impl Config {
     cfg.validate_bootstrap_paths()?;
     cfg.validate_bootstrap_guards()?;
     cfg.validate_labels()?;
+    cfg.validate_aliases()?;
     Ok(cfg)
+  }
+
+  /// Reject `[aliases]` entries that shadow built-in subcommands, are
+  /// empty, or contain shell pipeline metachars (issue #86). Delegates
+  /// to [`crate::aliases::validate_aliases`] so the same rules apply
+  /// symmetrically to the user-level `~/.config/gwm/aliases.toml`.
+  fn validate_aliases(&self) -> Result<()> {
+    crate::aliases::validate_aliases(&self.aliases, ".gwm.toml `[aliases]`")
   }
 
   /// Reject `[[labels]]` entries whose `name` would be parsed as a flag

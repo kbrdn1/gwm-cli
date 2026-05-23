@@ -3,6 +3,7 @@
 //! Used both by the `gwm` binary (`src/main.rs`) and by integration tests
 //! under `tests/`. Module surface is intentionally `pub` for testability.
 
+pub mod aliases;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
