@@ -1,5 +1,8 @@
-use std::{fs, path::Path, process::Command};
+use std::fs;
+#[cfg(unix)]
+use std::{path::Path, process::Command};
 
+#[cfg(unix)]
 const CHECK_RC_DUPES: &str = ".github/scripts/check-rc-changelog-dupes.sh";
 
 #[test]
@@ -69,6 +72,28 @@ fn prerelease_workflow_does_not_match_stable_tags() {
 }
 
 #[test]
+fn ci_test_matrix_runs_on_windows_latest() {
+  let workflow = fs::read_to_string(".github/workflows/ci.yml").unwrap();
+  let test_job = workflow
+    .split("  test:")
+    .nth(1)
+    .and_then(|tail| tail.split("\n  hook-smoke:").next())
+    .expect("ci.yml must contain a test job before hook-smoke");
+
+  for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+    assert!(test_job.contains(os), "ci.yml test matrix must include {os}");
+  }
+  assert!(
+    test_job.contains("run: cargo build --verbose"),
+    "windows-latest must run the same cargo build step as the other test matrix rows"
+  );
+  assert!(
+    test_job.contains("run: cargo test --verbose"),
+    "windows-latest must run the same cargo test step as the other test matrix rows"
+  );
+}
+
+#[test]
 fn prerelease_workflow_checks_unreleased_against_previous_rc_before_publish() {
   let workflow = fs::read_to_string(".github/workflows/pre-release.yml").unwrap();
   let check_pos = workflow
@@ -88,6 +113,7 @@ fn prerelease_workflow_checks_unreleased_against_previous_rc_before_publish() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_fails_on_repeated_bullet() {
   let tmp = tempfile::tempdir().unwrap();
@@ -128,6 +154,7 @@ fn rc_changelog_dupe_check_fails_on_repeated_bullet() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_fails_on_repeated_issue_ref() {
   let tmp = tempfile::tempdir().unwrap();
@@ -163,6 +190,7 @@ fn rc_changelog_dupe_check_fails_on_repeated_issue_ref() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_allows_new_post_rc_delta() {
   let tmp = tempfile::tempdir().unwrap();
@@ -197,6 +225,7 @@ fn rc_changelog_dupe_check_allows_new_post_rc_delta() {
   );
 }
 
+#[cfg(unix)]
 #[test]
 fn rc_changelog_dupe_check_skips_first_rc_without_previous_notes() {
   let tmp = tempfile::tempdir().unwrap();
@@ -226,13 +255,24 @@ fn rc_changelog_dupe_check_skips_first_rc_without_previous_notes() {
   );
 }
 
+#[cfg(unix)]
 fn write_release_files(root: &Path, changelog: &str, previous_rc: &str) {
   fs::create_dir_all(root.join("changelogs/pre-releases")).unwrap();
   fs::write(root.join("CHANGELOG.md"), changelog).unwrap();
   fs::write(root.join("changelogs/pre-releases/0.7.0-rc.2.md"), previous_rc).unwrap();
 }
 
+#[cfg(unix)]
 fn run_dupe_check(root: &Path, tag: &str) -> std::process::Output {
   let script = std::env::current_dir().unwrap().join(CHECK_RC_DUPES);
-  Command::new(script).arg(tag).current_dir(root).output().unwrap()
+  let test_script = root.join(CHECK_RC_DUPES);
+  fs::create_dir_all(test_script.parent().unwrap()).unwrap();
+  fs::copy(script, &test_script).unwrap();
+
+  Command::new("bash")
+    .arg(CHECK_RC_DUPES)
+    .arg(tag)
+    .current_dir(root)
+    .output()
+    .unwrap()
 }

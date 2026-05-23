@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Pre-release publishing now fails before upload when root `[Unreleased]` repeats bullets or issue references already shipped in the immediately previous RC notes. (#147)
 - Stable GitHub Releases now publish through the GitHub CLI with the workflow token and clobberable asset uploads, avoiding the `softprops/action-gh-release` bad-credentials failure seen on v0.7.0. (#146)
+- CI now runs the main cargo build/test matrix on `windows-latest`, exercising Windows-only path validation coverage. (#112)
 
 ## Past releases
 

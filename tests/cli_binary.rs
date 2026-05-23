@@ -1160,9 +1160,21 @@ base = "{base}"
 path_pattern = "{{type}}-{{issue}}-{{desc}}"
 branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 "#,
-    base = base.display(),
+    base = toml_basic_string(base),
   );
   std::fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+fn toml_basic_string(path: &Path) -> String {
+  path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[test]
+fn test_config_base_path_is_escaped_for_toml_basic_strings() {
+  assert_eq!(
+    toml_basic_string(Path::new(r#"C:\Users\runner\AppData\Local\Temp"#)),
+    r#"C:\\Users\\runner\\AppData\\Local\\Temp"#
+  );
 }
 
 #[test]
@@ -1233,7 +1245,7 @@ from = "seed.env"
 to = "seed.env"
 required = true
 "#,
-    base = base.path().display(),
+    base = toml_basic_string(base.path()),
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
@@ -1279,7 +1291,7 @@ from = "seed.env"
 to = "seed.env"
 required = true
 "#,
-    base = base.path().display(),
+    base = toml_basic_string(base.path()),
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
@@ -1802,7 +1814,7 @@ base = "{base}"
 path_pattern = "{{type}}-{{issue}}-{{desc}}"
 branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 "#,
-      base = base.path().display(),
+      base = toml_basic_string(base.path()),
     ),
   )
   .unwrap();

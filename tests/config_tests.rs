@@ -3,6 +3,16 @@ use gwm::config::{
 };
 use tempfile::TempDir;
 
+#[cfg(unix)]
+fn toml_absolute_path(unix: &'static str, _windows: &'static str) -> &'static str {
+  unix
+}
+
+#[cfg(windows)]
+fn toml_absolute_path(_unix: &'static str, windows: &'static str) -> &'static str {
+  windows
+}
+
 // --- Labels section (issue #81) -----------------------------------------
 
 #[test]
@@ -1031,13 +1041,16 @@ to   = "../../OWNED"
 #[test]
 fn load_rejects_absolute_path_in_copy_to() {
   let dir = TempDir::new().unwrap();
+  let absolute_path = toml_absolute_path("/etc/passwd", r#"C:\\Windows\\win.ini"#);
   std::fs::write(
     dir.path().join(CONFIG_FILE),
-    r#"
+    format!(
+      r#"
 [[bootstrap.copy]]
 from = ".env"
-to   = "/etc/passwd"
+to   = "{absolute_path}"
 "#,
+    ),
   )
   .unwrap();
   let err = Config::load_for_repo(dir.path()).expect_err("absolute path must be rejected at load");
@@ -1048,7 +1061,7 @@ to   = "/etc/passwd"
     msg
   );
   assert!(
-    msg.contains("absolute") || msg.contains("/etc/passwd"),
+    msg.contains("absolute") || msg.contains(absolute_path),
     "error must explain absolute path rejection, got: {}",
     msg
   );
@@ -1088,15 +1101,18 @@ example_file   = "../../../etc/passwd"
 #[test]
 fn load_rejects_absolute_path_in_guard_example_file() {
   let dir = TempDir::new().unwrap();
+  let absolute_path = toml_absolute_path("/etc/shadow", r#"C:\\Windows\\System32\\config\\SAM"#);
   std::fs::write(
     dir.path().join(CONFIG_FILE),
-    r#"
+    format!(
+      r#"
 [[bootstrap.guard]]
 name           = "leaky"
 deny_patterns  = ["amazonaws"]
 on_match       = "seed-from-example"
-example_file   = "/etc/shadow"
+example_file   = "{absolute_path}"
 "#,
+    ),
   )
   .unwrap();
   let err = Config::load_for_repo(dir.path()).expect_err("absolute example_file must be rejected");
@@ -1107,7 +1123,7 @@ example_file   = "/etc/shadow"
     msg
   );
   assert!(
-    msg.contains("absolute") || msg.contains("/etc/shadow"),
+    msg.contains("absolute") || msg.contains(absolute_path),
     "error must explain absolute path rejection, got: {}",
     msg
   );
