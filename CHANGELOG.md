@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ConfirmModal extraction). The single external read site
   (`src/tui/ui.rs` rendering the safety-countdown bar) was migrated;
   no behaviour change. ([#131](https://github.com/kbrdn1/gwm-cli/issues/131))
+- ♻️ **`FilterState.query` is now private; read access goes through `FilterState::query() -> &str`** ([#134](https://github.com/kbrdn1/gwm-cli/issues/134)). Copilot review on PR #134 (the FilterState extraction) flagged the `pub query: String` field as leaking the buffer across the module boundary — every external caller did `.is_empty()`, `.len()`, or `format!("... {}", q)`, all equally well served by a `&str` accessor. Privatising the field also funnels the full write surface through `push_char` / `pop_char` / `set_query` / `clear`, each of which maintains the cache-invalidation contract that the field-write path bypassed. 8 read sites migrated across `src/tui/{mod,ui,app}.rs`; 32 test sites switched to `set_query()` / `query()`. New `query_accessor_reflects_push_char_and_pop_char` test pins the accessor.
+- ♻️ **`tui::fuzzy_match_indices` re-export dropped** ([#134](https://github.com/kbrdn1/gwm-cli/issues/134)). The helper was promoted to `tui::` even though the only in-crate consumer (`tui::app::App`) already imports it via the full `tui::state::filter::fuzzy_match_indices` path. The re-export widened the public surface by one symbol for no return. Trimmed to `pub use state::filter::FilterState;`.
 
 ### Fixed
 
