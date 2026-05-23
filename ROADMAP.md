@@ -78,7 +78,7 @@ Small, well-scoped items with high daily-usage payoff. Likely picks for the next
 
 ## Release hardening
 
-The stable v0.7.0 release was successful, but two process gaps should be closed before the next tag.
+The stable v0.7.0 release was successful, but three gaps should be closed before the next tag — two release-process gaps and one CI-coverage blind spot.
 
 - [#146](https://github.com/kbrdn1/gwm-cli/issues/146) — **Make `release.yml` publish reliably**. Replace or fix the failing `softprops/action-gh-release@v3` publish step so stable releases do not need manual recovery.
 - [#147](https://github.com/kbrdn1/gwm-cli/issues/147) — **Guard pre-release changelog hygiene**. Compare root `[Unreleased]` against the previous RC changelog and fail on duplicate issue/PR references or repeated bullets.
