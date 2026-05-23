@@ -18,7 +18,21 @@
 use chrono::{Duration, Utc};
 use gwm::history::{self, OpEntry, OpKind};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use tempfile::TempDir;
+
+/// Process-global lock guarding every test that mutates `std::env`.
+/// Rust 1.86+ marks `set_var` / `remove_var` as `unsafe` because the
+/// underlying libc calls aren't thread-safe; without this lock, two
+/// env-mutating tests running in parallel under `cargo test`'s
+/// default thread pool can race and trigger UB. Mirrors the same
+/// helper in `tests/trust_tests.rs` — the two test files use distinct
+/// locks because they live in distinct cargo-test binaries, so a
+/// shared helper module would buy nothing.
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Build a synthetic [`OpEntry`] for the given suffix. Timestamps
 /// default to `now()`; callers that need ordering override after the
@@ -214,33 +228,52 @@ fn default_path_resolution_order() {
   // home dir lookup and isn't safe to override mid-test — we trust the
   // `dirs` crate for that one.
 
+  // Hold the process-wide env lock for the whole test body so a
+  // parallel env-mutating test cannot interleave `set_var` /
+  // `remove_var` calls with ours. Rust 1.86+ marks both as `unsafe`
+  // specifically because libc's env table isn't thread-safe.
+  // Poisoning is fine to ignore: a panic in another env test is
+  // unrelated to our state, and we're going to overwrite the
+  // variable anyway.
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+
   // Snapshot whatever the runner's env looked like so we restore it
   // verbatim afterwards (CI runners can have either, neither, or both
   // set; PR #43 hit a CI flake from a similar oversight in trust tests).
   let prev_history = std::env::var("GWM_HISTORY_FILE").ok();
   let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
 
-  // (1) `GWM_HISTORY_FILE` wins when set and non-empty.
-  std::env::set_var("GWM_HISTORY_FILE", "/tmp/explicit-gwm-history.toml");
+  // SAFETY: env mutation is guarded by `env_lock()` above, so no
+  // other test in this binary is mutating env concurrently. We
+  // restore the prior values before dropping the lock to keep the
+  // harness consistent for any later test.
+  unsafe {
+    // (1) `GWM_HISTORY_FILE` wins when set and non-empty.
+    std::env::set_var("GWM_HISTORY_FILE", "/tmp/explicit-gwm-history.toml");
+  }
   let path = history::default_journal_path().unwrap();
   assert_eq!(path, PathBuf::from("/tmp/explicit-gwm-history.toml"));
 
   // (2) Falls back to `$XDG_DATA_HOME/gwm/history.toml` when the override
   // is unset.
   let tmp = TempDir::new().unwrap();
-  std::env::remove_var("GWM_HISTORY_FILE");
-  std::env::set_var("XDG_DATA_HOME", tmp.path());
+  unsafe {
+    std::env::remove_var("GWM_HISTORY_FILE");
+    std::env::set_var("XDG_DATA_HOME", tmp.path());
+  }
   let path = history::default_journal_path().unwrap();
   assert_eq!(path, tmp.path().join("gwm").join("history.toml"));
 
-  // Restore the original env so unrelated tests in the same process
-  // aren't affected.
-  match prev_history {
-    Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
-    None => std::env::remove_var("GWM_HISTORY_FILE"),
-  }
-  match prev_xdg {
-    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-    None => std::env::remove_var("XDG_DATA_HOME"),
+  // SAFETY: restoration step paired with the set/remove_var above,
+  // still under the env_lock guard.
+  unsafe {
+    match prev_history {
+      Some(v) => std::env::set_var("GWM_HISTORY_FILE", v),
+      None => std::env::remove_var("GWM_HISTORY_FILE"),
+    }
+    match prev_xdg {
+      Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+      None => std::env::remove_var("XDG_DATA_HOME"),
+    }
   }
 }

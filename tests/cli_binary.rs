@@ -2916,6 +2916,78 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 }
 
 #[test]
+fn undo_refuses_detached_head_entry_with_clear_error() {
+  // PR #155 Copilot review: a journal entry with `branch = ""` (the
+  // serialised form of `branch: None`) flags a worktree that was
+  // removed while on a detached HEAD. The pre-fix code fell back to
+  // `branch_name = "HEAD"` and called `worktree::add`, which either
+  // failed at the libgit2 level (invalid refname) or created a real
+  // branch named "HEAD" — a foot-gun. The fix surfaces a clear
+  // error message so the user knows the limitation and can file a
+  // follow-up if it matters.
+  //
+  // We seed the journal directly with a `branch = ""` entry rather
+  // than going through `gwm create / gwm remove` because the create
+  // path always attaches a branch — there's no shortcut to a
+  // detached-HEAD worktree from the CLI. The fixture matches what
+  // serde produces for `Option<String>::None` once round-tripped
+  // through TOML.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // Direct TOML seed without a `branch` key — serde will deserialise
+  // it as `Option::None`, which is the detached-HEAD discriminator.
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-detached-foo"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-detached-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("detached-HEAD"));
+}
+
+#[test]
+fn history_with_zero_limit_prints_nothing_but_does_not_lie() {
+  // PR #155 Copilot review: `--limit 0` used to truncate the row list
+  // to empty, which then triggered the "no operations recorded"
+  // branch — factually wrong when ops exist, and breaks the scripted
+  // signal callers rely on. The fix prints nothing and exits 0,
+  // leaving the "no operations recorded" sentinel reserved for the
+  // truly-empty case.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+  write_seed_history(&history_file, &repo_root, "feat-zero-foo", "feat/#1-zero");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["history", "--limit", "0"])
+    .assert()
+    .success()
+    .stdout(predicate::eq(""));
+}
+
+#[test]
 fn undo_with_empty_journal_errors_clearly() {
   // A clean install with no recorded operations: `gwm undo` must
   // exit non-zero with a clear "nothing to undo" message — silent

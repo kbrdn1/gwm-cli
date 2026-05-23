@@ -2198,14 +2198,21 @@ fn cmd_history(limit: usize, all: bool) -> Result<()> {
     None => journal.entries().iter().collect(),
   };
 
-  // Newest first — the user just ran an op, they expect it on top.
-  rows.sort_by_key(|e| std::cmp::Reverse(e.ts));
-  rows.truncate(limit);
-
+  // Distinguish "the journal is empty for this view" from "the user
+  // asked for zero rows" — `--limit 0` is an explicit no-op that
+  // should print nothing and exit 0, not falsely claim the journal
+  // is empty (PR #155 Copilot review).
   if rows.is_empty() {
     println!("no operations recorded");
     return Ok(());
   }
+  if limit == 0 {
+    return Ok(());
+  }
+
+  // Newest first — the user just ran an op, they expect it on top.
+  rows.sort_by_key(|e| std::cmp::Reverse(e.ts));
+  rows.truncate(limit);
 
   let now = chrono::Utc::now();
   for entry in rows {
@@ -2264,7 +2271,23 @@ fn cmd_undo(run_bootstrap: bool) -> Result<()> {
   //     to clobber an existing directory, so a leftover dir from a
   //     half-failed remove will surface as an error here — the user
   //     can clean up manually before retrying undo.
-  let branch_name = entry.branch.as_deref().unwrap_or("HEAD");
+  //
+  //     `OpEntry.branch == None` flags a worktree that was checked out
+  //     in detached-HEAD state. We don't support resurrecting those
+  //     yet — the original sin is that `worktree::add` only knows how
+  //     to attach a worktree to a named branch. Falling back to a
+  //     literal `"HEAD"` (the pre-fix behaviour) would either fail at
+  //     the libgit2 level (invalid refname) or create a real branch
+  //     named "HEAD" which is a disaster all of its own. Surface a
+  //     clear error so the user knows what's happening and can file
+  //     a follow-up issue if detached-HEAD support matters to them
+  //     (PR #155 Copilot review).
+  let branch_name = entry.branch.as_deref().ok_or_else(|| {
+    GwmError::Other(format!(
+      "cannot undo remove of detached-HEAD worktree {} — only branch-attached worktrees are supported today",
+      entry.worktree
+    ))
+  })?;
   // `reuse_branch: true` because the branch already exists (we just
   // created it above, or it was never deleted).
   worktree::add(&repo, &entry.worktree, &entry.path, branch_name, true)?;
