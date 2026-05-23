@@ -278,6 +278,35 @@ pub enum Command {
     #[command(subcommand)]
     action: TrustAction,
   },
+  /// List the resolved CLI aliases (built-in + repo + user). Issue #86.
+  ///
+  /// `gwm aliases list` surfaces every alias reachable from `gwm
+  /// <name>`, grouped by source: `built-in` (clap `visible_alias`
+  /// set), `repo (.gwm.toml)`, `user (~/.config/gwm/aliases.toml)`.
+  /// The resolution chain favours repo aliases over user aliases when
+  /// both declare the same name, but both rows are still printed so
+  /// the user can see what's being shadowed.
+  Aliases {
+    #[command(subcommand)]
+    action: AliasesAction,
+  },
+}
+
+/// Subcommands of `gwm aliases` (issue #86). Read-only for now —
+/// declarative editing of the alias set stays in TOML files where
+/// users can grep / diff / version-control them. A future `add` /
+/// `remove` could land if real usage justifies it.
+#[derive(Debug, Subcommand)]
+pub enum AliasesAction {
+  /// Print the resolved alias chain (built-in / repo / user).
+  ///
+  /// Reads `.gwm.toml`'s `[aliases]` block (if any) and the
+  /// user-level fallback `~/.config/gwm/aliases.toml` (path resolved
+  /// via `$XDG_CONFIG_HOME` first, then `dirs::config_dir()`). The
+  /// output is grouped by source so users can audit which file
+  /// declares which mapping and where they need to edit to change
+  /// it.
+  List,
 }
 
 /// Subcommands of `gwm labels`. The split is intentional: `list` is
@@ -438,6 +467,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Labels { action } => cmd_labels(action),
     Command::Milestones { action } => cmd_milestones(action),
     Command::Trust { action } => cmd_trust(action),
+    Command::Aliases { action } => cmd_aliases(action),
   }
 }
 
@@ -1557,6 +1587,89 @@ fn print_bootstrap_summary(cfg: &Config) {
   for c in &bs.command {
     println!("       - run    {} ({})", c.name, c.run);
   }
+}
+
+// ---- Aliases commands (issue #86) ---------------------------------------
+
+fn cmd_aliases(action: AliasesAction) -> Result<()> {
+  match action {
+    AliasesAction::List => cmd_aliases_list(),
+  }
+}
+
+/// `gwm aliases list` — print the resolved alias chain. Reads
+/// `.gwm.toml` from the current repo workdir when available (gracefully
+/// degrades to "no repo" when invoked outside a git repo) and the
+/// user-level fallback `~/.config/gwm/aliases.toml`.
+///
+/// Output shape (matches the issue example verbatim):
+///
+/// ```text
+/// built-in:
+///   s    → switch
+///   cd   → path
+/// repo (.gwm.toml):
+///   wip    → create feat 0 wip
+///   ll     → list --format names
+/// user (~/.config/gwm/aliases.toml):
+///   copy   → path
+/// ```
+fn cmd_aliases_list() -> Result<()> {
+  // Discover the repo workdir if any — outside a repo this is `None`
+  // and the repo section degrades to "(no .gwm.toml — not inside a
+  // git repository)". `aliases list` is intentionally tolerant of
+  // running outside a repo so power users can audit their user-level
+  // file without cd'ing first.
+  let repo_workdir: Option<PathBuf> = crate::worktree::discover_repo(None)
+    .ok()
+    .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+
+  let resolved = crate::aliases::load(repo_workdir.as_deref(), None)?;
+
+  // built-in section ---------------------------------------------------
+  println!("built-in:");
+  if resolved.built_in.is_empty() {
+    println!("  (none)");
+  } else {
+    let width = resolved.built_in.iter().map(|e| e.name.len()).max().unwrap_or(2).max(2);
+    for e in &resolved.built_in {
+      println!("  {:<width$} → {}", e.name, e.expansion, width = width);
+    }
+  }
+
+  // repo section -------------------------------------------------------
+  println!("repo (.gwm.toml):");
+  if repo_workdir.is_none() {
+    println!("  (not inside a git repository — repo aliases are read from <repo>/.gwm.toml)");
+  } else if resolved.repo.is_empty() {
+    println!("  (none declared)");
+  } else {
+    let width = resolved.repo.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    for (name, expansion) in &resolved.repo {
+      println!("  {:<width$} → {}", name, expansion, width = width);
+    }
+  }
+
+  // user section -------------------------------------------------------
+  // The display path mirrors the issue example. We don't call into
+  // `default_user_path()` for the label because that function is
+  // private to the `aliases` module; the rendered string is purely
+  // informational here.
+  println!("user (~/.config/gwm/aliases.toml):");
+  if resolved.user.is_empty() {
+    println!("  (none declared)");
+  } else {
+    let width = resolved.user.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    for (name, expansion) in &resolved.user {
+      // Mark entries shadowed by a repo declaration so the user can
+      // see why a `gwm <name>` does not pick up the user expansion.
+      let shadowed = resolved.repo.contains_key(name);
+      let suffix = if shadowed { "  (shadowed by repo)" } else { "" };
+      println!("  {:<width$} → {}{}", name, expansion, suffix, width = width);
+    }
+  }
+
+  Ok(())
 }
 
 pub fn shell_init_script(shell: InitShell) -> &'static str {

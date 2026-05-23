@@ -44,7 +44,9 @@ fn help_prints_subcommands() {
     // Issue #82: declarative GitHub milestones.
     .stdout(predicate::str::contains("  milestones "))
     // Issue #95: TOFU trust ledger.
-    .stdout(predicate::str::contains("  trust "));
+    .stdout(predicate::str::contains("  trust "))
+    // Issue #86: CLI aliases (`gwm aliases list`).
+    .stdout(predicate::str::contains("  aliases "));
 }
 
 // --- labels (issue #81) -------------------------------------------------
@@ -1890,4 +1892,282 @@ fn deny_bootstrap_aborts_even_when_trusted() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("--deny-bootstrap"));
+}
+
+// --- aliases (issue #86) ------------------------------------------------
+
+#[test]
+fn aliases_help_lists_list() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["aliases", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("list"));
+}
+
+#[test]
+fn aliases_list_prints_built_in_section_outside_repo() {
+  // `aliases list` is read-only and must work outside a git repo —
+  // built-in clap aliases are static and independent of any repo
+  // config. The user fallback (`~/.config/gwm/aliases.toml`) is
+  // silently empty when missing.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    // Isolate the test from the developer's real `~/.config/gwm/aliases.toml`.
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("built-in:"))
+    // Canonical built-in entries from `BUILT_IN_ALIASES`. Assert the full
+    // formatted row (`  <name>  → <expansion>` with width-2 padding) rather
+    // than a loose `contains("s")` — the latter matched incidental letters
+    // in unrelated words (`aliases`, `built-ins`, …) and let the test pass
+    // even when the `s → switch` row was missing or malformed.
+    .stdout(predicate::str::contains("  s  → switch"))
+    .stdout(predicate::str::contains("  cd → path"));
+}
+
+#[test]
+fn aliases_list_prints_repo_aliases_with_source() {
+  // `.gwm.toml` with `[aliases]` ⇒ `aliases list` surfaces them under
+  // the `repo (.gwm.toml):` section.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+wip = "create feat 0 wip"
+ll = "list --format names"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("repo (.gwm.toml)"))
+    .stdout(predicate::str::contains("wip"))
+    .stdout(predicate::str::contains("create feat 0 wip"))
+    .stdout(predicate::str::contains("ll"))
+    .stdout(predicate::str::contains("list --format names"));
+}
+
+#[test]
+fn aliases_list_prints_user_aliases_with_source() {
+  // `~/.config/gwm/aliases.toml` (XDG resolved via `$XDG_CONFIG_HOME`)
+  // surfaces under the user section.
+  let dir = tempfile::TempDir::new().unwrap();
+  let user_cfg = dir.path().join("gwm");
+  std::fs::create_dir_all(&user_cfg).unwrap();
+  std::fs::write(
+    user_cfg.join("aliases.toml"),
+    r#"
+[aliases]
+copy = "path"
+"#,
+  )
+  .unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("user"))
+    .stdout(predicate::str::contains("aliases.toml"))
+    .stdout(predicate::str::contains("copy"))
+    .stdout(predicate::str::contains("path"));
+}
+
+#[test]
+fn aliases_list_repo_overrides_user_for_same_name() {
+  // When repo and user both declare the same alias, the repo entry
+  // takes precedence at expansion time. `aliases list` still prints
+  // BOTH sections so the user can see what's being shadowed.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+copy = "path bar"
+"#,
+  )
+  .unwrap();
+  let user_cfg = dir.path().join("gwm");
+  std::fs::create_dir_all(&user_cfg).unwrap();
+  std::fs::write(
+    user_cfg.join("aliases.toml"),
+    r#"
+[aliases]
+copy = "path foo"
+"#,
+  )
+  .unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("path bar"))
+    .stdout(predicate::str::contains("path foo"));
+}
+
+#[test]
+fn aliases_list_surfaces_shadow_error_with_alias_name() {
+  // An invalid alias in `.gwm.toml` must fail `aliases list` with a
+  // message naming the offending entry.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+list = "create feat 0 wip"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("list").and(predicate::str::contains("built-in")));
+}
+
+#[test]
+fn alias_expansion_runs_built_in_subcommand() {
+  // End-to-end expansion: declare `lst = "list --format names"`,
+  // invoke `gwm lst` — must behave as `gwm list --format names`.
+  // The repo has no worktrees yet so the names output is just empty.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+lst = "list --format names"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .arg("lst")
+    .assert()
+    .success();
+}
+
+#[test]
+fn alias_expansion_preserves_trailing_user_args() {
+  // `gwm typ` with `typ = "types"` plus a trailing `--help` must
+  // surface clap's `types` help (or success), proving the trailing
+  // arg made it through the expansion.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+typ = "types"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["typ", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("branch types"));
+}
+
+#[test]
+fn alias_does_not_shadow_built_in_subcommand_at_runtime() {
+  // Even if a hostile `.gwm.toml` somehow tries to alias `types`,
+  // the load gate refuses — `gwm types` always reaches the
+  // built-in. This is the "defence in depth" pillar of the design.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+types = "list"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["types"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("types"));
+}
+
+// --- argv robustness (issue #86 — Copilot follow-up) --------------------
+
+#[cfg(unix)]
+#[test]
+fn binary_tolerates_non_utf8_argv() {
+  // `std::env::args()` panics if any argv entry is non-UTF-8, which is
+  // a regression vs. clap's default `args_os` handling. The binary
+  // must NOT abort the process on a perfectly valid OS argv just
+  // because someone passed bytes that don't decode as UTF-8.
+  //
+  // We don't care about the exit code per se — the contract is "no
+  // panic, no SIGABRT". clap may legitimately reject the unknown
+  // subcommand and exit non-zero (UsageError = 2), which is fine.
+  // What we forbid is the process aborting before clap even sees
+  // the args.
+  use std::ffi::OsString;
+  use std::os::unix::ffi::OsStringExt;
+
+  let dir = tempfile::TempDir::new().unwrap();
+  let invalid_utf8: OsString = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
+
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .arg(&invalid_utf8)
+    .output()
+    .expect("binary must launch");
+
+  // Reject SIGABRT / SIGSEGV / SIGILL — anything that indicates the
+  // process died on a signal rather than exited normally. On Unix,
+  // signal deaths surface as `status.code() == None` from `assert_cmd`.
+  assert!(
+    output.status.code().is_some(),
+    "binary died on a signal (likely a panic abort) when given non-UTF-8 argv; stderr={:?}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  // Belt-and-suspenders: the stderr should not contain the libstd panic
+  // banner for invalid UTF-8 in argv.
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    !stderr.contains("invalid utf-8") && !stderr.contains("panicked at"),
+    "binary panicked instead of gracefully handling non-UTF-8 argv: {}",
+    stderr
+  );
 }
