@@ -49,7 +49,10 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  aliases "))
     // Issue #85: gitmoji commit-prefix + commit-msg hook installer.
     .stdout(predicate::str::contains("  commit-prefix "))
-    .stdout(predicate::str::contains("  hooks "));
+    .stdout(predicate::str::contains("  hooks "))
+    // Issue #29: operation journal + undo + history.
+    .stdout(predicate::str::contains("  undo "))
+    .stdout(predicate::str::contains("  history "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -2579,4 +2582,476 @@ fn binary_tolerates_non_utf8_argv() {
     "binary panicked instead of gracefully handling non-UTF-8 argv: {}",
     stderr
   );
+}
+
+// --- Issue #29: gwm history + gwm undo --------------------------------------
+
+/// Seed a journal file at `path` with a single recorded `remove` op
+/// rooted at `repo_root` (canonical form). The OID is a synthetic 40-
+/// char hex string the journal accepts verbatim — `gwm history` is a
+/// read-only listing so it never resolves the OID against the object
+/// DB, which means we don't need to seed a matching commit.
+///
+/// `repo_root` is escaped via `toml_basic_string` because Windows
+/// paths (`\\?\C:\...`) contain backslashes that TOML treats as
+/// escape sequences; without the escape the parser fails with
+/// "missing escaped value, expected b, e, f, n, r, \\, …".
+fn write_seed_history(path: &Path, repo_root: &Path, worktree: &str, branch: &str) {
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "{worktree}"
+branch = "{branch}"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/{worktree}"
+deleted_branch = false
+repo_root = "{repo_root}"
+"#,
+    repo_root = toml_basic_string(repo_root),
+  );
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(path, body).unwrap();
+}
+
+#[test]
+fn history_empty_journal_reports_no_ops() {
+  // Empty case: a fresh repo with no recorded operations must print
+  // a clear "no operations recorded" line and exit 0. Scripted callers
+  // (e.g. `gwm history | head -n1`) need a stable signal — silent
+  // stdout would force them to also check `$?` to disambiguate.
+  let (dir, _) = init_repo();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no operations recorded"));
+}
+
+#[test]
+fn history_lists_recorded_remove_op() {
+  // Happy path: a seeded journal with one `remove` op produces a
+  // single-row listing carrying the worktree name. The exact
+  // column shape is intentionally flexible — we pin only the
+  // load-bearing tokens (kind = `remove`, worktree name) so the
+  // formatter can evolve without test churn.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+  write_seed_history(&history_file, &repo_root, "feat-29-foo", "feat/#29-foo");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("remove"))
+    .stdout(predicate::str::contains("feat-29-foo"));
+}
+
+#[test]
+fn history_filters_to_current_repo_by_default() {
+  // Two ops recorded against two different repos. From inside
+  // repo A, `gwm history` must surface ONLY the entry whose
+  // `repo_root` matches the current repo — the per-repo
+  // separation contract.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // Seed two ops: one for the current repo, one for a fake "other-repo"
+  // path. Only the first should surface in the default listing.
+  // `toml_basic_string` escapes the repo path for TOML — Windows
+  // canonical paths (`\\?\C:\…`) would otherwise break the parser.
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-here-foo"
+branch = "feat/#1-here"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-here-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+
+[[op]]
+ts = "2026-05-19T09:00:00Z"
+kind = "remove"
+worktree = "feat-elsewhere-bar"
+branch = "feat/#2-elsewhere"
+branch_oid = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1"
+path = "/tmp/cc-worktree/feat-elsewhere-bar"
+deleted_branch = false
+repo_root = "/nonexistent/other-repo"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  if let Some(parent) = history_file.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-here-foo"))
+    .stdout(predicate::str::contains("feat-elsewhere-bar").not());
+}
+
+#[test]
+fn remove_records_journal_entry_before_destruction() {
+  // Issue #29: `gwm remove <name>` must write a journal entry naming
+  // the doomed worktree + branch + OID BEFORE the destructive call
+  // runs. Without this hook `gwm undo` has nothing to replay. The
+  // assertion is intentionally loose on the exact TOML shape — we
+  // pin only that the journal file exists, is non-empty, and
+  // contains the worktree name we asked to remove.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  // Seed a worktree the test will then remove.
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "29", "doomed", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // No journal entry should exist yet — `gwm create` does NOT hook
+  // the journal (only destructive ops do).
+  assert!(
+    !history_file.exists() || std::fs::read_to_string(&history_file).unwrap().trim().is_empty(),
+    "create must not record a journal entry"
+  );
+
+  // Now remove it — the journal must capture the op.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-29-doomed"])
+    .assert()
+    .success();
+
+  assert!(
+    history_file.exists(),
+    "remove must create the journal file at {}",
+    history_file.display()
+  );
+  let body = std::fs::read_to_string(&history_file).unwrap();
+  assert!(
+    body.contains("feat-29-doomed"),
+    "journal must record the removed worktree name; got:\n{}",
+    body
+  );
+  assert!(
+    body.contains("kind = \"remove\""),
+    "journal must record kind = remove; got:\n{}",
+    body
+  );
+  assert!(
+    body.contains("feat/#29-doomed"),
+    "journal must record the branch name; got:\n{}",
+    body
+  );
+}
+
+#[test]
+fn remove_dry_run_does_not_record_journal_entry() {
+  // The dry-run flag (issue #31) gives the user a preview without
+  // touching state. The journal hook MUST gate on the destructive
+  // path only — a `--dry-run` invocation that wrote to the journal
+  // would let the user "undo" something that never happened.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "31", "preview", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // dry-run must not write to the journal.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-31-preview", "--dry-run"])
+    .assert()
+    .success();
+
+  assert!(
+    !history_file.exists() || std::fs::read_to_string(&history_file).unwrap().trim().is_empty(),
+    "remove --dry-run must NOT write to the journal; got: {:?}",
+    std::fs::read_to_string(&history_file).ok()
+  );
+}
+
+#[test]
+fn undo_recreates_branch_and_worktree_after_remove() {
+  // The full round-trip contract: create → remove → undo. After
+  // `gwm undo`, the worktree dir must exist again AND the local
+  // branch must resolve. The journal entry must be consumed.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  // 1. Create.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "29", "undo-rt", "--no-bootstrap"])
+    .assert()
+    .success();
+  let wt_path = base.path().join("feat-29-undo-rt");
+  assert!(wt_path.exists(), "create must produce the worktree dir");
+
+  // 2. Remove (with --delete-branch so we exercise the harder
+  //    resurrection path).
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-29-undo-rt", "--delete-branch"])
+    .assert()
+    .success();
+  assert!(!wt_path.exists(), "remove must drop the worktree dir");
+
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.find_branch("feat/#29-undo-rt", git2::BranchType::Local).is_err(),
+    "remove --delete-branch must drop the local branch"
+  );
+
+  // 3. Undo. The branch must come back at the same OID, and the
+  //    worktree dir must reappear.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("recreated branch"))
+    .stdout(predicate::str::contains("re-added worktree"));
+
+  assert!(wt_path.exists(), "undo must restore the worktree dir");
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.find_branch("feat/#29-undo-rt", git2::BranchType::Local).is_ok(),
+    "undo must recreate the local branch"
+  );
+
+  // 4. The journal entry is consumed — a second undo errors with
+  //    "nothing to undo".
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("nothing to undo"));
+}
+
+#[test]
+fn undo_refuses_detached_head_entry_with_clear_error() {
+  // PR #155 Copilot review: a journal entry with `branch = ""` (the
+  // serialised form of `branch: None`) flags a worktree that was
+  // removed while on a detached HEAD. The pre-fix code fell back to
+  // `branch_name = "HEAD"` and called `worktree::add`, which either
+  // failed at the libgit2 level (invalid refname) or created a real
+  // branch named "HEAD" — a foot-gun. The fix surfaces a clear
+  // error message so the user knows the limitation and can file a
+  // follow-up if it matters.
+  //
+  // We seed the journal directly with a `branch = ""` entry rather
+  // than going through `gwm create / gwm remove` because the create
+  // path always attaches a branch — there's no shortcut to a
+  // detached-HEAD worktree from the CLI. The fixture matches what
+  // serde produces for `Option<String>::None` once round-tripped
+  // through TOML.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // Direct TOML seed without a `branch` key — serde will deserialise
+  // it as `Option::None`, which is the detached-HEAD discriminator.
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-detached-foo"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-detached-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("detached-HEAD"));
+}
+
+#[test]
+fn history_with_zero_limit_prints_nothing_but_does_not_lie() {
+  // PR #155 Copilot review: `--limit 0` used to truncate the row list
+  // to empty, which then triggered the "no operations recorded"
+  // branch — factually wrong when ops exist, and breaks the scripted
+  // signal callers rely on. The fix prints nothing and exits 0,
+  // leaving the "no operations recorded" sentinel reserved for the
+  // truly-empty case.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+  write_seed_history(&history_file, &repo_root, "feat-zero-foo", "feat/#1-zero");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["history", "--limit", "0"])
+    .assert()
+    .success()
+    .stdout(predicate::eq(""));
+}
+
+#[test]
+fn undo_with_empty_journal_errors_clearly() {
+  // A clean install with no recorded operations: `gwm undo` must
+  // exit non-zero with a clear "nothing to undo" message — silent
+  // success would mislead users into thinking the previous op was
+  // already undone.
+  let (dir, _) = init_repo();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("nothing to undo"));
+}
+
+#[test]
+fn history_all_flag_surfaces_every_repo() {
+  // `--all` opt-out from the per-repo filter: useful for power users
+  // grepping the journal for forensic purposes. Both entries must
+  // appear in the listing.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // `toml_basic_string` escapes the repo path for TOML so this seed
+  // parses on Windows (canonical paths there start with `\\?\C:\…`).
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-here-foo"
+branch = "feat/#1-here"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-here-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+
+[[op]]
+ts = "2026-05-19T09:00:00Z"
+kind = "remove"
+worktree = "feat-elsewhere-bar"
+branch = "feat/#2-elsewhere"
+branch_oid = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1"
+path = "/tmp/cc-worktree/feat-elsewhere-bar"
+deleted_branch = false
+repo_root = "/nonexistent/other-repo"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["history", "--all"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-here-foo"))
+    .stdout(predicate::str::contains("feat-elsewhere-bar"));
 }

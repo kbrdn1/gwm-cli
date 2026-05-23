@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod error;
 pub mod github;
 pub mod gitmoji;
+pub mod history;
 pub mod hooks;
 pub mod labels;
 pub mod launcher;

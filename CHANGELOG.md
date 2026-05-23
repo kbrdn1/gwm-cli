@@ -12,6 +12,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gwm undo` + `gwm history` + operation journal**
+  ([#29](https://github.com/kbrdn1/gwm-cli/issues/29)). Recover from
+  a misfired `gwm remove` without `git reflog` archaeology.
+  - **Operation journal**: every destructive op (`gwm remove`,
+    with or without `--delete-branch`) appends an entry to
+    `$XDG_DATA_HOME/gwm/history.toml` (override via
+    `$GWM_HISTORY_FILE`; macOS fallback under `Application
+    Support`, Windows under `%LOCALAPPDATA%`). Each entry
+    captures the timestamp, worktree name, branch name,
+    branch OID at deletion time, on-disk path, the
+    `--delete-branch` flag, and the canonicalised
+    `repo_root` so per-repo separation works across symlink
+    chains.
+  - **Rotation cap**: 100 entries max across the whole
+    journal; oldest-by-timestamp dropped on overflow.
+  - **`gwm undo [--bootstrap]`**: pops the most recent op for
+    the current repo, recreates `refs/heads/<branch>` at the
+    saved OID via `Repository::reference`, re-adds the
+    worktree at the saved path with `reuse_branch: true`. The
+    `--bootstrap` flag opts into re-running the per-worktree
+    bootstrap (off by default to keep undo cheap). The
+    journal entry is consumed only after a successful
+    resurrection — a mid-flight failure keeps the recovery
+    anchor intact.
+  - **`gwm history [--limit N] [--all]`**: lists the recent
+    ops newest-first. Default `--limit` is 20. By default
+    filters to the current repo's canonicalised workdir;
+    `--all` surfaces every entry across every repo for
+    forensic / multi-repo grep. Empty result prints `no
+    operations recorded` as a stable scripted signal.
+  - `gwm remove --dry-run` does NOT write to the journal —
+    previewing a destruction must never allow "undoing"
+    something that never happened.
+  - Journal IO failures are logged to stderr but never block
+    the destructive op: failing a remove because we couldn't
+    write `~/.local/share/gwm/history.toml` (disk full,
+    read-only FS, sandboxed CI runner) would be more
+    surprising than losing recoverability.
 - **`--dry-run` flag on `gwm remove` and `gwm prune`**
   ([#31](https://github.com/kbrdn1/gwm-cli/issues/31)). Preview
   destructive operations before running them.

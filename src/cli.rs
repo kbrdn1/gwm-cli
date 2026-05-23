@@ -4,6 +4,7 @@ use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::gitmoji;
+use crate::history::{self, OpEntry};
 use crate::hooks;
 use crate::labels::{self, LabelDiff};
 use crate::milestones::{self, MilestoneDiff};
@@ -348,6 +349,37 @@ pub enum Command {
     #[command(subcommand)]
     action: AliasesAction,
   },
+  /// List the recent destructive operations recorded by `gwm`
+  /// (issue #29). One line per op, newest first, with timestamp,
+  /// kind, and worktree name.
+  ///
+  /// Defaults to the current repo only — pass `--all` to list ops
+  /// across every repo in the journal. The journal file lives at
+  /// `$GWM_HISTORY_FILE` if set, otherwise
+  /// `$XDG_DATA_HOME/gwm/history.toml`.
+  History {
+    /// Maximum number of entries to print (newest first). Default 20.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Show ops across every repo, not just the current one. Useful
+    /// for power users grepping the journal for forensic purposes.
+    #[arg(long)]
+    all: bool,
+  },
+  /// Undo the most recent destructive operation recorded for the
+  /// current repo (issue #29). Recreates the branch at the saved
+  /// OID, re-adds the worktree at the saved path, then drops the
+  /// entry from the journal.
+  ///
+  /// Pass `--bootstrap` to re-run the per-worktree bootstrap after
+  /// the resurrection (off by default — bootstrap can be expensive
+  /// and the user often just wants the directory back).
+  Undo {
+    /// Re-run bootstrap after the worktree is re-added. Off by
+    /// default to keep undo cheap.
+    #[arg(long)]
+    bootstrap: bool,
+  },
 }
 
 /// Subcommands of `gwm aliases` (issue #86). Read-only for now —
@@ -566,6 +598,8 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Milestones { action } => cmd_milestones(action),
     Command::Trust { action } => cmd_trust(action),
     Command::Aliases { action } => cmd_aliases(action),
+    Command::History { limit, all } => cmd_history(limit, all),
+    Command::Undo { bootstrap } => cmd_undo(bootstrap),
   }
 }
 
@@ -800,7 +834,9 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
     // already happened above — an ambiguous pattern surfaced via
     // `find_fuzzy` returns the same `Other(... ambiguous ...)` error
     // the destructive form raises, satisfying the spec's "same error
-    // contract" requirement.
+    // contract" requirement. The journal hook MUST NOT fire here —
+    // a preview that wrote to the journal would let the user "undo"
+    // something that never happened.
     worktree::remove_dry_run(&repo, &found.name)?;
     print!(
       "{}",
@@ -808,6 +844,44 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
     );
     return Ok(());
   }
+
+  // Issue #29: capture the branch OID via libgit2 BEFORE the
+  // destructive call so we can resurrect the branch on `gwm undo`.
+  // We swallow any journal IO failure with a stderr warning rather
+  // than blocking a destruction the user explicitly asked for —
+  // losing recoverability is unfortunate, but failing the remove
+  // because we can't write to `~/.local/share/gwm/history.toml` would
+  // be far more surprising. (Disk full, read-only FS, sandboxed
+  // CI runner without home dir, …)
+  let branch_oid = found.branch.as_deref().and_then(|b| {
+    repo
+      .find_branch(b, git2::BranchType::Local)
+      .ok()
+      .and_then(|br| br.into_reference().target())
+      .map(|o| o.to_string())
+  });
+  let repo_root = repo
+    .workdir()
+    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+    .unwrap_or_default();
+  let entry = OpEntry {
+    ts: chrono::Utc::now(),
+    kind: crate::history::OpKind::Remove,
+    worktree: found.name.clone(),
+    branch: found.branch.clone(),
+    branch_oid,
+    path: found.path.clone(),
+    deleted_branch: delete_branch,
+    repo_root,
+    undone: false,
+  };
+  if let Err(e) = history::record(entry) {
+    eprintln!(
+      "warning: failed to record undo journal entry: {} (continuing with the remove anyway)",
+      e
+    );
+  }
+
   worktree::remove(&repo, &found.name, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
@@ -2081,4 +2155,163 @@ fn print_report(report: &bootstrap::BootstrapReport) {
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Issue #29 — `gwm history` + `gwm undo`
+// ---------------------------------------------------------------------------
+
+/// Resolve the canonicalised main repo workdir for journal lookups.
+/// `gwm undo` / `gwm history` filter on this path verbatim, so the
+/// canonicalisation step matters: `/var` vs `/private/var` on macOS
+/// would otherwise cross-pollute repos that happen to live on
+/// different symlink chains.
+fn current_repo_root() -> Result<PathBuf> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  Ok(std::fs::canonicalize(&workdir).unwrap_or(workdir))
+}
+
+/// Render one journal entry as a single line for `gwm history`. Shape:
+/// `<ago>  <kind>  <worktree>  [(undone)]`. Extracted as a pure
+/// function so the formatter is unit-testable without spinning up a
+/// real journal (see `cli_format_tests.rs`).
+pub fn format_history_row(entry: &OpEntry, now: chrono::DateTime<chrono::Utc>) -> String {
+  let delta = (now - entry.ts).to_std().unwrap_or(std::time::Duration::from_secs(0));
+  let ago = worktree::format_relative_duration(delta);
+  let suffix = if entry.undone { "  (undone)" } else { "" };
+  format!("{:<5}  {:<7}  {}{}", ago, entry.kind.as_str(), entry.worktree, suffix)
+}
+
+fn cmd_history(limit: usize, all: bool) -> Result<()> {
+  let path = history::default_journal_path()?;
+  let journal = history::Journal::load(&path)?;
+
+  // Build the filtered+sorted view. With `--all`, surface every entry
+  // regardless of `repo_root`. Without it, restrict to the current
+  // repo's canonicalised workdir. Resolving the root outside the
+  // `if` so its lifetime spans the whole function — the `else` arm
+  // returns an iterator that borrows from it.
+  let root: Option<PathBuf> = if all { None } else { Some(current_repo_root()?) };
+  let mut rows: Vec<&OpEntry> = match &root {
+    Some(r) => journal.entries_for_repo(r).collect(),
+    None => journal.entries().iter().collect(),
+  };
+
+  // Distinguish "the journal is empty for this view" from "the user
+  // asked for zero rows" — `--limit 0` is an explicit no-op that
+  // should print nothing and exit 0, not falsely claim the journal
+  // is empty (PR #155 Copilot review).
+  if rows.is_empty() {
+    println!("no operations recorded");
+    return Ok(());
+  }
+  if limit == 0 {
+    return Ok(());
+  }
+
+  // Newest first — the user just ran an op, they expect it on top.
+  rows.sort_by_key(|e| std::cmp::Reverse(e.ts));
+  rows.truncate(limit);
+
+  let now = chrono::Utc::now();
+  for entry in rows {
+    println!("{}", format_history_row(entry, now));
+  }
+  Ok(())
+}
+
+fn cmd_undo(run_bootstrap: bool) -> Result<()> {
+  let path = history::default_journal_path()?;
+  let mut journal = history::Journal::load(&path)?;
+  let root = current_repo_root()?;
+
+  let Some(entry) = journal.pop_last_for_repo(&root) else {
+    return Err(GwmError::Other(format!(
+      "nothing to undo for {} — the journal is empty for this repo",
+      root.display()
+    )));
+  };
+
+  let repo = worktree::discover_repo(None)?;
+
+  // (1) Resurrect the branch at the saved OID — only if a branch was
+  //     recorded AND the user opted into deletion (or the branch is
+  //     missing for any other reason). Skipping the branch create
+  //     when the ref already exists keeps `gwm undo` idempotent
+  //     against partial recoveries.
+  if let (Some(branch_name), Some(oid_hex)) = (&entry.branch, &entry.branch_oid) {
+    let oid = git2::Oid::from_str(oid_hex)
+      .map_err(|e| GwmError::Other(format!("journal entry has invalid branch_oid '{}': {}", oid_hex, e)))?;
+    if repo.find_branch(branch_name, git2::BranchType::Local).is_err() {
+      repo
+        .reference(
+          &format!("refs/heads/{}", branch_name),
+          oid,
+          false,
+          "gwm undo: resurrect branch",
+        )
+        .map_err(|e| {
+          GwmError::Other(format!(
+            "failed to recreate branch {} at {}: {}",
+            branch_name, oid_hex, e
+          ))
+        })?;
+      println!(
+        "✓ recreated branch {} at {}",
+        branch_name,
+        &oid_hex[..oid_hex.len().min(8)]
+      );
+    } else {
+      println!("· branch {} already exists — skipping resurrection", branch_name);
+    }
+  }
+
+  // (2) Re-add the worktree at the saved path. `worktree::add` refuses
+  //     to clobber an existing directory, so a leftover dir from a
+  //     half-failed remove will surface as an error here — the user
+  //     can clean up manually before retrying undo.
+  //
+  //     `OpEntry.branch == None` flags a worktree that was checked out
+  //     in detached-HEAD state. We don't support resurrecting those
+  //     yet — the original sin is that `worktree::add` only knows how
+  //     to attach a worktree to a named branch. Falling back to a
+  //     literal `"HEAD"` (the pre-fix behaviour) would either fail at
+  //     the libgit2 level (invalid refname) or create a real branch
+  //     named "HEAD" which is a disaster all of its own. Surface a
+  //     clear error so the user knows what's happening and can file
+  //     a follow-up issue if detached-HEAD support matters to them
+  //     (PR #155 Copilot review).
+  let branch_name = entry.branch.as_deref().ok_or_else(|| {
+    GwmError::Other(format!(
+      "cannot undo remove of detached-HEAD worktree {} — only branch-attached worktrees are supported today",
+      entry.worktree
+    ))
+  })?;
+  // `reuse_branch: true` because the branch already exists (we just
+  // created it above, or it was never deleted).
+  worktree::add(&repo, &entry.worktree, &entry.path, branch_name, true)?;
+  println!("✓ re-added worktree at {}", entry.path.display());
+
+  // (3) Persist the journal AFTER the resurrection succeeds — if we
+  //     dropped the entry first and then the resurrection failed, the
+  //     user would lose the recovery anchor entirely.
+  journal.save(&path)?;
+
+  // (4) Optionally re-run bootstrap.
+  if run_bootstrap {
+    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+    let config = Config::load_for_repo(&workdir)?;
+    let ctx = BootstrapCtx {
+      main_repo: &workdir,
+      worktree: &entry.path,
+      config: &config,
+    };
+    let report = bootstrap::run(&ctx)?;
+    print_report(&report);
+  } else {
+    println!("(skipped re-bootstrap; pass --bootstrap to run it)");
+  }
+
+  Ok(())
 }
