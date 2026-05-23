@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Stable GitHub Releases now publish through the GitHub CLI with the workflow token and clobberable asset uploads, avoiding the `softprops/action-gh-release` bad-credentials failure seen on v0.7.0. (#146)
+
 ## Past releases
 
 In reverse chronological order:
