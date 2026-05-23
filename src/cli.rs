@@ -709,6 +709,41 @@ fn cmd_create(
   Ok(())
 }
 
+/// Render the would-do plan for `gwm remove --dry-run` (issue #31).
+/// Extracted from `cmd_remove` so the formatter is unit-testable
+/// without spinning up a real worktree. Pure function: takes the
+/// resolved name + path + branch, returns a multi-line string
+/// (trailing newline included).
+///
+/// `delete_branch` only adds "(would be deleted)" when there *is* a
+/// branch to delete — a detached HEAD worktree with
+/// `--delete-branch` reports "(no branch to delete)" instead, mirror-
+/// ing `worktree::remove`'s actual behaviour (it only drops a branch
+/// when one is resolvable).
+pub fn format_remove_plan(
+  name: &str,
+  path: &Path,
+  branch: Option<&str>,
+  delete_branch: bool,
+) -> String {
+  String::new()
+}
+
+/// Render the would-do plan for `gwm prune --dry-run` (issue #31).
+/// Extracted from `cmd_prune` so the formatter is unit-testable on
+/// arbitrary `PrunableEntry` fixtures (non-ASCII names / paths
+/// without needing a real repo). Pure function: trailing newline
+/// included; empty input still emits the canonical
+/// "0 worktree(s) to prune" line so piped consumers get a stable
+/// signal instead of empty stdout.
+///
+/// Column widths are computed in Unicode characters
+/// (`.chars().count()`), not bytes (`.len()`), so non-ASCII paths
+/// stay aligned in a fixed-width terminal.
+pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
+  String::new()
+}
+
 fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let found = worktree::find_fuzzy(&repo, &pattern)?;
