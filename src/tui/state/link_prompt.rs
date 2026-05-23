@@ -32,16 +32,11 @@ use crate::tui::app::LinkTarget;
 /// Stage of the two-step link prompt. `ChooseTarget` is the entry state
 /// (the user rotates / picks); `InputNumber` is the typing state (the
 /// user enters digits, then Enter to submit or Esc to cancel).
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum LinkPromptStage {
+  #[default]
   ChooseTarget,
   InputNumber,
-}
-
-impl Default for LinkPromptStage {
-  fn default() -> Self {
-    Self::ChooseTarget
-  }
 }
 
 /// Pure state for the two-stage issue/PR link prompt. `Default` opens
