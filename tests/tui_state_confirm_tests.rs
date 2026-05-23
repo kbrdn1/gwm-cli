@@ -19,10 +19,7 @@ fn classic_mode_fires_immediately_on_first_y() {
   let mut modal = ConfirmModal::new();
   let action = modal.press_y(Instant::now(), Duration::ZERO);
   assert_eq!(action, ConfirmKeyAction::FireNow);
-  assert!(
-    modal.started_at.is_none(),
-    "classic mode must never arm the countdown timer"
-  );
+  assert!(!modal.is_armed(), "classic mode must never arm the countdown timer");
 }
 
 #[test]
@@ -34,13 +31,17 @@ fn countdown_mode_arms_on_first_y_and_disarms_on_second() {
   let t0 = Instant::now();
   let action = modal.press_y(t0, total);
   assert_eq!(action, ConfirmKeyAction::Armed);
-  assert_eq!(modal.started_at, Some(t0));
+  assert!(modal.is_armed());
+  // Anchor is exactly t0 → progress at t0 is 0.0 (zero elapsed since
+  // arming). This pins the anchor through the public API rather than
+  // reading the private `started_at` field directly.
+  assert_eq!(modal.progress(t0, total), 0.0);
 
   // Second press 1s later disarms.
   let t1 = t0 + Duration::from_secs(1);
   let action = modal.press_y(t1, total);
   assert_eq!(action, ConfirmKeyAction::Disarmed);
-  assert!(modal.started_at.is_none());
+  assert!(!modal.is_armed());
 }
 
 #[test]
@@ -48,9 +49,9 @@ fn dismiss_clears_armed_countdown() {
   let mut modal = ConfirmModal::new();
   let total = Duration::from_secs(3);
   modal.press_y(Instant::now(), total);
-  assert!(modal.started_at.is_some());
+  assert!(modal.is_armed());
   modal.dismiss();
-  assert!(modal.started_at.is_none(), "dismiss must reset the timer");
+  assert!(!modal.is_armed(), "dismiss must reset the timer");
 }
 
 #[test]
@@ -79,7 +80,7 @@ fn tick_returns_ready_to_fire_at_or_after_total() {
   let outcome = modal.tick(t0 + Duration::from_secs(3), total);
   assert_eq!(outcome, CountdownTickOutcome::ReadyToFire);
   assert!(
-    modal.started_at.is_none(),
+    !modal.is_armed(),
     "tick that reached the deadline must clear the timer so a re-entrant tick returns NotArmed"
   );
 }
@@ -93,11 +94,11 @@ fn tick_with_zero_total_resets_and_returns_not_armed() {
   let total = Duration::from_secs(3);
   let t0 = Instant::now();
   modal.press_y(t0, total);
-  assert!(modal.started_at.is_some());
+  assert!(modal.is_armed());
 
   let outcome = modal.tick(t0 + Duration::from_millis(100), Duration::ZERO);
   assert_eq!(outcome, CountdownTickOutcome::NotArmed);
-  assert!(modal.started_at.is_none());
+  assert!(!modal.is_armed());
 }
 
 #[test]
@@ -128,10 +129,7 @@ fn is_armed_returns_true_after_first_press_y_and_false_after_second() {
   // peek at the `Option<Instant>` directly.
   let mut modal = ConfirmModal::new();
   let total = Duration::from_secs(3);
-  assert!(
-    !modal.is_armed(),
-    "freshly constructed modal must not be armed"
-  );
+  assert!(!modal.is_armed(), "freshly constructed modal must not be armed");
 
   let t0 = Instant::now();
   let action = modal.press_y(t0, total);

@@ -920,10 +920,7 @@ fn confirm_press_y_in_classic_mode_fires_immediately() {
   // delete_branch OFF → classic flow
   let action = app.confirm_press_y(Instant::now());
   assert_eq!(action, ConfirmKeyAction::FireNow);
-  assert!(
-    app.confirm.started_at.is_none(),
-    "classic mode must never set the timer"
-  );
+  assert!(!app.confirm.is_armed(), "classic mode must never set the timer");
 }
 
 #[test]
@@ -933,7 +930,11 @@ fn confirm_press_y_in_countdown_mode_arms_the_timer() {
   let now = Instant::now();
   let action = app.confirm_press_y(now);
   assert_eq!(action, ConfirmKeyAction::Armed);
-  assert_eq!(app.confirm.started_at, Some(now));
+  assert!(app.confirm.is_armed());
+  // Anchor is exactly `now`: zero elapsed means progress is 0.0. This
+  // pins the anchor through the public API instead of reading the
+  // (now private since #131) raw `started_at` field.
+  assert_eq!(app.confirm.progress(now, app.confirm_countdown_total()), 0.0);
 }
 
 #[test]
@@ -945,7 +946,7 @@ fn confirm_press_y_a_second_time_disarms_the_timer() {
   let t1 = t0 + Duration::from_millis(500);
   let action = app.confirm_press_y(t1);
   assert_eq!(action, ConfirmKeyAction::Disarmed);
-  assert!(app.confirm.started_at.is_none());
+  assert!(!app.confirm.is_armed());
 }
 
 #[test]
@@ -954,13 +955,10 @@ fn confirm_dismiss_resets_timer_and_returns_to_list() {
   app.toggle_delete_branch();
   app.view = View::Confirm;
   app.confirm_press_y(Instant::now());
-  assert!(app.confirm.started_at.is_some());
+  assert!(app.confirm.is_armed());
   app.confirm_dismiss();
   assert_eq!(app.view, View::List);
-  assert!(
-    app.confirm.started_at.is_none(),
-    "Esc/n must always disarm the countdown"
-  );
+  assert!(!app.confirm.is_armed(), "Esc/n must always disarm the countdown");
 }
 
 #[test]
@@ -978,10 +976,7 @@ fn tick_before_duration_is_pending() {
   app.confirm_press_y(t0);
   let outcome = app.tick_confirm_countdown(t0 + Duration::from_millis(1500));
   assert_eq!(outcome, CountdownTickOutcome::Pending);
-  assert!(
-    app.confirm.started_at.is_some(),
-    "pending tick must not clear the timer"
-  );
+  assert!(app.confirm.is_armed(), "pending tick must not clear the timer");
 }
 
 #[test]
