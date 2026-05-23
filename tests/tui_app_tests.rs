@@ -2704,6 +2704,10 @@ fn app_with_config(toml_body: &str) -> (tempfile::TempDir, App) {
   (dir, app)
 }
 
+fn toml_basic_string(path: &std::path::Path) -> String {
+  path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 #[test]
 fn tui_gate_passes_when_no_gwm_toml_present() {
   // The CLI gate is a no-op when `.gwm.toml` doesn't exist — same
@@ -2864,7 +2868,7 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 name = "echo"
 run  = "echo would-have-run"
 "#,
-    base = base_dir.path().display(),
+    base = toml_basic_string(base_dir.path()),
   );
   let (_dir, mut app) = app_with_config(&body);
 
