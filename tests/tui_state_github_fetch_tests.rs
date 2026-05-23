@@ -203,3 +203,96 @@ fn complete_clears_inflight_slot() {
     action
   );
 }
+
+// ---- Bug #138 / pin 1: cache identity must include the FetchKey number ----
+//
+// Pre-fix: `is_cached` looked only at the per-target `*_state` enum, so
+// any terminal variant for `Issue(_)` made every `Issue(*)` key falsely
+// hit the cache. After completing Issue(42), a request for Issue(43)
+// must STILL return Spawn — Issue 43 was never fetched, so the cache
+// for 43 is cold.
+
+#[test]
+fn request_after_complete_for_different_number_returns_spawn_not_hit_cache() {
+  let mut gh = GitHubFetch::new();
+  // Warm Issue(42).
+  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
+  gh.complete_issue(42, Ok(sample_issue(42)));
+  // Issue(42) is now cached — sanity check.
+  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::HitCache));
+  // Different number, same target — MUST Spawn. The cache is keyed by
+  // `(target, number)`, and Issue(43) was never fetched.
+  let action = gh.request(FetchKey::Issue(43));
+  assert!(
+    matches!(action, FetchAction::Spawn(FetchKey::Issue(43))),
+    "Issue(43) was never fetched, but is_cached(Issue(43)) wrongly returned true — \
+     cache identity ignores the FetchKey number field (bug #138). got {:?}",
+    action
+  );
+}
+
+#[test]
+fn request_after_complete_for_different_pr_number_returns_spawn_not_hit_cache() {
+  // PR-side mirror of the issue bug — same shape, different target.
+  let mut gh = GitHubFetch::new();
+  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
+  gh.complete_pr(7, Ok(sample_pr(7)));
+  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::HitCache));
+  let action = gh.request(FetchKey::Pr(8));
+  assert!(
+    matches!(action, FetchAction::Spawn(FetchKey::Pr(8))),
+    "Pr(8) was never fetched, but is_cached(Pr(8)) wrongly returned true — \
+     cache identity ignores the FetchKey number field (bug #138). got {:?}",
+    action
+  );
+}
+
+// ---- Bug #138 / pin 2: complete_* must drop result if invalidated mid-flight
+//
+// Pre-fix: `complete_issue`/`complete_pr` unconditionally stamped the
+// result onto `*_state`, even when an intervening `invalidate()` had
+// already cleared the inflight slot. The race:
+//
+//   1. request(Issue(42))      → Spawn, inflight = {Issue(42)}
+//   2. invalidate()            → inflight = {} (user navigated away)
+//   3. complete_issue(42, Ok(...)) → stamps Loaded() into the
+//      now-active state, corrupting the new worktree's cache.
+//
+// The fix: complete_* must check whether the inflight slot survived
+// the invalidation and silently drop the result if not.
+
+#[test]
+fn complete_after_invalidate_drops_the_stale_result() {
+  let mut gh = GitHubFetch::new();
+  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
+  // User navigates away → invalidate() clears the inflight slot.
+  gh.invalidate();
+  // The shell-out finally returns. complete_issue must drop it because
+  // the slot is no longer claimed — anything else corrupts the cache
+  // for the now-active worktree (bug #138).
+  gh.complete_issue(42, Ok(sample_issue(42)));
+  // The cache must remain cold for Issue(42) — the late result was
+  // dropped, so a fresh request must Spawn, not HitCache.
+  let action = gh.request(FetchKey::Issue(42));
+  assert!(
+    matches!(action, FetchAction::Spawn(_)),
+    "complete_issue stamped a stale result into a cache that was invalidated mid-flight — \
+     the late result must be dropped (bug #138). got {:?}",
+    action
+  );
+}
+
+#[test]
+fn complete_pr_after_invalidate_drops_the_stale_result() {
+  let mut gh = GitHubFetch::new();
+  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
+  gh.invalidate();
+  gh.complete_pr(7, Ok(sample_pr(7)));
+  let action = gh.request(FetchKey::Pr(7));
+  assert!(
+    matches!(action, FetchAction::Spawn(_)),
+    "complete_pr stamped a stale result into a cache that was invalidated mid-flight — \
+     the late result must be dropped (bug #138). got {:?}",
+    action
+  );
+}
