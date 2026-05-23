@@ -12,6 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--dry-run` flag on `gwm remove` and `gwm prune`**
+  ([#31](https://github.com/kbrdn1/gwm-cli/issues/31)). Preview
+  destructive operations before running them.
+  - `gwm prune --dry-run` walks the worktree list, prints every
+    prunable entry (name + path + reason), and exits 0 without
+    touching the admin files. Empty case reports `0 worktree(s) to
+    prune` so scripted callers get a stable signal. Output is sorted
+    by name for deterministic stdout diffing.
+  - `gwm remove <pattern> --dry-run` resolves the fuzzy pattern,
+    prints the would-remove plan (name + path + branch, with
+    `(would be deleted)` next to the branch when `--delete-branch` is
+    also passed), and exits 0. An ambiguous pattern fires the same
+    non-zero candidate-list error as the destructive form —
+    `--dry-run` only suppresses destruction, not resolution failures.
+  - No breaking change: existing call sites without `--dry-run` keep
+    the destructive default.
 - **CLI aliases (`[aliases]` in `.gwm.toml` + user-level fallback)**
   ([#86](https://github.com/kbrdn1/gwm-cli/issues/86)). `git config`
   ships with `[alias]`; `gwm` now mirrors the shape. Declare an

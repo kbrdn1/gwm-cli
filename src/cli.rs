@@ -105,6 +105,13 @@ pub enum Command {
     /// Also delete the branch.
     #[arg(long)]
     delete_branch: bool,
+    /// Print the resolved worktree (name + path + branch + would-delete-branch
+    /// flag) without touching anything. Exit code 0. If the pattern is
+    /// ambiguous, the same non-zero candidate-list error fires as in the
+    /// destructive form — `--dry-run` only suppresses *destruction*, not
+    /// resolution failures. Issue #31.
+    #[arg(long)]
+    dry_run: bool,
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   ///
@@ -118,7 +125,14 @@ pub enum Command {
     target: Option<String>,
   },
   /// Prune stale worktree references (admin files without a working dir).
-  Prune,
+  Prune {
+    /// List the prunable worktrees (name + path + reason) without
+    /// touching the admin entries. Exit code 0. Useful for piping into
+    /// a confirmation script before running the destructive form.
+    /// Issue #31.
+    #[arg(long)]
+    dry_run: bool,
+  },
   /// Diagnose the gwm setup (config, env, worktree state).
   ///
   /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
@@ -519,10 +533,14 @@ pub fn run(cli: Cli) -> Result<()> {
       no_bootstrap,
       reuse_branch,
     } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, mode),
-    Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
+    Command::Remove {
+      pattern,
+      delete_branch,
+      dry_run,
+    } => cmd_remove(pattern, delete_branch, dry_run),
     Command::Path { pattern } => cmd_path(pattern),
     Command::Bootstrap { target } => cmd_bootstrap(target, mode),
-    Command::Prune => cmd_prune(),
+    Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Doctor => cmd_doctor(),
     Command::Types { gitmoji } => cmd_types(gitmoji),
     Command::CommitPrefix { branch, unicode } => cmd_commit_prefix(branch, unicode),
@@ -691,9 +709,27 @@ fn cmd_create(
   Ok(())
 }
 
-fn cmd_remove(pattern: String, delete_branch: bool) -> Result<()> {
+fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let found = worktree::find_fuzzy(&repo, &pattern)?;
+  if dry_run {
+    // Issue #31: print the would-remove plan and exit. Resolution
+    // already happened above — an ambiguous pattern surfaced via
+    // `find_fuzzy` returns the same `Other(... ambiguous ...)` error
+    // the destructive form raises, satisfying the spec's "same error
+    // contract" requirement.
+    worktree::remove_dry_run(&repo, &found.name)?;
+    let branch_display = found.branch.as_deref().unwrap_or("-");
+    println!("would remove:");
+    println!("  name:   {}", found.name);
+    println!("  path:   {}", found.path.display());
+    if delete_branch {
+      println!("  branch: {} (would be deleted)", branch_display);
+    } else {
+      println!("  branch: {}", branch_display);
+    }
+    return Ok(());
+  }
   worktree::remove(&repo, &found.name, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
@@ -740,8 +776,40 @@ fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
   Ok(())
 }
 
-fn cmd_prune() -> Result<()> {
+fn cmd_prune(dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+  if dry_run {
+    // Issue #31: enumerate prunable worktrees (name + path + reason),
+    // print one row per entry plus a header that names the count so
+    // even the empty case has a stable signal for piped consumers.
+    let plan = worktree::prunable_worktrees(&repo)?;
+    if plan.is_empty() {
+      println!("0 worktree(s) to prune");
+      return Ok(());
+    }
+    // Align the name + path columns on the widest observed value so
+    // human eyeballs can scan the plan. The reason column is fixed-length
+    // today ("working dir missing") but its width is still computed so a
+    // future libgit2 with richer reasons stays aligned without code change.
+    let name_w = plan.iter().map(|e| e.name.len()).max().unwrap_or(4);
+    let path_w = plan
+      .iter()
+      .map(|e| e.path.display().to_string().len())
+      .max()
+      .unwrap_or(4);
+    println!("would prune {} worktree(s):", plan.len());
+    for entry in &plan {
+      println!(
+        "  {:<nw$}  {:<pw$}  ({})",
+        entry.name,
+        entry.path.display(),
+        entry.reason,
+        nw = name_w,
+        pw = path_w,
+      );
+    }
+    return Ok(());
+  }
   let n = worktree::prune(&repo)?;
   println!("pruned {} stale worktree(s)", n);
   Ok(())

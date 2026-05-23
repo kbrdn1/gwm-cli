@@ -358,6 +358,46 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
   Ok(())
 }
 
+/// One prunable worktree entry as surfaced by `gwm prune --dry-run`
+/// (issue #31). The `reason` is libgit2's prunable rationale rendered
+/// for humans — currently always "working dir missing" because
+/// `is_prunable(None)` only flags worktrees whose working tree has been
+/// removed out from under the admin entry. Captured as a struct field
+/// rather than hard-coded in the CLI so future libgit2 versions can
+/// expose richer reasons without breaking the CLI surface.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunableEntry {
+  pub name: String,
+  pub path: PathBuf,
+  pub reason: String,
+}
+
+/// Compute (without mutating) the list of worktree admin entries that
+/// `gwm prune` would drop. Used by `gwm prune --dry-run` (issue #31)
+/// and as the shared scanner for the real `prune` so the two surfaces
+/// can never drift on what "prunable" means. Output is sorted by name
+/// for deterministic stdout — scripted callers diff across runs.
+pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
+  let names = repo.worktrees()?;
+  let mut out = Vec::new();
+  for name in names.iter().flatten() {
+    let wt = match repo.find_worktree(name) {
+      Ok(w) => w,
+      Err(_) => continue,
+    };
+    if !matches!(wt.is_prunable(None), Ok(p) if p) {
+      continue;
+    }
+    out.push(PrunableEntry {
+      name: name.to_string(),
+      path: wt.path().to_path_buf(),
+      reason: "working dir missing".to_string(),
+    });
+  }
+  out.sort_by(|a, b| a.name.cmp(&b.name));
+  Ok(out)
+}
+
 /// Prune stale worktree admin entries (gwq cleanup equivalent).
 pub fn prune(repo: &Repository) -> Result<usize> {
   let names = repo.worktrees()?;
@@ -378,6 +418,20 @@ pub fn prune(repo: &Repository) -> Result<usize> {
     }
   }
   Ok(pruned)
+}
+
+/// Read-only check that `name` resolves to a removable worktree —
+/// the libgit2 half of `gwm remove --dry-run` (issue #31). Errors on
+/// the same "worktree not found" path as `remove` so the dry-run
+/// surface and the destructive surface share an error contract;
+/// returns `Ok(())` when the worktree exists. The caller (the CLI)
+/// is responsible for rendering the plan; this function intentionally
+/// touches no filesystem state and emits no output.
+pub fn remove_dry_run(repo: &Repository, name: &str) -> Result<()> {
+  repo
+    .find_worktree(name)
+    .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  Ok(())
 }
 
 /// A commit row pulled from `git log` for the Recent Commits sidebar block.
