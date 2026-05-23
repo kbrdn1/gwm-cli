@@ -34,7 +34,7 @@ fn add_creates_branch_and_worktree() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-1-foo");
-  worktree::add(&repo, "feat-1-foo", &target, "feat/#1-foo").unwrap();
+  worktree::add(&repo, "feat-1-foo", &target, "feat/#1-foo", false).unwrap();
 
   assert!(target.exists(), "worktree dir should exist on disk");
   assert!(repo.find_branch("feat/#1-foo", git2::BranchType::Local).is_ok());
@@ -54,7 +54,7 @@ fn add_records_gwm_base_for_new_branch() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-7-launcher");
-  worktree::add(&repo, "feat-7-launcher", &target, "feat/#7-launcher").unwrap();
+  worktree::add(&repo, "feat-7-launcher", &target, "feat/#7-launcher", false).unwrap();
 
   let cfg = repo.config().unwrap();
   let base = cfg.get_string("branch.feat/#7-launcher.gwm-base").unwrap();
@@ -72,7 +72,7 @@ fn add_refuses_to_clobber_existing_dir() {
   let target = wt_root.path().join("clash");
   std::fs::create_dir(&target).unwrap();
 
-  let err = worktree::add(&repo, "clash", &target, "feat/#9-x").unwrap_err();
+  let err = worktree::add(&repo, "clash", &target, "feat/#9-x", false).unwrap_err();
   assert!(matches!(err, gwm::error::GwmError::WorktreeExists(_, _)));
 }
 
@@ -82,7 +82,7 @@ fn remove_deletes_dir_and_prunes() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-2-bar");
-  worktree::add(&repo, "feat-2-bar", &target, "feat/#2-bar").unwrap();
+  worktree::add(&repo, "feat-2-bar", &target, "feat/#2-bar", false).unwrap();
   assert!(target.exists());
 
   worktree::remove(&repo, "feat-2-bar", false).unwrap();
@@ -98,7 +98,7 @@ fn remove_with_delete_branch_drops_branch() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-3-baz");
-  worktree::add(&repo, "feat-3-baz", &target, "feat/#3-baz").unwrap();
+  worktree::add(&repo, "feat-3-baz", &target, "feat/#3-baz", false).unwrap();
 
   worktree::remove(&repo, "feat-3-baz", true).unwrap();
   assert!(repo.find_branch("feat/#3-baz", git2::BranchType::Local).is_err());
@@ -110,7 +110,7 @@ fn find_fuzzy_matches_substring() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-99-auth");
-  worktree::add(&repo, "feat-99-auth", &target, "feat/#99-auth").unwrap();
+  worktree::add(&repo, "feat-99-auth", &target, "feat/#99-auth", false).unwrap();
 
   let found = worktree::find_fuzzy(&repo, "auth").unwrap();
   assert_eq!(found.name, "feat-99-auth");
@@ -121,8 +121,8 @@ fn find_fuzzy_errors_on_ambiguous() {
   let (dir, _) = init_repo();
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
-  worktree::add(&repo, "feat-1-foo", &wt_root.path().join("a"), "feat/#1-foo").unwrap();
-  worktree::add(&repo, "feat-2-foo", &wt_root.path().join("b"), "feat/#2-foo").unwrap();
+  worktree::add(&repo, "feat-1-foo", &wt_root.path().join("a"), "feat/#1-foo", false).unwrap();
+  worktree::add(&repo, "feat-2-foo", &wt_root.path().join("b"), "feat/#2-foo", false).unwrap();
 
   let err = worktree::find_fuzzy(&repo, "foo").unwrap_err();
   assert!(matches!(err, gwm::error::GwmError::Other(_)));
@@ -152,7 +152,7 @@ fn discover_from_inside_linked_worktree_walks_back_to_main() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-1-foo");
-  worktree::add(&repo, "feat-1-foo", &target, "feat/#1-foo").unwrap();
+  worktree::add(&repo, "feat-1-foo", &target, "feat/#1-foo", false).unwrap();
 
   let main_again = worktree::discover_repo(Some(&target)).unwrap();
   assert!(paths_equal(main_again.workdir().unwrap(), dir.path()));
@@ -400,37 +400,79 @@ fn commit_with_time(workdir: &Path, repo: &Repository, ref_name: &str, message: 
 }
 
 // --------------------------------------------------------------------------
-// Issue #101 — characterization tests for the mutating worktree primitives.
+// Issue #99 — refuse/reuse contract for `worktree::add` on pre-existing
+// local branches. Issue #101 ships the E2E coverage; this block holds
+// the libgit2-level pair.
 // --------------------------------------------------------------------------
 //
 // These complement the CLI-level E2E tests in `tests/cli_binary.rs` by
 // pinning the libgit2-level contract of `worktree::add` / `worktree::remove`.
-// The first test below intentionally documents the *current* behaviour that
-// powers bug #99 — when issue #99 is fixed the contract changes and the
-// assertion must be updated. Pinning the buggy contract now means the fix
-// can't land silently: the test goes red and forces the reviewer to confirm
-// the new behaviour intentionally.
+// The pair below covers #99: with `reuse_branch: false` (the new default)
+// `worktree::add` refuses to attach to a pre-existing local branch — the
+// caller has to opt back into the historical reuse behaviour explicitly.
 
 #[test]
-fn add_silently_attaches_to_pre_existing_stale_branch() {
-  // Characterization test for #99. `worktree::add(repo, name, path, branch)`
-  // currently *reuses* a local branch of the same name when one already
-  // exists, attaching the new worktree to its existing tip rather than
-  // refusing the operation or moving the branch to HEAD. This is the
-  // observable contract today; a fix for #99 will introduce a `--reuse`
-  // flag (or similar) and turn this test red on purpose.
+fn add_refuses_stale_branch_without_reuse_flag() {
+  // Issue #99 contract. Default (`reuse_branch: false`) must refuse to
+  // resurrect a stale branch silently — the previous behaviour pointed
+  // the new worktree at whatever commit the stale ref referenced, which
+  // is invisible to the user until they run `git log` inside the new
+  // worktree. The error carries the offending OID so the CLI can render
+  // it in the message.
   let (_dir, repo) = init_repo();
   let sig = Signature::now("gwm-test", "gwm@test").unwrap();
 
-  // Pin a "stale" branch at the current main commit, then advance main
-  // by one commit so the branch ends up BEHIND HEAD. The point is just
-  // to make HEAD and the branch tip resolve to different OIDs.
   let main_oid = repo.head().unwrap().target().unwrap();
   let main_commit = repo.find_commit(main_oid).unwrap();
   let stale_branch = repo.branch("feat/#99-stale", &main_commit, false).unwrap();
   let stale_oid = stale_branch.into_reference().target().unwrap();
 
-  // Advance main by one commit so HEAD != stale branch tip.
+  // Advance main so HEAD diverges from the stale branch tip — that
+  // divergence is what made the silent reuse a foot-gun.
+  let tree_id = repo.index().unwrap().write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  repo
+    .commit(Some("HEAD"), &sig, &sig, "advance main", &tree, &[&main_commit])
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-99-stale");
+  let err = worktree::add(&repo, "feat-99-stale", &target, "feat/#99-stale", false).unwrap_err();
+
+  match err {
+    gwm::error::GwmError::BranchExists { name, oid } => {
+      assert_eq!(name, "feat/#99-stale");
+      assert_eq!(
+        oid,
+        stale_oid.to_string(),
+        "error must surface the stale branch tip so the user can audit it"
+      );
+    }
+    other => panic!("expected BranchExists, got {:?}", other),
+  }
+
+  assert!(
+    !target.exists(),
+    "worktree dir must not be created when the branch is refused"
+  );
+}
+
+#[test]
+fn add_attaches_to_stale_branch_with_reuse_flag() {
+  // Companion to `add_refuses_stale_branch_without_reuse_flag`: when the
+  // caller passes `reuse_branch: true` (the explicit opt-in plumbed
+  // through `--reuse-branch` on the CLI), the legacy attach-to-existing
+  // behaviour applies — the new worktree comes up on whatever commit the
+  // pre-existing branch references, and the branch tip is NOT moved to
+  // HEAD. This pins the only escape hatch for #99.
+  let (_dir, repo) = init_repo();
+  let sig = Signature::now("gwm-test", "gwm@test").unwrap();
+
+  let main_oid = repo.head().unwrap().target().unwrap();
+  let main_commit = repo.find_commit(main_oid).unwrap();
+  let stale_branch = repo.branch("feat/#99-stale", &main_commit, false).unwrap();
+  let stale_oid = stale_branch.into_reference().target().unwrap();
+
   let tree_id = repo.index().unwrap().write_tree().unwrap();
   let tree = repo.find_tree(tree_id).unwrap();
   let new_head = repo
@@ -440,10 +482,8 @@ fn add_silently_attaches_to_pre_existing_stale_branch() {
 
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-99-stale");
-  worktree::add(&repo, "feat-99-stale", &target, "feat/#99-stale").unwrap();
+  worktree::add(&repo, "feat-99-stale", &target, "feat/#99-stale", true).unwrap();
 
-  // Documented buggy behaviour: the branch tip is unchanged (still at
-  // the stale commit), NOT moved to HEAD.
   let resolved = repo
     .find_branch("feat/#99-stale", git2::BranchType::Local)
     .unwrap()
@@ -452,10 +492,9 @@ fn add_silently_attaches_to_pre_existing_stale_branch() {
     .unwrap();
   assert_eq!(
     resolved, stale_oid,
-    "characterization for #99: stale branch tip is reused as-is; \
-     when #99 lands, update this assertion to reflect the fix"
+    "with reuse_branch=true the existing branch tip is kept as-is"
   );
-  assert!(target.exists(), "worktree dir must still appear on disk");
+  assert!(target.exists(), "worktree dir must be created when reuse is opt-in");
 }
 
 #[test]
@@ -470,7 +509,7 @@ fn remove_prunes_admin_files_on_happy_path() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-98-prune");
-  worktree::add(&repo, "feat-98-prune", &target, "feat/#98-prune").unwrap();
+  worktree::add(&repo, "feat-98-prune", &target, "feat/#98-prune", false).unwrap();
 
   let admin_dir = dir.path().join(".git").join("worktrees").join("feat-98-prune");
   assert!(admin_dir.exists(), "precondition: admin entry exists after add");
@@ -507,7 +546,7 @@ fn remove_failed_filesystem_unlink_still_prunes_metadata() {
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("feat-98-ghost");
-  worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost").unwrap();
+  worktree::add(&repo, "feat-98-ghost", &target, "feat/#98-ghost", false).unwrap();
 
   // Capture the original mode so we can restore EXACTLY what TempDir
   // gave us (mac defaults to 0o700, linux 0o755, umask-dependent on
@@ -535,5 +574,78 @@ fn remove_failed_filesystem_unlink_still_prunes_metadata() {
   assert!(
     repo.find_worktree("feat-98-ghost").is_err(),
     "prune must run BEFORE remove_dir_all so a failed unlink cannot leave a phantom worktree"
+  );
+}
+
+// --------------------------------------------------------------------------
+// Issue #103 — `WorktreeInfo.age` pre-computed at list time so the TUI
+// render loop no longer opens a fresh `git2::Repository` per row per frame.
+// --------------------------------------------------------------------------
+
+#[test]
+fn list_populates_age_on_feature_worktree() {
+  // Issue #103: the TUI used to call `branch_age_for(w)` per row per frame,
+  // which opened a `git2::Repository` and ran a revwalk every time. The fix
+  // moves that computation into `worktree::list()` so the render path becomes
+  // pure read-only struct field access. Asserting `WorktreeInfo.age` is
+  // populated by `list()` pins the new contract: the TUI is no longer
+  // permitted to open libgit2 handles on the render path.
+  let (dir, repo) = init_repo();
+
+  // Pin a `feat/#103-age` branch with one commit dated 2 days ago so the
+  // formatter has something stable to read.
+  let two_days_ago = chrono::Utc::now().timestamp() - 2 * 86_400;
+  let main_oid = repo.head().unwrap().target().unwrap();
+  let main_commit = repo.find_commit(main_oid).unwrap();
+  repo.branch("feat/#103-age", &main_commit, false).unwrap();
+  commit_with_time(
+    dir.path(),
+    &repo,
+    "refs/heads/feat/#103-age",
+    "branch-old",
+    two_days_ago,
+  );
+
+  // Attach a worktree on that branch and list. The branch was created
+  // above, so `reuse_branch=true` is required (the #99 stale-branch
+  // refusal would otherwise reject this `add`).
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-103-age");
+  worktree::add(&repo, "feat-103-age", &target, "feat/#103-age", true).unwrap();
+
+  let trees = worktree::list(&repo).unwrap();
+  let feature = trees
+    .iter()
+    .find(|w| w.name == "feat-103-age")
+    .expect("feature worktree must appear in list");
+
+  let age = feature
+    .age
+    .expect("WorktreeInfo.age must be Some on a feature branch with divergence");
+  let drift = age.as_secs().abs_diff(2 * 86_400);
+  assert!(
+    drift < 300,
+    "expected ~2 days on the cached age field, got {}s (drift {}s)",
+    age.as_secs(),
+    drift
+  );
+}
+
+#[test]
+fn list_returns_none_age_for_main_worktree() {
+  // Trunk branches (`main` / `master` / `dev`) have no meaningful "branch
+  // age" — `worktree::list()` must surface `None` so the TUI renders `-`,
+  // matching the prior `branch_age_for` semantics.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let trees = worktree::list(&repo).unwrap();
+  let main = trees
+    .iter()
+    .find(|w| w.is_main)
+    .expect("main worktree must appear in list");
+  assert!(
+    main.age.is_none(),
+    "main worktree on a trunk branch must report age = None, got {:?}",
+    main.age
   );
 }

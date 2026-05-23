@@ -5,11 +5,16 @@
 //!
 //! Decomposition order (one PR per slice, all tracking #102):
 //!
-//! - `confirm` — safety countdown for the destructive-action modal (#125, this PR)
+//! - `confirm` — safety countdown for the destructive-action modal (#125)
 //! - `create_form` — issue/type/slug input form (#123)
 //! - `filter` — fuzzy filter buffer + memoised indices (#124)
 //! - `link_prompt` — two-stage issue/PR linking prompt (#126)
 //! - `sidebar` — scroll offsets + commit-line cache (#127)
-//! - `github_fetch` — TTL cache + inflight dedupe for `gh` shell-outs (#128)
+//! - `github_fetch` — TTL cache + inflight dedupe for `gh` shell-outs (#128, this PR)
 
 pub mod confirm;
+pub mod create_form;
+pub mod filter;
+pub mod github_fetch;
+pub mod link_prompt;
+pub mod sidebar;

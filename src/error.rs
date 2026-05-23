@@ -66,6 +66,17 @@ pub enum GwmError {
   #[error("worktree '{0}' already exists at {1}")]
   WorktreeExists(String, String),
 
+  /// `gwm create` refuses to silently reuse a pre-existing local branch
+  /// (issue #99). The caller must opt in explicitly (`--reuse-branch` /
+  /// `reuse_branch: true`) to attach the new worktree to the existing
+  /// branch tip; otherwise this surfaces so the user can delete the
+  /// stale ref or rename their request rather than ending up on
+  /// whatever commit the stale branch resurrected.
+  #[error(
+    "branch '{name}' already exists at {oid} — pass --reuse-branch to attach the worktree to it, or delete the stale branch first"
+  )]
+  BranchExists { name: String, oid: String },
+
   #[error("guard '{name}' tripped: file {file} matches deny pattern")]
   GuardTripped { name: String, file: String },
 
