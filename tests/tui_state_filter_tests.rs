@@ -78,8 +78,8 @@ fn pop_char_on_empty_is_noop() {
 #[test]
 fn query_accessor_reflects_push_char_and_pop_char() {
   // Pin the `query()` accessor as the public read path now that the
-  // `query` field is private (refs #134). Two `push_char` calls then a
-  // single `pop_char` must reflect through the accessor without
+  // `query` field is private (refs #134). Three `push_char` calls then
+  // two `pop_char` calls must reflect through the accessor without
   // leaking the underlying `String`.
   let mut f = FilterState::new();
   f.push_char('a');

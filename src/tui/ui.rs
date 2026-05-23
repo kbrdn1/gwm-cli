@@ -99,7 +99,7 @@ pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
 fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
   let mut spans = vec![
     Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-    Span::raw(app.filter.query().to_string()),
+    Span::raw(app.filter.query()),
   ];
   if app.filter.active {
     spans.push(Span::styled(
