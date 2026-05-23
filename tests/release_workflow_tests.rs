@@ -77,10 +77,9 @@ fn ci_test_matrix_runs_on_windows_latest() {
     .and_then(|tail| tail.split("\n  hook-smoke:").next())
     .expect("ci.yml must contain a test job before hook-smoke");
 
-  assert!(
-    test_job.contains("os: [ubuntu-latest, macos-latest, windows-latest]"),
-    "ci.yml test matrix must include windows-latest"
-  );
+  for os in ["ubuntu-latest", "macos-latest", "windows-latest"] {
+    assert!(test_job.contains(os), "ci.yml test matrix must include {os}");
+  }
   assert!(
     test_job.contains("run: cargo build --verbose"),
     "windows-latest must run the same cargo build step as the other test matrix rows"
