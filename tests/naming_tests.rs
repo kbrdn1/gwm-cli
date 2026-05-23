@@ -83,7 +83,7 @@ fn renders_paths() {
   assert_eq!(spec.branch_name(&cfg, "myrepo").unwrap(), "feat/#10-x");
   assert_eq!(spec.worktree_dirname(&cfg, "myrepo").unwrap(), "feat-10-x");
   let p = spec.worktree_path(&cfg, "myrepo").unwrap();
-  assert!(p.to_string_lossy().ends_with("/cc-worktree/myrepo/feat-10-x"));
+  assert!(p.ends_with(std::path::Path::new("cc-worktree").join("myrepo").join("feat-10-x")));
 }
 
 #[test]
@@ -154,5 +154,5 @@ fn renders_with_custom_patterns() {
   assert_eq!(spec.branch_name(&cfg, "r").unwrap(), "release/fix-7");
   assert_eq!(spec.worktree_dirname(&cfg, "r").unwrap(), "fix_7_foo-bar");
   let p = spec.worktree_path(&cfg, "r").unwrap();
-  assert_eq!(p.to_string_lossy(), "/tmp/r/fix_7_foo-bar");
+  assert_eq!(p, std::path::Path::new("/tmp/r").join("fix_7_foo-bar"));
 }
