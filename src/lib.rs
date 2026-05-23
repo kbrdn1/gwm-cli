@@ -10,6 +10,8 @@ pub mod config;
 pub mod doctor;
 pub mod error;
 pub mod github;
+pub mod gitmoji;
+pub mod hooks;
 pub mod labels;
 pub mod launcher;
 pub mod milestones;
