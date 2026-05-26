@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 pub const CONFIG_FILE: &str = ".gwm.toml";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
   #[serde(default)]
   pub worktree: WorktreeConfig,
@@ -53,6 +54,10 @@ pub struct Config {
   /// values containing shell pipeline metachars.
   #[serde(default)]
   pub aliases: BTreeMap<String, String>,
+  /// `[gitmoji]` table — branch type to Gitmoji shortcode overrides used
+  /// by `gwm types --gitmoji` and `gwm commit-prefix`.
+  #[serde(default)]
+  pub gitmoji: BTreeMap<String, String>,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -60,6 +65,7 @@ pub struct Config {
 /// the labels module at push time (deterministic pastel by default,
 /// overridable via `--random-colors`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LabelConfig {
   pub name: String,
   #[serde(default)]
@@ -77,6 +83,7 @@ pub struct LabelConfig {
 /// `state` (`"open"` | `"closed"`) at push time so a typo doesn't
 /// break unrelated subcommands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MilestoneConfig {
   pub title: String,
   #[serde(default)]
@@ -95,6 +102,7 @@ pub struct MilestoneConfig {
 /// config block is absent, so both the configured and built-in flavours
 /// share the same shape downstream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BranchType {
   pub name: String,
   pub description: String,
@@ -132,23 +140,40 @@ pub struct ResolvedBranchTypes {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorktreeConfig {
+  #[serde(default = "default_worktree_base")]
   pub base: String,
+  #[serde(default = "default_path_pattern")]
   pub path_pattern: String,
+  #[serde(default = "default_branch_pattern")]
   pub branch_pattern: String,
 }
 
 impl Default for WorktreeConfig {
   fn default() -> Self {
     Self {
-      base: "{home}/cc-worktree/{repo}".into(),
-      path_pattern: "{type}-{issue}-{desc}".into(),
-      branch_pattern: "{type}/#{issue}-{desc}".into(),
+      base: default_worktree_base(),
+      path_pattern: default_path_pattern(),
+      branch_pattern: default_branch_pattern(),
     }
   }
 }
 
+fn default_worktree_base() -> String {
+  "{home}/cc-worktree/{repo}".into()
+}
+
+fn default_path_pattern() -> String {
+  "{type}-{issue}-{desc}".into()
+}
+
+fn default_branch_pattern() -> String {
+  "{type}/#{issue}-{desc}".into()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
   #[serde(default)]
   pub copy: Vec<CopyStep>,
@@ -163,6 +188,7 @@ pub struct BootstrapConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CopyStep {
   pub from: String,
   pub to: String,
@@ -178,6 +204,7 @@ pub struct CopyStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Guard {
   pub name: String,
   #[serde(default)]
@@ -194,11 +221,13 @@ fn default_on_match() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NoSymlink {
   pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandStep {
   pub name: String,
   pub run: String,
@@ -210,6 +239,7 @@ pub struct CommandStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FallbackContent {
   pub target: String,
   pub content: String,
@@ -221,6 +251,7 @@ pub struct FallbackContent {
 /// any repo using a different trunk convention (`master`, `trunk`,
 /// `release-1.x`, …). Default preserves the previous behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DoctorConfig {
   /// Trunk branches the orphan-branch check treats as "merge destinations".
   /// A gwm-style branch fully reachable from one of these is preserved per
@@ -253,6 +284,7 @@ fn default_trunks() -> Vec<String> {
 /// like `confirm_countdown_secs = 300` can never strand a destructive
 /// path behind a 300-second wait.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TuiConfig {
   /// Safety countdown (in seconds) applied to the confirm overlay when
   /// `delete_branch_on_remove` is ON. Accepts any non-negative integer;
@@ -287,6 +319,7 @@ impl Default for TuiConfig {
 /// in a shell or `$EDITOR` directly, sharing the spawn-and-restore
 /// lifecycle that `l: lazygit` already uses.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TuiOpenConfig {
   #[serde(default)]
   pub mode: TuiOpenMode,
@@ -372,7 +405,7 @@ impl Config {
   /// empty, or contain shell pipeline metachars (issue #86). Delegates
   /// to [`crate::aliases::validate_aliases`] so the same rules apply
   /// symmetrically to the user-level `~/.config/gwm/aliases.toml`.
-  fn validate_aliases(&self) -> Result<()> {
+  pub(crate) fn validate_aliases(&self) -> Result<()> {
     crate::aliases::validate_aliases(&self.aliases, ".gwm.toml `[aliases]`")
   }
 
@@ -387,7 +420,7 @@ impl Config {
   /// `Display` impl reads `config error: labels[<i>]: config error:
   /// labels: …` with the prefix echoed twice, which is what the user
   /// actually sees on stderr.
-  fn validate_labels(&self) -> Result<()> {
+  pub(crate) fn validate_labels(&self) -> Result<()> {
     for (i, l) in self.labels.iter().enumerate() {
       crate::labels::validate_label_name(&l.name).map_err(|e| {
         let inner = match e {
@@ -471,7 +504,7 @@ impl Config {
   /// trust assumption no longer holds and this validator should be
   /// extended symmetrically — `check_relative_no_traversal` already
   /// accepts an arbitrary field label and is ready for it.
-  fn validate_bootstrap_paths(&self) -> Result<()> {
+  pub(crate) fn validate_bootstrap_paths(&self) -> Result<()> {
     for (i, c) in self.bootstrap.copy.iter().enumerate() {
       check_relative_no_traversal(&c.to, &format!("bootstrap.copy[{}].to", i))?;
     }
@@ -495,7 +528,7 @@ impl Config {
   ///   - `name`s must be unique across the table — duplicates would
   ///     silently override each other under `serde`'s `Vec` decoding
   ///     and make the resolved list non-deterministic
-  fn validate_branch_types(&self) -> Result<()> {
+  pub(crate) fn validate_branch_types(&self) -> Result<()> {
     let name_re = regex::Regex::new(r"^[a-z]+$").expect("static regex compiles");
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for entry in &self.branch_types {
@@ -564,6 +597,7 @@ impl Config {
 /// shape (placeholder expansion + `fullscreen` flag) keeps the user's
 /// mental model consistent across the two launcher keybindings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitTuiConfig {
   /// Shell line. Accepts the `{path}` placeholder. When `None`, the
   /// resolved launcher uses `lazygit -p {path}`.
@@ -601,6 +635,7 @@ impl GitTuiConfig {
 /// When both are set, `command` wins (and the TUI surfaces a status-bar
 /// hint at startup so the user notices their `tool` choice is shadowed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewConfig {
   /// Shell line. Accepts `{base} {head} {path} {diff}` placeholders.
   #[serde(default)]

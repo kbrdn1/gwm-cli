@@ -7,6 +7,7 @@ pub mod aliases;
 pub mod bootstrap;
 pub mod cli;
 pub mod config;
+pub mod config_cli;
 pub mod doctor;
 pub mod error;
 pub mod github;

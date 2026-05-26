@@ -47,6 +47,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  trust "))
     // Issue #86: CLI aliases (`gwm aliases list`).
     .stdout(predicate::str::contains("  aliases "))
+    // Issue #89: git-config-style `.gwm.toml` editing.
+    .stdout(predicate::str::contains("  config "))
     // Issue #85: gitmoji commit-prefix + commit-msg hook installer.
     .stdout(predicate::str::contains("  commit-prefix "))
     .stdout(predicate::str::contains("  hooks "))
