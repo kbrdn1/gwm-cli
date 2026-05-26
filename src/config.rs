@@ -62,6 +62,8 @@ pub struct Config {
   pub gitmoji: BTreeMap<String, String>,
   #[serde(default)]
   pub issue_template: IssueTemplateConfig,
+  #[serde(default)]
+  pub pr_template: PrTemplateConfig,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -132,6 +134,35 @@ pub struct IssueTemplateTypeConfig {
   pub title_prefix: Option<String>,
   #[serde(default)]
   pub labels: Vec<String>,
+}
+
+/// `[pr_template]` config block (issue #84). `default` is a workdir-
+/// relative path to a Markdown template used as the fallback PR body;
+/// `by_type` maps a branch type to either a per-type `path` or an
+/// inline `body` string. The resolver in `pr_templates` picks the most
+/// specific entry (per-type wins over default) and runs the templating
+/// engine on the result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrTemplateConfig {
+  #[serde(default)]
+  pub default: Option<String>,
+  #[serde(default)]
+  pub by_type: BTreeMap<String, PrTemplateTypeConfig>,
+}
+
+/// Per-branch-type override under `[pr_template.by_type.<type>]`. Either
+/// `path` (a workdir-relative Markdown file) or `body` (an inline
+/// string) must be set; setting both is allowed and `path` wins so an
+/// inline `body` can be used as a stable default while a per-repo file
+/// shadows it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrTemplateTypeConfig {
+  #[serde(default)]
+  pub path: Option<String>,
+  #[serde(default)]
+  pub body: Option<String>,
 }
 
 /// Origin of the resolved branch-type list — surfaced verbatim under

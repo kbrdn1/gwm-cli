@@ -20,6 +20,8 @@ use std::sync::LazyLock;
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
   LazyLock::new(|| regex::Regex::new(r"/issues/(\d+)(?:\b|$)").expect("static issue URL regex compiles"));
+static PR_URL_RE: LazyLock<regex::Regex> =
+  LazyLock::new(|| regex::Regex::new(r"/pull/(\d+)(?:\b|$)").expect("static PR URL regex compiles"));
 
 const ISSUE_CONFIG_KEY: &str = "gwm-issue";
 const PR_CONFIG_KEY: &str = "gwm-pr";
@@ -216,6 +218,22 @@ pub struct CreatedIssue {
   pub url: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct PrCreateRequest<'a> {
+  pub title: &'a str,
+  pub body_file: &'a std::path::Path,
+  pub head: &'a str,
+  pub base: Option<&'a str>,
+  pub draft: bool,
+  pub repo: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedPr {
+  pub number: u64,
+  pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {
   Open,
@@ -378,6 +396,47 @@ pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
     .and_then(|m| m.as_str().parse::<u64>().ok())
     .ok_or_else(|| GwmError::CommandFailed(format!("failed to parse issue number from gh output: {}", stdout)))?;
   Ok(CreatedIssue { number, url: stdout })
+}
+
+/// Shell out to `gh pr create` with a body file already rendered by
+/// [`crate::pr_templates::render_pr_body`]. Parses the URL printed by
+/// gh on success to extract the PR number.
+pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
+  let mut args: Vec<OsString> = Vec::with_capacity(
+    8 + if req.draft { 1 } else { 0 } + if req.base.is_some() { 2 } else { 0 } + if req.repo.is_some() { 2 } else { 0 },
+  );
+  args.push("pr".into());
+  args.push("create".into());
+  args.push("--title".into());
+  args.push(req.title.into());
+  args.push("--body-file".into());
+  args.push(req.body_file.as_os_str().to_owned());
+  args.push("--head".into());
+  args.push(req.head.into());
+  if let Some(base) = req.base {
+    args.push("--base".into());
+    args.push(base.into());
+  }
+  if req.draft {
+    args.push("--draft".into());
+  }
+  if let Some(repo) = req.repo {
+    args.push("--repo".into());
+    args.push(repo.into());
+  }
+  let stdout = run_gh(&args)?;
+  let stdout = stdout.trim().to_string();
+  let Some(caps) = PR_URL_RE.captures(&stdout) else {
+    return Err(GwmError::CommandFailed(format!(
+      "gh pr create did not print a PR URL containing a number: {}",
+      stdout
+    )));
+  };
+  let number = caps
+    .get(1)
+    .and_then(|m| m.as_str().parse::<u64>().ok())
+    .ok_or_else(|| GwmError::CommandFailed(format!("failed to parse PR number from gh output: {}", stdout)))?;
+  Ok(CreatedPr { number, url: stdout })
 }
 
 /// Run `gh pr view <n> --repo <slug> --json …` and parse the result.
