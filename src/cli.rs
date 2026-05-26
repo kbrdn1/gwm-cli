@@ -799,16 +799,21 @@ fn cmd_theme_list() -> Result<()> {
 
 /// Print a preset as a copy-pasteable `[theme]` TOML block (issue #33).
 ///
-/// Renders every role as `#RRGGBB` (or `Reset` for the special
-/// `Color::Reset` value) so the output is unambiguous and
-/// round-trippable through the `[theme]` parser.
+/// Every emitted value is a **quoted TOML string** so the output
+/// round-trips cleanly through the `[theme]` parser
+/// (`ThemeConfig.overrides: BTreeMap<String, String>` only accepts
+/// string values; a bare integer for `Color::Indexed` would fail to
+/// deserialize at re-parse). `Color::Rgb` renders as `#RRGGBB`,
+/// named colours as their canonical lowercase slug, and
+/// `Color::Indexed(n)` as the quoted decimal `"n"` form the
+/// `parse_color` indexed branch already accepts.
 fn cmd_theme_show(name: &str) -> Result<()> {
   use crate::tui::theme::Theme;
   use ratatui::style::Color;
 
   let theme = Theme::preset(name).ok_or_else(|| {
     let known = crate::tui::theme::preset_names().join(", ");
-    GwmError::Config(format!("theme show: unknown preset {:?} (known: {})", name, known))
+    GwmError::Other(format!("theme show: unknown preset {:?} (known: {})", name, known))
   })?;
   let color_str = |c: Color| -> String {
     match c {
@@ -830,7 +835,10 @@ fn cmd_theme_show(name: &str) -> Result<()> {
       Color::LightMagenta => "\"bright_magenta\"".to_string(),
       Color::LightCyan => "\"bright_cyan\"".to_string(),
       Color::White => "\"white\"".to_string(),
-      Color::Indexed(n) => n.to_string(),
+      // Quote the indexed value so it round-trips through the
+      // string-only `[theme]` map. `parse_color` accepts bare digit
+      // strings as `Color::Indexed` (e.g. `"220"` → Color::Indexed(220)).
+      Color::Indexed(n) => format!("\"{}\"", n),
     }
   };
   println!("[theme]");
