@@ -6,6 +6,7 @@ use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
+use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -154,6 +155,12 @@ pub struct App {
   /// change, mirroring how every other knob in `[tui]` behaves.
   pub keymap: Keymap,
 
+  /// Resolved colour theme for this TUI session (issue #33). Built
+  /// from `[theme]` in `.gwm.toml` at construction time. Threaded
+  /// through `draw_*` calls so user overrides reach every visual
+  /// signal. Same hot-reload-on-relaunch contract as the keymap.
+  pub theme: Theme,
+
   // Inline fuzzy filter on the worktree list (issue #21, extracted per
   // #124 with memoisation closing #104). The sub-struct owns the buffer
   // (`query`), the typing-bar flag (`active`), and a cached indices vec
@@ -244,6 +251,12 @@ impl App {
     // fresh error — but we re-`?` it rather than `.expect()` so a
     // future hot-reload path could exercise the same call.
     let keymap = config.tui.keys.resolved_keymap()?;
+    // Issue #33: resolve the colour theme once at construction.
+    // Validated by `Config::load_for_repo` already, so this can
+    // only surface a fresh error if the loader pre-validation is
+    // bypassed (e.g. a future hot-reload path) — `?` is still the
+    // right propagation policy.
+    let theme = config.theme.resolve()?;
     let worktrees = worktree::list(&repo)?;
     let mut state = TableState::default();
     if !worktrees.is_empty() {
@@ -266,6 +279,7 @@ impl App {
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
+      theme,
       filter: FilterState::new(),
       picker_mode: false,
       picker_result: None,

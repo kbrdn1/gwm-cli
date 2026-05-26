@@ -458,6 +458,27 @@ pub enum Command {
     #[command(subcommand)]
     action: TuiAction,
   },
+  /// TUI theme subcommands (issue #33).
+  ///
+  /// `gwm theme list` prints the names of every built-in preset.
+  /// `gwm theme show <name>` dumps the preset as a `[theme]` TOML
+  /// block the user can paste into `.gwm.toml`.
+  Theme {
+    #[command(subcommand)]
+    action: ThemeAction,
+  },
+}
+
+/// Subcommands of `gwm theme` (issue #33).
+#[derive(Debug, Subcommand)]
+pub enum ThemeAction {
+  /// List the names of every built-in preset.
+  List,
+  /// Print a preset as a copy-pasteable `[theme]` TOML block.
+  Show {
+    /// Preset name (`catppuccin`, `gruvbox`, `tokyo-night`, …).
+    name: String,
+  },
 }
 
 /// Subcommands of `gwm tui` (issue #87).
@@ -747,6 +768,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::History { limit, all } => cmd_history(limit, all),
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
     Command::Tui { action } => cmd_tui(action),
+    Command::Theme { action } => cmd_theme(action),
   }
 }
 
@@ -754,6 +776,76 @@ fn cmd_tui(action: TuiAction) -> Result<()> {
   match action {
     TuiAction::Keys => cmd_tui_keys(),
   }
+}
+
+fn cmd_theme(action: ThemeAction) -> Result<()> {
+  match action {
+    ThemeAction::List => cmd_theme_list(),
+    ThemeAction::Show { name } => cmd_theme_show(&name),
+  }
+}
+
+/// Print every built-in TUI preset name (issue #33).
+///
+/// Pure read against `crate::tui::theme::preset_names` so the
+/// command works outside any repository and never needs a config
+/// load.
+fn cmd_theme_list() -> Result<()> {
+  for name in crate::tui::theme::preset_names() {
+    println!("{}", name);
+  }
+  Ok(())
+}
+
+/// Print a preset as a copy-pasteable `[theme]` TOML block (issue #33).
+///
+/// Renders every role as `#RRGGBB` (or `Reset` for the special
+/// `Color::Reset` value) so the output is unambiguous and
+/// round-trippable through the `[theme]` parser.
+fn cmd_theme_show(name: &str) -> Result<()> {
+  use crate::tui::theme::Theme;
+  use ratatui::style::Color;
+
+  let theme = Theme::preset(name).ok_or_else(|| {
+    let known = crate::tui::theme::preset_names().join(", ");
+    GwmError::Config(format!("theme show: unknown preset {:?} (known: {})", name, known))
+  })?;
+  let color_str = |c: Color| -> String {
+    match c {
+      Color::Rgb(r, g, b) => format!("\"#{:02x}{:02x}{:02x}\"", r, g, b),
+      Color::Reset => "\"reset\"".to_string(),
+      Color::Black => "\"black\"".to_string(),
+      Color::Red => "\"red\"".to_string(),
+      Color::Green => "\"green\"".to_string(),
+      Color::Yellow => "\"yellow\"".to_string(),
+      Color::Blue => "\"blue\"".to_string(),
+      Color::Magenta => "\"magenta\"".to_string(),
+      Color::Cyan => "\"cyan\"".to_string(),
+      Color::Gray => "\"gray\"".to_string(),
+      Color::DarkGray => "\"dark_gray\"".to_string(),
+      Color::LightRed => "\"bright_red\"".to_string(),
+      Color::LightGreen => "\"bright_green\"".to_string(),
+      Color::LightYellow => "\"bright_yellow\"".to_string(),
+      Color::LightBlue => "\"bright_blue\"".to_string(),
+      Color::LightMagenta => "\"bright_magenta\"".to_string(),
+      Color::LightCyan => "\"bright_cyan\"".to_string(),
+      Color::White => "\"white\"".to_string(),
+      Color::Indexed(n) => n.to_string(),
+    }
+  };
+  println!("[theme]");
+  println!("preset       = {:?}", name);
+  println!("focus        = {}", color_str(theme.focus));
+  println!("accent       = {}", color_str(theme.accent));
+  println!("branch       = {}", color_str(theme.branch));
+  println!("clean        = {}", color_str(theme.clean));
+  println!("dirty        = {}", color_str(theme.dirty));
+  println!("main         = {}", color_str(theme.main));
+  println!("locked       = {}", color_str(theme.locked));
+  println!("prunable     = {}", color_str(theme.prunable));
+  println!("muted        = {}", color_str(theme.muted));
+  println!("selection_bg = {}", color_str(theme.selection_bg));
+  Ok(())
 }
 
 /// Print the resolved TUI keymap as a 3-column table.

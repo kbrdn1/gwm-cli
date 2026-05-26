@@ -3793,3 +3793,47 @@ down = ["Ctrl+n"]
     "expected `up` row source to stay `default`, got: {up_line}"
   );
 }
+
+// --- gwm theme list / show (issue #33) ----------------------------------
+
+#[test]
+fn theme_list_includes_builtin_presets() {
+  // `gwm theme list` prints the names of every built-in preset
+  // shipped by the binary. Catppuccin is the named example in the
+  // issue; the exact catalogue can grow over time.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("catppuccin"));
+}
+
+#[test]
+fn theme_show_emits_toml_block_users_can_copy() {
+  // `gwm theme show catppuccin` dumps a `[theme]` block that, when
+  // pasted into a `.gwm.toml`, reproduces the preset.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[theme]"))
+    .stdout(predicate::str::contains("focus"));
+}
+
+#[test]
+fn theme_show_rejects_unknown_preset() {
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "does-not-exist"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("does-not-exist"));
+}

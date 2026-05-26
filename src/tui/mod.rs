@@ -9,6 +9,7 @@ pub mod commit_graph;
 pub mod keymap;
 pub mod palette;
 pub mod state;
+pub mod theme;
 mod ui;
 
 use crate::error::Result;
