@@ -73,6 +73,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::Report => draw_report(f, app),
     View::OpenMenu => draw_open_menu(f, app),
     View::LinkPrompt => draw_link_prompt(f, app),
+    View::CommandPalette => draw_command_palette(f, app),
     View::List => {}
   }
 }
@@ -1036,6 +1037,9 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
   }
   lines.push(row(Action::Help, "this help"));
   if !picker_mode {
+    lines.push(row(Action::CommandPalette, "open the command palette"));
+  }
+  if !picker_mode {
     lines.extend([
       String::new(),
       "create form".to_string(),
@@ -1405,6 +1409,66 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
     }
   };
   f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+/// Render the command palette overlay (issue #32).
+///
+/// Layout: bottom 40% of the frame is dedicated to the palette —
+/// matches paragraph on top (scrolling vertically when the list is
+/// longer than the viewport), input bar pinned to the bottom row.
+/// The highlight follows the user's cycle key (`Up`/`Down`/`Tab`);
+/// `Enter` fires the highlighted entry, `Esc` cancels.
+fn draw_command_palette(f: &mut Frame, app: &App) {
+  let area = centered(60, 50, f.area());
+  f.render_widget(Clear, area);
+
+  let outer = Block::default()
+    .borders(Borders::ALL)
+    .title(" command palette ")
+    .border_style(Style::default().fg(Color::Cyan));
+  let inner = outer.inner(area);
+  f.render_widget(outer, area);
+
+  // Two rows: matches list (flex) + input bar (height 1).
+  let layout = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([Constraint::Min(3), Constraint::Length(1)])
+    .split(inner);
+
+  let entries = app.palette.matches();
+  let highlight = app.palette.highlight();
+  let mut lines: Vec<Line<'_>> = entries
+    .iter()
+    .enumerate()
+    .map(|(i, entry)| {
+      let prefix = if i == highlight { "▶ " } else { "  " };
+      let name_style = if i == highlight {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(Color::White)
+      };
+      Line::from(vec![
+        Span::raw(prefix),
+        Span::styled(format!("{:<22}", entry.name), name_style),
+        Span::raw("  "),
+        Span::styled(entry.description, Style::default().fg(Color::DarkGray)),
+      ])
+    })
+    .collect();
+  if lines.is_empty() {
+    lines.push(Line::from(Span::styled(
+      "  (no matching command — backspace to broaden)",
+      Style::default().fg(Color::Red),
+    )));
+  }
+  f.render_widget(Paragraph::new(lines), layout[0]);
+
+  let input_line = Line::from(vec![
+    Span::styled(":", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    Span::raw(app.palette.buffer().to_string()),
+    Span::styled("_", Style::default().fg(Color::DarkGray)),
+  ]);
+  f.render_widget(Paragraph::new(input_line), layout[1]);
 }
 
 /// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)
