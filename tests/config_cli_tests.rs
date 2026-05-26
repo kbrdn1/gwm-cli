@@ -313,6 +313,18 @@ fn config_edit_opens_editor_on_config_path() {
 }
 
 fn write_editor_script(root: &Path) -> std::path::PathBuf {
+  #[cfg(unix)]
+  {
+    write_unix_editor_script(root)
+  }
+  #[cfg(windows)]
+  {
+    write_windows_editor_script(root)
+  }
+}
+
+#[cfg(unix)]
+fn write_unix_editor_script(root: &Path) -> std::path::PathBuf {
   let script = root.join("fake-editor.sh");
   fs::write(
     &script,
@@ -323,11 +335,22 @@ fn write_editor_script(root: &Path) -> std::path::PathBuf {
   )
   .unwrap();
   let mut perms = fs::metadata(&script).unwrap().permissions();
-  #[cfg(unix)]
-  {
-    use std::os::unix::fs::PermissionsExt;
-    perms.set_mode(0o755);
-    fs::set_permissions(&script, perms).unwrap();
-  }
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
+}
+
+#[cfg(windows)]
+fn write_windows_editor_script(root: &Path) -> std::path::PathBuf {
+  let script = root.join("fake-editor.cmd");
+  fs::write(
+    &script,
+    format!(
+      "@echo off\r\n<nul set /p=%~1> \"{}\"\r\n",
+      root.join("editor-target.txt").display()
+    ),
+  )
+  .unwrap();
   script
 }
