@@ -1520,6 +1520,276 @@ required = true
 }
 
 #[test]
+fn create_runs_lifecycle_hooks_and_legacy_bootstrap_command_alias() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "record pre-create"
+run = "printf pre-{{branch}}-{{issue}}-{{desc}} > pre-create.txt"
+
+[[hooks.post_create]]
+name = "record post-create"
+run = "printf post-{{branch}} > post-create.txt"
+
+[[bootstrap.command]]
+name = "legacy post-create"
+run = "printf legacy > legacy-post-create.txt"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "hooks"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[pre_create] record pre-create"))
+    .stdout(predicate::str::contains("[post_create] record post-create"))
+    .stdout(predicate::str::contains("[post_create] legacy post-create"));
+
+  let worktree = base.path().join("feat-88-hooks");
+  assert_eq!(
+    std::fs::read_to_string(dir.path().join("pre-create.txt")).unwrap(),
+    "pre-feat/#88-hooks-88-hooks"
+  );
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("post-create.txt")).unwrap(),
+    "post-feat/#88-hooks"
+  );
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("legacy-post-create.txt")).unwrap(),
+    "legacy"
+  );
+}
+
+#[test]
+fn create_pre_create_abort_failure_leaves_no_worktree() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "block create"
+run = "false"
+on_fail = "abort"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "blocked"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("hook pre_create 'block create' failed"));
+
+  assert!(
+    !base.path().join("feat-88-blocked").exists(),
+    "pre_create abort must happen before worktree creation"
+  );
+}
+
+#[test]
+fn create_warn_and_ignore_hook_failures_do_not_abort() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "warn only"
+run = "false"
+on_fail = "warn"
+
+[[hooks.pre_create]]
+name = "ignore failure"
+run = "false"
+on_fail = "ignore"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "nonfatal"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("! [pre_create] warn only"))
+    .stdout(predicate::str::contains("· [pre_create] ignore failure"));
+
+  assert!(base.path().join("feat-88-nonfatal").exists());
+}
+
+#[test]
+fn create_skip_hooks_bypasses_named_phase() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "would block"
+run = "false"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "skip", "--skip-hooks", "pre_create"])
+    .assert()
+    .success();
+
+  assert!(base.path().join("feat-88-skip").exists());
+}
+
+#[test]
+fn bootstrap_runs_pre_and_post_bootstrap_hooks() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_bootstrap]]
+name = "before bootstrap"
+run = "printf pre > pre-bootstrap.txt"
+
+[[bootstrap.copy]]
+from = "seed.txt"
+to = "seed.txt"
+required = true
+
+[[hooks.post_bootstrap]]
+name = "after bootstrap"
+run = "printf post > post-bootstrap.txt"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+  std::fs::write(dir.path().join("seed.txt"), "seed").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "88", "boot-hooks", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["bootstrap", "feat-88-boot-hooks"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[pre_bootstrap] before bootstrap"))
+    .stdout(predicate::str::contains("[post_bootstrap] after bootstrap"));
+
+  let worktree = base.path().join("feat-88-boot-hooks");
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("pre-bootstrap.txt")).unwrap(),
+    "pre"
+  );
+  assert_eq!(std::fs::read_to_string(worktree.join("seed.txt")).unwrap(), "seed");
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("post-bootstrap.txt")).unwrap(),
+    "post"
+  );
+}
+
+#[test]
+fn remove_runs_pre_and_post_remove_hooks_and_force_skips_them() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "88", "remove-hooks", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "block remove"
+run = "false"
+
+[[hooks.post_remove]]
+name = "cleanup"
+run = "printf removed-{{branch}} > post-remove.txt"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "remove-hooks"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("hook pre_remove 'block remove' failed"));
+  assert!(base.path().join("feat-88-remove-hooks").exists());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "remove-hooks", "--force"])
+    .assert()
+    .success();
+  assert!(!base.path().join("feat-88-remove-hooks").exists());
+  assert!(
+    !dir.path().join("post-remove.txt").exists(),
+    "--force must skip pre_remove and post_remove hooks"
+  );
+}
+
+#[test]
 fn create_skips_bootstrap_with_no_bootstrap_flag() {
   // Same scaffolding as the previous test, but `--no-bootstrap` must
   // short-circuit `bootstrap::run` BEFORE the copy step. The worktree
