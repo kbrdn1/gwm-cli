@@ -7,7 +7,7 @@ use predicates::prelude::*;
 use std::fs;
 use std::path::Path;
 
-use common::init_repo;
+use common::{init_repo, paths_equal};
 
 #[test]
 fn config_help_lists_git_config_style_actions() {
@@ -240,13 +240,22 @@ fn config_path_and_validate_report_resolved_config_file() {
   let config_path = fs::canonicalize(dir.path()).unwrap().join(".gwm.toml");
   fs::write(&config_path, "[tui]\nconfirm_countdown_secs = 2\n").unwrap();
 
-  Command::cargo_bin("gwm")
+  let output = Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .args(["config", "path"])
     .assert()
     .success()
-    .stdout(format!("{}\n", config_path.display()));
+    .get_output()
+    .stdout
+    .clone();
+  let printed = String::from_utf8(output).unwrap();
+  assert!(
+    paths_equal(Path::new(printed.trim()), &config_path),
+    "printed path {:?} should resolve to {}",
+    printed.trim(),
+    config_path.display()
+  );
 
   Command::cargo_bin("gwm")
     .unwrap()
@@ -302,13 +311,13 @@ fn config_edit_opens_editor_on_config_path() {
     .success();
 
   let marker = fs::read_to_string(dir.path().join("editor-target.txt")).unwrap();
-  assert_eq!(
-    marker,
-    fs::canonicalize(dir.path())
-      .unwrap()
-      .join(".gwm.toml")
-      .display()
-      .to_string()
+  assert!(
+    paths_equal(
+      Path::new(marker.trim()),
+      &fs::canonicalize(dir.path()).unwrap().join(".gwm.toml")
+    ),
+    "editor received {:?}",
+    marker.trim()
   );
 }
 
@@ -347,7 +356,7 @@ fn write_windows_editor_script(root: &Path) -> std::path::PathBuf {
   fs::write(
     &script,
     format!(
-      "@echo off\r\n<nul set /p=%~1> \"{}\"\r\n",
+      "@echo off\r\necho %~1> \"{}\"\r\nexit /b 0\r\n",
       root.join("editor-target.txt").display()
     ),
   )
