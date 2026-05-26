@@ -1,3 +1,4 @@
+use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -12,6 +13,7 @@ use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
@@ -124,7 +126,25 @@ pub struct App {
   pub sidebar: SidebarState,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
+  // **Kept for backward compatibility** with pre-#87 tests that read
+  // it directly. Now a *mirror* of [`Self::pending_chord`] —
+  // [`Self::dispatch_key`] keeps the two synchronised via
+  // [`Self::sync_legacy_pending`]. New code should consume
+  // [`Self::pending_chord_is_empty`] instead.
   pub pending_g: bool,
+
+  /// Generic pending-keys buffer for the configurable keymap
+  /// (issue #87). Empty most of the time; populated with the
+  /// strokes seen so far whenever the user is partway through a
+  /// chord that is a prefix of a bound binding (e.g. after the
+  /// first `g` of the default `g g → Top`).
+  pub pending_chord: Vec<KeyStroke>,
+
+  /// Resolved keymap for this TUI session. Built from
+  /// [`Config::tui.keys`] at construction time and never mutated
+  /// thereafter — the user has to relaunch gwm to pick up a config
+  /// change, mirroring how every other knob in `[tui]` behaves.
+  pub keymap: Keymap,
 
   // Inline fuzzy filter on the worktree list (issue #21, extracted per
   // #124 with memoisation closing #104). The sub-struct owns the buffer
@@ -195,6 +215,11 @@ impl App {
     let repo_name = worktree::repo_name(&repo);
     let config = Config::load_for_repo(&workdir)?;
     let branch_types = config.resolved_branch_types().types;
+    // Resolve the keymap once at construction. Config::load_for_repo
+    // already validated the overrides, so this should not surface a
+    // fresh error — but we re-`?` it rather than `.expect()` so a
+    // future hot-reload path could exercise the same call.
+    let keymap = config.tui.keys.resolved_keymap()?;
     let worktrees = worktree::list(&repo)?;
     let mut state = TableState::default();
     if !worktrees.is_empty() {
@@ -215,6 +240,8 @@ impl App {
       report: None,
       sidebar: SidebarState::new(),
       pending_g: false,
+      pending_chord: Vec::new(),
+      keymap,
       filter: FilterState::new(),
       picker_mode: false,
       picker_result: None,
@@ -382,17 +409,97 @@ impl App {
   }
 
   /// Drive the two-keystroke `gg` motion. First press arms it, second jumps to top.
+  ///
+  /// **Compatibility shim** — kept so the existing tests in
+  /// `tests/tui_app_tests.rs::handle_g_motion_tracks_pending_then_jumps_to_first`
+  /// and the not-yet-migrated event-loop branch keep working
+  /// verbatim. The implementation routes through
+  /// [`Self::dispatch_key`] so the legacy and generic paths cannot
+  /// drift on the chord semantics.
   pub fn handle_g(&mut self) {
-    if self.pending_g {
-      self.pending_g = false;
+    let ev = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty());
+    if let Some(Action::Top) = self.dispatch_key(ev) {
       self.first();
-    } else {
-      self.pending_g = true;
     }
   }
 
+  /// Drop any in-flight chord prefix. Called by the legacy event-loop
+  /// branch on any non-`g` keystroke (pre-#87 contract). New call
+  /// sites that route through [`Self::dispatch_key`] don't need it —
+  /// `dispatch_key` already clears the buffer on `NoMatch`.
   pub fn cancel_pending_motion(&mut self) {
-    self.pending_g = false;
+    self.pending_chord.clear();
+    self.sync_legacy_pending_flag();
+  }
+
+  /// True iff no chord prefix is currently armed. Surface for tests
+  /// and for the help / status-bar code that may want to show a
+  /// "waiting for next key" hint once chord support is wired up.
+  pub fn pending_chord_is_empty(&self) -> bool {
+    self.pending_chord.is_empty()
+  }
+
+  /// Drive a raw `KeyEvent` through the keymap.
+  ///
+  /// Returns `Some(action)` when the buffer (current pending chord +
+  /// this stroke) matches a binding — caller fires the action and the
+  /// buffer is left cleared. Returns `None` when the buffer is now a
+  /// strict prefix of a longer binding (caller waits for the next
+  /// keystroke) **or** when the stroke matches nothing at all
+  /// (caller drops it).
+  ///
+  /// Vim-style fallback: if appending the stroke to a non-empty
+  /// buffer produces a `NoMatch`, the buffer is cleared and the
+  /// stroke is re-tried on its own. This mirrors the historical
+  /// `g j` behaviour where the stray `g` is forgotten and `j`
+  /// still navigates down.
+  pub fn dispatch_key(&mut self, key: KeyEvent) -> Option<Action> {
+    let stroke = KeyStroke::from_event(&key);
+    let mut tentative = self.pending_chord.clone();
+    tentative.push(stroke.clone());
+
+    let outcome = match self.keymap.lookup(&tentative) {
+      ChordResolution::Matched(action) => {
+        self.pending_chord.clear();
+        Some(action)
+      }
+      ChordResolution::PendingPrefix => {
+        self.pending_chord = tentative;
+        None
+      }
+      ChordResolution::NoMatch if self.pending_chord.is_empty() => {
+        // Single stroke, no binding. Nothing to retry.
+        None
+      }
+      ChordResolution::NoMatch => {
+        // Mismatched continuation. Drop the in-flight prefix and
+        // retry the new stroke on its own so the user's keypress
+        // is not silently swallowed when it has a single-key
+        // binding (the `g j` case).
+        self.pending_chord.clear();
+        let single = vec![stroke];
+        match self.keymap.lookup(&single) {
+          ChordResolution::Matched(action) => Some(action),
+          ChordResolution::PendingPrefix => {
+            self.pending_chord = single;
+            None
+          }
+          ChordResolution::NoMatch => None,
+        }
+      }
+    };
+
+    self.sync_legacy_pending_flag();
+    outcome
+  }
+
+  /// Mirror the new `pending_chord` buffer into the legacy
+  /// `pending_g` boolean so pre-#87 tests that read it as a field
+  /// stay green. Removed when those tests migrate to
+  /// [`Self::pending_chord_is_empty`].
+  fn sync_legacy_pending_flag(&mut self) {
+    let g = KeyStroke::new(KeyCode::Char('g'), KeyModifiers::empty());
+    self.pending_g = self.pending_chord.len() == 1 && self.pending_chord[0] == g;
   }
 
   // ---- Sidebar ------------------------------------------------------------

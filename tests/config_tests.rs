@@ -1460,3 +1460,151 @@ bogus = true
   let msg = format!("{}", err);
   assert!(msg.contains("bogus"), "{msg}");
 }
+
+// --- [tui.keys] section (issue #87) -------------------------------------
+
+#[test]
+fn tui_keys_default_is_empty_map() {
+  // Absent `[tui.keys]` block resolves to an empty map — the keymap
+  // layer then keeps every built-in default. Mirrors the `labels` /
+  // `milestones` "no override declared" contract.
+  let cfg = Config::default();
+  assert!(cfg.tui.keys.bindings.is_empty());
+}
+
+#[test]
+fn tui_keys_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = ["j", "Ctrl+n"]
+up   = ["k", "Ctrl+p"]
+top  = ["g g"]
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(
+    cfg.tui.keys.bindings.get("down").map(Vec::as_slice),
+    Some(["j".to_string(), "Ctrl+n".to_string()].as_slice())
+  );
+  assert_eq!(
+    cfg.tui.keys.bindings.get("up").map(Vec::as_slice),
+    Some(["k".to_string(), "Ctrl+p".to_string()].as_slice())
+  );
+  assert_eq!(
+    cfg.tui.keys.bindings.get("top").map(Vec::as_slice),
+    Some(["g g".to_string()].as_slice())
+  );
+}
+
+#[test]
+fn tui_keys_rejects_unknown_action_at_load_time() {
+  // `gallop` is not in `keymap::ACTIONS`. The user almost certainly
+  // typo'd a real action name; surfacing the error here saves a
+  // mystifying "my binding does nothing in the TUI" round trip.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+gallop = ["g"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("unknown action must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(
+    msg.contains("gallop"),
+    "expected message to name the bad action, got: {msg}"
+  );
+  assert!(
+    msg.contains("unknown"),
+    "expected message to flag it as unknown, got: {msg}"
+  );
+}
+
+#[test]
+fn tui_keys_rejects_invalid_key_string() {
+  // `Foobar` is not a named key and is not a single character. The
+  // parser surfaces it as a config error.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = ["Foobar"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid key string must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(
+    msg.contains("foobar"),
+    "expected message to name the bad key, got: {msg}"
+  );
+}
+
+#[test]
+fn tui_keys_rejects_chord_that_is_strict_prefix() {
+  // Binding `g` alone while the default `g g` is still in place
+  // creates a chord/prefix ambiguity. Per the design note on PR #87
+  // this is a hard error at load — never a runtime timeout.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+open = ["g"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("prefix collision must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("prefix"), "expected prefix error, got: {msg}");
+}
+
+#[test]
+fn tui_keys_rejects_chord_conflict_across_actions() {
+  // `down` and `up` both rebound to `x` — same chord, two actions,
+  // ambiguous dispatch. Refuse at load time.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = ["x"]
+up   = ["x"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("conflict must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("conflict"), "expected conflict error, got: {msg}");
+}
+
+#[test]
+fn tui_keys_empty_binding_list_unbinds_action() {
+  // `down = []` removes every binding for the `down` action. Useful
+  // for users who prefer to navigate with the arrow keys only.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = []
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let km = cfg.tui.keys.resolved_keymap().unwrap();
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  let j = KeyStroke::parse_chord("j").unwrap();
+  assert!(matches!(km.lookup(&j), ChordResolution::NoMatch));
+  // The other defaults survive.
+  let k = KeyStroke::parse_chord("k").unwrap();
+  assert!(matches!(km.lookup(&k), ChordResolution::Matched(Action::Up)));
+}

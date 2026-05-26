@@ -845,71 +845,123 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
 }
 
-fn draw_help(f: &mut Frame, app: &App) {
-  let area = centered(60, 60, f.area());
-  let title_text = if app.picker_mode {
+/// Pure builder for the help overlay body (issue #87).
+///
+/// Reads every list-view binding from the resolved `Keymap` so user
+/// overrides under `[tui.keys]` show through verbatim — a user who
+/// rebinds `down = ["Ctrl+n"]` sees `Ctrl+n` next to "next" instead
+/// of the historical `j / ↓`. Lines that document non-rebindable
+/// surfaces (Ctrl-C escape hatch, contextual Esc / Enter, create-
+/// form keys, confirm-delete keys) remain hard-coded.
+///
+/// Exposed as `pub` (and re-exported through `tui::help_lines`) so
+/// the state-machine test in `tests/tui_chord_tests.rs` can assert
+/// the doc/binding contract end-to-end without spawning a terminal.
+pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
+  use super::keymap::Action;
+
+  // Format every chord bound to `action` as a comma-separated list
+  // (`"j, Down"` or `"g g"` or `""` for unbound). The width 13 is
+  // wide enough for `Ctrl+Shift+Tab` while keeping the help overlay
+  // narrow enough for an 80-column terminal.
+  let keys_for = |action: Action| -> String {
+    km.list()
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| {
+        b.chords
+          .iter()
+          .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+          .collect::<Vec<_>>()
+          .join(", ")
+      })
+      .unwrap_or_default()
+  };
+  let row = |action: Action, label: &str| -> String {
+    let keys = keys_for(action);
+    let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
+    format!("  {:<13} {}", keys, label)
+  };
+
+  let title_text = if picker_mode {
     "gwm switch — keys"
   } else {
     "gwm — keys"
   };
-  let mut lines = vec![
-    Line::from(Span::styled(
-      title_text,
-      Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )),
-    Line::from(""),
-    Line::from("global"),
-    Line::from("  q / Esc       quit"),
-    Line::from("  Ctrl-C        force quit"),
-    Line::from(""),
-    Line::from("list view"),
-    Line::from("  j / ↓         next (scrolls sidebar when focused)"),
-    Line::from("  k / ↑         prev (scrolls sidebar when focused)"),
-    Line::from("  gg            jump to first worktree"),
-    Line::from("  G             jump to last worktree"),
+
+  let mut lines: Vec<String> = vec![
+    title_text.to_string(),
+    String::new(),
+    "global".to_string(),
+    format!(
+      "  {:<13} quit (Esc also quits when filter is clear)",
+      keys_for(Action::Quit)
+    ),
+    "  Ctrl-C        force quit (hard-coded escape hatch)".to_string(),
+    String::new(),
+    "list view".to_string(),
+    row(Action::Down, "next (scrolls sidebar when focused)"),
+    row(Action::Up, "prev (scrolls sidebar when focused)"),
+    row(Action::Top, "jump to first worktree"),
+    row(Action::Bottom, "jump to last worktree"),
   ];
-  if app.picker_mode {
-    lines.push(Line::from(
-      "  enter         select highlighted worktree (prints path on exit)",
-    ));
+  if picker_mode {
+    lines.push("  enter         select highlighted worktree (prints path on exit)".to_string());
   } else {
-    lines.push(Line::from("  n             new worktree"));
-    lines.push(Line::from("  d             delete selected"));
-    lines.push(Line::from("  b             bootstrap selected"));
+    lines.push(row(Action::Create, "new worktree"));
+    lines.push(row(Action::DeleteConfirm, "delete selected"));
+    lines.push(row(Action::Bootstrap, "bootstrap selected"));
   }
-  lines.extend([
-    Line::from("  o             open per [tui.open] — shell (default) / editor / finder"),
-    Line::from("  y             yank selected path to system clipboard"),
-    Line::from("  l             launch [git_tui] launcher (default lazygit -p, configurable)"),
-    Line::from("  v             toggle git preview sidebar (auto-hidden < 120 cols)"),
-    Line::from("  Tab           swap focus between worktree list and sidebar"),
-    Line::from("  /             open fuzzy filter bar (enter: sticky, esc: clear)"),
-    Line::from("  f             refresh worktree list"),
-    Line::from("  F             refresh GitHub issue/PR status via `gh`"),
-    Line::from("  R             run [review] launcher against the resolved base"),
-  ]);
-  if !app.picker_mode {
-    lines.push(Line::from("  p             toggle 'delete branch on remove'"));
-    lines.push(Line::from("  enter         show path in status bar"));
-    lines.push(Line::from(""));
-    lines.push(Line::from("issue / PR (#67)"));
-    lines.push(Line::from("  O             open menu — i=issue · p=pull request"));
-    lines.push(Line::from("  L             link prompt — i / p then digits"));
+  lines.push(row(Action::Open, "open per [tui.open] — shell / editor / finder"));
+  lines.push(row(Action::Yank, "yank selected path to system clipboard"));
+  lines.push(row(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
+  lines.push(row(Action::ToggleSidebar, "toggle git preview sidebar"));
+  lines.push(row(Action::FocusSwap, "swap focus between worktree list and sidebar"));
+  lines.push(row(Action::Filter, "open fuzzy filter bar (enter: sticky, esc: clear)"));
+  lines.push(row(Action::Refresh, "refresh worktree list"));
+  if !picker_mode {
+    lines.push(row(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
+    lines.push(row(Action::Review, "run [review] launcher against the resolved base"));
+    lines.push(row(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
+    lines.push("  enter         show path in status bar".to_string());
+    lines.push(String::new());
+    lines.push("issue / PR (#67)".to_string());
+    lines.push(row(Action::OpenMenu, "open menu — i=issue · p=pull request"));
+    lines.push(row(Action::LinkPrompt, "link prompt — i / p then digits"));
   }
-  lines.push(Line::from("  ?             this help"));
-  if !app.picker_mode {
+  lines.push(row(Action::Help, "this help"));
+  if !picker_mode {
     lines.extend([
-      Line::from(""),
-      Line::from("create form"),
-      Line::from("  ↑/↓           change branch type"),
-      Line::from("  Tab/Shift-Tab next/prev field"),
-      Line::from("  Enter (desc)  submit"),
-      Line::from("  Esc           cancel"),
-      Line::from(""),
-      Line::from("confirm delete"),
-      Line::from("  y / Enter     confirm"),
-      Line::from("  n / Esc       cancel"),
+      String::new(),
+      "create form".to_string(),
+      "  ↑/↓           change branch type".to_string(),
+      "  Tab/Shift-Tab next/prev field".to_string(),
+      "  Enter (desc)  submit".to_string(),
+      "  Esc           cancel".to_string(),
+      String::new(),
+      "confirm delete".to_string(),
+      "  y / Enter     confirm".to_string(),
+      "  n / Esc       cancel".to_string(),
     ]);
+  }
+  lines
+}
+
+fn draw_help(f: &mut Frame, app: &App) {
+  let area = centered(60, 60, f.area());
+  let strings = help_lines(&app.keymap, app.picker_mode);
+  let mut lines: Vec<Line<'_>> = Vec::with_capacity(strings.len());
+  // First line is the title — render bold cyan like the pre-#87
+  // overlay. Subsequent lines are plain so the resolved bindings
+  // stay legible at low contrast.
+  if let Some((first, rest)) = strings.split_first() {
+    lines.push(Line::from(Span::styled(
+      first.clone(),
+      Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    for s in rest {
+      lines.push(Line::from(s.clone()));
+    }
   }
   let block = Block::default()
     .borders(Borders::ALL)
