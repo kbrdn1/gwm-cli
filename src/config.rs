@@ -153,9 +153,12 @@ pub struct PrTemplateConfig {
 
 /// Per-branch-type override under `[pr_template.by_type.<type>]`. Either
 /// `path` (a workdir-relative Markdown file) or `body` (an inline
-/// string) must be set; setting both is allowed and `path` wins so an
-/// inline `body` can be used as a stable default while a per-repo file
-/// shadows it.
+/// string) must be set; setting both is allowed and inline `body` wins
+/// over `path` so a stable on-disk template can be carried in `path`
+/// while a focused `body` override takes precedence for a specific
+/// branch type. The resolver in `pr_templates` enforces this ordering;
+/// see `inline_body_wins_over_path_when_both_set` in
+/// `tests/pr_templates_tests.rs` for the pinned contract.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrTemplateTypeConfig {
