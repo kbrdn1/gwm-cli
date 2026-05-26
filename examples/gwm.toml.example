@@ -361,6 +361,20 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # title = "v0.6.0"
 # state = "closed"
 
+# --- issue templates for `gwm new` (issue #83) ------------------------------
+# `gwm new <type> <desc>` renders one of `.github/ISSUE_TEMPLATE/*.yml`,
+# creates the issue with `gh issue create`, captures the issue number, then
+# delegates to `gwm create <type> <issue> <desc>`.
+#
+# [issue_template]
+# default = "feature_request.yml"
+#
+# [issue_template.by_type]
+# feat = { template = "feature_request.yml", surface = "cli", title_prefix = "[Feature]: ", labels = ["enhancement"] }
+# fix = { template = "bug_report.yml", surface = "cli", title_prefix = "[Bug]: " }
+# docs = { template = "task.yml", title_prefix = "[Docs]: " }
+# hotfix = { template = "bug_report.yml", surface = "cli", title_prefix = "[Hotfix]: ", labels = ["priority: high"] }
+
 # --- CLI aliases (issue #86) ------------------------------------------------
 # Mirror of `git config`'s `[alias]` block. Each entry maps a short
 # name to an argv-substituted expansion run BEFORE clap parses, so

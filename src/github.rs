@@ -197,6 +197,20 @@ pub struct IssueStatus {
   pub updated_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct IssueCreateRequest<'a> {
+  pub title: &'a str,
+  pub body_file: &'a std::path::Path,
+  pub labels: &'a [String],
+  pub repo: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedIssue {
+  pub number: u64,
+  pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {
   Open,
@@ -324,6 +338,48 @@ pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
     ISSUE_JSON_FIELDS,
   ])?;
   parse_issue_json(&stdout)
+}
+
+pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+  let mut cmd = Command::new("gh");
+  cmd
+    .arg("issue")
+    .arg("create")
+    .arg("--title")
+    .arg(req.title)
+    .arg("--body-file")
+    .arg(req.body_file);
+  for label in req.labels {
+    cmd.arg("--label").arg(label);
+  }
+  if let Some(repo) = req.repo {
+    cmd.arg("--repo").arg(repo);
+  }
+
+  let output = cmd
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "gh issue create exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+
+  let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+  let re = regex::Regex::new(r"/issues/(\d+)(?:\b|$)").expect("static issue URL regex compiles");
+  let Some(caps) = re.captures(&stdout) else {
+    return Err(GwmError::CommandFailed(format!(
+      "gh issue create did not print an issue URL containing a number: {}",
+      stdout
+    )));
+  };
+  let number = caps
+    .get(1)
+    .and_then(|m| m.as_str().parse::<u64>().ok())
+    .ok_or_else(|| GwmError::CommandFailed(format!("failed to parse issue number from gh output: {}", stdout)))?;
+  Ok(CreatedIssue { number, url: stdout })
 }
 
 /// Run `gh pr view <n> --repo <slug> --json …` and parse the result.
