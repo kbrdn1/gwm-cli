@@ -11,7 +11,7 @@
 //! ([`palette_entries`]) so neither surface can quietly drift from
 //! the other: an `Action` variant that exists in `keymap::ACTIONS`
 //! but not here would be reachable by key only, and vice versa.
-//! [`palette_entries_cover_every_action_variant`] in
+//! `registry_covers_every_action_variant` in
 //! `tests/palette_tests.rs` is the tripwire.
 
 use super::keymap::Action;

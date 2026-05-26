@@ -177,6 +177,14 @@ pub struct App {
   /// instead of being kicked out with exit code 1.
   pub picker_should_exit: bool,
 
+  /// Event-loop exit signal for `Action::Quit` fired from a path
+  /// that cannot itself `break` the loop (issue #32: the command
+  /// palette routes accepted actions through `run_action`, which
+  /// returns `Result<()>` and has no `break` channel). Set by
+  /// `run_action` when it sees `Action::Quit`; checked at the top
+  /// of every event-loop iteration alongside `picker_should_exit`.
+  pub should_quit: bool,
+
   /// Safety countdown state for the confirm overlay (issue #30, extracted
   /// per #125). Holds the timer anchor and exposes the pure state-machine
   /// API; this `App` keeps the side-effecting wrappers below that compose
@@ -262,6 +270,7 @@ impl App {
       picker_mode: false,
       picker_result: None,
       picker_should_exit: false,
+      should_quit: false,
       confirm: ConfirmModal::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),

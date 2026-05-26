@@ -277,13 +277,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
         _ => {}
       },
-      // Issue #32: command palette overlay. The palette captures
-      // every key as input (so the user can type `q`, `?`, `:` etc.
-      // as part of an action name) — only Esc / Enter / arrows
-      // exit. Successful accept routes the resolved action back
-      // through the SAME match arm the keymap dispatcher uses, so
-      // palette and key path fire identical side effects (no risk
-      // of the two surfaces drifting on a future feature).
+      // Issue #32: command palette overlay. Palette entry names
+      // are restricted to `[a-z0-9_-]` (see
+      // `tests/palette_tests.rs::registry_names_are_unique_and_lowercase_words`),
+      // so only those characters can usefully reach the buffer —
+      // any other typed character would just shrink the match set
+      // to empty. The accepted-character set is enforced explicitly
+      // here so a stray `:` (the palette's own trigger) doesn't
+      // self-append, and so future overlays (themes / fuzzy
+      // search) that share the input bar don't inherit a "swallow
+      // everything" contract by accident. Esc / Enter / arrows /
+      // Tab still exit or navigate; Backspace edits.
       View::CommandPalette => match key.code {
         KeyCode::Esc => app.close_command_palette(),
         KeyCode::Enter => {
@@ -294,7 +298,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         KeyCode::Up => app.palette_cycle_up(),
         KeyCode::Down | KeyCode::Tab => app.palette_cycle_down(),
         KeyCode::Backspace => app.palette_pop_char(),
-        KeyCode::Char(c) => app.palette_push_char(c),
+        KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+          app.palette_push_char(c);
+        }
+        // Any other char (including the palette trigger `:`, the
+        // help glyph `?`, uppercase letters) is dropped — there is
+        // no palette entry name that could match it. Silently
+        // ignoring is friendlier than appending and producing zero
+        // matches with no explanation.
+        KeyCode::Char(_) => {}
         _ => {}
       },
     }
@@ -305,6 +317,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // unconditional `break` after Enter that turned an empty-match
     // Enter into a surprise exit-1.
     if app.picker_should_exit {
+      break;
+    }
+    // Issue #32: `Action::Quit` fired from a non-keystroke path
+    // (the command palette accepting `:quit`) sets this flag via
+    // `run_action`. The keystroke path also breaks directly, so
+    // this branch only matters for palette / future-non-keystroke
+    // dispatchers.
+    if app.should_quit {
       break;
     }
   }
@@ -335,18 +355,23 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// this single funnel the two surfaces would inevitably drift: a
 /// future feature wired into one would silently miss the other.
 ///
-/// `Action::Quit` is **not** handled here — quitting needs `break`
-/// from the event loop, which `run_action` cannot do. Callers that
-/// can act on quit (the `View::List` keystroke path) match for it
-/// before invoking `run_action`; callers that cannot (the palette,
-/// which never fires Quit because it closes itself first) ignore
-/// the variant.
+/// `Action::Quit` raises `app.should_quit` so the event loop can
+/// honour it from any caller — the keystroke path can also just
+/// `break` directly, but the palette path delegates here and has
+/// no way to signal `break` through a `Result<()>`. The loop
+/// checks the flag at the top of every iteration (alongside
+/// `picker_should_exit`).
 fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, action: Action) -> Result<()> {
   match action {
-    // Quit is the event-loop's responsibility (see docstring). Treat
-    // it as a no-op here so the palette never gets stuck firing a
-    // verb it cannot honour.
-    Action::Quit => {}
+    // Issue #32: signal quit via `app.should_quit` so the palette
+    // path (which can't `break` from inside `run_action` →
+    // `accept_command_palette` → event-loop match) still exits the
+    // TUI when the user types `:quit`. The keystroke path also
+    // matches on `Action::Quit` and `break`s directly before
+    // calling `run_action`, so this branch is observationally a
+    // no-op for the `q` key — both paths converge on the loop
+    // exit.
+    Action::Quit => app.should_quit = true,
     Action::Down => app.next(),
     Action::Up => app.prev(),
     Action::Top => app.first(),

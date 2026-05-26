@@ -1413,11 +1413,12 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 
 /// Render the command palette overlay (issue #32).
 ///
-/// Layout: bottom 40% of the frame is dedicated to the palette —
-/// matches paragraph on top (scrolling vertically when the list is
-/// longer than the viewport), input bar pinned to the bottom row.
-/// The highlight follows the user's cycle key (`Up`/`Down`/`Tab`);
-/// `Enter` fires the highlighted entry, `Esc` cancels.
+/// Layout: a centered modal sized at 60% × 50% of the frame
+/// (matches the `centered(60, 50, …)` call below). Matches list
+/// occupies the top of the inner area, input bar is pinned to the
+/// bottom row. The highlight follows the user's cycle key
+/// (`Up` / `Down` / `Tab`); `Enter` fires the highlighted entry,
+/// `Esc` cancels.
 fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered(60, 50, f.area());
   f.render_widget(Clear, area);

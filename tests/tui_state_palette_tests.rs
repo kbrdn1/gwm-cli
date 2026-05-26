@@ -97,3 +97,23 @@ fn cycle_highlight_walks_matches() {
   app.palette_cycle_down();
   assert_ne!(app.palette.highlight(), first, "cycle_down must advance the highlight");
 }
+
+#[test]
+fn palette_quit_must_route_through_should_quit_flag() {
+  // Copilot review on PR #167 caught that `Action::Quit` was a
+  // no-op in `run_action`, so `:quit` from the palette never
+  // exited the TUI even though `quit` was a registered palette
+  // entry. The fix routes Quit through `App.should_quit`, which
+  // the event loop checks at the top of every iteration. Pin
+  // that the palette's accept produces `Action::Quit` on a `quit`
+  // input — the actual flag toggle happens inside the event-loop
+  // helper `run_action` and is exercised by the keystroke `q`
+  // path which already worked.
+  let (_dir, mut app) = make_app();
+  assert!(!app.should_quit, "fresh App must not be in quit state");
+  app.open_command_palette();
+  for c in "quit".chars() {
+    app.palette_push_char(c);
+  }
+  assert_eq!(app.accept_command_palette(), Some(Action::Quit));
+}
