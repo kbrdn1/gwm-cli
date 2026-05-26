@@ -161,7 +161,20 @@ impl Theme {
   /// unknown or `value` does not parse as a color. On `Ok` the
   /// targeted field is mutated in place.
   pub fn apply_override(&mut self, role: &str, value: &str) -> Result<()> {
-    let color = parse_color(value).map_err(|e| GwmError::Config(format!("theme.{}: {}", role, e)))?;
+    // Unwrap an inner `GwmError::Config` before re-wrapping so the
+    // user-visible error reads `config error: theme.<role>: …`
+    // rather than the duplicated `config error: theme.<role>:
+    // config error: …` that the naive `format!("…: {}", e)` would
+    // produce — the inner Display already carries the "config
+    // error:" prefix. Same pattern as `Config::validate_labels` /
+    // `validate_tui_keys` use elsewhere.
+    let color = parse_color(value).map_err(|e| {
+      let inner = match e {
+        GwmError::Config(msg) => msg,
+        other => other.to_string(),
+      };
+      GwmError::Config(format!("theme.{}: {}", role, inner))
+    })?;
     let slot = self
       .role_mut(role)
       .ok_or_else(|| GwmError::Config(format!("theme: unknown role {:?}", role)))?;
