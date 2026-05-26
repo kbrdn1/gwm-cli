@@ -6,10 +6,12 @@ mod app;
 /// actually depend on.
 #[doc(hidden)]
 pub mod commit_graph;
+pub mod keymap;
 pub mod state;
 mod ui;
 
 use crate::error::Result;
+use crate::tui::keymap::Action;
 use crossterm::{
   event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
   execute,
@@ -49,8 +51,8 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color, header_title,
-  issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines, table_marker,
-  tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  help_lines, issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines,
+  table_marker, tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
@@ -171,78 +173,87 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ => {}
       },
       View::List => {
-        // Two-keystroke vim motion `gg`: any non-'g' keypress disarms it.
-        if !matches!(key.code, KeyCode::Char('g')) {
+        // Esc and Enter stay hard-coded because their semantics are
+        // *contextual* (filter state, picker mode, sticky filter) —
+        // folding them into the user-rebindable keymap would require
+        // a modal grammar the config language cannot express. Their
+        // pre-#87 behaviour is preserved verbatim; both also drop
+        // any in-flight chord so a stray `g` followed by Esc never
+        // leaks state into the next view.
+        if key.code == KeyCode::Esc {
           app.cancel_pending_motion();
-        }
-        match key.code {
-          KeyCode::Char('q') => break,
-          // Esc on the list clears a sticky filter first, then quits if the
-          // list is already in its plain state. Avoids the trap where a user
-          // hits Esc expecting to clear /-filter and accidentally exits.
-          KeyCode::Esc => {
-            if !app.filter.query().is_empty() {
-              app.exit_filter_cancel();
-            } else {
-              break;
-            }
+          if !app.filter.query().is_empty() {
+            app.exit_filter_cancel();
+          } else {
+            break;
           }
-          KeyCode::Char('?') => app.view = View::Help,
-          KeyCode::Char('j') | KeyCode::Down => app.next(),
-          KeyCode::Char('k') | KeyCode::Up => app.prev(),
-          KeyCode::Char('g') => app.handle_g(),
-          KeyCode::Char('G') => app.last(),
-          KeyCode::Char('v') => app.toggle_sidebar(),
-          KeyCode::Tab => app.toggle_focus(),
-          KeyCode::Char('/') => app.enter_filter(),
-          KeyCode::Char('l') => {
-            // Issue #75: `l` is driven by the configurable `[git_tui]`
-            // launcher pipeline (default `lazygit -p {path}`,
-            // fullscreen=true). Replaces the old hardcoded lazygit call.
-            if let Some(plan) = app.prepare_git_tui() {
-              run_launcher(terminal, plan, &mut app)?;
-            }
+        } else if key.code == KeyCode::Enter {
+          app.cancel_pending_motion();
+          if app.picker_mode {
+            app.picker_confirm();
+          } else {
+            app.copy_path_to_status();
           }
-          // Issue #75 keybinding reshuffle (was `r` → refresh worktree list).
-          // `f` is the new mnemonic; the `r` alias is kept for muscle memory.
-          KeyCode::Char('f') | KeyCode::Char('r') => app.refresh()?,
-          // Mutating actions are inert in picker mode — the issue explicitly
-          // calls for a stripped-down picker that only navigates and selects.
-          KeyCode::Char('n') if !app.picker_mode => app.enter_create(),
-          KeyCode::Char('d') if !app.picker_mode => app.enter_confirm_delete(),
-          KeyCode::Char('b') if !app.picker_mode => app.bootstrap_selected(),
-          KeyCode::Char('p') if !app.picker_mode => app.toggle_delete_branch(),
-          KeyCode::Char('y') => yank_selected_path_to_clipboard(&mut app),
-          KeyCode::Char('o') => match app.resolve_open_target() {
-            None => app.status = "nothing selected".into(),
-            Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
-            Some(OpenTarget::Shell { path, command }) => {
-              run_subshell(terminal, &command, &[], Some(&path), &mut app, "shell")?
+        } else if let Some(action) = app.dispatch_key(key) {
+          // Issue #87: the View::List binding table is driven by the
+          // resolved keymap (`config.tui.keys` overrides on top of
+          // `Keymap::defaults`). The match below maps each Action to
+          // its side-effect; picker-mode-gated rows preserve the
+          // pre-#87 contract that `gwm switch` exposes a stripped-
+          // down picker (navigate + select, no mutations).
+          match action {
+            Action::Quit => break,
+            Action::Down => app.next(),
+            Action::Up => app.prev(),
+            Action::Top => app.first(),
+            Action::Bottom => app.last(),
+            Action::ToggleSidebar => app.toggle_sidebar(),
+            Action::FocusSwap => app.toggle_focus(),
+            Action::Filter => app.enter_filter(),
+            Action::Refresh => app.refresh()?,
+            Action::Help => app.view = View::Help,
+            Action::Yank => yank_selected_path_to_clipboard(&mut app),
+            Action::Open => match app.resolve_open_target() {
+              None => app.status = "nothing selected".into(),
+              Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
+              Some(OpenTarget::Shell { path, command }) => {
+                run_subshell(terminal, &command, &[], Some(&path), &mut app, "shell")?
+              }
+              Some(OpenTarget::Editor { path, command }) => {
+                let path_str = path.display().to_string();
+                run_subshell(terminal, &command, &[&path_str], None, &mut app, "editor")?
+              }
+            },
+            Action::GitTui => {
+              if let Some(plan) = app.prepare_git_tui() {
+                run_launcher(terminal, plan, &mut app)?;
+              }
             }
-            Some(OpenTarget::Editor { path, command }) => {
-              let path_str = path.display().to_string();
-              run_subshell(terminal, &command, &[&path_str], None, &mut app, "editor")?
+            // Mutating actions inert in picker mode.
+            Action::Create if !app.picker_mode => app.enter_create(),
+            Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
+            Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
+            Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
+            Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
+            Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
+            Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
+            Action::Review if !app.picker_mode => {
+              if let Some(plan) = app.prepare_review() {
+                run_launcher(terminal, plan, &mut app)?;
+              }
             }
-          },
-          // Issue/PR linking (issue #67).
-          KeyCode::Char('O') if !app.picker_mode => app.enter_open_menu(),
-          KeyCode::Char('L') if !app.picker_mode => app.enter_link_prompt(),
-          // Issue #75 reshuffle: `F` is the new mnemonic for "fetch GitHub
-          // status" (was `R`). `R` now triggers the configured review tool.
-          KeyCode::Char('F') if !app.picker_mode => app.refresh_github_status(),
-          KeyCode::Char('R') if !app.picker_mode => {
-            if let Some(plan) = app.prepare_review() {
-              run_launcher(terminal, plan, &mut app)?;
-            }
+            // Reserved for #32 — bound to `:` by default, currently a
+            // no-op until the command palette overlay lands. Surfacing
+            // it here (rather than dropping it from the keymap) keeps
+            // the `gwm tui keys` output stable across the #87 → #32
+            // boundary.
+            Action::CommandPalette => {}
+            // Picker-mode-gated actions fall through to no-op when
+            // the guard fails (i.e. the user pressed them inside
+            // `gwm switch`). Same fallthrough catches future actions
+            // not yet wired into the List view.
+            _ => {}
           }
-          KeyCode::Enter => {
-            if app.picker_mode {
-              app.picker_confirm();
-            } else {
-              app.copy_path_to_status();
-            }
-          }
-          _ => {}
         }
       }
       View::Help => match key.code {

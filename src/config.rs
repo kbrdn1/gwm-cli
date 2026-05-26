@@ -426,6 +426,14 @@ pub struct TuiConfig {
   /// kept available under `mode = "finder"`.
   #[serde(default)]
   pub open: TuiOpenConfig,
+
+  /// `[tui.keys]` sub-table (issue #87) — user overrides for the
+  /// remappable keymap. Absent → keymap stays at the built-in
+  /// defaults. Present → every listed action *replaces* its default
+  /// binding set; actions left unmentioned keep their defaults. An
+  /// empty array (`down = []`) unbinds the action entirely.
+  #[serde(default)]
+  pub keys: TuiKeysConfig,
 }
 
 impl Default for TuiConfig {
@@ -433,7 +441,65 @@ impl Default for TuiConfig {
     Self {
       confirm_countdown_secs: default_confirm_countdown_secs(),
       open: TuiOpenConfig::default(),
+      keys: TuiKeysConfig::default(),
     }
+  }
+}
+
+/// `[tui.keys]` — user-facing override table for the TUI keymap.
+/// Stored as `action-slug -> [chord, …]` so the TOML stays declarative
+/// and copy-pastable across machines.
+///
+/// Resolution / validation happens in [`Self::resolved_keymap`], which
+/// is called from `Config::load_for_repo` so a malformed override is
+/// surfaced at load time (action name typos, parse errors, chord
+/// conflicts, prefix collisions) rather than as a silent no-op in the
+/// TUI. The raw map is preserved on `Self` so `gwm tui keys` can show
+/// both the user's source and the resolved bindings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TuiKeysConfig {
+  pub bindings: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl TuiKeysConfig {
+  /// Apply this user override layer on top of the built-in defaults.
+  /// Returns a fully-resolved [`crate::tui::keymap::Keymap`] ready to
+  /// hand to the TUI event loop.
+  pub fn resolved_keymap(&self) -> Result<crate::tui::keymap::Keymap> {
+    use crate::tui::keymap::{Action, KeyStroke, Keymap};
+
+    let mut km = Keymap::defaults();
+    for (action_slug, chord_strings) in &self.bindings {
+      let action = Action::from_slug(action_slug).ok_or_else(|| {
+        GwmError::Config(format!(
+          "tui.keys: unknown action {:?} (run `gwm tui keys` for the full list)",
+          action_slug
+        ))
+      })?;
+      let mut parsed = Vec::with_capacity(chord_strings.len());
+      for chord_str in chord_strings {
+        let chord = KeyStroke::parse_chord(chord_str).map_err(|e| {
+          // Re-wrap so the user sees `tui.keys.<action>` as the
+          // coordinate rather than the bare "keymap:" prefix from
+          // the parser.
+          let inner = match e {
+            GwmError::Config(msg) => msg,
+            other => other.to_string(),
+          };
+          GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
+        })?;
+        parsed.push(chord);
+      }
+      km.apply_override(action, parsed).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
+      })?;
+    }
+    Ok(km)
   }
 }
 
@@ -522,7 +588,19 @@ impl Config {
     cfg.validate_bootstrap_guards()?;
     cfg.validate_labels()?;
     cfg.validate_aliases()?;
+    cfg.validate_tui_keys()?;
     Ok(cfg)
+  }
+
+  /// Reject `[tui.keys]` entries that name an unknown action, list a
+  /// chord that does not parse, or create a conflict / prefix
+  /// collision with another binding (issue #87). Delegates to
+  /// [`TuiKeysConfig::resolved_keymap`] which does the full layering +
+  /// validation in one pass — the resolved keymap is discarded here
+  /// (it's rebuilt by the TUI at startup); the call is only kept for
+  /// its error side-effects.
+  pub(crate) fn validate_tui_keys(&self) -> Result<()> {
+    self.tui.keys.resolved_keymap().map(|_| ())
   }
 
   /// Reject `[aliases]` entries that shadow built-in subcommands, are

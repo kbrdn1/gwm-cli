@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add lifecycle hooks under `[hooks.*]` for create/bootstrap/remove phases, with placeholders, per-step `on_fail`, `--skip-hooks`, and legacy `[[bootstrap.command]]` compatibility as `post_create`.
 - Add `[issue_template]` defaults plus `gwm new <type> <desc>` to create a GitHub issue from issue-form templates and immediately create the linked worktree.
 - Add `[pr_template]` defaults plus `gwm pr [--draft] [--base <ref>] [--render]` to render per-branch-type PR bodies (with `{commits}` / `{files_changed}` placeholders) and shell out to `gh pr create`.
+- Add `[tui.keys]` block in `.gwm.toml` to rebind every TUI list-view action (`down`, `up`, `top`, `bottom`, `quit`, …) with crossterm-grammar keys, including multi-key chords like `g g`. Overrides are validated at load time (unknown actions, parse errors, chord conflicts, and prefix collisions are hard errors). Adds `gwm tui keys` to print the resolved keymap with per-row source, a `gwm doctor` check for unbound `quit`, and a keymap-driven help overlay (`?`) so the documentation always matches the resolved bindings.
 
 ## Past releases
 

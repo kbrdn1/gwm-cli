@@ -787,3 +787,65 @@ fn orphan_check_ignores_configured_trunks_that_do_not_exist() {
   let c = report.checks.iter().find(|c| c.name.contains("orphan")).unwrap();
   assert_eq!(c.status, CheckStatus::Ok);
 }
+
+// --- TUI keymap check (issue #87) ---------------------------------------
+
+#[test]
+fn doctor_passes_with_default_keymap() {
+  // No `[tui.keys]` overrides → the resolved keymap is the built-in
+  // default. Every required action is bound, so the check is green.
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check in the report");
+  assert_eq!(
+    c.status,
+    CheckStatus::Ok,
+    "default keymap must pass cleanly, got: {} — {}",
+    match c.status {
+      CheckStatus::Ok => "ok",
+      CheckStatus::Warning => "warning",
+      CheckStatus::Failed => "failed",
+    },
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_warns_when_user_unbinds_quit() {
+  // `quit` is the only action with a hard-coded escape hatch
+  // (`Ctrl+C` in `run_app`). Even so, leaving it without any other
+  // binding is hostile UX: warn the user so they can either restore
+  // a binding or acknowledge the choice.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[tui.keys]
+quit = []
+"#,
+  )
+  .unwrap();
+  let config = Config::load_for_repo(dir.path()).unwrap();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check in the report");
+  assert_eq!(c.status, CheckStatus::Warning);
+  assert!(
+    c.detail.to_lowercase().contains("quit"),
+    "expected message to name the missing action, got: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.to_lowercase().contains("ctrl"),
+    "expected message to mention the Ctrl+C fallback, got: {}",
+    c.detail
+  );
+}

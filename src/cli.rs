@@ -447,6 +447,39 @@ pub enum Command {
     #[arg(long)]
     bootstrap: bool,
   },
+  /// TUI introspection / debugging subcommands (issue #87).
+  ///
+  /// Today exposes a single child — `keys` — which prints the
+  /// resolved keymap (built-in defaults layered with `[tui.keys]`
+  /// overrides from `.gwm.toml`). Reserved as a sub-tree so future
+  /// TUI knobs (`gwm tui themes`, `gwm tui dump-state`, …) have a
+  /// stable home without further crowding the top-level surface.
+  Tui {
+    #[command(subcommand)]
+    action: TuiAction,
+  },
+}
+
+/// Subcommands of `gwm tui` (issue #87).
+#[derive(Debug, Subcommand)]
+pub enum TuiAction {
+  /// Print the resolved TUI keymap (built-in defaults + `[tui.keys]`
+  /// overrides, with the source per row).
+  ///
+  /// Output shape:
+  /// ```text
+  /// action            keys              source
+  /// down              j, Down           default
+  /// up                Ctrl+n            .gwm.toml
+  /// top               g g               default
+  /// …
+  /// ```
+  ///
+  /// The action column lists the slugs accepted in `[tui.keys]`;
+  /// the keys column shows every chord bound to that action
+  /// (comma-separated). Empty keys = action is currently unbound
+  /// (the user explicitly cleared it).
+  Keys,
 }
 
 /// Subcommands of `gwm aliases` (issue #86). Read-only for now —
@@ -713,7 +746,90 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Config { action } => cmd_config(action),
     Command::History { limit, all } => cmd_history(limit, all),
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
+    Command::Tui { action } => cmd_tui(action),
   }
+}
+
+fn cmd_tui(action: TuiAction) -> Result<()> {
+  match action {
+    TuiAction::Keys => cmd_tui_keys(),
+  }
+}
+
+/// Print the resolved TUI keymap as a 3-column table.
+///
+/// Resolves `[tui.keys]` against the current repo's `.gwm.toml`
+/// (falling back to bare defaults if there is no `.gwm.toml` and to
+/// repo-less defaults when invoked outside any repo, so the command
+/// is useful even before a project is set up). The output is the
+/// human-readable side of the keymap surface — `gwm doctor` (issue
+/// #87 part 8) consumes the same `Keymap::list()` API for its
+/// validation pass, so the column contents stay in sync.
+fn cmd_tui_keys() -> Result<()> {
+  use crate::tui::keymap::{Keymap, Source};
+
+  // Build the resolved keymap. Outside a repo, OR inside a bare
+  // repo (no workdir to read `.gwm.toml` from), fall back to
+  // defaults so the command stays useful for new users discovering
+  // the binary. Same fallback path either way — surfacing
+  // `NotInGitRepo` on a bare repo would be misleading because the
+  // command itself is repo-agnostic.
+  let keymap = match worktree::discover_repo(None) {
+    Ok(repo) => match repo.workdir() {
+      Some(workdir) => {
+        let cfg = Config::load_for_repo(workdir)?;
+        cfg.tui.keys.resolved_keymap()?
+      }
+      None => Keymap::defaults(),
+    },
+    Err(_) => Keymap::defaults(),
+  };
+
+  let rows = keymap.list();
+  // Column widths sized to the longest content so the table stays
+  // aligned even when a chord runs long (`Ctrl+Alt+Shift+F12`).
+  let action_w = rows
+    .iter()
+    .map(|b| b.action.slug().len())
+    .max()
+    .unwrap_or(0)
+    .max("action".len());
+  let keys_w = rows
+    .iter()
+    .map(|b| {
+      b.chords
+        .iter()
+        .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(", ")
+        .len()
+    })
+    .max()
+    .unwrap_or(0)
+    .max("keys".len());
+
+  println!("{:<aw$}  {:<kw$}  source", "action", "keys", aw = action_w, kw = keys_w);
+  for binding in rows {
+    let keys = binding
+      .chords
+      .iter()
+      .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+      .collect::<Vec<_>>()
+      .join(", ");
+    let source = match binding.source {
+      Source::Default => "default",
+      Source::UserConfig => ".gwm.toml",
+    };
+    println!(
+      "{:<aw$}  {:<kw$}  {}",
+      binding.action.slug(),
+      keys,
+      source,
+      aw = action_w,
+      kw = keys_w
+    );
+  }
+  Ok(())
 }
 
 fn cmd_init() -> Result<()> {
