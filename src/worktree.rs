@@ -639,8 +639,6 @@ pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usi
   Ok(out)
 }
 
-/// Shell out to `git status --short` inside `path` and return raw stdout.
-/// Used by the TUI sidebar to preview the working-tree state.
 /// One row of `git stash list` (issue #34). Surfaced by the sidebar
 /// in stashes mode. Kept deliberately minimal — `ref_name` so the user
 /// can copy `stash@{N}` to the status bar, `subject` so they can tell
@@ -671,10 +669,17 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   // or git ref name, so it's a safe per-field delimiter — same
   // technique `git_log_with_author` uses with `\x1c` for record
   // separation.
+  //
+  // Pass `-n <limit>` (a `git log` option `stash list` forwards
+  // through) so a repo with hundreds of stashes doesn't materialise
+  // the full list in stdout just for the panel to drop everything
+  // past the cap. Pre-review the limit was applied client-side after
+  // the full stdout was read.
+  let limit_arg = format!("-n{}", limit);
   let output = Command::new("git")
     .arg("-C")
     .arg(path)
-    .args(["stash", "list", "--pretty=format:%gd\x1f%s"])
+    .args(["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])
     .output()
     .map_err(|e| GwmError::CommandFailed(format!("git stash list failed to spawn: {}", e)))?;
   if !output.status.success() {
@@ -699,6 +704,8 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
+/// Shell out to `git status --short` inside `path` and return raw stdout.
+/// Used by the TUI sidebar to preview the working-tree state.
 pub fn git_status_short(path: &Path) -> Result<String> {
   let output = Command::new("git")
     .arg("-C")

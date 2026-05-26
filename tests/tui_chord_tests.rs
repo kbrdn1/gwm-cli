@@ -136,9 +136,16 @@ fn help_overlay_lists_toggle_sidebar_mode() {
     .iter()
     .find(|l| l.contains("sidebar mode") || l.contains("stash") || l.contains("toggle_sidebar_mode"))
     .unwrap_or_else(|| panic!("expected a sidebar-mode row in:\n{}", lines.join("\n")));
+  // Target the keys column specifically. `help_lines` formats every
+  // row as `  {keys:<13} {label}`, so the default `s` binding
+  // surfaces as exactly `"  s            "` at the row start.
+  // Pre-review the assertion was `row.contains('s')`, which passed
+  // trivially because the description carries words like
+  // "stashes" / "sidebar" — a regression in the binding column
+  // would not have failed.
   assert!(
-    row.contains('s'),
-    "expected the default `s` binding to appear, got: {row}"
+    row.starts_with("  s ") || row.starts_with("  s\t"),
+    "expected the default `s` binding in the keys column, got: {row}"
   );
 }
 
