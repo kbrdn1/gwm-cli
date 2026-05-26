@@ -14,7 +14,12 @@ use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
+use std::ffi::{OsStr, OsString};
 use std::process::Command;
+use std::sync::LazyLock;
+
+static ISSUE_URL_RE: LazyLock<regex::Regex> =
+  LazyLock::new(|| regex::Regex::new(r"/issues/(\d+)(?:\b|$)").expect("static issue URL regex compiles"));
 
 const ISSUE_CONFIG_KEY: &str = "gwm-issue";
 const PR_CONFIG_KEY: &str = "gwm-pr";
@@ -197,6 +202,20 @@ pub struct IssueStatus {
   pub updated_at: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct IssueCreateRequest<'a> {
+  pub title: &'a str,
+  pub body_file: &'a std::path::Path,
+  pub labels: &'a [String],
+  pub repo: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreatedIssue {
+  pub number: u64,
+  pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrState {
   Open,
@@ -314,7 +333,7 @@ const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusChe
 
 /// Run `gh issue view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
-  let stdout = run_gh(&[
+  let stdout = run_gh([
     "issue",
     "view",
     &number.to_string(),
@@ -326,9 +345,44 @@ pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
   parse_issue_json(&stdout)
 }
 
+fn gh_command() -> Command {
+  Command::new(std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into()))
+}
+
+pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+  let mut args: Vec<OsString> = Vec::with_capacity(6 + 2 * req.labels.len() + if req.repo.is_some() { 2 } else { 0 });
+  args.push("issue".into());
+  args.push("create".into());
+  args.push("--title".into());
+  args.push(req.title.into());
+  args.push("--body-file".into());
+  args.push(req.body_file.as_os_str().to_owned());
+  for label in req.labels {
+    args.push("--label".into());
+    args.push(label.into());
+  }
+  if let Some(repo) = req.repo {
+    args.push("--repo".into());
+    args.push(repo.into());
+  }
+  let stdout = run_gh(&args)?;
+  let stdout = stdout.trim().to_string();
+  let Some(caps) = ISSUE_URL_RE.captures(&stdout) else {
+    return Err(GwmError::CommandFailed(format!(
+      "gh issue create did not print an issue URL containing a number: {}",
+      stdout
+    )));
+  };
+  let number = caps
+    .get(1)
+    .and_then(|m| m.as_str().parse::<u64>().ok())
+    .ok_or_else(|| GwmError::CommandFailed(format!("failed to parse issue number from gh output: {}", stdout)))?;
+  Ok(CreatedIssue { number, url: stdout })
+}
+
 /// Run `gh pr view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
-  let stdout = run_gh(&[
+  let stdout = run_gh([
     "pr",
     "view",
     &number.to_string(),
@@ -346,7 +400,7 @@ pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
 /// `Ok(None)` otherwise. Callers that need state-aware filtering should
 /// pair this with `fetch_pr` to inspect `PrState` afterwards.
 pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
-  let stdout = run_gh(&[
+  let stdout = run_gh([
     "pr", "list", "--repo", slug, "--head", branch, "--state", "all", "--json", "number", "--limit", "1",
   ])?;
   #[derive(Deserialize)]
@@ -360,8 +414,12 @@ pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
   Ok(arr.into_iter().next().map(|p| p.number))
 }
 
-fn run_gh(args: &[&str]) -> Result<String> {
-  let output = Command::new("gh")
+fn run_gh<I, S>(args: I) -> Result<String>
+where
+  I: IntoIterator<Item = S>,
+  S: AsRef<OsStr>,
+{
+  let output = gh_command()
     .args(args)
     .output()
     .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;

@@ -7,6 +7,7 @@ use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrSta
 use crate::gitmoji;
 use crate::history::{self, OpEntry};
 use crate::hooks;
+use crate::issue_templates;
 use crate::labels::{self, LabelDiff};
 use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::milestones::{self, MilestoneDiff};
@@ -99,6 +100,24 @@ pub enum Command {
     /// same name instead of refusing (issue #99). Off by default — a
     /// pre-existing branch ends `gwm create` with an error naming the
     /// stale tip so the user can audit it.
+    #[arg(long)]
+    reuse_branch: bool,
+    /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
+  },
+  /// Create a GitHub issue from templates, then create its worktree.
+  New {
+    /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
+    #[arg()]
+    branch_type: String,
+    /// Short description (kebab-case, will be normalized).
+    #[arg()]
+    desc: String,
+    /// Skip bootstrap after creation.
+    #[arg(long)]
+    no_bootstrap: bool,
+    /// Attach the new worktree to an already-existing local branch of the same name.
     #[arg(long)]
     reuse_branch: bool,
     /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
@@ -619,6 +638,13 @@ pub fn run(cli: Cli) -> Result<()> {
       reuse_branch,
       skip_hooks,
     } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
+    Command::New {
+      branch_type,
+      desc,
+      no_bootstrap,
+      reuse_branch,
+      skip_hooks,
+    } => cmd_new(branch_type, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
     Command::Remove {
       pattern,
       delete_branch,
@@ -820,6 +846,57 @@ fn cmd_create(
   let report = lifecycle::run_phase(&config, HookPhase::PostCreate, &post_ctx, &skips, !no_bootstrap)?;
   print_lifecycle_report(&report);
   Ok(())
+}
+
+fn cmd_new(
+  branch_type: String,
+  desc: String,
+  no_bootstrap: bool,
+  reuse_branch: bool,
+  skip_hooks: Option<String>,
+  trust_mode: TrustMode,
+) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let repo_name = worktree::repo_name(&repo);
+  let config = Config::load_for_repo(&workdir)?;
+  let resolved_types = config.resolved_branch_types();
+  let spec = BranchSpec::new_with_types(branch_type.clone(), "0", desc, &resolved_types.types)?;
+  let draft = issue_templates::render_issue_draft(&repo, &config, &spec.type_, &spec.desc)?;
+  let slug = github::repo_slug(&repo).ok();
+  let created = github::create_issue(&github::IssueCreateRequest {
+    title: &draft.title,
+    body_file: draft.body_file.path(),
+    labels: &draft.labels,
+    repo: slug.as_deref(),
+  })?;
+
+  let label_summary = if draft.labels.is_empty() {
+    String::new()
+  } else {
+    format!(" (labels: {})", draft.labels.join(", "))
+  };
+  println!("✓ created issue #{} {}{}", created.number, draft.title, label_summary);
+  let issue = created.number.to_string();
+  let branch = BranchSpec::new_with_types(
+    spec.type_.clone(),
+    issue.clone(),
+    spec.desc.clone(),
+    &resolved_types.types,
+  )?
+  .branch_name(&config.worktree, &repo_name)?;
+  println!("  {}", created.url);
+  println!("creating linked worktree for {}", branch);
+
+  cmd_create(
+    spec.type_,
+    issue,
+    spec.desc,
+    no_bootstrap,
+    reuse_branch,
+    skip_hooks,
+    trust_mode,
+  )
 }
 
 /// Render the would-do plan for `gwm remove --dry-run` (issue #31).

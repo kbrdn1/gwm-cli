@@ -60,6 +60,8 @@ pub struct Config {
   /// by `gwm types --gitmoji` and `gwm commit-prefix`.
   #[serde(default)]
   pub gitmoji: BTreeMap<String, String>,
+  #[serde(default)]
+  pub issue_template: IssueTemplateConfig,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -108,6 +110,28 @@ pub struct MilestoneConfig {
 pub struct BranchType {
   pub name: String,
   pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTemplateConfig {
+  #[serde(default)]
+  pub default: Option<String>,
+  #[serde(default)]
+  pub by_type: BTreeMap<String, IssueTemplateTypeConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTemplateTypeConfig {
+  #[serde(default)]
+  pub template: Option<String>,
+  #[serde(default)]
+  pub surface: Option<String>,
+  #[serde(default)]
+  pub title_prefix: Option<String>,
+  #[serde(default)]
+  pub labels: Vec<String>,
 }
 
 /// Origin of the resolved branch-type list — surfaced verbatim under
