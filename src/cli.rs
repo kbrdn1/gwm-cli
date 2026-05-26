@@ -1021,16 +1021,27 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
   Ok(())
 }
 
-/// Pick the first `trunks` entry that resolves to a local branch in
-/// `repo`. Returns `None` if the list is empty or no entry exists —
-/// the caller falls back to `"main"` so a freshly-init'd repo doesn't
-/// trip on the `[doctor].trunks` default of `["dev", "main"]` (issue
-/// #84: the trunk list was added for `gwm doctor`, but `gwm pr` is the
-/// first feature that *requires* a base ref to actually exist).
+/// Pick a base ref for `gwm pr` by walking the configured `[doctor].trunks`
+/// list first, then the common defaults (`main`, `master`, `dev`,
+/// `develop`, `trunk`) so a repo whose local trunk is `master` and which
+/// hasn't customised `[doctor]` doesn't fall back to a non-existent
+/// `"main"`. Returns `None` only if none of the candidates resolve to a
+/// local branch — the caller then uses `"main"` as a last resort so the
+/// downstream `gh pr create --base main` produces a clean error message
+/// instead of a panic.
 fn resolve_pr_base(repo: &Repository, trunks: &[String]) -> Option<String> {
+  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
   for trunk in trunks {
     if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
       return Some(trunk.clone());
+    }
+  }
+  for trunk in COMMON_TRUNKS {
+    if trunks.iter().any(|t| t == trunk) {
+      continue; // already tried as a configured trunk above
+    }
+    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
+      return Some((*trunk).to_string());
     }
   }
   None

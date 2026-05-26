@@ -3656,6 +3656,44 @@ body = "draft body for {desc}"
 }
 
 #[test]
+fn pr_falls_back_to_common_trunk_when_configured_trunks_do_not_resolve() {
+  // If `[doctor].trunks` only lists refs that don't exist locally
+  // (e.g. a repo customised the list but the trunk hasn't been
+  // created yet, or the repo uses `master`), `gwm pr` must still
+  // find a sensible base ref by walking the common trunk names
+  // (`main` / `master` / `dev` / `develop` / `trunk`) before giving
+  // up — otherwise `{commits}` / `{files_changed}` come out empty
+  // and the user has no signal as to why (Copilot review on PR #164).
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-fallback",
+    "src/fallback.rs",
+    "fn fb() {}\n",
+    "✨ feat: fallback",
+  );
+
+  let body = r###"
+[doctor]
+trunks = ["nonexistent-trunk"]
+
+[pr_template.by_type.feat]
+body = "summary: {desc} (#{issue})\ncommits:\n{commits}\n"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("fallback (#84)"))
+    .stdout(predicate::str::contains("- ✨ feat: fallback"));
+}
+
+#[test]
 fn pr_errors_when_no_template_configured() {
   // Without any `[pr_template]` block in `.gwm.toml`, `gwm pr` exits
   // non-zero with a hint about the missing config — same shape as the
