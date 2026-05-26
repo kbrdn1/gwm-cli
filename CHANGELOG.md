@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
+### Added
+
+- Add `gwm config get/set/unset/list/validate/path/edit` for git-config-style `.gwm.toml` reads and comment-preserving edits.
 
 ## Past releases
 

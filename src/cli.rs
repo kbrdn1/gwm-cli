@@ -1,5 +1,6 @@
 use crate::bootstrap::{self, BootstrapCtx};
 use crate::config::Config;
+use crate::config_cli;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
@@ -349,6 +350,11 @@ pub enum Command {
     #[command(subcommand)]
     action: AliasesAction,
   },
+  /// Read, edit, and validate `.gwm.toml` values (issue #89).
+  Config {
+    #[command(subcommand)]
+    action: ConfigAction,
+  },
   /// List the recent destructive operations recorded by `gwm`
   /// (issue #29). One line per op, newest first, with timestamp,
   /// kind, and worktree name.
@@ -397,6 +403,40 @@ pub enum AliasesAction {
   /// declares which mapping and where they need to edit to change
   /// it.
   List,
+}
+
+/// Subcommands of `gwm config` (issue #89).
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+  /// Print a single value resolved from `.gwm.toml` plus defaults.
+  Get {
+    /// Dot-path key, e.g. `worktree.base` or `labels[0].name`.
+    key: String,
+  },
+  /// Set a value while preserving TOML comments and formatting.
+  Set {
+    /// Dot-path key, e.g. `tui.confirm_countdown_secs`, `labels[+].name`, or `key=value`.
+    key: String,
+    /// TOML scalar value. Bare strings are accepted for convenience.
+    value: Option<String>,
+  },
+  /// Remove a value so the runtime default applies.
+  Unset {
+    /// Dot-path key to remove.
+    key: String,
+  },
+  /// List resolved config values.
+  List {
+    /// Only print keys under this dot-path prefix.
+    #[arg(long)]
+    prefix: Option<String>,
+  },
+  /// Validate `.gwm.toml` syntax and schema.
+  Validate,
+  /// Print the resolved `.gwm.toml` path.
+  Path,
+  /// Open `.gwm.toml` in `$EDITOR`.
+  Edit,
 }
 
 /// Subcommands of `gwm hooks` (issue #85). The split anticipates
@@ -598,6 +638,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Milestones { action } => cmd_milestones(action),
     Command::Trust { action } => cmd_trust(action),
     Command::Aliases { action } => cmd_aliases(action),
+    Command::Config { action } => cmd_config(action),
     Command::History { limit, all } => cmd_history(limit, all),
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
   }
@@ -1984,6 +2025,18 @@ fn print_bootstrap_summary(cfg: &Config) {
 fn cmd_aliases(action: AliasesAction) -> Result<()> {
   match action {
     AliasesAction::List => cmd_aliases_list(),
+  }
+}
+
+fn cmd_config(action: ConfigAction) -> Result<()> {
+  match action {
+    ConfigAction::Get { key } => config_cli::get(&key),
+    ConfigAction::Set { key, value } => config_cli::set(&key, value.as_deref()),
+    ConfigAction::Unset { key } => config_cli::unset(&key),
+    ConfigAction::List { prefix } => config_cli::list(prefix.as_deref()),
+    ConfigAction::Validate => config_cli::validate(),
+    ConfigAction::Path => config_cli::path(),
+    ConfigAction::Edit => config_cli::edit(),
   }
 }
 
