@@ -340,8 +340,12 @@ pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
   parse_issue_json(&stdout)
 }
 
+fn gh_command() -> Command {
+  Command::new(std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into()))
+}
+
 pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
-  let mut cmd = Command::new("gh");
+  let mut cmd = gh_command();
   cmd
     .arg("issue")
     .arg("create")
@@ -417,7 +421,7 @@ pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
 }
 
 fn run_gh(args: &[&str]) -> Result<String> {
-  let output = Command::new("gh")
+  let output = gh_command()
     .args(args)
     .output()
     .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;

@@ -1659,7 +1659,7 @@ fn new_creates_issue_from_template_then_creates_worktree() {
   let (dir, _repo) = init_repo();
   let base = tempfile::TempDir::new().unwrap();
   let fake_bin = tempfile::TempDir::new().unwrap();
-  write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/issues/142\n");
+  let fake_gh = write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/issues/142\n");
   fs::create_dir_all(dir.path().join(".github/ISSUE_TEMPLATE")).unwrap();
   fs::write(
     dir.path().join(".github/ISSUE_TEMPLATE/feature_request.yml"),
@@ -1708,6 +1708,7 @@ feat = {{ template = "feature_request.yml", surface = "cli", title_prefix = "[Fe
     .unwrap()
     .current_dir(dir.path())
     .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
     .args(["new", "feat", "add-config-types", "--no-bootstrap"])
     .assert()
