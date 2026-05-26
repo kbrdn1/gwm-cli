@@ -208,6 +208,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
             Action::Top => app.first(),
             Action::Bottom => app.last(),
             Action::ToggleSidebar => app.toggle_sidebar(),
+            Action::ToggleSidebarMode => app.cycle_sidebar_mode(),
             Action::FocusSwap => app.toggle_focus(),
             Action::Filter => app.enter_filter(),
             Action::Refresh => app.refresh()?,

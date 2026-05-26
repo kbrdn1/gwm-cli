@@ -104,6 +104,7 @@ define_actions! {
   Top               => "top",
   Bottom            => "bottom",
   ToggleSidebar     => "toggle_sidebar",
+  ToggleSidebarMode => "toggle_sidebar_mode",
   FocusSwap         => "focus_swap",
   // Filter
   Filter            => "filter",
@@ -353,6 +354,7 @@ impl Keymap {
       def(Action::Top, &["g g"]),
       def(Action::Bottom, &["G", "End"]),
       def(Action::ToggleSidebar, &["v"]),
+      def(Action::ToggleSidebarMode, &["s"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),

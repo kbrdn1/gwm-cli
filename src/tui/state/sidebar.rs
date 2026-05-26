@@ -34,6 +34,35 @@
 use crate::tui::ui::SidebarSections;
 use std::path::PathBuf;
 
+/// Which content the sidebar previews (issue #34).
+///
+/// Toggled with the `s` key in the list view, dispatched through
+/// `Action::ToggleSidebarMode` in the rebindable keymap. Default is
+/// `Commits` so the pre-#34 sidebar behaviour is preserved verbatim.
+/// The mode is per-session — not persisted across `gwm` launches —
+/// because the low-frequency need to view stashes does not justify a
+/// new `.gwm.toml` knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SidebarMode {
+  /// `git log --oneline -n 10` + `git status --short`. Pre-#34
+  /// behaviour, kept as the default so existing users see no change
+  /// until they press `s`.
+  Commits,
+  /// `git stash list` + a per-stash quick view. New in #34.
+  Stashes,
+}
+
+impl SidebarMode {
+  /// Human-readable label rendered into the sidebar title bar
+  /// (` Details — commits ` vs. ` Details — stashes `).
+  pub fn label(self) -> &'static str {
+    match self {
+      SidebarMode::Commits => "commits",
+      SidebarMode::Stashes => "stashes",
+    }
+  }
+}
+
 /// Pure sidebar state. Use [`Self::new`] (or the [`Default`] impl below)
 /// to get the initial state that matches the previous `App::new_at`
 /// behaviour (open + unfocused + zero scroll + cold cache) — the
@@ -61,12 +90,19 @@ pub struct SidebarState {
   /// be pushed entirely off-screen.
   pub max_scroll: u16,
   /// Cached pre-rendered sections keyed by the selected worktree's
-  /// path. `None` = cold cache (the renderer will rebuild and store).
-  /// Invalidated on selection change ([`Self::on_navigation`]),
-  /// worktree list mutation (`App::refresh` calls [`Self::invalidate`]),
-  /// and filter narrowing (`App::filter_push_char` /
-  /// `filter_pop_char`).
-  pub cache: Option<(PathBuf, SidebarSections)>,
+  /// path **and** the active mode (issue #34). `None` = cold cache
+  /// (the renderer will rebuild and store). Invalidated on selection
+  /// change ([`Self::on_navigation`]), worktree list mutation
+  /// (`App::refresh` calls [`Self::invalidate`]), filter narrowing
+  /// (`App::filter_push_char` / `filter_pop_char`), and mode toggle
+  /// ([`Self::cycle_mode`]). Two-tuple key so a re-toggle re-shells
+  /// `git stash list` / `git log` rather than serving stale content
+  /// for the other mode.
+  pub cache: Option<((PathBuf, SidebarMode), SidebarSections)>,
+  /// Active preview mode. Defaults to [`SidebarMode::Commits`] so the
+  /// pre-#34 sidebar behaviour is unchanged until the user presses
+  /// `s`. Toggled by [`Self::cycle_mode`].
+  pub mode: SidebarMode,
 }
 
 impl Default for SidebarState {
@@ -83,7 +119,24 @@ impl SidebarState {
       scroll: 0,
       max_scroll: 0,
       cache: None,
+      mode: SidebarMode::Commits,
     }
+  }
+
+  /// Cycle the preview mode (issue #34). Pre-#34 the sidebar only
+  /// ever showed `git log` + `git status`; now `s` flips between
+  /// `Commits` and `Stashes`. The scroll offset resets to 0 because
+  /// the new content has its own length and the previous offset
+  /// becomes meaningless. The cache is invalidated because the key
+  /// (path + mode) changes — the new mode re-shells the right git
+  /// command on the next frame.
+  pub fn cycle_mode(&mut self) {
+    self.mode = match self.mode {
+      SidebarMode::Commits => SidebarMode::Stashes,
+      SidebarMode::Stashes => SidebarMode::Commits,
+    };
+    self.scroll = 0;
+    self.cache = None;
   }
 
   /// Navigation-driven reset: drop the scroll back to the top AND

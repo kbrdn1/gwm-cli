@@ -19,7 +19,7 @@
 //!   in a single `App::on_navigation()` wrapper so the triple cannot
 //!   drift back into duplicated literals.
 
-use gwm::tui::state::sidebar::SidebarState;
+use gwm::tui::state::sidebar::{SidebarMode, SidebarState};
 use gwm::tui::SidebarSections;
 use std::path::PathBuf;
 
@@ -51,7 +51,10 @@ fn on_navigation_resets_scroll_to_zero() {
 #[test]
 fn on_navigation_invalidates_cache() {
   let mut s = SidebarState::new();
-  s.cache = Some((PathBuf::from("/tmp/x"), SidebarSections::default()));
+  s.cache = Some((
+    (PathBuf::from("/tmp/x"), SidebarMode::Commits),
+    SidebarSections::default(),
+  ));
   s.on_navigation();
   assert!(
     s.cache.is_none(),
@@ -161,13 +164,68 @@ fn toggle_focus_flips_when_open() {
 
 // ---- Explicit cache flush -------------------------------------------------
 
+// ---- Mode toggle (issue #34) ----------------------------------------------
+
+#[test]
+fn default_mode_is_commits() {
+  // The historical sidebar showed `git log --oneline` + `git status --short`.
+  // Mode = Commits is the only behaviour that pre-existed, so it must
+  // remain the default after the toggle lands.
+  let s = SidebarState::new();
+  assert_eq!(s.mode, SidebarMode::Commits);
+}
+
+#[test]
+fn cycle_mode_flips_commits_to_stashes_and_back() {
+  let mut s = SidebarState::new();
+  s.cycle_mode();
+  assert_eq!(s.mode, SidebarMode::Stashes);
+  s.cycle_mode();
+  assert_eq!(s.mode, SidebarMode::Commits);
+}
+
+#[test]
+fn cycle_mode_resets_scroll() {
+  // Switching modes presents fresh content with its own length; the
+  // scroll offset from the previous mode is meaningless. Reset to 0
+  // matches the on_navigation contract and avoids the user landing
+  // halfway through a panel they did not scroll.
+  let mut s = SidebarState::new();
+  s.max_scroll = 8;
+  s.scroll = 4;
+  s.cycle_mode();
+  assert_eq!(s.scroll, 0, "cycle_mode must reset scroll back to top");
+}
+
+#[test]
+fn cache_is_keyed_by_path_and_mode() {
+  // Per the issue note "Same caching pattern as commits/status mode" —
+  // the cache key carries the active mode so toggling does not leak a
+  // stale render across modes. Storing both modes for the same path
+  // would be possible but adds memory pressure for marginal gain;
+  // keying by `(path, mode)` makes a re-toggle reshell git, which is
+  // documented behaviour.
+  let mut s = SidebarState::new();
+  let path = PathBuf::from("/tmp/wt-a");
+  s.cache = Some(((path.clone(), SidebarMode::Commits), SidebarSections::default()));
+  // Cycling mode invalidates the cache because the key changes.
+  s.cycle_mode();
+  assert!(
+    s.cache.is_none(),
+    "cycle_mode must drop the cached sections for the previous mode"
+  );
+}
+
 #[test]
 fn invalidate_drops_cache_keeps_scroll() {
   // `invalidate()` is the standalone cache flush used outside the
   // navigation path (e.g. `filter_push_char` re-narrows the visible
   // set but doesn't move the cursor — scroll state must survive).
   let mut s = SidebarState::new();
-  s.cache = Some((PathBuf::from("/tmp/x"), SidebarSections::default()));
+  s.cache = Some((
+    (PathBuf::from("/tmp/x"), SidebarMode::Commits),
+    SidebarSections::default(),
+  ));
   s.scroll = 4;
   s.max_scroll = 10;
   s.invalidate();

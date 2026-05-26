@@ -735,3 +735,77 @@ fn list_returns_none_age_for_main_worktree() {
     main.age
   );
 }
+
+// --- git_stash_list (issue #34) -----------------------------------------
+
+/// Create one stash on the given tempdir repo by writing a tracked file,
+/// staging an edit, then `git stash push -m <subject>`. Returns once the
+/// stash has been created so the caller can immediately `git_stash_list`.
+fn create_stash(path: &Path, file_rel: &str, subject: &str) {
+  // Seed a tracked file (commit) then mutate it so `git stash push`
+  // has a non-empty diff to capture. `git stash` on an empty diff is a
+  // no-op and would make the test pin the wrong contract.
+  let abs = path.join(file_rel);
+  std::fs::write(&abs, "v1\n").unwrap();
+  let run = |args: &[&str]| {
+    let status = std::process::Command::new("git")
+      .arg("-C")
+      .arg(path)
+      .args(args)
+      .status()
+      .unwrap();
+    assert!(status.success(), "git {:?} failed", args);
+  };
+  run(&["add", file_rel]);
+  run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "seed"]);
+  std::fs::write(&abs, "v2 dirty\n").unwrap();
+  run(&["stash", "push", "-m", subject]);
+}
+
+#[test]
+fn git_stash_list_empty_returns_empty_vec() {
+  // A fresh repo has no stashes; the helper must report that as an
+  // empty `Vec`, not an error. The sidebar renderer relies on this to
+  // distinguish "(no stashes)" from "git stash list failed".
+  let (dir, _) = init_repo();
+  let entries = worktree::git_stash_list(dir.path(), 10).unwrap();
+  assert!(entries.is_empty());
+}
+
+#[test]
+fn git_stash_list_parses_canonical_output() {
+  let (dir, _) = init_repo();
+  create_stash(dir.path(), "a.txt", "wip on auth refactor");
+  create_stash(dir.path(), "b.txt", "wip on docs");
+
+  let entries = worktree::git_stash_list(dir.path(), 10).unwrap();
+  assert_eq!(entries.len(), 2);
+  // git stashes are LIFO — the most recent push is `stash@{0}`.
+  assert_eq!(entries[0].ref_name, "stash@{0}");
+  assert!(
+    entries[0].subject.contains("wip on docs"),
+    "expected the latest stash subject, got: {}",
+    entries[0].subject
+  );
+  assert_eq!(entries[1].ref_name, "stash@{1}");
+  assert!(
+    entries[1].subject.contains("wip on auth refactor"),
+    "expected the earlier stash subject, got: {}",
+    entries[1].subject
+  );
+}
+
+#[test]
+fn git_stash_list_respects_limit() {
+  // The helper caps the returned vec at `limit` so the sidebar
+  // doesn't allocate an unbounded list on a repo with hundreds of
+  // stashes. The full list is still available through `git stash`
+  // directly — this is a preview-only cap.
+  let (dir, _) = init_repo();
+  create_stash(dir.path(), "a.txt", "first");
+  create_stash(dir.path(), "b.txt", "second");
+  create_stash(dir.path(), "c.txt", "third");
+
+  let limited = worktree::git_stash_list(dir.path(), 2).unwrap();
+  assert_eq!(limited.len(), 2, "limit must cap the result vec");
+}

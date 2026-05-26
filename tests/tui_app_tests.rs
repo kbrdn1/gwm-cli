@@ -313,11 +313,23 @@ fn next_prev_invalidate_sidebar_cache() {
   // Moving selection must drop any cached sidebar content so the new
   // worktree's preview is recomputed on the next frame.
   let (_dir, mut app) = make_app();
-  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((
+    (
+      std::path::PathBuf::from("/tmp/x"),
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+    ),
+    Default::default(),
+  ));
   app.next();
   assert!(app.sidebar.cache.is_none(), "next() must invalidate the sidebar cache");
 
-  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((
+    (
+      std::path::PathBuf::from("/tmp/x"),
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+    ),
+    Default::default(),
+  ));
   app.prev();
   assert!(app.sidebar.cache.is_none(), "prev() must invalidate the sidebar cache");
 }
@@ -325,7 +337,13 @@ fn next_prev_invalidate_sidebar_cache() {
 #[test]
 fn refresh_invalidates_sidebar_cache() {
   let (_dir, mut app) = make_app();
-  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((
+    (
+      std::path::PathBuf::from("/tmp/x"),
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+    ),
+    Default::default(),
+  ));
   app.refresh().unwrap();
   assert!(app.sidebar.cache.is_none());
 }
@@ -348,7 +366,13 @@ fn on_navigation_resets_scroll_and_invalidates_sidebar_cache() {
   // half of the contract in isolation.
   let (_dir, mut app) = make_app();
   app.sidebar.scroll = 7;
-  app.sidebar.cache = Some((std::path::PathBuf::from("/tmp/x"), Default::default()));
+  app.sidebar.cache = Some((
+    (
+      std::path::PathBuf::from("/tmp/x"),
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+    ),
+    Default::default(),
+  ));
 
   app.on_navigation();
 
@@ -1834,7 +1858,7 @@ fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
 #[test]
 fn sidebar_sections_omit_commands_block() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -1864,7 +1888,7 @@ fn sidebar_sections_omit_inline_section_headers() {
   // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
   // disappear from the content lines.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -1879,7 +1903,7 @@ fn sidebar_sections_omit_inline_section_headers() {
 #[test]
 fn sidebar_worktree_section_is_compact_identity() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let text = section_text(&sections.worktree);
 
   assert!(text.contains("api-rest"), "name on top line: {}", text);
@@ -1902,7 +1926,7 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
   // Compact identity block: name, branch · head, badges, path → 4 lines target.
   // Allow ≤5 to leave headroom for variable badges.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   assert!(
     sections.worktree.len() <= 5,
     "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
@@ -1921,7 +1945,7 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
   // those flags — only the ones that are true add visual noise.
   let mut w = detailed_worktree_fixture();
   w.is_main = false;
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let text = section_text(&sections.worktree);
   assert!(
     !text.contains("★ main"),
@@ -1954,7 +1978,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     behind: 0,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -1974,7 +1998,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     behind: 3,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -1990,7 +2014,7 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
   // synced label *should* still display `✓`. Guards against an over-eager
   // fix that would drop the sigil everywhere.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
   assert!(badge.contains("synced"), "label must still say synced: {}", badge);
@@ -2281,7 +2305,7 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 30); // 31 total commits
   let w = worktree_pointing_at_dir(dir.path());
-  let sections = build_sidebar_sections(&w);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
   assert_eq!(
     sections.recent_commits.len(),
     31,
