@@ -954,9 +954,22 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
     .or_else(|| resolve_pr_base(&repo, &config.doctor.trunks))
     .unwrap_or_else(|| "main".into());
 
-  let commits = worktree::git_log_subject_between(&workdir, &base, &head_name).unwrap_or_default();
-  let files_changed =
-    worktree::git_diff_stat_between(&workdir, &base, &head_name, PR_FILES_CHANGED_MAX_LINES).unwrap_or_default();
+  let commits = worktree::git_log_subject_between(&workdir, &base, &head_name)
+    .inspect_err(|e| {
+      eprintln!(
+        "note: could not collect `{{commits}}` from `git log {}..{}`: {} (placeholder will be empty)",
+        base, head_name, e
+      );
+    })
+    .unwrap_or_default();
+  let files_changed = worktree::git_diff_stat_between(&workdir, &base, &head_name, PR_FILES_CHANGED_MAX_LINES)
+    .inspect_err(|e| {
+      eprintln!(
+        "note: could not collect `{{files_changed}}` from `git diff --stat {}..{}`: {} (placeholder will be empty)",
+        base, head_name, e
+      );
+    })
+    .unwrap_or_default();
   let repo_slug = github::repo_slug(&repo).unwrap_or_default();
 
   let ctx = PrTemplateContext {
