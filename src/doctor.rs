@@ -132,7 +132,56 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
   }
 
   report.checks.push(check_base_dir_writable(ctx));
+  report.checks.push(check_tui_keymap(ctx));
   Ok(report)
+}
+
+/// TUI keymap diagnostic (issue #87). Re-runs the same
+/// [`crate::tui::keymap::Keymap`] resolution path the TUI itself uses
+/// at startup, so any user-facing `[tui.keys]` mistake surfaces here
+/// before the TUI actually fails to dispatch.
+///
+/// Three outcomes:
+///
+/// 1. **Failed** — the keymap fails to resolve (parse error, unknown
+///    action slug, chord conflict, prefix collision). The detail
+///    repeats the underlying [`crate::error::GwmError::Config`]
+///    message verbatim so the user can paste it into a search.
+/// 2. **Warning** — the keymap resolves, but `quit` has been
+///    unbound entirely. The hard-coded `Ctrl+C` branch in `run_app`
+///    keeps the TUI exitable; we warn anyway because losing the
+///    discoverable quit key is a hostile UX choice users usually
+///    don't realise they made.
+/// 3. **Ok** — keymap is valid and `quit` has at least one
+///    user-visible binding.
+fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "[tui.keys] keymap resolves";
+
+  let keymap = match ctx.config.tui.keys.resolved_keymap() {
+    Ok(km) => km,
+    Err(e) => {
+      return Check::failed(name, format!("{}", e))
+        .with_hint("fix the `[tui.keys]` entry called out above; the full list of action slugs is `gwm tui keys`");
+    }
+  };
+
+  // Quit is special: the only hard-coded escape hatch is `Ctrl+C` in
+  // `run_app`. We don't refuse an empty `quit` binding (per the design
+  // note in `src/tui/keymap.rs`), but we do flag it so the user knows
+  // the discoverable key is gone.
+  let quit_has_user_binding = keymap
+    .list()
+    .iter()
+    .any(|b| b.action == crate::tui::keymap::Action::Quit && !b.chords.is_empty());
+  if !quit_has_user_binding {
+    return Check::warning(
+      name,
+      "`quit` has no binding — Ctrl+C still exits the TUI as a hard-coded fallback, but no discoverable key remains",
+    )
+    .with_hint("add `quit = [\"q\", \"Esc\"]` (or any other key) to `[tui.keys]`");
+  }
+
+  Check::ok(name, format!("{} action(s) bound", keymap.list().len()))
 }
 
 /// Check #1: `.gwm.toml` parses cleanly. Missing config is fine — defaults

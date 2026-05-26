@@ -59,7 +59,9 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  hooks "))
     // Issue #29: operation journal + undo + history.
     .stdout(predicate::str::contains("  undo "))
-    .stdout(predicate::str::contains("  history "));
+    .stdout(predicate::str::contains("  history "))
+    // Issue #87: configurable TUI keymap (`gwm tui keys`).
+    .stdout(predicate::str::contains("  tui "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -3717,4 +3719,77 @@ fn pr_errors_when_no_template_configured() {
     .failure()
     .stderr(predicate::str::contains("pr_template"))
     .stderr(predicate::str::contains("feat"));
+}
+
+// --- gwm tui keys (issue #87) -------------------------------------------
+
+#[test]
+fn tui_keys_lists_default_bindings() {
+  // The bare invocation prints the full resolved keymap as a
+  // human-readable table. Default surface ships with `down → j, Down`,
+  // `top → g g`, `quit → q`, … — assert the canary rows so a regression
+  // in the table layout or the defaults map fails loudly.
+  let (dir, _) = init_repo();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["tui", "keys"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("down"))
+    .stdout(predicate::str::contains("j"))
+    .stdout(predicate::str::contains("top"))
+    .stdout(predicate::str::contains("g g"))
+    .stdout(predicate::str::contains("quit"))
+    .stdout(predicate::str::contains("default"));
+}
+
+#[test]
+fn tui_keys_marks_user_overrides_in_source_column() {
+  // When the user overrides a binding via `[tui.keys]`, the source
+  // column for that row flips from `default` to a non-default marker
+  // (we use `.gwm.toml`). The other rows keep `default`.
+  let (dir, _) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[tui.keys]
+down = ["Ctrl+n"]
+"#,
+  )
+  .unwrap();
+
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["tui", "keys"])
+    .assert()
+    .success()
+    .get_output()
+    .clone();
+
+  let stdout = String::from_utf8(output.stdout).unwrap();
+  // Find the `down` row and assert it carries the user-config marker.
+  let down_line = stdout
+    .lines()
+    .find(|l| l.starts_with("down"))
+    .unwrap_or_else(|| panic!("expected a `down` row in:\n{stdout}"));
+  assert!(
+    down_line.contains("Ctrl+n"),
+    "expected `down` row to show the override, got: {down_line}"
+  );
+  assert!(
+    down_line.contains(".gwm.toml"),
+    "expected `down` row source to be `.gwm.toml`, got: {down_line}"
+  );
+  // `up` was not overridden — must still read as default.
+  let up_line = stdout
+    .lines()
+    .find(|l| l.starts_with("up"))
+    .unwrap_or_else(|| panic!("expected an `up` row in:\n{stdout}"));
+  assert!(
+    up_line.contains("default"),
+    "expected `up` row source to stay `default`, got: {up_line}"
+  );
 }
