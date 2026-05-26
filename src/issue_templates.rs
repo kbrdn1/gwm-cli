@@ -69,15 +69,90 @@ fn defaults_for(type_config: Option<&IssueTemplateTypeConfig>) -> FormDefaults {
 
 fn resolve_template_path(workdir: &Path, template_name: &str) -> Result<PathBuf> {
   let rel = Path::new(template_name);
-  if rel.is_absolute() || rel.components().any(|c| matches!(c, Component::ParentDir)) {
+  // Reject anything that could escape the worktree root or the
+  // `.github/ISSUE_TEMPLATE` base:
+  //   - absolute paths (Unix `/etc/passwd`, Windows `C:\Windows\…`)
+  //   - parent traversals (`..`)
+  //   - Windows drive prefixes on relative paths (`C:foo.yml` parses as a
+  //     relative path with a `Prefix` component but joining it onto `workdir`
+  //     can ignore the base)
+  //   - root-only segments (`\foo.yml` is not absolute on Windows but has a
+  //     `RootDir` component that resets the joined path)
+  let suspicious = rel.is_absolute()
+    || rel
+      .components()
+      .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_) | Component::RootDir));
+  if suspicious {
     return Err(GwmError::Config(format!(
       "issue template path '{}' must be relative and stay inside .github/ISSUE_TEMPLATE",
       template_name
     )));
   }
-  if rel.starts_with(".github") {
-    Ok(workdir.join(rel))
+  let joined = if rel.starts_with(".github") {
+    workdir.join(rel)
   } else {
-    Ok(workdir.join(".github").join("ISSUE_TEMPLATE").join(rel))
+    workdir.join(".github").join("ISSUE_TEMPLATE").join(rel)
+  };
+  if joined.strip_prefix(workdir).is_err() {
+    return Err(GwmError::Config(format!(
+      "issue template path '{}' escapes the worktree root",
+      template_name
+    )));
+  }
+  Ok(joined)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn resolve_rejects_parent_traversal() {
+    let workdir = Path::new("/tmp/wd");
+    let err = resolve_template_path(workdir, "../etc/passwd.yml").unwrap_err();
+    assert!(matches!(err, GwmError::Config(_)), "got {err:?}");
+  }
+
+  #[test]
+  fn resolve_rejects_absolute_paths() {
+    let workdir = Path::new("/tmp/wd");
+    let err = resolve_template_path(workdir, "/etc/passwd.yml").unwrap_err();
+    assert!(matches!(err, GwmError::Config(_)), "got {err:?}");
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn resolve_rejects_windows_drive_prefix() {
+    let workdir = Path::new(r"C:\tmp\wd");
+    let err = resolve_template_path(workdir, "C:foo.yml").unwrap_err();
+    assert!(matches!(err, GwmError::Config(_)), "got {err:?}");
+  }
+
+  #[cfg(windows)]
+  #[test]
+  fn resolve_rejects_windows_rootdir_prefix() {
+    let workdir = Path::new(r"C:\tmp\wd");
+    let err = resolve_template_path(workdir, r"\Windows\System32\config").unwrap_err();
+    assert!(matches!(err, GwmError::Config(_)), "got {err:?}");
+  }
+
+  #[test]
+  fn resolve_accepts_plain_template_name() {
+    let workdir = Path::new("/tmp/wd");
+    let path = resolve_template_path(workdir, "feature_request.yml").unwrap();
+    assert_eq!(
+      path,
+      workdir
+        .join(".github")
+        .join("ISSUE_TEMPLATE")
+        .join("feature_request.yml")
+    );
+  }
+
+  #[test]
+  fn resolve_accepts_explicit_dot_github_prefix() {
+    let workdir = Path::new("/tmp/wd");
+    let path = resolve_template_path(workdir, ".github/ISSUE_TEMPLATE/bug.yml").unwrap();
+    assert_eq!(path, workdir.join(".github").join("ISSUE_TEMPLATE").join("bug.yml"));
   }
 }
