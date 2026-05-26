@@ -860,12 +860,18 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
   use super::keymap::Action;
 
+  // Snapshot the keymap once. The pre-#87-review version called
+  // `km.list()` inside `keys_for`, which cloned the entire bindings
+  // vector for every help row — measurable churn for the ~20 rows
+  // the overlay renders. Single clone here, indexed by action below.
+  let bindings = km.list();
+
   // Format every chord bound to `action` as a comma-separated list
   // (`"j, Down"` or `"g g"` or `""` for unbound). The width 13 is
   // wide enough for `Ctrl+Shift+Tab` while keeping the help overlay
   // narrow enough for an 80-column terminal.
   let keys_for = |action: Action| -> String {
-    km.list()
+    bindings
       .iter()
       .find(|b| b.action == action)
       .map(|b| {

@@ -165,12 +165,16 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
     }
   };
 
+  // Snapshot once. The pre-review version called `keymap.list()`
+  // twice — both `quit_has_user_binding` and the success count
+  // cloned the bindings vector. One snapshot reused below.
+  let bindings = keymap.list();
+
   // Quit is special: the only hard-coded escape hatch is `Ctrl+C` in
   // `run_app`. We don't refuse an empty `quit` binding (per the design
   // note in `src/tui/keymap.rs`), but we do flag it so the user knows
   // the discoverable key is gone.
-  let quit_has_user_binding = keymap
-    .list()
+  let quit_has_user_binding = bindings
     .iter()
     .any(|b| b.action == crate::tui::keymap::Action::Quit && !b.chords.is_empty());
   if !quit_has_user_binding {
@@ -181,7 +185,14 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
     .with_hint("add `quit = [\"q\", \"Esc\"]` (or any other key) to `[tui.keys]`");
   }
 
-  Check::ok(name, format!("{} action(s) bound", keymap.list().len()))
+  // Count only actions with at least one chord. The pre-review
+  // version used `bindings.len()` which includes unbound entries
+  // (`action = []` in `[tui.keys]` leaves the action in the list
+  // with an empty chord vec), inflating the count visible in
+  // `gwm doctor` output and misleading the user about how many
+  // actions are actually reachable.
+  let bound_count = bindings.iter().filter(|b| !b.chords.is_empty()).count();
+  Check::ok(name, format!("{} action(s) bound", bound_count))
 }
 
 /// Check #1: `.gwm.toml` parses cleanly. Missing config is fine — defaults

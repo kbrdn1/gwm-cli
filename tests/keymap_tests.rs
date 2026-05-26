@@ -2,7 +2,7 @@
 //!
 //! Covers in this file:
 //!   - `Action` enum + `ACTIONS` table invariants (slug uniqueness,
-//!     kebab-case, every variant present);
+//!     snake_case, every variant present);
 //!   - key-string parser (`parse_chord` — single keys, named keys,
 //!     modifiers, multi-key chords, every reject path);
 //!   - `Keymap` layering (defaults, override replaces single action,
@@ -39,7 +39,7 @@ fn actions_table_covers_every_variant() {
 }
 
 #[test]
-fn action_slugs_are_unique_and_kebab_case() {
+fn action_slugs_are_unique_and_snake_case() {
   let mut seen = std::collections::HashSet::new();
   for (action, slug) in ACTIONS.iter() {
     assert!(seen.insert(*slug), "duplicate slug {:?} for {:?}", slug, action);

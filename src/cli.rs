@@ -768,14 +768,20 @@ fn cmd_tui(action: TuiAction) -> Result<()> {
 fn cmd_tui_keys() -> Result<()> {
   use crate::tui::keymap::{Keymap, Source};
 
-  // Build the resolved keymap. Outside a repo, fall back to defaults
-  // so the command still works for new users discovering the binary.
+  // Build the resolved keymap. Outside a repo, OR inside a bare
+  // repo (no workdir to read `.gwm.toml` from), fall back to
+  // defaults so the command stays useful for new users discovering
+  // the binary. Same fallback path either way — surfacing
+  // `NotInGitRepo` on a bare repo would be misleading because the
+  // command itself is repo-agnostic.
   let keymap = match worktree::discover_repo(None) {
-    Ok(repo) => {
-      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-      let cfg = Config::load_for_repo(&workdir)?;
-      cfg.tui.keys.resolved_keymap()?
-    }
+    Ok(repo) => match repo.workdir() {
+      Some(workdir) => {
+        let cfg = Config::load_for_repo(workdir)?;
+        cfg.tui.keys.resolved_keymap()?
+      }
+      None => Keymap::defaults(),
+    },
     Err(_) => Keymap::defaults(),
   };
 
