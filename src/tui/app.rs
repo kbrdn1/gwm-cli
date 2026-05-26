@@ -513,6 +513,15 @@ impl App {
     };
   }
 
+  /// Cycle the sidebar preview mode between Commits and Stashes
+  /// (issue #34). Drives the pure-state cycle on `SidebarState`
+  /// plus the status-bar copy: orchestrator-shaped because the
+  /// status bar is owned by `App`, not by the sub-struct.
+  pub fn cycle_sidebar_mode(&mut self) {
+    self.sidebar.cycle_mode();
+    self.status = format!("sidebar: {}", self.sidebar.mode.label());
+  }
+
   pub fn toggle_focus(&mut self) {
     self.sidebar.toggle_focus();
   }

@@ -257,14 +257,18 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // dot line on the Worktree section is also rebuilt fresh each frame
   // (issue #73) so it tracks live PR / issue fetches without
   // invalidating the expensive git-preview cache underneath.
+  // Cache key carries the active mode (issue #34) so toggling between
+  // commits / stashes re-shells the right git command instead of
+  // serving the previous mode's pre-rendered lines.
+  let active_mode = app.sidebar.mode;
   let sections = match app.selected().cloned() {
     Some(w) => {
       let needs_refresh = match &app.sidebar.cache {
-        Some((p, _)) => *p != w.path,
+        Some(((p, m), _)) => *p != w.path || *m != active_mode,
         None => true,
       };
       if needs_refresh {
-        app.sidebar.cache = Some((w.path.clone(), build_sidebar_sections(&w)));
+        app.sidebar.cache = Some(((w.path.clone(), active_mode), build_sidebar_sections(&w, active_mode)));
       }
       let mut cached = app.sidebar.cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
       let mut worktree = vec![sidebar_header_line(&w, app)];
@@ -290,14 +294,23 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let issue_pr_inner_width = area.width.saturating_sub(3) as usize;
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
 
-  // Per-section block height = content rows + 2 border lines. Fixed for
-  // the small sections (worktree / issue-PR / working-tree); Recent
-  // Commits flexes to fill the rest of the sidebar height.
+  // Per-section block height = content rows + 2 border lines. Fixed
+  // for the small sections (worktree / issue-PR / working-tree);
+  // Recent Commits flexes to fill the rest of the sidebar height.
+  // Issue #34: the Working Tree section is empty in `Stashes` mode
+  // (no `git status --short` to render); collapse its constraint to
+  // 0 so the empty titled block disappears instead of leaving a
+  // bordered void.
   let h = |lines: usize| (lines as u16).saturating_add(2);
+  let working_tree_height = if sections.working_tree.is_empty() {
+    0
+  } else {
+    h(sections.working_tree.len())
+  };
   let constraints = [
     Constraint::Length(h(sections.worktree.len())),
     Constraint::Length(h(issue_pr_lines.len())),
-    Constraint::Length(h(sections.working_tree.len())),
+    Constraint::Length(working_tree_height),
     Constraint::Min(3),
   ];
   let chunks = Layout::default()
@@ -307,15 +320,17 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 
   render_section(f, chunks[0], " Worktree ", sections.worktree, border_color, 0, None);
   render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0, None);
-  render_section(
-    f,
-    chunks[2],
-    " Working Tree ",
-    sections.working_tree,
-    border_color,
-    0,
-    None,
-  );
+  if !sections.working_tree.is_empty() {
+    render_section(
+      f,
+      chunks[2],
+      " Working Tree ",
+      sections.working_tree,
+      border_color,
+      0,
+      None,
+    );
+  }
 
   // Recent Commits is the only scrollable section. Clamp the scroll
   // offset to its visible area so `j` / `k` can't scroll past the end.
@@ -329,27 +344,57 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   if app.sidebar.scroll > app.sidebar.max_scroll {
     app.sidebar.scroll = app.sidebar.max_scroll;
   }
-  let footer = if commits_len == 0 {
-    None
-  } else {
-    let bottom = app.sidebar.scroll.saturating_add(commits_visible).min(commits_len);
-    Some(format!(" {} of {} ", bottom, commits_len))
+  // Issue #34: surface the active mode in the bottom-scrollable
+  // panel title. The footer keeps the `i of N` counter; the bottom
+  // hint switches to "Enter: copy stash@{N}" in stashes mode.
+  let (panel_title, panel_footer) = match active_mode {
+    super::state::sidebar::SidebarMode::Commits => {
+      let title = " Recent Commits — commits ".to_string();
+      let footer = if commits_len == 0 {
+        None
+      } else {
+        let bottom = app.sidebar.scroll.saturating_add(commits_visible).min(commits_len);
+        Some(format!(" {} of {} ", bottom, commits_len))
+      };
+      (title, footer)
+    }
+    super::state::sidebar::SidebarMode::Stashes => {
+      let title = " Stashes — stashes ".to_string();
+      // The "Enter on stash …" hint from the issue is the operative
+      // affordance in this mode — it's worth more than the i/N
+      // counter because the user needs to know they can paste the
+      // ref name.
+      let footer = if commits_len == 0 {
+        None
+      } else {
+        Some(" Enter: copy stash@{N} to status ".to_string())
+      };
+      (title, footer)
+    }
   };
   render_section(
     f,
     commits_area,
-    " Recent Commits ",
+    panel_title,
     sections.recent_commits,
     border_color,
     app.sidebar.scroll,
-    footer,
+    panel_footer,
   );
 }
 
 fn render_section(
   f: &mut Frame,
   area: Rect,
-  title: &'static str,
+  // Title is `impl Into<Line<'static>>` so static-literal call
+  // sites (` Worktree ` / ` Issue / PR ` / ` Working Tree `) pass
+  // through to ratatui zero-copy (a `&'static str` becomes a
+  // `Line<'static>` borrowing the slice), while the dynamic
+  // mode-aware title for the bottom panel (` Recent Commits —
+  // commits ` / ` Stashes — stashes `) moves in as an owned
+  // `String`. Pre-review the signature was `impl Into<String>`,
+  // which copied every static literal on every render frame.
+  title: impl Into<ratatui::text::Line<'static>>,
   lines: Vec<Line<'static>>,
   border_color: Color,
   scroll: u16,
@@ -358,7 +403,7 @@ fn render_section(
   let mut block = Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
-    .title(title)
+    .title(title.into())
     .border_style(Style::default().fg(border_color));
   if let Some(f) = footer {
     block = block.title_bottom(ratatui::text::Line::from(f).right_aligned());
@@ -423,11 +468,64 @@ fn sidebar_status_dot(app: &App) -> (&'static str, Color) {
 /// The `●` status-dot header is intentionally NOT in `worktree` here either —
 /// it's rebuilt fresh by `draw_sidebar` on every frame so the dot tracks
 /// live PR / issue fetch state without invalidating this cached payload.
-pub fn build_sidebar_sections(w: &WorktreeInfo) -> SidebarSections {
+pub fn build_sidebar_sections(w: &WorktreeInfo, mode: super::state::sidebar::SidebarMode) -> SidebarSections {
+  use super::state::sidebar::SidebarMode;
+  let body = match mode {
+    // Pre-#34 behaviour. The `Working Tree` section is unconditionally
+    // rendered alongside; both come from `git log` / `git status` and
+    // share a single cache invalidation cycle.
+    SidebarMode::Commits => recent_commits_lines(w, RECENT_COMMITS_LIMIT),
+    // Stashes view (issue #34). `working_tree` is left empty: the
+    // user's current dirty state has nothing to do with the stashed
+    // contents they're auditing, so a separate `git status` block
+    // alongside would only distract. A per-stash file summary
+    // (`+/-` counts via `git diff-tree --numstat`) is on the
+    // follow-up list; v1 ships `<ref>  <subject>` only.
+    SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT),
+  };
+  let working_tree = match mode {
+    SidebarMode::Commits => working_tree_lines(w),
+    SidebarMode::Stashes => Vec::new(),
+  };
   SidebarSections {
     worktree: worktree_identity_lines(w),
-    working_tree: working_tree_lines(w),
-    recent_commits: recent_commits_lines(w, RECENT_COMMITS_LIMIT),
+    working_tree,
+    recent_commits: body,
+  }
+}
+
+/// Number of stash entries shown in `SidebarMode::Stashes`. Set to
+/// match `RECENT_COMMITS_LIMIT` so the panel stays a comparable height
+/// across modes. Stashes beyond this are still listed by
+/// `git stash list` — the limit only governs the in-panel preview.
+pub const STASHES_DISPLAY_LIMIT: usize = 10;
+
+/// Render `git stash list` output (issue #34) into ratatui lines for
+/// the stashes mode of the sidebar. One stash per row, formatted as
+/// `<ref>  <subject>` with the ref in yellow (to mimic git's own
+/// colourisation). When the worktree has no stashes the renderer
+/// shows a single muted "(no stashes)" line so the panel never reads
+/// as broken on a fresh worktree.
+fn stash_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
+  match crate::worktree::git_stash_list(&w.path, limit) {
+    Ok(stashes) if stashes.is_empty() => vec![Line::from(Span::styled(
+      "(no stashes)",
+      Style::default().fg(Color::DarkGray),
+    ))],
+    Ok(stashes) => stashes
+      .into_iter()
+      .map(|s| {
+        Line::from(vec![
+          Span::styled(s.ref_name, Style::default().fg(Color::Yellow)),
+          Span::raw("  "),
+          Span::raw(s.subject),
+        ])
+      })
+      .collect(),
+    Err(e) => vec![Line::from(Span::styled(
+      format!("git stash list failed: {}", e),
+      Style::default().fg(Color::Red),
+    ))],
   }
 }
 
@@ -922,6 +1020,7 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
   lines.push(row(Action::Yank, "yank selected path to system clipboard"));
   lines.push(row(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
   lines.push(row(Action::ToggleSidebar, "toggle git preview sidebar"));
+  lines.push(row(Action::ToggleSidebarMode, "cycle sidebar mode (commits / stashes)"));
   lines.push(row(Action::FocusSwap, "swap focus between worktree list and sidebar"));
   lines.push(row(Action::Filter, "open fuzzy filter bar (enter: sticky, esc: clear)"));
   lines.push(row(Action::Refresh, "refresh worktree list"));

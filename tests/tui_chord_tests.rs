@@ -109,6 +109,47 @@ fn shifted_uppercase_g_dispatches_bottom() {
 }
 
 #[test]
+fn s_dispatches_toggle_sidebar_mode() {
+  // Issue #34: pressing `s` in the list view must cycle the sidebar
+  // preview mode (Commits ↔ Stashes). The binding is wired through
+  // the rebindable keymap (`Action::ToggleSidebarMode`) so users can
+  // remap it via `[tui.keys]` if `s` clashes with their muscle
+  // memory.
+  let (_dir, mut app) = make_app();
+  assert_eq!(
+    app.dispatch_key(press('s')),
+    Some(gwm::tui::keymap::Action::ToggleSidebarMode)
+  );
+}
+
+#[test]
+fn help_overlay_lists_toggle_sidebar_mode() {
+  // The keymap-driven help overlay surfaces the new action with its
+  // default `s` binding so users discover the stashes mode through
+  // `?` rather than the changelog.
+  use gwm::tui::help_lines;
+  use gwm::tui::keymap::Keymap;
+
+  let km = Keymap::defaults();
+  let lines = help_lines(&km, false);
+  let row = lines
+    .iter()
+    .find(|l| l.contains("sidebar mode") || l.contains("stash") || l.contains("toggle_sidebar_mode"))
+    .unwrap_or_else(|| panic!("expected a sidebar-mode row in:\n{}", lines.join("\n")));
+  // Target the keys column specifically. `help_lines` formats every
+  // row as `  {keys:<13} {label}`, so the default `s` binding
+  // surfaces as exactly `"  s            "` at the row start.
+  // Pre-review the assertion was `row.contains('s')`, which passed
+  // trivially because the description carries words like
+  // "stashes" / "sidebar" — a regression in the binding column
+  // would not have failed.
+  assert!(
+    row.starts_with("  s ") || row.starts_with("  s\t"),
+    "expected the default `s` binding in the keys column, got: {row}"
+  );
+}
+
+#[test]
 fn help_overlay_reflects_user_keymap_override() {
   // The help overlay must read from the resolved keymap rather than
   // hard-coded strings, so a user who rebinds `down = ["Ctrl+n"]`

@@ -639,6 +639,71 @@ pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usi
   Ok(out)
 }
 
+/// One row of `git stash list` (issue #34). Surfaced by the sidebar
+/// in stashes mode. Kept deliberately minimal — `ref_name` so the user
+/// can copy `stash@{N}` to the status bar, `subject` so they can tell
+/// which stash is which. Per-file diff numbers (`+/-`) live in a
+/// follow-up — the v1 contract is just "name + subject".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashEntry {
+  /// Canonical git stash reference (e.g. `stash@{0}`). Stable for the
+  /// lifetime of the panel — the user can paste it into `git stash
+  /// apply <ref>` from the surrounding shell.
+  pub ref_name: String,
+  /// Human-readable subject as written by `git stash push -m <msg>`
+  /// (or the auto-generated `WIP on <branch>: …` when no `-m` was
+  /// supplied).
+  pub subject: String,
+}
+
+/// Parse the worktree's stash list (issue #34). Returns up to `limit`
+/// entries in `git stash list` order (LIFO — `stash@{0}` is the most
+/// recent push).
+///
+/// Uses `--pretty=format:%gd<US>%s` (with `\x1f` as the unit
+/// separator) so subjects containing spaces, colons, or `:` round-trip
+/// safely. An empty stash list returns `Ok(Vec::new())`; only spawn /
+/// non-zero-exit failures surface as `GwmError::CommandFailed`.
+pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
+  // ASCII Unit Separator (0x1F) cannot occur in a normal shell argv
+  // or git ref name, so it's a safe per-field delimiter — same
+  // technique `git_log_with_author` uses with `\x1c` for record
+  // separation.
+  //
+  // Pass `-n <limit>` (a `git log` option `stash list` forwards
+  // through) so a repo with hundreds of stashes doesn't materialise
+  // the full list in stdout just for the panel to drop everything
+  // past the cap. Pre-review the limit was applied client-side after
+  // the full stdout was read.
+  let limit_arg = format!("-n{}", limit);
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git stash list failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git stash list exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  let raw = String::from_utf8_lossy(&output.stdout);
+  let entries = raw
+    .lines()
+    .filter(|line| !line.is_empty())
+    .take(limit)
+    .filter_map(|line| {
+      let mut parts = line.splitn(2, '\x1f');
+      let ref_name = parts.next()?.to_string();
+      let subject = parts.next().unwrap_or("").to_string();
+      Some(StashEntry { ref_name, subject })
+    })
+    .collect();
+  Ok(entries)
+}
+
 /// Shell out to `git status --short` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview the working-tree state.
 pub fn git_status_short(path: &Path) -> Result<String> {
