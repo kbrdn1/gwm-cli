@@ -8,6 +8,7 @@ use crate::gitmoji;
 use crate::history::{self, OpEntry};
 use crate::hooks;
 use crate::labels::{self, LabelDiff};
+use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
@@ -100,6 +101,9 @@ pub enum Command {
     /// stale tip so the user can audit it.
     #[arg(long)]
     reuse_branch: bool,
+    /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
   },
   /// Remove a worktree by fuzzy name match.
   Remove {
@@ -114,6 +118,12 @@ pub enum Command {
     /// resolution failures. Issue #31.
     #[arg(long)]
     dry_run: bool,
+    /// Emergency removal mode: skip pre_remove and post_remove hooks.
+    #[arg(long)]
+    force: bool,
+    /// Skip lifecycle hooks for comma-separated phases.
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   ///
@@ -125,6 +135,9 @@ pub enum Command {
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
     target: Option<String>,
+    /// Skip lifecycle hooks for comma-separated phases.
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
   },
   /// Prune stale worktree references (admin files without a working dir).
   Prune {
@@ -604,14 +617,17 @@ pub fn run(cli: Cli) -> Result<()> {
       desc,
       no_bootstrap,
       reuse_branch,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, mode),
+      skip_hooks,
+    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
     Command::Remove {
       pattern,
       delete_branch,
       dry_run,
-    } => cmd_remove(pattern, delete_branch, dry_run),
+      force,
+      skip_hooks,
+    } => cmd_remove(pattern, delete_branch, dry_run, force, skip_hooks, mode),
     Command::Path { pattern } => cmd_path(pattern),
-    Command::Bootstrap { target } => cmd_bootstrap(target, mode),
+    Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
     Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Doctor => cmd_doctor(),
     Command::Types { gitmoji } => cmd_types(gitmoji),
@@ -741,6 +757,7 @@ fn cmd_create(
   desc: String,
   no_bootstrap: bool,
   reuse_branch: bool,
+  skip_hooks: Option<String>,
   trust_mode: TrustMode,
 ) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
@@ -753,13 +770,21 @@ fn cmd_create(
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
   let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
   let target = spec.worktree_path(&config.worktree, &repo_name)?;
+  let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
   // creating the worktree — a deny / abort here leaves the user's
   // disk state untouched (no orphaned worktree to clean up).
-  if !no_bootstrap {
+  let create_hooks_present = !config.hooks.pre_create.is_empty()
+    || !config.hooks.post_create.is_empty()
+    || (!no_bootstrap && !config.bootstrap.command.is_empty());
+  if !no_bootstrap || create_hooks_present {
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
+
+  let pre_ctx = HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, &spec);
+  let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
 
   println!("creating worktree:");
   println!("  branch : {}", branch);
@@ -769,18 +794,31 @@ fn cmd_create(
   let created = worktree::add(&repo, &dirname, &target, &branch, reuse_branch)?;
   println!("✓ worktree created at {}", created.display());
 
+  let post_ctx = pre_ctx.with_cwd(&created);
+
   if no_bootstrap {
     println!("(skipped bootstrap)");
-    return Ok(());
+  } else {
+    let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &post_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
+
+    let ctx = BootstrapCtx {
+      main_repo: &workdir,
+      worktree: &created,
+      config: &config,
+    };
+    let report = bootstrap::run_core(&ctx)?;
+    print_report(&report);
+
+    let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &post_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
   }
 
-  let ctx = BootstrapCtx {
-    main_repo: &workdir,
-    worktree: &created,
-    config: &config,
-  };
-  let report = bootstrap::run(&ctx)?;
-  print_report(&report);
+  if config.hooks.has_any() && !config.bootstrap.command.is_empty() {
+    eprintln!("warning: [[bootstrap.command]] is deprecated as a post_create hook when [hooks.*] is present");
+  }
+  let report = lifecycle::run_phase(&config, HookPhase::PostCreate, &post_ctx, &skips, !no_bootstrap)?;
+  print_lifecycle_report(&report);
   Ok(())
 }
 
@@ -867,8 +905,16 @@ pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
   out
 }
 
-fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()> {
+fn cmd_remove(
+  pattern: String,
+  delete_branch: bool,
+  dry_run: bool,
+  force: bool,
+  skip_hooks: Option<String>,
+  trust_mode: TrustMode,
+) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let found = worktree::find_fuzzy(&repo, &pattern)?;
   if dry_run {
     // Issue #31: print the would-remove plan and exit. Resolution
@@ -885,6 +931,18 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
     );
     return Ok(());
   }
+
+  let config = Config::load_for_repo(&workdir)?;
+  let mut skips = HookSkips::parse(skip_hooks.as_deref())?;
+  if force {
+    skips = skips.with(HookPhase::PreRemove).with(HookPhase::PostRemove);
+  }
+  if config.hooks.has_any() {
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+  }
+  let pre_ctx = HookContext::for_worktree(&repo, &workdir, &found.path, &found.path, found.branch.as_deref());
+  let report = lifecycle::run_phase(&config, HookPhase::PreRemove, &pre_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
 
   // Issue #29: capture the branch OID via libgit2 BEFORE the
   // destructive call so we can resurrect the branch on `gwm undo`.
@@ -930,6 +988,9 @@ fn cmd_remove(pattern: String, delete_branch: bool, dry_run: bool) -> Result<()>
       println!("  branch {} deleted", b);
     }
   }
+  let post_ctx = pre_ctx.with_cwd(&workdir);
+  let report = lifecycle::run_phase(&config, HookPhase::PostRemove, &post_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
   Ok(())
 }
 
@@ -940,32 +1001,48 @@ fn cmd_path(pattern: String) -> Result<()> {
   Ok(())
 }
 
-fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
+fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode: TrustMode) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let config = Config::load_for_repo(&workdir)?;
 
+  let mut worktree_branch: Option<String> = None;
   let worktree_path: PathBuf = match target {
     Some(t) => {
       let p = PathBuf::from(&t);
       if p.is_dir() {
         p
       } else {
-        worktree::find_fuzzy(&repo, &t)?.path
+        let found = worktree::find_fuzzy(&repo, &t)?;
+        worktree_branch = found.branch.clone();
+        found.path
       }
     }
     None => std::env::current_dir()?,
   };
+  let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+
+  let hook_ctx = HookContext::for_worktree(
+    &repo,
+    &workdir,
+    &worktree_path,
+    &worktree_path,
+    worktree_branch.as_deref(),
+  );
+  let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &hook_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
 
   let ctx = BootstrapCtx {
     main_repo: &workdir,
     worktree: &worktree_path,
     config: &config,
   };
-  let report = bootstrap::run(&ctx)?;
+  let report = bootstrap::run_core(&ctx)?;
   print_report(&report);
+  let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &hook_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
   Ok(())
 }
 
@@ -2197,6 +2274,9 @@ function gcd {
 "#;
 
 fn print_report(report: &bootstrap::BootstrapReport) {
+  if report.steps.is_empty() {
+    return;
+  }
   println!();
   println!("bootstrap report:");
   for s in &report.steps {
@@ -2208,6 +2288,13 @@ fn print_report(report: &bootstrap::BootstrapReport) {
       }
     }
   }
+}
+
+fn print_lifecycle_report(report: &bootstrap::BootstrapReport) {
+  if report.steps.is_empty() {
+    return;
+  }
+  lifecycle::print_report(report);
 }
 
 // ---------------------------------------------------------------------------
