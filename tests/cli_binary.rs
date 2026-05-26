@@ -6,7 +6,8 @@ mod common;
 use assert_cmd::Command;
 use common::init_repo;
 use predicates::prelude::*;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn help_prints_subcommands() {
@@ -25,6 +26,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  init "))
     .stdout(predicate::str::contains("  list "))
     .stdout(predicate::str::contains("  create "))
+    // Issue #83: create an issue from repo templates, then create the worktree.
+    .stdout(predicate::str::contains("  new "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
@@ -1419,6 +1422,85 @@ fn toml_basic_string(path: &Path) -> String {
   path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+fn prepend_path(dir: &Path) -> String {
+  let old = std::env::var_os("PATH").unwrap_or_default();
+  let mut paths = vec![dir.to_path_buf()];
+  paths.extend(std::env::split_paths(&old));
+  std::env::join_paths(paths).unwrap().to_string_lossy().into_owned()
+}
+
+fn write_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
+  #[cfg(unix)]
+  {
+    write_unix_fake_gh(root, issue_url)
+  }
+  #[cfg(windows)]
+  {
+    write_windows_fake_gh(root, issue_url)
+  }
+}
+
+#[cfg(unix)]
+fn write_unix_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
+  let script = root.join("gh");
+  fs::write(
+    &script,
+    format!(
+      r#"#!/bin/sh
+printf '%s\n' "$*" > '{args}'
+body_file=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--body-file" ]; then
+    body_file="$arg"
+  fi
+  prev="$arg"
+done
+if [ -n "$body_file" ]; then
+  cp "$body_file" '{body}'
+fi
+printf '%s' '{url}'
+"#,
+      args = root.join("gh-args.txt").display(),
+      body = root.join("gh-body.md").display(),
+      url = issue_url.replace('\'', "'\\''"),
+    ),
+  )
+  .unwrap();
+  let mut perms = fs::metadata(&script).unwrap().permissions();
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
+}
+
+#[cfg(windows)]
+fn write_windows_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
+  let script = root.join("gh.cmd");
+  fs::write(
+    &script,
+    format!(
+      r#"@echo off
+echo %* > "{args}"
+:scan
+if "%~1"=="" goto done
+if "%~1"=="--body-file" (
+  copy "%~2" "{body}" > nul
+)
+shift
+goto scan
+:done
+echo {url}
+"#,
+      args = root.join("gh-args.txt").display(),
+      body = root.join("gh-body.md").display(),
+      url = issue_url.trim(),
+    ),
+  )
+  .unwrap();
+  script
+}
+
 #[test]
 fn test_config_base_path_is_escaped_for_toml_basic_strings() {
   assert_eq!(
@@ -1570,6 +1652,80 @@ run = "printf legacy > legacy-post-create.txt"
     std::fs::read_to_string(worktree.join("legacy-post-create.txt")).unwrap(),
     "legacy"
   );
+}
+
+#[test]
+fn new_creates_issue_from_template_then_creates_worktree() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/issues/142\n");
+  fs::create_dir_all(dir.path().join(".github/ISSUE_TEMPLATE")).unwrap();
+  fs::write(
+    dir.path().join(".github/ISSUE_TEMPLATE/feature_request.yml"),
+    r#"
+name: Feature
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature request for {desc}
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - cli
+        - tui
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: "Implement {type}"
+"#,
+  )
+  .unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[issue_template]
+default = "feature_request.yml"
+
+[issue_template.by_type]
+feat = {{ template = "feature_request.yml", surface = "cli", title_prefix = "[Feature]: ", labels = ["enhancement"] }}
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["new", "feat", "add-config-types", "--no-bootstrap"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created issue #142"))
+    .stdout(predicate::str::contains("feat/#142-add-config-types"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  assert!(base.path().join("feat-142-add-config-types").exists());
+  let gh_args = fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  assert!(gh_args.contains("issue create"), "{gh_args}");
+  assert!(gh_args.contains("--title [Feature]: add-config-types"), "{gh_args}");
+  assert!(gh_args.contains("--label feature"), "{gh_args}");
+  assert!(gh_args.contains("--label enhancement"), "{gh_args}");
+  let gh_body = fs::read_to_string(fake_bin.path().join("gh-body.md")).unwrap();
+  assert!(gh_body.contains("Feature request for add-config-types"), "{gh_body}");
+  assert!(gh_body.contains("**Surface:** cli"), "{gh_body}");
+  assert!(gh_body.contains("Implement feat"), "{gh_body}");
 }
 
 #[test]
