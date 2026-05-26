@@ -70,39 +70,52 @@ path = "vendor"
 [[bootstrap.no_symlink]]
 path = "node_modules"
 
-# --- post-copy commands -----------------------------------------------------
+# --- lifecycle hooks --------------------------------------------------------
+# Phases: pre_create, post_create, pre_bootstrap, post_bootstrap, pre_remove,
+# post_remove. Placeholders: {branch} {path} {type} {issue} {desc} {user}
+# {owner} {repo}. Failure handling: on_fail = "abort" (default), "warn",
+# or "ignore". Emergency bypass: --skip-hooks <phase,phase>; `gwm remove
+# --force` implies --skip-hooks pre_remove,post_remove.
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "composer install"
 run = "composer install --no-interaction --prefer-dist"
 when = "file_exists:composer.json"
+on_fail = "warn"
 env = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "direnv allow"
 run = "direnv allow ."
 when = "file_exists:.envrc"
+on_fail = "ignore"
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "npm install"
 run = "npm install"
 when = "file_exists:package.json"
+
+# --- legacy post-create commands -------------------------------------------
+# `[[bootstrap.command]]` is still accepted for compatibility. New configs
+# should prefer `[[hooks.post_create]]`; if both legacy commands and any
+# `[hooks.*]` entries are present, gwm warns and runs legacy commands as
+# additional post_create hooks.
 
 # --- composable when predicates --------------------------------------------
 # Atoms: file_exists / cmd_exists / env_set / env_eq / glob_exists
 # Operators: ! (NOT), && (AND), || (OR) — precedence: ! > && > ||
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "install (bun if available)"
 run = "bun install"
 when = "file_exists:package.json && cmd_exists:bun"
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "install (npm fallback)"
 run = "npm ci"
 when = "file_exists:package.json && !cmd_exists:bun"
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "full local build"
 run = "./scripts/full-build.sh"
 when = "glob_exists:src/**/*.rs && !env_set:CI"

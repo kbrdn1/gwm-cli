@@ -16,6 +16,7 @@ pub mod history;
 pub mod hooks;
 pub mod labels;
 pub mod launcher;
+pub mod lifecycle;
 pub mod milestones;
 pub mod multiplexer;
 pub mod naming;

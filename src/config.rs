@@ -13,6 +13,8 @@ pub struct Config {
   #[serde(default)]
   pub bootstrap: BootstrapConfig,
   #[serde(default)]
+  pub hooks: LifecycleHooksConfig,
+  #[serde(default)]
   pub doctor: DoctorConfig,
   #[serde(default)]
   pub tui: TuiConfig,
@@ -236,6 +238,70 @@ pub struct CommandStep {
   pub when: Option<String>,
   #[serde(default)]
   pub env: HashMap<String, String>,
+}
+
+/// `[hooks]` lifecycle automation. Each array uses the same command
+/// shape as `[[bootstrap.command]]`, plus explicit failure handling.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleHooksConfig {
+  #[serde(default)]
+  pub pre_create: Vec<HookStep>,
+  #[serde(default)]
+  pub post_create: Vec<HookStep>,
+  #[serde(default)]
+  pub pre_bootstrap: Vec<HookStep>,
+  #[serde(default)]
+  pub post_bootstrap: Vec<HookStep>,
+  #[serde(default)]
+  pub pre_remove: Vec<HookStep>,
+  #[serde(default)]
+  pub post_remove: Vec<HookStep>,
+}
+
+impl LifecycleHooksConfig {
+  pub fn has_any(&self) -> bool {
+    !self.pre_create.is_empty()
+      || !self.post_create.is_empty()
+      || !self.pre_bootstrap.is_empty()
+      || !self.post_bootstrap.is_empty()
+      || !self.pre_remove.is_empty()
+      || !self.post_remove.is_empty()
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookStep {
+  pub name: String,
+  pub run: String,
+  #[serde(default)]
+  pub when: Option<String>,
+  #[serde(default)]
+  pub env: HashMap<String, String>,
+  #[serde(default)]
+  pub on_fail: HookOnFail,
+}
+
+impl From<CommandStep> for HookStep {
+  fn from(step: CommandStep) -> Self {
+    Self {
+      name: step.name,
+      run: step.run,
+      when: step.when,
+      env: step.env,
+      on_fail: HookOnFail::Abort,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookOnFail {
+  #[default]
+  Abort,
+  Warn,
+  Ignore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

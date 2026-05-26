@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add `gwm config get/set/unset/list/validate/path/edit` for git-config-style `.gwm.toml` reads and comment-preserving edits.
+- Add lifecycle hooks under `[hooks.*]` for create/bootstrap/remove phases, with placeholders, per-step `on_fail`, `--skip-hooks`, and legacy `[[bootstrap.command]]` compatibility as `post_create`.
 
 ## Past releases
 

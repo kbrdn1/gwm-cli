@@ -166,7 +166,12 @@ pub fn evaluate(workdir: &Path, origin: &str, mode: TrustMode) -> Result<TrustOu
   if let Ok(body_str) = std::str::from_utf8(&bytes) {
     if let Ok(cfg) = toml::from_str::<Config>(body_str) {
       let bs = &cfg.bootstrap;
-      if bs.copy.is_empty() && bs.guard.is_empty() && bs.no_symlink.is_empty() && bs.command.is_empty() {
+      if bs.copy.is_empty()
+        && bs.guard.is_empty()
+        && bs.no_symlink.is_empty()
+        && bs.command.is_empty()
+        && !cfg.hooks.has_any()
+      {
         return Ok(TrustOutcome::Proceed);
       }
     }
