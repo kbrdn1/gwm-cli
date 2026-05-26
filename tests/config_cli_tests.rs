@@ -257,13 +257,25 @@ fn config_path_and_validate_report_resolved_config_file() {
     config_path.display()
   );
 
-  Command::cargo_bin("gwm")
+  let output = Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .args(["config", "validate"])
     .assert()
     .success()
-    .stdout(predicate::str::contains(format!("{} is valid", config_path.display())));
+    .get_output()
+    .stdout
+    .clone();
+  let printed = String::from_utf8(output).unwrap();
+  let Some(path_text) = printed.trim().strip_suffix(" is valid") else {
+    panic!("unexpected validate output: {}", printed);
+  };
+  assert!(
+    paths_equal(Path::new(path_text), &config_path),
+    "validated path {:?} should resolve to {}",
+    path_text,
+    config_path.display()
+  );
 }
 
 #[test]
