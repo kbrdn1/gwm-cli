@@ -1718,11 +1718,14 @@ feat = {{ template = "feature_request.yml", surface = "cli", title_prefix = "[Fe
     .stdout(predicate::str::contains("worktree created"));
 
   assert!(base.path().join("feat-142-add-config-types").exists());
-  let gh_args = fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
-  assert!(gh_args.contains("issue create"), "{gh_args}");
-  assert!(gh_args.contains("--title [Feature]: add-config-types"), "{gh_args}");
-  assert!(gh_args.contains("--label feature"), "{gh_args}");
-  assert!(gh_args.contains("--label enhancement"), "{gh_args}");
+  let gh_args_raw = fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  // `cmd.exe`'s `echo %*` keeps the surrounding quotes on quoted args, so
+  // normalise by stripping them before doing substring assertions.
+  let gh_args = gh_args_raw.replace('"', "");
+  assert!(gh_args.contains("issue create"), "{gh_args_raw}");
+  assert!(gh_args.contains("--title [Feature]: add-config-types"), "{gh_args_raw}");
+  assert!(gh_args.contains("--label feature"), "{gh_args_raw}");
+  assert!(gh_args.contains("--label enhancement"), "{gh_args_raw}");
   let gh_body = fs::read_to_string(fake_bin.path().join("gh-body.md")).unwrap();
   assert!(gh_body.contains("Feature request for add-config-types"), "{gh_body}");
   assert!(gh_body.contains("**Surface:** cli"), "{gh_body}");
