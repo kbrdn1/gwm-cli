@@ -579,6 +579,66 @@ pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
   Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// Shell out to `git log --pretty=- %s <base>..<head>` inside `path`
+/// and return raw stdout. Used by `gwm pr` to fill the `{commits}`
+/// placeholder in PR templates (issue #84) — each commit becomes a
+/// Markdown bullet so a list of commit subjects drops straight into a
+/// PR body without extra formatting.
+pub fn git_log_subject_between(path: &Path, base: &str, head: &str) -> Result<String> {
+  let range = format!("{}..{}", base, head);
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["log", "--pretty=format:- %s"])
+    .arg(&range)
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git log exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+}
+
+/// Shell out to `git diff --stat <base>..<head>` inside `path`. The
+/// output is truncated to `max_lines` lines so a sprawling diff stat
+/// doesn't blow up the PR body (issue #84: 30-line cap by convention).
+pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usize) -> Result<String> {
+  let range = format!("{}..{}", base, head);
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["diff", "--stat"])
+    .arg(&range)
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git diff failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git diff exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  let raw = String::from_utf8_lossy(&output.stdout);
+  let mut lines: Vec<&str> = raw.lines().collect();
+  let truncated = lines.len() > max_lines;
+  if truncated {
+    lines.truncate(max_lines);
+  }
+  let mut out = lines.join("\n");
+  if truncated {
+    out.push_str(&format!(
+      "\n… ({} more line{} trimmed)",
+      raw.lines().count() - max_lines,
+      if raw.lines().count() - max_lines == 1 { "" } else { "s" }
+    ));
+  }
+  Ok(out)
+}
+
 /// Shell out to `git status --short` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview the working-tree state.
 pub fn git_status_short(path: &Path) -> Result<String> {

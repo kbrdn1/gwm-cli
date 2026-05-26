@@ -1376,3 +1376,87 @@ on_match      = "abort"
     msg
   );
 }
+
+// --- PR template section (issue #84) ------------------------------------
+
+#[test]
+fn pr_template_defaults_are_empty() {
+  // Without a [pr_template] block, both `default` and `by_type`
+  // resolve to empty so `gwm pr` falls back to the GitHub-side
+  // PULL_REQUEST_TEMPLATE.md (same as before #84).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "").unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert!(cfg.pr_template.default.is_none());
+  assert!(cfg.pr_template.by_type.is_empty());
+}
+
+#[test]
+fn pr_template_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r###"
+[pr_template]
+default = ".github/pull_request_template.md"
+
+[pr_template.by_type]
+feat = { path = ".github/pr-templates/feat.md" }
+fix = { path = ".github/pr-templates/fix.md" }
+
+[pr_template.by_type.chore]
+body = "## Summary\n{desc}\n\nCloses #{issue}\n"
+"###,
+  )
+  .unwrap();
+
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(
+    cfg.pr_template.default.as_deref(),
+    Some(".github/pull_request_template.md")
+  );
+
+  let feat = cfg.pr_template.by_type.get("feat").expect("feat entry");
+  assert_eq!(feat.path.as_deref(), Some(".github/pr-templates/feat.md"));
+  assert_eq!(feat.body, None);
+
+  let chore = cfg.pr_template.by_type.get("chore").expect("chore entry");
+  assert_eq!(chore.path, None);
+  assert_eq!(chore.body.as_deref(), Some("## Summary\n{desc}\n\nCloses #{issue}\n"));
+}
+
+#[test]
+fn pr_template_unknown_root_field_is_rejected() {
+  // `[pr_template]` mirrors `[issue_template]`'s `deny_unknown_fields`
+  // contract so typos surface at load time, not as a silent no-op.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[pr_template]
+default = ".github/pull_request_template.md"
+mystery = "boom"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("unknown field must reject");
+  let msg = format!("{}", err);
+  assert!(msg.contains("mystery"), "{msg}");
+}
+
+#[test]
+fn pr_template_unknown_per_type_field_is_rejected() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[pr_template.by_type.feat]
+path = ".github/pr-templates/feat.md"
+bogus = true
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("unknown per-type field must reject");
+  let msg = format!("{}", err);
+  assert!(msg.contains("bogus"), "{msg}");
+}

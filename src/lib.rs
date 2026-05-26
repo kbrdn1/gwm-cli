@@ -21,6 +21,7 @@ pub mod lifecycle;
 pub mod milestones;
 pub mod multiplexer;
 pub mod naming;
+pub mod pr_templates;
 pub mod templating;
 pub mod trust;
 pub mod tui;

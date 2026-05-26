@@ -15,6 +15,7 @@ use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
 use crate::naming::{parse_branch, BranchSpec};
+use crate::pr_templates::{self, PrTemplateContext};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -105,6 +106,34 @@ pub enum Command {
     /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
+  },
+  /// Render the PR body from `[pr_template]` (issue #84), then
+  /// `gh pr create` unless `--render` is passed.
+  ///
+  /// Without `--render`, the rendered Markdown is written to a temp
+  /// file and shelled out to `gh pr create --title <subject> --body-file
+  /// <tmp> --head <branch>` (plus `--draft` and `--base` when
+  /// specified). The body resolution honours
+  /// `[pr_template.by_type.<type>]` (inline `body` wins over per-type
+  /// `path`), then `[pr_template].default` as a fallback.
+  ///
+  /// Placeholders substituted by the template engine:
+  ///   `{type}` `{issue}` `{desc}` `{base}` `{head}` `{repo}`
+  ///   `{commits}`        — `git log --pretty='- %s' base..head`
+  ///   `{files_changed}`  — `git diff --stat base..head`, capped 30 lines
+  Pr {
+    /// Render the body to stdout instead of creating the PR. The output
+    /// is suitable for piping into `gh pr create --body-file -`.
+    #[arg(long)]
+    render: bool,
+    /// Create the PR as a draft (shells out to `gh pr create --draft`).
+    /// Ignored when `--render` is set.
+    #[arg(long, conflicts_with = "render")]
+    draft: bool,
+    /// Override the base ref to compare against (defaults to the
+    /// resolved trunk from `[doctor].trunks`, then `main`).
+    #[arg(long, value_name = "REF")]
+    base: Option<String>,
   },
   /// Create a GitHub issue from templates, then create its worktree.
   New {
@@ -645,6 +674,7 @@ pub fn run(cli: Cli) -> Result<()> {
       reuse_branch,
       skip_hooks,
     } => cmd_new(branch_type, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
+    Command::Pr { render, draft, base } => cmd_pr(render, draft, base),
     Command::Remove {
       pattern,
       delete_branch,
@@ -897,6 +927,140 @@ fn cmd_new(
     skip_hooks,
     trust_mode,
   )
+}
+
+/// Maximum number of lines kept from `git diff --stat <base>..<head>`
+/// when rendering the `{files_changed}` placeholder. Hardcoded by issue
+/// #84 so a sprawling refactor PR doesn't push the body past GitHub's
+/// 65 535-byte limit; the renderer appends a `… (N more lines trimmed)`
+/// rider when the cap fires.
+const PR_FILES_CHANGED_MAX_LINES: usize = 30;
+
+fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let config = Config::load_for_repo(&workdir)?;
+  let head_name = current_branch(&repo)?;
+  let branch_spec = parse_branch(&head_name);
+
+  let branch_type = branch_spec
+    .as_ref()
+    .map(|s| s.type_.clone())
+    .unwrap_or_else(|| "chore".into());
+  let issue = branch_spec.as_ref().map(|s| s.issue.clone()).unwrap_or_default();
+  let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();
+
+  let base = base_override
+    .or_else(|| resolve_pr_base(&repo, &config.doctor.trunks))
+    .unwrap_or_else(|| "main".into());
+
+  let commits = worktree::git_log_subject_between(&workdir, &base, &head_name)
+    .inspect_err(|e| {
+      eprintln!(
+        "note: could not collect `{{commits}}` from `git log {}..{}`: {} (placeholder will be empty)",
+        base, head_name, e
+      );
+    })
+    .unwrap_or_default();
+  let files_changed = worktree::git_diff_stat_between(&workdir, &base, &head_name, PR_FILES_CHANGED_MAX_LINES)
+    .inspect_err(|e| {
+      eprintln!(
+        "note: could not collect `{{files_changed}}` from `git diff --stat {}..{}`: {} (placeholder will be empty)",
+        base, head_name, e
+      );
+    })
+    .unwrap_or_default();
+  let repo_slug = github::repo_slug(&repo).unwrap_or_default();
+
+  let ctx = PrTemplateContext {
+    branch_type: branch_type.clone(),
+    issue,
+    desc,
+    base: base.clone(),
+    head: head_name.clone(),
+    commits,
+    files_changed,
+    repo: repo_slug.clone(),
+  };
+  let body = pr_templates::render_pr_body(&config.pr_template, &workdir, &ctx)?;
+
+  if render_only {
+    print!("{}", body);
+    if !body.ends_with('\n') {
+      println!();
+    }
+    return Ok(());
+  }
+
+  let mut body_file = tempfile::NamedTempFile::new()?;
+  use std::io::Write;
+  body_file.write_all(body.as_bytes())?;
+  body_file.flush()?;
+
+  let title = pr_title(&ctx);
+  let slug = if repo_slug.is_empty() {
+    None
+  } else {
+    Some(repo_slug.as_str())
+  };
+  let created = github::create_pr(&github::PrCreateRequest {
+    title: &title,
+    body_file: body_file.path(),
+    head: &head_name,
+    base: Some(base.as_str()),
+    draft,
+    repo: slug,
+  })?;
+  println!("✓ created PR #{}", created.number);
+  println!("  {}", created.url);
+  if let Err(e) = github::link_pr(&repo, &head_name, created.number) {
+    // Linking is a best-effort convenience: surface the failure but
+    // don't drop the freshly-created PR on the floor.
+    eprintln!("note: could not record gwm-pr config for {}: {}", head_name, e);
+  }
+  Ok(())
+}
+
+/// Pick a base ref for `gwm pr` by walking the configured `[doctor].trunks`
+/// list first, then the common defaults (`main`, `master`, `dev`,
+/// `develop`, `trunk`) so a repo whose local trunk is `master` and which
+/// hasn't customised `[doctor]` doesn't fall back to a non-existent
+/// `"main"`. Returns `None` only if none of the candidates resolve to a
+/// local branch — the caller then uses `"main"` as a last resort so the
+/// downstream `gh pr create --base main` produces a clean error message
+/// instead of a panic.
+fn resolve_pr_base(repo: &Repository, trunks: &[String]) -> Option<String> {
+  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
+  for trunk in trunks {
+    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
+      return Some(trunk.clone());
+    }
+  }
+  for trunk in COMMON_TRUNKS {
+    if trunks.iter().any(|t| t == trunk) {
+      continue; // already tried as a configured trunk above
+    }
+    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
+      return Some((*trunk).to_string());
+    }
+  }
+  None
+}
+
+fn pr_title(ctx: &PrTemplateContext) -> String {
+  // Title heuristic mirrors `me:issue-worktree-pr`: take the latest
+  // commit subject if there is one, else fall back to "<type>: <desc>"
+  // so the user gets a deterministic, non-empty title.
+  if let Some(first) = ctx.commits.lines().next() {
+    let trimmed = first.trim_start_matches("- ").trim();
+    if !trimmed.is_empty() {
+      return trimmed.to_string();
+    }
+  }
+  if !ctx.desc.is_empty() {
+    return format!("{}: {}", ctx.branch_type, ctx.desc);
+  }
+  format!("update {}", ctx.head)
 }
 
 /// Render the would-do plan for `gwm remove --dry-run` (issue #31).

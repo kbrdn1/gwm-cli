@@ -375,6 +375,38 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # docs = { template = "task.yml", title_prefix = "[Docs]: " }
 # hotfix = { template = "bug_report.yml", surface = "cli", title_prefix = "[Hotfix]: ", labels = ["priority: high"] }
 
+# --- PR templates for `gwm pr` (issue #84) ----------------------------------
+# `gwm pr [--draft] [--base <ref>] [--render]` renders a per-branch-type PR
+# body and shells out to `gh pr create`. Bodies can be a workdir-relative
+# Markdown file (`path = …`) or an inline string (`body = "…"`). Placeholders
+# `{type}`, `{issue}`, `{desc}`, `{base}`, `{head}`, `{repo}`, `{commits}`
+# (`- subject` lines from `git log base..head`), and `{files_changed}`
+# (`git diff --stat base..head`, capped at 30 lines) are substituted before
+# the body lands on the temp file `gh pr create --body-file` reads.
+#
+# `gwm pr --render` skips `gh` entirely and prints the rendered body to
+# stdout so you can pipe it elsewhere: `gwm pr --render | gh pr create
+# --body-file -`.
+#
+# [pr_template]
+# default = ".github/pull_request_template.md"
+#
+# [pr_template.by_type]
+# feat = { path = ".github/pr-templates/feat.md" }
+# fix  = { path = ".github/pr-templates/fix.md" }
+# docs = { path = ".github/pr-templates/docs.md" }
+#
+# [pr_template.by_type.chore]
+# body = """
+# ## Summary
+# {desc}
+#
+# Closes #{issue}
+#
+# ## Test plan
+# - [ ] cargo test
+# """
+
 # --- CLI aliases (issue #86) ------------------------------------------------
 # Mirror of `git config`'s `[alias]` block. Each entry maps a short
 # name to an argv-substituted expansion run BEFORE clap parses, so

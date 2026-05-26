@@ -28,6 +28,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  create "))
     // Issue #83: create an issue from repo templates, then create the worktree.
     .stdout(predicate::str::contains("  new "))
+    // Issue #84: render the PR body from `[pr_template]` and shell out to `gh pr create`.
+    .stdout(predicate::str::contains("  pr "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
@@ -3486,4 +3488,233 @@ repo_root = "/nonexistent/other-repo"
     .success()
     .stdout(predicate::str::contains("feat-here-foo"))
     .stdout(predicate::str::contains("feat-elsewhere-bar"));
+}
+
+// --- gwm pr (issue #84) -------------------------------------------------
+
+/// Build a `feat/#<issue>-<desc>` branch on top of `main` carrying one
+/// extra commit so `git log main..HEAD` and `git diff --stat main..HEAD`
+/// produce non-empty output for the `{commits}` and `{files_changed}`
+/// placeholders. Switches the working tree to that branch.
+fn make_feature_branch_with_commit(
+  repo: &git2::Repository,
+  workdir: &std::path::Path,
+  branch: &str,
+  filename: &str,
+  contents: &str,
+  message: &str,
+) {
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  let branch_ref = repo.branch(branch, &head, false).unwrap();
+  let ref_name = branch_ref.into_reference().name().unwrap().to_string();
+  repo.set_head(&ref_name).unwrap();
+  repo
+    .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+    .unwrap();
+
+  let dest = workdir.join(filename);
+  if let Some(parent) = dest.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(&dest, contents).unwrap();
+  let mut index = repo.index().unwrap();
+  index.add_path(std::path::Path::new(filename)).unwrap();
+  index.write().unwrap();
+  let tree_id = index.write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head]).unwrap();
+}
+
+#[test]
+fn pr_render_prints_body_with_placeholders_substituted() {
+  // `gwm pr --render` resolves the template configured for the current
+  // branch type, substitutes the placeholders against the current
+  // branch's context (type / issue / desc / base / head / commits /
+  // files_changed), and prints the rendered Markdown to stdout. It
+  // never shells out to `gh` — the canonical pipe-friendly form is
+  // `gwm pr --render | gh pr create --body-file -`.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "docs/note.md",
+    "hello pr\n",
+    "✨ feat: pr templates",
+  );
+
+  let body = r###"
+[pr_template.by_type.feat]
+body = """
+## Summary
+
+{desc} (#{issue})
+
+## Commits
+
+{commits}
+
+## Files changed
+
+{files_changed}
+"""
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pr-templates (#84)"))
+    .stdout(predicate::str::contains("- ✨ feat: pr templates"))
+    .stdout(predicate::str::contains("docs/note.md"));
+}
+
+#[test]
+fn pr_creates_pull_request_via_gh() {
+  // `gwm pr` (no `--render`) renders the body, writes it to a temp
+  // file, and shells out to `gh pr create --title … --body-file …
+  // --head <branch>`. The fake gh prints a PR URL so the CLI can
+  // surface the new number in stdout.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/x.rs",
+    "fn x() {}\n",
+    "✨ feat: x",
+  );
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/pull/321\n");
+
+  let body = r###"
+[pr_template.by_type.feat]
+body = "## Summary\n{desc} (#{issue})\n"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created PR #321"))
+    .stdout(predicate::str::contains("https://github.com/acme/widgets/pull/321"));
+
+  let gh_args_raw = std::fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  let gh_args = gh_args_raw.replace('"', "");
+  assert!(gh_args.contains("pr create"), "{gh_args_raw}");
+  assert!(gh_args.contains("--head feat/#84-pr-templates"), "{gh_args_raw}");
+  let gh_body = std::fs::read_to_string(fake_bin.path().join("gh-body.md")).unwrap();
+  assert!(gh_body.contains("pr-templates (#84)"), "{gh_body}");
+}
+
+#[test]
+fn pr_draft_flag_is_forwarded_to_gh() {
+  // `gwm pr --draft` passes `--draft` through to `gh pr create` so the
+  // resulting PR opens as a draft instead of a normal review-ready PR.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/y.rs",
+    "fn y() {}\n",
+    "✨ feat: y",
+  );
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/pull/777\n");
+
+  let body = r###"
+[pr_template.by_type.feat]
+body = "draft body for {desc}"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["pr", "--draft"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created PR #777"));
+
+  let gh_args_raw = std::fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  let gh_args = gh_args_raw.replace('"', "");
+  assert!(gh_args.contains("--draft"), "{gh_args_raw}");
+}
+
+#[test]
+fn pr_falls_back_to_common_trunk_when_configured_trunks_do_not_resolve() {
+  // If `[doctor].trunks` only lists refs that don't exist locally
+  // (e.g. a repo customised the list but the trunk hasn't been
+  // created yet, or the repo uses `master`), `gwm pr` must still
+  // find a sensible base ref by walking the common trunk names
+  // (`main` / `master` / `dev` / `develop` / `trunk`) before giving
+  // up — otherwise `{commits}` / `{files_changed}` come out empty
+  // and the user has no signal as to why (Copilot review on PR #164).
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-fallback",
+    "src/fallback.rs",
+    "fn fb() {}\n",
+    "✨ feat: fallback",
+  );
+
+  let body = r###"
+[doctor]
+trunks = ["nonexistent-trunk"]
+
+[pr_template.by_type.feat]
+body = "summary: {desc} (#{issue})\ncommits:\n{commits}\n"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("fallback (#84)"))
+    .stdout(predicate::str::contains("- ✨ feat: fallback"));
+}
+
+#[test]
+fn pr_errors_when_no_template_configured() {
+  // Without any `[pr_template]` block in `.gwm.toml`, `gwm pr` exits
+  // non-zero with a hint about the missing config — same shape as the
+  // `gwm new` failure for an unconfigured branch type.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/z.rs",
+    "fn z() {}\n",
+    "✨ feat: z",
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), "").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("pr_template"))
+    .stderr(predicate::str::contains("feat"));
 }
