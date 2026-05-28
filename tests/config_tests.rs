@@ -1608,3 +1608,108 @@ down = []
   let k = KeyStroke::parse_chord("k").unwrap();
   assert!(matches!(km.lookup(&k), ChordResolution::Matched(Action::Up)));
 }
+
+// --- [theme] section (issue #33) ----------------------------------------
+
+#[test]
+fn theme_default_is_pre_issue_33_scheme() {
+  // No `[theme]` block → the resolved theme matches the pre-#33
+  // hardcoded scheme verbatim. Pinned at the config layer so a
+  // regression in the loader is caught here rather than as a
+  // surprise palette in someone's screenshot.
+  use ratatui::style::Color;
+  let cfg = Config::default();
+  let theme = cfg.theme.resolve().unwrap();
+  assert_eq!(theme.focus, Color::Cyan);
+  assert_eq!(theme.branch, Color::Green);
+}
+
+#[test]
+fn theme_preset_is_applied_at_load() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+preset = "catppuccin"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let theme = cfg.theme.resolve().unwrap();
+  // Catppuccin's focus role differs from the default `Cyan` —
+  // assert the difference rather than the specific hex to keep
+  // the test resilient to upstream palette tweaks.
+  use gwm::tui::theme::Theme;
+  let default = Theme::default();
+  assert_ne!(
+    theme.focus, default.focus,
+    "preset must override the default focus colour"
+  );
+}
+
+#[test]
+fn theme_per_role_overrides_win_over_preset() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+preset = "catppuccin"
+focus  = "red"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let theme = cfg.theme.resolve().unwrap();
+  use ratatui::style::Color;
+  assert_eq!(theme.focus, Color::Red, "explicit override must win over the preset");
+}
+
+#[test]
+fn theme_rejects_unknown_preset() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+preset = "does-not-exist"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("unknown preset must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("does-not-exist"), "got: {msg}");
+}
+
+#[test]
+fn theme_rejects_unknown_role() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+phantom = "red"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("unknown role must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("phantom"), "got: {msg}");
+}
+
+#[test]
+fn theme_rejects_bad_color_value() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+focus = "not_a_color"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_for_repo(dir.path()).expect_err("invalid color must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("not_a_color"), "got: {msg}");
+}

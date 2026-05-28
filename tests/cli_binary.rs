@@ -3793,3 +3793,86 @@ down = ["Ctrl+n"]
     "expected `up` row source to stay `default`, got: {up_line}"
   );
 }
+
+// --- gwm theme list / show (issue #33) ----------------------------------
+
+#[test]
+fn theme_list_includes_builtin_presets() {
+  // `gwm theme list` prints the names of every built-in preset
+  // shipped by the binary. Catppuccin is the named example in the
+  // issue; the exact catalogue can grow over time.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("catppuccin"));
+}
+
+#[test]
+fn theme_show_emits_toml_block_users_can_copy() {
+  // `gwm theme show catppuccin` dumps a `[theme]` block that, when
+  // pasted into a `.gwm.toml`, reproduces the preset.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[theme]"))
+    .stdout(predicate::str::contains("focus"));
+}
+
+#[test]
+fn theme_show_rejects_unknown_preset() {
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "does-not-exist"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("does-not-exist"));
+}
+
+#[test]
+fn theme_show_output_round_trips_through_gwm_toml() {
+  // Copilot review on PR #168 caught that `Color::Indexed(n)` was
+  // emitted as a bare integer, breaking the round-trip because
+  // `ThemeConfig.overrides` is a `BTreeMap<String, String>` and
+  // TOML integers won't deserialise as `String`. Pin the
+  // round-trip contract end-to-end: capture stdout, drop the
+  // first `preset = "…"` line (preset is a dedicated field, not
+  // an override), write the rest as `.gwm.toml`, reload, assert
+  // no error.
+  let (dir, _) = init_repo();
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .get_output()
+    .clone();
+  let toml_block = String::from_utf8(output.stdout).unwrap();
+  // Pasting verbatim into a fresh `.gwm.toml` and reloading must
+  // succeed — every value in the block has to be a TOML string.
+  let target = dir.path().join(".gwm.toml");
+  std::fs::write(&target, &toml_block).unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor"])
+    .assert()
+    // doctor's exit code may be 0 or 1 depending on local env
+    // (it's advisory). What matters is that the config parses —
+    // a TOML parse error would produce a `failed` config check
+    // and exit code 2 / a hard error before doctor runs. We
+    // assert the absence of "invalid TOML" / "config error" in
+    // stderr to pin the round-trip.
+    .stderr(predicate::str::contains("invalid TOML").not())
+    .stderr(predicate::str::contains("config error").not());
+}

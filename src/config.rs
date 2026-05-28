@@ -19,6 +19,8 @@ pub struct Config {
   #[serde(default)]
   pub tui: TuiConfig,
   #[serde(default)]
+  pub theme: ThemeConfig,
+  #[serde(default)]
   pub git_tui: GitTuiConfig,
   #[serde(default)]
   pub review: ReviewConfig,
@@ -503,6 +505,66 @@ impl TuiKeysConfig {
   }
 }
 
+/// `[theme]` block (issue #33) — role-based TUI colour scheme.
+///
+/// Two knobs:
+///
+/// - `preset` (optional string) — pick a built-in palette
+///   (`catppuccin`, `gruvbox`, `tokyo-night`). When absent, the
+///   resolved theme starts from [`crate::tui::theme::Theme::default`]
+///   (the pre-#33 hardcoded scheme).
+/// - Per-role keys (`focus`, `accent`, `branch`, …) — override the
+///   colour of a single role on top of the preset (or default).
+///   Recognised colours: named (`cyan`, `bright_blue`), indexed
+///   (`220`), or hex (`#89b4fa`).
+///
+/// Validation runs in `Config::load_for_repo` via
+/// [`Self::resolve`], so unknown presets, unknown roles, and bad
+/// colour values fail at load instead of silently picking the
+/// default colour at render time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThemeConfig {
+  /// Optional preset name. `None` → start from the default scheme.
+  /// `Some("catppuccin")` → seed every role from that preset.
+  pub preset: Option<String>,
+  /// Per-role overrides. Keys must match an entry in
+  /// [`crate::tui::theme::Theme`]; values must parse via
+  /// [`crate::tui::theme::parse_color`].
+  #[serde(flatten)]
+  pub overrides: std::collections::BTreeMap<String, String>,
+}
+
+impl ThemeConfig {
+  /// Resolve this config into a [`crate::tui::theme::Theme`]:
+  ///
+  /// 1. Start from the preset if any (else default).
+  /// 2. Apply every per-role override on top.
+  ///
+  /// Returns `Err(GwmError::Config(_))` on unknown preset, unknown
+  /// role, or bad colour value.
+  pub fn resolve(&self) -> Result<crate::tui::theme::Theme> {
+    use crate::tui::theme::Theme;
+    let mut theme = match &self.preset {
+      Some(name) => Theme::preset(name).ok_or_else(|| {
+        let known = crate::tui::theme::preset_names().join(", ");
+        GwmError::Config(format!("theme.preset: unknown preset {:?} (known: {})", name, known))
+      })?,
+      None => Theme::default(),
+    };
+    for (role, value) in &self.overrides {
+      // `preset` lands in `overrides` via `#[serde(flatten)]` only if
+      // a user happens to also write `[theme] preset = "x"` (it
+      // doesn't — the dedicated field absorbs it first). Defensive
+      // guard anyway in case a future refactor moves the field.
+      if role == "preset" {
+        continue;
+      }
+      theme.apply_override(role, value)?;
+    }
+    Ok(theme)
+  }
+}
+
 /// `[tui.open]` — how the `o` key resolves the action on the selected
 /// worktree. Adds a configurable hook on top of the historical "reveal
 /// in OS file manager" so users with a worktree-heavy workflow can land
@@ -589,6 +651,7 @@ impl Config {
     cfg.validate_labels()?;
     cfg.validate_aliases()?;
     cfg.validate_tui_keys()?;
+    cfg.validate_theme()?;
     Ok(cfg)
   }
 
@@ -601,6 +664,16 @@ impl Config {
   /// its error side-effects.
   pub(crate) fn validate_tui_keys(&self) -> Result<()> {
     self.tui.keys.resolved_keymap().map(|_| ())
+  }
+
+  /// Reject `[theme]` entries that name an unknown preset, unknown
+  /// role, or unparsable colour value (issue #33). Delegates to
+  /// [`ThemeConfig::resolve`] which does the full preset + override
+  /// pass in one shot. The resolved theme is discarded here — the
+  /// TUI rebuilds it at startup; the call is kept only for its
+  /// error side-effects.
+  pub(crate) fn validate_theme(&self) -> Result<()> {
+    self.theme.resolve().map(|_| ())
   }
 
   /// Reject `[aliases]` entries that shadow built-in subcommands, are
