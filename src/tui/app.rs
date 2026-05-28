@@ -1,4 +1,5 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
+use super::palette::PaletteState;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -56,6 +57,13 @@ pub enum View {
   OpenMenu,
   /// Two-stage prompt: pick the link kind, then enter the number.
   LinkPrompt,
+  /// Command palette (issue #32). A bottom overlay where the user
+  /// types an action by name (`:create`, `:bootstrap`, …). State
+  /// lives on [`App::palette`]; orchestrator methods are
+  /// `open_command_palette` / `palette_push_char` / `palette_pop_char`
+  /// / `palette_cycle_*` / `accept_command_palette` /
+  /// `close_command_palette`.
+  CommandPalette,
 }
 
 /// Target of an open / link action. Canonical definition lives in
@@ -169,6 +177,14 @@ pub struct App {
   /// instead of being kicked out with exit code 1.
   pub picker_should_exit: bool,
 
+  /// Event-loop exit signal for `Action::Quit` fired from a path
+  /// that cannot itself `break` the loop (issue #32: the command
+  /// palette routes accepted actions through `run_action`, which
+  /// returns `Result<()>` and has no `break` channel). Set by
+  /// `run_action` when it sees `Action::Quit`; checked at the top
+  /// of every event-loop iteration alongside `picker_should_exit`.
+  pub should_quit: bool,
+
   /// Safety countdown state for the confirm overlay (issue #30, extracted
   /// per #125). Holds the timer anchor and exposes the pure state-machine
   /// API; this `App` keeps the side-effecting wrappers below that compose
@@ -192,6 +208,14 @@ pub struct App {
   /// transitions to update the status bar and shell out to
   /// `github::link_{issue,pr}` on submit.
   link_prompt: LinkPrompt,
+
+  /// Command palette overlay state (issue #32). Opened by
+  /// `Action::CommandPalette` (default `:` binding). The pure state
+  /// machine — buffer, fuzzy-matched candidates, highlight cursor —
+  /// lives on `PaletteState`; this `App` owns the view transition
+  /// and routes the accepted `Action` back through the normal
+  /// dispatcher so palette and keymap fire identical side effects.
+  pub palette: PaletteState,
 
   /// TOFU trust mode for this TUI session (issue #95). Resolved at
   /// the CLI entrypoint from `--allow-bootstrap` / `--deny-bootstrap`
@@ -246,9 +270,11 @@ impl App {
       picker_mode: false,
       picker_result: None,
       picker_should_exit: false,
+      should_quit: false,
       confirm: ConfirmModal::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
+      palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
     };
     out.refresh_link();
@@ -500,6 +526,63 @@ impl App {
   fn sync_legacy_pending_flag(&mut self) {
     let g = KeyStroke::new(KeyCode::Char('g'), KeyModifiers::empty());
     self.pending_g = self.pending_chord.len() == 1 && self.pending_chord[0] == g;
+  }
+
+  // ---- Command palette (issue #32) ----------------------------------------
+
+  /// Open the command palette overlay. Transitions the active view
+  /// to `View::CommandPalette` and arms the pure state machine on
+  /// `self.palette` with a fresh empty buffer. Status bar shows a
+  /// short hint so the user knows what to type.
+  pub fn open_command_palette(&mut self) {
+    self.palette.open();
+    self.view = View::CommandPalette;
+    self.status = "command palette — type, Enter to run, Esc to cancel".into();
+  }
+
+  /// Close the palette without firing anything. Called on `Esc` from
+  /// inside the overlay. Returns the view to `View::List` and drops
+  /// the buffer.
+  pub fn close_command_palette(&mut self) {
+    self.palette.close();
+    self.view = View::List;
+    self.status = "palette cancelled".into();
+  }
+
+  /// Append a character to the palette input buffer. The pure state
+  /// machine re-runs its fuzzy match and resets the highlight to 0.
+  pub fn palette_push_char(&mut self, c: char) {
+    self.palette.push_char(c);
+  }
+
+  /// Remove the trailing character from the palette input buffer.
+  pub fn palette_pop_char(&mut self) {
+    self.palette.pop_char();
+  }
+
+  /// Move the palette highlight one row down (wraps at the end).
+  pub fn palette_cycle_down(&mut self) {
+    self.palette.cycle_highlight_down();
+  }
+
+  /// Move the palette highlight one row up (wraps at the start).
+  pub fn palette_cycle_up(&mut self) {
+    self.palette.cycle_highlight_up();
+  }
+
+  /// Accept the highlighted entry. Returns the resolved `Action` and
+  /// drops the palette overlay; the caller (event loop) routes the
+  /// action through the same dispatcher branch as a keystroke so
+  /// palette + key fire identical side effects.
+  ///
+  /// When the input buffer matches nothing the palette stays open
+  /// and `None` is returned — the user can backspace and retry
+  /// without losing context.
+  pub fn accept_command_palette(&mut self) -> Option<Action> {
+    let action = self.palette.accept()?;
+    self.view = View::List;
+    self.status = format!("palette: {}", action.slug());
+    Some(action)
   }
 
   // ---- Sidebar ------------------------------------------------------------

@@ -7,6 +7,7 @@ mod app;
 #[doc(hidden)]
 pub mod commit_graph;
 pub mod keymap;
+pub mod palette;
 pub mod state;
 mod ui;
 
@@ -196,65 +197,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           }
         } else if let Some(action) = app.dispatch_key(key) {
           // Issue #87: the View::List binding table is driven by the
-          // resolved keymap (`config.tui.keys` overrides on top of
-          // `Keymap::defaults`). The match below maps each Action to
-          // its side-effect; picker-mode-gated rows preserve the
-          // pre-#87 contract that `gwm switch` exposes a stripped-
-          // down picker (navigate + select, no mutations).
-          match action {
-            Action::Quit => break,
-            Action::Down => app.next(),
-            Action::Up => app.prev(),
-            Action::Top => app.first(),
-            Action::Bottom => app.last(),
-            Action::ToggleSidebar => app.toggle_sidebar(),
-            Action::ToggleSidebarMode => app.cycle_sidebar_mode(),
-            Action::FocusSwap => app.toggle_focus(),
-            Action::Filter => app.enter_filter(),
-            Action::Refresh => app.refresh()?,
-            Action::Help => app.view = View::Help,
-            Action::Yank => yank_selected_path_to_clipboard(&mut app),
-            Action::Open => match app.resolve_open_target() {
-              None => app.status = "nothing selected".into(),
-              Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
-              Some(OpenTarget::Shell { path, command }) => {
-                run_subshell(terminal, &command, &[], Some(&path), &mut app, "shell")?
-              }
-              Some(OpenTarget::Editor { path, command }) => {
-                let path_str = path.display().to_string();
-                run_subshell(terminal, &command, &[&path_str], None, &mut app, "editor")?
-              }
-            },
-            Action::GitTui => {
-              if let Some(plan) = app.prepare_git_tui() {
-                run_launcher(terminal, plan, &mut app)?;
-              }
-            }
-            // Mutating actions inert in picker mode.
-            Action::Create if !app.picker_mode => app.enter_create(),
-            Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
-            Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
-            Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
-            Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
-            Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
-            Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
-            Action::Review if !app.picker_mode => {
-              if let Some(plan) = app.prepare_review() {
-                run_launcher(terminal, plan, &mut app)?;
-              }
-            }
-            // Reserved for #32 — bound to `:` by default, currently a
-            // no-op until the command palette overlay lands. Surfacing
-            // it here (rather than dropping it from the keymap) keeps
-            // the `gwm tui keys` output stable across the #87 → #32
-            // boundary.
-            Action::CommandPalette => {}
-            // Picker-mode-gated actions fall through to no-op when
-            // the guard fails (i.e. the user pressed them inside
-            // `gwm switch`). Same fallthrough catches future actions
-            // not yet wired into the List view.
-            _ => {}
+          // resolved keymap. Routed through `run_action` so the
+          // palette overlay (issue #32) and the key path stay
+          // observationally identical: both call the same dispatch.
+          if matches!(action, Action::Quit) {
+            break;
           }
+          run_action(terminal, &mut app, action)?;
         }
       }
       View::Help => match key.code {
@@ -328,6 +277,38 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
         _ => {}
       },
+      // Issue #32: command palette overlay. Palette entry names
+      // are restricted to `[a-z0-9_-]` (see
+      // `tests/palette_tests.rs::registry_names_are_unique_and_lowercase_words`),
+      // so only those characters can usefully reach the buffer —
+      // any other typed character would just shrink the match set
+      // to empty. The accepted-character set is enforced explicitly
+      // here so a stray `:` (the palette's own trigger) doesn't
+      // self-append, and so future overlays (themes / fuzzy
+      // search) that share the input bar don't inherit a "swallow
+      // everything" contract by accident. Esc / Enter / arrows /
+      // Tab still exit or navigate; Backspace edits.
+      View::CommandPalette => match key.code {
+        KeyCode::Esc => app.close_command_palette(),
+        KeyCode::Enter => {
+          if let Some(action) = app.accept_command_palette() {
+            run_palette_action(terminal, &mut app, action)?;
+          }
+        }
+        KeyCode::Up => app.palette_cycle_up(),
+        KeyCode::Down | KeyCode::Tab => app.palette_cycle_down(),
+        KeyCode::Backspace => app.palette_pop_char(),
+        KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+          app.palette_push_char(c);
+        }
+        // Any other char (including the palette trigger `:`, the
+        // help glyph `?`, uppercase letters) is dropped — there is
+        // no palette entry name that could match it. Silently
+        // ignoring is friendlier than appending and producing zero
+        // matches with no explanation.
+        KeyCode::Char(_) => {}
+        _ => {}
+      },
     }
 
     // Picker contract (Copilot PR #53): only break when the App has
@@ -336,6 +317,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // unconditional `break` after Enter that turned an empty-match
     // Enter into a surprise exit-1.
     if app.picker_should_exit {
+      break;
+    }
+    // Issue #32: `Action::Quit` fired from a non-keystroke path
+    // (the command palette accepting `:quit`) sets this flag via
+    // `run_action`. The keystroke path also breaks directly, so
+    // this branch only matters for palette / future-non-keystroke
+    // dispatchers.
+    if app.should_quit {
       break;
     }
   }
@@ -358,6 +347,100 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// on PR #76; the previous docstring claimed "run in the background"
 /// which `output()` does not.
 ///
+/// Apply a resolved `Action` (issue #87 dispatch) to `App`.
+///
+/// Centralised so the keystroke path (`View::List` → `dispatch_key`)
+/// and the command-palette path (issue #32: `View::CommandPalette` →
+/// `accept_command_palette`) fire identical side effects. Without
+/// this single funnel the two surfaces would inevitably drift: a
+/// future feature wired into one would silently miss the other.
+///
+/// `Action::Quit` raises `app.should_quit` so the event loop can
+/// honour it from any caller — the keystroke path can also just
+/// `break` directly, but the palette path delegates here and has
+/// no way to signal `break` through a `Result<()>`. The loop
+/// checks the flag at the top of every iteration (alongside
+/// `picker_should_exit`).
+fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, action: Action) -> Result<()> {
+  match action {
+    // Issue #32: signal quit via `app.should_quit` so the palette
+    // path (which can't `break` from inside `run_action` →
+    // `accept_command_palette` → event-loop match) still exits the
+    // TUI when the user types `:quit`. The keystroke path also
+    // matches on `Action::Quit` and `break`s directly before
+    // calling `run_action`, so this branch is observationally a
+    // no-op for the `q` key — both paths converge on the loop
+    // exit.
+    Action::Quit => app.should_quit = true,
+    Action::Down => app.next(),
+    Action::Up => app.prev(),
+    Action::Top => app.first(),
+    Action::Bottom => app.last(),
+    Action::ToggleSidebar => app.toggle_sidebar(),
+    // Issue #34: cycle the sidebar preview between commits and
+    // stashes. Lands here as the merge resolution between #166
+    // (which added the action) and #167 (which extracted run_action).
+    Action::ToggleSidebarMode => app.cycle_sidebar_mode(),
+    Action::FocusSwap => app.toggle_focus(),
+    Action::Filter => app.enter_filter(),
+    Action::Refresh => app.refresh()?,
+    Action::Help => app.view = View::Help,
+    Action::Yank => yank_selected_path_to_clipboard(app),
+    Action::Open => match app.resolve_open_target() {
+      None => app.status = "nothing selected".into(),
+      Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
+      Some(OpenTarget::Shell { path, command }) => run_subshell(terminal, &command, &[], Some(&path), app, "shell")?,
+      Some(OpenTarget::Editor { path, command }) => {
+        let path_str = path.display().to_string();
+        run_subshell(terminal, &command, &[&path_str], None, app, "editor")?
+      }
+    },
+    Action::GitTui => {
+      if let Some(plan) = app.prepare_git_tui() {
+        run_launcher(terminal, plan, app)?;
+      }
+    }
+    Action::Create if !app.picker_mode => app.enter_create(),
+    Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
+    Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
+    Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
+    Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
+    Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
+    Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
+    Action::Review if !app.picker_mode => {
+      if let Some(plan) = app.prepare_review() {
+        run_launcher(terminal, plan, app)?;
+      }
+    }
+    // Issue #32: pressing `:` (or any user-rebound key for
+    // `Action::CommandPalette`) opens the palette overlay. Inside
+    // the palette, the user can type `:command-palette` to reopen
+    // it — harmless, but explicitly handled here so the palette →
+    // CommandPalette → run_action loop terminates cleanly (the
+    // overlay just stays open).
+    Action::CommandPalette => app.open_command_palette(),
+    // Picker-mode-gated actions fall through to no-op when the
+    // guard fails (i.e. the user pressed them inside `gwm switch`).
+    // Same fallthrough catches future actions not yet wired into
+    // the List view.
+    _ => {}
+  }
+  Ok(())
+}
+
+/// Dispatch an action accepted from the command palette (issue #32).
+/// Thin wrapper around [`run_action`] so the call site in
+/// `View::CommandPalette` reads symmetrically with the keystroke
+/// path. Distinct name keeps stack traces meaningful — if a feature
+/// fires only from the palette and breaks, the frame name names it.
+fn run_palette_action(
+  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  app: &mut App,
+  action: Action,
+) -> Result<()> {
+  run_action(terminal, app, action)
+}
+
 /// `LauncherPlan` is consumed by-value so the `{diff}` tempfile it
 /// carries lives at least until the child process has been waited on.
 /// Errors are never propagated — the user pressed a key in the TUI,
