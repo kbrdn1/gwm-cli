@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
+### Added
+
+- **`cargo-binstall` support** ([#27](https://github.com/kbrdn1/gwm-cli/issues/27)). `[package.metadata.binstall]` in `Cargo.toml` lets `cargo binstall gwm` pull the prebuilt archive (`gwm-v{version}-{target}.tar.gz`, `.zip` on Windows) straight from the GitHub Release — no Rust toolchain or libgit2 compile at install time. Pinned against artefact-naming drift by `tests/binstall_metadata_tests.rs`.
 
 ## Past releases
 

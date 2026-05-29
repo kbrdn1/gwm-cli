@@ -16,6 +16,21 @@ readme = "README.md"
 keywords = ["git", "worktree", "tui", "cli", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
 
+# cargo-binstall (#27): pull the prebuilt binary from the GitHub
+# Release instead of compiling git2/vendored-libgit2 from source.
+# Mirrors the release workflows' artefact naming — `gwm-v{version}-
+# {target}.tar.gz` (`.zip` on windows) — and the in-archive layout
+# `gwm-v{version}-{target}/{gwm|gwm.exe}`. `tests/binstall_metadata_tests.rs`
+# pins this block against drift.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/gwm-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "gwm-v{ version }-{ target }/{ bin }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/gwm-v{ version }-{ target }.zip"
+pkg-fmt = "zip"
+
 [lib]
 name = "gwm"
 path = "src/lib.rs"
@@ -62,6 +77,10 @@ libc = "0.2"
 assert_cmd = "2"
 criterion = "0.8"
 predicates = "3"
+# Parse our own Cargo.toml in tests/binstall_metadata_tests.rs (#27) so
+# the `[package.metadata.binstall]` contract is asserted structurally,
+# not by string-matching. Same `toml` major as the runtime dependency.
+toml = "1.1"
 
 [[bench]]
 name = "commit_graph"
