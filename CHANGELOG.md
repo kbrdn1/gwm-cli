@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
+### Added
+
+- **`gwm sync [<pattern>] [--merge]`** ([#24](https://github.com/kbrdn1/gwm-cli/issues/24)). Fetch a worktree's upstream and rebase its branch onto it — or merge with `--merge`. Resolves the target worktree by fuzzy pattern (defaults to the CWD worktree). Refuses a dirty working tree and a branch with no upstream; a conflicting rebase/merge is aborted so the worktree stays usable, with an actionable error. Read-side inspection uses libgit2; the fetch/rebase/merge steps shell out to `git` so the user's configured credentials are honoured.
 
 ## Past releases
 
