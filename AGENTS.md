@@ -110,8 +110,12 @@ exception; codify the manual test as an integration test.
   edit is the limiting factor.
 - **Keep root `CHANGELOG.md` as in-progress only.** PRs may add entries
   under `[Unreleased]`, but must not reintroduce bullets already moved
-  into the latest `changelogs/pre-releases/<previous-rc>.md`. Until the
-  guard in #147 exists, manually compare before cutting an RC.
+  into the latest `changelogs/pre-releases/<previous-rc>.md`. The guard
+  from #147 now ships as `.github/scripts/check-rc-changelog-dupes.sh`
+  and runs in CI on every pre-release tag (`pre-release.yml`). Run it
+  locally before cutting an RC — `./.github/scripts/check-rc-changelog-dupes.sh <tag>`
+  (e.g. `v0.8.0-rc.4`) — so a duplicated bullet is caught before the tag,
+  not by a red CI job after it.
 - **Release workflow edits must prove publishing credentials.** The
   v0.7.0 stable tag built all five release artifacts, then the GitHub
   Release publish step failed with `Bad credentials` and required
