@@ -377,6 +377,66 @@ fn sync_in_repo_without_upstream_reports_missing_upstream() {
 }
 
 #[test]
+fn sync_from_subdir_names_the_worktree_root_not_the_subdir() {
+  // Regression for the Copilot nit on #172: run from a subdirectory,
+  // the success line must name the worktree root (the dir tracking the
+  // upstream), not the CWD basename. Set up a bare origin + tracking
+  // clone so `gwm sync` reaches the "up to date" success print.
+  use std::process::Command as Git;
+
+  fn git(dir: &Path, args: &[&str]) {
+    let out = Git::new("git")
+      .arg("-C")
+      .arg(dir)
+      .args(["-c", "commit.gpgsign=false"])
+      .args(args)
+      .env("GIT_AUTHOR_NAME", "t")
+      .env("GIT_AUTHOR_EMAIL", "t@t")
+      .env("GIT_COMMITTER_NAME", "t")
+      .env("GIT_COMMITTER_EMAIL", "t@t")
+      .output()
+      .unwrap();
+    assert!(
+      out.status.success(),
+      "git {:?}: {}",
+      args,
+      String::from_utf8_lossy(&out.stderr)
+    );
+  }
+
+  let td = tempfile::TempDir::new().unwrap();
+  let origin = td.path().join("origin");
+  let wt = td.path().join("my-worktree");
+  std::fs::create_dir_all(&origin).unwrap();
+  Git::new("git")
+    .args(["init", "--bare", "-b", "main"])
+    .arg(&origin)
+    .output()
+    .unwrap();
+  Git::new("git").args(["init", "-b", "main"]).arg(&wt).output().unwrap();
+  git(&wt, &["config", "user.email", "t@t"]);
+  git(&wt, &["config", "user.name", "t"]);
+  std::fs::write(wt.join("file.txt"), "base\n").unwrap();
+  git(&wt, &["add", "-A"]);
+  git(&wt, &["commit", "-m", "init"]);
+  git(&wt, &["remote", "add", "origin", origin.to_str().unwrap()]);
+  git(&wt, &["push", "-u", "origin", "main"]);
+
+  let sub = wt.join("src/deep");
+  std::fs::create_dir_all(&sub).unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(&sub)
+    .arg("sync")
+    .assert()
+    .success()
+    // Names the worktree root dir, not the "deep" subdir we ran from.
+    .stdout(predicate::str::contains("my-worktree"))
+    .stdout(predicate::str::contains("deep").not());
+}
+
+#[test]
 fn labels_push_with_no_declared_labels_is_a_no_op() {
   // Same fast path as `list`. Push must not call `gh` when there's
   // nothing to push — that would surface `gh: not found` to users

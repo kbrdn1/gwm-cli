@@ -1525,24 +1525,28 @@ fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode:
 }
 
 fn cmd_sync(pattern: Option<String>, merge: bool) -> Result<()> {
-  let repo = worktree::discover_repo(None)?;
-
-  // Resolve the target worktree. With a pattern, fuzzy-match like the
-  // rest of gwm; without one, default to the worktree containing the
-  // CWD — which, unlike `find_fuzzy`, may legitimately be the main
-  // worktree (syncing trunk is a valid use).
+  // Resolve the target worktree. With a pattern, fuzzy-match against the
+  // main repo's worktree list like the rest of gwm. Without one, default
+  // to the worktree *containing* the CWD — which, unlike `find_fuzzy`,
+  // may legitimately be the main worktree (syncing trunk is valid). We
+  // discover that worktree's own workdir (not the CWD basename) so a
+  // `gwm sync` from a subdirectory still names and targets the worktree
+  // root rather than the subdir.
   let (target_path, name) = match pattern {
     Some(p) => {
+      let repo = worktree::discover_repo(None)?;
       let found = worktree::find_fuzzy(&repo, &p)?;
       (found.path, found.name)
     }
     None => {
       let cwd = std::env::current_dir()?;
-      let name = cwd
+      let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+      let name = workdir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "worktree".into());
-      (cwd, name)
+      (workdir, name)
     }
   };
 

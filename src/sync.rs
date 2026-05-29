@@ -159,14 +159,34 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
     SyncStrategy::Rebase => run_git(&workdir, &["rebase", &upstream_short]),
     SyncStrategy::Merge => run_git(&workdir, &["merge", "--no-edit", &upstream_short]),
   };
-  if integrate.is_err() {
+  if let Err(e) = integrate {
+    // Distinguish a genuine conflict from any other failure (a failing
+    // hook, a missing committer identity, a strategy/config error) by
+    // inspecting the index for conflict stages BEFORE aborting —
+    // language-independent, unlike grepping git's output. Either way we
+    // abort so the worktree is left usable.
+    let conflicted = Repository::discover(start)
+      .ok()
+      .and_then(|r| r.index().ok())
+      .map(|idx| idx.has_conflicts())
+      .unwrap_or(false);
     let _ = run_git(&workdir, &[strategy.verb(), "--abort"]);
+    if conflicted {
+      return Err(GwmError::Other(format!(
+        "{} onto {} hit conflicts and was aborted; reconcile manually with `git {} {}`",
+        strategy.verb(),
+        upstream_short,
+        strategy.verb(),
+        upstream_short
+      )));
+    }
+    // Not a conflict — surface the underlying git failure verbatim so
+    // the user isn't sent down the wrong recovery path.
     return Err(GwmError::Other(format!(
-      "{} onto {} hit conflicts and was aborted; reconcile manually with `git {} {}`",
+      "git {} onto {} failed and was aborted: {}",
       strategy.verb(),
       upstream_short,
-      strategy.verb(),
-      upstream_short
+      e
     )));
   }
 
