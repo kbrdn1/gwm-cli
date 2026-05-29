@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0`.
+Source: https://github.com/kbrdn1/gwm-cli — current version: `0.7.0`.
 
 ## When to use this skill
 
@@ -29,7 +29,7 @@ Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0`.
 
 ```bash
 command -v gwm           # required — installed by `cargo install --path .` from the gwm-cli repo
-command -v cargo         # required at install time (1.80+ recommended)
+command -v cargo         # required at install time (1.82+ — the crate MSRV)
 command -v git           # required at runtime
 command -v gh            # OPTIONAL — needed for live `gwm status` / TUI GitHub state / `R: review` preset
 command -v tmux          # OPTIONAL — needed by `gwm tmux`
