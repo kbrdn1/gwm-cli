@@ -1,6 +1,6 @@
 [package]
 name = "gwm"
-version = "0.8.0-rc.2"
+version = "0.8.0-rc.3"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
 # newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
