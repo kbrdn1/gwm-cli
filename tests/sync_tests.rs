@@ -27,8 +27,6 @@ fn git(dir: &Path, args: &[&str]) {
     .env("GIT_AUTHOR_EMAIL", "gwm@test")
     .env("GIT_COMMITTER_NAME", "gwm-test")
     .env("GIT_COMMITTER_EMAIL", "gwm@test")
-    .env("GIT_CONFIG_GLOBAL", "/dev/null")
-    .env("GIT_CONFIG_SYSTEM", "/dev/null")
     .output()
     .unwrap_or_else(|e| panic!("git {:?} failed to spawn: {e}", args));
   assert!(
@@ -42,14 +40,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// Capture stdout of `git -C <dir> <args>`, trimmed.
 fn git_out(dir: &Path, args: &[&str]) -> String {
-  let out = Command::new("git")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .env("GIT_CONFIG_GLOBAL", "/dev/null")
-    .env("GIT_CONFIG_SYSTEM", "/dev/null")
-    .output()
-    .unwrap();
+  let out = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
   assert!(
     out.status.success(),
     "git {:?} failed: {}",
@@ -96,6 +87,12 @@ fn local_tracking_origin() -> (TempDir, PathBuf, PathBuf) {
     "init local: {}",
     String::from_utf8_lossy(&out.stderr)
   );
+  // Pin identity + no-signing as LOCAL repo config so the rebase/merge
+  // that `sync()` runs (it shells out to `git` with no identity env)
+  // succeeds on a CI runner with no global git config.
+  git(&local, &["config", "user.email", "gwm@test"]);
+  git(&local, &["config", "user.name", "gwm-test"]);
+  git(&local, &["config", "commit.gpgsign", "false"]);
   write(&local.join("file.txt"), "base\n");
   git(&local, &["add", "-A"]);
   git(&local, &["commit", "-m", "init"]);
