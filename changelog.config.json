@@ -1,0 +1,17 @@
+{
+  "country": "FR",
+  "course_weeks": [],
+  "branches": {
+    "default_base": "main",
+    "default_compare": "dev"
+  },
+  "output": {
+    "dir": "./changelogs",
+    "pre_release_dir": "pre-releases"
+  },
+  "verbosity": {
+    "entries": "verbose",
+    "version_details": "normal",
+    "client": false
+  }
+}
