@@ -12,7 +12,8 @@
 //!   not bytes, so worktree names or paths containing non-ASCII code
 //!   points still align in a fixed-width terminal.
 
-use gwm::cli::{format_prune_plan, format_remove_plan};
+use gwm::cli::{format_prune_plan, format_remove_plan, format_sync_report};
+use gwm::sync::{SyncAction, SyncReport, SyncStrategy};
 use gwm::worktree::PrunableEntry;
 use std::path::{Path, PathBuf};
 
@@ -174,4 +175,65 @@ fn prune_plan_aligns_columns_in_unicode_chars_not_bytes() {
     reason_offsets[0], reason_offsets[1],
     "reason column drifted across rows ({reason_offsets:?}) — width must be in chars, not bytes:\n{out}"
   );
+}
+
+// --- format_sync_report (issue #24) -----------------------------------------
+
+#[test]
+fn sync_report_up_to_date_renders_ok_sigil_and_upstream() {
+  let report = SyncReport {
+    branch: "main".into(),
+    upstream: "origin/main".into(),
+    strategy: SyncStrategy::Rebase,
+    ahead_before: 0,
+    behind_before: 0,
+    action: SyncAction::UpToDate,
+  };
+  let out = format_sync_report("feat-24-sync", &report);
+
+  assert!(out.starts_with('✓'), "up-to-date should use the success sigil: {out}");
+  assert!(out.contains("feat-24-sync"), "worktree name missing: {out}");
+  assert!(out.contains("origin/main"), "upstream label missing: {out}");
+  assert!(
+    out.contains("up to date") || out.contains("up-to-date"),
+    "should state the branch is up to date: {out}"
+  );
+}
+
+#[test]
+fn sync_report_rebased_states_commit_count_and_strategy() {
+  let report = SyncReport {
+    branch: "feat/#24-sync".into(),
+    upstream: "origin/main".into(),
+    strategy: SyncStrategy::Rebase,
+    ahead_before: 1,
+    behind_before: 3,
+    action: SyncAction::Integrated,
+  };
+  let out = format_sync_report("feat-24-sync", &report);
+
+  assert!(
+    out.starts_with('✓'),
+    "successful integration uses the success sigil: {out}"
+  );
+  assert!(out.contains("rebased"), "rebase strategy should be named: {out}");
+  assert!(out.contains('3'), "the integrated commit count should appear: {out}");
+  assert!(out.contains("origin/main"), "upstream label missing: {out}");
+}
+
+#[test]
+fn sync_report_merged_names_the_merge_strategy() {
+  let report = SyncReport {
+    branch: "feat/#24-sync".into(),
+    upstream: "origin/main".into(),
+    strategy: SyncStrategy::Merge,
+    ahead_before: 0,
+    behind_before: 2,
+    action: SyncAction::Integrated,
+  };
+  let out = format_sync_report("feat-24-sync", &report);
+
+  assert!(out.contains("merged"), "merge strategy should be named: {out}");
+  assert!(!out.contains("rebased"), "must not claim a rebase when merging: {out}");
+  assert!(out.contains('2'), "the integrated commit count should appear: {out}");
 }

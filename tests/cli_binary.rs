@@ -33,6 +33,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
+    // Issue #24: fetch + rebase/merge a worktree onto its upstream.
+    .stdout(predicate::str::contains("  sync "))
     .stdout(predicate::str::contains("  prune "))
     .stdout(predicate::str::contains("  completions "))
     .stdout(predicate::str::contains("  shell-init "))
@@ -342,6 +344,36 @@ fn labels_list_with_no_declared_labels_is_a_no_op() {
     .assert()
     .success()
     .stdout(predicate::str::contains("0 labels declared"));
+}
+
+// --- sync (issue #24) -------------------------------------------------------
+
+#[test]
+fn sync_unknown_pattern_errors() {
+  // A pattern that resolves to no worktree must fail loudly with the
+  // worktree name, not silently no-op.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["sync", "does-not-exist"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("does-not-exist"));
+}
+
+#[test]
+fn sync_in_repo_without_upstream_reports_missing_upstream() {
+  // `gwm sync` with no pattern targets the CWD worktree. A fresh repo
+  // on `main` with no remote has no upstream → clear, actionable error.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("sync")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("upstream"));
 }
 
 #[test]
