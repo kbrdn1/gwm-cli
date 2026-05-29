@@ -12,7 +12,7 @@ Source: https://github.com/kbrdn1/gwm-cli — current version: `0.6.0`.
 
 ## When to use this skill
 
-- User runs or asks about any `gwm <subcommand>`: `init`, `list`, `create`, `remove`, `path` / `cd`, `bootstrap`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`.
+- User runs or asks about any `gwm <subcommand>`: `init`, `list`, `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`.
 - User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
 - User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[tui.open]`, `[git_tui]`, `[review]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
 - User asks about composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`) and the `!` / `&&` / `||` operators.
@@ -88,6 +88,9 @@ gwm path <pattern>                        # print path (fuzzy match) → use $(g
 gwm cd   <pattern>                        # alias of `gwm path`
 gwm bootstrap                             # re-run bootstrap on cwd worktree
 gwm bootstrap <pattern>                   # ...or on a named worktree
+gwm sync                                  # fetch + rebase the cwd worktree onto its upstream
+gwm sync <pattern>                        # ...or a fuzzy-matched worktree
+gwm sync <pattern> --merge                # merge the upstream instead of rebasing
 gwm remove <pattern>                      # remove (fuzzy). Keeps the branch.
 gwm remove <pattern> --delete-branch      # also drop the local branch
 gwm prune                                 # clean stale .git/worktrees entries
@@ -700,6 +703,7 @@ gwm list                     # list worktrees
 gwm path|cd <pat>            # print path
 gwm switch | gwm s | gcd     # interactive picker (cd via shell wrapper)
 gwm bootstrap [pat]          # re-run bootstrap
+gwm sync [pat] [--merge]     # fetch + rebase (or merge) onto upstream
 gwm remove <pat> [-b]        # remove (-b drops branch)
 gwm prune                    # clean stale refs
 gwm types                    # show branch types

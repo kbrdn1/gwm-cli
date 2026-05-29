@@ -33,6 +33,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
+    // Issue #24: fetch + rebase/merge a worktree onto its upstream.
+    .stdout(predicate::str::contains("  sync "))
     .stdout(predicate::str::contains("  prune "))
     .stdout(predicate::str::contains("  completions "))
     .stdout(predicate::str::contains("  shell-init "))
@@ -342,6 +344,96 @@ fn labels_list_with_no_declared_labels_is_a_no_op() {
     .assert()
     .success()
     .stdout(predicate::str::contains("0 labels declared"));
+}
+
+// --- sync (issue #24) -------------------------------------------------------
+
+#[test]
+fn sync_unknown_pattern_errors() {
+  // A pattern that resolves to no worktree must fail loudly with the
+  // worktree name, not silently no-op.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["sync", "does-not-exist"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("does-not-exist"));
+}
+
+#[test]
+fn sync_in_repo_without_upstream_reports_missing_upstream() {
+  // `gwm sync` with no pattern targets the CWD worktree. A fresh repo
+  // on `main` with no remote has no upstream → clear, actionable error.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("sync")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("upstream"));
+}
+
+#[test]
+fn sync_from_subdir_names_the_worktree_root_not_the_subdir() {
+  // Regression for the Copilot nit on #172: run from a subdirectory,
+  // the success line must name the worktree root (the dir tracking the
+  // upstream), not the CWD basename. Set up a bare origin + tracking
+  // clone so `gwm sync` reaches the "up to date" success print.
+  use std::process::Command as Git;
+
+  fn git(dir: &Path, args: &[&str]) {
+    let out = Git::new("git")
+      .arg("-C")
+      .arg(dir)
+      .args(["-c", "commit.gpgsign=false"])
+      .args(args)
+      .env("GIT_AUTHOR_NAME", "t")
+      .env("GIT_AUTHOR_EMAIL", "t@t")
+      .env("GIT_COMMITTER_NAME", "t")
+      .env("GIT_COMMITTER_EMAIL", "t@t")
+      .output()
+      .unwrap();
+    assert!(
+      out.status.success(),
+      "git {:?}: {}",
+      args,
+      String::from_utf8_lossy(&out.stderr)
+    );
+  }
+
+  let td = tempfile::TempDir::new().unwrap();
+  let origin = td.path().join("origin");
+  let wt = td.path().join("my-worktree");
+  std::fs::create_dir_all(&origin).unwrap();
+  Git::new("git")
+    .args(["init", "--bare", "-b", "main"])
+    .arg(&origin)
+    .output()
+    .unwrap();
+  Git::new("git").args(["init", "-b", "main"]).arg(&wt).output().unwrap();
+  git(&wt, &["config", "user.email", "t@t"]);
+  git(&wt, &["config", "user.name", "t"]);
+  std::fs::write(wt.join("file.txt"), "base\n").unwrap();
+  git(&wt, &["add", "-A"]);
+  git(&wt, &["commit", "-m", "init"]);
+  git(&wt, &["remote", "add", "origin", origin.to_str().unwrap()]);
+  git(&wt, &["push", "-u", "origin", "main"]);
+
+  let sub = wt.join("src/deep");
+  std::fs::create_dir_all(&sub).unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(&sub)
+    .arg("sync")
+    .assert()
+    .success()
+    // Names the worktree root dir, not the "deep" subdir we ran from.
+    .stdout(predicate::str::contains("my-worktree"))
+    .stdout(predicate::str::contains("deep").not());
 }
 
 #[test]

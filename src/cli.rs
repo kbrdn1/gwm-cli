@@ -16,6 +16,7 @@ use crate::multiplexer::{
 };
 use crate::naming::{parse_branch, BranchSpec};
 use crate::pr_templates::{self, PrTemplateContext};
+use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -186,6 +187,25 @@ pub enum Command {
     /// Skip lifecycle hooks for comma-separated phases.
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
+  },
+  /// Fetch + rebase (or merge) a worktree's branch onto its upstream.
+  ///
+  /// Resolves the target worktree (defaults to the CWD worktree when
+  /// no pattern is given), runs `git fetch` for its upstream's remote,
+  /// then rebases the branch onto the upstream — or merges with
+  /// `--merge`. Reports the outcome with the same ✓ / ! / ✗ sigils as
+  /// the rest of gwm.
+  ///
+  /// Refuses up front on a dirty working tree (commit or stash first)
+  /// and on a branch with no upstream configured. A conflicting
+  /// rebase/merge is aborted so the worktree stays usable, and the
+  /// user is told to reconcile by hand. Issue #24.
+  Sync {
+    /// Worktree name/pattern; defaults to the worktree containing the CWD.
+    pattern: Option<String>,
+    /// Merge the upstream instead of rebasing onto it.
+    #[arg(long)]
+    merge: bool,
   },
   /// Prune stale worktree references (admin files without a working dir).
   Prune {
@@ -738,6 +758,7 @@ pub fn run(cli: Cli) -> Result<()> {
     } => cmd_remove(pattern, delete_branch, dry_run, force, skip_hooks, mode),
     Command::Path { pattern } => cmd_path(pattern),
     Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
+    Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
     Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Doctor => cmd_doctor(),
     Command::Types { gitmoji } => cmd_types(gitmoji),
@@ -1501,6 +1522,65 @@ fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode:
   let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &hook_ctx, &skips, false)?;
   print_lifecycle_report(&report);
   Ok(())
+}
+
+fn cmd_sync(pattern: Option<String>, merge: bool) -> Result<()> {
+  // Resolve the target worktree. With a pattern, fuzzy-match against the
+  // main repo's worktree list like the rest of gwm. Without one, default
+  // to the worktree *containing* the CWD — which, unlike `find_fuzzy`,
+  // may legitimately be the main worktree (syncing trunk is valid). We
+  // discover that worktree's own workdir (not the CWD basename) so a
+  // `gwm sync` from a subdirectory still names and targets the worktree
+  // root rather than the subdir.
+  let (target_path, name) = match pattern {
+    Some(p) => {
+      let repo = worktree::discover_repo(None)?;
+      let found = worktree::find_fuzzy(&repo, &p)?;
+      (found.path, found.name)
+    }
+    None => {
+      let cwd = std::env::current_dir()?;
+      let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+      let name = workdir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "worktree".into());
+      (workdir, name)
+    }
+  };
+
+  let strategy = if merge {
+    SyncStrategy::Merge
+  } else {
+    SyncStrategy::Rebase
+  };
+  let report = sync::sync(&target_path, strategy)?;
+  print!("{}", format_sync_report(&name, &report));
+  Ok(())
+}
+
+/// Render a successful [`SyncReport`] as a single ✓ status line. The
+/// error paths (dirty tree, missing upstream, conflicts) surface as
+/// `GwmError` and are printed by `main`'s top-level handler, so this
+/// only ever formats the success cases.
+pub fn format_sync_report(name: &str, report: &SyncReport) -> String {
+  match report.action {
+    SyncAction::UpToDate => {
+      format!("✓ {} already up to date with {}\n", name, report.upstream)
+    }
+    SyncAction::Integrated => {
+      let verb = match report.strategy {
+        SyncStrategy::Rebase => "rebased",
+        SyncStrategy::Merge => "merged",
+      };
+      let plural = if report.behind_before == 1 { "" } else { "s" };
+      format!(
+        "✓ {} {} {} commit{} from {}\n",
+        name, verb, report.behind_before, plural, report.upstream
+      )
+    }
+  }
 }
 
 fn cmd_prune(dry_run: bool) -> Result<()> {

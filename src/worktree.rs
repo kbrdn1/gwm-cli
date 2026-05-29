@@ -92,18 +92,29 @@ impl BranchStatus {
   }
 }
 
-/// Compute the working-tree + upstream status of a single repo / linked worktree.
-fn compute_status(repo: &Repository) -> BranchStatus {
-  let mut out = BranchStatus::default();
-
-  // Dirty check
+/// True when the worktree at `repo` carries staged, unstaged, or
+/// untracked changes (ignored files excluded). Shares its
+/// `StatusOptions` shape with [`compute_status`] so the status column
+/// and `gwm sync`'s dirty-tree refusal (issue #24) agree on what
+/// "dirty" means.
+pub fn is_dirty(repo: &Repository) -> Result<bool> {
   let mut opts = StatusOptions::new();
   opts
     .include_untracked(true)
     .include_ignored(false)
     .recurse_untracked_dirs(true);
-  match repo.statuses(Some(&mut opts)) {
-    Ok(s) => out.is_dirty = !s.is_empty(),
+  let statuses = repo.statuses(Some(&mut opts))?;
+  Ok(!statuses.is_empty())
+}
+
+/// Compute the working-tree + upstream status of a single repo / linked worktree.
+fn compute_status(repo: &Repository) -> BranchStatus {
+  let mut out = BranchStatus::default();
+
+  // Dirty check — reuse the shared `is_dirty` scanner so the column
+  // and `gwm sync` can never disagree on dirtiness.
+  match is_dirty(repo) {
+    Ok(dirty) => out.is_dirty = dirty,
     Err(_) => out.unknown = true,
   }
 
