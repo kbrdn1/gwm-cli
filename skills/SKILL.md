@@ -53,6 +53,8 @@ cargo install --path .         # → ~/.cargo/bin/gwm
 gwm --version
 ```
 
+No Rust toolchain at hand? `cargo binstall gwm` pulls the prebuilt binary from the matching GitHub Release (via `[package.metadata.binstall]`) and drops it in `~/.cargo/bin/` without compiling `git2`/vendored-libgit2 from source — much faster on first install.
+
 Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): https://github.com/kbrdn1/gwm-cli/releases. A Homebrew formula ships under `packaging/homebrew/` and a Nix `flake.nix` is at the repo root.
 
 ## Default conventions
