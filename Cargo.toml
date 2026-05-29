@@ -50,7 +50,7 @@ tempfile = "3"
 # trust ledger. Whitespace-sensitive on purpose — `rm -rf /tmp/` and
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /
