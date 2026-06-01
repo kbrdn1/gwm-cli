@@ -120,7 +120,7 @@ fn compute_status(repo: &Repository) -> BranchStatus {
 
   // Ahead / behind vs upstream
   if let Ok(head_ref) = repo.head() {
-    if let Some(shorthand) = head_ref.shorthand() {
+    if let Ok(shorthand) = head_ref.shorthand() {
       if let Ok(local_branch) = repo.find_branch(shorthand, BranchType::Local) {
         if let Ok(upstream) = local_branch.upstream() {
           if let (Some(local_oid), Some(up_oid)) = (head_ref.target(), upstream.into_reference().target()) {
@@ -176,7 +176,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   // The main worktree is not listed by git2::Repository::worktrees(); add it manually.
   if let Some(workdir) = repo.workdir() {
     let head_ref = repo.head().ok();
-    let branch = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
+    let branch = head_ref
+      .as_ref()
+      .and_then(|r| r.shorthand().ok().map(|s| s.to_string()));
     let head = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
     let link = branch
       .as_deref()
@@ -201,7 +203,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   }
 
   let names = repo.worktrees()?;
-  for name in names.iter().flatten() {
+  // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
+  // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
+  for name in names.iter().filter_map(|r| r.ok().flatten()) {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
@@ -217,7 +221,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let (branch, head, status, age) = match Repository::open(&path) {
       Ok(sub) => {
         let head_ref = sub.head().ok();
-        let b = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
+        let b = head_ref
+          .as_ref()
+          .and_then(|r| r.shorthand().ok().map(|s| s.to_string()));
         let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
         let s = compute_status(&sub);
         // The trunk-baseline lookup must run against the main repo's
@@ -294,7 +300,7 @@ pub fn add(
   // record points at the actual parent (`main` / `dev` / a release
   // train), not the freshly-created `branch_name` itself.
   let head_ref = repo.head()?;
-  let head_short = head_ref.shorthand().map(|s| s.to_string());
+  let head_short = head_ref.shorthand().ok().map(|s| s.to_string());
   let head_commit = head_ref.peel_to_commit()?;
   let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
     Ok(b) => {
@@ -340,7 +346,7 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
 
   // Capture the branch (if any) so we can drop it after pruning.
   let branch_name = match Repository::open(&path) {
-    Ok(sub) => sub.head().ok().and_then(|r| r.shorthand().map(|s| s.to_string())),
+    Ok(sub) => sub.head().ok().and_then(|r| r.shorthand().ok().map(|s| s.to_string())),
     Err(_) => None,
   };
 
@@ -392,7 +398,9 @@ pub struct PrunableEntry {
 pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
   let names = repo.worktrees()?;
   let mut out = Vec::new();
-  for name in names.iter().flatten() {
+  // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
+  // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
+  for name in names.iter().filter_map(|r| r.ok().flatten()) {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
@@ -533,7 +541,7 @@ fn recent_commits_revwalk(repo: &Repository, tip: git2::Oid, limit: usize) -> Re
       hash: oid,
       author: commit.author().name().unwrap_or("").to_string(),
       parents: commit.parent_ids().collect(),
-      subject: commit.summary().unwrap_or("").to_string(),
+      subject: commit.summary().ok().flatten().unwrap_or("").to_string(),
     });
   }
   Ok(rows)

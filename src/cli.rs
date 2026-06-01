@@ -1976,6 +1976,7 @@ fn current_branch(repo: &Repository) -> Result<String> {
   })?;
   head
     .shorthand()
+    .ok()
     .map(|s| s.to_string())
     .ok_or_else(|| GwmError::UnbornHead {
       reason: "HEAD has no shorthand (detached?)".into(),
@@ -2620,7 +2621,7 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 fn origin_url_for_repo(repo: Option<&Repository>) -> Option<String> {
   let r = repo?;
   let remote = r.find_remote("origin").ok()?;
-  remote.url().map(|s| s.to_string())
+  remote.url().ok().map(|s| s.to_string())
 }
 
 /// Interactive y/N/show loop. Prints a one-shot summary of the

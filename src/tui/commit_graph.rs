@@ -152,7 +152,7 @@ pub fn box_drawing_chars(up: bool, down: bool, left: bool, right: bool) -> (char
 /// commit. Zero OID is outside normal `git log` output and keeps pipe
 /// comparisons allocation-free.
 fn start_hash() -> Oid {
-  Oid::zero()
+  Oid::ZERO_SHA1
 }
 
 /// Walk `commits` once, producing the per-row pipe sets. This is the
