@@ -16,10 +16,11 @@
 //!   green → `branch` (branch identity) / `clean` (ok/synced status)
 //!   cyan  → `focus` (focus border) / `accent` (highlight, staged, ahead)
 //!   yellow→ `main` (trunk badge) / `dirty` (modified, warning, hash, prompt)
-//!   gray  → `selection_bg` (selection background) / `muted` (dim text)
+//!   dark gray → `selection_bg` (selection background) / `muted` (dim text)
 //!   magenta → `locked`   red → `prunable`
 //! Since #210 the worktree-name chrome (`Color::White`) maps to the `name`
-//! role and the table path column (`Color::Gray`) to the `path` role. The
+//! role and the table path column (`Color::Gray`, a brighter mid-grey than
+//! the dark-gray `selection_bg` / `muted`) to the `path` role. The
 //! remaining structural `Color::White` (help/step labels, the not-yet-fetched
 //! dot) and `Color::Reset` (unlinked marker) still carry no semantic role.
 
