@@ -197,6 +197,7 @@ pub fn repo_slug(repo: &Repository) -> Result<String> {
     .map_err(|_| GwmError::Other("no 'origin' remote configured".into()))?;
   let url = remote
     .url()
+    .ok()
     .ok_or_else(|| GwmError::Other("origin remote has no URL (non-utf8?)".into()))?
     .to_string();
   parse_github_slug(&url)

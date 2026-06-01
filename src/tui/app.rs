@@ -343,7 +343,7 @@ impl App {
       .repo
       .find_remote("origin")
       .ok()
-      .and_then(|r| r.url().map(String::from));
+      .and_then(|r| r.url().ok().map(String::from));
     let origin = trust::resolve_origin_key(origin_url.as_deref(), &self.workdir);
 
     match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
@@ -1244,10 +1244,13 @@ impl App {
   }
 
   fn selected_branch_name(&self) -> Option<String> {
-    self
-      .selected()
-      .and_then(|w| w.branch.clone())
-      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
+    self.selected().and_then(|w| w.branch.clone()).or_else(|| {
+      self
+        .repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()))
+    })
   }
 
   pub fn current_link(&self) -> &BranchLink {
@@ -1483,7 +1486,13 @@ impl App {
     let branch = self
       .selected()
       .and_then(|w| w.branch.clone())
-      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
+      .or_else(|| {
+        self
+          .repo
+          .head()
+          .ok()
+          .and_then(|h| h.shorthand().ok().map(|s| s.to_string()))
+      })
       .ok_or_else(|| GwmError::Other("no branch resolved for selected worktree".into()))?;
     match target {
       LinkTarget::Issue => github::link_issue(&self.repo, &branch, n)?,

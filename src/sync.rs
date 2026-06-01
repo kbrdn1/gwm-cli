@@ -102,11 +102,12 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   }
   let branch_short = head
     .shorthand()
+    .ok()
     .ok_or_else(|| GwmError::UnbornHead {
       reason: "sync: HEAD has no branch name".into(),
     })?
     .to_string();
-  let head_refname = head.name().map(|s| s.to_string());
+  let head_refname = head.name().ok().map(|s| s.to_string());
 
   let local = repo
     .find_branch(&branch_short, BranchType::Local)
@@ -129,7 +130,7 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   let remote = head_refname
     .as_deref()
     .and_then(|rn| repo.branch_upstream_remote(rn).ok())
-    .and_then(|buf| buf.as_str().map(|s| s.to_string()));
+    .and_then(|buf| buf.as_str().ok().map(|s| s.to_string()));
 
   // 3. Fetch. After this the in-memory `repo` ref cache is stale, so
   //    everything past here re-resolves against a freshly opened repo.

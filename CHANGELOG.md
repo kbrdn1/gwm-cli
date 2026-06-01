@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Dependencies
+
+- ⬆️ `git2` `0.20` → `0.21` ([#169](https://github.com/kbrdn1/gwm-cli/issues/169)). A breaking source migration, not just a version bump: git2 0.21 reworks the UTF-8 accessors `Reference::shorthand` / `Reference::name` / `Remote::url` / `Buf::as_str` to return `Result<&str, git2::Error>` (was `Option<&str>`), `Commit::summary` to `Result<Option<&str>, _>`, and `StringArray::iter` to yield `Result<Option<&str>, _>`; `Oid::zero` is deprecated in favour of the `Oid::ZERO_SHA1` constant. All call sites now collapse the new `Err` arm to `None` via `.ok()` so the observable behaviour (a non-UTF-8 / absent name is treated as missing) is preserved. Side effect: git2 0.21 drops its `url` dependency, pruning the whole `idna` / `icu_*` transitive tree from `Cargo.lock`. Closes Dependabot [#157](https://github.com/kbrdn1/gwm-cli/pull/157).
+
 ### Docs
 
 - 📝 Sync the root `README.md` landing page to the v0.8.0 surface and fix the MSRV badge (`1.80+` → `1.82+`) ([#203](https://github.com/kbrdn1/gwm-cli/issues/203)). The "what gwm does" list now covers the config CLI + user-level global config, lifecycle hooks, CLI aliases + Gitmoji, the GitHub `gwm new` / `gwm pr` workflow with PR auto-detection, safety-daily (`--dry-run`, `gwm undo` / `gwm history`), `gwm sync`, and TUI personalisation (themes / remappable keymap / command palette / stashes). Follow-up to the #199 docs refresh — landing page only, every feature keeps its dedicated section under `docs/`.
