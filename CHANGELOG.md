@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - TUI statusline is now a single line. Key hints render as reverse-video badge chips (the key painted with the theme accent, followed by a short label) and the status message (action log) is pinned flush-right with absolute priority — when the terminal is too narrow, the hint list is truncated with an `…` marker while the log stays visible. Previously the footer occupied two rows and wrapped, which could push the log off-screen. No keybindings changed. (#180)
+- TUI header line is now styled with a clear visual hierarchy instead of one flat cyan string. The version renders as a reverse-video badge chip (matching the #180 footer chips), the repo name is bold, and the working directory is tilde-compressed and dimmed as secondary context. The `picker` flag is now its own reverse-video chip. The layout is width-driven: under width pressure the path is truncated/dropped first, the repo name next, and the version chip survives last. `gwm --version` parity is preserved (version still sourced from `CARGO_PKG_VERSION`). (#185)
 
 ## Past releases
 
