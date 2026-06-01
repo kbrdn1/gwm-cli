@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `{repo_path}` and `{repo_parent}` placeholders for `.gwm.toml` paths/patterns. `{repo_path}` expands to the main repo's absolute working directory and `{repo_parent}` to its parent, so a base can be expressed relative to the repo on disk — e.g. `base = "{repo_parent}/worktrees"` puts worktrees in a sibling `worktrees/` dir, matching an editor's `../worktrees` convention (Zed's `git.worktree_directory`) without a per-project editor config. Purely additive; existing `{home}`/`{repo}` bases are unchanged. (#175)
-- Git-style colourisation of the **Working Tree** sidebar block in the TUI: the staged (X) status column renders green, the unstaged (Y) column red, untracked `??` entries red, and each file name takes the dominant status colour (red when it carries unstaged/untracked changes, green when staged-only). The displayed text is unchanged — only colour is added — so it stays a faithful `git status -s` view at a glance. (#179)
+- Colourisation of the **Working Tree** sidebar block in the TUI, with three distinct status colours so modified and created files stay visually apart: the staged (X) status column renders cyan, a worktree modification (Y) yellow, and untracked `??` entries green. Each file name takes its dominant status colour (green when untracked, yellow when modified, cyan when staged-only). The displayed text is unchanged — only colour is added — so each entry still shows the exact `git status --short` codes. (#179)
 
 ## Past releases
 
