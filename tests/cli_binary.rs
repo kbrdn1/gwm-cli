@@ -801,6 +801,45 @@ fn create_outside_git_repo_fails() {
 }
 
 #[test]
+fn list_detect_pr_flag_adds_pr_column_with_detected_number() {
+  // E2E (issue #181): `gwm list --detect-pr` shows a PR column populated
+  // by `gh pr list` detection for each worktree's branch.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--detect-pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("PR"))
+    .stdout(predicate::str::contains("#128"));
+}
+
+#[test]
+fn list_without_detect_pr_flag_has_no_pr_column() {
+  // Default `gwm list` stays network-free: no PR column, no `#` markers.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("STATUS"))
+    .stdout(predicate::str::contains("PATH"))
+    .stdout(predicate::str::contains('#').not());
+}
+
+#[test]
 fn completions_zsh_emits_compdef_header() {
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.args(["completions", "zsh"]);
