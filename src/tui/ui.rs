@@ -662,16 +662,26 @@ fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
 /// identical to the input — only `Span` styling is added — so the sidebar
 /// keeps showing the exact `git status --short` codes it always did.
 pub fn working_tree_status_line(raw: &str) -> Line<'static> {
-  // Defensive: porcelain short output is always `XY PATH`, but a truncated
-  // read must not panic on byte slicing. Anything shorter than the two
-  // status columns + separator is rendered verbatim.
-  let bytes = raw.as_bytes();
-  if bytes.len() < 3 {
-    return Line::from(raw.to_string());
-  }
-  // X and Y are always ASCII status codes, so byte indexing is sound.
-  let x = bytes[0] as char;
-  let y = bytes[1] as char;
+  // Porcelain short output is always `XY<space>PATH` with ASCII status
+  // codes, but the helper is `pub` — a non-git caller could pass arbitrary
+  // input. Split on char boundaries (not byte offsets) so a multi-byte
+  // leading codepoint can never slice mid-character and panic. Anything
+  // shorter than the two status columns + separator is rendered verbatim.
+  let mut indices = raw.char_indices();
+  let (x_at, x) = match indices.next() {
+    Some(c) => c,
+    None => return Line::from(raw.to_string()),
+  };
+  let (y_at, y) = match indices.next() {
+    Some(c) => c,
+    None => return Line::from(raw.to_string()),
+  };
+  let (sep_at, sep) = match indices.next() {
+    Some(c) => c,
+    None => return Line::from(raw.to_string()),
+  };
+  // Byte offset where the path begins (just past the separator char).
+  let path_at = sep_at + sep.len_utf8();
   let untracked = x == '?' && y == '?';
 
   let green = Style::default().fg(Color::Green);
@@ -693,10 +703,10 @@ pub fn working_tree_status_line(raw: &str) -> Line<'static> {
   };
 
   Line::from(vec![
-    Span::styled(raw[0..1].to_string(), x_style),
-    Span::styled(raw[1..2].to_string(), y_style),
-    Span::raw(raw[2..3].to_string()),
-    Span::styled(raw[3..].to_string(), name_style),
+    Span::styled(raw[x_at..y_at].to_string(), x_style),
+    Span::styled(raw[y_at..sep_at].to_string(), y_style),
+    Span::raw(raw[sep_at..path_at].to_string()),
+    Span::styled(raw[path_at..].to_string(), name_style),
   ])
 }
 

@@ -1995,6 +1995,17 @@ fn working_tree_status_line_untracked_is_red() {
 }
 
 #[test]
+fn working_tree_status_line_handles_multibyte_leading_chars() {
+  // The helper is `pub` (exported for these tests), so a non-git caller can
+  // feed it arbitrary input. Splitting on byte offsets (`raw[0..1]`) would
+  // panic mid-codepoint when the first chars are multi-byte UTF-8. Split on
+  // char boundaries instead — no panic, and the exact text is preserved.
+  let raw = "éM café.rs"; // X='é' (2 bytes), Y='M', sep=' ', path="café.rs"
+  let line = working_tree_status_line(raw);
+  assert_eq!(section_text_single(&line), raw, "multi-byte text preserved without panic");
+}
+
+#[test]
 fn working_tree_status_line_partially_staged_splits_status_columns() {
   // `AM`: index add (green) + worktree modify (red). The file name takes the
   // dominant worktree colour (red) since it carries unstaged changes.
