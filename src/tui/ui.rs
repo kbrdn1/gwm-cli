@@ -1554,6 +1554,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     spans.extend(countdown_bar(
       app.confirm_countdown_progress(now),
       app.confirm_countdown_remaining_secs(now),
+      danger,
+      app.theme.dirty,
+      muted,
     ));
     f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), inner[1]);
   }
@@ -1572,10 +1575,10 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // --- key hint ---
   let hint = if app.confirm_is_countdown_mode() {
     if app.confirm.is_armed() {
-      "y: cancel countdown   ←/→ Tab: move   Enter: activate   Esc: cancel".to_string()
+      "y: cancel countdown   ←/→ Tab: move   Enter: activate   n/Esc: cancel".to_string()
     } else {
       let total = app.confirm_countdown_total().as_secs();
-      format!("y: arm {total}s countdown   ←/→ Tab: move   Enter: activate   Esc: cancel")
+      format!("y: arm {total}s countdown   ←/→ Tab: move   Enter: activate   n/Esc: cancel")
     }
   } else {
     "y: confirm   ←/→ Tab: move   Enter: activate   n/Esc: cancel".to_string()
@@ -1607,23 +1610,32 @@ fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Li
   ])
 }
 
-/// Build the `[████░░] Ns — Esc to cancel` countdown line. Width is fixed
-/// at 10 cells so the bar reads the same regardless of modal size.
-fn countdown_bar<'a>(progress: f64, remaining_secs: u64) -> Vec<Span<'a>> {
+/// Build the `[████░░] Ns` countdown line, themed by the caller (#187
+/// review: was hard-coding `Red` / `Yellow` / `DarkGray`, which clashed
+/// with non-default themes). Width is fixed at 10 cells so the bar reads
+/// the same regardless of modal size. The control hint (`n` / `Esc` to
+/// cancel) lives in the modal's hint row, not here, so the controls have
+/// a single source of truth.
+fn countdown_bar<'a>(
+  progress: f64,
+  remaining_secs: u64,
+  filled_color: Color,
+  secs_color: Color,
+  frame_color: Color,
+) -> Vec<Span<'a>> {
   const CELLS: usize = 10;
   let filled = filled_cells_for_progress(progress, CELLS);
   let bar: String = std::iter::repeat_n('█', filled)
     .chain(std::iter::repeat_n('░', CELLS - filled))
     .collect();
   vec![
-    Span::styled("  [", Style::default().fg(Color::DarkGray)),
-    Span::styled(bar, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-    Span::styled("] ", Style::default().fg(Color::DarkGray)),
+    Span::styled("  [", Style::default().fg(frame_color)),
+    Span::styled(bar, Style::default().fg(filled_color).add_modifier(Modifier::BOLD)),
+    Span::styled("] ", Style::default().fg(frame_color)),
     Span::styled(
       format!("{remaining_secs}s"),
-      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+      Style::default().fg(secs_color).add_modifier(Modifier::BOLD),
     ),
-    Span::styled(" — Esc to cancel", Style::default().fg(Color::DarkGray)),
   ]
 }
 
