@@ -96,3 +96,29 @@ fn keys_render_as_reverse_video_chips_on_the_accent_colour() {
   // Labels are still present so the row stays self-documenting.
   assert!(plain(&line).contains("new"));
 }
+
+#[test]
+fn newlines_in_status_never_break_the_single_line_contract() {
+  // Action logs are sometimes error strings that embed `\n` / `\r`
+  // (e.g. a multi-line template error). With `Wrap` disabled a raw newline
+  // would still split the row in two — the builder must neutralise them so
+  // the footer stays one visual line (PR #183 review).
+  let line = footer_line(HINTS, "template error:\nbad line\r\nsecond", 80, Color::Cyan);
+  let text = plain(&line);
+  assert!(!text.contains('\n'), "status newline leaked into footer: {text:?}");
+  assert!(!text.contains('\r'), "status CR leaked into footer: {text:?}");
+  assert!(display_width(&line) <= 80, "overflowed 80: {text:?}");
+}
+
+#[test]
+fn zero_width_emits_an_empty_line_without_overflowing() {
+  // Degenerate terminal width: the row must not be wider than asked. The
+  // pre-fix `trunc()` floor returned "…" (width 1) for width 0 (PR #183 review).
+  let line = footer_line(HINTS, "anything", 0, Color::Cyan);
+  assert_eq!(
+    display_width(&line),
+    0,
+    "footer overflowed a zero width: {:?}",
+    plain(&line)
+  );
+}
