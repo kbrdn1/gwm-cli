@@ -1071,19 +1071,41 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   f.render_widget(Paragraph::new(line), area);
 }
 
-/// Pure builder for the help overlay body (issue #87).
+/// A single logical row of the help overlay (#187).
+///
+/// Decouples *what* the overlay documents from *how* it is painted.
+/// [`help_rows`] produces this structured form so [`draw_help`] can
+/// render coloured section headers and key *badges* (the same chip
+/// style as the bottom statusline), while [`help_lines`] flattens it
+/// back to the legacy `  {keys:<13} {label}` strings the chord tests
+/// in `tests/tui_chord_tests.rs` pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HelpRow {
+  /// Overlay title — always the first row.
+  Title(String),
+  /// Section header (`global`, `list view`, `issue / PR (#67)`, …).
+  Section(String),
+  /// Blank spacer row.
+  Blank,
+  /// A documented binding: the resolved chord(s) and the human label.
+  /// `keys` is empty only for an unbound action; the flattening in
+  /// [`help_lines`] renders that as `(unbound)`.
+  Entry { keys: String, label: String },
+}
+
+/// Structured builder for the help overlay (issue #87 logic,
+/// restructured into rows in #187).
 ///
 /// Reads every list-view binding from the resolved `Keymap` so user
 /// overrides under `[tui.keys]` show through verbatim — a user who
 /// rebinds `down = ["Ctrl+n"]` sees `Ctrl+n` next to "next" instead
-/// of the historical `j / ↓`. Lines that document non-rebindable
+/// of the historical `j / ↓`. Rows that document non-rebindable
 /// surfaces (Ctrl-C escape hatch, contextual Esc / Enter, create-
-/// form keys, confirm-delete keys) remain hard-coded.
+/// form keys, confirm-delete keys) carry a fixed key string.
 ///
-/// Exposed as `pub` (and re-exported through `tui::help_lines`) so
-/// the state-machine test in `tests/tui_chord_tests.rs` can assert
-/// the doc/binding contract end-to-end without spawning a terminal.
-pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
+/// Exposed as `pub` (and re-exported through `tui::help_rows`) so the
+/// renderer and the state-machine tests share one source of truth.
+pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> {
   use super::keymap::Action;
 
   // Snapshot the keymap once. The pre-#87-review version called
@@ -1109,10 +1131,20 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
       })
       .unwrap_or_default()
   };
-  let row = |action: Action, label: &str| -> String {
-    let keys = keys_for(action);
-    let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
-    format!("  {:<13} {}", keys, label)
+  // A rebindable entry: keys resolved from the keymap.
+  let entry = |action: Action, label: &str| -> HelpRow {
+    HelpRow::Entry {
+      keys: keys_for(action),
+      label: label.to_string(),
+    }
+  };
+  // A fixed entry: a non-rebindable surface documented with a literal
+  // key string (Ctrl-C, contextual Enter, create-form / confirm keys).
+  let fixed = |keys: &str, label: &str| -> HelpRow {
+    HelpRow::Entry {
+      keys: keys.to_string(),
+      label: label.to_string(),
+    }
   };
 
   let title_text = if picker_mode {
@@ -1121,66 +1153,88 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
     "gwm — keys"
   };
 
-  let mut lines: Vec<String> = vec![
-    title_text.to_string(),
-    String::new(),
-    "global".to_string(),
-    format!(
-      "  {:<13} quit (Esc also quits when filter is clear)",
-      keys_for(Action::Quit)
-    ),
-    "  Ctrl-C        force quit (hard-coded escape hatch)".to_string(),
-    String::new(),
-    "list view".to_string(),
-    row(Action::Down, "next (scrolls sidebar when focused)"),
-    row(Action::Up, "prev (scrolls sidebar when focused)"),
-    row(Action::Top, "jump to first worktree"),
-    row(Action::Bottom, "jump to last worktree"),
+  let mut rows: Vec<HelpRow> = vec![
+    HelpRow::Title(title_text.to_string()),
+    HelpRow::Blank,
+    HelpRow::Section("global".to_string()),
+    entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
+    fixed("Ctrl-C", "force quit (hard-coded escape hatch)"),
+    HelpRow::Blank,
+    HelpRow::Section("list view".to_string()),
+    entry(Action::Down, "next (scrolls sidebar when focused)"),
+    entry(Action::Up, "prev (scrolls sidebar when focused)"),
+    entry(Action::Top, "jump to first worktree"),
+    entry(Action::Bottom, "jump to last worktree"),
   ];
   if picker_mode {
-    lines.push("  enter         select highlighted worktree (prints path on exit)".to_string());
+    rows.push(fixed("enter", "select highlighted worktree (prints path on exit)"));
   } else {
-    lines.push(row(Action::Create, "new worktree"));
-    lines.push(row(Action::DeleteConfirm, "delete selected"));
-    lines.push(row(Action::Bootstrap, "bootstrap selected"));
+    rows.push(entry(Action::Create, "new worktree"));
+    rows.push(entry(Action::DeleteConfirm, "delete selected"));
+    rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
-  lines.push(row(Action::Open, "open per [tui.open] — shell / editor / finder"));
-  lines.push(row(Action::Yank, "yank selected path to system clipboard"));
-  lines.push(row(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
-  lines.push(row(Action::ToggleSidebar, "toggle git preview sidebar"));
-  lines.push(row(Action::ToggleSidebarMode, "cycle sidebar mode (commits / stashes)"));
-  lines.push(row(Action::FocusSwap, "swap focus between worktree list and sidebar"));
-  lines.push(row(Action::Filter, "open fuzzy filter bar (enter: sticky, esc: clear)"));
-  lines.push(row(Action::Refresh, "refresh worktree list"));
+  rows.push(entry(Action::Open, "open per [tui.open] — shell / editor / finder"));
+  rows.push(entry(Action::Yank, "yank selected path to system clipboard"));
+  rows.push(entry(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
+  rows.push(entry(Action::ToggleSidebar, "toggle git preview sidebar"));
+  rows.push(entry(
+    Action::ToggleSidebarMode,
+    "cycle sidebar mode (commits / stashes)",
+  ));
+  rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
+  rows.push(entry(
+    Action::Filter,
+    "open fuzzy filter bar (enter: sticky, esc: clear)",
+  ));
+  rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
-    lines.push(row(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
-    lines.push(row(Action::Review, "run [review] launcher against the resolved base"));
-    lines.push(row(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
-    lines.push("  enter         show path in status bar".to_string());
-    lines.push(String::new());
-    lines.push("issue / PR (#67)".to_string());
-    lines.push(row(Action::OpenMenu, "open menu — i=issue · p=pull request"));
-    lines.push(row(Action::LinkPrompt, "link prompt — i / p then digits"));
+    rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
+    rows.push(entry(Action::Review, "run [review] launcher against the resolved base"));
+    rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
+    rows.push(fixed("enter", "show path in status bar"));
+    rows.push(HelpRow::Blank);
+    rows.push(HelpRow::Section("issue / PR (#67)".to_string()));
+    rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
+    rows.push(entry(Action::LinkPrompt, "link prompt — i / p then digits"));
   }
-  lines.push(row(Action::Help, "this help"));
+  rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
-    lines.push(row(Action::CommandPalette, "open the command palette"));
+    rows.push(entry(Action::CommandPalette, "open the command palette"));
   }
   if !picker_mode {
-    lines.extend([
-      String::new(),
-      "create form".to_string(),
-      "  ↑/↓           change branch type".to_string(),
-      "  Tab/Shift-Tab next/prev field".to_string(),
-      "  Enter (desc)  submit".to_string(),
-      "  Esc           cancel".to_string(),
-      String::new(),
-      "confirm delete".to_string(),
-      "  y / Enter     confirm".to_string(),
-      "  n / Esc       cancel".to_string(),
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("create form".to_string()),
+      fixed("↑/↓", "change branch type"),
+      fixed("Tab/Shift-Tab", "next/prev field"),
+      fixed("Enter (desc)", "submit"),
+      fixed("Esc", "cancel"),
+      HelpRow::Blank,
+      HelpRow::Section("confirm delete".to_string()),
+      fixed("y / Enter", "confirm"),
+      fixed("n / Esc", "cancel"),
     ]);
   }
-  lines
+  rows
+}
+
+/// Flatten [`help_rows`] back into the legacy `Vec<String>` overlay body
+/// (issue #87). Kept as the stable, terminal-free contract that
+/// `tests/tui_chord_tests.rs` asserts against: every entry renders as
+/// `  {keys:<13} {label}`, sections / title as their bare text, blanks
+/// as empty strings. The width 13 is wide enough for `Ctrl+Shift+Tab`.
+pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
+  help_rows(km, picker_mode)
+    .into_iter()
+    .map(|row| match row {
+      HelpRow::Title(s) | HelpRow::Section(s) => s,
+      HelpRow::Blank => String::new(),
+      HelpRow::Entry { keys, label } => {
+        let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
+        format!("  {:<13} {}", keys, label)
+      }
+    })
+    .collect()
 }
 
 fn draw_help(f: &mut Frame, app: &App) {
