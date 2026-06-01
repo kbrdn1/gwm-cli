@@ -2025,6 +2025,116 @@ fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
+// ---- working_tree_status_line (issue #179) ---------------------------------
+// Colourisation of each `git status --short` entry in the Working Tree sidebar
+// block, with three distinct status colours so modified ≠ created at a glance:
+//   - staged (X column)        → cyan
+//   - modified (Y column)      → yellow
+//   - untracked (`??`)         → green
+// The file name takes the dominant status colour.
+use gwm::tui::working_tree_status_line;
+
+fn filename_span_fg(line: &ratatui::text::Line<'static>, needle: &str) -> Option<Color> {
+  line
+    .spans
+    .iter()
+    .find(|s| s.content.contains(needle))
+    .unwrap_or_else(|| panic!("no span carrying {:?} in {:?}", needle, section_text_single(line)))
+    .style
+    .fg
+}
+
+#[test]
+fn working_tree_status_line_preserves_raw_text() {
+  // Only Span styling is added — the rendered text must read back
+  // byte-for-byte identical to the raw `git status --short` line.
+  for raw in [
+    "A  staged.rs",
+    "AM both.rs",
+    " M tracked.rs",
+    "?? untracked.rs",
+    "R  old.rs -> new.rs",
+  ] {
+    assert_eq!(
+      section_text_single(&working_tree_status_line(raw)),
+      raw,
+      "raw text preserved for {:?}",
+      raw
+    );
+  }
+}
+
+#[test]
+fn working_tree_status_line_staged_only_is_cyan() {
+  let line = working_tree_status_line("A  staged.rs");
+  assert_eq!(line.spans[0].content.as_ref(), "A");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
+  assert_eq!(
+    filename_span_fg(&line, "staged.rs"),
+    Some(Color::Cyan),
+    "staged-only filename → cyan"
+  );
+}
+
+#[test]
+fn working_tree_status_line_unstaged_modified_is_yellow() {
+  let line = working_tree_status_line(" M tracked.rs");
+  assert_eq!(line.spans[1].content.as_ref(), "M");
+  assert_eq!(
+    line.spans[1].style.fg,
+    Some(Color::Yellow),
+    "Y column (modified) → yellow"
+  );
+  assert_eq!(
+    filename_span_fg(&line, "tracked.rs"),
+    Some(Color::Yellow),
+    "modified filename → yellow"
+  );
+}
+
+#[test]
+fn working_tree_status_line_untracked_is_green() {
+  let line = working_tree_status_line("?? untracked.rs");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
+  assert_eq!(
+    filename_span_fg(&line, "untracked.rs"),
+    Some(Color::Green),
+    "untracked filename → green"
+  );
+}
+
+#[test]
+fn working_tree_status_line_handles_multibyte_leading_chars() {
+  // The helper is `pub` (exported for these tests), so a non-git caller can
+  // feed it arbitrary input. Splitting on byte offsets (`raw[0..1]`) would
+  // panic mid-codepoint when the first chars are multi-byte UTF-8. Split on
+  // char boundaries instead — no panic, and the exact text is preserved.
+  let raw = "éM café.rs"; // X='é' (2 bytes), Y='M', sep=' ', path="café.rs"
+  let line = working_tree_status_line(raw);
+  assert_eq!(
+    section_text_single(&line),
+    raw,
+    "multi-byte text preserved without panic"
+  );
+}
+
+#[test]
+fn working_tree_status_line_partially_staged_splits_status_columns() {
+  // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
+  // dominant worktree colour (yellow) since it carries unstaged changes.
+  let line = working_tree_status_line("AM both.rs");
+  assert_eq!(line.spans[0].content.as_ref(), "A");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
+  assert_eq!(line.spans[1].content.as_ref(), "M");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y=M modified → yellow");
+  assert_eq!(
+    filename_span_fg(&line, "both.rs"),
+    Some(Color::Yellow),
+    "filename with modified change → yellow"
+  );
+}
+
 #[test]
 fn sidebar_worktree_section_skips_irrelevant_badges() {
   // A non-main, unlocked, non-prunable worktree should NOT advertise
