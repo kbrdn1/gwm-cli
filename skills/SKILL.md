@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — current version: `0.7.0`.
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: `0.7.0`; `0.8.0-rc.5` on `dev` (user-level global config, CLI aliases + gitmoji, config CLI + lifecycle hooks, issue/PR templates, `gwm sync`, `cargo-binstall`, TUI personalisation: remappable keymap, command palette, `[theme]` presets incl. `claude-dark`, responsive sidebar).
 
 ## When to use this skill
 
@@ -193,7 +193,9 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 | `R`         | run the configured `[review]` launcher against the resolved base (issue #75)    |
 | `O`         | open menu — pick issue or PR URL to open in `$BROWSER`                          |
 | `L`         | link prompt — bind selected worktree to a GitHub issue or PR number             |
-| `v`         | toggle the git details sidebar (auto-hidden when terminal width < 120 cols)     |
+| `v`         | toggle the git details sidebar (narrow terminal: stacks under the table instead of hiding) |
+| `V`         | cycle the sidebar layout — `auto` (width-driven) → `side-by-side` → `stacked`   |
+| `H`         | toggle the sidebar position left ↔ right (side-by-side layout only)             |
 | `Tab`       | swap focus between the worktree list and the sidebar                            |
 | `f`         | refresh worktree list (also accepts `r` for muscle memory)                      |
 | `F`         | refresh GitHub issue/PR status via `gh` (was `R` pre-#75)                       |
@@ -209,7 +211,7 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 
 ## Details sidebar
 
-When the terminal width is ≥ 120 columns and the sidebar is open (default ON, toggle with `v`), the right pane shows a details panel for the selected worktree. Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically — no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
+When the sidebar is open (default ON, toggle with `v`), it shows a details panel for the selected worktree. The layout is responsive (issue #188): at ≥ 120 columns it sits **side-by-side** with the table; below that it **stacks** under the table (it is no longer hidden). `V` cycles `auto → side-by-side → stacked`; `H` flips the side-by-side position left ↔ right, with the default set by `[tui] sidebar_position = "left" | "right"` (default `right`). Since the lazygit-style redesign (issues #69 / #71 / #73) the panel is **four independent rounded-border subsections** stacked vertically — no outer `Details` frame, section titles ride the block borders, no inline `Label:` content headers.
 
 ```
 ╭─ Worktree ──────────────────────╮      ●  status dot tracks the linked PR / issue
