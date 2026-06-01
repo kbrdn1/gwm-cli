@@ -3093,3 +3093,21 @@ fn link_target_is_canonical_across_cli_and_tui() {
   let from_cli: gwm::cli::LinkTarget = from_tui;
   assert_eq!(from_cli, gwm::cli::LinkTarget::Pr);
 }
+
+#[test]
+fn fresh_app_confirm_modal_focuses_cancel() {
+  // #187: the App wires the confirm modal's default button focus to
+  // Cancel, so the destructive `[ Confirm ]` is never the button a
+  // stray Enter lands on when the modal first opens.
+  use gwm::tui::ConfirmButton;
+  let (_dir, app) = make_app();
+  assert_eq!(app.confirm.focused_button(), ConfirmButton::Cancel);
+}
+
+#[test]
+fn fresh_app_spinner_starts_at_first_frame() {
+  // #187: the App owns a Spinner loader initialised to its first frame.
+  use gwm::tui::state::spinner::DOT_FRAMES;
+  let (_dir, app) = make_app();
+  assert_eq!(app.spinner.glyph(DOT_FRAMES), DOT_FRAMES[0]);
+}

@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
-pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
@@ -111,6 +111,24 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resu
   Ok(())
 }
 
+/// Confirm-side of the delete modal: arm/fire the destructive action.
+/// Shared by the `y` shortcut and the `Enter`-on-`[ Confirm ]` path so
+/// the arm-then-fire countdown semantics stay identical (#187). In
+/// countdown mode the first call arms (the loop ticks the bar), a second
+/// disarms; in classic mode it fires immediately.
+fn confirm_fire(app: &mut App) {
+  match app.confirm_press_y(Instant::now()) {
+    ConfirmKeyAction::FireNow => {
+      if let Err(e) = app.confirm_delete() {
+        app.status = format!("delete failed: {}", e);
+      }
+    }
+    // Armed / Disarmed update the status line; the loop keeps the modal
+    // open and lets the countdown tick (or wait for another y / Esc).
+    ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
+  }
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
     terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -122,6 +140,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // doesn't fire a key event, stretching a 3s countdown by the
     // input-handling latency of every armed iteration.
     if app.view == View::Confirm {
+      // Advance the loader animation while the safety countdown is
+      // armed (#187). The 200ms poll re-enters this block every tick,
+      // so the spinner animates at the poll cadence; when idle (no
+      // countdown) the frame stays put.
+      if app.confirm.is_armed() {
+        app.spinner.tick();
+      }
       match app.tick_confirm_countdown(Instant::now()) {
         CountdownTickOutcome::ReadyToFire => {
           if let Err(e) = app.confirm_delete() {
@@ -232,17 +257,21 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ => {}
       },
       View::Confirm => match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => match app.confirm_press_y(Instant::now()) {
-          ConfirmKeyAction::FireNow => match app.confirm_delete() {
-            Ok(_) => {}
-            Err(e) => app.status = format!("delete failed: {}", e),
-          },
-          // Armed / Disarmed update the App's status line; the loop
-          // keeps the modal open and lets the countdown tick (or wait
-          // for another y / Esc).
-          ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
+        // `y` confirms directly regardless of which button is focused
+        // (unchanged muscle memory). `Enter` activates the *focused*
+        // button — and focus defaults to Cancel (#187), so a stray
+        // Enter on a freshly-opened modal cancels rather than deletes.
+        KeyCode::Char('y') => confirm_fire(&mut app),
+        KeyCode::Enter => match app.confirm.focused_button() {
+          ConfirmButton::Confirm => confirm_fire(&mut app),
+          ConfirmButton::Cancel => app.confirm_dismiss(),
         },
         KeyCode::Char('n') | KeyCode::Esc => app.confirm_dismiss(),
+        // Button focus navigation (#187). `←` / `h` → Confirm,
+        // `→` / `l` → Cancel, `Tab` toggles.
+        KeyCode::Left | KeyCode::Char('h') => app.confirm.focus_confirm(),
+        KeyCode::Right | KeyCode::Char('l') => app.confirm.focus_cancel(),
+        KeyCode::Tab => app.confirm.toggle_focus(),
         _ => {}
       },
       View::Report => match key.code {

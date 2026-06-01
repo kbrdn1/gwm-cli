@@ -1,10 +1,12 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, View};
+use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
+use super::state::spinner::DOT_FRAMES;
 use crate::bootstrap::StepStatus;
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
-  layout::{Constraint, Direction, Layout, Rect},
+  layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
   widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
@@ -1211,7 +1213,9 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
       fixed("Esc", "cancel"),
       HelpRow::Blank,
       HelpRow::Section("confirm delete".to_string()),
-      fixed("y / Enter", "confirm"),
+      fixed("←/→ Tab", "move focus between [ Confirm ] / [ Cancel ]"),
+      fixed("Enter", "activate the focused button (defaults to Cancel)"),
+      fixed("y", "confirm"),
       fixed("n / Esc", "cancel"),
     ]);
   }
@@ -1386,67 +1390,143 @@ fn field_input(label: &str, value: &str, focused: bool) -> Paragraph<'static> {
 }
 
 fn draw_confirm(f: &mut Frame, app: &App) {
-  let area = centered(60, 30, f.area());
+  let area = centered(62, 44, f.area());
   f.render_widget(Clear, area);
+
+  let muted = app.theme.muted;
+  // The destructive modal reads in the theme's "danger" colour (the
+  // same role the prunable `⚠` badge uses), so it tracks `[theme]`
+  // instead of the pre-#187 hard-coded `Red`.
+  let danger = app.theme.prunable;
+
   let block = Block::default()
     .borders(Borders::ALL)
-    .title(" confirm delete ")
-    .border_style(Style::default().fg(Color::Red));
-  let body = match app.selected() {
-    Some(w) => {
-      let mut lines = vec![
-        Line::from(""),
-        Line::from(vec![
-          Span::raw("delete "),
-          Span::styled(&w.name, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from(format!("at {}", w.path.display())),
-      ];
-      if let Some(b) = &w.branch {
-        lines.push(Line::from(vec![
-          Span::raw("branch: "),
-          Span::styled(b.clone(), Style::default().fg(Color::Green)),
-        ]));
-      }
-      lines.push(Line::from(""));
-      lines.push(Line::from(format!(
-        "delete branch too: {}  (press p before to toggle)",
-        app.delete_branch_on_remove
-      )));
-      lines.push(Line::from(""));
+    .border_type(BorderType::Rounded)
+    .title(Span::styled(
+      " confirm delete ",
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    ))
+    .border_style(Style::default().fg(danger));
 
-      // Footer + (optional) countdown progress bar. Countdown applies
-      // only when delete_branch is ON and config secs > 0 (issue #30);
-      // otherwise the modal stays single-keystroke as before.
-      if app.confirm_is_countdown_mode() {
-        let now = Instant::now();
-        let total_secs = app.confirm_countdown_total().as_secs();
-        if app.confirm.is_armed() {
-          lines.push(Line::from(countdown_bar(
-            app.confirm_countdown_progress(now),
-            app.confirm_countdown_remaining_secs(now),
-          )));
-          lines.push(Line::from(Span::styled(
-            "y: cancel countdown    n/Esc: cancel",
-            Style::default().fg(Color::DarkGray),
-          )));
-        } else {
-          lines.push(Line::from(Span::styled(
-            format!("y/Enter: arm {total_secs}s countdown    n/Esc: cancel"),
-            Style::default().fg(Color::DarkGray),
-          )));
-        }
-      } else {
-        lines.push(Line::from(Span::styled(
-          "y/Enter: confirm    n/Esc: cancel",
-          Style::default().fg(Color::DarkGray),
-        )));
-      }
-      lines
-    }
-    None => vec![Line::from("nothing selected")],
+  let Some(w) = app.selected() else {
+    f.render_widget(
+      Paragraph::new("nothing selected")
+        .block(block)
+        .alignment(Alignment::Center),
+      area,
+    );
+    return;
   };
-  f.render_widget(Paragraph::new(body).block(block).wrap(Wrap { trim: false }), area);
+
+  // Four stacked regions inside the border: the description, a
+  // loader/countdown row, the button row, and a muted key hint. The
+  // loader row stays reserved (Length 1) even when idle so the buttons
+  // never jump as the countdown arms.
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .margin(1)
+    .constraints([
+      Constraint::Min(1),    // description
+      Constraint::Length(1), // loader / countdown
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint
+    ])
+    .split(area);
+  f.render_widget(block, area);
+
+  // --- description (centred) ---
+  let mut content: Vec<Line> = vec![
+    Line::from(vec![
+      Span::raw("delete "),
+      Span::styled(
+        w.name.clone(),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+      ),
+    ]),
+    Line::from(Span::styled(
+      format!("at {}", w.path.display()),
+      Style::default().fg(muted),
+    )),
+  ];
+  if let Some(b) = &w.branch {
+    content.push(Line::from(vec![
+      Span::raw("branch: "),
+      Span::styled(b.clone(), Style::default().fg(app.theme.branch)),
+    ]));
+  }
+  content.push(Line::from(""));
+  content.push(Line::from(format!(
+    "delete branch too: {}  (press p to toggle)",
+    app.delete_branch_on_remove
+  )));
+  f.render_widget(
+    Paragraph::new(content)
+      .alignment(Alignment::Center)
+      .wrap(Wrap { trim: false }),
+    inner[0],
+  );
+
+  // --- loader + countdown (only while the safety countdown is armed) ---
+  if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
+    let now = Instant::now();
+    let mut spans = vec![Span::styled(
+      format!("{} ", app.spinner.glyph(DOT_FRAMES)),
+      Style::default().fg(danger).add_modifier(Modifier::BOLD),
+    )];
+    spans.extend(countdown_bar(
+      app.confirm_countdown_progress(now),
+      app.confirm_countdown_remaining_secs(now),
+    ));
+    f.render_widget(Paragraph::new(Line::from(spans)).alignment(Alignment::Center), inner[1]);
+  }
+
+  // --- buttons (focused one highlighted) ---
+  f.render_widget(
+    Paragraph::new(confirm_buttons_line(
+      app.confirm.focused_button(),
+      app.theme.accent,
+      muted,
+    ))
+    .alignment(Alignment::Center),
+    inner[2],
+  );
+
+  // --- key hint ---
+  let hint = if app.confirm_is_countdown_mode() {
+    if app.confirm.is_armed() {
+      "y: cancel countdown   ←/→ Tab: move   Enter: activate   Esc: cancel".to_string()
+    } else {
+      let total = app.confirm_countdown_total().as_secs();
+      format!("y: arm {total}s countdown   ←/→ Tab: move   Enter: activate   Esc: cancel")
+    }
+  } else {
+    "y: confirm   ←/→ Tab: move   Enter: activate   n/Esc: cancel".to_string()
+  };
+  f.render_widget(
+    Paragraph::new(Span::styled(hint, Style::default().fg(muted))).alignment(Alignment::Center),
+    inner[3],
+  );
+}
+
+/// The `[ Confirm ] [ Cancel ]` button row (#187). The focused button
+/// gets the reversed-bold accent chip — the same badge style as the
+/// bottom statusline and the help overlay — while the idle button reads
+/// muted-bold. Focus defaults to Cancel, so the destructive button is
+/// never the one a stray `Enter` lands on.
+fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
+  let focused = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
+  let (confirm_style, cancel_style) = match focus {
+    ConfirmButton::Confirm => (focused, idle),
+    ConfirmButton::Cancel => (idle, focused),
+  };
+  Line::from(vec![
+    Span::styled(" [ Confirm ] ", confirm_style),
+    Span::raw("   "),
+    Span::styled(" [ Cancel ] ", cancel_style),
+  ])
 }
 
 /// Build the `[████░░] Ns — Esc to cancel` countdown line. Width is fixed
