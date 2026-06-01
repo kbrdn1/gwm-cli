@@ -10,8 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet. Entries land here as PRs merge into `dev`, then move into the
-per-version file under [`changelogs/`](changelogs/) when the release is cut._
+### Docs
+
+- 📝 Sync the root `README.md` landing page to the v0.8.0 surface and fix the MSRV badge (`1.80+` → `1.82+`) ([#203](https://github.com/kbrdn1/gwm-cli/issues/203)). The "what gwm does" list now covers the config CLI + user-level global config, lifecycle hooks, CLI aliases + Gitmoji, the GitHub `gwm new` / `gwm pr` workflow with PR auto-detection, safety-daily (`--dry-run`, `gwm undo` / `gwm history`), `gwm sync`, and TUI personalisation (themes / remappable keymap / command palette / stashes). Follow-up to the #199 docs refresh — landing page only, every feature keeps its dedicated section under `docs/`.
 
 ## Past releases
 
