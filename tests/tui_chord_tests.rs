@@ -33,6 +33,19 @@ fn press_named(code: KeyCode) -> KeyEvent {
   KeyEvent::new(code, KeyModifiers::empty())
 }
 
+/// An uppercase letter delivered *with* the SHIFT bit, as modern
+/// terminals (Ghostty / Kitty / WezTerm) report shifted keys.
+fn press_shift_upper(c: char) -> KeyEvent {
+  KeyEvent::new(KeyCode::Char(c.to_ascii_uppercase()), KeyModifiers::SHIFT)
+}
+
+/// The base (lowercase) letter delivered with the SHIFT bit, as the
+/// kitty keyboard protocol reports a shifted key (base layout key +
+/// modifier rather than the resolved uppercase glyph).
+fn press_shift_lower(c: char) -> KeyEvent {
+  KeyEvent::new(KeyCode::Char(c.to_ascii_lowercase()), KeyModifiers::SHIFT)
+}
+
 #[test]
 fn single_key_dispatches_action_immediately() {
   let (_dir, mut app) = make_app();
@@ -105,6 +118,30 @@ fn shifted_uppercase_g_dispatches_bottom() {
   // not `Shift+g`. Most terminals deliver Shift+G as `KeyCode::Char('G')`
   // sans modifier, which is what `KeyStroke::from_event` consumes.
   let (_dir, mut app) = make_app();
+  assert_eq!(app.dispatch_key(press('G')), Some(Action::Bottom));
+}
+
+#[test]
+fn uppercase_binding_matches_shift_modifier_variants() {
+  // Issue #188 regression: on terminals that DO report the SHIFT bit
+  // for an uppercase letter (Ghostty / Kitty / WezTerm), `from_event`
+  // used to keep SHIFT while the bound chord `"V"` carried none, so the
+  // lookup missed and nothing fired — the symptom reported on PR #192
+  // where `V` / `H` did nothing, not even a status-bar update. A char
+  // keystroke must match its binding regardless of how the terminal
+  // encodes the shift (bare uppercase, uppercase+SHIFT, or base+SHIFT).
+  let (_dir, mut app) = make_app();
+  assert_eq!(
+    app.dispatch_key(press_shift_upper('V')),
+    Some(Action::CycleSidebarLayout),
+    "uppercase char + SHIFT must resolve the `V` binding"
+  );
+  assert_eq!(
+    app.dispatch_key(press_shift_lower('h')),
+    Some(Action::ToggleSidebarPosition),
+    "base char + SHIFT (kitty-style) must resolve the `H` binding"
+  );
+  // And the pre-existing bare-uppercase path still works.
   assert_eq!(app.dispatch_key(press('G')), Some(Action::Bottom));
 }
 

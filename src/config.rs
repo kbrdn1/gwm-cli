@@ -400,6 +400,37 @@ fn default_trunks() -> Vec<String> {
   vec!["dev".into(), "main".into()]
 }
 
+/// Which side the worktree-details sidebar sits on in the side-by-side
+/// TUI layout (issue #188). `Right` preserves the pre-#188 behaviour and
+/// is the default. In the stacked (narrow-terminal) layout the sidebar
+/// always sits at the bottom, so this preference only governs the
+/// side-by-side split. Toggled live with `H`; persisted here so the
+/// choice survives across launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarPosition {
+  /// Sidebar on the left, worktree table on the right.
+  Left,
+  /// Sidebar on the right of the table — pre-#188 behaviour. Default.
+  #[default]
+  Right,
+}
+
+impl SidebarPosition {
+  /// Human-readable label for the status bar (`sidebar position: left`).
+  pub fn label(self) -> &'static str {
+    match self {
+      SidebarPosition::Left => "left",
+      SidebarPosition::Right => "right",
+    }
+  }
+
+  /// `true` when the sidebar should be drawn to the left of the table.
+  pub fn is_left(self) -> bool {
+    matches!(self, SidebarPosition::Left)
+  }
+}
+
 /// `[tui]` table — runtime knobs for the worktree TUI. Currently exposes
 /// the safety countdown on the delete-confirm overlay (issue #30): when
 /// `delete_branch_on_remove` has been toggled ON, the modal forces the
@@ -429,6 +460,14 @@ pub struct TuiConfig {
   #[serde(default)]
   pub open: TuiOpenConfig,
 
+  /// Which side the worktree-details sidebar sits on in the side-by-side
+  /// layout (issue #188). Default `right` preserves pre-#188 behaviour;
+  /// `left` flips the split. Toggled live in the TUI with `H`. Ignored by
+  /// the stacked (narrow-terminal) layout, where the sidebar is always at
+  /// the bottom.
+  #[serde(default)]
+  pub sidebar_position: SidebarPosition,
+
   /// `[tui.keys]` sub-table (issue #87) — user overrides for the
   /// remappable keymap. Absent → keymap stays at the built-in
   /// defaults. Present → every listed action *replaces* its default
@@ -443,6 +482,7 @@ impl Default for TuiConfig {
     Self {
       confirm_countdown_secs: default_confirm_countdown_secs(),
       open: TuiOpenConfig::default(),
+      sidebar_position: SidebarPosition::default(),
       keys: TuiKeysConfig::default(),
     }
   }

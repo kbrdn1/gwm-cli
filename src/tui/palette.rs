@@ -112,6 +112,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "cycle the sidebar between commits and stashes",
     },
     PaletteEntry {
+      action: Action::CycleSidebarLayout,
+      name: "cycle-sidebar-layout",
+      description: "cycle the sidebar layout (auto / side-by-side / stacked)",
+    },
+    PaletteEntry {
+      action: Action::ToggleSidebarPosition,
+      name: "toggle-sidebar-position",
+      description: "toggle the sidebar position (left / right)",
+    },
+    PaletteEntry {
       action: Action::ToggleDeleteBranch,
       name: "toggle-delete-branch",
       description: "toggle whether `delete` also drops the branch",

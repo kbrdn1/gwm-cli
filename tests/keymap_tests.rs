@@ -190,6 +190,31 @@ fn keymap_lookup_returns_no_match_for_unbound_key() {
 }
 
 #[test]
+fn default_keymap_binds_sidebar_layout_and_position() {
+  // Issue #188: `V` cycles the sidebar orientation, `H` toggles the
+  // left/right position. Both must be distinct from `v` (ToggleSidebar).
+  let km = Keymap::defaults();
+
+  let cycle = KeyStroke::parse_chord("V").unwrap();
+  assert!(matches!(
+    km.lookup(&cycle),
+    ChordResolution::Matched(Action::CycleSidebarLayout)
+  ));
+
+  let toggle_pos = KeyStroke::parse_chord("H").unwrap();
+  assert!(matches!(
+    km.lookup(&toggle_pos),
+    ChordResolution::Matched(Action::ToggleSidebarPosition)
+  ));
+
+  let open = KeyStroke::parse_chord("v").unwrap();
+  assert!(matches!(
+    km.lookup(&open),
+    ChordResolution::Matched(Action::ToggleSidebar)
+  ));
+}
+
+#[test]
 fn user_override_replaces_default_for_one_action() {
   let mut km = Keymap::defaults();
   km.apply_override(Action::Down, vec![KeyStroke::parse_chord("Ctrl+n").unwrap()])

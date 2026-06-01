@@ -228,6 +228,17 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [tui]
 # confirm_countdown_secs = 3
 
+# --- TUI sidebar position (issue #188) ---------------------------------------
+# Which side the worktree-details preview sidebar sits on in the side-by-side
+# layout: "right" (default, pre-#188 behaviour) or "left". Toggle it live in
+# the TUI with `H`. The narrow-terminal stacked layout (table on top, sidebar
+# below) ignores this — there the sidebar is always at the bottom. Cycle the
+# orientation (auto / side-by-side / stacked) live with `V`; "auto" picks
+# side-by-side on a wide terminal and stacks on a narrow one.
+#
+# [tui]
+# sidebar_position = "left"
+
 # --- TUI launcher: `l` (git_tui) keybinding (issue #75) ----------------------
 # The `l` key suspends the gwm TUI and launches a git TUI on the selected
 # worktree. Placeholders: {path}. Default (no section) → `lazygit -p {path}`

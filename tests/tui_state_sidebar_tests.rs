@@ -19,7 +19,10 @@
 //!   in a single `App::on_navigation()` wrapper so the triple cannot
 //!   drift back into duplicated literals.
 
-use gwm::tui::state::sidebar::{SidebarMode, SidebarState};
+use gwm::config::SidebarPosition;
+use gwm::tui::state::sidebar::{
+  ResolvedSidebarLayout, SidebarMode, SidebarOrientation, SidebarState, SIDEBAR_MIN_WIDTH,
+};
 use gwm::tui::SidebarSections;
 use std::path::PathBuf;
 
@@ -30,7 +33,10 @@ fn default_state_is_open_unfocused_zero_scroll() {
   // Matches the previous `App::new_at` defaults verbatim so the
   // extraction is observably a no-op for the renderer.
   let s = SidebarState::new();
-  assert!(s.open, "sidebar defaults to open (renderer hides on narrow terminals)");
+  assert!(
+    s.open,
+    "sidebar defaults to open (renderer stacks it under the table on narrow terminals)"
+  );
   assert!(!s.focused, "focus defaults to the worktree list");
   assert_eq!(s.scroll, 0);
   assert_eq!(s.max_scroll, 0);
@@ -232,4 +238,109 @@ fn invalidate_drops_cache_keeps_scroll() {
   assert!(s.cache.is_none());
   assert_eq!(s.scroll, 4, "plain invalidate must NOT touch scroll");
   assert_eq!(s.max_scroll, 10, "plain invalidate must NOT touch max_scroll");
+}
+
+// ---- Responsive layout + position (issue #188) ----------------------------
+
+#[test]
+fn default_position_is_right_orientation_is_auto() {
+  // Pre-#188 behaviour: sidebar on the right, width-driven layout. `App`
+  // overrides `position` from `[tui] sidebar_position` at construction.
+  let s = SidebarState::new();
+  assert_eq!(s.position, SidebarPosition::Right);
+  assert_eq!(s.orientation, SidebarOrientation::Auto);
+}
+
+#[test]
+fn resolve_layout_hidden_when_closed_regardless_of_width() {
+  let mut s = SidebarState::new();
+  s.open = false;
+  assert_eq!(s.resolve_layout(200), ResolvedSidebarLayout::Hidden);
+  assert_eq!(s.resolve_layout(40), ResolvedSidebarLayout::Hidden);
+}
+
+#[test]
+fn resolve_layout_auto_is_side_by_side_at_or_above_min_width() {
+  let s = SidebarState::new(); // open, Auto, Right
+  assert_eq!(
+    s.resolve_layout(SIDEBAR_MIN_WIDTH),
+    ResolvedSidebarLayout::SideBySide { sidebar_left: false },
+    "exactly at the threshold counts as wide"
+  );
+  assert_eq!(
+    s.resolve_layout(SIDEBAR_MIN_WIDTH + 50),
+    ResolvedSidebarLayout::SideBySide { sidebar_left: false }
+  );
+}
+
+#[test]
+fn resolve_layout_auto_stacks_below_min_width() {
+  // The headline #188 change: narrow no longer hides the sidebar, it
+  // stacks it under the table.
+  let s = SidebarState::new();
+  assert_eq!(s.resolve_layout(SIDEBAR_MIN_WIDTH - 1), ResolvedSidebarLayout::Stacked);
+  assert_eq!(s.resolve_layout(0), ResolvedSidebarLayout::Stacked);
+}
+
+#[test]
+fn resolve_layout_auto_honours_left_position() {
+  let mut s = SidebarState::new();
+  s.position = SidebarPosition::Left;
+  assert_eq!(
+    s.resolve_layout(SIDEBAR_MIN_WIDTH),
+    ResolvedSidebarLayout::SideBySide { sidebar_left: true }
+  );
+  // Position is irrelevant to the stacked layout.
+  assert_eq!(s.resolve_layout(SIDEBAR_MIN_WIDTH - 1), ResolvedSidebarLayout::Stacked);
+}
+
+#[test]
+fn resolve_layout_forced_side_by_side_ignores_narrow_width() {
+  let mut s = SidebarState::new();
+  s.orientation = SidebarOrientation::SideBySide;
+  assert_eq!(
+    s.resolve_layout(20),
+    ResolvedSidebarLayout::SideBySide { sidebar_left: false },
+    "a forced side-by-side stays beside the table even when narrow"
+  );
+}
+
+#[test]
+fn resolve_layout_forced_stacked_ignores_wide_width() {
+  let mut s = SidebarState::new();
+  s.orientation = SidebarOrientation::Stacked;
+  assert_eq!(
+    s.resolve_layout(300),
+    ResolvedSidebarLayout::Stacked,
+    "a forced stack stays stacked even on a wide terminal"
+  );
+}
+
+#[test]
+fn cycle_orientation_walks_auto_side_by_side_stacked_and_wraps() {
+  let mut s = SidebarState::new();
+  assert_eq!(s.orientation, SidebarOrientation::Auto);
+  s.cycle_orientation();
+  assert_eq!(s.orientation, SidebarOrientation::SideBySide);
+  s.cycle_orientation();
+  assert_eq!(s.orientation, SidebarOrientation::Stacked);
+  s.cycle_orientation();
+  assert_eq!(s.orientation, SidebarOrientation::Auto, "cycle wraps back to Auto");
+}
+
+#[test]
+fn toggle_position_flips_left_right() {
+  let mut s = SidebarState::new();
+  assert_eq!(s.position, SidebarPosition::Right);
+  s.toggle_position();
+  assert_eq!(s.position, SidebarPosition::Left);
+  s.toggle_position();
+  assert_eq!(s.position, SidebarPosition::Right);
+}
+
+#[test]
+fn orientation_label_is_human_readable() {
+  assert_eq!(SidebarOrientation::Auto.label(), "auto");
+  assert_eq!(SidebarOrientation::SideBySide.label(), "side-by-side");
+  assert_eq!(SidebarOrientation::Stacked.label(), "stacked");
 }
