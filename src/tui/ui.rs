@@ -1319,6 +1319,21 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
     .collect()
 }
 
+/// Display width of a help row's key *badges* once split into one badge
+/// per chord (#187 review). Each badge renders as ` chord ` (chord + 2
+/// pad cells); badges are separated by a single space. `(unbound)` /
+/// empty render as one muted badge. Used to right-pad the badge column
+/// so the labels line up regardless of how many chords a row binds.
+pub fn badge_group_width(keys: &str) -> usize {
+  if keys.is_empty() || keys == "(unbound)" {
+    return "(unbound)".chars().count() + 2;
+  }
+  let chords: Vec<&str> = keys.split(", ").collect();
+  let badges: usize = chords.iter().map(|c| c.chars().count() + 2).sum();
+  // One space between adjacent badges.
+  badges + chords.len().saturating_sub(1)
+}
+
 fn draw_help(f: &mut Frame, app: &App) {
   let area = centered(60, 60, f.area());
   let rows = help_rows(&app.keymap, app.picker_mode);
@@ -1340,15 +1355,12 @@ fn draw_help(f: &mut Frame, app: &App) {
   let label_style = Style::default().fg(Color::White);
   let muted_style = Style::default().fg(muted);
 
-  // Align every label to the same column: pad each key badge out to the
-  // widest key string so the descriptions line up under one another.
-  let max_key_w = rows
+  // Align every label to the same column: pad each badge *group* out to
+  // the widest one so the descriptions line up under one another.
+  let max_group_w = rows
     .iter()
     .filter_map(|r| match r {
-      HelpRow::Entry { keys, .. } => {
-        let k = if keys.is_empty() { "(unbound)" } else { keys.as_str() };
-        Some(k.chars().count())
-      }
+      HelpRow::Entry { keys, .. } => Some(badge_group_width(keys)),
       _ => None,
     })
     .max()
@@ -1362,15 +1374,23 @@ fn draw_help(f: &mut Frame, app: &App) {
       }
       HelpRow::Blank => lines.push(Line::from(String::new())),
       HelpRow::Entry { keys, label } => {
-        let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
-        let pad = " ".repeat(max_key_w.saturating_sub(keys.chars().count()) + 1);
-        let badge_style = if keys == "(unbound)" { muted_style } else { chip_style };
-        lines.push(Line::from(vec![
-          Span::raw("  "),
-          Span::styled(format!(" {} ", keys), badge_style),
-          Span::raw(pad),
-          Span::styled(label, label_style),
-        ]));
+        // One badge per chord, separated by a space (#187 review: the
+        // comma-joined `j, Down` now reads as `[ j ] [ Down ]`).
+        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+        if keys.is_empty() || keys == "(unbound)" {
+          spans.push(Span::styled(" (unbound) ", muted_style));
+        } else {
+          for (i, chord) in keys.split(", ").enumerate() {
+            if i > 0 {
+              spans.push(Span::raw(" "));
+            }
+            spans.push(Span::styled(format!(" {} ", chord), chip_style));
+          }
+        }
+        let pad = max_group_w.saturating_sub(badge_group_width(&keys)) + 1;
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(label, label_style));
+        lines.push(Line::from(spans));
       }
     }
   }
@@ -1468,9 +1488,6 @@ fn field_input(label: &str, value: &str, focused: bool) -> Paragraph<'static> {
 }
 
 fn draw_confirm(f: &mut Frame, app: &App) {
-  let area = centered(62, 44, f.area());
-  f.render_widget(Clear, area);
-
   let muted = app.theme.muted;
   // The destructive modal reads in the theme's "danger" colour (the
   // same role the prunable `⚠` badge uses), so it tracks `[theme]`
@@ -1487,6 +1504,8 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     .border_style(Style::default().fg(danger));
 
   let Some(w) = app.selected() else {
+    let area = centered_h(40, 5, f.area());
+    f.render_widget(Clear, area);
     f.render_widget(
       Paragraph::new("nothing selected")
         .block(block)
@@ -1495,6 +1514,47 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     );
     return;
   };
+
+  // Width first (a fixed % of the terminal) so a long path / name can be
+  // middle-ellipsized to one line instead of wrapping mid-path (#187
+  // review). `text_w` is the room inside the 1-col margins.
+  let term = f.area();
+  let outer_w = term.width.saturating_mul(62) / 100;
+  let text_w = outer_w.saturating_sub(2) as usize;
+
+  let name = ellipsize_middle(&w.name, text_w.saturating_sub("delete ".len()));
+  let path = ellipsize_middle(
+    &tilde_compress(&w.path.display().to_string()),
+    text_w.saturating_sub("at ".len()),
+  );
+
+  // --- description (centred) ---
+  let mut content: Vec<Line> = vec![
+    Line::from(vec![
+      Span::raw("delete "),
+      Span::styled(name, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    ]),
+    Line::from(Span::styled(format!("at {path}"), Style::default().fg(muted))),
+  ];
+  if let Some(b) = &w.branch {
+    let branch = ellipsize_middle(b, text_w.saturating_sub("branch: ".len()));
+    content.push(Line::from(vec![
+      Span::raw("branch: "),
+      Span::styled(branch, Style::default().fg(app.theme.branch)),
+    ]));
+  }
+  content.push(Line::from(""));
+  content.push(Line::from(format!(
+    "delete branch too: {}  (press p to toggle)",
+    app.delete_branch_on_remove
+  )));
+
+  // Size the modal to its content: the description rows plus the three
+  // fixed rows (loader / buttons / hint) and the rounded border — no
+  // more fixed 44%-tall box that dwarfed its few lines (#187 review).
+  let height = content.len() as u16 + 3 + 2;
+  let area = centered_h(62, height, term);
+  f.render_widget(Clear, area);
 
   // Four stacked regions inside the border: the description, a
   // loader/countdown row, the button row, and a muted key hint. The
@@ -1512,31 +1572,6 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     .split(area);
   f.render_widget(block, area);
 
-  // --- description (centred) ---
-  let mut content: Vec<Line> = vec![
-    Line::from(vec![
-      Span::raw("delete "),
-      Span::styled(
-        w.name.clone(),
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-      ),
-    ]),
-    Line::from(Span::styled(
-      format!("at {}", w.path.display()),
-      Style::default().fg(muted),
-    )),
-  ];
-  if let Some(b) = &w.branch {
-    content.push(Line::from(vec![
-      Span::raw("branch: "),
-      Span::styled(b.clone(), Style::default().fg(app.theme.branch)),
-    ]));
-  }
-  content.push(Line::from(""));
-  content.push(Line::from(format!(
-    "delete branch too: {}  (press p to toggle)",
-    app.delete_branch_on_remove
-  )));
   f.render_widget(
     Paragraph::new(content)
       .alignment(Alignment::Center)
@@ -1723,6 +1758,40 @@ fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
       Constraint::Percentage((100 - pct_x) / 2),
     ])
     .split(v[1])[1]
+}
+
+/// Centre a box of `width_pct`% width and a fixed `height` (rows) in
+/// `area`. Unlike [`centered`], the height is absolute so an overlay can
+/// size itself to its content rather than a fixed percentage of the
+/// screen (#187 — the confirm modal was far taller than its few lines).
+fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
+  let height = height.min(area.height);
+  let width = area.width.saturating_mul(width_pct) / 100;
+  let x = area.x + area.width.saturating_sub(width) / 2;
+  let y = area.y + area.height.saturating_sub(height) / 2;
+  Rect { x, y, width, height }
+}
+
+/// Middle-ellipsize `s` to at most `max` display columns, keeping the
+/// head and tail so a long path keeps both its root and the worktree
+/// name (e.g. `~/Projects/…/feat-187-modal`). Returns `s` unchanged when
+/// it already fits, and a lone `…` when `max` is too small to keep
+/// anything either side. Counts by `char`, not byte, so multi-byte path
+/// segments are not sliced mid-codepoint.
+pub fn ellipsize_middle(s: &str, max: usize) -> String {
+  let count = s.chars().count();
+  if count <= max {
+    return s.to_string();
+  }
+  if max <= 1 {
+    return "…".to_string();
+  }
+  let keep = max - 1; // reserve one column for the ellipsis
+  let head = keep.div_ceil(2);
+  let tail = keep - head;
+  let head_str: String = s.chars().take(head).collect();
+  let tail_str: String = s.chars().skip(count - tail).collect();
+  format!("{head_str}…{tail_str}")
 }
 
 fn trunc(s: &str, max: usize) -> String {
