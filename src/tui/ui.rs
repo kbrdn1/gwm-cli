@@ -638,12 +638,66 @@ fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
       "✓ clean".to_string(),
       Style::default().fg(Color::Green),
     ))],
-    Ok(s) => s.lines().map(|l| Line::from(l.to_string())).collect(),
+    Ok(s) => s.lines().map(working_tree_status_line).collect(),
     Err(e) => vec![Line::from(Span::styled(
       format!("! {}", e),
       Style::default().fg(Color::Red),
     ))],
   }
+}
+
+/// Colourise one `git status --short` porcelain line git-style (issue #179).
+///
+/// The short format is `XY<space>PATH`, where `X` is the index (staged)
+/// status and `Y` the worktree (unstaged) status. Mirroring `git status -s`:
+///
+/// - `X` column → green when it carries a staged change,
+/// - `Y` column → red when it carries an unstaged change,
+/// - `??` (untracked) → both columns red,
+/// - the **file name** → the dominant status colour: red when the worktree
+///   side carries any change (unstaged or untracked), green when only the
+///   index side does.
+///
+/// The separator space is left unstyled. The rendered text is byte-for-byte
+/// identical to the input — only `Span` styling is added — so the sidebar
+/// keeps showing the exact `git status --short` codes it always did.
+pub fn working_tree_status_line(raw: &str) -> Line<'static> {
+  // Defensive: porcelain short output is always `XY PATH`, but a truncated
+  // read must not panic on byte slicing. Anything shorter than the two
+  // status columns + separator is rendered verbatim.
+  let bytes = raw.as_bytes();
+  if bytes.len() < 3 {
+    return Line::from(raw.to_string());
+  }
+  // X and Y are always ASCII status codes, so byte indexing is sound.
+  let x = bytes[0] as char;
+  let y = bytes[1] as char;
+  let untracked = x == '?' && y == '?';
+
+  let green = Style::default().fg(Color::Green);
+  let red = Style::default().fg(Color::Red);
+  let x_style = if x == '?' {
+    red
+  } else if x != ' ' {
+    green
+  } else {
+    Style::default()
+  };
+  let y_style = if y != ' ' { red } else { Style::default() };
+  let name_style = if untracked || y != ' ' {
+    red
+  } else if x != ' ' {
+    green
+  } else {
+    Style::default()
+  };
+
+  Line::from(vec![
+    Span::styled(raw[0..1].to_string(), x_style),
+    Span::styled(raw[1..2].to_string(), y_style),
+    Span::raw(raw[2..3].to_string()),
+    Span::styled(raw[3..].to_string(), name_style),
+  ])
 }
 
 /// Default number of commits pulled into the Recent Commits block — chosen
