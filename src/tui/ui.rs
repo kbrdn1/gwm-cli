@@ -1239,24 +1239,64 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
 
 fn draw_help(f: &mut Frame, app: &App) {
   let area = centered(60, 60, f.area());
-  let strings = help_lines(&app.keymap, app.picker_mode);
-  let mut lines: Vec<Line<'_>> = Vec::with_capacity(strings.len());
-  // First line is the title — render bold cyan like the pre-#87
-  // overlay. Subsequent lines are plain so the resolved bindings
-  // stay legible at low contrast.
-  if let Some((first, rest)) = strings.split_first() {
-    lines.push(Line::from(Span::styled(
-      first.clone(),
-      Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-    )));
-    for s in rest {
-      lines.push(Line::from(s.clone()));
+  let rows = help_rows(&app.keymap, app.picker_mode);
+
+  // Theme-driven colours so the overlay tracks `[theme]` like the rest
+  // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+
+  // Key *badges* mirror the bottom statusline's chip style
+  // (`footer_line`): a reversed-bold accent block. Section headers and
+  // the title share the bold-accent heading style. Labels stay white
+  // for contrast; an `(unbound)` action renders muted instead of a chip
+  // so it reads as "no binding" rather than a live key.
+  let chip_style = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+  let label_style = Style::default().fg(Color::White);
+  let muted_style = Style::default().fg(muted);
+
+  // Align every label to the same column: pad each key badge out to the
+  // widest key string so the descriptions line up under one another.
+  let max_key_w = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } => {
+        let k = if keys.is_empty() { "(unbound)" } else { keys.as_str() };
+        Some(k.chars().count())
+      }
+      _ => None,
+    })
+    .max()
+    .unwrap_or(0);
+
+  let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+  for row in rows {
+    match row {
+      HelpRow::Title(t) | HelpRow::Section(t) => {
+        lines.push(Line::from(Span::styled(t, heading_style)));
+      }
+      HelpRow::Blank => lines.push(Line::from(String::new())),
+      HelpRow::Entry { keys, label } => {
+        let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
+        let pad = " ".repeat(max_key_w.saturating_sub(keys.chars().count()) + 1);
+        let badge_style = if keys == "(unbound)" { muted_style } else { chip_style };
+        lines.push(Line::from(vec![
+          Span::raw("  "),
+          Span::styled(format!(" {} ", keys), badge_style),
+          Span::raw(pad),
+          Span::styled(label, label_style),
+        ]));
+      }
     }
   }
+
   let block = Block::default()
     .borders(Borders::ALL)
-    .title(" help ")
-    .border_style(Style::default().fg(Color::Cyan));
+    .title(Span::styled(" help ", heading_style))
+    .border_style(Style::default().fg(accent));
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(block), area);
 }
