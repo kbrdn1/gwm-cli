@@ -105,6 +105,8 @@ define_actions! {
   Bottom            => "bottom",
   ToggleSidebar     => "toggle_sidebar",
   ToggleSidebarMode => "toggle_sidebar_mode",
+  CycleSidebarLayout => "cycle_sidebar_layout",
+  ToggleSidebarPosition => "toggle_sidebar_position",
   FocusSwap         => "focus_swap",
   // Filter
   Filter            => "filter",
@@ -355,6 +357,8 @@ impl Keymap {
       def(Action::Bottom, &["G", "End"]),
       def(Action::ToggleSidebar, &["v"]),
       def(Action::ToggleSidebarMode, &["s"]),
+      def(Action::CycleSidebarLayout, &["V"]),
+      def(Action::ToggleSidebarPosition, &["H"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),

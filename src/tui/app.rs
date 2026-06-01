@@ -291,6 +291,9 @@ impl App {
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
     };
+    // Seed the sidebar position from `[tui] sidebar_position` (issue
+    // #188). Orientation stays at its `Auto` default — runtime-only.
+    out.sidebar.position = out.config.tui.sidebar_position;
     out.refresh_link();
     Ok(out)
   }
@@ -617,6 +620,20 @@ impl App {
   pub fn cycle_sidebar_mode(&mut self) {
     self.sidebar.cycle_mode();
     self.status = format!("sidebar: {}", self.sidebar.mode.label());
+  }
+
+  /// Cycle the sidebar orientation `auto → side-by-side → stacked`
+  /// (issue #188). Orchestrator-shaped for the status-bar copy, like
+  /// [`Self::cycle_sidebar_mode`].
+  pub fn cycle_sidebar_layout(&mut self) {
+    self.sidebar.cycle_orientation();
+    self.status = format!("sidebar layout: {}", self.sidebar.orientation.label());
+  }
+
+  /// Flip the side-by-side sidebar position left ↔ right (issue #188).
+  pub fn toggle_sidebar_position(&mut self) {
+    self.sidebar.toggle_position();
+    self.status = format!("sidebar position: {}", self.sidebar.position.label());
   }
 
   pub fn toggle_focus(&mut self) {

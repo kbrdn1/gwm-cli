@@ -31,10 +31,6 @@ pub struct SidebarSections {
   pub recent_commits: Vec<Line<'static>>,
 }
 
-/// Minimum total terminal width required to render the sidebar alongside the
-/// worktree table without compressing the table beyond readability.
-pub const SIDEBAR_MIN_WIDTH: u16 = 120;
-
 pub fn draw(f: &mut Frame, app: &mut App) {
   // Filter bar is shown while the user is typing, AND while a sticky filter
   // remains in effect (so they can see what's filtering the list).
@@ -117,22 +113,54 @@ fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
   f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-/// Decide whether to split horizontally for a sidebar, based on terminal width
-/// and user preference. Sidebar is hidden on narrow terminals to keep the
-/// worktree table readable.
+/// Lay out the worktree table and the optional preview sidebar for the
+/// body region. The layout (hidden / side-by-side / stacked) and the
+/// left-or-right side are decided by the pure
+/// [`SidebarState::resolve_layout`](super::state::sidebar::SidebarState::resolve_layout),
+/// so this function only translates that decision into ratatui splits
+/// (issue #188). The table keeps 60% of the split, the sidebar 40%, in
+/// both orientations.
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
-  let show_sidebar = app.sidebar.open && area.width >= SIDEBAR_MIN_WIDTH;
-  if show_sidebar {
-    let split = Layout::default()
-      .direction(Direction::Horizontal)
-      .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-      .split(area);
-    draw_list(f, split[0], app);
-    draw_sidebar(f, split[1], app);
-  } else {
-    // Sidebar not rendered → no scrollable surface → no max scroll to track.
-    app.sidebar.max_scroll = 0;
-    draw_list(f, area, app);
+  use super::state::sidebar::ResolvedSidebarLayout as Resolved;
+
+  // Table 60% / sidebar 40% — shared by both split orientations.
+  let table_pct = Constraint::Percentage(60);
+  let sidebar_pct = Constraint::Percentage(40);
+
+  match app.sidebar.resolve_layout(area.width) {
+    Resolved::Hidden => {
+      // Sidebar not rendered → no scrollable surface → no max scroll to track.
+      app.sidebar.max_scroll = 0;
+      draw_list(f, area, app);
+    }
+    Resolved::SideBySide { sidebar_left } => {
+      let split = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(if sidebar_left {
+          [sidebar_pct, table_pct]
+        } else {
+          [table_pct, sidebar_pct]
+        })
+        .split(area);
+      let (list_area, sidebar_area) = if sidebar_left {
+        (split[1], split[0])
+      } else {
+        (split[0], split[1])
+      };
+      draw_list(f, list_area, app);
+      draw_sidebar(f, sidebar_area, app);
+    }
+    Resolved::Stacked => {
+      // Table on top, sidebar below — the narrow-terminal fallback that
+      // replaces pre-#188 hiding. The left/right position does not apply
+      // to a vertical stack.
+      let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([table_pct, sidebar_pct])
+        .split(area);
+      draw_list(f, split[0], app);
+      draw_sidebar(f, split[1], app);
+    }
   }
 }
 
@@ -1227,6 +1255,14 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
   lines.push(row(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
   lines.push(row(Action::ToggleSidebar, "toggle git preview sidebar"));
   lines.push(row(Action::ToggleSidebarMode, "cycle sidebar mode (commits / stashes)"));
+  lines.push(row(
+    Action::CycleSidebarLayout,
+    "cycle sidebar layout (auto / side-by-side / stacked)",
+  ));
+  lines.push(row(
+    Action::ToggleSidebarPosition,
+    "toggle sidebar position (left / right)",
+  ));
   lines.push(row(Action::FocusSwap, "swap focus between worktree list and sidebar"));
   lines.push(row(Action::Filter, "open fuzzy filter bar (enter: sticky, esc: clear)"));
   lines.push(row(Action::Refresh, "refresh worktree list"));

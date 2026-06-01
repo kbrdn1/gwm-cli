@@ -383,6 +383,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // stashes. Lands here as the merge resolution between #166
     // (which added the action) and #167 (which extracted run_action).
     Action::ToggleSidebarMode => app.cycle_sidebar_mode(),
+    // Issue #188: responsive sidebar layout — cycle orientation and
+    // flip the side-by-side position.
+    Action::CycleSidebarLayout => app.cycle_sidebar_layout(),
+    Action::ToggleSidebarPosition => app.toggle_sidebar_position(),
     Action::FocusSwap => app.toggle_focus(),
     Action::Filter => app.enter_filter(),
     Action::Refresh => app.refresh()?,
