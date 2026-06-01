@@ -2006,11 +2006,17 @@ fn spawn_opener(url: &str) -> Result<()> {
 
 fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
-  let link = github::read_link(&repo, &branch)?;
 
   // Slug + fetched status are best-effort: if there's no GitHub remote
   // or `gh` isn't installed, we still print the local link.
   let slug = github::repo_slug(&repo).ok();
+  // When a remote is present, auto-detect the branch's PR if none is
+  // explicitly linked (issue #181). Falls back to the plain local read
+  // with no remote — keeping the "local link only" mode network-free.
+  let link = match slug.as_deref() {
+    Some(s) => github::read_link_with_pr_detection(&repo, &branch, s)?,
+    None => github::read_link(&repo, &branch)?,
+  };
   let (issue_status, pr_status) = fetch_link_status(&link, slug.as_deref());
 
   if json {

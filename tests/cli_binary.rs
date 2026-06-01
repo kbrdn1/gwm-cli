@@ -1341,6 +1341,74 @@ fn unlink_issue_falls_back_to_branch_name_auto_detect() {
 }
 
 #[test]
+fn status_auto_detects_pr_when_none_explicitly_linked() {
+  // E2E (issue #181): a branch with a GitHub remote and no explicit PR
+  // link. `gwm status --json` should detect the branch's PR via `gh pr
+  // list` and report it with source "detected".
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  // No issue number in the name → isolates the PR-detection path.
+  repo.branch("detect-me", &head, false).unwrap();
+  repo.set_head("refs/heads/detect-me").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    r#"[{"number":128}]"#,
+    r#"{"number":128,"title":"Auto-detect PR","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/128"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["status", "--json"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("\"number\":128"))
+    .stdout(predicate::str::contains("\"source\":\"detected\""));
+}
+
+#[test]
+fn status_explicit_pr_link_wins_over_detection() {
+  // An explicit `gwm link --pr` must not be clobbered by detection: the
+  // reported source stays "explicit" even though `gh pr list` would
+  // return a different number.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("detect-me", &head, false).unwrap();
+  repo.set_head("refs/heads/detect-me").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    r#"[{"number":999}]"#,
+    r#"{"number":61,"title":"Explicit","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/61"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["link", "pr", "61"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["status", "--json"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("\"number\":61"))
+    .stdout(predicate::str::contains("\"source\":\"explicit\""));
+}
+
+#[test]
 fn open_print_url_emits_url_without_spawning_browser() {
   // `--print-url` is the test-friendly mode: we want to assert the URL
   // construction without actually shelling out to `open`/`xdg-open`.
@@ -1523,6 +1591,52 @@ fn prepend_path(dir: &Path) -> String {
   let mut paths = vec![dir.to_path_buf()];
   paths.extend(std::env::split_paths(&old));
   std::env::join_paths(paths).unwrap().to_string_lossy().into_owned()
+}
+
+/// Fake `gh` that dispatches on the first two args, used to exercise the
+/// PR auto-detection path (issue #181): `gh pr list …` returns
+/// `pr_list_json`, `gh pr view …` returns `pr_view_json`. Both arms emit
+/// the JSON verbatim so the real `find_pr_for_branch` / `fetch_pr` parse
+/// it. Unix + Windows variants so CI stays green on both.
+fn write_dispatch_gh(root: &Path, pr_list_json: &str, pr_view_json: &str) -> PathBuf {
+  #[cfg(unix)]
+  {
+    let script = root.join("gh");
+    fs::write(
+      &script,
+      format!(
+        r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s' '{list}'
+elif [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s' '{view}'
+fi
+"#,
+        list = pr_list_json.replace('\'', "'\\''"),
+        view = pr_view_json.replace('\'', "'\\''"),
+      ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+  }
+  #[cfg(windows)]
+  {
+    let script = root.join("gh.cmd");
+    fs::write(
+      &script,
+      format!(
+        "@echo off\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"list\" echo {list}\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"view\" echo {view}\r\n",
+        list = pr_list_json,
+        view = pr_view_json,
+      ),
+    )
+    .unwrap();
+    script
+  }
 }
 
 fn write_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
