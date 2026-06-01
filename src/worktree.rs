@@ -203,7 +203,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   }
 
   let names = repo.worktrees()?;
-  for name in names.iter().flatten().flatten() {
+  // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
+  // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
+  for name in names.iter().filter_map(|r| r.ok().flatten()) {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
@@ -396,7 +398,9 @@ pub struct PrunableEntry {
 pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
   let names = repo.worktrees()?;
   let mut out = Vec::new();
-  for name in names.iter().flatten().flatten() {
+  // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
+  // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
+  for name in names.iter().filter_map(|r| r.ok().flatten()) {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
