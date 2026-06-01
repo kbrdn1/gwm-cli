@@ -1,6 +1,8 @@
 # gwm — worktree bootstrap for gwm-cli (Rust)
 #
-# Placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+# Placeholders supported in paths/patterns: {repo} {home} {repo_path}
+# {repo_parent} {type} {issue} {desc}. {repo_parent} = the dir containing the
+# repo, so `base = "{repo_parent}/worktrees"` mirrors a `../worktrees` layout.
 # Docs: https://github.com/kbrdn1/gwm-cli
 
 [worktree]

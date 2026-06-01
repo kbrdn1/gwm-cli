@@ -1,5 +1,11 @@
 # gwm config — copy this to your repo root as `.gwm.toml`
-# placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+# placeholders supported in paths/patterns:
+#   {repo}        repo name              {home}    your home directory
+#   {repo_path}   repo's absolute dir    {repo_parent}  the dir *containing* the repo
+#   {type} {issue} {desc}
+# `{repo_parent}` lets the base sit next to the repo — e.g.
+#   base = "{repo_parent}/worktrees"  → a sibling `worktrees/` dir,
+# matching an editor's `../worktrees` convention (Zed git.worktree_directory).
 #
 # === TOFU trust gate (issue #95) ===========================================
 # The first `gwm create` / `gwm bootstrap` against this file opens a
@@ -15,6 +21,8 @@
 
 [worktree]
 base = "{home}/cc-worktree/{repo}"
+# Repo-relative alternative (sibling `worktrees/`, à la Zed `../worktrees`):
+#   base = "{repo_parent}/worktrees"
 path_pattern = "{type}-{issue}-{desc}"
 branch_pattern = "{type}/#{issue}-{desc}"
 
