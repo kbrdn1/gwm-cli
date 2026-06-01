@@ -47,13 +47,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Length(3),
         Constraint::Min(0),
         Constraint::Length(1),
-        Constraint::Length(2),
+        Constraint::Length(1),
       ])
       .split(f.area())
   } else {
     Layout::default()
       .direction(Direction::Vertical)
-      .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(2)])
+      .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
       .split(f.area())
   };
 
@@ -928,20 +928,133 @@ fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
   (label, color)
 }
 
+/// `(key, label)` hints advertised in the full TUI footer, in display order.
+/// Picker mode hides the mutating actions (n/d/b/F) — they're inert in the
+/// picker event loop, so advertising them would be a lie.
+const FOOTER_HINTS: &[(&str, &str)] = &[
+  ("n", "new"),
+  ("d", "del"),
+  ("b", "boot"),
+  ("o", "open"),
+  ("y", "yank"),
+  ("l", "git"),
+  ("R", "review"),
+  ("v", "sidebar"),
+  ("Tab", "focus"),
+  ("/", "filter"),
+  ("gg/G", "top/bot"),
+  ("j/k", "nav"),
+  ("f", "refresh"),
+  ("F", "gh"),
+  ("?", "help"),
+  ("q", "quit"),
+];
+
+/// Picker-mode footer hints — `enter`/`esc` select/cancel instead of the
+/// mutating actions, matching the picker event loop.
+const PICKER_FOOTER_HINTS: &[(&str, &str)] = &[
+  ("enter", "select"),
+  ("esc", "cancel"),
+  ("o", "open"),
+  ("y", "yank"),
+  ("l", "git"),
+  ("v", "sidebar"),
+  ("Tab", "focus"),
+  ("/", "filter"),
+  ("gg/G", "top/bot"),
+  ("j/k", "nav"),
+  ("f", "refresh"),
+  ("?", "help"),
+  ("q", "quit"),
+];
+
+/// Build the single-line statusline (issue #180).
+///
+/// Layout, left-to-right:
+///
+/// ```text
+///  n  new  d  del  …                                   [<status>]
+/// ```
+///
+/// Each hint renders as a reverse-video badge chip (` key ` painted with the
+/// theme `accent` as background via `REVERSED`) followed by a dim label. The
+/// status message (the action log) is pinned flush-right and has **absolute
+/// priority**: when `width` is too small for every hint, the hint list is cut
+/// short with an `…` marker, but the status is always kept — clipped only if
+/// it alone exceeds `width`. There is no wrapping: the caller renders this
+/// without `Wrap`, so the row is hard-clipped at the terminal edge.
+///
+/// Pure and width-driven so the contract is pinned by
+/// `tests/tui_footer_tests.rs` without spinning up a ratatui backend. Widths
+/// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
+/// labels and the bracketed status are ASCII / single-width in practice).
+pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, accent: Color) -> Line<'static> {
+  let chip_style = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let label_style = Style::default().fg(Color::DarkGray);
+  let status_style = Style::default().fg(Color::Yellow);
+
+  let status_text = format!("[{}]", status);
+  let status_w = status_text.chars().count();
+
+  // Priority floor: if even the status cannot fit, show a clipped status
+  // alone — never a hint at the log's expense.
+  if width <= status_w {
+    return Line::from(Span::styled(trunc(&status_text, width), status_style));
+  }
+
+  // One column minimum gap between the hints and the right-pinned status,
+  // plus one column held in reserve for the `…` truncation marker.
+  let hint_budget = (width - status_w - 1).saturating_sub(1);
+
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut used = 0usize; // display columns consumed by hint badges so far
+  let mut truncated = false;
+  for (i, (key, label)) in hints.iter().enumerate() {
+    let sep = usize::from(i > 0); // single space between badges
+                                  // chip ` key ` (key + 2 pad) + ` label` (label + 1 leading space)
+    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    if used + sep + badge_w > hint_budget {
+      truncated = true;
+      break;
+    }
+    if sep == 1 {
+      spans.push(Span::raw(" "));
+      used += 1;
+    }
+    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled(format!(" {}", label), label_style));
+    used += badge_w;
+  }
+
+  if truncated {
+    if used > 0 {
+      spans.push(Span::raw(" "));
+      used += 1;
+    }
+    spans.push(Span::styled("…", label_style));
+    used += 1;
+  }
+
+  // Pad so the status sits flush right (priority: the log is at the end).
+  let pad = width.saturating_sub(used + status_w);
+  if pad > 0 {
+    spans.push(Span::raw(" ".repeat(pad)));
+  }
+  spans.push(Span::styled(status_text, status_style));
+  Line::from(spans)
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  // Picker mode hides the mutating actions (n/d/b/p) — they're inert in the
-  // event loop, so advertising them would be a lie.
-  let help = if app.picker_mode {
-    "enter:select esc:cancel o:open y:yank l:git_tui v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav f:refresh ?:help q:quit"
+  let hints = if app.picker_mode {
+    PICKER_FOOTER_HINTS
   } else {
-    "n:new d:del b:boot o:open y:yank l:git_tui R:review v:sidebar Tab:focus /:filter gg/G:top/bot j/k:nav f:refresh F:gh ?:help q:quit"
+    FOOTER_HINTS
   };
-  let text = Line::from(vec![
-    Span::styled(help, Style::default().fg(Color::DarkGray)),
-    Span::raw("  "),
-    Span::styled(format!("[{}]", app.status), Style::default().fg(Color::Yellow)),
-  ]);
-  f.render_widget(Paragraph::new(text).wrap(Wrap { trim: true }), area);
+  let line = footer_line(hints, &app.status, area.width as usize, app.theme.accent);
+  // No `Wrap`: the footer is a single hard-clipped row (issue #180).
+  f.render_widget(Paragraph::new(line), area);
 }
 
 /// Pure builder for the help overlay body (issue #87).
