@@ -1516,6 +1516,7 @@ fn source_marker(s: LinkSource) -> &'static str {
     LinkSource::None => "",
     LinkSource::BranchName => " (auto)",
     LinkSource::Explicit => "",
+    LinkSource::Detected => " (detected)",
   }
 }
 

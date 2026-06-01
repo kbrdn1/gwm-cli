@@ -2052,6 +2052,7 @@ fn link_source_str(s: LinkSource) -> &'static str {
     LinkSource::None => "none",
     LinkSource::BranchName => "branch-name",
     LinkSource::Explicit => "explicit",
+    LinkSource::Detected => "detected",
   }
 }
 
