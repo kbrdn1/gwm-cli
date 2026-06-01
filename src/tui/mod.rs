@@ -52,8 +52,8 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color, header_title,
-  help_lines, issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines,
+  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, footer_line, freshness_color,
+  header_title, help_lines, issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines,
   table_marker, tilde_compress_with_home, working_tree_status_line, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
   RECENT_COMMITS_LIMIT,
 };
