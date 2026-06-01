@@ -345,6 +345,12 @@ fn placeholders_no_optional_args_leave_repo_only() {
 #[test]
 fn placeholders_expand_repo_path_and_parent() {
   let repo_path = std::path::Path::new("/Users/me/Projects/Perso/gwm-cli");
+  // Derive the expected prefixes from `repo_path` itself rather than
+  // duplicating the literal parent string — the contract under test is
+  // "{repo_parent} → the repo's parent dir, {repo_path} → the repo dir".
+  let parent = repo_path.parent().unwrap().to_string_lossy();
+  let full_dir = repo_path.to_string_lossy();
+
   let out = expand_placeholders(
     "{repo_parent}/worktrees/{repo}-{type}-{issue}",
     "gwm-cli",
@@ -354,11 +360,11 @@ fn placeholders_expand_repo_path_and_parent() {
     Some(repo_path),
   )
   .unwrap();
-  assert_eq!(out, "/Users/me/Projects/Perso/worktrees/gwm-cli-feat-42");
+  assert_eq!(out, format!("{parent}/worktrees/gwm-cli-feat-42"));
   assert!(!out.contains("{repo_parent}"));
 
   let full = expand_placeholders("{repo_path}/.worktrees", "gwm-cli", None, None, None, Some(repo_path)).unwrap();
-  assert_eq!(full, "/Users/me/Projects/Perso/gwm-cli/.worktrees");
+  assert_eq!(full, format!("{full_dir}/.worktrees"));
   assert!(!full.contains("{repo_path}"));
 }
 
