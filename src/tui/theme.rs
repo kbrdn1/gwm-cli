@@ -77,7 +77,10 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-  /// Pre-#33 hardcoded scheme. Documented field-by-field above.
+  /// Pre-#33 hardcoded scheme. Documented field-by-field above. A
+  /// non-default look (e.g. the Claude orange) is opt-in via a
+  /// `[theme] preset = "claude-dark"` block — not baked into the
+  /// default, so users who never write a `[theme]` block see no change.
   fn default() -> Self {
     Self {
       focus: Color::Cyan,
@@ -104,7 +107,28 @@ impl Theme {
       "catppuccin" | "catppuccin-mocha" => Some(Self::catppuccin_mocha()),
       "gruvbox" | "gruvbox-dark" => Some(Self::gruvbox_dark()),
       "tokyo-night" | "tokyonight" => Some(Self::tokyo_night()),
+      "claude-dark" | "claude" => Some(Self::claude_dark()),
       _ => None,
+    }
+  }
+
+  /// Claude dark palette, ported from the Anthropic "Pure Dark"
+  /// reference scheme. The signature orange (`#D4825D` primary,
+  /// `#C15F3C` for focused borders) drives focus/accent; the semantic
+  /// colours map green→branch/clean, yellow→dirty/main, purple→locked,
+  /// red→prunable, and the warm overlay greys to muted/selection.
+  fn claude_dark() -> Self {
+    Self {
+      focus: Color::Rgb(0xC1, 0x5F, 0x3C),        // Orange Dark (focused borders)
+      accent: Color::Rgb(0xD4, 0x82, 0x5D),       // Orange (primary accent)
+      branch: Color::Rgb(0x86, 0xE8, 0x9A),       // Success green
+      clean: Color::Rgb(0x86, 0xE8, 0x9A),        // Success green
+      dirty: Color::Rgb(0xFF, 0xDF, 0x61),        // Warning yellow
+      main: Color::Rgb(0xFF, 0xDF, 0x61),         // Warning yellow
+      locked: Color::Rgb(0xC7, 0x9B, 0xFF),       // Special purple
+      prunable: Color::Rgb(0xFF, 0x7A, 0x7A),     // Error red
+      muted: Color::Rgb(0x99, 0x99, 0x99),        // Text muted
+      selection_bg: Color::Rgb(0x38, 0x38, 0x38), // Surface 1 (active)
     }
   }
 
@@ -201,7 +225,7 @@ impl Theme {
 
 /// Names of every built-in preset. Surfaced by `gwm theme list`.
 pub fn preset_names() -> &'static [&'static str] {
-  &["catppuccin", "gruvbox", "tokyo-night"]
+  &["catppuccin", "gruvbox", "tokyo-night", "claude-dark"]
 }
 
 // ---------------------------------------------------------------------------

@@ -13,9 +13,10 @@ use ratatui::style::Color;
 #[test]
 fn app_theme_defaults_when_no_config() {
   // Fresh repo with no `.gwm.toml` → `App.theme == Theme::default()`.
-  // The pre-#33 hardcoded palette is preserved verbatim.
+  // The pre-#33 hardcoded palette is preserved verbatim (the Claude
+  // orange is opt-in via the `claude-dark` preset, not the default).
   let (dir, _) = init_repo();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   assert_eq!(app.theme, Theme::default());
   assert_eq!(app.theme.focus, Color::Cyan);
 }
@@ -35,7 +36,7 @@ preset = "catppuccin"
 "#,
   )
   .unwrap();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   assert_ne!(app.theme, Theme::default(), "preset must change at least one role");
 }
 
@@ -50,7 +51,7 @@ focus = "red"
 "#,
   )
   .unwrap();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   assert_eq!(app.theme.focus, Color::Red);
   // Other roles untouched.
   assert_eq!(app.theme.branch, Theme::default().branch);

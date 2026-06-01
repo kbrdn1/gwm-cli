@@ -18,7 +18,9 @@ fn default_theme_matches_pre_issue_33_scheme() {
   // for branch/clean, yellow for dirty/main, magenta for locked,
   // red for prunable, dark gray for muted. The default Theme must
   // be observationally equivalent so users who never write a
-  // `[theme]` block see no change.
+  // `[theme]` block see no change — a different look (e.g. the
+  // Claude orange) is opt-in via the `claude-dark` preset, not the
+  // default.
   let t = Theme::default();
   assert_eq!(t.focus, Color::Cyan);
   assert_eq!(t.accent, Color::Cyan);
@@ -29,6 +31,32 @@ fn default_theme_matches_pre_issue_33_scheme() {
   assert_eq!(t.locked, Color::Magenta);
   assert_eq!(t.prunable, Color::Red);
   assert_eq!(t.muted, Color::DarkGray);
+}
+
+#[test]
+fn claude_dark_preset_ports_the_palette() {
+  // #185: a full port of the Claude dark palette
+  // (`~/.claude/.../claude-dark-palette.md`) into gwm's role scheme.
+  // Pin the signature mappings so a regression in the port is caught.
+  let t = Theme::preset("claude-dark").expect("claude-dark preset must resolve");
+  assert_eq!(t.accent, Color::Rgb(0xD4, 0x82, 0x5D), "primary orange");
+  assert_eq!(t.focus, Color::Rgb(0xC1, 0x5F, 0x3C), "orange-dark / focused borders");
+  assert_eq!(t.branch, Color::Rgb(0x86, 0xE8, 0x9A), "success green");
+  assert_eq!(t.clean, Color::Rgb(0x86, 0xE8, 0x9A), "success green");
+  assert_eq!(t.dirty, Color::Rgb(0xFF, 0xDF, 0x61), "warning yellow");
+  assert_eq!(t.main, Color::Rgb(0xFF, 0xDF, 0x61), "warning yellow");
+  assert_eq!(t.locked, Color::Rgb(0xC7, 0x9B, 0xFF), "special purple");
+  assert_eq!(t.prunable, Color::Rgb(0xFF, 0x7A, 0x7A), "error red");
+  // The alias `claude` resolves to the same theme.
+  assert_eq!(Theme::preset("claude"), Some(t), "`claude` aliases `claude-dark`");
+}
+
+#[test]
+fn claude_dark_is_listed_among_presets() {
+  assert!(
+    preset_names().contains(&"claude-dark"),
+    "claude-dark must be discoverable via `gwm theme list`"
+  );
 }
 
 // ---------------------------------------------------------------------------
