@@ -10,6 +10,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Force repo-only config loading so the suite never picks up a
+  # runner's user-level ~/.config/gwm/config.toml (issue #190 opt-out).
+  GWM_NO_GLOBAL_CONFIG: "1"
 
 concurrency:
   group: ci-${{ github.ref }}

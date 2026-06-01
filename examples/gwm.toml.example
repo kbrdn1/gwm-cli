@@ -6,6 +6,7 @@
 # `[theme] preset = "…"`) and every repo inherits it. The repo `.gwm.toml`
 # always wins on conflict: scalars override, tables merge key-by-key,
 # arrays ([[labels]], [[bootstrap.copy]], …) are replaced wholesale.
+# Set GWM_NO_GLOBAL_CONFIG=1 to ignore the global file (repo-only).
 #
 # placeholders supported in paths/patterns:
 #   {repo}        repo name              {home}    your home directory
