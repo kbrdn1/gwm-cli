@@ -328,6 +328,7 @@ fn placeholders_expand() {
     Some("feat"),
     Some("123"),
     Some("foo"),
+    None,
   )
   .unwrap();
   assert!(out.ends_with("/cc-worktree/my-repo/feat-123-foo"));
@@ -337,8 +338,36 @@ fn placeholders_expand() {
 
 #[test]
 fn placeholders_no_optional_args_leave_repo_only() {
-  let out = expand_placeholders("{home}/{repo}", "x", None, None, None).unwrap();
+  let out = expand_placeholders("{home}/{repo}", "x", None, None, None, None).unwrap();
   assert!(out.ends_with("/x"));
+}
+
+#[test]
+fn placeholders_expand_repo_path_and_parent() {
+  let repo_path = std::path::Path::new("/Users/me/Projects/Perso/gwm-cli");
+  let out = expand_placeholders(
+    "{repo_parent}/worktrees/{repo}-{type}-{issue}",
+    "gwm-cli",
+    Some("feat"),
+    Some("42"),
+    None,
+    Some(repo_path),
+  )
+  .unwrap();
+  assert_eq!(out, "/Users/me/Projects/Perso/worktrees/gwm-cli-feat-42");
+  assert!(!out.contains("{repo_parent}"));
+
+  let full = expand_placeholders("{repo_path}/.worktrees", "gwm-cli", None, None, None, Some(repo_path)).unwrap();
+  assert_eq!(full, "/Users/me/Projects/Perso/gwm-cli/.worktrees");
+  assert!(!full.contains("{repo_path}"));
+}
+
+#[test]
+fn placeholders_repo_path_tokens_left_literal_without_path() {
+  // When no repo path is supplied the disk-path tokens are passed
+  // through untouched rather than collapsing to an empty string.
+  let out = expand_placeholders("{repo_parent}/x", "r", None, None, None, None).unwrap();
+  assert_eq!(out, "{repo_parent}/x");
 }
 
 #[test]

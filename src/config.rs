@@ -1066,6 +1066,7 @@ pub fn expand_placeholders(
   type_: Option<&str>,
   issue: Option<&str>,
   desc: Option<&str>,
+  _repo_path: Option<&Path>,
 ) -> Result<String> {
   let home = dirs::home_dir()
     .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
