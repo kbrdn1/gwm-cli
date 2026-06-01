@@ -3,9 +3,9 @@
 [![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
-[![rust](https://img.shields.io/badge/rust-1.80%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![rust](https://img.shields.io/badge/rust-1.82%2B-orange?logo=rust)](https://www.rust-lang.org/)
 
-Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2` (vendored — no `gwq` / `git` CLI dependency), per-repo configurable bootstrap (file copies, regex guards, shell hooks), single binary, portable.
+Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2` (vendored — no `gwq` / `git` CLI dependency), per-repo + user-level configurable bootstrap (file copies, regex guards, lifecycle hooks), single binary, portable.
 
 > **Full documentation lives in [`docs/`](docs/).** This README is the landing page; every feature has a dedicated section in the doc tree.
 
@@ -40,10 +40,14 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 
 - **Native worktree ops** via vendored `libgit2` — `git worktree add/list/remove/prune` without shelling out.
 - **CLI + ratatui TUI** — `gwm <subcommand>` for scripts, bare `gwm` opens the interactive interface.
-- **Per-repo `.gwm.toml`** — branch / path conventions, file copies, regex guards, shell hooks, no-symlink invariants.
+- **Per-repo `.gwm.toml` + user-level global config** — branch / path conventions, file copies, regex guards, no-symlink invariants. A `~/.config/gwm/config.toml` deep-merges underneath each repo's `.gwm.toml`. Edit it git-config-style with `gwm config get / set / list / validate`.
+- **Lifecycle hooks `[hooks.*]`** — `pre_create` / `post_create` / `pre_bootstrap` / `post_bootstrap` / `pre_remove` / `post_remove` phases, each with `when:` predicates and per-step `on_fail = abort|warn|ignore`.
+- **CLI aliases + Gitmoji convention** — `[aliases]` expand `gwm <alias>` to argv before parsing; `gwm commit-prefix`, `gwm types --gitmoji`, and an opt-in `gwm hooks install commit-msg` hook enforce the repo's Gitmoji + Conventional Commits style.
+- **GitHub workflow** — branches matching `<type>/#<N>-<slug>` auto-link to their issue (with ephemeral PR auto-detection); `gwm new` opens an issue from a template then spins up the worktree, `gwm pr` renders the PR body; live status surfaces in the TUI sidebar via `gh`.
+- **Safety daily** — `--dry-run` on `gwm remove` / `gwm prune` to preview, `gwm undo` + `gwm history` to recover a misfired removal, a confirm-overlay countdown on armed branch-deletion, and deny-list regexes on copied files (the original "no AWS RDS in `.env`" incident, generalised).
+- **`gwm sync`** — fetch a worktree's upstream and rebase (or `--merge`) its branch onto it, conflict-safe.
 - **Configurable launchers** — drive the TUI's `l` (git TUI) and `R` (review) keybindings through `[git_tui]` and `[review]` sections in `.gwm.toml`.
-- **GitHub issue / PR linking** — branches matching `<type>/#<N>-<slug>` auto-link to their issue; live status surfaces in the TUI sidebar via `gh`.
-- **Safety guards** — deny-list regexes on copied files (the original "no AWS RDS in `.env`" incident, generalised), plus a confirm-overlay countdown when destructive branch-deletion is armed.
+- **TUI personalisation** — role-based `[theme]` presets (`catppuccin` / `gruvbox` / `tokyo-night` / `claude-dark`), a remappable `[tui.keys]` keymap with multi-key chords, a `:` command palette, and a sidebar stashes mode — all responsive down to a narrow terminal.
 - **TOFU trust ledger on `.gwm.toml`** ([#95](https://github.com/kbrdn1/gwm-cli/issues/95)) — first `gwm create` / `gwm bootstrap` against a repo prints the bootstrap surface (copies, guards, commands) and prompts before running anything. Recorded in `~/.config/gwm/trust.toml` keyed on `(origin URL, sha256 of .gwm.toml)`; any byte change re-prompts. CI bypass: `--allow-bootstrap` or `GWM_ALLOW_BOOTSTRAP=1`. Manage with `gwm trust list / revoke / show`.
 
 ## documentation
