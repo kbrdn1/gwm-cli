@@ -24,7 +24,7 @@ fn display_width(line: &Line<'_>) -> usize {
 }
 
 /// First span whose content contains `needle`, for asserting on its style.
-fn span_with<'a>(line: &'a Line<'a>, needle: &str) -> Option<&'a Span<'a>> {
+fn span_with<'a, 'b>(line: &'a Line<'b>, needle: &str) -> Option<&'a Span<'b>> {
   line.spans.iter().find(|s| s.content.contains(needle))
 }
 
