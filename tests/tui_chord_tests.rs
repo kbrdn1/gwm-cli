@@ -245,3 +245,79 @@ down = ["Ctrl+n"]
   let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
   assert_eq!(app.dispatch_key(ctrl_n), Some(Action::Down));
 }
+
+#[test]
+fn help_rows_structures_title_sections_and_entries() {
+  // #187: the help overlay is built from a structured `HelpRow` list so
+  // the renderer can paint coloured section headers and key badges. The
+  // first row must be the title; sections and rebindable entries must
+  // surface as their own variants (not flattened strings).
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::HelpRow;
+
+  let km = Keymap::defaults();
+  let rows = help_rows(&km, false);
+
+  assert!(
+    matches!(rows.first(), Some(HelpRow::Title(t)) if t == "gwm — keys"),
+    "first row must be the title, got: {:?}",
+    rows.first()
+  );
+  assert!(
+    rows.iter().any(|r| matches!(r, HelpRow::Section(s) if s == "global")),
+    "expected a `global` section header"
+  );
+  assert!(
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Section(s) if s == "confirm delete")),
+    "expected a `confirm delete` section header"
+  );
+  // The `Down` action's default `j` binding must surface as an Entry
+  // with the resolved chord in its `keys`, not baked into a string.
+  let keys = km
+    .list()
+    .iter()
+    .find(|b| b.action == Action::Down)
+    .map(|b| {
+      b.chords
+        .iter()
+        .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(", ")
+    })
+    .unwrap();
+  assert!(
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Entry { keys: k, label } if *k == keys && label.starts_with("next"))),
+    "expected a `next` entry carrying the resolved `Down` chord {keys:?}"
+  );
+}
+
+#[test]
+fn help_lines_is_help_rows_flattened() {
+  // #187: `help_lines` must stay a pure flattening of `help_rows` so the
+  // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in
+  // this file) is preserved byte-for-byte after the refactor. This pins
+  // the two builders together so they can never drift.
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::{help_lines, help_rows, HelpRow};
+
+  let km = Keymap::defaults();
+  for picker_mode in [false, true] {
+    let expected: Vec<String> = help_rows(&km, picker_mode)
+      .into_iter()
+      .map(|row| match row {
+        HelpRow::Title(s) | HelpRow::Section(s) => s,
+        HelpRow::Blank => String::new(),
+        HelpRow::Entry { keys, label } => {
+          let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
+          format!("  {:<13} {}", keys, label)
+        }
+      })
+      .collect();
+    assert_eq!(help_lines(&km, picker_mode), expected, "picker_mode={picker_mode}");
+  }
+}

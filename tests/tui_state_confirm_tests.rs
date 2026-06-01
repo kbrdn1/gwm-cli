@@ -7,7 +7,7 @@
 //! after the decomposition, but the unit tests below are what
 //! reviewers should read to understand the modal's state machine.
 
-use gwm::tui::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+use gwm::tui::state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use std::time::{Duration, Instant};
 
 #[test]
@@ -169,4 +169,43 @@ fn remaining_secs_rounds_up_to_next_whole_second() {
   // At t0 + 3s, remaining = 0 → label shows 0.
   let r = modal.remaining_secs(t0 + Duration::from_secs(3), total);
   assert_eq!(r, 0);
+}
+
+// ---- Button focus (issue #187) ------------------------------------------
+
+#[test]
+fn default_focus_is_cancel_the_safe_choice() {
+  // A freshly-opened modal focuses Cancel so a stray Enter never fires a
+  // destructive delete (#187).
+  let modal = ConfirmModal::new();
+  assert_eq!(modal.focused_button(), ConfirmButton::Cancel);
+}
+
+#[test]
+fn focus_confirm_and_focus_cancel_set_the_button() {
+  let mut modal = ConfirmModal::new();
+  modal.focus_confirm();
+  assert_eq!(modal.focused_button(), ConfirmButton::Confirm);
+  modal.focus_cancel();
+  assert_eq!(modal.focused_button(), ConfirmButton::Cancel);
+}
+
+#[test]
+fn toggle_focus_alternates_between_buttons() {
+  let mut modal = ConfirmModal::new();
+  // Starts on Cancel.
+  modal.toggle_focus();
+  assert_eq!(modal.focused_button(), ConfirmButton::Confirm);
+  modal.toggle_focus();
+  assert_eq!(modal.focused_button(), ConfirmButton::Cancel);
+}
+
+#[test]
+fn reset_restores_focus_to_cancel() {
+  // The orchestrator calls reset() when the modal opens; it must return
+  // focus to the safe default even if a prior modal left it on Confirm.
+  let mut modal = ConfirmModal::new();
+  modal.focus_confirm();
+  modal.reset();
+  assert_eq!(modal.focused_button(), ConfirmButton::Cancel);
 }

@@ -37,10 +37,29 @@ pub enum CountdownTickOutcome {
   ReadyToFire,
 }
 
+/// Which button the confirm overlay has focused (issue #187). `Default`
+/// is [`ConfirmButton::Cancel`] — the safe choice for a destructive
+/// action, so a stray `Enter` on a freshly-opened modal cancels rather
+/// than deletes.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum ConfirmButton {
+  /// `[ Confirm ]` — activating it fires the delete (same path as `y`).
+  Confirm,
+  /// `[ Cancel ]` — activating it dismisses the modal (same path as `n`).
+  #[default]
+  Cancel,
+}
+
 /// Safety countdown state for the confirm modal. `Default` opens the
 /// modal in "classic / not-armed" state.
 #[derive(Debug, Default)]
 pub struct ConfirmModal {
+  /// Which button is focused for `←` / `→` / `Tab` navigation (#187).
+  /// `Enter` activates the focused button; the legacy `y` / `n` / `Esc`
+  /// keys still work regardless of focus. Defaults to
+  /// [`ConfirmButton::Cancel`] so the destructive action is never one
+  /// stray `Enter` away.
+  focus: ConfirmButton,
   /// Anchor for the safety countdown (issue #30). When `Some`, the modal
   /// renders a progress bar and [`ConfirmModal::tick`] decrements it
   /// before returning `ReadyToFire`. `None` = modal closed, classic mode,
@@ -60,10 +79,36 @@ impl ConfirmModal {
     Self::default()
   }
 
-  /// Reset to the freshly-opened state (timer cleared, classic mode).
-  /// Called by the orchestrator when the modal opens or dismisses.
+  /// Reset to the freshly-opened state (timer cleared, classic mode,
+  /// focus back on the safe [`ConfirmButton::Cancel`]). Called by the
+  /// orchestrator when the modal opens or dismisses.
   pub fn reset(&mut self) {
     self.started_at = None;
+    self.focus = ConfirmButton::default();
+  }
+
+  /// The currently-focused button (`←` / `→` / `Tab` move it; `Enter`
+  /// activates it). Defaults to [`ConfirmButton::Cancel`].
+  pub fn focused_button(&self) -> ConfirmButton {
+    self.focus
+  }
+
+  /// Focus the `[ Confirm ]` button (`←` / `h`).
+  pub fn focus_confirm(&mut self) {
+    self.focus = ConfirmButton::Confirm;
+  }
+
+  /// Focus the `[ Cancel ]` button (`→` / `l`).
+  pub fn focus_cancel(&mut self) {
+    self.focus = ConfirmButton::Cancel;
+  }
+
+  /// Toggle focus between the two buttons (`Tab`).
+  pub fn toggle_focus(&mut self) {
+    self.focus = match self.focus {
+      ConfirmButton::Confirm => ConfirmButton::Cancel,
+      ConfirmButton::Cancel => ConfirmButton::Confirm,
+    };
   }
 
   /// `true` when the safety countdown is currently running (between

@@ -6,6 +6,7 @@ use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
+use super::state::spinner::Spinner;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
@@ -198,6 +199,12 @@ pub struct App {
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
 
+  /// Animated loader for overlays (issue #187). Advanced by the event
+  /// loop's 200ms poll tick while the confirm countdown is armed and
+  /// read by the renderer; pure state lives in
+  /// [`super::state::spinner::Spinner`].
+  pub spinner: Spinner,
+
   // ---- Issue/PR linking (issue #67) -------------------------------------
   /// GitHub fetch state slice — owns the cached link for the currently
   /// selected worktree's branch, the repo slug parsed from `origin`,
@@ -286,6 +293,7 @@ impl App {
       picker_should_exit: false,
       should_quit: false,
       confirm: ConfirmModal::new(),
+      spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
@@ -933,6 +941,9 @@ impl App {
     }
     self.view = View::Confirm;
     self.confirm.reset();
+    // Start the loader animation from a deterministic frame each time
+    // the modal opens (#187).
+    self.spinner.reset();
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
