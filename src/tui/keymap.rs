@@ -148,10 +148,8 @@ pub struct KeyStroke {
 
 impl KeyStroke {
   pub fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
-    Self {
-      code,
-      modifiers: Self::sanitize(modifiers),
-    }
+    let (code, modifiers) = Self::normalize(code, Self::sanitize(modifiers));
+    Self { code, modifiers }
   }
 
   /// Build a stroke from a raw crossterm event, dropping modifier
@@ -162,6 +160,31 @@ impl KeyStroke {
 
   fn sanitize(m: KeyModifiers) -> KeyModifiers {
     m & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+  }
+
+  /// Fold a shifted character keystroke to a terminal-independent
+  /// canonical form. A shifted letter already encodes its shift state
+  /// in the glyph itself, but terminals disagree on how they report it:
+  ///
+  /// - legacy terminals: `Char('V')` with **no** modifier;
+  /// - many modern terminals: `Char('V')` **with** `SHIFT`;
+  /// - the kitty keyboard protocol: the base key `Char('v')` with `SHIFT`.
+  ///
+  /// All three mean the same keystroke. We canonicalise any `Char` that
+  /// still carries `SHIFT` to its uppercase form with the `SHIFT` bit
+  /// dropped, so a binding written `"V"` (parsed to `Char('V')`, no
+  /// modifier) matches every variant. Without this, the bound chord and
+  /// the runtime event compared unequal on SHIFT-reporting terminals and
+  /// every uppercase binding (`G`, `R`, `V`, `H`, …) silently did nothing
+  /// (PR #192). Non-`Char` codes (e.g. `Shift+Tab` → `BackTab`) keep their
+  /// SHIFT bit untouched.
+  fn normalize(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    match code {
+      KeyCode::Char(c) if modifiers.contains(KeyModifiers::SHIFT) => {
+        (KeyCode::Char(c.to_ascii_uppercase()), modifiers - KeyModifiers::SHIFT)
+      }
+      _ => (code, modifiers),
+    }
   }
 
   /// Parse a chord string (`"j"`, `"g g"`, `"Ctrl+x Ctrl+s"`) into
@@ -209,7 +232,10 @@ impl KeyStroke {
     }
 
     let code = parse_keycode(key_str, token)?;
-    Ok(KeyStroke { code, modifiers })
+    // Route through `new` so a chord written `"Shift+v"` canonicalises
+    // to the same `Char('V')` (no SHIFT) as `"V"` — and matches whatever
+    // shift encoding the terminal delivers at runtime. See `normalize`.
+    Ok(KeyStroke::new(code, modifiers))
   }
 }
 
