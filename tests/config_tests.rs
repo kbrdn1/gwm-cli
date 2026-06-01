@@ -1,5 +1,6 @@
 use gwm::config::{
-  expand_placeholders, review_tool_preset, BranchTypesSource, Config, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+  expand_placeholders, review_tool_preset, BranchTypesSource, Config, SidebarPosition, TuiOpenMode, WorktreeConfig,
+  CONFIG_FILE,
 };
 use tempfile::TempDir;
 
@@ -475,6 +476,45 @@ branch_pattern = "{type}/#{issue}-{desc}"
   .unwrap();
   let cfg = Config::load_for_repo(dir.path()).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
+}
+
+#[test]
+fn tui_sidebar_position_defaults_to_right() {
+  // Pre-#188 behaviour: sidebar on the right. The default must hold so
+  // existing users see no change until they set the knob or press `H`.
+  let cfg = Config::default();
+  assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Right);
+}
+
+#[test]
+fn tui_sidebar_position_absent_keeps_right() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 2
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Right);
+}
+
+#[test]
+fn tui_sidebar_position_parses_left() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+sidebar_position = "left"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Left);
+  assert!(cfg.tui.sidebar_position.is_left());
 }
 
 #[test]
