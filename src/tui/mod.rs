@@ -55,8 +55,8 @@ pub use ui::{
   author_initials, badge_group_width, branch_name_color, build_sidebar_sections, ellipsize_middle,
   filled_cells_for_progress, footer_line, freshness_color, header_line, header_title, help_lines, help_rows,
   issue_badge_color, issue_summary_line, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
-  table_marker, tilde_compress_with_home, working_tree_status_line, HelpRow, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
-  RECENT_COMMITS_LIMIT,
+  table_marker, tilde_compress_with_home, working_tree_status_line, worktree_name_style, worktree_path_style, HelpRow,
+  SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {

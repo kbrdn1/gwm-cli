@@ -2,9 +2,9 @@
 //!
 //! Role-based colours: every visual signal in the TUI maps to a
 //! semantic role (`focus`, `accent`, `branch`, `clean`, `dirty`,
-//! `main`, `locked`, `prunable`, `muted`, `selection_bg`) rather
-//! than a hard-coded `Color::Cyan`. Users override roles in
-//! `.gwm.toml`:
+//! `main`, `locked`, `prunable`, `muted`, `selection_bg`, `name`,
+//! `path`) rather than a hard-coded `Color::Cyan`. Users override
+//! roles in `.gwm.toml`:
 //!
 //! ```toml
 //! [theme]
@@ -74,6 +74,19 @@ pub struct Theme {
   /// background (e.g. catppuccin's surface tone) can move it
   /// independently of `muted`.
   pub selection_bg: Color,
+  /// Primary identity text: the worktree *name* in the table and the
+  /// sidebar header, plus the `Issue #N` / `PR #N` heads of the link
+  /// summary lines. Pre-#170 these were a hard-coded `Color::White`
+  /// with no semantic role (issue #210). Rendered bold at the name
+  /// sites; the role only carries the foreground colour.
+  pub name: Color,
+  /// Worktree path column in the table. Pre-#170 a hard-coded
+  /// `Color::Gray`, distinct from `muted` (`DarkGray`) so the path
+  /// reads as a structural mid-grey rather than dimmed text (issue
+  /// #210). The sidebar identity-card path stays on `muted` and is
+  /// intentionally *not* moved here — doing so would shift its
+  /// default appearance.
+  pub path: Color,
 }
 
 impl Default for Theme {
@@ -93,6 +106,8 @@ impl Default for Theme {
       prunable: Color::Red,
       muted: Color::DarkGray,
       selection_bg: Color::DarkGray,
+      name: Color::White,
+      path: Color::Gray,
     }
   }
 }
@@ -129,6 +144,8 @@ impl Theme {
       prunable: Color::Rgb(0xFF, 0x7A, 0x7A),     // Error red
       muted: Color::Rgb(0x99, 0x99, 0x99),        // Text muted
       selection_bg: Color::Rgb(0x38, 0x38, 0x38), // Surface 1 (active)
+      name: Color::Rgb(0xF5, 0xF4, 0xEF),         // Text (warm near-white)
+      path: Color::Rgb(0xC2, 0xBD, 0xB4),         // Text dim (warm path grey)
     }
   }
 
@@ -146,6 +163,8 @@ impl Theme {
       prunable: Color::Rgb(0xf3, 0x8b, 0xa8),     // Red
       muted: Color::Rgb(0x6c, 0x70, 0x86),        // Overlay 0
       selection_bg: Color::Rgb(0x31, 0x32, 0x44), // Surface 0
+      name: Color::Rgb(0xcd, 0xd6, 0xf4),         // Text
+      path: Color::Rgb(0xa6, 0xad, 0xc8),         // Subtext 0
     }
   }
 
@@ -162,6 +181,8 @@ impl Theme {
       prunable: Color::Rgb(0xfb, 0x49, 0x34),     // Bright red
       muted: Color::Rgb(0x92, 0x83, 0x74),        // Light4
       selection_bg: Color::Rgb(0x3c, 0x38, 0x36), // Dark1
+      name: Color::Rgb(0xeb, 0xdb, 0xb2),         // fg / Light1
+      path: Color::Rgb(0xa8, 0x99, 0x84),         // Light4 (brighter than the muted gray)
     }
   }
 
@@ -178,6 +199,8 @@ impl Theme {
       prunable: Color::Rgb(0xf7, 0x76, 0x8e),     // Red
       muted: Color::Rgb(0x56, 0x5f, 0x89),        // Comment
       selection_bg: Color::Rgb(0x33, 0x3a, 0x55), // Selection
+      name: Color::Rgb(0xc0, 0xca, 0xf5),         // fg
+      path: Color::Rgb(0x73, 0x7a, 0xa2),         // dark5 (brighter than comment muted)
     }
   }
 
@@ -218,6 +241,8 @@ impl Theme {
       "prunable" => Some(&mut self.prunable),
       "muted" => Some(&mut self.muted),
       "selection_bg" => Some(&mut self.selection_bg),
+      "name" => Some(&mut self.name),
+      "path" => Some(&mut self.path),
       _ => None,
     }
   }

@@ -31,6 +31,24 @@ fn default_theme_matches_pre_issue_33_scheme() {
   assert_eq!(t.locked, Color::Magenta);
   assert_eq!(t.prunable, Color::Red);
   assert_eq!(t.muted, Color::DarkGray);
+  // #210: the chrome roles default to their pre-#170 structural literals
+  // so a `[theme]`-less config still paints the worktree name white and
+  // the table path grey.
+  assert_eq!(t.name, Color::White, "name role default → White");
+  assert_eq!(t.path, Color::Gray, "path role default → Gray");
+}
+
+#[test]
+fn apply_override_replaces_name_and_path_roles() {
+  // #210: the new chrome roles must be overridable like any other role.
+  let mut t = Theme::default();
+  t.apply_override("name", "#abcdef").unwrap();
+  t.apply_override("path", "240").unwrap();
+  assert_eq!(t.name, Color::Rgb(0xab, 0xcd, 0xef), "name override wins");
+  assert_eq!(t.path, Color::Indexed(240), "path override wins");
+  // Other roles untouched.
+  assert_eq!(t.focus, Color::Cyan);
+  assert_eq!(t.muted, Color::DarkGray);
 }
 
 #[test]

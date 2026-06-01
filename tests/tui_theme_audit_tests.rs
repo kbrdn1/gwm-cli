@@ -16,10 +16,13 @@
 //!   green → `branch` (branch identity) / `clean` (ok/synced status)
 //!   cyan  → `focus` (focus border) / `accent` (highlight, staged, ahead)
 //!   yellow→ `main` (trunk badge) / `dirty` (modified, warning, hash, prompt)
-//!   gray  → `selection_bg` (selection background) / `muted` (dim text)
+//!   dark gray → `selection_bg` (selection background) / `muted` (dim text)
 //!   magenta → `locked`   red → `prunable`
-//! `Color::White` / `Color::Gray` / `Color::Reset` carry no semantic role
-//! and stay structural (asserted to remain unthemed where relevant).
+//! Since #210 the worktree-name chrome (`Color::White`) maps to the `name`
+//! role and the table path column (`Color::Gray`, a brighter mid-grey than
+//! the dark-gray `selection_bg` / `muted`) to the `path` role. The
+//! remaining structural `Color::White` (help/step labels, the not-yet-fetched
+//! dot) and `Color::Reset` (unlinked marker) still carry no semantic role.
 
 mod common;
 
@@ -30,10 +33,10 @@ use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, build_sidebar_sections, footer_line, freshness_color, header_line, issue_badge_color,
-  pr_badge_color, table_marker, working_tree_status_line,
+  pr_badge_color, table_marker, working_tree_status_line, worktree_name_style, worktree_path_style,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -52,6 +55,8 @@ fn audit_theme() -> Theme {
     prunable: Color::Rgb(8, 8, 8),
     muted: Color::Rgb(9, 9, 9),
     selection_bg: Color::Rgb(10, 10, 10),
+    name: Color::Rgb(11, 11, 11),
+    path: Color::Rgb(12, 12, 12),
   }
 }
 
@@ -227,6 +232,65 @@ fn issue_summary_line_closed_badge_agrees_with_the_header_dot() {
     fg_containing(&line, "closed"),
     Some(issue_badge_color(IssueState::Closed, &t)),
     "summary line and the header dot must use the same role for closed issues"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// #210: `name` / `path` chrome roles
+// ---------------------------------------------------------------------------
+
+#[test]
+fn name_and_path_styles_resolve_through_theme_roles() {
+  // The worktree-name style (table name cell + sidebar header) reads the
+  // `name` role and stays bold; the table path cell reads `path`.
+  let t = audit_theme();
+  let name = worktree_name_style(&t);
+  assert_eq!(name.fg, Some(t.name), "worktree name → name role");
+  assert!(
+    name.add_modifier.contains(Modifier::BOLD),
+    "the worktree name stays bold so it anchors each row"
+  );
+  assert_eq!(worktree_path_style(&t).fg, Some(t.path), "table path cell → path role");
+}
+
+#[test]
+fn name_and_path_styles_default_to_legacy_white_and_gray() {
+  // Guard the "no visible change without [theme]" contract for the new
+  // chrome roles: the default theme keeps the pre-#170 White name / Gray
+  // path literals.
+  let d = Theme::default();
+  assert_eq!(worktree_name_style(&d).fg, Some(Color::White), "default name → White");
+  assert_eq!(worktree_path_style(&d).fg, Some(Color::Gray), "default path → Gray");
+}
+
+#[test]
+fn summary_line_heads_resolve_through_name_role() {
+  // The `Issue #N` / `PR #N` heads are identity text, not a status signal,
+  // so they paint with the `name` role (the badge keeps its state colour).
+  let t = audit_theme();
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Idle,
+    80,
+    &t,
+  );
+  assert_eq!(
+    fg_containing(&issue, "Issue #7"),
+    Some(t.name),
+    "issue summary head → name role"
+  );
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Idle,
+    80,
+    &t,
+  );
+  assert_eq!(
+    fg_containing(&pr, "PR    #9"),
+    Some(t.name),
+    "pr summary head → name role"
   );
 }
 
