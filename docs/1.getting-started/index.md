@@ -9,7 +9,7 @@ navigation:
 
 Three steps to a working gwm setup:
 
-1. **[Install](/getting-started/install)** — from source, Homebrew, prebuilt binary, or a Nix flake.
+1. **[Install](/getting-started/install)** — from source, `cargo binstall`, Homebrew, prebuilt binary, or a Nix flake.
 2. **[Create your first worktree](/getting-started/first-worktree)** — `gwm create feat 42 user-auth` and what it does.
 3. **[Wire up `gcd`](/getting-started/shell-init)** — one-line `cd` into any worktree from anywhere.
 
