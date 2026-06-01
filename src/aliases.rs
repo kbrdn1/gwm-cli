@@ -133,6 +133,12 @@ impl ResolvedAliases {
 /// `~/.config/gwm/aliases.toml`; an explicit path is honoured even if
 /// it doesn't exist (returns empty user map).
 ///
+/// Production entry point: the repo step merges the **real** user-level
+/// global config (`global_config_path()`) underneath `.gwm.toml`, exactly
+/// like `Config::load_for_repo`. Tests that must not read the runner's
+/// real `~/.config/gwm/` should drive [`load_layered`] instead, which
+/// takes both the global and user paths explicitly (issue #194).
+///
 /// Errors:
 ///   - `GwmError::Config` when a TOML parse fails, an alias shadows a
 ///     built-in subcommand, an alias value contains shell pipeline
@@ -141,25 +147,45 @@ impl ResolvedAliases {
 ///   - `GwmError::Io` if the file exists but can't be read.
 ///   - `GwmError::TomlParse` propagates the underlying serde error.
 pub fn load(repo_root: Option<&Path>, user_path: Option<&Path>) -> Result<ResolvedAliases> {
+  // Resolve the two real-world fallbacks here, then delegate to the
+  // injectable seam so runtime behaviour is unchanged: the repo step sees
+  // the real global config, the user step sees `~/.config/gwm/aliases.toml`
+  // when no explicit path was given.
+  let global = crate::config::global_config_path();
+  let resolved_user_path = user_path.map(PathBuf::from).or_else(default_user_path);
+  load_layered(repo_root, global.as_deref(), resolved_user_path.as_deref())
+}
+
+/// Injectable variant of [`load`] with **no** hidden environment reads
+/// (issue #194). The repo step layers `global_path` underneath the repo's
+/// `.gwm.toml` via [`crate::config::Config::load_layered`]; `user_path` is
+/// taken literally (no `default_user_path` fallback). Passing `None` for
+/// both yields a fully hermetic, repo-only resolution — the seam tests use
+/// so they never depend on the runner's real `~/.config/gwm/`. Mirrors the
+/// `Config::load_for_repo` / `Config::load_layered` pair added in #190.
+pub fn load_layered(
+  repo_root: Option<&Path>,
+  global_path: Option<&Path>,
+  user_path: Option<&Path>,
+) -> Result<ResolvedAliases> {
   let built_in = BUILT_IN_ALIASES.to_vec();
 
-  // Repo: read `.gwm.toml`'s `[aliases]` block via `Config::load_for_repo`,
-  // which already validates the same shadow / shell-pipeline rules via
-  // its dedicated `validate_aliases` method (called below).
+  // Repo: read `.gwm.toml`'s `[aliases]` block via `Config::load_layered`
+  // (injected global), which already validates the same shadow /
+  // shell-pipeline rules via its dedicated `validate_aliases` method.
   let repo = match repo_root {
     Some(root) => {
-      let cfg = crate::config::Config::load_for_repo(root)?;
+      let cfg = crate::config::Config::load_layered(root, global_path)?;
       cfg.aliases
     }
     None => BTreeMap::new(),
   };
 
   // User: same shape, validated through the standalone helper so the
-  // file path appears in the error message.
-  let resolved_user_path = user_path.map(PathBuf::from).or_else(default_user_path);
-  let user = match resolved_user_path {
+  // file path appears in the error message. `user_path` is literal here.
+  let user = match user_path {
     Some(path) if path.exists() => {
-      let raw = std::fs::read_to_string(&path)?;
+      let raw = std::fs::read_to_string(path)?;
       let file: AliasesFile = toml::from_str(&raw)?;
       let map = file.aliases;
       validate_aliases(&map, &format!("{} `[aliases]`", path.display()))?;

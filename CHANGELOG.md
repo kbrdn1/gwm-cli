@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Test hermeticity** — config-dependent tests no longer read the contributor's real `~/.config/gwm/config.toml`. After #190 added the global-config layer, `aliases::load` and `App::new_at` merged the runner's actual global config, so `cargo test` failed on any machine whose global config diverged from the built-in defaults (e.g. a `[theme] preset` unknown to the checked-out build). Added injectable seams `aliases::load_layered(repo, global, user)` and `App::new_at_layered(start, global)` mirroring `Config::load_layered` (#190); the leaking tests now inject `None` for a fully repo-only, deterministic resolution. Runtime behaviour of `aliases::load` / `App::new_at` is unchanged — they still read the real global config. (#194)
 - The focused panel border (worktree list ↔ sidebar, toggled with `Tab`) now paints with the theme `focus` role instead of a hardcoded `Color::Cyan`, so the active "tab" honours the configured palette (e.g. the `claude-dark` preset's orange) rather than always rendering cyan. The default theme is unchanged (`focus` is still `Cyan`), so default-theme users see no difference. (#185)
 
 ## Past releases
