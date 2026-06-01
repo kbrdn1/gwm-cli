@@ -995,6 +995,17 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, accent: C
   let label_style = Style::default().fg(Color::DarkGray);
   let status_style = Style::default().fg(Color::Yellow);
 
+  // A zero-width row can hold nothing — return an empty line rather than let
+  // the `trunc()` floor below emit a 1-column `…`.
+  if width == 0 {
+    return Line::default();
+  }
+
+  // Action logs are sometimes error strings carrying embedded newlines /
+  // tabs. `Wrap` is disabled, but a raw `\n` would still split the row in
+  // two, so collapse every control char to a single space first — the footer
+  // must stay one visual line.
+  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
   let status_text = format!("[{}]", status);
   let status_w = status_text.chars().count();
 
@@ -1004,8 +1015,11 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, accent: C
     return Line::from(Span::styled(trunc(&status_text, width), status_style));
   }
 
-  // One column minimum gap between the hints and the right-pinned status,
-  // plus one column held in reserve for the `…` truncation marker.
+  // Budget for the hint badges: the width left after the right-pinned status,
+  // minus one column reserved for the `…` truncation marker. The gap between
+  // the hints and the status is best-effort — it shows up as left-over
+  // padding only when at least one badge fits; in the tight band just above
+  // `status_w` there may be room for neither a badge nor a gap.
   let hint_budget = (width - status_w - 1).saturating_sub(1);
 
   let mut spans: Vec<Span<'static>> = Vec::new();
