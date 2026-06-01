@@ -882,6 +882,9 @@ fn cmd_theme_show(name: &str) -> Result<()> {
   println!("selection_bg = {}", color_str(theme.selection_bg));
   println!("name         = {}", color_str(theme.name));
   println!("path         = {}", color_str(theme.path));
+  println!("staged       = {}", color_str(theme.staged));
+  println!("modified     = {}", color_str(theme.modified));
+  println!("untracked    = {}", color_str(theme.untracked));
   Ok(())
 }
 

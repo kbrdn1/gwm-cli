@@ -14,8 +14,8 @@
 //! The mapping rule under test (literal → role, preserving the pre-theme
 //! default appearance since each role's default equals the old literal):
 //!   green → `branch` (branch identity) / `clean` (ok/synced status)
-//!   cyan  → `focus` (focus border) / `accent` (highlight, staged, ahead)
-//!   yellow→ `main` (trunk badge) / `dirty` (modified, warning, hash, prompt)
+//!   cyan  → `focus` (focus border) / `accent` (highlight, ahead)
+//!   yellow→ `main` (trunk badge) / `dirty` (warning, hash, prompt)
 //!   dark gray → `selection_bg` (selection background) / `muted` (dim text)
 //!   magenta → `locked`   red → `prunable`
 //! Since #210 the worktree-name chrome (`Color::White`) maps to the `name`
@@ -23,6 +23,9 @@
 //! the dark-gray `selection_bg` / `muted`) to the `path` role. The
 //! remaining structural `Color::White` (help/step labels, the not-yet-fetched
 //! dot) and `Color::Reset` (unlinked marker) still carry no semantic role.
+//! Since #211 the git-status families have dedicated roles `staged`
+//! (default cyan) / `modified` (yellow) / `untracked` (green) rather
+//! than borrowing accent / dirty / clean.
 
 mod common;
 
@@ -57,6 +60,9 @@ fn audit_theme() -> Theme {
     selection_bg: Color::Rgb(10, 10, 10),
     name: Color::Rgb(11, 11, 11),
     path: Color::Rgb(12, 12, 12),
+    staged: Color::Rgb(13, 13, 13),
+    modified: Color::Rgb(14, 14, 14),
+    untracked: Color::Rgb(15, 15, 15),
   }
 }
 
@@ -168,37 +174,66 @@ fn table_marker_resolves_through_theme_roles_but_keeps_neutral_default() {
 }
 
 // ---------------------------------------------------------------------------
-// working_tree_status_line — git-status families borrow nearest-colour roles
+// working_tree_status_line — #211: git-status families have dedicated roles
 // ---------------------------------------------------------------------------
 
 #[test]
-fn working_tree_status_line_resolves_status_families_through_theme_roles() {
+fn working_tree_status_line_resolves_status_families_through_dedicated_roles() {
   let t = audit_theme();
 
-  // Staged change (X column set, Y blank) → accent on both the status code
-  // column and the file name.
+  // The dedicated roles are distinct from the accent/dirty/clean they used
+  // to borrow, so this fixture proves the families decoupled (a regression
+  // back to the borrow would resolve to accent/dirty/clean and fail here).
+  assert_ne!(t.staged, t.accent, "fixture: staged must differ from accent");
+  assert_ne!(t.modified, t.dirty, "fixture: modified must differ from dirty");
+  assert_ne!(t.untracked, t.clean, "fixture: untracked must differ from clean");
+
+  // Staged change (X column set, Y blank) → `staged` on both the status
+  // code column and the file name.
   let staged = working_tree_status_line("A  staged.rs", &t);
-  assert_eq!(staged.spans[0].style.fg, Some(t.accent), "staged code → accent");
+  assert_eq!(staged.spans[0].style.fg, Some(t.staged), "staged code → staged role");
   assert_eq!(
     fg_containing(&staged, "staged.rs"),
-    Some(t.accent),
-    "staged name → accent"
+    Some(t.staged),
+    "staged name → staged role"
   );
 
-  // Worktree modification (Y column set) → dirty.
+  // Worktree modification (Y column set) → `modified`.
   let modified = working_tree_status_line(" M tracked.rs", &t);
   assert_eq!(
     fg_containing(&modified, "tracked.rs"),
-    Some(t.dirty),
-    "modified name → dirty"
+    Some(t.modified),
+    "modified name → modified role"
   );
 
-  // Untracked (`??`) → clean (the green "created" family).
+  // Untracked (`??`) → `untracked`.
   let untracked = working_tree_status_line("?? new.rs", &t);
   assert_eq!(
     fg_containing(&untracked, "new.rs"),
-    Some(t.clean),
-    "untracked name → clean"
+    Some(t.untracked),
+    "untracked name → untracked role"
+  );
+}
+
+#[test]
+fn working_tree_status_families_default_to_legacy_cyan_yellow_green() {
+  // Guard the "no visible change without [theme]" contract: with the
+  // default theme the families keep their pre-#211 cyan/yellow/green.
+  let d = Theme::default();
+  assert_eq!(
+    working_tree_status_line("A  s.rs", &d).spans[0].style.fg,
+    Some(Color::Cyan),
+    "default staged → Cyan"
+  );
+  assert_eq!(
+    fg_containing(&working_tree_status_line(" M t.rs", &d), "t.rs"),
+    Some(Color::Yellow),
+    "default modified → Yellow"
+  );
+  assert_eq!(
+    fg_containing(&working_tree_status_line("?? n.rs", &d), "n.rs"),
+    Some(Color::Green),
+    "default untracked → Green"
   );
 }
 

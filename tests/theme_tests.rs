@@ -36,6 +36,29 @@ fn default_theme_matches_pre_issue_33_scheme() {
   // the table path grey.
   assert_eq!(t.name, Color::White, "name role default → White");
   assert_eq!(t.path, Color::Gray, "path role default → Gray");
+  // #211: the git-status families default to the cyan/yellow/green they
+  // used to borrow from accent/dirty/clean, so the working-tree panel is
+  // unchanged for a `[theme]`-less config.
+  assert_eq!(t.staged, Color::Cyan, "staged role default → Cyan");
+  assert_eq!(t.modified, Color::Yellow, "modified role default → Yellow");
+  assert_eq!(t.untracked, Color::Green, "untracked role default → Green");
+}
+
+#[test]
+fn apply_override_replaces_git_status_roles() {
+  // #211: the git-status families must be overridable independently of the
+  // accent/dirty/clean roles they used to borrow.
+  let mut t = Theme::default();
+  t.apply_override("staged", "magenta").unwrap();
+  t.apply_override("modified", "#123456").unwrap();
+  t.apply_override("untracked", "200").unwrap();
+  assert_eq!(t.staged, Color::Magenta, "staged override wins");
+  assert_eq!(t.modified, Color::Rgb(0x12, 0x34, 0x56), "modified override wins");
+  assert_eq!(t.untracked, Color::Indexed(200), "untracked override wins");
+  // The roles they used to borrow are untouched — proving the decoupling.
+  assert_eq!(t.accent, Color::Cyan, "accent untouched by staged override");
+  assert_eq!(t.dirty, Color::Yellow, "dirty untouched by modified override");
+  assert_eq!(t.clean, Color::Green, "clean untouched by untracked override");
 }
 
 #[test]

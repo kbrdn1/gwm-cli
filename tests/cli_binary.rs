@@ -4104,6 +4104,22 @@ fn theme_show_includes_name_and_path_chrome_roles() {
 }
 
 #[test]
+fn theme_show_includes_git_status_family_roles() {
+  // #211: the staged / modified / untracked roles must be dumpable so
+  // users can discover and override the working-tree colours.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("staged       ="))
+    .stdout(predicate::str::contains("modified     ="))
+    .stdout(predicate::str::contains("untracked    ="));
+}
+
+#[test]
 fn theme_show_rejects_unknown_preset() {
   let (dir, _) = init_repo();
   Command::cargo_bin("gwm")
