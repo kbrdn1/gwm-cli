@@ -122,6 +122,7 @@ impl BranchSpec {
       Some(&self.type_),
       Some(&self.issue),
       Some(&self.desc),
+      None,
     )
   }
 
@@ -132,11 +133,29 @@ impl BranchSpec {
       Some(&self.type_),
       Some(&self.issue),
       Some(&self.desc),
+      None,
     )
   }
 
-  pub fn worktree_path(&self, cfg: &WorktreeConfig, repo: &str) -> Result<std::path::PathBuf> {
-    let base = expand_placeholders(&cfg.base, repo, Some(&self.type_), Some(&self.issue), Some(&self.desc))?;
+  /// Resolve the absolute worktree path for this spec. `repo_path` is the
+  /// main repo's working directory on disk — it feeds the `{repo_path}` /
+  /// `{repo_parent}` placeholders so a `base` like `{repo_parent}/worktrees`
+  /// can be expressed relative to the repo (matching, e.g., an editor's
+  /// `../worktrees` convention).
+  pub fn worktree_path(
+    &self,
+    cfg: &WorktreeConfig,
+    repo: &str,
+    repo_path: &std::path::Path,
+  ) -> Result<std::path::PathBuf> {
+    let base = expand_placeholders(
+      &cfg.base,
+      repo,
+      Some(&self.type_),
+      Some(&self.issue),
+      Some(&self.desc),
+      Some(repo_path),
+    )?;
     let dir = self.worktree_dirname(cfg, repo)?;
     Ok(std::path::PathBuf::from(base).join(dir))
   }

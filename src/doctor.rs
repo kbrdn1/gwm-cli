@@ -422,7 +422,8 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
 fn check_base_dir_writable(ctx: &DoctorCtx<'_>) -> Check {
   let name = "base directory writable";
   let repo_name = worktree::repo_name(ctx.repo);
-  let base_expanded = match expand_placeholders(&ctx.config.worktree.base, &repo_name, None, None, None) {
+  let repo_path = ctx.repo.workdir();
+  let base_expanded = match expand_placeholders(&ctx.config.worktree.base, &repo_name, None, None, None, repo_path) {
     Ok(s) => s,
     Err(e) => return Check::failed(name, format!("could not expand base placeholders: {}", e)),
   };

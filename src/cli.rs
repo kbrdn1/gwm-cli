@@ -1062,7 +1062,7 @@ fn cmd_create(
   let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
   let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
-  let target = spec.worktree_path(&config.worktree, &repo_name)?;
+  let target = spec.worktree_path(&config.worktree, &repo_name, &workdir)?;
   let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE

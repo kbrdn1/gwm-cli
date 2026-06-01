@@ -1059,13 +1059,22 @@ pub struct ResolvedLauncher {
   pub fullscreen: bool,
 }
 
-/// Expand `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}` in a template string.
+/// Expand `{home}`, `{repo}`, `{repo_path}`, `{repo_parent}`, `{type}`,
+/// `{issue}`, `{desc}` in a template string.
+///
+/// `{repo}` is the repo **name**; `{repo_path}` is the main repo's
+/// absolute working directory and `{repo_parent}` its parent directory —
+/// both resolved from `repo_path`. These two let a `base` be expressed
+/// relative to the repo on disk (e.g. `{repo_parent}/worktrees`, matching
+/// an editor's `../worktrees` convention). When `repo_path` is `None` the
+/// disk-path tokens are left untouched rather than collapsed to empty.
 pub fn expand_placeholders(
   template: &str,
   repo: &str,
   type_: Option<&str>,
   issue: Option<&str>,
   desc: Option<&str>,
+  repo_path: Option<&Path>,
 ) -> Result<String> {
   let home = dirs::home_dir()
     .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
@@ -1080,6 +1089,12 @@ pub fn expand_placeholders(
   }
   if let Some(d) = desc {
     out = out.replace("{desc}", d);
+  }
+  if let Some(p) = repo_path {
+    out = out.replace("{repo_path}", &p.to_string_lossy());
+    if let Some(parent) = p.parent() {
+      out = out.replace("{repo_parent}", &parent.to_string_lossy());
+    }
   }
   // Tilde expansion in case the template starts with ~/...
   let expanded = shellexpand::tilde(&out).to_string();

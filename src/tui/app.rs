@@ -873,7 +873,7 @@ impl App {
     )?;
     let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
-    let target = spec.worktree_path(&self.config.worktree, &self.repo_name)?;
+    let target = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
 
     // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
     // creating the worktree on disk (issue #95). A refusal here
