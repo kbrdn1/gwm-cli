@@ -18,3 +18,4 @@ pub mod filter;
 pub mod github_fetch;
 pub mod link_prompt;
 pub mod sidebar;
+pub mod spinner;
