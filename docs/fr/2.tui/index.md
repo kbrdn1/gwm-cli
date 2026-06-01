@@ -20,7 +20,7 @@ Lancer `gwm` sans argument ouvre l'interface ratatui sur le dépôt courant. De 
 
 `n` (nouveau worktree) et `b` (re-bootstrap) sont protégés par le [registre de confiance TOFU](/fr/configuration/trust-ledger) — un `.gwm.toml` non approuvé fait apparaître un message de refus dans la barre de statut plutôt que de lancer le bootstrap. La variante picker (`gwm switch`, alias `gwm s`) réutilise la même TUI mais désactive la création / suppression / bootstrap, puis affiche le chemin du worktree choisi sur stdout — pensé pour être `eval`-ué par le wrapper shell `gcd`.
 
-## chrome
+## habillage
 
 La passe de polish v0.8.0 a resserré le cadre de la TUI. Toutes les couleurs suivent le [`[theme]`](/fr/tui/themes) résolu :
 

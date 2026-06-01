@@ -9,7 +9,7 @@ _Cette page est la traduction française de la documentation. La version anglais
 
 CLI Rust + TUI ratatui pour gérer les worktrees git entre projets.
 
-- `libgit2` natif (vendored) — aucune dépendance à la CLI `gwq` / `git`.
+- Les opérations sur les worktrees s'appuient sur `libgit2` vendored — aucune dépendance à `gwq` ; seules quelques fonctionnalités (`gwm sync`, le lanceur de diff de review, le `git status` / `git log` de la barre latérale) délèguent à votre propre `git`.
 - `gwm <subcommand>` pour les scripts et les hooks ; `gwm` seul ouvre une interface ratatui.
 - `.gwm.toml` par dépôt : conventions de branche / chemin, copies de fichiers, garde-fous regex, commandes de cycle de vie `[hooks.*]`, invariants no-symlink — plus une configuration globale au niveau utilisateur dans `~/.config/gwm/config.toml` fusionnée en dessous, de sorte qu'une préférence définie une fois s'applique à chaque dépôt.
 - Convention de branche `<type>/#<issue>-<description>` par défaut ; redéfinissable par dépôt. Les `[aliases]` reflètent les alias `git config` ; `gwm commit-prefix` plus un hook `commit-msg` optionnel pilotent la convention Gitmoji + Conventional Commits.

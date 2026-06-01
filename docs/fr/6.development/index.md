@@ -30,7 +30,7 @@ nix develop
 
 ## vs. script bash
 
-Le contexte complet — ce qui a changé par rapport au `tools/worktree-manager.sh` original et pourquoi — se trouve sur la page de contribution, sous « [historique](/fr/development/contributing#history) ».
+Le contexte complet — ce qui a changé par rapport au `tools/worktree-manager.sh` original et pourquoi — se trouve sur la page de contribution, sous « [historique](/fr/development/contributing#historique) ».
 
 ## changelog
 
