@@ -21,7 +21,7 @@ use common::init_repo;
 
 fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   (dir, app)
 }
 
@@ -236,7 +236,7 @@ down = ["Ctrl+n"]
   )
   .unwrap();
 
-  let mut app = App::new_at(Some(dir.path())).unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
 
   // The default `j` no longer fires Down — the override replaces.
   assert_eq!(app.dispatch_key(press('j')), None);

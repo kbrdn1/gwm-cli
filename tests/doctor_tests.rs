@@ -830,7 +830,7 @@ quit = []
 "#,
   )
   .unwrap();
-  let config = Config::load_for_repo(dir.path()).unwrap();
+  let config = Config::load_layered(dir.path(), None).unwrap();
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
   let c = report
     .checks

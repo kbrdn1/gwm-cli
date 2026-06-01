@@ -48,7 +48,7 @@ color = "7057ff"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.labels.len(), 3);
 
   assert_eq!(cfg.labels[0].name, "bug");
@@ -80,7 +80,7 @@ name = "wip"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.labels.len(), 1);
   assert_eq!(cfg.labels[0].name, "wip");
   assert_eq!(cfg.labels[0].description, None);
@@ -109,7 +109,7 @@ name = "-h"
   )
   .unwrap();
 
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   let msg = format!("{}", err);
   assert!(
     msg.contains("labels[0]"),
@@ -140,7 +140,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.labels.is_empty());
 }
 
@@ -177,7 +177,7 @@ state = "closed"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.milestones.len(), 3);
 
   assert_eq!(cfg.milestones[0].title, "v0.7.0");
@@ -211,7 +211,7 @@ title = "Backlog"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.milestones.len(), 1);
   assert_eq!(cfg.milestones[0].title, "Backlog");
   assert_eq!(cfg.milestones[0].description, None);
@@ -235,7 +235,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.milestones.is_empty());
 }
 
@@ -270,7 +270,7 @@ trunks = ["master", "release-3.x", "release-4.x"]
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(
     cfg.doctor.trunks,
     vec![
@@ -298,7 +298,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.doctor.trunks, vec!["dev".to_string(), "main".to_string()]);
 }
 
@@ -317,7 +317,7 @@ trunks = []
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.doctor.trunks.is_empty());
 }
 
@@ -380,7 +380,7 @@ fn placeholders_repo_path_tokens_left_literal_without_path() {
 #[test]
 fn load_returns_defaults_when_no_file() {
   let dir = TempDir::new().unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.worktree.branch_pattern, WorktreeConfig::default().branch_pattern);
 }
 
@@ -413,7 +413,7 @@ run = "echo hi"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.worktree.base, "/tmp/wt/{repo}");
   assert_eq!(cfg.bootstrap.copy.len(), 1);
   assert_eq!(cfg.bootstrap.guard.len(), 1);
@@ -443,7 +443,7 @@ fn write_default_refuses_overwrite() {
 fn malformed_config_returns_error() {
   let dir = TempDir::new().unwrap();
   std::fs::write(dir.path().join(CONFIG_FILE), "not valid toml [[[").unwrap();
-  let res = Config::load_for_repo(dir.path());
+  let res = Config::load_layered(dir.path(), None);
   assert!(res.is_err());
 }
 
@@ -474,7 +474,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
 }
 
@@ -497,7 +497,7 @@ confirm_countdown_secs = 2
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Right);
 }
 
@@ -512,7 +512,7 @@ sidebar_position = "left"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Left);
   assert!(cfg.tui.sidebar_position.is_left());
 }
@@ -528,7 +528,7 @@ confirm_countdown_secs = 2
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.confirm_countdown_secs, 2);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 2);
 }
@@ -544,7 +544,7 @@ confirm_countdown_secs = 0
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 0);
 }
 
@@ -563,7 +563,7 @@ confirm_countdown_secs = 30
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.confirm_countdown_secs, 30);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
 }
@@ -599,7 +599,7 @@ fullscreen = true
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.git_tui.resolved();
   assert_eq!(r.command, "gitui -d {path}");
   assert!(r.fullscreen);
@@ -619,7 +619,7 @@ fullscreen = false
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.git_tui.resolved();
   assert_eq!(r.command, "code {path}");
   assert!(!r.fullscreen);
@@ -657,7 +657,7 @@ default_base = "trunk"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().expect("explicit command must resolve");
   assert_eq!(r.command, "my-review --base {base} --head {head}");
   assert!(r.fullscreen);
@@ -679,7 +679,7 @@ tool = "lumen"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().expect("lumen preset must resolve");
   assert_eq!(r.command, "lumen diff {base}..{head}");
   assert!(r.fullscreen, "lumen is a TUI — gwm must suspend itself");
@@ -719,7 +719,7 @@ tool = "made-up"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(
     cfg.review.resolved().is_none(),
     "unknown preset must not silently fall back to a real tool"
@@ -740,7 +740,7 @@ command = "my-bot --diff-file {diff}"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().unwrap();
   assert_eq!(
     r.command, "my-bot --diff-file {diff}",
@@ -763,7 +763,7 @@ fullscreen = false
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().unwrap();
   assert!(
     !r.fullscreen,
@@ -788,7 +788,7 @@ confirm_countdown_secs = 300
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).expect("300 must parse, not error");
+  let cfg = Config::load_layered(dir.path(), None).expect("300 must parse, not error");
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
 }
 
@@ -818,7 +818,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
 }
 
@@ -834,7 +834,7 @@ editor_cmd = "hx"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Editor);
   assert_eq!(cfg.tui.open.editor_cmd.as_deref(), Some("hx"));
 }
@@ -853,7 +853,7 @@ mode = "finder"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Finder);
 }
 
@@ -869,7 +869,7 @@ shell_cmd = "/usr/bin/fish"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
   assert_eq!(cfg.tui.open.shell_cmd.as_deref(), Some("/usr/bin/fish"));
 }
@@ -888,7 +888,7 @@ mode = "neovim"
 "#,
   )
   .unwrap();
-  assert!(Config::load_for_repo(dir.path()).is_err());
+  assert!(Config::load_layered(dir.path(), None).is_err());
 }
 
 // ---- [[branch_types]] (issue #80) ------------------------------------------
@@ -932,7 +932,7 @@ description = "Database migration"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let resolved = cfg.resolved_branch_types();
   assert_eq!(resolved.source, BranchTypesSource::Config);
   let names: Vec<_> = resolved.types.iter().map(|t| t.name.as_str()).collect();
@@ -957,7 +957,7 @@ branch_types = []
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let resolved = cfg.resolved_branch_types();
   assert_eq!(resolved.source, BranchTypesSource::Default);
   assert!(!resolved.types.is_empty());
@@ -986,7 +986,7 @@ description = "Whoops"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   let msg = format!("{}", err);
   assert!(msg.contains("branch_types"), "{msg}");
   assert!(msg.contains("empty"), "{msg}");
@@ -1015,7 +1015,7 @@ description = "x"
     )
     .unwrap();
     assert!(
-      Config::load_for_repo(dir.path()).is_err(),
+      Config::load_layered(dir.path(), None).is_err(),
       "name = {:?} must be rejected at load",
       bad
     );
@@ -1041,7 +1041,7 @@ description = "Different description for the same name"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   let msg = format!("{}", err);
   assert!(msg.contains("duplicate"), "{msg}");
   assert!(msg.contains("feat"), "{msg}");
@@ -1070,7 +1070,7 @@ description = "Work in progress"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).expect("valid config must load");
+  let cfg = Config::load_layered(dir.path(), None).expect("valid config must load");
   let names: Vec<_> = cfg.branch_types.iter().map(|t| t.name.as_str()).collect();
   assert_eq!(names, vec!["feat", "migration", "wip"]);
 }
@@ -1099,7 +1099,7 @@ to   = "../../OWNED"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("traversal must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("traversal must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("bootstrap.copy") && msg.contains("to"),
@@ -1128,7 +1128,7 @@ to   = "{absolute_path}"
     ),
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("absolute path must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("absolute path must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("bootstrap.copy") && msg.contains("to"),
@@ -1159,7 +1159,7 @@ example_file   = "../../../etc/passwd"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("traversal in example_file must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("traversal in example_file must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("guard") && msg.contains("example_file"),
@@ -1190,7 +1190,7 @@ example_file   = "{absolute_path}"
     ),
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("absolute example_file must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("absolute example_file must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("guard") && msg.contains("example_file"),
@@ -1220,7 +1220,7 @@ content = "FOO=bar"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("traversal in fallback.target must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("traversal in fallback.target must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("fallback") && msg.contains("target"),
@@ -1248,7 +1248,7 @@ to   = "C:foo"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("drive-prefixed path must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("drive-prefixed path must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("bootstrap.copy") && msg.contains("to"),
@@ -1287,7 +1287,7 @@ content = "X=1"
 "#,
   )
   .unwrap();
-  Config::load_for_repo(dir.path()).expect("benign relative paths must load");
+  Config::load_layered(dir.path(), None).expect("benign relative paths must load");
 }
 
 // --- Issue #96: guard deny_patterns must compile at load time ---------------
@@ -1314,7 +1314,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid deny_patterns must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid deny_patterns must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("no-secrets"),
@@ -1349,7 +1349,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid sole deny pattern must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid sole deny pattern must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("broken") && msg.contains("*foo"),
@@ -1372,7 +1372,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).expect("valid patterns must load");
+  let cfg = Config::load_layered(dir.path(), None).expect("valid patterns must load");
   assert_eq!(cfg.bootstrap.guard.len(), 1);
   assert_eq!(cfg.bootstrap.guard[0].deny_patterns.len(), 3);
 }
@@ -1435,7 +1435,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid pattern in second guard must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid pattern in second guard must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("guard-two") && msg.contains("[unclosed"),
@@ -1461,7 +1461,7 @@ fn pr_template_defaults_are_empty() {
   // PULL_REQUEST_TEMPLATE.md (same as before #84).
   let dir = TempDir::new().unwrap();
   std::fs::write(dir.path().join(CONFIG_FILE), "").unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.pr_template.default.is_none());
   assert!(cfg.pr_template.by_type.is_empty());
 }
@@ -1485,7 +1485,7 @@ body = "## Summary\n{desc}\n\nCloses #{issue}\n"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(
     cfg.pr_template.default.as_deref(),
     Some(".github/pull_request_template.md")
@@ -1514,7 +1514,7 @@ mystery = "boom"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("unknown field must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown field must reject");
   let msg = format!("{}", err);
   assert!(msg.contains("mystery"), "{msg}");
 }
@@ -1531,7 +1531,7 @@ bogus = true
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("unknown per-type field must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown per-type field must reject");
   let msg = format!("{}", err);
   assert!(msg.contains("bogus"), "{msg}");
 }
@@ -1561,7 +1561,7 @@ top  = ["g g"]
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(
     cfg.tui.keys.bindings.get("down").map(Vec::as_slice),
     Some(["j".to_string(), "Ctrl+n".to_string()].as_slice())
@@ -1590,7 +1590,7 @@ gallop = ["g"]
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("unknown action must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown action must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(
     msg.contains("gallop"),
@@ -1615,7 +1615,7 @@ down = ["Foobar"]
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid key string must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid key string must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(
     msg.contains("foobar"),
@@ -1637,7 +1637,7 @@ open = ["g"]
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("prefix collision must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("prefix collision must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(msg.contains("prefix"), "expected prefix error, got: {msg}");
 }
@@ -1656,7 +1656,7 @@ up   = ["x"]
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("conflict must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("conflict must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(msg.contains("conflict"), "expected conflict error, got: {msg}");
 }
@@ -1674,7 +1674,7 @@ down = []
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let km = cfg.tui.keys.resolved_keymap().unwrap();
   use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
   let j = KeyStroke::parse_chord("j").unwrap();
@@ -1710,7 +1710,7 @@ preset = "catppuccin"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let theme = cfg.theme.resolve().unwrap();
   // Catppuccin's focus role differs from the default `Cyan` —
   // assert the difference rather than the specific hex to keep
@@ -1735,7 +1735,7 @@ focus  = "red"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let theme = cfg.theme.resolve().unwrap();
   use ratatui::style::Color;
   assert_eq!(theme.focus, Color::Red, "explicit override must win over the preset");
@@ -1752,7 +1752,7 @@ preset = "does-not-exist"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("unknown preset must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown preset must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(msg.contains("does-not-exist"), "got: {msg}");
 }
@@ -1768,7 +1768,7 @@ phantom = "red"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("unknown role must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown role must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(msg.contains("phantom"), "got: {msg}");
 }
@@ -1784,7 +1784,7 @@ focus = "not_a_color"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid color must reject");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid color must reject");
   let msg = format!("{}", err).to_lowercase();
   assert!(msg.contains("not_a_color"), "got: {msg}");
 }

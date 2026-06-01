@@ -16,7 +16,7 @@ use gwm::tui::{App, View};
 
 fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   (dir, app)
 }
 

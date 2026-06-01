@@ -368,7 +368,15 @@ impl App {
   /// motions) behaves identically; only the event-loop interpretation of
   /// Enter / n / d / b changes.
   pub fn new_picker_at(start: Option<&Path>) -> Result<Self> {
-    let mut app = Self::new_at(start)?;
+    Self::new_picker_at_layered(start, crate::config::global_config_path().as_deref())
+  }
+
+  /// Injectable variant of [`Self::new_picker_at`] (issue #196): mirrors
+  /// [`Self::new_at_layered`] so picker-mode tests never read the runner's
+  /// real `~/.config/gwm/config.toml`. `new_picker_at` delegates with the
+  /// real `global_config_path()`.
+  pub fn new_picker_at_layered(start: Option<&Path>, global_path: Option<&Path>) -> Result<Self> {
+    let mut app = Self::new_at_layered(start, global_path)?;
     app.picker_mode = true;
     app.filter.open();
     app.status = "switch picker — type to filter · enter selects · esc cancels".into();

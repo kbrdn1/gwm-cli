@@ -46,7 +46,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
 
 fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   (dir, app)
 }
 
@@ -760,7 +760,7 @@ fn new_picker_at_enables_picker_mode() {
   // `gwm switch` enters the TUI through this constructor; the picker flag
   // is what drives the event loop into "Enter confirms, n/d/b are inert".
   let (dir, _) = init_repo();
-  let app = App::new_picker_at(Some(dir.path())).unwrap();
+  let app = App::new_picker_at_layered(Some(dir.path()), None).unwrap();
   assert!(app.picker_mode, "new_picker_at must set picker_mode=true");
 }
 
@@ -770,7 +770,7 @@ fn new_picker_at_opens_filter_bar() {
   // startup". A user invoking `gwm switch` already knows they want to
   // narrow the list; opening the bar saves one keystroke.
   let (dir, _) = init_repo();
-  let app = App::new_picker_at(Some(dir.path())).unwrap();
+  let app = App::new_picker_at_layered(Some(dir.path()), None).unwrap();
   assert!(app.filter.active, "picker mode must open with the filter bar active");
 }
 
@@ -1145,7 +1145,7 @@ fn make_app_on_branch(name: &str) -> (tempfile::TempDir, git2::Repository, App) 
     repo.branch(name, &head, false).unwrap();
   }
   repo.set_head(&format!("refs/heads/{}", name)).unwrap();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   (dir, repo, app)
 }
 
@@ -2941,7 +2941,7 @@ use gwm::trust::TrustMode;
 fn app_with_config(toml_body: &str) -> (tempfile::TempDir, App) {
   let (dir, _repo) = init_repo();
   std::fs::write(dir.path().join(".gwm.toml"), toml_body).unwrap();
-  let app = App::new_at(Some(dir.path())).unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
   (dir, app)
 }
 
