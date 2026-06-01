@@ -9,7 +9,21 @@ use gwm::tui::{
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Process-global lock guarding every test in this binary that mutates
+/// `std::env`. `set_var` / `remove_var` are `unsafe` because the libc
+/// calls aren't thread-safe; under `cargo test`'s default thread pool,
+/// two env-mutating tests running in parallel can race and trigger UB.
+/// Every test fn here that touches env vars MUST take this lock before
+/// any `set_var` / `remove_var` (the trust-gate tests and the GitHub
+/// PR-detection refresh test, #181). Mirrors the same pattern in
+/// `trust_tests.rs` / `history_tests.rs`.
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Build a synthetic worktree row for state-machine tests that need a known
 /// list shape (fuzzy filter ranking, multi-row navigation). Lets the test
@@ -1393,27 +1407,44 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   app.refresh_link();
 
   let gh = dir.path().join("fake-gh");
-  std::fs::write(
-    &gh,
-    "#!/bin/sh\n\
-     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
-       printf '%s' '[{\"number\":128}]'\n\
-     elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
-       printf '%s' '{\"number\":128,\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/128\"}'\n\
-     fi\n",
-  )
-  .unwrap();
-  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
-  perms.set_mode(0o755);
-  std::fs::set_permissions(&gh, perms).unwrap();
+  // Write a fake `gh` that detects PR `n` (both `pr list` and `pr view`).
+  let write_gh = |n: u64| {
+    std::fs::write(
+      &gh,
+      format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+           printf '%s' '[{{\"number\":{n}}}]'\n\
+         elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+           printf '%s' '{{\"number\":{n},\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/{n}\"}}'\n\
+         fi\n"
+      ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&gh, perms).unwrap();
+  };
+  write_gh(128);
 
+  // Serialise against the other env-mutating tests in this binary.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior = std::env::var("GWM_GH").ok();
-  // SAFETY: this test is the sole GWM_GH mutator in this binary; the
-  // var is restored immediately after the call, before any assert.
+  // SAFETY: env mutation is guarded by `env_lock()` above; GWM_GH is
+  // restored at the end of the test, before returning.
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
 
+  // First refresh: nothing linked → detect PR #128.
+  app.refresh_github_status();
+  assert_eq!(app.current_link().pr, Some(128));
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+
+  // The branch's PR changed (e.g. closed + reopened as #200). A detected
+  // link is "resolved live", so a second refresh must re-detect rather
+  // than stick to #128 (issue #181 — Copilot review on PR #184).
+  write_gh(200);
   app.refresh_github_status();
 
   unsafe {
@@ -1423,7 +1454,11 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
     }
   }
 
-  assert_eq!(app.current_link().pr, Some(128));
+  assert_eq!(
+    app.current_link().pr,
+    Some(200),
+    "a detected PR must re-resolve on refresh"
+  );
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
 }
 
@@ -2822,13 +2857,12 @@ fn tui_gate_refuses_untrusted_config_in_prompt_mode() {
   // at the CLI gate / env bypass.
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
-  // Hold the env lock + clean up afterwards to keep the harness
-  // hermetic against the trust_tests env-mutation test.
+  // Serialise against the other env-mutating tests in this binary
+  // (the PR-detection refresh test also mutates env, #181).
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
   let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
-  // SAFETY: this test is the sole env mutator inside this binary.
-  // The `trust_tests` env tests live in a separate test binary and
-  // run in their own process, so there's no cross-binary race.
+  // SAFETY: env mutation is guarded by `env_lock()` above.
   unsafe {
     std::env::set_var("GWM_TRUST_LEDGER", &ledger);
     std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
@@ -2925,6 +2959,7 @@ fn tui_submit_create_aborts_on_untrusted_config() {
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
   let base_dir = tempfile::TempDir::new().unwrap();
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
   let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
   // SAFETY: see comment on `tui_gate_refuses_untrusted_config_in_prompt_mode`.
@@ -2994,6 +3029,7 @@ fn tui_bootstrap_selected_aborts_on_untrusted_config() {
   // (re-run bootstrap on an existing worktree) takes the same gate.
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
   let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
   // SAFETY: same rationale as the previous test.
