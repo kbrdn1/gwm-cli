@@ -31,8 +31,99 @@
 //!    wraps them with `refresh_link()` in a single `App::on_navigation`
 //!    so the literal triple can't drift back into duplicated copies.
 
+use crate::config::SidebarPosition;
 use crate::tui::ui::SidebarSections;
 use std::path::PathBuf;
+
+/// Minimum total terminal width (in columns) required to render the
+/// sidebar *beside* the worktree table without squeezing the table
+/// beyond readability. At or above this width the `Auto` orientation
+/// picks the side-by-side split; below it, `Auto` stacks the sidebar
+/// under the table (issue #188) rather than hiding it (pre-#188).
+pub const SIDEBAR_MIN_WIDTH: u16 = 120;
+
+/// How the sidebar is arranged relative to the worktree table (issue
+/// #188). `Auto` is the default: the renderer picks side-by-side on a
+/// wide terminal and stacked on a narrow one. The other two variants
+/// pin the choice regardless of width, set by cycling with `V`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidebarOrientation {
+  /// Width-driven: side-by-side at `>= SIDEBAR_MIN_WIDTH`, stacked
+  /// below it. Default — restores a usable sidebar on narrow terminals
+  /// where it was previously hidden entirely.
+  #[default]
+  Auto,
+  /// Always beside the table (table | sidebar), even when narrow.
+  SideBySide,
+  /// Always stacked (table on top, sidebar below), even when wide.
+  Stacked,
+}
+
+impl SidebarOrientation {
+  /// Status-bar label (`sidebar layout: auto`).
+  pub fn label(self) -> &'static str {
+    match self {
+      SidebarOrientation::Auto => "auto",
+      SidebarOrientation::SideBySide => "side-by-side",
+      SidebarOrientation::Stacked => "stacked",
+    }
+  }
+
+  /// Advance to the next orientation in the cycle
+  /// `Auto → SideBySide → Stacked → Auto`. Drives the `V` keybinding.
+  pub fn next(self) -> Self {
+    match self {
+      SidebarOrientation::Auto => SidebarOrientation::SideBySide,
+      SidebarOrientation::SideBySide => SidebarOrientation::Stacked,
+      SidebarOrientation::Stacked => SidebarOrientation::Auto,
+    }
+  }
+}
+
+/// The concrete layout the renderer should draw for the current frame,
+/// resolved from `open` + orientation + position + terminal width by
+/// [`SidebarState::resolve_layout`]. Kept ratatui-free so the decision
+/// is unit-testable against the width contract without a backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolvedSidebarLayout {
+  /// Sidebar closed — draw the worktree table full-area.
+  Hidden,
+  /// Side-by-side split. `sidebar_left` mirrors [`SidebarPosition`]:
+  /// `true` draws the sidebar on the left of the table, `false` on the
+  /// right.
+  SideBySide { sidebar_left: bool },
+  /// Stacked split — table on top, sidebar below.
+  Stacked,
+}
+
+/// Which content the sidebar previews (issue #34).
+///
+/// Toggled with the `s` key in the list view, dispatched through
+/// `Action::ToggleSidebarMode` in the rebindable keymap. Default is
+/// `Commits` so the pre-#34 sidebar behaviour is preserved verbatim.
+/// The mode is per-session — not persisted across `gwm` launches —
+/// because the low-frequency need to view stashes does not justify a
+/// new `.gwm.toml` knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SidebarMode {
+  /// `git log --oneline -n 10` + `git status --short`. Pre-#34
+  /// behaviour, kept as the default so existing users see no change
+  /// until they press `s`.
+  Commits,
+  /// `git stash list` + a per-stash quick view. New in #34.
+  Stashes,
+}
+
+impl SidebarMode {
+  /// Human-readable label rendered into the sidebar title bar
+  /// (` Details — commits ` vs. ` Details — stashes `).
+  pub fn label(self) -> &'static str {
+    match self {
+      SidebarMode::Commits => "commits",
+      SidebarMode::Stashes => "stashes",
+    }
+  }
+}
 
 /// Pure sidebar state. Use [`Self::new`] (or the [`Default`] impl below)
 /// to get the initial state that matches the previous `App::new_at`
@@ -42,11 +133,22 @@ use std::path::PathBuf;
 /// `new()`. The hand-written `Default` keeps the contract single-sourced.
 #[derive(Debug)]
 pub struct SidebarState {
-  /// `true` when the sidebar is visible. The renderer additionally
-  /// hides it on narrow terminals (`area.width < SIDEBAR_MIN_WIDTH`)
-  /// without flipping this flag — a wider terminal then re-shows the
-  /// panel without re-toggling.
+  /// `true` when the sidebar is visible. On a narrow terminal the
+  /// renderer no longer hides it (pre-#188 behaviour) but stacks it
+  /// under the table instead — see [`Self::resolve_layout`]. Closing
+  /// the panel (`open = false`) is the only way to reclaim the full
+  /// width for the table.
   pub open: bool,
+  /// Which side the sidebar sits on in the side-by-side layout
+  /// (issue #188). Seeded from `[tui] sidebar_position` at `App`
+  /// construction, toggled live by [`Self::toggle_position`] (`H`).
+  /// Ignored by the stacked layout (sidebar always at the bottom).
+  pub position: SidebarPosition,
+  /// How the sidebar is arranged relative to the table (issue #188).
+  /// Defaults to [`SidebarOrientation::Auto`] (width-driven); cycled
+  /// by [`Self::cycle_orientation`] (`V`). Runtime-only — not persisted
+  /// to `.gwm.toml`, unlike `position`.
+  pub orientation: SidebarOrientation,
   /// `true` when keyboard navigation (`j` / `k`) targets the sidebar
   /// (scrolling Recent Commits) instead of the worktree list.
   /// Invariant: `focused` is `false` whenever `open` is `false`.
@@ -61,12 +163,19 @@ pub struct SidebarState {
   /// be pushed entirely off-screen.
   pub max_scroll: u16,
   /// Cached pre-rendered sections keyed by the selected worktree's
-  /// path. `None` = cold cache (the renderer will rebuild and store).
-  /// Invalidated on selection change ([`Self::on_navigation`]),
-  /// worktree list mutation (`App::refresh` calls [`Self::invalidate`]),
-  /// and filter narrowing (`App::filter_push_char` /
-  /// `filter_pop_char`).
-  pub cache: Option<(PathBuf, SidebarSections)>,
+  /// path **and** the active mode (issue #34). `None` = cold cache
+  /// (the renderer will rebuild and store). Invalidated on selection
+  /// change ([`Self::on_navigation`]), worktree list mutation
+  /// (`App::refresh` calls [`Self::invalidate`]), filter narrowing
+  /// (`App::filter_push_char` / `filter_pop_char`), and mode toggle
+  /// ([`Self::cycle_mode`]). Two-tuple key so a re-toggle re-shells
+  /// `git stash list` / `git log` rather than serving stale content
+  /// for the other mode.
+  pub cache: Option<((PathBuf, SidebarMode), SidebarSections)>,
+  /// Active preview mode. Defaults to [`SidebarMode::Commits`] so the
+  /// pre-#34 sidebar behaviour is unchanged until the user presses
+  /// `s`. Toggled by [`Self::cycle_mode`].
+  pub mode: SidebarMode,
 }
 
 impl Default for SidebarState {
@@ -79,11 +188,76 @@ impl SidebarState {
   pub fn new() -> Self {
     Self {
       open: true,
+      position: SidebarPosition::default(),
+      orientation: SidebarOrientation::default(),
       focused: false,
       scroll: 0,
       max_scroll: 0,
       cache: None,
+      mode: SidebarMode::Commits,
     }
+  }
+
+  /// Resolve the concrete layout for a frame of `width` columns from
+  /// the current visibility, orientation, and position. Pure and
+  /// ratatui-free so the width contract is unit-testable:
+  ///
+  /// - closed → [`ResolvedSidebarLayout::Hidden`];
+  /// - `Auto` → side-by-side at `width >= SIDEBAR_MIN_WIDTH`, else
+  ///   stacked;
+  /// - `SideBySide` / `Stacked` → that layout regardless of width.
+  ///
+  /// In a side-by-side result `sidebar_left` mirrors [`Self::position`].
+  pub fn resolve_layout(&self, width: u16) -> ResolvedSidebarLayout {
+    if !self.open {
+      return ResolvedSidebarLayout::Hidden;
+    }
+    let side_by_side = ResolvedSidebarLayout::SideBySide {
+      sidebar_left: self.position.is_left(),
+    };
+    match self.orientation {
+      SidebarOrientation::SideBySide => side_by_side,
+      SidebarOrientation::Stacked => ResolvedSidebarLayout::Stacked,
+      SidebarOrientation::Auto => {
+        if width >= SIDEBAR_MIN_WIDTH {
+          side_by_side
+        } else {
+          ResolvedSidebarLayout::Stacked
+        }
+      }
+    }
+  }
+
+  /// Cycle the orientation `Auto → SideBySide → Stacked → Auto`
+  /// (issue #188, `V`). The cache survives — orientation changes the
+  /// frame geometry, not the previewed git content.
+  pub fn cycle_orientation(&mut self) {
+    self.orientation = self.orientation.next();
+  }
+
+  /// Flip the side-by-side position left ↔ right (issue #188, `H`).
+  /// The cache survives for the same reason as [`Self::cycle_orientation`].
+  pub fn toggle_position(&mut self) {
+    self.position = match self.position {
+      SidebarPosition::Left => SidebarPosition::Right,
+      SidebarPosition::Right => SidebarPosition::Left,
+    };
+  }
+
+  /// Cycle the preview mode (issue #34). Pre-#34 the sidebar only
+  /// ever showed `git log` + `git status`; now `s` flips between
+  /// `Commits` and `Stashes`. The scroll offset resets to 0 because
+  /// the new content has its own length and the previous offset
+  /// becomes meaningless. The cache is invalidated because the key
+  /// (path + mode) changes — the new mode re-shells the right git
+  /// command on the next frame.
+  pub fn cycle_mode(&mut self) {
+    self.mode = match self.mode {
+      SidebarMode::Commits => SidebarMode::Stashes,
+      SidebarMode::Stashes => SidebarMode::Commits,
+    };
+    self.scroll = 0;
+    self.cache = None;
   }
 
   /// Navigation-driven reset: drop the scroll back to the top AND

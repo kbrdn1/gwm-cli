@@ -1,7 +1,18 @@
 use gwm::config::{
-  expand_placeholders, review_tool_preset, BranchTypesSource, Config, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+  expand_placeholders, review_tool_preset, BranchTypesSource, Config, SidebarPosition, TuiOpenMode, WorktreeConfig,
+  CONFIG_FILE,
 };
 use tempfile::TempDir;
+
+#[cfg(unix)]
+fn toml_absolute_path(unix: &'static str, _windows: &'static str) -> &'static str {
+  unix
+}
+
+#[cfg(windows)]
+fn toml_absolute_path(_unix: &'static str, windows: &'static str) -> &'static str {
+  windows
+}
 
 // --- Labels section (issue #81) -----------------------------------------
 
@@ -37,7 +48,7 @@ color = "7057ff"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.labels.len(), 3);
 
   assert_eq!(cfg.labels[0].name, "bug");
@@ -69,7 +80,7 @@ name = "wip"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.labels.len(), 1);
   assert_eq!(cfg.labels[0].name, "wip");
   assert_eq!(cfg.labels[0].description, None);
@@ -98,7 +109,7 @@ name = "-h"
   )
   .unwrap();
 
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   let msg = format!("{}", err);
   assert!(
     msg.contains("labels[0]"),
@@ -129,7 +140,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.labels.is_empty());
 }
 
@@ -166,7 +177,7 @@ state = "closed"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.milestones.len(), 3);
 
   assert_eq!(cfg.milestones[0].title, "v0.7.0");
@@ -200,7 +211,7 @@ title = "Backlog"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.milestones.len(), 1);
   assert_eq!(cfg.milestones[0].title, "Backlog");
   assert_eq!(cfg.milestones[0].description, None);
@@ -224,7 +235,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.milestones.is_empty());
 }
 
@@ -259,7 +270,7 @@ trunks = ["master", "release-3.x", "release-4.x"]
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(
     cfg.doctor.trunks,
     vec![
@@ -287,7 +298,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.doctor.trunks, vec!["dev".to_string(), "main".to_string()]);
 }
 
@@ -306,7 +317,7 @@ trunks = []
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(cfg.doctor.trunks.is_empty());
 }
 
@@ -318,6 +329,7 @@ fn placeholders_expand() {
     Some("feat"),
     Some("123"),
     Some("foo"),
+    None,
   )
   .unwrap();
   assert!(out.ends_with("/cc-worktree/my-repo/feat-123-foo"));
@@ -327,14 +339,48 @@ fn placeholders_expand() {
 
 #[test]
 fn placeholders_no_optional_args_leave_repo_only() {
-  let out = expand_placeholders("{home}/{repo}", "x", None, None, None).unwrap();
+  let out = expand_placeholders("{home}/{repo}", "x", None, None, None, None).unwrap();
   assert!(out.ends_with("/x"));
+}
+
+#[test]
+fn placeholders_expand_repo_path_and_parent() {
+  let repo_path = std::path::Path::new("/Users/me/Projects/Perso/gwm-cli");
+  // Derive the expected prefixes from `repo_path` itself rather than
+  // duplicating the literal parent string — the contract under test is
+  // "{repo_parent} → the repo's parent dir, {repo_path} → the repo dir".
+  let parent = repo_path.parent().unwrap().to_string_lossy();
+  let full_dir = repo_path.to_string_lossy();
+
+  let out = expand_placeholders(
+    "{repo_parent}/worktrees/{repo}-{type}-{issue}",
+    "gwm-cli",
+    Some("feat"),
+    Some("42"),
+    None,
+    Some(repo_path),
+  )
+  .unwrap();
+  assert_eq!(out, format!("{parent}/worktrees/gwm-cli-feat-42"));
+  assert!(!out.contains("{repo_parent}"));
+
+  let full = expand_placeholders("{repo_path}/.worktrees", "gwm-cli", None, None, None, Some(repo_path)).unwrap();
+  assert_eq!(full, format!("{full_dir}/.worktrees"));
+  assert!(!full.contains("{repo_path}"));
+}
+
+#[test]
+fn placeholders_repo_path_tokens_left_literal_without_path() {
+  // When no repo path is supplied the disk-path tokens are passed
+  // through untouched rather than collapsing to an empty string.
+  let out = expand_placeholders("{repo_parent}/x", "r", None, None, None, None).unwrap();
+  assert_eq!(out, "{repo_parent}/x");
 }
 
 #[test]
 fn load_returns_defaults_when_no_file() {
   let dir = TempDir::new().unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.worktree.branch_pattern, WorktreeConfig::default().branch_pattern);
 }
 
@@ -367,7 +413,7 @@ run = "echo hi"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.worktree.base, "/tmp/wt/{repo}");
   assert_eq!(cfg.bootstrap.copy.len(), 1);
   assert_eq!(cfg.bootstrap.guard.len(), 1);
@@ -397,7 +443,7 @@ fn write_default_refuses_overwrite() {
 fn malformed_config_returns_error() {
   let dir = TempDir::new().unwrap();
   std::fs::write(dir.path().join(CONFIG_FILE), "not valid toml [[[").unwrap();
-  let res = Config::load_for_repo(dir.path());
+  let res = Config::load_layered(dir.path(), None);
   assert!(res.is_err());
 }
 
@@ -428,8 +474,47 @@ branch_pattern = "{type}/#{issue}-{desc}"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
+}
+
+#[test]
+fn tui_sidebar_position_defaults_to_right() {
+  // Pre-#188 behaviour: sidebar on the right. The default must hold so
+  // existing users see no change until they set the knob or press `H`.
+  let cfg = Config::default();
+  assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Right);
+}
+
+#[test]
+fn tui_sidebar_position_absent_keeps_right() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+confirm_countdown_secs = 2
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Right);
+}
+
+#[test]
+fn tui_sidebar_position_parses_left() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+sidebar_position = "left"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.sidebar_position, SidebarPosition::Left);
+  assert!(cfg.tui.sidebar_position.is_left());
 }
 
 #[test]
@@ -443,7 +528,7 @@ confirm_countdown_secs = 2
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.confirm_countdown_secs, 2);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 2);
 }
@@ -459,7 +544,7 @@ confirm_countdown_secs = 0
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 0);
 }
 
@@ -478,7 +563,7 @@ confirm_countdown_secs = 30
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.confirm_countdown_secs, 30);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
 }
@@ -514,7 +599,7 @@ fullscreen = true
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.git_tui.resolved();
   assert_eq!(r.command, "gitui -d {path}");
   assert!(r.fullscreen);
@@ -534,7 +619,7 @@ fullscreen = false
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.git_tui.resolved();
   assert_eq!(r.command, "code {path}");
   assert!(!r.fullscreen);
@@ -572,7 +657,7 @@ default_base = "trunk"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().expect("explicit command must resolve");
   assert_eq!(r.command, "my-review --base {base} --head {head}");
   assert!(r.fullscreen);
@@ -594,7 +679,7 @@ tool = "lumen"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().expect("lumen preset must resolve");
   assert_eq!(r.command, "lumen diff {base}..{head}");
   assert!(r.fullscreen, "lumen is a TUI — gwm must suspend itself");
@@ -634,7 +719,7 @@ tool = "made-up"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert!(
     cfg.review.resolved().is_none(),
     "unknown preset must not silently fall back to a real tool"
@@ -655,7 +740,7 @@ command = "my-bot --diff-file {diff}"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().unwrap();
   assert_eq!(
     r.command, "my-bot --diff-file {diff}",
@@ -678,7 +763,7 @@ fullscreen = false
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let r = cfg.review.resolved().unwrap();
   assert!(
     !r.fullscreen,
@@ -703,7 +788,7 @@ confirm_countdown_secs = 300
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).expect("300 must parse, not error");
+  let cfg = Config::load_layered(dir.path(), None).expect("300 must parse, not error");
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 5);
 }
 
@@ -733,7 +818,7 @@ branch_pattern = "{type}/#{issue}-{desc}"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
 }
 
@@ -749,7 +834,7 @@ editor_cmd = "hx"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Editor);
   assert_eq!(cfg.tui.open.editor_cmd.as_deref(), Some("hx"));
 }
@@ -768,7 +853,7 @@ mode = "finder"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Finder);
 }
 
@@ -784,7 +869,7 @@ shell_cmd = "/usr/bin/fish"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.open.mode, TuiOpenMode::Shell);
   assert_eq!(cfg.tui.open.shell_cmd.as_deref(), Some("/usr/bin/fish"));
 }
@@ -803,7 +888,7 @@ mode = "neovim"
 "#,
   )
   .unwrap();
-  assert!(Config::load_for_repo(dir.path()).is_err());
+  assert!(Config::load_layered(dir.path(), None).is_err());
 }
 
 // ---- [[branch_types]] (issue #80) ------------------------------------------
@@ -847,7 +932,7 @@ description = "Database migration"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let resolved = cfg.resolved_branch_types();
   assert_eq!(resolved.source, BranchTypesSource::Config);
   let names: Vec<_> = resolved.types.iter().map(|t| t.name.as_str()).collect();
@@ -872,7 +957,7 @@ branch_types = []
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   let resolved = cfg.resolved_branch_types();
   assert_eq!(resolved.source, BranchTypesSource::Default);
   assert!(!resolved.types.is_empty());
@@ -901,7 +986,7 @@ description = "Whoops"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   let msg = format!("{}", err);
   assert!(msg.contains("branch_types"), "{msg}");
   assert!(msg.contains("empty"), "{msg}");
@@ -930,7 +1015,7 @@ description = "x"
     )
     .unwrap();
     assert!(
-      Config::load_for_repo(dir.path()).is_err(),
+      Config::load_layered(dir.path(), None).is_err(),
       "name = {:?} must be rejected at load",
       bad
     );
@@ -956,7 +1041,7 @@ description = "Different description for the same name"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   let msg = format!("{}", err);
   assert!(msg.contains("duplicate"), "{msg}");
   assert!(msg.contains("feat"), "{msg}");
@@ -985,7 +1070,7 @@ description = "Work in progress"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).expect("valid config must load");
+  let cfg = Config::load_layered(dir.path(), None).expect("valid config must load");
   let names: Vec<_> = cfg.branch_types.iter().map(|t| t.name.as_str()).collect();
   assert_eq!(names, vec!["feat", "migration", "wip"]);
 }
@@ -1014,7 +1099,7 @@ to   = "../../OWNED"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("traversal must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("traversal must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("bootstrap.copy") && msg.contains("to"),
@@ -1031,16 +1116,19 @@ to   = "../../OWNED"
 #[test]
 fn load_rejects_absolute_path_in_copy_to() {
   let dir = TempDir::new().unwrap();
+  let absolute_path = toml_absolute_path("/etc/passwd", r#"C:\\Windows\\win.ini"#);
   std::fs::write(
     dir.path().join(CONFIG_FILE),
-    r#"
+    format!(
+      r#"
 [[bootstrap.copy]]
 from = ".env"
-to   = "/etc/passwd"
+to   = "{absolute_path}"
 "#,
+    ),
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("absolute path must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("absolute path must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("bootstrap.copy") && msg.contains("to"),
@@ -1048,7 +1136,7 @@ to   = "/etc/passwd"
     msg
   );
   assert!(
-    msg.contains("absolute") || msg.contains("/etc/passwd"),
+    msg.contains("absolute") || msg.contains(absolute_path),
     "error must explain absolute path rejection, got: {}",
     msg
   );
@@ -1071,7 +1159,7 @@ example_file   = "../../../etc/passwd"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("traversal in example_file must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("traversal in example_file must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("guard") && msg.contains("example_file"),
@@ -1088,18 +1176,21 @@ example_file   = "../../../etc/passwd"
 #[test]
 fn load_rejects_absolute_path_in_guard_example_file() {
   let dir = TempDir::new().unwrap();
+  let absolute_path = toml_absolute_path("/etc/shadow", r#"C:\\Windows\\System32\\config\\SAM"#);
   std::fs::write(
     dir.path().join(CONFIG_FILE),
-    r#"
+    format!(
+      r#"
 [[bootstrap.guard]]
 name           = "leaky"
 deny_patterns  = ["amazonaws"]
 on_match       = "seed-from-example"
-example_file   = "/etc/shadow"
+example_file   = "{absolute_path}"
 "#,
+    ),
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("absolute example_file must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("absolute example_file must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("guard") && msg.contains("example_file"),
@@ -1107,7 +1198,7 @@ example_file   = "/etc/shadow"
     msg
   );
   assert!(
-    msg.contains("absolute") || msg.contains("/etc/shadow"),
+    msg.contains("absolute") || msg.contains(absolute_path),
     "error must explain absolute path rejection, got: {}",
     msg
   );
@@ -1129,7 +1220,7 @@ content = "FOO=bar"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("traversal in fallback.target must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("traversal in fallback.target must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("fallback") && msg.contains("target"),
@@ -1157,7 +1248,7 @@ to   = "C:foo"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("drive-prefixed path must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("drive-prefixed path must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("bootstrap.copy") && msg.contains("to"),
@@ -1196,7 +1287,7 @@ content = "X=1"
 "#,
   )
   .unwrap();
-  Config::load_for_repo(dir.path()).expect("benign relative paths must load");
+  Config::load_layered(dir.path(), None).expect("benign relative paths must load");
 }
 
 // --- Issue #96: guard deny_patterns must compile at load time ---------------
@@ -1223,7 +1314,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid deny_patterns must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid deny_patterns must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("no-secrets"),
@@ -1258,7 +1349,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid sole deny pattern must be rejected at load");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid sole deny pattern must be rejected at load");
   let msg = format!("{}", err);
   assert!(
     msg.contains("broken") && msg.contains("*foo"),
@@ -1281,7 +1372,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let cfg = Config::load_for_repo(dir.path()).expect("valid patterns must load");
+  let cfg = Config::load_layered(dir.path(), None).expect("valid patterns must load");
   assert_eq!(cfg.bootstrap.guard.len(), 1);
   assert_eq!(cfg.bootstrap.guard[0].deny_patterns.len(), 3);
 }
@@ -1344,7 +1435,7 @@ on_match      = "abort"
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).expect_err("invalid pattern in second guard must be rejected");
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid pattern in second guard must be rejected");
   let msg = format!("{}", err);
   assert!(
     msg.contains("guard-two") && msg.contains("[unclosed"),
@@ -1359,4 +1450,341 @@ on_match      = "abort"
     "error must locate the failing entry by index, got: {}",
     msg
   );
+}
+
+// --- PR template section (issue #84) ------------------------------------
+
+#[test]
+fn pr_template_defaults_are_empty() {
+  // Without a [pr_template] block, both `default` and `by_type`
+  // resolve to empty so `gwm pr` falls back to the GitHub-side
+  // PULL_REQUEST_TEMPLATE.md (same as before #84).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert!(cfg.pr_template.default.is_none());
+  assert!(cfg.pr_template.by_type.is_empty());
+}
+
+#[test]
+fn pr_template_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r###"
+[pr_template]
+default = ".github/pull_request_template.md"
+
+[pr_template.by_type]
+feat = { path = ".github/pr-templates/feat.md" }
+fix = { path = ".github/pr-templates/fix.md" }
+
+[pr_template.by_type.chore]
+body = "## Summary\n{desc}\n\nCloses #{issue}\n"
+"###,
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.pr_template.default.as_deref(),
+    Some(".github/pull_request_template.md")
+  );
+
+  let feat = cfg.pr_template.by_type.get("feat").expect("feat entry");
+  assert_eq!(feat.path.as_deref(), Some(".github/pr-templates/feat.md"));
+  assert_eq!(feat.body, None);
+
+  let chore = cfg.pr_template.by_type.get("chore").expect("chore entry");
+  assert_eq!(chore.path, None);
+  assert_eq!(chore.body.as_deref(), Some("## Summary\n{desc}\n\nCloses #{issue}\n"));
+}
+
+#[test]
+fn pr_template_unknown_root_field_is_rejected() {
+  // `[pr_template]` mirrors `[issue_template]`'s `deny_unknown_fields`
+  // contract so typos surface at load time, not as a silent no-op.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[pr_template]
+default = ".github/pull_request_template.md"
+mystery = "boom"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown field must reject");
+  let msg = format!("{}", err);
+  assert!(msg.contains("mystery"), "{msg}");
+}
+
+#[test]
+fn pr_template_unknown_per_type_field_is_rejected() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[pr_template.by_type.feat]
+path = ".github/pr-templates/feat.md"
+bogus = true
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown per-type field must reject");
+  let msg = format!("{}", err);
+  assert!(msg.contains("bogus"), "{msg}");
+}
+
+// --- [tui.keys] section (issue #87) -------------------------------------
+
+#[test]
+fn tui_keys_default_is_empty_map() {
+  // Absent `[tui.keys]` block resolves to an empty map — the keymap
+  // layer then keeps every built-in default. Mirrors the `labels` /
+  // `milestones` "no override declared" contract.
+  let cfg = Config::default();
+  assert!(cfg.tui.keys.bindings.is_empty());
+}
+
+#[test]
+fn tui_keys_section_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = ["j", "Ctrl+n"]
+up   = ["k", "Ctrl+p"]
+top  = ["g g"]
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.tui.keys.bindings.get("down").map(Vec::as_slice),
+    Some(["j".to_string(), "Ctrl+n".to_string()].as_slice())
+  );
+  assert_eq!(
+    cfg.tui.keys.bindings.get("up").map(Vec::as_slice),
+    Some(["k".to_string(), "Ctrl+p".to_string()].as_slice())
+  );
+  assert_eq!(
+    cfg.tui.keys.bindings.get("top").map(Vec::as_slice),
+    Some(["g g".to_string()].as_slice())
+  );
+}
+
+#[test]
+fn tui_keys_rejects_unknown_action_at_load_time() {
+  // `gallop` is not in `keymap::ACTIONS`. The user almost certainly
+  // typo'd a real action name; surfacing the error here saves a
+  // mystifying "my binding does nothing in the TUI" round trip.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+gallop = ["g"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown action must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(
+    msg.contains("gallop"),
+    "expected message to name the bad action, got: {msg}"
+  );
+  assert!(
+    msg.contains("unknown"),
+    "expected message to flag it as unknown, got: {msg}"
+  );
+}
+
+#[test]
+fn tui_keys_rejects_invalid_key_string() {
+  // `Foobar` is not a named key and is not a single character. The
+  // parser surfaces it as a config error.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = ["Foobar"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid key string must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(
+    msg.contains("foobar"),
+    "expected message to name the bad key, got: {msg}"
+  );
+}
+
+#[test]
+fn tui_keys_rejects_chord_that_is_strict_prefix() {
+  // Binding `g` alone while the default `g g` is still in place
+  // creates a chord/prefix ambiguity. Per the design note on PR #87
+  // this is a hard error at load — never a runtime timeout.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+open = ["g"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("prefix collision must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("prefix"), "expected prefix error, got: {msg}");
+}
+
+#[test]
+fn tui_keys_rejects_chord_conflict_across_actions() {
+  // `down` and `up` both rebound to `x` — same chord, two actions,
+  // ambiguous dispatch. Refuse at load time.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = ["x"]
+up   = ["x"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("conflict must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("conflict"), "expected conflict error, got: {msg}");
+}
+
+#[test]
+fn tui_keys_empty_binding_list_unbinds_action() {
+  // `down = []` removes every binding for the `down` action. Useful
+  // for users who prefer to navigate with the arrow keys only.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+down = []
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let km = cfg.tui.keys.resolved_keymap().unwrap();
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  let j = KeyStroke::parse_chord("j").unwrap();
+  assert!(matches!(km.lookup(&j), ChordResolution::NoMatch));
+  // The other defaults survive.
+  let k = KeyStroke::parse_chord("k").unwrap();
+  assert!(matches!(km.lookup(&k), ChordResolution::Matched(Action::Up)));
+}
+
+// --- [theme] section (issue #33) ----------------------------------------
+
+#[test]
+fn theme_default_is_pre_issue_33_scheme() {
+  // No `[theme]` block → the resolved theme matches the pre-#33
+  // hardcoded scheme verbatim. Pinned at the config layer so a
+  // regression in the loader is caught here rather than as a
+  // surprise palette in someone's screenshot.
+  use ratatui::style::Color;
+  let cfg = Config::default();
+  let theme = cfg.theme.resolve().unwrap();
+  assert_eq!(theme.focus, Color::Cyan);
+  assert_eq!(theme.branch, Color::Green);
+}
+
+#[test]
+fn theme_preset_is_applied_at_load() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+preset = "catppuccin"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let theme = cfg.theme.resolve().unwrap();
+  // Catppuccin's focus role differs from the default `Cyan` —
+  // assert the difference rather than the specific hex to keep
+  // the test resilient to upstream palette tweaks.
+  use gwm::tui::theme::Theme;
+  let default = Theme::default();
+  assert_ne!(
+    theme.focus, default.focus,
+    "preset must override the default focus colour"
+  );
+}
+
+#[test]
+fn theme_per_role_overrides_win_over_preset() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+preset = "catppuccin"
+focus  = "red"
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let theme = cfg.theme.resolve().unwrap();
+  use ratatui::style::Color;
+  assert_eq!(theme.focus, Color::Red, "explicit override must win over the preset");
+}
+
+#[test]
+fn theme_rejects_unknown_preset() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+preset = "does-not-exist"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown preset must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("does-not-exist"), "got: {msg}");
+}
+
+#[test]
+fn theme_rejects_unknown_role() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+phantom = "red"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown role must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("phantom"), "got: {msg}");
+}
+
+#[test]
+fn theme_rejects_bad_color_value() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[theme]
+focus = "not_a_color"
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("invalid color must reject");
+  let msg = format!("{}", err).to_lowercase();
+  assert!(msg.contains("not_a_color"), "got: {msg}");
 }

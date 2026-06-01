@@ -6,7 +6,8 @@ mod common;
 use assert_cmd::Command;
 use common::init_repo;
 use predicates::prelude::*;
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn help_prints_subcommands() {
@@ -25,9 +26,15 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  init "))
     .stdout(predicate::str::contains("  list "))
     .stdout(predicate::str::contains("  create "))
+    // Issue #83: create an issue from repo templates, then create the worktree.
+    .stdout(predicate::str::contains("  new "))
+    // Issue #84: render the PR body from `[pr_template]` and shell out to `gh pr create`.
+    .stdout(predicate::str::contains("  pr "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
+    // Issue #24: fetch + rebase/merge a worktree onto its upstream.
+    .stdout(predicate::str::contains("  sync "))
     .stdout(predicate::str::contains("  prune "))
     .stdout(predicate::str::contains("  completions "))
     .stdout(predicate::str::contains("  shell-init "))
@@ -44,7 +51,259 @@ fn help_prints_subcommands() {
     // Issue #82: declarative GitHub milestones.
     .stdout(predicate::str::contains("  milestones "))
     // Issue #95: TOFU trust ledger.
-    .stdout(predicate::str::contains("  trust "));
+    .stdout(predicate::str::contains("  trust "))
+    // Issue #86: CLI aliases (`gwm aliases list`).
+    .stdout(predicate::str::contains("  aliases "))
+    // Issue #89: git-config-style `.gwm.toml` editing.
+    .stdout(predicate::str::contains("  config "))
+    // Issue #85: gitmoji commit-prefix + commit-msg hook installer.
+    .stdout(predicate::str::contains("  commit-prefix "))
+    .stdout(predicate::str::contains("  hooks "))
+    // Issue #29: operation journal + undo + history.
+    .stdout(predicate::str::contains("  undo "))
+    .stdout(predicate::str::contains("  history "))
+    // Issue #87: configurable TUI keymap (`gwm tui keys`).
+    .stdout(predicate::str::contains("  tui "));
+}
+
+// --- gitmoji (issue #85) ------------------------------------------------
+
+#[test]
+fn commit_prefix_resolves_branch_to_shortcode_form() {
+  // The canonical contract: `gwm commit-prefix --branch feat/#41-foo`
+  // prints `:sparkles: feat(#41):` — the prefix every commit in this
+  // repo starts with. The shortcode form is the default (matches
+  // most commit hooks and tooling that lint emoji on raw text).
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "feat/#41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":sparkles: feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_unicode_emits_real_emoji() {
+  // The `--unicode` flag swaps `:sparkles:` for ✨ — meant for shell
+  // prompts and the commit-msg hook (which wants the final byte
+  // sequence in the message body, not the shortcode form).
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "feat/#41-foo", "--unicode"]);
+  cmd.assert().success().stdout(predicate::str::contains("✨ feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_for_fix_branch_uses_bug_emoji() {
+  // Second branch type to pin: `fix/#10-bar` ↔ `:bug:` ↔ 🐛. The two
+  // most-used emojis in the history both need an end-to-end test
+  // so a future refactor that breaks one trips a binary-level
+  // assertion.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "fix/#10-bar"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":bug: fix(#10):"));
+}
+
+#[test]
+fn commit_prefix_with_explicit_branch_honours_repo_gitmoji_overrides() {
+  // Regression guard: `--branch <name>` is a scripted entry point —
+  // shell prompts, AI assistants, the installed commit-msg hook —
+  // but if it bypasses `.gwm.toml`'s `[gitmoji]` block the renderer
+  // contradicts itself between `gwm types --gitmoji` (which loads
+  // the config) and `gwm commit-prefix --branch …` (which used not
+  // to). The two surfaces MUST agree.
+  let (dir, _repo) = init_repo();
+  let cfg = "[gitmoji]\nfeat = \":rocket:\"\n";
+  std::fs::write(dir.path().join(".gwm.toml"), cfg).expect("seed .gwm.toml");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":rocket: feat(#41):"));
+}
+
+#[test]
+fn commit_prefix_on_non_gwm_branch_reports_error() {
+  // `gwm commit-prefix --branch random` doesn't match the
+  // `<type>/#<N>-<slug>` regex — the contract is "fail loudly with a
+  // pointer to the convention" rather than silently rendering a
+  // bogus prefix. The user typed `--branch <name>` explicitly, so
+  // there's no auto-fallback to CWD to fall back to.
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["commit-prefix", "--branch", "random"]);
+  cmd.assert().failure().stderr(predicate::str::contains("random"));
+}
+
+#[test]
+fn commit_prefix_unicode_normalizes_known_shortcode_override() {
+  // The UX guarantee from the PR #152 follow-up: under `--unicode`,
+  // a `.gwm.toml` override that supplied a known `:shortcode:` (like
+  // `:rocket:`) must render as the unicode glyph (🚀), not the
+  // shortcode literal. Asymmetry between this surface and
+  // `gwm types --gitmoji`'s unicode column was the original bug.
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
+  cmd.assert().success().stdout(predicate::str::contains("🚀 feat(#1):"));
+}
+
+#[test]
+fn commit_prefix_unicode_leaves_unknown_shortcode_override_verbatim() {
+  // Graceful degradation for shortcodes the built-in table doesn't
+  // know about. `:foo:` is not in `shortcode_to_unicode`, so under
+  // `--unicode` we keep the value verbatim — the surface must remain
+  // usable on any user configuration without falling back to
+  // `:question:`/❓ (which would hide the user's intent).
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":foo:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/#1-x", "--unicode"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":foo: feat(#1):"));
+}
+
+#[test]
+fn types_gitmoji_normalizes_known_shortcode_override_in_unicode_column() {
+  // Symmetry with `gwm commit-prefix --unicode`: the `gwm types
+  // --gitmoji` unicode column must show the GLYPH for a known
+  // shortcode override (not the shortcode literal). The shortcode
+  // column still shows the literal `:rocket:` so both forms remain
+  // greppable on the same row.
+  let (dir, _repo) = init_repo();
+  std::fs::write(dir.path().join(".gwm.toml"), "[gitmoji]\nfeat = \":rocket:\"\n").expect("seed .gwm.toml");
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
+  let assert = cmd.assert().success();
+  let stdout = String::from_utf8(assert.get_output().stdout.clone()).expect("utf8 stdout");
+  // Find the `feat` row and check both columns on it. A per-row
+  // assertion (rather than two independent `contains(...)` checks)
+  // catches the regression where the glyph appears on some unrelated
+  // row but `feat` still shows `:rocket:` in the unicode column.
+  let feat_row = stdout
+    .lines()
+    .find(|l| l.trim_start().starts_with("feat "))
+    .expect("feat row must be present in `gwm types --gitmoji` output");
+  assert!(
+    feat_row.contains("🚀"),
+    "feat unicode column must be normalised to 🚀, got: {feat_row:?}"
+  );
+  assert!(
+    feat_row.contains(":rocket:"),
+    "feat shortcode column must still be :rocket:, got: {feat_row:?}"
+  );
+}
+
+#[test]
+fn types_with_gitmoji_flag_includes_emoji_columns() {
+  // `gwm types --gitmoji` extends the existing per-type list with
+  // two more columns: the unicode emoji and the shortcode form. The
+  // shortcode is asserted via `:sparkles:` (textual, deterministic);
+  // the unicode column is asserted via the ✨ character.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["types", "--gitmoji"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains(":sparkles:"))
+    .stdout(predicate::str::contains("✨"))
+    .stdout(predicate::str::contains(":bug:"))
+    .stdout(predicate::str::contains("🐛"));
+}
+
+#[test]
+fn types_without_gitmoji_flag_does_not_include_emoji_columns() {
+  // Backwards compatibility: `gwm types` (no flag) must NOT spill
+  // shortcodes into its output — every scripted parser of the
+  // pre-#85 surface depends on the two-column layout.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).arg("types");
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat"))
+    .stdout(predicate::str::contains(":sparkles:").not())
+    .stdout(predicate::str::contains("✨").not());
+}
+
+#[test]
+fn hooks_install_commit_msg_creates_executable_hook() {
+  // `gwm hooks install commit-msg` writes `.git/hooks/commit-msg` and
+  // exits 0. We assert on the resulting file (not the stdout
+  // message), so the test is robust to cosmetic copy changes.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
+  cmd.assert().success();
+
+  let hook = dir.path().join(".git").join("hooks").join("commit-msg");
+  assert!(hook.exists(), "commit-msg hook must exist after `gwm hooks install`");
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&hook).expect("stat hook").permissions().mode();
+    assert!(mode & 0o100 != 0, "hook must be executable by owner");
+  }
+}
+
+#[test]
+fn hooks_install_commit_msg_refuses_existing_hook_without_force() {
+  // Idempotent-safe contract: a pre-existing `commit-msg` (husky,
+  // commitlint, …) is left intact and the command exits non-zero
+  // with a clear pointer to `--force`.
+  let (dir, _repo) = init_repo();
+  let hooks_dir = dir.path().join(".git").join("hooks");
+  std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+  let hook_path = hooks_dir.join("commit-msg");
+  std::fs::write(&hook_path, "#!/bin/sh\necho 'pre-existing hook'\n").expect("seed hook");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.current_dir(dir.path()).args(["hooks", "install", "commit-msg"]);
+  cmd.assert().failure().stderr(predicate::str::contains("--force"));
+
+  let body = std::fs::read_to_string(&hook_path).expect("read seeded hook");
+  assert!(
+    body.contains("pre-existing hook"),
+    "seeded hook must not be overwritten on the refusal path"
+  );
+}
+
+#[test]
+fn hooks_install_commit_msg_force_overwrites() {
+  // The escape hatch.
+  let (dir, _repo) = init_repo();
+  let hooks_dir = dir.path().join(".git").join("hooks");
+  std::fs::create_dir_all(&hooks_dir).expect("hooks dir");
+  let hook_path = hooks_dir.join("commit-msg");
+  std::fs::write(&hook_path, "#!/bin/sh\necho 'old'\n").expect("seed hook");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["hooks", "install", "commit-msg", "--force"]);
+  cmd.assert().success();
+
+  let body = std::fs::read_to_string(&hook_path).expect("read installed hook");
+  assert!(
+    body.contains("gwm commit-msg hook"),
+    "installed hook must carry the gwm marker; got {:?}",
+    body
+  );
 }
 
 // --- labels (issue #81) -------------------------------------------------
@@ -85,6 +344,96 @@ fn labels_list_with_no_declared_labels_is_a_no_op() {
     .assert()
     .success()
     .stdout(predicate::str::contains("0 labels declared"));
+}
+
+// --- sync (issue #24) -------------------------------------------------------
+
+#[test]
+fn sync_unknown_pattern_errors() {
+  // A pattern that resolves to no worktree must fail loudly with the
+  // worktree name, not silently no-op.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["sync", "does-not-exist"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("does-not-exist"));
+}
+
+#[test]
+fn sync_in_repo_without_upstream_reports_missing_upstream() {
+  // `gwm sync` with no pattern targets the CWD worktree. A fresh repo
+  // on `main` with no remote has no upstream → clear, actionable error.
+  let (dir, _repo) = init_repo();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .arg("sync")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("upstream"));
+}
+
+#[test]
+fn sync_from_subdir_names_the_worktree_root_not_the_subdir() {
+  // Regression for the Copilot nit on #172: run from a subdirectory,
+  // the success line must name the worktree root (the dir tracking the
+  // upstream), not the CWD basename. Set up a bare origin + tracking
+  // clone so `gwm sync` reaches the "up to date" success print.
+  use std::process::Command as Git;
+
+  fn git(dir: &Path, args: &[&str]) {
+    let out = Git::new("git")
+      .arg("-C")
+      .arg(dir)
+      .args(["-c", "commit.gpgsign=false"])
+      .args(args)
+      .env("GIT_AUTHOR_NAME", "t")
+      .env("GIT_AUTHOR_EMAIL", "t@t")
+      .env("GIT_COMMITTER_NAME", "t")
+      .env("GIT_COMMITTER_EMAIL", "t@t")
+      .output()
+      .unwrap();
+    assert!(
+      out.status.success(),
+      "git {:?}: {}",
+      args,
+      String::from_utf8_lossy(&out.stderr)
+    );
+  }
+
+  let td = tempfile::TempDir::new().unwrap();
+  let origin = td.path().join("origin");
+  let wt = td.path().join("my-worktree");
+  std::fs::create_dir_all(&origin).unwrap();
+  Git::new("git")
+    .args(["init", "--bare", "-b", "main"])
+    .arg(&origin)
+    .output()
+    .unwrap();
+  Git::new("git").args(["init", "-b", "main"]).arg(&wt).output().unwrap();
+  git(&wt, &["config", "user.email", "t@t"]);
+  git(&wt, &["config", "user.name", "t"]);
+  std::fs::write(wt.join("file.txt"), "base\n").unwrap();
+  git(&wt, &["add", "-A"]);
+  git(&wt, &["commit", "-m", "init"]);
+  git(&wt, &["remote", "add", "origin", origin.to_str().unwrap()]);
+  git(&wt, &["push", "-u", "origin", "main"]);
+
+  let sub = wt.join("src/deep");
+  std::fs::create_dir_all(&sub).unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(&sub)
+    .arg("sync")
+    .assert()
+    .success()
+    // Names the worktree root dir, not the "deep" subdir we ran from.
+    .stdout(predicate::str::contains("my-worktree"))
+    .stdout(predicate::str::contains("deep").not());
 }
 
 #[test]
@@ -449,6 +798,45 @@ fn create_outside_git_repo_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
+fn list_detect_pr_flag_adds_pr_column_with_detected_number() {
+  // E2E (issue #181): `gwm list --detect-pr` shows a PR column populated
+  // by `gh pr list` detection for each worktree's branch.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--detect-pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("PR"))
+    .stdout(predicate::str::contains("#128"));
+}
+
+#[test]
+fn list_without_detect_pr_flag_has_no_pr_column() {
+  // Default `gwm list` stays network-free: no PR column, no `#` markers.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("STATUS"))
+    .stdout(predicate::str::contains("PATH"))
+    .stdout(predicate::str::contains('#').not());
 }
 
 #[test]
@@ -992,6 +1380,74 @@ fn unlink_issue_falls_back_to_branch_name_auto_detect() {
 }
 
 #[test]
+fn status_auto_detects_pr_when_none_explicitly_linked() {
+  // E2E (issue #181): a branch with a GitHub remote and no explicit PR
+  // link. `gwm status --json` should detect the branch's PR via `gh pr
+  // list` and report it with source "detected".
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  // No issue number in the name → isolates the PR-detection path.
+  repo.branch("detect-me", &head, false).unwrap();
+  repo.set_head("refs/heads/detect-me").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    r#"[{"number":128}]"#,
+    r#"{"number":128,"title":"Auto-detect PR","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/128"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["status", "--json"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("\"number\":128"))
+    .stdout(predicate::str::contains("\"source\":\"detected\""));
+}
+
+#[test]
+fn status_explicit_pr_link_wins_over_detection() {
+  // An explicit `gwm link --pr` must not be clobbered by detection: the
+  // reported source stays "explicit" even though `gh pr list` would
+  // return a different number.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("detect-me", &head, false).unwrap();
+  repo.set_head("refs/heads/detect-me").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    r#"[{"number":999}]"#,
+    r#"{"number":61,"title":"Explicit","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/61"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["link", "pr", "61"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["status", "--json"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("\"number\":61"))
+    .stdout(predicate::str::contains("\"source\":\"explicit\""));
+}
+
+#[test]
 fn open_print_url_emits_url_without_spawning_browser() {
   // `--print-url` is the test-friendly mode: we want to assert the URL
   // construction without actually shelling out to `open`/`xdg-open`.
@@ -1160,9 +1616,146 @@ base = "{base}"
 path_pattern = "{{type}}-{{issue}}-{{desc}}"
 branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 "#,
-    base = base.display(),
+    base = toml_basic_string(base),
   );
   std::fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+fn toml_basic_string(path: &Path) -> String {
+  path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn prepend_path(dir: &Path) -> String {
+  let old = std::env::var_os("PATH").unwrap_or_default();
+  let mut paths = vec![dir.to_path_buf()];
+  paths.extend(std::env::split_paths(&old));
+  std::env::join_paths(paths).unwrap().to_string_lossy().into_owned()
+}
+
+/// Fake `gh` that dispatches on the first two args, used to exercise the
+/// PR auto-detection path (issue #181): `gh pr list …` returns
+/// `pr_list_json`, `gh pr view …` returns `pr_view_json`. Both arms emit
+/// the JSON verbatim so the real `find_pr_for_branch` / `fetch_pr` parse
+/// it. Unix + Windows variants so CI stays green on both.
+fn write_dispatch_gh(root: &Path, pr_list_json: &str, pr_view_json: &str) -> PathBuf {
+  #[cfg(unix)]
+  {
+    let script = root.join("gh");
+    fs::write(
+      &script,
+      format!(
+        r#"#!/bin/sh
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s' '{list}'
+elif [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  printf '%s' '{view}'
+fi
+"#,
+        list = pr_list_json.replace('\'', "'\\''"),
+        view = pr_view_json.replace('\'', "'\\''"),
+      ),
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&script).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).unwrap();
+    script
+  }
+  #[cfg(windows)]
+  {
+    let script = root.join("gh.cmd");
+    fs::write(
+      &script,
+      format!(
+        "@echo off\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"list\" echo {list}\r\nif \"%~1\"==\"pr\" if \"%~2\"==\"view\" echo {view}\r\n",
+        list = pr_list_json,
+        view = pr_view_json,
+      ),
+    )
+    .unwrap();
+    script
+  }
+}
+
+fn write_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
+  #[cfg(unix)]
+  {
+    write_unix_fake_gh(root, issue_url)
+  }
+  #[cfg(windows)]
+  {
+    write_windows_fake_gh(root, issue_url)
+  }
+}
+
+#[cfg(unix)]
+fn write_unix_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
+  let script = root.join("gh");
+  fs::write(
+    &script,
+    format!(
+      r#"#!/bin/sh
+printf '%s\n' "$*" > '{args}'
+body_file=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--body-file" ]; then
+    body_file="$arg"
+  fi
+  prev="$arg"
+done
+if [ -n "$body_file" ]; then
+  cp "$body_file" '{body}'
+fi
+printf '%s' '{url}'
+"#,
+      args = root.join("gh-args.txt").display(),
+      body = root.join("gh-body.md").display(),
+      url = issue_url.replace('\'', "'\\''"),
+    ),
+  )
+  .unwrap();
+  let mut perms = fs::metadata(&script).unwrap().permissions();
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
+}
+
+#[cfg(windows)]
+fn write_windows_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
+  let script = root.join("gh.cmd");
+  fs::write(
+    &script,
+    format!(
+      r#"@echo off
+echo %* > "{args}"
+:scan
+if "%~1"=="" goto done
+if "%~1"=="--body-file" (
+  copy "%~2" "{body}" > nul
+)
+shift
+goto scan
+:done
+echo {url}
+"#,
+      args = root.join("gh-args.txt").display(),
+      body = root.join("gh-body.md").display(),
+      url = issue_url.trim(),
+    ),
+  )
+  .unwrap();
+  script
+}
+
+#[test]
+fn test_config_base_path_is_escaped_for_toml_basic_strings() {
+  assert_eq!(
+    toml_basic_string(Path::new(r#"C:\Users\runner\AppData\Local\Temp"#)),
+    r#"C:\\Users\\runner\\AppData\\Local\\Temp"#
+  );
 }
 
 #[test]
@@ -1233,7 +1826,7 @@ from = "seed.env"
 to = "seed.env"
 required = true
 "#,
-    base = base.path().display(),
+    base = toml_basic_string(base.path()),
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
@@ -1254,6 +1847,354 @@ required = true
   assert!(
     body.contains(marker),
     "bootstrap copy must duplicate the source file content"
+  );
+}
+
+#[test]
+fn create_runs_lifecycle_hooks_and_legacy_bootstrap_command_alias() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "record pre-create"
+run = "printf pre-{{branch}}-{{issue}}-{{desc}} > pre-create.txt"
+
+[[hooks.post_create]]
+name = "record post-create"
+run = "printf post-{{branch}} > post-create.txt"
+
+[[bootstrap.command]]
+name = "legacy post-create"
+run = "printf legacy > legacy-post-create.txt"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "hooks"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[pre_create] record pre-create"))
+    .stdout(predicate::str::contains("[post_create] record post-create"))
+    .stdout(predicate::str::contains("[post_create] legacy post-create"));
+
+  let worktree = base.path().join("feat-88-hooks");
+  assert_eq!(
+    std::fs::read_to_string(dir.path().join("pre-create.txt")).unwrap(),
+    "pre-feat/#88-hooks-88-hooks"
+  );
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("post-create.txt")).unwrap(),
+    "post-feat/#88-hooks"
+  );
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("legacy-post-create.txt")).unwrap(),
+    "legacy"
+  );
+}
+
+#[test]
+fn new_creates_issue_from_template_then_creates_worktree() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/issues/142\n");
+  fs::create_dir_all(dir.path().join(".github/ISSUE_TEMPLATE")).unwrap();
+  fs::write(
+    dir.path().join(".github/ISSUE_TEMPLATE/feature_request.yml"),
+    r#"
+name: Feature
+title: "[Feature]: "
+labels: ["feature"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Feature request for {desc}
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - cli
+        - tui
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: "Implement {type}"
+"#,
+  )
+  .unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[issue_template]
+default = "feature_request.yml"
+
+[issue_template.by_type]
+feat = {{ template = "feature_request.yml", surface = "cli", title_prefix = "[Feature]: ", labels = ["enhancement"] }}
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["new", "feat", "add-config-types", "--no-bootstrap"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created issue #142"))
+    .stdout(predicate::str::contains("feat/#142-add-config-types"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  assert!(base.path().join("feat-142-add-config-types").exists());
+  let gh_args_raw = fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  // `cmd.exe`'s `echo %*` keeps the surrounding quotes on quoted args, so
+  // normalise by stripping them before doing substring assertions.
+  let gh_args = gh_args_raw.replace('"', "");
+  assert!(gh_args.contains("issue create"), "{gh_args_raw}");
+  assert!(gh_args.contains("--title [Feature]: add-config-types"), "{gh_args_raw}");
+  assert!(gh_args.contains("--label feature"), "{gh_args_raw}");
+  assert!(gh_args.contains("--label enhancement"), "{gh_args_raw}");
+  let gh_body = fs::read_to_string(fake_bin.path().join("gh-body.md")).unwrap();
+  assert!(gh_body.contains("Feature request for add-config-types"), "{gh_body}");
+  assert!(gh_body.contains("**Surface:** cli"), "{gh_body}");
+  assert!(gh_body.contains("Implement feat"), "{gh_body}");
+}
+
+#[test]
+fn create_pre_create_abort_failure_leaves_no_worktree() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "block create"
+run = "false"
+on_fail = "abort"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "blocked"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("hook pre_create 'block create' failed"));
+
+  assert!(
+    !base.path().join("feat-88-blocked").exists(),
+    "pre_create abort must happen before worktree creation"
+  );
+}
+
+#[test]
+fn create_warn_and_ignore_hook_failures_do_not_abort() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "warn only"
+run = "false"
+on_fail = "warn"
+
+[[hooks.pre_create]]
+name = "ignore failure"
+run = "false"
+on_fail = "ignore"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "nonfatal"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("! [pre_create] warn only"))
+    .stdout(predicate::str::contains("· [pre_create] ignore failure"));
+
+  assert!(base.path().join("feat-88-nonfatal").exists());
+}
+
+#[test]
+fn create_skip_hooks_bypasses_named_phase() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_create]]
+name = "would block"
+run = "false"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "88", "skip", "--skip-hooks", "pre_create"])
+    .assert()
+    .success();
+
+  assert!(base.path().join("feat-88-skip").exists());
+}
+
+#[test]
+fn bootstrap_runs_pre_and_post_bootstrap_hooks() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_bootstrap]]
+name = "before bootstrap"
+run = "printf pre > pre-bootstrap.txt"
+
+[[bootstrap.copy]]
+from = "seed.txt"
+to = "seed.txt"
+required = true
+
+[[hooks.post_bootstrap]]
+name = "after bootstrap"
+run = "printf post > post-bootstrap.txt"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+  std::fs::write(dir.path().join("seed.txt"), "seed").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "88", "boot-hooks", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["bootstrap", "feat-88-boot-hooks"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[pre_bootstrap] before bootstrap"))
+    .stdout(predicate::str::contains("[post_bootstrap] after bootstrap"));
+
+  let worktree = base.path().join("feat-88-boot-hooks");
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("pre-bootstrap.txt")).unwrap(),
+    "pre"
+  );
+  assert_eq!(std::fs::read_to_string(worktree.join("seed.txt")).unwrap(), "seed");
+  assert_eq!(
+    std::fs::read_to_string(worktree.join("post-bootstrap.txt")).unwrap(),
+    "post"
+  );
+}
+
+#[test]
+fn remove_runs_pre_and_post_remove_hooks_and_force_skips_them() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["create", "feat", "88", "remove-hooks", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  let config = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[hooks.pre_remove]]
+name = "block remove"
+run = "false"
+
+[[hooks.post_remove]]
+name = "cleanup"
+run = "printf removed-{{branch}} > post-remove.txt"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "remove-hooks"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("hook pre_remove 'block remove' failed"));
+  assert!(base.path().join("feat-88-remove-hooks").exists());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["remove", "remove-hooks", "--force"])
+    .assert()
+    .success();
+  assert!(!base.path().join("feat-88-remove-hooks").exists());
+  assert!(
+    !dir.path().join("post-remove.txt").exists(),
+    "--force must skip pre_remove and post_remove hooks"
   );
 }
 
@@ -1279,7 +2220,7 @@ from = "seed.env"
 to = "seed.env"
 required = true
 "#,
-    base = base.path().display(),
+    base = toml_basic_string(base.path()),
   );
   std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
 
@@ -1539,6 +2480,172 @@ fn remove_outside_git_repo_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- remove --dry-run / prune --dry-run (issue #31) ---------------------
+
+#[test]
+fn remove_dry_run_prints_plan_and_keeps_worktree_intact() {
+  // Issue #31 contract for `gwm remove --dry-run`: resolve the pattern,
+  // print the would-remove plan (name + path + branch), exit 0, do NOT
+  // touch the worktree directory or the local branch. The user can pipe
+  // the output into a confirmation script.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "31", "preview"])
+    .assert()
+    .success();
+  let wt_dir = base.path().join("feat-31-preview");
+  assert!(wt_dir.exists());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "preview", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("would remove"))
+    .stdout(predicate::str::contains("feat-31-preview"))
+    .stdout(predicate::str::contains("feat/#31-preview"));
+
+  assert!(wt_dir.exists(), "--dry-run must not delete the worktree directory");
+  assert!(
+    repo.find_branch("feat/#31-preview", git2::BranchType::Local).is_ok(),
+    "--dry-run must not delete the local branch"
+  );
+}
+
+#[test]
+fn remove_dry_run_with_delete_branch_flags_branch_deletion() {
+  // When `--delete-branch` is combined with `--dry-run`, the plan must
+  // surface that the branch would be deleted — without actually
+  // dropping it. The user sees a single line that mirrors the live
+  // command's would-do trail.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "32", "preview-drop"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "preview-drop", "--delete-branch", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("would be deleted"));
+
+  assert!(
+    repo
+      .find_branch("feat/#32-preview-drop", git2::BranchType::Local)
+      .is_ok(),
+    "--dry-run --delete-branch must not delete the local branch"
+  );
+}
+
+#[test]
+fn remove_dry_run_on_ambiguous_pattern_still_fails() {
+  // Spec: an ambiguous pattern under `--dry-run` exits non-zero with the
+  // candidate list — same error contract as the regular failure mode.
+  // `--dry-run` only suppresses *destruction*, not resolution failures.
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "33", "ambiguous-one"])
+    .assert()
+    .success();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "34", "ambiguous-two"])
+    .assert()
+    .success();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["remove", "ambiguous", "--dry-run"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("ambiguous"));
+}
+
+#[test]
+fn prune_dry_run_prints_plan_without_pruning() {
+  // Issue #31 contract for `gwm prune --dry-run`: walk the worktree
+  // list, detect prunable entries, print each (name + path + reason),
+  // exit 0, and leave the admin entries in place. The follow-up
+  // (non-dry-run) `gwm prune` is the destructive sibling.
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "35", "stale"])
+    .assert()
+    .success();
+  let wt_dir = base.path().join("feat-35-stale");
+  assert!(wt_dir.exists());
+
+  // Simulate a "working dir missing" prunable: delete the worktree
+  // directory on disk WITHOUT going through `gwm remove`, so the admin
+  // entry under `.git/worktrees/<name>` stays around and libgit2 flags
+  // the worktree as prunable.
+  std::fs::remove_dir_all(&wt_dir).unwrap();
+
+  let admin_dir = dir.path().join(".git").join("worktrees").join("feat-35-stale");
+  assert!(admin_dir.exists(), "precondition: admin entry must still exist");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["prune", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("would prune"))
+    .stdout(predicate::str::contains("feat-35-stale"));
+
+  assert!(admin_dir.exists(), "--dry-run must not remove the prunable admin entry");
+  assert!(
+    repo.find_worktree("feat-35-stale").is_ok(),
+    "--dry-run must leave libgit2's worktree list untouched"
+  );
+}
+
+#[test]
+fn prune_dry_run_reports_no_candidates_when_clean() {
+  // Empty case: a clean repo has nothing to prune. The command exits 0
+  // with a friendly "0 worktree(s) to prune" so scripts that pipe the
+  // output get a stable signal instead of an empty stdout.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["prune", "--dry-run"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("0 worktree"));
 }
 
 // --- trust ledger (issue #95) -------------------------------------------
@@ -1802,7 +2909,7 @@ base = "{base}"
 path_pattern = "{{type}}-{{issue}}-{{desc}}"
 branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 "#,
-      base = base.path().display(),
+      base = toml_basic_string(base.path()),
     ),
   )
   .unwrap();
@@ -1878,4 +2985,1156 @@ fn deny_bootstrap_aborts_even_when_trusted() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("--deny-bootstrap"));
+}
+
+// --- aliases (issue #86) ------------------------------------------------
+
+#[test]
+fn aliases_help_lists_list() {
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd.args(["aliases", "--help"]);
+  cmd.assert().success().stdout(predicate::str::contains("list"));
+}
+
+#[test]
+fn aliases_list_prints_built_in_section_outside_repo() {
+  // `aliases list` is read-only and must work outside a git repo —
+  // built-in clap aliases are static and independent of any repo
+  // config. The user fallback (`~/.config/gwm/aliases.toml`) is
+  // silently empty when missing.
+  let dir = tempfile::TempDir::new().unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    // Isolate the test from the developer's real `~/.config/gwm/aliases.toml`.
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("built-in:"))
+    // Canonical built-in entries from `BUILT_IN_ALIASES`. Assert the full
+    // formatted row (`  <name>  → <expansion>` with width-2 padding) rather
+    // than a loose `contains("s")` — the latter matched incidental letters
+    // in unrelated words (`aliases`, `built-ins`, …) and let the test pass
+    // even when the `s → switch` row was missing or malformed.
+    .stdout(predicate::str::contains("  s  → switch"))
+    .stdout(predicate::str::contains("  cd → path"));
+}
+
+#[test]
+fn aliases_list_prints_repo_aliases_with_source() {
+  // `.gwm.toml` with `[aliases]` ⇒ `aliases list` surfaces them under
+  // the `repo (.gwm.toml):` section.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+wip = "create feat 0 wip"
+ll = "list --format names"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("repo (.gwm.toml)"))
+    .stdout(predicate::str::contains("wip"))
+    .stdout(predicate::str::contains("create feat 0 wip"))
+    .stdout(predicate::str::contains("ll"))
+    .stdout(predicate::str::contains("list --format names"));
+}
+
+#[test]
+fn aliases_list_prints_user_aliases_with_source() {
+  // `~/.config/gwm/aliases.toml` (XDG resolved via `$XDG_CONFIG_HOME`)
+  // surfaces under the user section.
+  let dir = tempfile::TempDir::new().unwrap();
+  let user_cfg = dir.path().join("gwm");
+  std::fs::create_dir_all(&user_cfg).unwrap();
+  std::fs::write(
+    user_cfg.join("aliases.toml"),
+    r#"
+[aliases]
+copy = "path"
+"#,
+  )
+  .unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("user"))
+    .stdout(predicate::str::contains("aliases.toml"))
+    .stdout(predicate::str::contains("copy"))
+    .stdout(predicate::str::contains("path"));
+}
+
+#[test]
+fn aliases_list_repo_overrides_user_for_same_name() {
+  // When repo and user both declare the same alias, the repo entry
+  // takes precedence at expansion time. `aliases list` still prints
+  // BOTH sections so the user can see what's being shadowed.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+copy = "path bar"
+"#,
+  )
+  .unwrap();
+  let user_cfg = dir.path().join("gwm");
+  std::fs::create_dir_all(&user_cfg).unwrap();
+  std::fs::write(
+    user_cfg.join("aliases.toml"),
+    r#"
+[aliases]
+copy = "path foo"
+"#,
+  )
+  .unwrap();
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("path bar"))
+    .stdout(predicate::str::contains("path foo"));
+}
+
+#[test]
+fn aliases_list_surfaces_shadow_error_with_alias_name() {
+  // An invalid alias in `.gwm.toml` must fail `aliases list` with a
+  // message naming the offending entry.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+list = "create feat 0 wip"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["aliases", "list"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("list").and(predicate::str::contains("built-in")));
+}
+
+#[test]
+fn alias_expansion_runs_built_in_subcommand() {
+  // End-to-end expansion: declare `lst = "list --format names"`,
+  // invoke `gwm lst` — must behave as `gwm list --format names`.
+  // The repo has no worktrees yet so the names output is just empty.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+lst = "list --format names"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .arg("lst")
+    .assert()
+    .success();
+}
+
+#[test]
+fn alias_expansion_preserves_trailing_user_args() {
+  // `gwm typ` with `typ = "types"` plus a trailing `--help` must
+  // surface clap's `types` help (or success), proving the trailing
+  // arg made it through the expansion.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+typ = "types"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["typ", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("branch types"));
+}
+
+#[test]
+fn alias_does_not_shadow_built_in_subcommand_at_runtime() {
+  // Even if a hostile `.gwm.toml` somehow tries to alias `types`,
+  // the load gate refuses — `gwm types` always reaches the
+  // built-in. This is the "defence in depth" pillar of the design.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[aliases]
+types = "list"
+"#,
+  )
+  .unwrap();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .args(["types"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("types"));
+}
+
+// --- argv robustness (issue #86 — Copilot follow-up) --------------------
+
+#[cfg(unix)]
+#[test]
+fn binary_tolerates_non_utf8_argv() {
+  // `std::env::args()` panics if any argv entry is non-UTF-8, which is
+  // a regression vs. clap's default `args_os` handling. The binary
+  // must NOT abort the process on a perfectly valid OS argv just
+  // because someone passed bytes that don't decode as UTF-8.
+  //
+  // We don't care about the exit code per se — the contract is "no
+  // panic, no SIGABRT". clap may legitimately reject the unknown
+  // subcommand and exit non-zero (UsageError = 2), which is fine.
+  // What we forbid is the process aborting before clap even sees
+  // the args.
+  use std::ffi::OsString;
+  use std::os::unix::ffi::OsStringExt;
+
+  let dir = tempfile::TempDir::new().unwrap();
+  let invalid_utf8: OsString = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
+
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("XDG_CONFIG_HOME", dir.path())
+    .env("HOME", dir.path())
+    .arg(&invalid_utf8)
+    .output()
+    .expect("binary must launch");
+
+  // Reject SIGABRT / SIGSEGV / SIGILL — anything that indicates the
+  // process died on a signal rather than exited normally. On Unix,
+  // signal deaths surface as `status.code() == None` from `assert_cmd`.
+  assert!(
+    output.status.code().is_some(),
+    "binary died on a signal (likely a panic abort) when given non-UTF-8 argv; stderr={:?}",
+    String::from_utf8_lossy(&output.stderr)
+  );
+
+  // Belt-and-suspenders: the stderr should not contain the libstd panic
+  // banner for invalid UTF-8 in argv.
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    !stderr.contains("invalid utf-8") && !stderr.contains("panicked at"),
+    "binary panicked instead of gracefully handling non-UTF-8 argv: {}",
+    stderr
+  );
+}
+
+// --- Issue #29: gwm history + gwm undo --------------------------------------
+
+/// Seed a journal file at `path` with a single recorded `remove` op
+/// rooted at `repo_root` (canonical form). The OID is a synthetic 40-
+/// char hex string the journal accepts verbatim — `gwm history` is a
+/// read-only listing so it never resolves the OID against the object
+/// DB, which means we don't need to seed a matching commit.
+///
+/// `repo_root` is escaped via `toml_basic_string` because Windows
+/// paths (`\\?\C:\...`) contain backslashes that TOML treats as
+/// escape sequences; without the escape the parser fails with
+/// "missing escaped value, expected b, e, f, n, r, \\, …".
+fn write_seed_history(path: &Path, repo_root: &Path, worktree: &str, branch: &str) {
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "{worktree}"
+branch = "{branch}"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/{worktree}"
+deleted_branch = false
+repo_root = "{repo_root}"
+"#,
+    repo_root = toml_basic_string(repo_root),
+  );
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(path, body).unwrap();
+}
+
+#[test]
+fn history_empty_journal_reports_no_ops() {
+  // Empty case: a fresh repo with no recorded operations must print
+  // a clear "no operations recorded" line and exit 0. Scripted callers
+  // (e.g. `gwm history | head -n1`) need a stable signal — silent
+  // stdout would force them to also check `$?` to disambiguate.
+  let (dir, _) = init_repo();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no operations recorded"));
+}
+
+#[test]
+fn history_lists_recorded_remove_op() {
+  // Happy path: a seeded journal with one `remove` op produces a
+  // single-row listing carrying the worktree name. The exact
+  // column shape is intentionally flexible — we pin only the
+  // load-bearing tokens (kind = `remove`, worktree name) so the
+  // formatter can evolve without test churn.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+  write_seed_history(&history_file, &repo_root, "feat-29-foo", "feat/#29-foo");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("remove"))
+    .stdout(predicate::str::contains("feat-29-foo"));
+}
+
+#[test]
+fn history_filters_to_current_repo_by_default() {
+  // Two ops recorded against two different repos. From inside
+  // repo A, `gwm history` must surface ONLY the entry whose
+  // `repo_root` matches the current repo — the per-repo
+  // separation contract.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // Seed two ops: one for the current repo, one for a fake "other-repo"
+  // path. Only the first should surface in the default listing.
+  // `toml_basic_string` escapes the repo path for TOML — Windows
+  // canonical paths (`\\?\C:\…`) would otherwise break the parser.
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-here-foo"
+branch = "feat/#1-here"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-here-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+
+[[op]]
+ts = "2026-05-19T09:00:00Z"
+kind = "remove"
+worktree = "feat-elsewhere-bar"
+branch = "feat/#2-elsewhere"
+branch_oid = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1"
+path = "/tmp/cc-worktree/feat-elsewhere-bar"
+deleted_branch = false
+repo_root = "/nonexistent/other-repo"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  if let Some(parent) = history_file.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("history")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-here-foo"))
+    .stdout(predicate::str::contains("feat-elsewhere-bar").not());
+}
+
+#[test]
+fn remove_records_journal_entry_before_destruction() {
+  // Issue #29: `gwm remove <name>` must write a journal entry naming
+  // the doomed worktree + branch + OID BEFORE the destructive call
+  // runs. Without this hook `gwm undo` has nothing to replay. The
+  // assertion is intentionally loose on the exact TOML shape — we
+  // pin only that the journal file exists, is non-empty, and
+  // contains the worktree name we asked to remove.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  // Seed a worktree the test will then remove.
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "29", "doomed", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // No journal entry should exist yet — `gwm create` does NOT hook
+  // the journal (only destructive ops do).
+  assert!(
+    !history_file.exists() || std::fs::read_to_string(&history_file).unwrap().trim().is_empty(),
+    "create must not record a journal entry"
+  );
+
+  // Now remove it — the journal must capture the op.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-29-doomed"])
+    .assert()
+    .success();
+
+  assert!(
+    history_file.exists(),
+    "remove must create the journal file at {}",
+    history_file.display()
+  );
+  let body = std::fs::read_to_string(&history_file).unwrap();
+  assert!(
+    body.contains("feat-29-doomed"),
+    "journal must record the removed worktree name; got:\n{}",
+    body
+  );
+  assert!(
+    body.contains("kind = \"remove\""),
+    "journal must record kind = remove; got:\n{}",
+    body
+  );
+  assert!(
+    body.contains("feat/#29-doomed"),
+    "journal must record the branch name; got:\n{}",
+    body
+  );
+}
+
+#[test]
+fn remove_dry_run_does_not_record_journal_entry() {
+  // The dry-run flag (issue #31) gives the user a preview without
+  // touching state. The journal hook MUST gate on the destructive
+  // path only — a `--dry-run` invocation that wrote to the journal
+  // would let the user "undo" something that never happened.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "31", "preview", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // dry-run must not write to the journal.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-31-preview", "--dry-run"])
+    .assert()
+    .success();
+
+  assert!(
+    !history_file.exists() || std::fs::read_to_string(&history_file).unwrap().trim().is_empty(),
+    "remove --dry-run must NOT write to the journal; got: {:?}",
+    std::fs::read_to_string(&history_file).ok()
+  );
+}
+
+#[test]
+fn undo_recreates_branch_and_worktree_after_remove() {
+  // The full round-trip contract: create → remove → undo. After
+  // `gwm undo`, the worktree dir must exist again AND the local
+  // branch must resolve. The journal entry must be consumed.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  // 1. Create.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "29", "undo-rt", "--no-bootstrap"])
+    .assert()
+    .success();
+  let wt_path = base.path().join("feat-29-undo-rt");
+  assert!(wt_path.exists(), "create must produce the worktree dir");
+
+  // 2. Remove (with --delete-branch so we exercise the harder
+  //    resurrection path).
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-29-undo-rt", "--delete-branch"])
+    .assert()
+    .success();
+  assert!(!wt_path.exists(), "remove must drop the worktree dir");
+
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.find_branch("feat/#29-undo-rt", git2::BranchType::Local).is_err(),
+    "remove --delete-branch must drop the local branch"
+  );
+
+  // 3. Undo. The branch must come back at the same OID, and the
+  //    worktree dir must reappear.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("recreated branch"))
+    .stdout(predicate::str::contains("re-added worktree"));
+
+  assert!(wt_path.exists(), "undo must restore the worktree dir");
+  let repo = git2::Repository::open(dir.path()).unwrap();
+  assert!(
+    repo.find_branch("feat/#29-undo-rt", git2::BranchType::Local).is_ok(),
+    "undo must recreate the local branch"
+  );
+
+  // 4. The journal entry is consumed — a second undo errors with
+  //    "nothing to undo".
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("nothing to undo"));
+}
+
+#[test]
+fn undo_refuses_detached_head_entry_with_clear_error() {
+  // PR #155 Copilot review: a journal entry with `branch = ""` (the
+  // serialised form of `branch: None`) flags a worktree that was
+  // removed while on a detached HEAD. The pre-fix code fell back to
+  // `branch_name = "HEAD"` and called `worktree::add`, which either
+  // failed at the libgit2 level (invalid refname) or created a real
+  // branch named "HEAD" — a foot-gun. The fix surfaces a clear
+  // error message so the user knows the limitation and can file a
+  // follow-up if it matters.
+  //
+  // We seed the journal directly with a `branch = ""` entry rather
+  // than going through `gwm create / gwm remove` because the create
+  // path always attaches a branch — there's no shortcut to a
+  // detached-HEAD worktree from the CLI. The fixture matches what
+  // serde produces for `Option<String>::None` once round-tripped
+  // through TOML.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // Direct TOML seed without a `branch` key — serde will deserialise
+  // it as `Option::None`, which is the detached-HEAD discriminator.
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-detached-foo"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-detached-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("detached-HEAD"));
+}
+
+#[test]
+fn history_with_zero_limit_prints_nothing_but_does_not_lie() {
+  // PR #155 Copilot review: `--limit 0` used to truncate the row list
+  // to empty, which then triggered the "no operations recorded"
+  // branch — factually wrong when ops exist, and breaks the scripted
+  // signal callers rely on. The fix prints nothing and exits 0,
+  // leaving the "no operations recorded" sentinel reserved for the
+  // truly-empty case.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+  write_seed_history(&history_file, &repo_root, "feat-zero-foo", "feat/#1-zero");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["history", "--limit", "0"])
+    .assert()
+    .success()
+    .stdout(predicate::eq(""));
+}
+
+#[test]
+fn undo_with_empty_journal_errors_clearly() {
+  // A clean install with no recorded operations: `gwm undo` must
+  // exit non-zero with a clear "nothing to undo" message — silent
+  // success would mislead users into thinking the previous op was
+  // already undone.
+  let (dir, _) = init_repo();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("nothing to undo"));
+}
+
+#[test]
+fn history_all_flag_surfaces_every_repo() {
+  // `--all` opt-out from the per-repo filter: useful for power users
+  // grepping the journal for forensic purposes. Both entries must
+  // appear in the listing.
+  let (dir, _) = init_repo();
+  let repo_root = dir.path().canonicalize().unwrap();
+  let tmp = tempfile::TempDir::new().unwrap();
+  let history_file = tmp.path().join("history.toml");
+
+  // `toml_basic_string` escapes the repo path for TOML so this seed
+  // parses on Windows (canonical paths there start with `\\?\C:\…`).
+  let body = format!(
+    r#"[[op]]
+ts = "2026-05-19T08:42:11Z"
+kind = "remove"
+worktree = "feat-here-foo"
+branch = "feat/#1-here"
+branch_oid = "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"
+path = "/tmp/cc-worktree/feat-here-foo"
+deleted_branch = false
+repo_root = "{repo_root}"
+
+[[op]]
+ts = "2026-05-19T09:00:00Z"
+kind = "remove"
+worktree = "feat-elsewhere-bar"
+branch = "feat/#2-elsewhere"
+branch_oid = "b2c3d4e5f60718293a4b5c6d7e8f9012345678a1"
+path = "/tmp/cc-worktree/feat-elsewhere-bar"
+deleted_branch = false
+repo_root = "/nonexistent/other-repo"
+"#,
+    repo_root = toml_basic_string(&repo_root),
+  );
+  std::fs::create_dir_all(history_file.parent().unwrap()).unwrap();
+  std::fs::write(&history_file, body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["history", "--all"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat-here-foo"))
+    .stdout(predicate::str::contains("feat-elsewhere-bar"));
+}
+
+// --- gwm pr (issue #84) -------------------------------------------------
+
+/// Build a `feat/#<issue>-<desc>` branch on top of `main` carrying one
+/// extra commit so `git log main..HEAD` and `git diff --stat main..HEAD`
+/// produce non-empty output for the `{commits}` and `{files_changed}`
+/// placeholders. Switches the working tree to that branch.
+fn make_feature_branch_with_commit(
+  repo: &git2::Repository,
+  workdir: &std::path::Path,
+  branch: &str,
+  filename: &str,
+  contents: &str,
+  message: &str,
+) {
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  let branch_ref = repo.branch(branch, &head, false).unwrap();
+  let ref_name = branch_ref.into_reference().name().unwrap().to_string();
+  repo.set_head(&ref_name).unwrap();
+  repo
+    .checkout_head(Some(git2::build::CheckoutBuilder::new().force()))
+    .unwrap();
+
+  let dest = workdir.join(filename);
+  if let Some(parent) = dest.parent() {
+    std::fs::create_dir_all(parent).unwrap();
+  }
+  std::fs::write(&dest, contents).unwrap();
+  let mut index = repo.index().unwrap();
+  index.add_path(std::path::Path::new(filename)).unwrap();
+  index.write().unwrap();
+  let tree_id = index.write_tree().unwrap();
+  let tree = repo.find_tree(tree_id).unwrap();
+  let sig = git2::Signature::now("gwm-test", "gwm@test").unwrap();
+  repo.commit(Some("HEAD"), &sig, &sig, message, &tree, &[&head]).unwrap();
+}
+
+#[test]
+fn pr_render_prints_body_with_placeholders_substituted() {
+  // `gwm pr --render` resolves the template configured for the current
+  // branch type, substitutes the placeholders against the current
+  // branch's context (type / issue / desc / base / head / commits /
+  // files_changed), and prints the rendered Markdown to stdout. It
+  // never shells out to `gh` — the canonical pipe-friendly form is
+  // `gwm pr --render | gh pr create --body-file -`.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "docs/note.md",
+    "hello pr\n",
+    "✨ feat: pr templates",
+  );
+
+  let body = r###"
+[pr_template.by_type.feat]
+body = """
+## Summary
+
+{desc} (#{issue})
+
+## Commits
+
+{commits}
+
+## Files changed
+
+{files_changed}
+"""
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("pr-templates (#84)"))
+    .stdout(predicate::str::contains("- ✨ feat: pr templates"))
+    .stdout(predicate::str::contains("docs/note.md"));
+}
+
+#[test]
+fn pr_creates_pull_request_via_gh() {
+  // `gwm pr` (no `--render`) renders the body, writes it to a temp
+  // file, and shells out to `gh pr create --title … --body-file …
+  // --head <branch>`. The fake gh prints a PR URL so the CLI can
+  // surface the new number in stdout.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/x.rs",
+    "fn x() {}\n",
+    "✨ feat: x",
+  );
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/pull/321\n");
+
+  let body = r###"
+[pr_template.by_type.feat]
+body = "## Summary\n{desc} (#{issue})\n"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created PR #321"))
+    .stdout(predicate::str::contains("https://github.com/acme/widgets/pull/321"));
+
+  let gh_args_raw = std::fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  let gh_args = gh_args_raw.replace('"', "");
+  assert!(gh_args.contains("pr create"), "{gh_args_raw}");
+  assert!(gh_args.contains("--head feat/#84-pr-templates"), "{gh_args_raw}");
+  let gh_body = std::fs::read_to_string(fake_bin.path().join("gh-body.md")).unwrap();
+  assert!(gh_body.contains("pr-templates (#84)"), "{gh_body}");
+}
+
+#[test]
+fn pr_draft_flag_is_forwarded_to_gh() {
+  // `gwm pr --draft` passes `--draft` through to `gh pr create` so the
+  // resulting PR opens as a draft instead of a normal review-ready PR.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/y.rs",
+    "fn y() {}\n",
+    "✨ feat: y",
+  );
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_fake_gh(fake_bin.path(), "https://github.com/acme/widgets/pull/777\n");
+
+  let body = r###"
+[pr_template.by_type.feat]
+body = "draft body for {desc}"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["pr", "--draft"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created PR #777"));
+
+  let gh_args_raw = std::fs::read_to_string(fake_bin.path().join("gh-args.txt")).unwrap();
+  let gh_args = gh_args_raw.replace('"', "");
+  assert!(gh_args.contains("--draft"), "{gh_args_raw}");
+}
+
+#[test]
+fn pr_falls_back_to_common_trunk_when_configured_trunks_do_not_resolve() {
+  // If `[doctor].trunks` only lists refs that don't exist locally
+  // (e.g. a repo customised the list but the trunk hasn't been
+  // created yet, or the repo uses `master`), `gwm pr` must still
+  // find a sensible base ref by walking the common trunk names
+  // (`main` / `master` / `dev` / `develop` / `trunk`) before giving
+  // up — otherwise `{commits}` / `{files_changed}` come out empty
+  // and the user has no signal as to why (Copilot review on PR #164).
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-fallback",
+    "src/fallback.rs",
+    "fn fb() {}\n",
+    "✨ feat: fallback",
+  );
+
+  let body = r###"
+[doctor]
+trunks = ["nonexistent-trunk"]
+
+[pr_template.by_type.feat]
+body = "summary: {desc} (#{issue})\ncommits:\n{commits}\n"
+"###;
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("fallback (#84)"))
+    .stdout(predicate::str::contains("- ✨ feat: fallback"));
+}
+
+#[test]
+fn pr_errors_when_no_template_configured() {
+  // Without any `[pr_template]` block in `.gwm.toml`, `gwm pr` exits
+  // non-zero with a hint about the missing config — same shape as the
+  // `gwm new` failure for an unconfigured branch type.
+  let (dir, repo) = init_repo();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/z.rs",
+    "fn z() {}\n",
+    "✨ feat: z",
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), "").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("pr_template"))
+    .stderr(predicate::str::contains("feat"));
+}
+
+// --- gwm tui keys (issue #87) -------------------------------------------
+
+#[test]
+fn tui_keys_lists_default_bindings() {
+  // The bare invocation prints the full resolved keymap as a
+  // human-readable table. Default surface ships with `down → j, Down`,
+  // `top → g g`, `quit → q`, … — assert the canary rows so a regression
+  // in the table layout or the defaults map fails loudly.
+  let (dir, _) = init_repo();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["tui", "keys"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("down"))
+    .stdout(predicate::str::contains("j"))
+    .stdout(predicate::str::contains("top"))
+    .stdout(predicate::str::contains("g g"))
+    .stdout(predicate::str::contains("quit"))
+    .stdout(predicate::str::contains("default"));
+}
+
+#[test]
+fn tui_keys_marks_user_overrides_in_source_column() {
+  // When the user overrides a binding via `[tui.keys]`, the source
+  // column for that row flips from `default` to a non-default marker
+  // (we use `.gwm.toml`). The other rows keep `default`.
+  let (dir, _) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[tui.keys]
+down = ["Ctrl+n"]
+"#,
+  )
+  .unwrap();
+
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["tui", "keys"])
+    .assert()
+    .success()
+    .get_output()
+    .clone();
+
+  let stdout = String::from_utf8(output.stdout).unwrap();
+  // Find the `down` row and assert it carries the user-config marker.
+  let down_line = stdout
+    .lines()
+    .find(|l| l.starts_with("down"))
+    .unwrap_or_else(|| panic!("expected a `down` row in:\n{stdout}"));
+  assert!(
+    down_line.contains("Ctrl+n"),
+    "expected `down` row to show the override, got: {down_line}"
+  );
+  assert!(
+    down_line.contains(".gwm.toml"),
+    "expected `down` row source to be `.gwm.toml`, got: {down_line}"
+  );
+  // `up` was not overridden — must still read as default.
+  let up_line = stdout
+    .lines()
+    .find(|l| l.starts_with("up"))
+    .unwrap_or_else(|| panic!("expected an `up` row in:\n{stdout}"));
+  assert!(
+    up_line.contains("default"),
+    "expected `up` row source to stay `default`, got: {up_line}"
+  );
+}
+
+// --- gwm theme list / show (issue #33) ----------------------------------
+
+#[test]
+fn theme_list_includes_builtin_presets() {
+  // `gwm theme list` prints the names of every built-in preset
+  // shipped by the binary. Catppuccin is the named example in the
+  // issue; the exact catalogue can grow over time.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "list"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("catppuccin"))
+    .stdout(predicate::str::contains("claude-dark"));
+}
+
+#[test]
+fn theme_show_claude_dark_emits_the_orange_accent_as_hex() {
+  // The Claude dark port (#185) is RGB-based, so `theme show` must
+  // render its accent as a copy-pasteable `#RRGGBB` string that
+  // round-trips through the `[theme]` parser.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "claude-dark"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[theme]"))
+    .stdout(predicate::str::contains("#d4825d"));
+}
+
+#[test]
+fn theme_show_emits_toml_block_users_can_copy() {
+  // `gwm theme show catppuccin` dumps a `[theme]` block that, when
+  // pasted into a `.gwm.toml`, reproduces the preset.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[theme]"))
+    .stdout(predicate::str::contains("focus"));
+}
+
+#[test]
+fn theme_show_rejects_unknown_preset() {
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "does-not-exist"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("does-not-exist"));
+}
+
+#[test]
+fn theme_show_output_round_trips_through_gwm_toml() {
+  // Copilot review on PR #168 caught that `Color::Indexed(n)` was
+  // emitted as a bare integer, breaking the round-trip because
+  // `ThemeConfig.overrides` is a `BTreeMap<String, String>` and
+  // TOML integers won't deserialise as `String`. Pin the
+  // round-trip contract end-to-end: capture stdout, drop the
+  // first `preset = "…"` line (preset is a dedicated field, not
+  // an override), write the rest as `.gwm.toml`, reload, assert
+  // no error.
+  let (dir, _) = init_repo();
+  let output = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "catppuccin"])
+    .assert()
+    .success()
+    .get_output()
+    .clone();
+  let toml_block = String::from_utf8(output.stdout).unwrap();
+  // Pasting verbatim into a fresh `.gwm.toml` and reloading must
+  // succeed — every value in the block has to be a TOML string.
+  let target = dir.path().join(".gwm.toml");
+  std::fs::write(&target, &toml_block).unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor"])
+    .assert()
+    // doctor's exit code may be 0 or 1 depending on local env
+    // (it's advisory). What matters is that the config parses —
+    // a TOML parse error would produce a `failed` config check
+    // and exit code 2 / a hard error before doctor runs. We
+    // assert the absence of "invalid TOML" / "config error" in
+    // stderr to pin the round-trip.
+    .stderr(predicate::str::contains("invalid TOML").not())
+    .stderr(predicate::str::contains("config error").not());
 }

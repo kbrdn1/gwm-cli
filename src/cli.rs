@@ -1,14 +1,22 @@
 use crate::bootstrap::{self, BootstrapCtx};
 use crate::config::Config;
+use crate::config_cli;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use crate::gitmoji;
+use crate::history::{self, OpEntry};
+use crate::hooks;
+use crate::issue_templates;
 use crate::labels::{self, LabelDiff};
+use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::BranchSpec;
+use crate::naming::{parse_branch, BranchSpec};
+use crate::pr_templates::{self, PrTemplateContext};
+use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
@@ -75,6 +83,12 @@ pub enum Command {
     /// Output format. `names` prints one worktree name per line (for shell completion).
     #[arg(long, value_enum, default_value_t = ListFormat::Table)]
     format: ListFormat,
+    /// Add a PR column, auto-detecting each worktree's pull request via
+    /// `gh pr list --head <branch>` (issue #181). Off by default: it
+    /// makes one `gh` call per worktree, so the plain listing stays
+    /// network-free. Ignored with `--format names`.
+    #[arg(long)]
+    detect_pr: bool,
   },
   /// Create a new worktree (and matching branch).
   Create {
@@ -96,6 +110,55 @@ pub enum Command {
     /// stale tip so the user can audit it.
     #[arg(long)]
     reuse_branch: bool,
+    /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
+  },
+  /// Render the PR body from `[pr_template]` (issue #84), then
+  /// `gh pr create` unless `--render` is passed.
+  ///
+  /// Without `--render`, the rendered Markdown is written to a temp
+  /// file and shelled out to `gh pr create --title <subject> --body-file
+  /// <tmp> --head <branch>` (plus `--draft` and `--base` when
+  /// specified). The body resolution honours
+  /// `[pr_template.by_type.<type>]` (inline `body` wins over per-type
+  /// `path`), then `[pr_template].default` as a fallback.
+  ///
+  /// Placeholders substituted by the template engine:
+  ///   `{type}` `{issue}` `{desc}` `{base}` `{head}` `{repo}`
+  ///   `{commits}`        — `git log --pretty='- %s' base..head`
+  ///   `{files_changed}`  — `git diff --stat base..head`, capped 30 lines
+  Pr {
+    /// Render the body to stdout instead of creating the PR. The output
+    /// is suitable for piping into `gh pr create --body-file -`.
+    #[arg(long)]
+    render: bool,
+    /// Create the PR as a draft (shells out to `gh pr create --draft`).
+    /// Ignored when `--render` is set.
+    #[arg(long, conflicts_with = "render")]
+    draft: bool,
+    /// Override the base ref to compare against (defaults to the
+    /// resolved trunk from `[doctor].trunks`, then `main`).
+    #[arg(long, value_name = "REF")]
+    base: Option<String>,
+  },
+  /// Create a GitHub issue from templates, then create its worktree.
+  New {
+    /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
+    #[arg()]
+    branch_type: String,
+    /// Short description (kebab-case, will be normalized).
+    #[arg()]
+    desc: String,
+    /// Skip bootstrap after creation.
+    #[arg(long)]
+    no_bootstrap: bool,
+    /// Attach the new worktree to an already-existing local branch of the same name.
+    #[arg(long)]
+    reuse_branch: bool,
+    /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
   },
   /// Remove a worktree by fuzzy name match.
   Remove {
@@ -103,6 +166,19 @@ pub enum Command {
     /// Also delete the branch.
     #[arg(long)]
     delete_branch: bool,
+    /// Print the resolved worktree (name + path + branch + would-delete-branch
+    /// flag) without touching anything. Exit code 0. If the pattern is
+    /// ambiguous, the same non-zero candidate-list error fires as in the
+    /// destructive form — `--dry-run` only suppresses *destruction*, not
+    /// resolution failures. Issue #31.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emergency removal mode: skip pre_remove and post_remove hooks.
+    #[arg(long)]
+    force: bool,
+    /// Skip lifecycle hooks for comma-separated phases.
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
   },
   /// Print the on-disk path of a worktree (use `$(gwm path …)` to cd into it).
   ///
@@ -114,16 +190,87 @@ pub enum Command {
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
     target: Option<String>,
+    /// Skip lifecycle hooks for comma-separated phases.
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
+  },
+  /// Fetch + rebase (or merge) a worktree's branch onto its upstream.
+  ///
+  /// Resolves the target worktree (defaults to the CWD worktree when
+  /// no pattern is given), runs `git fetch` for its upstream's remote,
+  /// then rebases the branch onto the upstream — or merges with
+  /// `--merge`. Reports the outcome with the same ✓ / ! / ✗ sigils as
+  /// the rest of gwm.
+  ///
+  /// Refuses up front on a dirty working tree (commit or stash first)
+  /// and on a branch with no upstream configured. A conflicting
+  /// rebase/merge is aborted so the worktree stays usable, and the
+  /// user is told to reconcile by hand. Issue #24.
+  Sync {
+    /// Worktree name/pattern; defaults to the worktree containing the CWD.
+    pattern: Option<String>,
+    /// Merge the upstream instead of rebasing onto it.
+    #[arg(long)]
+    merge: bool,
   },
   /// Prune stale worktree references (admin files without a working dir).
-  Prune,
+  Prune {
+    /// List the prunable worktrees (name + path + reason) without
+    /// touching the admin entries. Exit code 0. Useful for piping into
+    /// a confirmation script before running the destructive form.
+    /// Issue #31.
+    #[arg(long)]
+    dry_run: bool,
+  },
   /// Diagnose the gwm setup (config, env, worktree state).
   ///
   /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
   /// suitable for CI / pre-commit hooks.
   Doctor,
   /// List the supported branch types.
-  Types,
+  ///
+  /// Pass `--gitmoji` to extend the output with two more columns: the
+  /// resolved emoji (unicode) and its `:shortcode:` form (issue #85).
+  /// The shortcode mapping is the built-in default plus any per-repo
+  /// overrides under `[gitmoji]` in `.gwm.toml`.
+  Types {
+    /// Show the resolved emoji + shortcode for each branch type
+    /// (issue #85). Without the flag, only `name` + `description`
+    /// are printed — matches the pre-#85 surface.
+    #[arg(long)]
+    gitmoji: bool,
+  },
+  /// Print the Gitmoji + Conventional Commits prefix for the current
+  /// (or named) branch (issue #85).
+  ///
+  /// Output shape: `:sparkles: feat(#41):` — the canonical commit
+  /// prefix used across this repo (see CONTRIBUTING.md §Commits).
+  /// `--unicode` substitutes the shortcode for the real emoji
+  /// character (e.g. `✨` instead of `:sparkles:`); useful for shell
+  /// prompts and the bundled `commit-msg` hook.
+  ///
+  /// Without `--branch`, reads the current branch from HEAD via
+  /// libgit2 — requires the CWD to be inside a git repo.
+  CommitPrefix {
+    /// Branch name to resolve (e.g. `feat/#41-tui-search`). When
+    /// omitted, defaults to HEAD of the current repo.
+    #[arg(long)]
+    branch: Option<String>,
+    /// Emit the real emoji character (`✨`) instead of the
+    /// shortcode form (`:sparkles:`).
+    #[arg(long)]
+    unicode: bool,
+  },
+  /// Manage git hooks installed by `gwm` (issue #85).
+  ///
+  /// Currently exposes a single hook: `commit-msg`, which
+  /// auto-prepends the resolved Gitmoji + Conventional Commits
+  /// prefix when the commit message doesn't already start with one.
+  /// Hooks are **opt-in** — `gwm` never installs them implicitly.
+  Hooks {
+    #[command(subcommand)]
+    action: HooksAction,
+  },
   /// Generate a shell completion script on stdout.
   ///
   /// Install (zsh):  `gwm completions zsh > $fpath[1]/_gwm`
@@ -278,6 +425,193 @@ pub enum Command {
     #[command(subcommand)]
     action: TrustAction,
   },
+  /// List the resolved CLI aliases (built-in + repo + user). Issue #86.
+  ///
+  /// `gwm aliases list` surfaces every alias reachable from `gwm
+  /// <name>`, grouped by source: `built-in` (clap `visible_alias`
+  /// set), `repo (.gwm.toml)`, `user (~/.config/gwm/aliases.toml)`.
+  /// The resolution chain favours repo aliases over user aliases when
+  /// both declare the same name, but both rows are still printed so
+  /// the user can see what's being shadowed.
+  Aliases {
+    #[command(subcommand)]
+    action: AliasesAction,
+  },
+  /// Read, edit, and validate `.gwm.toml` values (issue #89).
+  Config {
+    #[command(subcommand)]
+    action: ConfigAction,
+  },
+  /// List the recent destructive operations recorded by `gwm`
+  /// (issue #29). One line per op, newest first, with timestamp,
+  /// kind, and worktree name.
+  ///
+  /// Defaults to the current repo only — pass `--all` to list ops
+  /// across every repo in the journal. The journal file lives at
+  /// `$GWM_HISTORY_FILE` if set, otherwise
+  /// `$XDG_DATA_HOME/gwm/history.toml`.
+  History {
+    /// Maximum number of entries to print (newest first). Default 20.
+    #[arg(long, default_value_t = 20)]
+    limit: usize,
+    /// Show ops across every repo, not just the current one. Useful
+    /// for power users grepping the journal for forensic purposes.
+    #[arg(long)]
+    all: bool,
+  },
+  /// Undo the most recent destructive operation recorded for the
+  /// current repo (issue #29). Recreates the branch at the saved
+  /// OID, re-adds the worktree at the saved path, then drops the
+  /// entry from the journal.
+  ///
+  /// Pass `--bootstrap` to re-run the per-worktree bootstrap after
+  /// the resurrection (off by default — bootstrap can be expensive
+  /// and the user often just wants the directory back).
+  Undo {
+    /// Re-run bootstrap after the worktree is re-added. Off by
+    /// default to keep undo cheap.
+    #[arg(long)]
+    bootstrap: bool,
+  },
+  /// TUI introspection / debugging subcommands (issue #87).
+  ///
+  /// Today exposes a single child — `keys` — which prints the
+  /// resolved keymap (built-in defaults layered with `[tui.keys]`
+  /// overrides from `.gwm.toml`). Reserved as a sub-tree so future
+  /// TUI knobs (`gwm tui themes`, `gwm tui dump-state`, …) have a
+  /// stable home without further crowding the top-level surface.
+  Tui {
+    #[command(subcommand)]
+    action: TuiAction,
+  },
+  /// TUI theme subcommands (issue #33).
+  ///
+  /// `gwm theme list` prints the names of every built-in preset.
+  /// `gwm theme show <name>` dumps the preset as a `[theme]` TOML
+  /// block the user can paste into `.gwm.toml`.
+  Theme {
+    #[command(subcommand)]
+    action: ThemeAction,
+  },
+}
+
+/// Subcommands of `gwm theme` (issue #33).
+#[derive(Debug, Subcommand)]
+pub enum ThemeAction {
+  /// List the names of every built-in preset.
+  List,
+  /// Print a preset as a copy-pasteable `[theme]` TOML block.
+  Show {
+    /// Preset name (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`, …).
+    name: String,
+  },
+}
+
+/// Subcommands of `gwm tui` (issue #87).
+#[derive(Debug, Subcommand)]
+pub enum TuiAction {
+  /// Print the resolved TUI keymap (built-in defaults + `[tui.keys]`
+  /// overrides, with the source per row).
+  ///
+  /// Output shape:
+  /// ```text
+  /// action            keys              source
+  /// down              j, Down           default
+  /// up                Ctrl+n            .gwm.toml
+  /// top               g g               default
+  /// …
+  /// ```
+  ///
+  /// The action column lists the slugs accepted in `[tui.keys]`;
+  /// the keys column shows every chord bound to that action
+  /// (comma-separated). Empty keys = action is currently unbound
+  /// (the user explicitly cleared it).
+  Keys,
+}
+
+/// Subcommands of `gwm aliases` (issue #86). Read-only for now —
+/// declarative editing of the alias set stays in TOML files where
+/// users can grep / diff / version-control them. A future `add` /
+/// `remove` could land if real usage justifies it.
+#[derive(Debug, Subcommand)]
+pub enum AliasesAction {
+  /// Print the resolved alias chain (built-in / repo / user).
+  ///
+  /// Reads `.gwm.toml`'s `[aliases]` block (if any) and the
+  /// user-level fallback `~/.config/gwm/aliases.toml` (path resolved
+  /// via `$XDG_CONFIG_HOME` first, then `dirs::config_dir()`). The
+  /// output is grouped by source so users can audit which file
+  /// declares which mapping and where they need to edit to change
+  /// it.
+  List,
+}
+
+/// Subcommands of `gwm config` (issue #89).
+#[derive(Debug, Subcommand)]
+pub enum ConfigAction {
+  /// Print a single value resolved from `.gwm.toml` plus defaults.
+  Get {
+    /// Dot-path key, e.g. `worktree.base` or `labels[0].name`.
+    key: String,
+  },
+  /// Set a value while preserving TOML comments and formatting.
+  Set {
+    /// Dot-path key, e.g. `tui.confirm_countdown_secs`, `labels[+].name`, or `key=value`.
+    key: String,
+    /// TOML scalar value. Bare strings are accepted for convenience.
+    value: Option<String>,
+  },
+  /// Remove a value so the runtime default applies.
+  Unset {
+    /// Dot-path key to remove.
+    key: String,
+  },
+  /// List resolved config values.
+  List {
+    /// Only print keys under this dot-path prefix.
+    #[arg(long)]
+    prefix: Option<String>,
+  },
+  /// Validate `.gwm.toml` syntax and schema.
+  Validate,
+  /// Print the resolved `.gwm.toml` path.
+  Path,
+  /// Open `.gwm.toml` in `$EDITOR`.
+  Edit,
+}
+
+/// Subcommands of `gwm hooks` (issue #85). The split anticipates
+/// future hook variants (`pre-push`, `pre-commit`); for now only
+/// `install commit-msg` is wired up, which is the directly-load-bearing
+/// surface for the auto-prefix workflow.
+#[derive(Debug, Subcommand)]
+pub enum HooksAction {
+  /// Install a hook into `.git/hooks/`. Refuses to overwrite an
+  /// existing hook unless `--force` is passed, so a pre-existing
+  /// husky / commitlint / pre-commit installation is preserved by
+  /// default.
+  Install {
+    /// Which hook to install. Today only `commit-msg` is supported.
+    #[arg(value_enum)]
+    hook: HookKind,
+    /// Replace an existing hook of the same name. Without `--force`,
+    /// the command exits non-zero with the path of the conflicting
+    /// hook so the user can decide.
+    #[arg(long)]
+    force: bool,
+  },
+}
+
+/// Discriminator for `gwm hooks install <kind>`. A `ValueEnum` (rather
+/// than a free-form string) so clap rejects typos at parse time
+/// (`gwm hooks install commit-msge` → "invalid value … expected one
+/// of: commit-msg") rather than letting the installer fail with a
+/// less-actionable error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookKind {
+  /// Auto-prepend the Gitmoji + Conventional Commits prefix when
+  /// the user's commit message doesn't already start with one.
+  CommitMsg,
 }
 
 /// Subcommands of `gwm labels`. The split is intentional: `list` is
@@ -404,20 +738,38 @@ pub fn run(cli: Cli) -> Result<()> {
 
   match cmd {
     Command::Init => cmd_init(),
-    Command::List { format } => cmd_list(format),
+    Command::List { format, detect_pr } => cmd_list(format, detect_pr),
     Command::Create {
       branch_type,
       issue,
       desc,
       no_bootstrap,
       reuse_branch,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, mode),
-    Command::Remove { pattern, delete_branch } => cmd_remove(pattern, delete_branch),
+      skip_hooks,
+    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
+    Command::New {
+      branch_type,
+      desc,
+      no_bootstrap,
+      reuse_branch,
+      skip_hooks,
+    } => cmd_new(branch_type, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
+    Command::Pr { render, draft, base } => cmd_pr(render, draft, base),
+    Command::Remove {
+      pattern,
+      delete_branch,
+      dry_run,
+      force,
+      skip_hooks,
+    } => cmd_remove(pattern, delete_branch, dry_run, force, skip_hooks, mode),
     Command::Path { pattern } => cmd_path(pattern),
-    Command::Bootstrap { target } => cmd_bootstrap(target, mode),
-    Command::Prune => cmd_prune(),
+    Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
+    Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
+    Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Doctor => cmd_doctor(),
-    Command::Types => cmd_types(),
+    Command::Types { gitmoji } => cmd_types(gitmoji),
+    Command::CommitPrefix { branch, unicode } => cmd_commit_prefix(branch, unicode),
+    Command::Hooks { action } => cmd_hooks(action),
     Command::Completions { shell } => cmd_completions(shell),
     Command::ShellInit { shell } => cmd_shell_init(shell),
     Command::Switch => cmd_switch(),
@@ -438,7 +790,173 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Labels { action } => cmd_labels(action),
     Command::Milestones { action } => cmd_milestones(action),
     Command::Trust { action } => cmd_trust(action),
+    Command::Aliases { action } => cmd_aliases(action),
+    Command::Config { action } => cmd_config(action),
+    Command::History { limit, all } => cmd_history(limit, all),
+    Command::Undo { bootstrap } => cmd_undo(bootstrap),
+    Command::Tui { action } => cmd_tui(action),
+    Command::Theme { action } => cmd_theme(action),
   }
+}
+
+fn cmd_tui(action: TuiAction) -> Result<()> {
+  match action {
+    TuiAction::Keys => cmd_tui_keys(),
+  }
+}
+
+fn cmd_theme(action: ThemeAction) -> Result<()> {
+  match action {
+    ThemeAction::List => cmd_theme_list(),
+    ThemeAction::Show { name } => cmd_theme_show(&name),
+  }
+}
+
+/// Print every built-in TUI preset name (issue #33).
+///
+/// Pure read against `crate::tui::theme::preset_names` so the
+/// command works outside any repository and never needs a config
+/// load.
+fn cmd_theme_list() -> Result<()> {
+  for name in crate::tui::theme::preset_names() {
+    println!("{}", name);
+  }
+  Ok(())
+}
+
+/// Print a preset as a copy-pasteable `[theme]` TOML block (issue #33).
+///
+/// Every emitted value is a **quoted TOML string** so the output
+/// round-trips cleanly through the `[theme]` parser
+/// (`ThemeConfig.overrides: BTreeMap<String, String>` only accepts
+/// string values; a bare integer for `Color::Indexed` would fail to
+/// deserialize at re-parse). `Color::Rgb` renders as `#RRGGBB`,
+/// named colours as their canonical lowercase slug, and
+/// `Color::Indexed(n)` as the quoted decimal `"n"` form the
+/// `parse_color` indexed branch already accepts.
+fn cmd_theme_show(name: &str) -> Result<()> {
+  use crate::tui::theme::Theme;
+  use ratatui::style::Color;
+
+  let theme = Theme::preset(name).ok_or_else(|| {
+    let known = crate::tui::theme::preset_names().join(", ");
+    GwmError::Other(format!("theme show: unknown preset {:?} (known: {})", name, known))
+  })?;
+  let color_str = |c: Color| -> String {
+    match c {
+      Color::Rgb(r, g, b) => format!("\"#{:02x}{:02x}{:02x}\"", r, g, b),
+      Color::Reset => "\"reset\"".to_string(),
+      Color::Black => "\"black\"".to_string(),
+      Color::Red => "\"red\"".to_string(),
+      Color::Green => "\"green\"".to_string(),
+      Color::Yellow => "\"yellow\"".to_string(),
+      Color::Blue => "\"blue\"".to_string(),
+      Color::Magenta => "\"magenta\"".to_string(),
+      Color::Cyan => "\"cyan\"".to_string(),
+      Color::Gray => "\"gray\"".to_string(),
+      Color::DarkGray => "\"dark_gray\"".to_string(),
+      Color::LightRed => "\"bright_red\"".to_string(),
+      Color::LightGreen => "\"bright_green\"".to_string(),
+      Color::LightYellow => "\"bright_yellow\"".to_string(),
+      Color::LightBlue => "\"bright_blue\"".to_string(),
+      Color::LightMagenta => "\"bright_magenta\"".to_string(),
+      Color::LightCyan => "\"bright_cyan\"".to_string(),
+      Color::White => "\"white\"".to_string(),
+      // Quote the indexed value so it round-trips through the
+      // string-only `[theme]` map. `parse_color` accepts bare digit
+      // strings as `Color::Indexed` (e.g. `"220"` → Color::Indexed(220)).
+      Color::Indexed(n) => format!("\"{}\"", n),
+    }
+  };
+  println!("[theme]");
+  println!("preset       = {:?}", name);
+  println!("focus        = {}", color_str(theme.focus));
+  println!("accent       = {}", color_str(theme.accent));
+  println!("branch       = {}", color_str(theme.branch));
+  println!("clean        = {}", color_str(theme.clean));
+  println!("dirty        = {}", color_str(theme.dirty));
+  println!("main         = {}", color_str(theme.main));
+  println!("locked       = {}", color_str(theme.locked));
+  println!("prunable     = {}", color_str(theme.prunable));
+  println!("muted        = {}", color_str(theme.muted));
+  println!("selection_bg = {}", color_str(theme.selection_bg));
+  Ok(())
+}
+
+/// Print the resolved TUI keymap as a 3-column table.
+///
+/// Resolves `[tui.keys]` against the current repo's `.gwm.toml`
+/// (falling back to bare defaults if there is no `.gwm.toml` and to
+/// repo-less defaults when invoked outside any repo, so the command
+/// is useful even before a project is set up). The output is the
+/// human-readable side of the keymap surface — `gwm doctor` (issue
+/// #87 part 8) consumes the same `Keymap::list()` API for its
+/// validation pass, so the column contents stay in sync.
+fn cmd_tui_keys() -> Result<()> {
+  use crate::tui::keymap::{Keymap, Source};
+
+  // Build the resolved keymap. Outside a repo, OR inside a bare
+  // repo (no workdir to read `.gwm.toml` from), fall back to
+  // defaults so the command stays useful for new users discovering
+  // the binary. Same fallback path either way — surfacing
+  // `NotInGitRepo` on a bare repo would be misleading because the
+  // command itself is repo-agnostic.
+  let keymap = match worktree::discover_repo(None) {
+    Ok(repo) => match repo.workdir() {
+      Some(workdir) => {
+        let cfg = Config::load_for_repo(workdir)?;
+        cfg.tui.keys.resolved_keymap()?
+      }
+      None => Keymap::defaults(),
+    },
+    Err(_) => Keymap::defaults(),
+  };
+
+  let rows = keymap.list();
+  // Column widths sized to the longest content so the table stays
+  // aligned even when a chord runs long (`Ctrl+Alt+Shift+F12`).
+  let action_w = rows
+    .iter()
+    .map(|b| b.action.slug().len())
+    .max()
+    .unwrap_or(0)
+    .max("action".len());
+  let keys_w = rows
+    .iter()
+    .map(|b| {
+      b.chords
+        .iter()
+        .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+        .collect::<Vec<_>>()
+        .join(", ")
+        .len()
+    })
+    .max()
+    .unwrap_or(0)
+    .max("keys".len());
+
+  println!("{:<aw$}  {:<kw$}  source", "action", "keys", aw = action_w, kw = keys_w);
+  for binding in rows {
+    let keys = binding
+      .chords
+      .iter()
+      .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+      .collect::<Vec<_>>()
+      .join(", ");
+    let source = match binding.source {
+      Source::Default => "default",
+      Source::UserConfig => ".gwm.toml",
+    };
+    println!(
+      "{:<aw$}  {:<kw$}  {}",
+      binding.action.slug(),
+      keys,
+      source,
+      aw = action_w,
+      kw = keys_w
+    );
+  }
+  Ok(())
 }
 
 fn cmd_init() -> Result<()> {
@@ -449,7 +967,7 @@ fn cmd_init() -> Result<()> {
   Ok(())
 }
 
-fn cmd_list(format: ListFormat) -> Result<()> {
+fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
 
@@ -463,6 +981,26 @@ fn cmd_list(format: ListFormat) -> Result<()> {
     return Ok(());
   }
 
+  // PR auto-detection (issue #181): off by default to keep the listing
+  // network-free. When `--detect-pr` is set and a GitHub remote resolves,
+  // detect each branch's PR via `gh pr list --head <branch>` — one `gh`
+  // call per worktree. The detected number is rendered in an extra
+  // column; an explicit `gwm link --pr` still wins via `read_link`.
+  let detected_prs: Vec<Option<u64>> = if detect_pr {
+    let slug = github::repo_slug(&repo).ok();
+    trees
+      .iter()
+      .map(|w| {
+        let (branch, slug) = (w.branch.as_deref()?, slug.as_deref()?);
+        github::read_link_with_pr_detection(&repo, branch, slug)
+          .ok()
+          .and_then(|l| l.pr)
+      })
+      .collect()
+  } else {
+    Vec::new()
+  };
+
   // Dynamic widths based on observed content.
   let name_w = trees.iter().map(|w| w.name.len()).max().unwrap_or(4).clamp(4, 40);
   let branch_w = trees
@@ -472,31 +1010,64 @@ fn cmd_list(format: ListFormat) -> Result<()> {
     .unwrap_or(6)
     .clamp(6, 40);
   let status_w = 14;
+  let pr_w = 6;
 
-  println!(
-    "  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
-    "NAME",
-    "BRANCH",
-    "STATUS",
-    nw = name_w,
-    bw = branch_w,
-    sw = status_w,
-  );
-  for w in trees {
-    let mark = if w.is_main { "*" } else { " " };
-    let branch = w.branch.clone().unwrap_or_else(|| "-".into());
-    let status = format_status_text(&w);
+  if detect_pr {
     println!(
-      "{} {:<nw$}  {:<bw$}  {:<sw$}  {}",
-      mark,
-      w.name,
-      branch,
-      status,
-      w.path.display(),
+      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "NAME",
+      "BRANCH",
+      "STATUS",
+      "PR",
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
+      pw = pr_w,
+    );
+  } else {
+    println!(
+      "  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "NAME",
+      "BRANCH",
+      "STATUS",
       nw = name_w,
       bw = branch_w,
       sw = status_w,
     );
+  }
+  for (i, w) in trees.iter().enumerate() {
+    let mark = if w.is_main { "*" } else { " " };
+    let branch = w.branch.clone().unwrap_or_else(|| "-".into());
+    let status = format_status_text(w);
+    if detect_pr {
+      let pr = detected_prs.get(i).copied().flatten();
+      let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
+      println!(
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        mark,
+        w.name,
+        branch,
+        status,
+        pr_cell,
+        w.path.display(),
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+        pw = pr_w,
+      );
+    } else {
+      println!(
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        mark,
+        w.name,
+        branch,
+        status,
+        w.path.display(),
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+      );
+    }
   }
   Ok(())
 }
@@ -538,6 +1109,7 @@ fn cmd_create(
   desc: String,
   no_bootstrap: bool,
   reuse_branch: bool,
+  skip_hooks: Option<String>,
   trust_mode: TrustMode,
 ) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
@@ -549,14 +1121,22 @@ fn cmd_create(
   let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
   let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
-  let target = spec.worktree_path(&config.worktree, &repo_name)?;
+  let target = spec.worktree_path(&config.worktree, &repo_name, &workdir)?;
+  let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
   // creating the worktree — a deny / abort here leaves the user's
   // disk state untouched (no orphaned worktree to clean up).
-  if !no_bootstrap {
+  let create_hooks_present = !config.hooks.pre_create.is_empty()
+    || !config.hooks.post_create.is_empty()
+    || (!no_bootstrap && !config.bootstrap.command.is_empty());
+  if !no_bootstrap || create_hooks_present {
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
+
+  let pre_ctx = HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, &spec);
+  let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
 
   println!("creating worktree:");
   println!("  branch : {}", branch);
@@ -566,24 +1146,378 @@ fn cmd_create(
   let created = worktree::add(&repo, &dirname, &target, &branch, reuse_branch)?;
   println!("✓ worktree created at {}", created.display());
 
+  let post_ctx = pre_ctx.with_cwd(&created);
+
   if no_bootstrap {
     println!("(skipped bootstrap)");
-    return Ok(());
+  } else {
+    let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &post_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
+
+    let ctx = BootstrapCtx {
+      main_repo: &workdir,
+      worktree: &created,
+      config: &config,
+    };
+    let report = bootstrap::run_core(&ctx)?;
+    print_report(&report);
+
+    let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &post_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
   }
 
-  let ctx = BootstrapCtx {
-    main_repo: &workdir,
-    worktree: &created,
-    config: &config,
-  };
-  let report = bootstrap::run(&ctx)?;
-  print_report(&report);
+  if config.hooks.has_any() && !config.bootstrap.command.is_empty() {
+    eprintln!("warning: [[bootstrap.command]] is deprecated as a post_create hook when [hooks.*] is present");
+  }
+  let report = lifecycle::run_phase(&config, HookPhase::PostCreate, &post_ctx, &skips, !no_bootstrap)?;
+  print_lifecycle_report(&report);
   Ok(())
 }
 
-fn cmd_remove(pattern: String, delete_branch: bool) -> Result<()> {
+fn cmd_new(
+  branch_type: String,
+  desc: String,
+  no_bootstrap: bool,
+  reuse_branch: bool,
+  skip_hooks: Option<String>,
+  trust_mode: TrustMode,
+) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let repo_name = worktree::repo_name(&repo);
+  let config = Config::load_for_repo(&workdir)?;
+  let resolved_types = config.resolved_branch_types();
+  let spec = BranchSpec::new_with_types(branch_type.clone(), "0", desc, &resolved_types.types)?;
+  let draft = issue_templates::render_issue_draft(&repo, &config, &spec.type_, &spec.desc)?;
+  let slug = github::repo_slug(&repo).ok();
+  let created = github::create_issue(&github::IssueCreateRequest {
+    title: &draft.title,
+    body_file: draft.body_file.path(),
+    labels: &draft.labels,
+    repo: slug.as_deref(),
+  })?;
+
+  let label_summary = if draft.labels.is_empty() {
+    String::new()
+  } else {
+    format!(" (labels: {})", draft.labels.join(", "))
+  };
+  println!("✓ created issue #{} {}{}", created.number, draft.title, label_summary);
+  let issue = created.number.to_string();
+  let branch = BranchSpec::new_with_types(
+    spec.type_.clone(),
+    issue.clone(),
+    spec.desc.clone(),
+    &resolved_types.types,
+  )?
+  .branch_name(&config.worktree, &repo_name)?;
+  println!("  {}", created.url);
+  println!("creating linked worktree for {}", branch);
+
+  cmd_create(
+    spec.type_,
+    issue,
+    spec.desc,
+    no_bootstrap,
+    reuse_branch,
+    skip_hooks,
+    trust_mode,
+  )
+}
+
+/// Maximum number of lines kept from `git diff --stat <base>..<head>`
+/// when rendering the `{files_changed}` placeholder. Hardcoded by issue
+/// #84 so a sprawling refactor PR doesn't push the body past GitHub's
+/// 65 535-byte limit; the renderer appends a `… (N more lines trimmed)`
+/// rider when the cap fires.
+const PR_FILES_CHANGED_MAX_LINES: usize = 30;
+
+fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let config = Config::load_for_repo(&workdir)?;
+  let head_name = current_branch(&repo)?;
+  let branch_spec = parse_branch(&head_name);
+
+  let branch_type = branch_spec
+    .as_ref()
+    .map(|s| s.type_.clone())
+    .unwrap_or_else(|| "chore".into());
+  let issue = branch_spec.as_ref().map(|s| s.issue.clone()).unwrap_or_default();
+  let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();
+
+  let base = base_override
+    .or_else(|| resolve_pr_base(&repo, &config.doctor.trunks))
+    .unwrap_or_else(|| "main".into());
+
+  let commits = worktree::git_log_subject_between(&workdir, &base, &head_name)
+    .inspect_err(|e| {
+      eprintln!(
+        "note: could not collect `{{commits}}` from `git log {}..{}`: {} (placeholder will be empty)",
+        base, head_name, e
+      );
+    })
+    .unwrap_or_default();
+  let files_changed = worktree::git_diff_stat_between(&workdir, &base, &head_name, PR_FILES_CHANGED_MAX_LINES)
+    .inspect_err(|e| {
+      eprintln!(
+        "note: could not collect `{{files_changed}}` from `git diff --stat {}..{}`: {} (placeholder will be empty)",
+        base, head_name, e
+      );
+    })
+    .unwrap_or_default();
+  let repo_slug = github::repo_slug(&repo).unwrap_or_default();
+
+  let ctx = PrTemplateContext {
+    branch_type: branch_type.clone(),
+    issue,
+    desc,
+    base: base.clone(),
+    head: head_name.clone(),
+    commits,
+    files_changed,
+    repo: repo_slug.clone(),
+  };
+  let body = pr_templates::render_pr_body(&config.pr_template, &workdir, &ctx)?;
+
+  if render_only {
+    print!("{}", body);
+    if !body.ends_with('\n') {
+      println!();
+    }
+    return Ok(());
+  }
+
+  let mut body_file = tempfile::NamedTempFile::new()?;
+  use std::io::Write;
+  body_file.write_all(body.as_bytes())?;
+  body_file.flush()?;
+
+  let title = pr_title(&ctx);
+  let slug = if repo_slug.is_empty() {
+    None
+  } else {
+    Some(repo_slug.as_str())
+  };
+  let created = github::create_pr(&github::PrCreateRequest {
+    title: &title,
+    body_file: body_file.path(),
+    head: &head_name,
+    base: Some(base.as_str()),
+    draft,
+    repo: slug,
+  })?;
+  println!("✓ created PR #{}", created.number);
+  println!("  {}", created.url);
+  if let Err(e) = github::link_pr(&repo, &head_name, created.number) {
+    // Linking is a best-effort convenience: surface the failure but
+    // don't drop the freshly-created PR on the floor.
+    eprintln!("note: could not record gwm-pr config for {}: {}", head_name, e);
+  }
+  Ok(())
+}
+
+/// Pick a base ref for `gwm pr` by walking the configured `[doctor].trunks`
+/// list first, then the common defaults (`main`, `master`, `dev`,
+/// `develop`, `trunk`) so a repo whose local trunk is `master` and which
+/// hasn't customised `[doctor]` doesn't fall back to a non-existent
+/// `"main"`. Returns `None` only if none of the candidates resolve to a
+/// local branch — the caller then uses `"main"` as a last resort so the
+/// downstream `gh pr create --base main` produces a clean error message
+/// instead of a panic.
+fn resolve_pr_base(repo: &Repository, trunks: &[String]) -> Option<String> {
+  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
+  for trunk in trunks {
+    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
+      return Some(trunk.clone());
+    }
+  }
+  for trunk in COMMON_TRUNKS {
+    if trunks.iter().any(|t| t == trunk) {
+      continue; // already tried as a configured trunk above
+    }
+    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
+      return Some((*trunk).to_string());
+    }
+  }
+  None
+}
+
+fn pr_title(ctx: &PrTemplateContext) -> String {
+  // Title heuristic mirrors `me:issue-worktree-pr`: take the latest
+  // commit subject if there is one, else fall back to "<type>: <desc>"
+  // so the user gets a deterministic, non-empty title.
+  if let Some(first) = ctx.commits.lines().next() {
+    let trimmed = first.trim_start_matches("- ").trim();
+    if !trimmed.is_empty() {
+      return trimmed.to_string();
+    }
+  }
+  if !ctx.desc.is_empty() {
+    return format!("{}: {}", ctx.branch_type, ctx.desc);
+  }
+  format!("update {}", ctx.head)
+}
+
+/// Render the would-do plan for `gwm remove --dry-run` (issue #31).
+/// Extracted from `cmd_remove` so the formatter is unit-testable
+/// without spinning up a real worktree. Pure function: takes the
+/// resolved name + path + branch, returns a multi-line string
+/// (trailing newline included).
+///
+/// `delete_branch` only adds "(would be deleted)" when there *is* a
+/// branch to delete — a detached HEAD worktree with
+/// `--delete-branch` reports "(no branch to delete)" instead, mirror-
+/// ing `worktree::remove`'s actual behaviour (it only drops a branch
+/// when one is resolvable).
+pub fn format_remove_plan(name: &str, path: &Path, branch: Option<&str>, delete_branch: bool) -> String {
+  use std::fmt::Write;
+  let mut out = String::new();
+  let _ = writeln!(out, "would remove:");
+  let _ = writeln!(out, "  name:   {}", name);
+  let _ = writeln!(out, "  path:   {}", path.display());
+  match (branch, delete_branch) {
+    (Some(b), true) => {
+      let _ = writeln!(out, "  branch: {} (would be deleted)", b);
+    }
+    (Some(b), false) => {
+      let _ = writeln!(out, "  branch: {}", b);
+    }
+    (None, true) => {
+      // Detached HEAD worktree: `worktree::remove` only drops a
+      // branch when one is resolvable, so the dry-run must not
+      // claim a deletion that will never happen. The clarifying
+      // rider tells the user why `--delete-branch` is a no-op
+      // here without forcing them to re-read the docs.
+      let _ = writeln!(out, "  branch: - (no branch to delete)");
+    }
+    (None, false) => {
+      let _ = writeln!(out, "  branch: -");
+    }
+  }
+  out
+}
+
+/// Render the would-do plan for `gwm prune --dry-run` (issue #31).
+/// Extracted from `cmd_prune` so the formatter is unit-testable on
+/// arbitrary `PrunableEntry` fixtures (non-ASCII names / paths
+/// without needing a real repo). Pure function: trailing newline
+/// included; empty input still emits the canonical
+/// "0 worktree(s) to prune" line so piped consumers get a stable
+/// signal instead of empty stdout.
+///
+/// Column widths are computed in Unicode characters
+/// (`.chars().count()`), not bytes (`.len()`), so non-ASCII paths
+/// stay aligned in a fixed-width terminal.
+pub fn format_prune_plan(entries: &[worktree::PrunableEntry]) -> String {
+  use std::fmt::Write;
+  let mut out = String::new();
+  if entries.is_empty() {
+    let _ = writeln!(out, "0 worktree(s) to prune");
+    return out;
+  }
+  // Widths in Unicode characters, not bytes — non-ASCII names or
+  // paths would otherwise drift the reason column right by the
+  // (byte_len - char_count) delta. Rust's `{:<width$}` format spec
+  // pads to a *character* count, so feeding it `.len()` is the bug
+  // Copilot flagged on PR #154.
+  let name_w = entries.iter().map(|e| e.name.chars().count()).max().unwrap_or(4);
+  let path_w = entries
+    .iter()
+    .map(|e| e.path.display().to_string().chars().count())
+    .max()
+    .unwrap_or(4);
+  let _ = writeln!(out, "would prune {} worktree(s):", entries.len());
+  for entry in entries {
+    let _ = writeln!(
+      out,
+      "  {:<nw$}  {:<pw$}  ({})",
+      entry.name,
+      entry.path.display(),
+      entry.reason,
+      nw = name_w,
+      pw = path_w,
+    );
+  }
+  out
+}
+
+fn cmd_remove(
+  pattern: String,
+  delete_branch: bool,
+  dry_run: bool,
+  force: bool,
+  skip_hooks: Option<String>,
+  trust_mode: TrustMode,
+) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let found = worktree::find_fuzzy(&repo, &pattern)?;
+  if dry_run {
+    // Issue #31: print the would-remove plan and exit. Resolution
+    // already happened above — an ambiguous pattern surfaced via
+    // `find_fuzzy` returns the same `Other(... ambiguous ...)` error
+    // the destructive form raises, satisfying the spec's "same error
+    // contract" requirement. The journal hook MUST NOT fire here —
+    // a preview that wrote to the journal would let the user "undo"
+    // something that never happened.
+    worktree::remove_dry_run(&repo, &found.name)?;
+    print!(
+      "{}",
+      format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
+    );
+    return Ok(());
+  }
+
+  let config = Config::load_for_repo(&workdir)?;
+  let mut skips = HookSkips::parse(skip_hooks.as_deref())?;
+  if force {
+    skips = skips.with(HookPhase::PreRemove).with(HookPhase::PostRemove);
+  }
+  if config.hooks.has_any() {
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+  }
+  let pre_ctx = HookContext::for_worktree(&repo, &workdir, &found.path, &found.path, found.branch.as_deref());
+  let report = lifecycle::run_phase(&config, HookPhase::PreRemove, &pre_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
+
+  // Issue #29: capture the branch OID via libgit2 BEFORE the
+  // destructive call so we can resurrect the branch on `gwm undo`.
+  // We swallow any journal IO failure with a stderr warning rather
+  // than blocking a destruction the user explicitly asked for —
+  // losing recoverability is unfortunate, but failing the remove
+  // because we can't write to `~/.local/share/gwm/history.toml` would
+  // be far more surprising. (Disk full, read-only FS, sandboxed
+  // CI runner without home dir, …)
+  let branch_oid = found.branch.as_deref().and_then(|b| {
+    repo
+      .find_branch(b, git2::BranchType::Local)
+      .ok()
+      .and_then(|br| br.into_reference().target())
+      .map(|o| o.to_string())
+  });
+  let repo_root = repo
+    .workdir()
+    .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()))
+    .unwrap_or_default();
+  let entry = OpEntry {
+    ts: chrono::Utc::now(),
+    kind: crate::history::OpKind::Remove,
+    worktree: found.name.clone(),
+    branch: found.branch.clone(),
+    branch_oid,
+    path: found.path.clone(),
+    deleted_branch: delete_branch,
+    repo_root,
+    undone: false,
+  };
+  if let Err(e) = history::record(entry) {
+    eprintln!(
+      "warning: failed to record undo journal entry: {} (continuing with the remove anyway)",
+      e
+    );
+  }
+
   worktree::remove(&repo, &found.name, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
@@ -591,6 +1525,9 @@ fn cmd_remove(pattern: String, delete_branch: bool) -> Result<()> {
       println!("  branch {} deleted", b);
     }
   }
+  let post_ctx = pre_ctx.with_cwd(&workdir);
+  let report = lifecycle::run_phase(&config, HookPhase::PostRemove, &post_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
   Ok(())
 }
 
@@ -601,37 +1538,121 @@ fn cmd_path(pattern: String) -> Result<()> {
   Ok(())
 }
 
-fn cmd_bootstrap(target: Option<String>, trust_mode: TrustMode) -> Result<()> {
+fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode: TrustMode) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let config = Config::load_for_repo(&workdir)?;
 
+  let mut worktree_branch: Option<String> = None;
   let worktree_path: PathBuf = match target {
     Some(t) => {
       let p = PathBuf::from(&t);
       if p.is_dir() {
         p
       } else {
-        worktree::find_fuzzy(&repo, &t)?.path
+        let found = worktree::find_fuzzy(&repo, &t)?;
+        worktree_branch = found.branch.clone();
+        found.path
       }
     }
     None => std::env::current_dir()?,
   };
+  let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+
+  let hook_ctx = HookContext::for_worktree(
+    &repo,
+    &workdir,
+    &worktree_path,
+    &worktree_path,
+    worktree_branch.as_deref(),
+  );
+  let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &hook_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
 
   let ctx = BootstrapCtx {
     main_repo: &workdir,
     worktree: &worktree_path,
     config: &config,
   };
-  let report = bootstrap::run(&ctx)?;
+  let report = bootstrap::run_core(&ctx)?;
   print_report(&report);
+  let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &hook_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
   Ok(())
 }
 
-fn cmd_prune() -> Result<()> {
+fn cmd_sync(pattern: Option<String>, merge: bool) -> Result<()> {
+  // Resolve the target worktree. With a pattern, fuzzy-match against the
+  // main repo's worktree list like the rest of gwm. Without one, default
+  // to the worktree *containing* the CWD — which, unlike `find_fuzzy`,
+  // may legitimately be the main worktree (syncing trunk is valid). We
+  // discover that worktree's own workdir (not the CWD basename) so a
+  // `gwm sync` from a subdirectory still names and targets the worktree
+  // root rather than the subdir.
+  let (target_path, name) = match pattern {
+    Some(p) => {
+      let repo = worktree::discover_repo(None)?;
+      let found = worktree::find_fuzzy(&repo, &p)?;
+      (found.path, found.name)
+    }
+    None => {
+      let cwd = std::env::current_dir()?;
+      let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+      let name = workdir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "worktree".into());
+      (workdir, name)
+    }
+  };
+
+  let strategy = if merge {
+    SyncStrategy::Merge
+  } else {
+    SyncStrategy::Rebase
+  };
+  let report = sync::sync(&target_path, strategy)?;
+  print!("{}", format_sync_report(&name, &report));
+  Ok(())
+}
+
+/// Render a successful [`SyncReport`] as a single ✓ status line. The
+/// error paths (dirty tree, missing upstream, conflicts) surface as
+/// `GwmError` and are printed by `main`'s top-level handler, so this
+/// only ever formats the success cases.
+pub fn format_sync_report(name: &str, report: &SyncReport) -> String {
+  match report.action {
+    SyncAction::UpToDate => {
+      format!("✓ {} already up to date with {}\n", name, report.upstream)
+    }
+    SyncAction::Integrated => {
+      let verb = match report.strategy {
+        SyncStrategy::Rebase => "rebased",
+        SyncStrategy::Merge => "merged",
+      };
+      let plural = if report.behind_before == 1 { "" } else { "s" };
+      format!(
+        "✓ {} {} {} commit{} from {}\n",
+        name, verb, report.behind_before, plural, report.upstream
+      )
+    }
+  }
+}
+
+fn cmd_prune(dry_run: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+  if dry_run {
+    // Issue #31: enumerate prunable worktrees (name + path + reason)
+    // and render the plan through the shared formatter. Empty input
+    // still emits "0 worktree(s) to prune" so piped consumers always
+    // get a stable signal.
+    let plan = worktree::prunable_worktrees(&repo)?;
+    print!("{}", format_prune_plan(&plan));
+    return Ok(());
+  }
   let n = worktree::prune(&repo)?;
   println!("pruned {} stale worktree(s)", n);
   Ok(())
@@ -674,7 +1695,7 @@ fn print_doctor_report(report: &doctor::DoctorReport) {
   }
 }
 
-fn cmd_types() -> Result<()> {
+fn cmd_types(gitmoji_flag: bool) -> Result<()> {
   // Resolve the active branch-type list. When invoked inside a repo
   // with a workdir we honour any `[[branch_types]]` override in
   // `.gwm.toml`; outside of one — or inside a bare repo where
@@ -683,22 +1704,135 @@ fn cmd_types() -> Result<()> {
   // `gwm types` remains useful as a discovery command (used by `gwm`
   // newcomers before they've initialised a config, and from CI inspect
   // commands that point at bare clones).
-  let resolved = match worktree::discover_repo(None) {
-    Ok(repo) => match repo.workdir().map(|w| w.to_path_buf()) {
-      Some(workdir) => Config::load_for_repo(&workdir)?.resolved_branch_types(),
-      None => Config::default().resolved_branch_types(),
-    },
-    Err(_) => Config::default().resolved_branch_types(),
+  let workdir = match worktree::discover_repo(None) {
+    Ok(repo) => repo.workdir().map(|w| w.to_path_buf()),
+    Err(_) => None,
+  };
+  let resolved = match &workdir {
+    Some(w) => Config::load_for_repo(w)?.resolved_branch_types(),
+    None => Config::default().resolved_branch_types(),
+  };
+
+  // Resolve the gitmoji map only when the caller asked for it — the
+  // default `gwm types` output stays a stable two-column shape every
+  // scripted parser of the pre-#85 surface depended on.
+  let gitmoji_map = if gitmoji_flag {
+    Some(gitmoji::load(workdir.as_deref())?)
+  } else {
+    None
   };
 
   // Align the description column on the longest name so a custom list
   // with a long entry (e.g. `migration`) still renders cleanly.
   let width = resolved.types.iter().map(|t| t.name.len()).max().unwrap_or(0).max(8);
+  // When the gitmoji columns are active, align the shortcode column on
+  // the widest shortcode (`:white_check_mark:`, currently 18 chars) so
+  // the description column doesn't drift between rows.
+  let sc_width = match &gitmoji_map {
+    Some(map) => map.iter().map(|(_, sc)| sc.len()).max().unwrap_or(0).max(10),
+    None => 0,
+  };
+
   for t in &resolved.types {
-    println!("  {:<width$}  {}", t.name, t.description, width = width);
+    match &gitmoji_map {
+      Some(map) => {
+        // Two extra columns: unicode glyph (1 cell wide, padded for
+        // BMP code points; emoji ZWJ sequences would break alignment
+        // but our built-in set is all single-glyph) + shortcode.
+        let shortcode = map.get(&t.name).unwrap_or(":question:");
+        let unicode = gitmoji::shortcode_to_unicode(shortcode);
+        println!(
+          "  {:<width$}  {}  {:<sw$}  {}",
+          t.name,
+          unicode,
+          shortcode,
+          t.description,
+          width = width,
+          sw = sc_width,
+        );
+      }
+      None => {
+        println!("  {:<width$}  {}", t.name, t.description, width = width);
+      }
+    }
   }
   println!();
   println!("(source: {})", resolved.source.label());
+  Ok(())
+}
+
+/// `gwm commit-prefix [--branch <name>] [--unicode]` (issue #85).
+/// Renders `:sparkles: feat(#41):` (or `✨ feat(#41):` with `--unicode`)
+/// for the supplied branch or HEAD. Useful for shell prompts, AI
+/// assistants, and the bundled `commit-msg` hook.
+fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<()> {
+  // Two resolution paths: an explicit `--branch <name>` (no repo
+  // *required* — useful for scripted contexts outside a repo) and
+  // the implicit "use HEAD" branch (requires a repo). Both go
+  // through `parse_branch` so the prefix shape stays canonical
+  // regardless of entry point.
+  //
+  // For BOTH paths we still attempt repo discovery so the workdir
+  // handle is fed into `gitmoji::load` — this is what makes
+  // per-repo `.gwm.toml` `[gitmoji]` overrides apply uniformly to
+  // `gwm commit-prefix` (no flag, --branch, or whatever the
+  // installed commit-msg hook ends up calling). Discovery failures
+  // are silently downgraded to "no workdir" so the `--branch` form
+  // still works outside a git checkout — that's the whole point of
+  // the explicit-branch entry point.
+  let (workdir, branch_name) = match branch_override {
+    Some(name) => {
+      // Best-effort discovery: outside a repo the user passed
+      // `--branch` precisely because there's no HEAD to read; we
+      // must not fail here. Inside a repo we want the workdir so
+      // `.gwm.toml` overrides apply.
+      let workdir = worktree::discover_repo(None)
+        .ok()
+        .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+      (workdir, name)
+    }
+    None => {
+      let repo = worktree::discover_repo(None)?;
+      let wd = repo.workdir().map(|w| w.to_path_buf());
+      let name = current_branch(&repo)?;
+      (wd, name)
+    }
+  };
+
+  let spec = parse_branch(&branch_name).ok_or_else(|| {
+    GwmError::Other(format!(
+      "branch '{}' does not follow the gwm convention <type>/#<issue>-<slug> — \
+       cannot derive a commit prefix from it",
+      branch_name
+    ))
+  })?;
+
+  let map = gitmoji::load(workdir.as_deref())?;
+  let prefix = gitmoji::resolve_prefix(&map, &spec, unicode);
+  println!("{}", prefix);
+  Ok(())
+}
+
+/// `gwm hooks <action>` (issue #85). Currently only `install
+/// commit-msg` is wired up; the subcommand layer is shaped so future
+/// hooks (`pre-push`, `pre-commit`) drop in without breaking the
+/// existing CLI surface.
+fn cmd_hooks(action: HooksAction) -> Result<()> {
+  match action {
+    HooksAction::Install { hook, force } => cmd_hooks_install(hook, force),
+  }
+}
+
+fn cmd_hooks_install(hook: HookKind, force: bool) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  match hook {
+    HookKind::CommitMsg => {
+      let path = hooks::install_commit_msg(&workdir, force)?;
+      println!("✓ installed {}", path.display());
+      println!("  (auto-prepends gitmoji+type prefix when missing)");
+    }
+  }
   Ok(())
 }
 
@@ -931,11 +2065,17 @@ fn spawn_opener(url: &str) -> Result<()> {
 
 fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
-  let link = github::read_link(&repo, &branch)?;
 
   // Slug + fetched status are best-effort: if there's no GitHub remote
   // or `gh` isn't installed, we still print the local link.
   let slug = github::repo_slug(&repo).ok();
+  // When a remote is present, auto-detect the branch's PR if none is
+  // explicitly linked (issue #181). Falls back to the plain local read
+  // with no remote — keeping the "local link only" mode network-free.
+  let link = match slug.as_deref() {
+    Some(s) => github::read_link_with_pr_detection(&repo, &branch, s)?,
+    None => github::read_link(&repo, &branch)?,
+  };
   let (issue_status, pr_status) = fetch_link_status(&link, slug.as_deref());
 
   if json {
@@ -977,6 +2117,7 @@ fn link_source_str(s: LinkSource) -> &'static str {
     LinkSource::None => "none",
     LinkSource::BranchName => "branch-name",
     LinkSource::Explicit => "explicit",
+    LinkSource::Detected => "detected",
   }
 }
 
@@ -1559,6 +2700,101 @@ fn print_bootstrap_summary(cfg: &Config) {
   }
 }
 
+// ---- Aliases commands (issue #86) ---------------------------------------
+
+fn cmd_aliases(action: AliasesAction) -> Result<()> {
+  match action {
+    AliasesAction::List => cmd_aliases_list(),
+  }
+}
+
+fn cmd_config(action: ConfigAction) -> Result<()> {
+  match action {
+    ConfigAction::Get { key } => config_cli::get(&key),
+    ConfigAction::Set { key, value } => config_cli::set(&key, value.as_deref()),
+    ConfigAction::Unset { key } => config_cli::unset(&key),
+    ConfigAction::List { prefix } => config_cli::list(prefix.as_deref()),
+    ConfigAction::Validate => config_cli::validate(),
+    ConfigAction::Path => config_cli::path(),
+    ConfigAction::Edit => config_cli::edit(),
+  }
+}
+
+/// `gwm aliases list` — print the resolved alias chain. Reads
+/// `.gwm.toml` from the current repo workdir when available (gracefully
+/// degrades to "no repo" when invoked outside a git repo) and the
+/// user-level fallback `~/.config/gwm/aliases.toml`.
+///
+/// Output shape (matches the issue example verbatim):
+///
+/// ```text
+/// built-in:
+///   s    → switch
+///   cd   → path
+/// repo (.gwm.toml):
+///   wip    → create feat 0 wip
+///   ll     → list --format names
+/// user (~/.config/gwm/aliases.toml):
+///   copy   → path
+/// ```
+fn cmd_aliases_list() -> Result<()> {
+  // Discover the repo workdir if any — outside a repo this is `None`
+  // and the repo section degrades to "(no .gwm.toml — not inside a
+  // git repository)". `aliases list` is intentionally tolerant of
+  // running outside a repo so power users can audit their user-level
+  // file without cd'ing first.
+  let repo_workdir: Option<PathBuf> = crate::worktree::discover_repo(None)
+    .ok()
+    .and_then(|r| r.workdir().map(|w| w.to_path_buf()));
+
+  let resolved = crate::aliases::load(repo_workdir.as_deref(), None)?;
+
+  // built-in section ---------------------------------------------------
+  println!("built-in:");
+  if resolved.built_in.is_empty() {
+    println!("  (none)");
+  } else {
+    let width = resolved.built_in.iter().map(|e| e.name.len()).max().unwrap_or(2).max(2);
+    for e in &resolved.built_in {
+      println!("  {:<width$} → {}", e.name, e.expansion, width = width);
+    }
+  }
+
+  // repo section -------------------------------------------------------
+  println!("repo (.gwm.toml):");
+  if repo_workdir.is_none() {
+    println!("  (not inside a git repository — repo aliases are read from <repo>/.gwm.toml)");
+  } else if resolved.repo.is_empty() {
+    println!("  (none declared)");
+  } else {
+    let width = resolved.repo.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    for (name, expansion) in &resolved.repo {
+      println!("  {:<width$} → {}", name, expansion, width = width);
+    }
+  }
+
+  // user section -------------------------------------------------------
+  // The display path mirrors the issue example. We don't call into
+  // `default_user_path()` for the label because that function is
+  // private to the `aliases` module; the rendered string is purely
+  // informational here.
+  println!("user (~/.config/gwm/aliases.toml):");
+  if resolved.user.is_empty() {
+    println!("  (none declared)");
+  } else {
+    let width = resolved.user.keys().map(|k| k.len()).max().unwrap_or(2).max(2);
+    for (name, expansion) in &resolved.user {
+      // Mark entries shadowed by a repo declaration so the user can
+      // see why a `gwm <name>` does not pick up the user expansion.
+      let shadowed = resolved.repo.contains_key(name);
+      let suffix = if shadowed { "  (shadowed by repo)" } else { "" };
+      println!("  {:<width$} → {}{}", name, expansion, suffix, width = width);
+    }
+  }
+
+  Ok(())
+}
+
 pub fn shell_init_script(shell: InitShell) -> &'static str {
   match shell {
     InitShell::Bash | InitShell::Zsh => POSIX_SHELL_INIT,
@@ -1641,6 +2877,9 @@ function gcd {
 "#;
 
 fn print_report(report: &bootstrap::BootstrapReport) {
+  if report.steps.is_empty() {
+    return;
+  }
   println!();
   println!("bootstrap report:");
   for s in &report.steps {
@@ -1652,4 +2891,170 @@ fn print_report(report: &bootstrap::BootstrapReport) {
       }
     }
   }
+}
+
+fn print_lifecycle_report(report: &bootstrap::BootstrapReport) {
+  if report.steps.is_empty() {
+    return;
+  }
+  lifecycle::print_report(report);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #29 — `gwm history` + `gwm undo`
+// ---------------------------------------------------------------------------
+
+/// Resolve the canonicalised main repo workdir for journal lookups.
+/// `gwm undo` / `gwm history` filter on this path verbatim, so the
+/// canonicalisation step matters: `/var` vs `/private/var` on macOS
+/// would otherwise cross-pollute repos that happen to live on
+/// different symlink chains.
+fn current_repo_root() -> Result<PathBuf> {
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  Ok(std::fs::canonicalize(&workdir).unwrap_or(workdir))
+}
+
+/// Render one journal entry as a single line for `gwm history`. Shape:
+/// `<ago>  <kind>  <worktree>  [(undone)]`. Extracted as a pure
+/// function so the formatter is unit-testable without spinning up a
+/// real journal (see `cli_format_tests.rs`).
+pub fn format_history_row(entry: &OpEntry, now: chrono::DateTime<chrono::Utc>) -> String {
+  let delta = (now - entry.ts).to_std().unwrap_or(std::time::Duration::from_secs(0));
+  let ago = worktree::format_relative_duration(delta);
+  let suffix = if entry.undone { "  (undone)" } else { "" };
+  format!("{:<5}  {:<7}  {}{}", ago, entry.kind.as_str(), entry.worktree, suffix)
+}
+
+fn cmd_history(limit: usize, all: bool) -> Result<()> {
+  let path = history::default_journal_path()?;
+  let journal = history::Journal::load(&path)?;
+
+  // Build the filtered+sorted view. With `--all`, surface every entry
+  // regardless of `repo_root`. Without it, restrict to the current
+  // repo's canonicalised workdir. Resolving the root outside the
+  // `if` so its lifetime spans the whole function — the `else` arm
+  // returns an iterator that borrows from it.
+  let root: Option<PathBuf> = if all { None } else { Some(current_repo_root()?) };
+  let mut rows: Vec<&OpEntry> = match &root {
+    Some(r) => journal.entries_for_repo(r).collect(),
+    None => journal.entries().iter().collect(),
+  };
+
+  // Distinguish "the journal is empty for this view" from "the user
+  // asked for zero rows" — `--limit 0` is an explicit no-op that
+  // should print nothing and exit 0, not falsely claim the journal
+  // is empty (PR #155 Copilot review).
+  if rows.is_empty() {
+    println!("no operations recorded");
+    return Ok(());
+  }
+  if limit == 0 {
+    return Ok(());
+  }
+
+  // Newest first — the user just ran an op, they expect it on top.
+  rows.sort_by_key(|e| std::cmp::Reverse(e.ts));
+  rows.truncate(limit);
+
+  let now = chrono::Utc::now();
+  for entry in rows {
+    println!("{}", format_history_row(entry, now));
+  }
+  Ok(())
+}
+
+fn cmd_undo(run_bootstrap: bool) -> Result<()> {
+  let path = history::default_journal_path()?;
+  let mut journal = history::Journal::load(&path)?;
+  let root = current_repo_root()?;
+
+  let Some(entry) = journal.pop_last_for_repo(&root) else {
+    return Err(GwmError::Other(format!(
+      "nothing to undo for {} — the journal is empty for this repo",
+      root.display()
+    )));
+  };
+
+  let repo = worktree::discover_repo(None)?;
+
+  // (1) Resurrect the branch at the saved OID — only if a branch was
+  //     recorded AND the user opted into deletion (or the branch is
+  //     missing for any other reason). Skipping the branch create
+  //     when the ref already exists keeps `gwm undo` idempotent
+  //     against partial recoveries.
+  if let (Some(branch_name), Some(oid_hex)) = (&entry.branch, &entry.branch_oid) {
+    let oid = git2::Oid::from_str(oid_hex)
+      .map_err(|e| GwmError::Other(format!("journal entry has invalid branch_oid '{}': {}", oid_hex, e)))?;
+    if repo.find_branch(branch_name, git2::BranchType::Local).is_err() {
+      repo
+        .reference(
+          &format!("refs/heads/{}", branch_name),
+          oid,
+          false,
+          "gwm undo: resurrect branch",
+        )
+        .map_err(|e| {
+          GwmError::Other(format!(
+            "failed to recreate branch {} at {}: {}",
+            branch_name, oid_hex, e
+          ))
+        })?;
+      println!(
+        "✓ recreated branch {} at {}",
+        branch_name,
+        &oid_hex[..oid_hex.len().min(8)]
+      );
+    } else {
+      println!("· branch {} already exists — skipping resurrection", branch_name);
+    }
+  }
+
+  // (2) Re-add the worktree at the saved path. `worktree::add` refuses
+  //     to clobber an existing directory, so a leftover dir from a
+  //     half-failed remove will surface as an error here — the user
+  //     can clean up manually before retrying undo.
+  //
+  //     `OpEntry.branch == None` flags a worktree that was checked out
+  //     in detached-HEAD state. We don't support resurrecting those
+  //     yet — the original sin is that `worktree::add` only knows how
+  //     to attach a worktree to a named branch. Falling back to a
+  //     literal `"HEAD"` (the pre-fix behaviour) would either fail at
+  //     the libgit2 level (invalid refname) or create a real branch
+  //     named "HEAD" which is a disaster all of its own. Surface a
+  //     clear error so the user knows what's happening and can file
+  //     a follow-up issue if detached-HEAD support matters to them
+  //     (PR #155 Copilot review).
+  let branch_name = entry.branch.as_deref().ok_or_else(|| {
+    GwmError::Other(format!(
+      "cannot undo remove of detached-HEAD worktree {} — only branch-attached worktrees are supported today",
+      entry.worktree
+    ))
+  })?;
+  // `reuse_branch: true` because the branch already exists (we just
+  // created it above, or it was never deleted).
+  worktree::add(&repo, &entry.worktree, &entry.path, branch_name, true)?;
+  println!("✓ re-added worktree at {}", entry.path.display());
+
+  // (3) Persist the journal AFTER the resurrection succeeds — if we
+  //     dropped the entry first and then the resurrection failed, the
+  //     user would lose the recovery anchor entirely.
+  journal.save(&path)?;
+
+  // (4) Optionally re-run bootstrap.
+  if run_bootstrap {
+    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+    let config = Config::load_for_repo(&workdir)?;
+    let ctx = BootstrapCtx {
+      main_repo: &workdir,
+      worktree: &entry.path,
+      config: &config,
+    };
+    let report = bootstrap::run(&ctx)?;
+    print_report(&report);
+  } else {
+    println!("(skipped re-bootstrap; pass --bootstrap to run it)");
+  }
+
+  Ok(())
 }

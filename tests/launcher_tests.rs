@@ -35,6 +35,16 @@ fn expand_substitutes_path_placeholder() {
 }
 
 #[test]
+fn expand_preserves_backslashes_in_path_placeholders() {
+  let c = ctx(Path::new(r"C:\Users\runner\AppData\Local\Temp\wt"), None, None);
+  let cmd = expand_command("lazygit -p {path}", &c).unwrap();
+  assert_eq!(
+    cmd.argv,
+    vec!["lazygit", "-p", r"C:\Users\runner\AppData\Local\Temp\wt"]
+  );
+}
+
+#[test]
 fn expand_substitutes_base_head_path() {
   // The review-style template wires base + head into a `git diff` style
   // expression. shell-words splits on whitespace — `{base}..{head}`

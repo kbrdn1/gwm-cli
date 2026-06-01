@@ -1,5 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use gwm::tui::commit_graph::{render_commits, test_row};
+use std::hint::black_box;
 
 fn graph_rows(count: usize) -> Vec<gwm::worktree::CommitRow> {
   let hashes: Vec<String> = (0..count).map(|i| format!("{:040x}", i + 1)).collect();

@@ -142,18 +142,37 @@ jobs:
           echo "path=${CHANGELOG_PATH}" >> "$GITHUB_OUTPUT"
 
       - name: publish release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
-          body_path: ${{ steps.changelog.outputs.path }}
-          files: |
-            dist/*.tar.gz
-            dist/*.tar.gz.sha256
-            dist/*.zip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file "${{ steps.changelog.outputs.path }}" \
+              --draft=false \
+              --prerelease=false
+          else
+            gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$TAG" \
+              --notes-file "${{ steps.changelog.outputs.path }}" \
+              --verify-tag \
+              --draft=false \
+              --prerelease=false
+          fi
+
+          gh release upload "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            dist/*.tar.gz \
+            dist/*.tar.gz.sha256 \
+            dist/*.zip \
             dist/*.zip.sha256
-          draft: false
-          prerelease: false
 
   homebrew-tap-update:
     name: update homebrew tap

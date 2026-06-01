@@ -106,16 +106,29 @@ pub fn run(ctx: &BootstrapCtx<'_>) -> Result<BootstrapReport> {
   let mut report = BootstrapReport { steps: Vec::new() };
   let bs = &ctx.config.bootstrap;
 
+  run_core_steps(ctx, bs, &mut report);
+  run_commands(ctx, bs, &mut report);
+
+  Ok(report)
+}
+
+pub fn run_core(ctx: &BootstrapCtx<'_>) -> Result<BootstrapReport> {
+  let mut report = BootstrapReport { steps: Vec::new() };
+  let bs = &ctx.config.bootstrap;
+
+  run_core_steps(ctx, bs, &mut report);
+
+  Ok(report)
+}
+
+fn run_core_steps(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut BootstrapReport) {
   // Order matters (issue #93): `run_no_symlinks` strips any declared
   // symlinked targets BEFORE `run_copies` opens them for writing.
   // Reversed, an attacker-planted symlink at a copy destination
   // redirects the `fs::copy` write outside the worktree — a write-
   // anywhere primitive triggered by `gwm bootstrap` alone.
-  run_no_symlinks(ctx, bs, &mut report);
-  run_copies(ctx, bs, &mut report);
-  run_commands(ctx, bs, &mut report);
-
-  Ok(report)
+  run_no_symlinks(ctx, bs, report);
+  run_copies(ctx, bs, report);
 }
 
 fn run_copies(ctx: &BootstrapCtx<'_>, bs: &BootstrapConfig, report: &mut BootstrapReport) {
@@ -619,7 +632,7 @@ fn exec_shell(step: &CommandStep, cwd: &Path) -> Result<String> {
   Ok(if stdout.is_empty() { stderr } else { stdout })
 }
 
-fn trailing_lines(s: &str, n: usize) -> String {
+pub fn trailing_lines(s: &str, n: usize) -> String {
   let lines: Vec<&str> = s.lines().collect();
   let start = lines.len().saturating_sub(n);
   lines[start..].join("\n")

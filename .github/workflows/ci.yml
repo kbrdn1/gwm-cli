@@ -10,6 +10,9 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
+  # Force repo-only config loading so the suite never picks up a
+  # runner's user-level ~/.config/gwm/config.toml (issue #190 opt-out).
+  GWM_NO_GLOBAL_CONFIG: "1"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -45,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable

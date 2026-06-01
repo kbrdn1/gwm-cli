@@ -1,20 +1,25 @@
 use crate::error::{GwmError, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 pub const CONFIG_FILE: &str = ".gwm.toml";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]
   pub bootstrap: BootstrapConfig,
   #[serde(default)]
+  pub hooks: LifecycleHooksConfig,
+  #[serde(default)]
   pub doctor: DoctorConfig,
   #[serde(default)]
   pub tui: TuiConfig,
+  #[serde(default)]
+  pub theme: ThemeConfig,
   #[serde(default)]
   pub git_tui: GitTuiConfig,
   #[serde(default)]
@@ -41,6 +46,26 @@ pub struct Config {
   /// by `BranchSpec::validate`, `gwm types` and the TUI create picker.
   #[serde(rename = "branch_types", default)]
   pub branch_types: Vec<BranchType>,
+  /// `[aliases]` table — repo-level CLI aliases expanded BEFORE clap
+  /// parses argv (issue #86). Maps alias name to argv-shell-tokenised
+  /// expansion (e.g. `wip = "create feat 0 wip"`). `BTreeMap` so the
+  /// ordering surfaced by `gwm aliases list` is deterministic.
+  ///
+  /// Absent block resolves to an empty map — aliasing disabled, no
+  /// behaviour change for repos that never opt in. Shadowing a
+  /// built-in subcommand or visible alias is a config error surfaced
+  /// at load time by [`crate::aliases::validate_aliases`]; same for
+  /// values containing shell pipeline metachars.
+  #[serde(default)]
+  pub aliases: BTreeMap<String, String>,
+  /// `[gitmoji]` table — branch type to Gitmoji shortcode overrides used
+  /// by `gwm types --gitmoji` and `gwm commit-prefix`.
+  #[serde(default)]
+  pub gitmoji: BTreeMap<String, String>,
+  #[serde(default)]
+  pub issue_template: IssueTemplateConfig,
+  #[serde(default)]
+  pub pr_template: PrTemplateConfig,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -48,6 +73,7 @@ pub struct Config {
 /// the labels module at push time (deterministic pastel by default,
 /// overridable via `--random-colors`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LabelConfig {
   pub name: String,
   #[serde(default)]
@@ -65,6 +91,7 @@ pub struct LabelConfig {
 /// `state` (`"open"` | `"closed"`) at push time so a typo doesn't
 /// break unrelated subcommands.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct MilestoneConfig {
   pub title: String,
   #[serde(default)]
@@ -83,9 +110,64 @@ pub struct MilestoneConfig {
 /// config block is absent, so both the configured and built-in flavours
 /// share the same shape downstream.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BranchType {
   pub name: String,
   pub description: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTemplateConfig {
+  #[serde(default)]
+  pub default: Option<String>,
+  #[serde(default)]
+  pub by_type: BTreeMap<String, IssueTemplateTypeConfig>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IssueTemplateTypeConfig {
+  #[serde(default)]
+  pub template: Option<String>,
+  #[serde(default)]
+  pub surface: Option<String>,
+  #[serde(default)]
+  pub title_prefix: Option<String>,
+  #[serde(default)]
+  pub labels: Vec<String>,
+}
+
+/// `[pr_template]` config block (issue #84). `default` is a workdir-
+/// relative path to a Markdown template used as the fallback PR body;
+/// `by_type` maps a branch type to either a per-type `path` or an
+/// inline `body` string. The resolver in `pr_templates` picks the most
+/// specific entry (per-type wins over default) and runs the templating
+/// engine on the result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrTemplateConfig {
+  #[serde(default)]
+  pub default: Option<String>,
+  #[serde(default)]
+  pub by_type: BTreeMap<String, PrTemplateTypeConfig>,
+}
+
+/// Per-branch-type override under `[pr_template.by_type.<type>]`. Either
+/// `path` (a workdir-relative Markdown file) or `body` (an inline
+/// string) must be set; setting both is allowed and inline `body` wins
+/// over `path` so a stable on-disk template can be carried in `path`
+/// while a focused `body` override takes precedence for a specific
+/// branch type. The resolver in `pr_templates` enforces this ordering;
+/// see `inline_body_wins_over_path_when_both_set` in
+/// `tests/pr_templates_tests.rs` for the pinned contract.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrTemplateTypeConfig {
+  #[serde(default)]
+  pub path: Option<String>,
+  #[serde(default)]
+  pub body: Option<String>,
 }
 
 /// Origin of the resolved branch-type list — surfaced verbatim under
@@ -120,23 +202,40 @@ pub struct ResolvedBranchTypes {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorktreeConfig {
+  #[serde(default = "default_worktree_base")]
   pub base: String,
+  #[serde(default = "default_path_pattern")]
   pub path_pattern: String,
+  #[serde(default = "default_branch_pattern")]
   pub branch_pattern: String,
 }
 
 impl Default for WorktreeConfig {
   fn default() -> Self {
     Self {
-      base: "{home}/cc-worktree/{repo}".into(),
-      path_pattern: "{type}-{issue}-{desc}".into(),
-      branch_pattern: "{type}/#{issue}-{desc}".into(),
+      base: default_worktree_base(),
+      path_pattern: default_path_pattern(),
+      branch_pattern: default_branch_pattern(),
     }
   }
 }
 
+fn default_worktree_base() -> String {
+  "{home}/cc-worktree/{repo}".into()
+}
+
+fn default_path_pattern() -> String {
+  "{type}-{issue}-{desc}".into()
+}
+
+fn default_branch_pattern() -> String {
+  "{type}/#{issue}-{desc}".into()
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BootstrapConfig {
   #[serde(default)]
   pub copy: Vec<CopyStep>,
@@ -151,6 +250,7 @@ pub struct BootstrapConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CopyStep {
   pub from: String,
   pub to: String,
@@ -166,6 +266,7 @@ pub struct CopyStep {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Guard {
   pub name: String,
   #[serde(default)]
@@ -182,11 +283,13 @@ fn default_on_match() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NoSymlink {
   pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CommandStep {
   pub name: String,
   pub run: String,
@@ -197,7 +300,72 @@ pub struct CommandStep {
   pub env: HashMap<String, String>,
 }
 
+/// `[hooks]` lifecycle automation. Each array uses the same command
+/// shape as `[[bootstrap.command]]`, plus explicit failure handling.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleHooksConfig {
+  #[serde(default)]
+  pub pre_create: Vec<HookStep>,
+  #[serde(default)]
+  pub post_create: Vec<HookStep>,
+  #[serde(default)]
+  pub pre_bootstrap: Vec<HookStep>,
+  #[serde(default)]
+  pub post_bootstrap: Vec<HookStep>,
+  #[serde(default)]
+  pub pre_remove: Vec<HookStep>,
+  #[serde(default)]
+  pub post_remove: Vec<HookStep>,
+}
+
+impl LifecycleHooksConfig {
+  pub fn has_any(&self) -> bool {
+    !self.pre_create.is_empty()
+      || !self.post_create.is_empty()
+      || !self.pre_bootstrap.is_empty()
+      || !self.post_bootstrap.is_empty()
+      || !self.pre_remove.is_empty()
+      || !self.post_remove.is_empty()
+  }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookStep {
+  pub name: String,
+  pub run: String,
+  #[serde(default)]
+  pub when: Option<String>,
+  #[serde(default)]
+  pub env: HashMap<String, String>,
+  #[serde(default)]
+  pub on_fail: HookOnFail,
+}
+
+impl From<CommandStep> for HookStep {
+  fn from(step: CommandStep) -> Self {
+    Self {
+      name: step.name,
+      run: step.run,
+      when: step.when,
+      env: step.env,
+      on_fail: HookOnFail::Abort,
+    }
+  }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookOnFail {
+  #[default]
+  Abort,
+  Warn,
+  Ignore,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FallbackContent {
   pub target: String,
   pub content: String,
@@ -209,6 +377,7 @@ pub struct FallbackContent {
 /// any repo using a different trunk convention (`master`, `trunk`,
 /// `release-1.x`, …). Default preserves the previous behaviour.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DoctorConfig {
   /// Trunk branches the orphan-branch check treats as "merge destinations".
   /// A gwm-style branch fully reachable from one of these is preserved per
@@ -231,6 +400,37 @@ fn default_trunks() -> Vec<String> {
   vec!["dev".into(), "main".into()]
 }
 
+/// Which side the worktree-details sidebar sits on in the side-by-side
+/// TUI layout (issue #188). `Right` preserves the pre-#188 behaviour and
+/// is the default. In the stacked (narrow-terminal) layout the sidebar
+/// always sits at the bottom, so this preference only governs the
+/// side-by-side split. Toggled live with `H`; persisted here so the
+/// choice survives across launches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SidebarPosition {
+  /// Sidebar on the left, worktree table on the right.
+  Left,
+  /// Sidebar on the right of the table — pre-#188 behaviour. Default.
+  #[default]
+  Right,
+}
+
+impl SidebarPosition {
+  /// Human-readable label for the status bar (`sidebar position: left`).
+  pub fn label(self) -> &'static str {
+    match self {
+      SidebarPosition::Left => "left",
+      SidebarPosition::Right => "right",
+    }
+  }
+
+  /// `true` when the sidebar should be drawn to the left of the table.
+  pub fn is_left(self) -> bool {
+    matches!(self, SidebarPosition::Left)
+  }
+}
+
 /// `[tui]` table — runtime knobs for the worktree TUI. Currently exposes
 /// the safety countdown on the delete-confirm overlay (issue #30): when
 /// `delete_branch_on_remove` has been toggled ON, the modal forces the
@@ -241,6 +441,7 @@ fn default_trunks() -> Vec<String> {
 /// like `confirm_countdown_secs = 300` can never strand a destructive
 /// path behind a 300-second wait.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TuiConfig {
   /// Safety countdown (in seconds) applied to the confirm overlay when
   /// `delete_branch_on_remove` is ON. Accepts any non-negative integer;
@@ -258,6 +459,22 @@ pub struct TuiConfig {
   /// kept available under `mode = "finder"`.
   #[serde(default)]
   pub open: TuiOpenConfig,
+
+  /// Which side the worktree-details sidebar sits on in the side-by-side
+  /// layout (issue #188). Default `right` preserves pre-#188 behaviour;
+  /// `left` flips the split. Toggled live in the TUI with `H`. Ignored by
+  /// the stacked (narrow-terminal) layout, where the sidebar is always at
+  /// the bottom.
+  #[serde(default)]
+  pub sidebar_position: SidebarPosition,
+
+  /// `[tui.keys]` sub-table (issue #87) — user overrides for the
+  /// remappable keymap. Absent → keymap stays at the built-in
+  /// defaults. Present → every listed action *replaces* its default
+  /// binding set; actions left unmentioned keep their defaults. An
+  /// empty array (`down = []`) unbinds the action entirely.
+  #[serde(default)]
+  pub keys: TuiKeysConfig,
 }
 
 impl Default for TuiConfig {
@@ -265,7 +482,126 @@ impl Default for TuiConfig {
     Self {
       confirm_countdown_secs: default_confirm_countdown_secs(),
       open: TuiOpenConfig::default(),
+      sidebar_position: SidebarPosition::default(),
+      keys: TuiKeysConfig::default(),
     }
+  }
+}
+
+/// `[tui.keys]` — user-facing override table for the TUI keymap.
+/// Stored as `action-slug -> [chord, …]` so the TOML stays declarative
+/// and copy-pastable across machines.
+///
+/// Resolution / validation happens in [`Self::resolved_keymap`], which
+/// is called from `Config::load_for_repo` so a malformed override is
+/// surfaced at load time (action name typos, parse errors, chord
+/// conflicts, prefix collisions) rather than as a silent no-op in the
+/// TUI. The raw map is preserved on `Self` so `gwm tui keys` can show
+/// both the user's source and the resolved bindings.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TuiKeysConfig {
+  pub bindings: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+impl TuiKeysConfig {
+  /// Apply this user override layer on top of the built-in defaults.
+  /// Returns a fully-resolved [`crate::tui::keymap::Keymap`] ready to
+  /// hand to the TUI event loop.
+  pub fn resolved_keymap(&self) -> Result<crate::tui::keymap::Keymap> {
+    use crate::tui::keymap::{Action, KeyStroke, Keymap};
+
+    let mut km = Keymap::defaults();
+    for (action_slug, chord_strings) in &self.bindings {
+      let action = Action::from_slug(action_slug).ok_or_else(|| {
+        GwmError::Config(format!(
+          "tui.keys: unknown action {:?} (run `gwm tui keys` for the full list)",
+          action_slug
+        ))
+      })?;
+      let mut parsed = Vec::with_capacity(chord_strings.len());
+      for chord_str in chord_strings {
+        let chord = KeyStroke::parse_chord(chord_str).map_err(|e| {
+          // Re-wrap so the user sees `tui.keys.<action>` as the
+          // coordinate rather than the bare "keymap:" prefix from
+          // the parser.
+          let inner = match e {
+            GwmError::Config(msg) => msg,
+            other => other.to_string(),
+          };
+          GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
+        })?;
+        parsed.push(chord);
+      }
+      km.apply_override(action, parsed).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
+      })?;
+    }
+    Ok(km)
+  }
+}
+
+/// `[theme]` block (issue #33) — role-based TUI colour scheme.
+///
+/// Two knobs:
+///
+/// - `preset` (optional string) — pick a built-in palette
+///   (`catppuccin`, `gruvbox`, `tokyo-night`). When absent, the
+///   resolved theme starts from [`crate::tui::theme::Theme::default`]
+///   (the pre-#33 hardcoded scheme).
+/// - Per-role keys (`focus`, `accent`, `branch`, …) — override the
+///   colour of a single role on top of the preset (or default).
+///   Recognised colours: named (`cyan`, `bright_blue`), indexed
+///   (`220`), or hex (`#89b4fa`).
+///
+/// Validation runs in `Config::load_for_repo` via
+/// [`Self::resolve`], so unknown presets, unknown roles, and bad
+/// colour values fail at load instead of silently picking the
+/// default colour at render time.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThemeConfig {
+  /// Optional preset name. `None` → start from the default scheme.
+  /// `Some("catppuccin")` → seed every role from that preset.
+  pub preset: Option<String>,
+  /// Per-role overrides. Keys must match an entry in
+  /// [`crate::tui::theme::Theme`]; values must parse via
+  /// [`crate::tui::theme::parse_color`].
+  #[serde(flatten)]
+  pub overrides: std::collections::BTreeMap<String, String>,
+}
+
+impl ThemeConfig {
+  /// Resolve this config into a [`crate::tui::theme::Theme`]:
+  ///
+  /// 1. Start from the preset if any (else default).
+  /// 2. Apply every per-role override on top.
+  ///
+  /// Returns `Err(GwmError::Config(_))` on unknown preset, unknown
+  /// role, or bad colour value.
+  pub fn resolve(&self) -> Result<crate::tui::theme::Theme> {
+    use crate::tui::theme::Theme;
+    let mut theme = match &self.preset {
+      Some(name) => Theme::preset(name).ok_or_else(|| {
+        let known = crate::tui::theme::preset_names().join(", ");
+        GwmError::Config(format!("theme.preset: unknown preset {:?} (known: {})", name, known))
+      })?,
+      None => Theme::default(),
+    };
+    for (role, value) in &self.overrides {
+      // `preset` lands in `overrides` via `#[serde(flatten)]` only if
+      // a user happens to also write `[theme] preset = "x"` (it
+      // doesn't — the dedicated field absorbs it first). Defensive
+      // guard anyway in case a future refactor moves the field.
+      if role == "preset" {
+        continue;
+      }
+      theme.apply_override(role, value)?;
+    }
+    Ok(theme)
   }
 }
 
@@ -275,6 +611,7 @@ impl Default for TuiConfig {
 /// in a shell or `$EDITOR` directly, sharing the spawn-and-restore
 /// lifecycle that `l: lazygit` already uses.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TuiOpenConfig {
   #[serde(default)]
   pub mode: TuiOpenMode,
@@ -338,21 +675,149 @@ fn default_confirm_countdown_secs() -> u32 {
   3
 }
 
-impl Config {
-  /// Look for `.gwm.toml` in the given repo root.
-  /// Falls back to defaults when missing.
-  pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
-    let path = repo_root.join(CONFIG_FILE);
-    if !path.exists() {
-      return Ok(Self::default());
+/// Read a config file as a raw `toml::Value` (always a table at the
+/// document root). Kept separate from `toml::from_str::<Config>` so the
+/// two layers can be deep-merged at the value level before a single
+/// `deny_unknown_fields` deserialization runs on the result. Issue #190.
+fn read_config_value(path: &Path) -> Result<toml::Value> {
+  let raw = std::fs::read_to_string(path)?;
+  let val: toml::Value = toml::from_str(&raw)?;
+  Ok(val)
+}
+
+/// Deep-merge `over` onto `base`: two tables merge key-by-key
+/// recursively (so disjoint sections from both files coexist and a
+/// nested table override keeps the untouched sibling keys); for every
+/// other shape — scalars AND arrays — `over` wins wholesale. Arrays are
+/// intentionally replaced, never element-wise unioned, so a repo's
+/// `[[labels]]` fully supersedes the global set rather than producing a
+/// confusing concatenation. Issue #190.
+fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
+  match (base, over) {
+    (toml::Value::Table(mut b), toml::Value::Table(o)) => {
+      for (k, ov) in o {
+        let merged = match b.remove(&k) {
+          Some(bv) => merge_toml(bv, ov),
+          None => ov,
+        };
+        b.insert(k, merged);
+      }
+      toml::Value::Table(b)
     }
-    let raw = std::fs::read_to_string(&path)?;
-    let cfg: Config = toml::from_str(&raw)?;
+    (_, over) => over,
+  }
+}
+
+/// On-disk location of the user-level global config under a given
+/// XDG config-home directory: `<config_home>/gwm/config.toml`. Pure
+/// (no env / FS access) so the path contract is unit-testable. Issue
+/// #190.
+pub fn global_config_path_in(config_home: &Path) -> PathBuf {
+  config_home.join("gwm").join("config.toml")
+}
+
+/// Resolve the user-level global config path, honouring
+/// `$XDG_CONFIG_HOME` first and falling back to `dirs::config_dir()` —
+/// the same resolution order as `~/.config/gwm/aliases.toml` and the
+/// trust ledger. Returns `None` on systems where neither resolves
+/// (sandboxed CI / containers without `$HOME`), in which case loading
+/// degrades to repo-only. Issue #190.
+pub fn global_config_path() -> Option<PathBuf> {
+  // Opt-out: `GWM_NO_GLOBAL_CONFIG=1` reports no global path, forcing
+  // repo-only loading. `load_for_repo` reads the real user-level file,
+  // so this keeps `cargo test` / CI deterministic on a machine that
+  // happens to have a `~/.config/gwm/config.toml`, and lets a user pin
+  // strictly repo-local config. Uses the same truthy parsing as the
+  // other `GWM_*` flags (`GWM_ALLOW_BOOTSTRAP`). Issue #190.
+  if crate::trust::env_truthy("GWM_NO_GLOBAL_CONFIG") {
+    return None;
+  }
+  if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    if !xdg.is_empty() {
+      return Some(global_config_path_in(Path::new(&xdg)));
+    }
+  }
+  dirs::config_dir().map(|p| global_config_path_in(&p))
+}
+
+impl Config {
+  /// Look for `.gwm.toml` in the given repo root, layered over the
+  /// user-level global config at [`global_config_path`] (issue #190).
+  /// Falls back to defaults when neither exists.
+  pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
+    Self::load_layered(repo_root, global_config_path().as_deref())
+  }
+
+  /// Load the effective config by deep-merging the user-level global
+  /// config (`global_path`, the base) under the repo's `.gwm.toml`
+  /// (the override). Issue #190.
+  ///
+  /// Merge rule: the repo wins on conflicting scalars; tables merge
+  /// key-by-key recursively; arrays are replaced wholesale by the repo
+  /// when present. Validation runs on the merged result, so a bad
+  /// value from either layer fails at load. When neither file exists
+  /// the bare default is returned — identical to the pre-#190
+  /// behaviour, which the absent-global case preserves byte-for-byte.
+  ///
+  /// `global_path` is injected (rather than resolved internally) so
+  /// the merge contract can be pinned by a test without touching the
+  /// runner's real `$HOME` / `$XDG_CONFIG_HOME`.
+  pub fn load_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
+    let repo_path = repo_root.join(CONFIG_FILE);
+    let global_val = match global_path {
+      Some(p) if p.exists() => Some(read_config_value(p)?),
+      _ => None,
+    };
+    let repo_val = if repo_path.exists() {
+      Some(read_config_value(&repo_path)?)
+    } else {
+      None
+    };
+
+    let cfg: Config = match (global_val, repo_val) {
+      (None, None) => return Ok(Self::default()),
+      (Some(g), None) => g.try_into()?,
+      (None, Some(r)) => r.try_into()?,
+      (Some(g), Some(r)) => merge_toml(g, r).try_into()?,
+    };
+
     cfg.validate_branch_types()?;
     cfg.validate_bootstrap_paths()?;
     cfg.validate_bootstrap_guards()?;
     cfg.validate_labels()?;
+    cfg.validate_aliases()?;
+    cfg.validate_tui_keys()?;
+    cfg.validate_theme()?;
     Ok(cfg)
+  }
+
+  /// Reject `[tui.keys]` entries that name an unknown action, list a
+  /// chord that does not parse, or create a conflict / prefix
+  /// collision with another binding (issue #87). Delegates to
+  /// [`TuiKeysConfig::resolved_keymap`] which does the full layering +
+  /// validation in one pass — the resolved keymap is discarded here
+  /// (it's rebuilt by the TUI at startup); the call is only kept for
+  /// its error side-effects.
+  pub(crate) fn validate_tui_keys(&self) -> Result<()> {
+    self.tui.keys.resolved_keymap().map(|_| ())
+  }
+
+  /// Reject `[theme]` entries that name an unknown preset, unknown
+  /// role, or unparsable colour value (issue #33). Delegates to
+  /// [`ThemeConfig::resolve`] which does the full preset + override
+  /// pass in one shot. The resolved theme is discarded here — the
+  /// TUI rebuilds it at startup; the call is kept only for its
+  /// error side-effects.
+  pub(crate) fn validate_theme(&self) -> Result<()> {
+    self.theme.resolve().map(|_| ())
+  }
+
+  /// Reject `[aliases]` entries that shadow built-in subcommands, are
+  /// empty, or contain shell pipeline metachars (issue #86). Delegates
+  /// to [`crate::aliases::validate_aliases`] so the same rules apply
+  /// symmetrically to the user-level `~/.config/gwm/aliases.toml`.
+  pub(crate) fn validate_aliases(&self) -> Result<()> {
+    crate::aliases::validate_aliases(&self.aliases, ".gwm.toml `[aliases]`")
   }
 
   /// Reject `[[labels]]` entries whose `name` would be parsed as a flag
@@ -366,7 +831,7 @@ impl Config {
   /// `Display` impl reads `config error: labels[<i>]: config error:
   /// labels: …` with the prefix echoed twice, which is what the user
   /// actually sees on stderr.
-  fn validate_labels(&self) -> Result<()> {
+  pub(crate) fn validate_labels(&self) -> Result<()> {
     for (i, l) in self.labels.iter().enumerate() {
       crate::labels::validate_label_name(&l.name).map_err(|e| {
         let inner = match e {
@@ -450,7 +915,7 @@ impl Config {
   /// trust assumption no longer holds and this validator should be
   /// extended symmetrically — `check_relative_no_traversal` already
   /// accepts an arbitrary field label and is ready for it.
-  fn validate_bootstrap_paths(&self) -> Result<()> {
+  pub(crate) fn validate_bootstrap_paths(&self) -> Result<()> {
     for (i, c) in self.bootstrap.copy.iter().enumerate() {
       check_relative_no_traversal(&c.to, &format!("bootstrap.copy[{}].to", i))?;
     }
@@ -474,7 +939,7 @@ impl Config {
   ///   - `name`s must be unique across the table — duplicates would
   ///     silently override each other under `serde`'s `Vec` decoding
   ///     and make the resolved list non-deterministic
-  fn validate_branch_types(&self) -> Result<()> {
+  pub(crate) fn validate_branch_types(&self) -> Result<()> {
     let name_re = regex::Regex::new(r"^[a-z]+$").expect("static regex compiles");
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for entry in &self.branch_types {
@@ -543,6 +1008,7 @@ impl Config {
 /// shape (placeholder expansion + `fullscreen` flag) keeps the user's
 /// mental model consistent across the two launcher keybindings.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GitTuiConfig {
   /// Shell line. Accepts the `{path}` placeholder. When `None`, the
   /// resolved launcher uses `lazygit -p {path}`.
@@ -580,6 +1046,7 @@ impl GitTuiConfig {
 /// When both are set, `command` wins (and the TUI surfaces a status-bar
 /// hint at startup so the user notices their `tool` choice is shadowed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewConfig {
   /// Shell line. Accepts `{base} {head} {path} {diff}` placeholders.
   #[serde(default)]
@@ -728,13 +1195,22 @@ pub struct ResolvedLauncher {
   pub fullscreen: bool,
 }
 
-/// Expand `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}` in a template string.
+/// Expand `{home}`, `{repo}`, `{repo_path}`, `{repo_parent}`, `{type}`,
+/// `{issue}`, `{desc}` in a template string.
+///
+/// `{repo}` is the repo **name**; `{repo_path}` is the main repo's
+/// absolute working directory and `{repo_parent}` its parent directory —
+/// both resolved from `repo_path`. These two let a `base` be expressed
+/// relative to the repo on disk (e.g. `{repo_parent}/worktrees`, matching
+/// an editor's `../worktrees` convention). When `repo_path` is `None` the
+/// disk-path tokens are left untouched rather than collapsed to empty.
 pub fn expand_placeholders(
   template: &str,
   repo: &str,
   type_: Option<&str>,
   issue: Option<&str>,
   desc: Option<&str>,
+  repo_path: Option<&Path>,
 ) -> Result<String> {
   let home = dirs::home_dir()
     .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
@@ -749,6 +1225,12 @@ pub fn expand_placeholders(
   }
   if let Some(d) = desc {
     out = out.replace("{desc}", d);
+  }
+  if let Some(p) = repo_path {
+    out = out.replace("{repo_path}", &p.to_string_lossy());
+    if let Some(parent) = p.parent() {
+      out = out.replace("{repo_parent}", &parent.to_string_lossy());
+    }
   }
   // Tilde expansion in case the template starts with ~/...
   let expanded = shellexpand::tilde(&out).to_string();

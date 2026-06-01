@@ -14,9 +14,12 @@ Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2`
 | Channel        | Command                                                              |
 |:---------------|:---------------------------------------------------------------------|
 | Cargo (source) | `cargo install --path .`                                              |
+| cargo-binstall | `cargo binstall gwm`                                                  |
 | Homebrew (macOS) | `brew tap kbrdn1/tap && brew install gwm`                          |
 | Nix flake      | `nix profile install github:kbrdn1/gwm-cli`                          |
 | Prebuilt       | <https://github.com/kbrdn1/gwm-cli/releases> (Linux / macOS / Windows) |
+
+`cargo binstall gwm` grabs the prebuilt binary from the matching GitHub Release instead of compiling `git2`/vendored-libgit2 from source — no Rust toolchain needed at install time.
 
 Full install matrix and verification steps: [`docs/getting-started/install.md`](docs/1.getting-started/1.install.md).
 

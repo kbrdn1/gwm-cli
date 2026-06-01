@@ -1,5 +1,20 @@
 # gwm config — copy this to your repo root as `.gwm.toml`
-# placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+#
+# Global config (issue #190): the same schema may live at
+# `~/.config/gwm/config.toml` ($XDG_CONFIG_HOME/gwm/config.toml). It is
+# merged UNDERNEATH this repo file — set a preference once (e.g.
+# `[theme] preset = "…"`) and every repo inherits it. The repo `.gwm.toml`
+# always wins on conflict: scalars override, tables merge key-by-key,
+# arrays ([[labels]], [[bootstrap.copy]], …) are replaced wholesale.
+# Set GWM_NO_GLOBAL_CONFIG=1 to ignore the global file (repo-only).
+#
+# placeholders supported in paths/patterns:
+#   {repo}        repo name              {home}    your home directory
+#   {repo_path}   repo's absolute dir    {repo_parent}  the dir *containing* the repo
+#   {type} {issue} {desc}
+# `{repo_parent}` lets the base sit next to the repo — e.g.
+#   base = "{repo_parent}/worktrees"  → a sibling `worktrees/` dir,
+# matching an editor's `../worktrees` convention (Zed git.worktree_directory).
 #
 # === TOFU trust gate (issue #95) ===========================================
 # The first `gwm create` / `gwm bootstrap` against this file opens a
@@ -15,6 +30,8 @@
 
 [worktree]
 base = "{home}/cc-worktree/{repo}"
+# Repo-relative alternative (sibling `worktrees/`, à la Zed `../worktrees`):
+#   base = "{repo_parent}/worktrees"
 path_pattern = "{type}-{issue}-{desc}"
 branch_pattern = "{type}/#{issue}-{desc}"
 
@@ -70,39 +87,52 @@ path = "vendor"
 [[bootstrap.no_symlink]]
 path = "node_modules"
 
-# --- post-copy commands -----------------------------------------------------
+# --- lifecycle hooks --------------------------------------------------------
+# Phases: pre_create, post_create, pre_bootstrap, post_bootstrap, pre_remove,
+# post_remove. Placeholders: {branch} {path} {type} {issue} {desc} {user}
+# {owner} {repo}. Failure handling: on_fail = "abort" (default), "warn",
+# or "ignore". Emergency bypass: --skip-hooks <phase,phase>; `gwm remove
+# --force` implies --skip-hooks pre_remove,post_remove.
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "composer install"
 run = "composer install --no-interaction --prefer-dist"
 when = "file_exists:composer.json"
+on_fail = "warn"
 env = { COMPOSER_IGNORE_PLATFORM_REQ = "ext-imagick" }
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "direnv allow"
 run = "direnv allow ."
 when = "file_exists:.envrc"
+on_fail = "ignore"
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "npm install"
 run = "npm install"
 when = "file_exists:package.json"
+
+# --- legacy post-create commands -------------------------------------------
+# `[[bootstrap.command]]` is still accepted for compatibility. New configs
+# should prefer `[[hooks.post_create]]`; if both legacy commands and any
+# `[hooks.*]` entries are present, gwm warns and runs legacy commands as
+# additional post_create hooks.
 
 # --- composable when predicates --------------------------------------------
 # Atoms: file_exists / cmd_exists / env_set / env_eq / glob_exists
 # Operators: ! (NOT), && (AND), || (OR) — precedence: ! > && > ||
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "install (bun if available)"
 run = "bun install"
 when = "file_exists:package.json && cmd_exists:bun"
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "install (npm fallback)"
 run = "npm ci"
 when = "file_exists:package.json && !cmd_exists:bun"
 
-[[bootstrap.command]]
+[[hooks.post_create]]
 name = "full local build"
 run = "./scripts/full-build.sh"
 when = "glob_exists:src/**/*.rs && !env_set:CI"
@@ -131,6 +161,50 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # name = "migration"
 # description = "Database migration"
 
+# --- gitmoji mapping (issue #85) --------------------------------------------
+# Per-repo override of the built-in `branch_type → :shortcode:` table used
+# by `gwm commit-prefix`, `gwm types --gitmoji`, and the bundled
+# `commit-msg` hook (`gwm hooks install commit-msg`). Absent (default) ⇒
+# the built-in table is used:
+#
+#   feat     → :sparkles:               ✨
+#   fix      → :bug:                    🐛
+#   hotfix   → :ambulance:              🚑
+#   docs     → :memo:                   📝
+#   test     → :white_check_mark:       ✅
+#   refactor → :recycle:                ♻
+#   chore    → :wrench:                 🔧
+#   perf     → :zap:                    ⚡
+#   ci       → :construction_worker:    👷
+#   build    → :package:                📦
+#
+# `[gitmoji]` is **additive** — overriding one entry doesn't wipe the
+# other nine. You can also map custom branch types (e.g. `migration`)
+# without redeclaring the built-ins.
+#
+# Surface:
+#   gwm commit-prefix                    → ":sparkles: feat(#41):"  (HEAD)
+#   gwm commit-prefix --unicode          → "✨ feat(#41):"
+#   gwm commit-prefix --branch feat/#7-x → ":sparkles: feat(#7):"   (named)
+#   gwm types --gitmoji                  → branch types + emoji columns
+#   gwm hooks install commit-msg         → opt-in auto-prepend on `git commit`
+#
+# `--unicode` normalisation of overrides:
+#   With `feat = ":rocket:"`:
+#     gwm commit-prefix --branch feat/#1-x           → ":rocket: feat(#1):"
+#     gwm commit-prefix --branch feat/#1-x --unicode → "🚀 feat(#1):"
+#   With `feat = ":foo:"` (shortcode unknown to gwm's built-in table):
+#     gwm commit-prefix --branch feat/#1-x --unicode → ":foo: feat(#1):"
+#   Unknown shortcodes fall through verbatim — no panic, no
+#   `:question:` substitution. The known-shortcode set covers the ten
+#   built-in mappings plus the most commonly-swapped Gitmoji entries
+#   (`:rocket:`, `:fire:`, `:lock:`, `:art:`, `:lipstick:`, `:hammer:`,
+#   `:bookmark:`, …).
+#
+# [gitmoji]
+# feat = ":rocket:"            # team uses 🚀 for new features instead of ✨
+# migration = ":truck:"        # custom branch type — emoji wins on `gwm types --gitmoji`
+
 # --- doctor knobs -----------------------------------------------------------
 # Trunk branches `gwm doctor`'s orphan-branch check treats as merge
 # destinations. A gwm-style branch fully reachable from one of these is
@@ -153,6 +227,17 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [tui]
 # confirm_countdown_secs = 3
+
+# --- TUI sidebar position (issue #188) ---------------------------------------
+# Which side the worktree-details preview sidebar sits on in the side-by-side
+# layout: "right" (default, pre-#188 behaviour) or "left". Toggle it live in
+# the TUI with `H`. The narrow-terminal stacked layout (table on top, sidebar
+# below) ignores this — there the sidebar is always at the bottom. Cycle the
+# orientation (auto / side-by-side / stacked) live with `V`; "auto" picks
+# side-by-side on a wide terminal and stacks on a narrow one.
+#
+# [tui]
+# sidebar_position = "left"
 
 # --- TUI launcher: `l` (git_tui) keybinding (issue #75) ----------------------
 # The `l` key suspends the gwm TUI and launches a git TUI on the selected
@@ -303,3 +388,85 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [[milestones]]
 # title = "v0.6.0"
 # state = "closed"
+
+# --- issue templates for `gwm new` (issue #83) ------------------------------
+# `gwm new <type> <desc>` renders one of `.github/ISSUE_TEMPLATE/*.yml`,
+# creates the issue with `gh issue create`, captures the issue number, then
+# delegates to `gwm create <type> <issue> <desc>`.
+#
+# [issue_template]
+# default = "feature_request.yml"
+#
+# [issue_template.by_type]
+# feat = { template = "feature_request.yml", surface = "cli", title_prefix = "[Feature]: ", labels = ["enhancement"] }
+# fix = { template = "bug_report.yml", surface = "cli", title_prefix = "[Bug]: " }
+# docs = { template = "task.yml", title_prefix = "[Docs]: " }
+# hotfix = { template = "bug_report.yml", surface = "cli", title_prefix = "[Hotfix]: ", labels = ["priority: high"] }
+
+# --- PR templates for `gwm pr` (issue #84) ----------------------------------
+# `gwm pr [--draft] [--base <ref>] [--render]` renders a per-branch-type PR
+# body and shells out to `gh pr create`. Bodies can be a workdir-relative
+# Markdown file (`path = …`) or an inline string (`body = "…"`). Placeholders
+# `{type}`, `{issue}`, `{desc}`, `{base}`, `{head}`, `{repo}`, `{commits}`
+# (`- subject` lines from `git log base..head`), and `{files_changed}`
+# (`git diff --stat base..head`, capped at 30 lines) are substituted before
+# the body lands on the temp file `gh pr create --body-file` reads.
+#
+# `gwm pr --render` skips `gh` entirely and prints the rendered body to
+# stdout so you can pipe it elsewhere: `gwm pr --render | gh pr create
+# --body-file -`.
+#
+# [pr_template]
+# default = ".github/pull_request_template.md"
+#
+# [pr_template.by_type]
+# feat = { path = ".github/pr-templates/feat.md" }
+# fix  = { path = ".github/pr-templates/fix.md" }
+# docs = { path = ".github/pr-templates/docs.md" }
+#
+# [pr_template.by_type.chore]
+# body = """
+# ## Summary
+# {desc}
+#
+# Closes #{issue}
+#
+# ## Test plan
+# - [ ] cargo test
+# """
+
+# --- CLI aliases (issue #86) ------------------------------------------------
+# Mirror of `git config`'s `[alias]` block. Each entry maps a short
+# name to an argv-substituted expansion run BEFORE clap parses, so
+# `gwm wip` becomes `gwm create feat 0 wip` for the dispatcher.
+#
+# Resolution order (highest precedence first):
+#   1. Built-in subcommands (`gwm list`, `gwm switch`, …) — never
+#      shadowable.
+#   2. `visible_alias` set on built-in subcommands (`s → switch`,
+#      `cd → path`) — also never shadowable.
+#   3. This `[aliases]` block (repo-level, follows the repo).
+#   4. `~/.config/gwm/aliases.toml` (user-level, lowest precedence).
+#
+# Rules:
+#   - Aliases are argv substitution only — `gwm <alias> <extra>` becomes
+#     `gwm <expansion> <extra>`. NO shell pipelines: values containing
+#     `&&`, `||`, `|`, `;`, or backticks are refused at load time. Use a
+#     shell alias if you need shell semantics (`alias gwmwip='gwm wip &&
+#     lazygit'`).
+#   - Names that shadow a built-in subcommand or visible alias are a
+#     hard config error surfaced at `Config::load_for_repo` time.
+#   - Single-pass expansion — `wip = "ll"` followed by `ll = "list
+#     --format names"` expands ONCE and then dispatches.
+#
+# Surface the resolved chain (built-in + repo + user, with shadowing
+# flagged inline) via:
+#
+#   gwm aliases list
+#
+# Example:
+#
+# [aliases]
+# wip    = "create feat 0 wip"
+# ll     = "list --format names"
+# sync   = "bootstrap"

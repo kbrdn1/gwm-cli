@@ -1,10 +1,15 @@
 # gwm — worktree bootstrap for gwm-cli (Rust)
 #
-# Placeholders supported in paths/patterns: {repo} {home} {type} {issue} {desc}
+# Placeholders supported in paths/patterns: {repo} {home} {repo_path}
+# {repo_parent} {type} {issue} {desc}. {repo_parent} = the dir containing the
+# repo. `base = "{repo_parent}/worktrees/{repo}"` mirrors Zed's default
+# git.worktree_directory = "../worktrees": Zed resolves it relative to the repo
+# then appends the repo dir name (zed-industries/zed#53673), so both land
+# worktrees in <repo_parent>/worktrees/<repo>/… — same on-disk location.
 # Docs: https://github.com/kbrdn1/gwm-cli
 
 [worktree]
-base           = "{home}/cc-worktree/{repo}"
+base           = "{repo_parent}/worktrees/{repo}"
 path_pattern   = "{type}-{issue}-{desc}"
 branch_pattern = "{type}/#{issue}-{desc}"
 

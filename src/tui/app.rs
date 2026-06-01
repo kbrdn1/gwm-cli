@@ -1,9 +1,13 @@
+use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
+use super::palette::PaletteState;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::CreateForm;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
+use super::state::spinner::Spinner;
+use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
@@ -12,6 +16,7 @@ use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
@@ -54,6 +59,13 @@ pub enum View {
   OpenMenu,
   /// Two-stage prompt: pick the link kind, then enter the number.
   LinkPrompt,
+  /// Command palette (issue #32). A bottom overlay where the user
+  /// types an action by name (`:create`, `:bootstrap`, …). State
+  /// lives on [`App::palette`]; orchestrator methods are
+  /// `open_command_palette` / `palette_push_char` / `palette_pop_char`
+  /// / `palette_cycle_*` / `accept_command_palette` /
+  /// `close_command_palette`.
+  CommandPalette,
 }
 
 /// Target of an open / link action. Canonical definition lives in
@@ -124,7 +136,31 @@ pub struct App {
   pub sidebar: SidebarState,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
+  // **Kept for backward compatibility** with pre-#87 tests that read
+  // it directly. Now a *mirror* of [`Self::pending_chord`] —
+  // [`Self::dispatch_key`] keeps the two synchronised via
+  // [`Self::sync_legacy_pending`]. New code should consume
+  // [`Self::pending_chord_is_empty`] instead.
   pub pending_g: bool,
+
+  /// Generic pending-keys buffer for the configurable keymap
+  /// (issue #87). Empty most of the time; populated with the
+  /// strokes seen so far whenever the user is partway through a
+  /// chord that is a prefix of a bound binding (e.g. after the
+  /// first `g` of the default `g g → Top`).
+  pub pending_chord: Vec<KeyStroke>,
+
+  /// Resolved keymap for this TUI session. Built from
+  /// [`Config::tui.keys`] at construction time and never mutated
+  /// thereafter — the user has to relaunch gwm to pick up a config
+  /// change, mirroring how every other knob in `[tui]` behaves.
+  pub keymap: Keymap,
+
+  /// Resolved colour theme for this TUI session (issue #33). Built
+  /// from `[theme]` in `.gwm.toml` at construction time. Threaded
+  /// through `draw_*` calls so user overrides reach every visual
+  /// signal. Same hot-reload-on-relaunch contract as the keymap.
+  pub theme: Theme,
 
   // Inline fuzzy filter on the worktree list (issue #21, extracted per
   // #124 with memoisation closing #104). The sub-struct owns the buffer
@@ -149,11 +185,25 @@ pub struct App {
   /// instead of being kicked out with exit code 1.
   pub picker_should_exit: bool,
 
+  /// Event-loop exit signal for `Action::Quit` fired from a path
+  /// that cannot itself `break` the loop (issue #32: the command
+  /// palette routes accepted actions through `run_action`, which
+  /// returns `Result<()>` and has no `break` channel). Set by
+  /// `run_action` when it sees `Action::Quit`; checked at the top
+  /// of every event-loop iteration alongside `picker_should_exit`.
+  pub should_quit: bool,
+
   /// Safety countdown state for the confirm overlay (issue #30, extracted
   /// per #125). Holds the timer anchor and exposes the pure state-machine
   /// API; this `App` keeps the side-effecting wrappers below that compose
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
+
+  /// Animated loader for overlays (issue #187). Advanced by the event
+  /// loop's 200ms poll tick while the confirm countdown is armed and
+  /// read by the renderer; pure state lives in
+  /// [`super::state::spinner::Spinner`].
+  pub spinner: Spinner,
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
   /// GitHub fetch state slice — owns the cached link for the currently
@@ -173,6 +223,14 @@ pub struct App {
   /// `github::link_{issue,pr}` on submit.
   link_prompt: LinkPrompt,
 
+  /// Command palette overlay state (issue #32). Opened by
+  /// `Action::CommandPalette` (default `:` binding). The pure state
+  /// machine — buffer, fuzzy-matched candidates, highlight cursor —
+  /// lives on `PaletteState`; this `App` owns the view transition
+  /// and routes the accepted `Action` back through the normal
+  /// dispatcher so palette and keymap fire identical side effects.
+  pub palette: PaletteState,
+
   /// TOFU trust mode for this TUI session (issue #95). Resolved at
   /// the CLI entrypoint from `--allow-bootstrap` / `--deny-bootstrap`
   /// / `GWM_ALLOW_BOOTSTRAP=1` and threaded down via `tui::run(mode)`.
@@ -190,11 +248,32 @@ impl App {
   }
 
   pub fn new_at(start: Option<&Path>) -> Result<Self> {
+    Self::new_at_layered(start, crate::config::global_config_path().as_deref())
+  }
+
+  /// Injectable variant of [`Self::new_at`] (issue #194): `global_path`
+  /// is the user-level global config layered under the repo's `.gwm.toml`
+  /// (`None` = repo-only, no environment read). Tests pass `None` so `App`
+  /// construction never depends on the runner's real
+  /// `~/.config/gwm/config.toml`. `new_at` delegates with the real
+  /// `global_config_path()`, so runtime behaviour is unchanged.
+  pub fn new_at_layered(start: Option<&Path>, global_path: Option<&Path>) -> Result<Self> {
     let repo = worktree::discover_repo(start)?;
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
     let repo_name = worktree::repo_name(&repo);
-    let config = Config::load_for_repo(&workdir)?;
+    let config = Config::load_layered(&workdir, global_path)?;
     let branch_types = config.resolved_branch_types().types;
+    // Resolve the keymap once at construction. Config::load_for_repo
+    // already validated the overrides, so this should not surface a
+    // fresh error — but we re-`?` it rather than `.expect()` so a
+    // future hot-reload path could exercise the same call.
+    let keymap = config.tui.keys.resolved_keymap()?;
+    // Issue #33: resolve the colour theme once at construction.
+    // Validated by `Config::load_for_repo` already, so this can
+    // only surface a fresh error if the loader pre-validation is
+    // bypassed (e.g. a future hot-reload path) — `?` is still the
+    // right propagation policy.
+    let theme = config.theme.resolve()?;
     let worktrees = worktree::list(&repo)?;
     let mut state = TableState::default();
     if !worktrees.is_empty() {
@@ -215,15 +294,24 @@ impl App {
       report: None,
       sidebar: SidebarState::new(),
       pending_g: false,
+      pending_chord: Vec::new(),
+      keymap,
+      theme,
       filter: FilterState::new(),
       picker_mode: false,
       picker_result: None,
       picker_should_exit: false,
+      should_quit: false,
       confirm: ConfirmModal::new(),
+      spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
+      palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
     };
+    // Seed the sidebar position from `[tui] sidebar_position` (issue
+    // #188). Orientation stays at its `Auto` default — runtime-only.
+    out.sidebar.position = out.config.tui.sidebar_position;
     out.refresh_link();
     Ok(out)
   }
@@ -280,7 +368,15 @@ impl App {
   /// motions) behaves identically; only the event-loop interpretation of
   /// Enter / n / d / b changes.
   pub fn new_picker_at(start: Option<&Path>) -> Result<Self> {
-    let mut app = Self::new_at(start)?;
+    Self::new_picker_at_layered(start, crate::config::global_config_path().as_deref())
+  }
+
+  /// Injectable variant of [`Self::new_picker_at`] (issue #196): mirrors
+  /// [`Self::new_at_layered`] so picker-mode tests never read the runner's
+  /// real `~/.config/gwm/config.toml`. `new_picker_at` delegates with the
+  /// real `global_config_path()`.
+  pub fn new_picker_at_layered(start: Option<&Path>, global_path: Option<&Path>) -> Result<Self> {
+    let mut app = Self::new_at_layered(start, global_path)?;
     app.picker_mode = true;
     app.filter.open();
     app.status = "switch picker — type to filter · enter selects · esc cancels".into();
@@ -382,17 +478,154 @@ impl App {
   }
 
   /// Drive the two-keystroke `gg` motion. First press arms it, second jumps to top.
+  ///
+  /// **Compatibility shim** — kept so the existing tests in
+  /// `tests/tui_app_tests.rs::handle_g_motion_tracks_pending_then_jumps_to_first`
+  /// and the not-yet-migrated event-loop branch keep working
+  /// verbatim. The implementation routes through
+  /// [`Self::dispatch_key`] so the legacy and generic paths cannot
+  /// drift on the chord semantics.
   pub fn handle_g(&mut self) {
-    if self.pending_g {
-      self.pending_g = false;
+    let ev = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::empty());
+    if let Some(Action::Top) = self.dispatch_key(ev) {
       self.first();
-    } else {
-      self.pending_g = true;
     }
   }
 
+  /// Drop any in-flight chord prefix. Called by the legacy event-loop
+  /// branch on any non-`g` keystroke (pre-#87 contract). New call
+  /// sites that route through [`Self::dispatch_key`] don't need it —
+  /// `dispatch_key` already clears the buffer on `NoMatch`.
   pub fn cancel_pending_motion(&mut self) {
-    self.pending_g = false;
+    self.pending_chord.clear();
+    self.sync_legacy_pending_flag();
+  }
+
+  /// True iff no chord prefix is currently armed. Surface for tests
+  /// and for the help / status-bar code that may want to show a
+  /// "waiting for next key" hint once chord support is wired up.
+  pub fn pending_chord_is_empty(&self) -> bool {
+    self.pending_chord.is_empty()
+  }
+
+  /// Drive a raw `KeyEvent` through the keymap.
+  ///
+  /// Returns `Some(action)` when the buffer (current pending chord +
+  /// this stroke) matches a binding — caller fires the action and the
+  /// buffer is left cleared. Returns `None` when the buffer is now a
+  /// strict prefix of a longer binding (caller waits for the next
+  /// keystroke) **or** when the stroke matches nothing at all
+  /// (caller drops it).
+  ///
+  /// Vim-style fallback: if appending the stroke to a non-empty
+  /// buffer produces a `NoMatch`, the buffer is cleared and the
+  /// stroke is re-tried on its own. This mirrors the historical
+  /// `g j` behaviour where the stray `g` is forgotten and `j`
+  /// still navigates down.
+  pub fn dispatch_key(&mut self, key: KeyEvent) -> Option<Action> {
+    let stroke = KeyStroke::from_event(&key);
+    let mut tentative = self.pending_chord.clone();
+    tentative.push(stroke.clone());
+
+    let outcome = match self.keymap.lookup(&tentative) {
+      ChordResolution::Matched(action) => {
+        self.pending_chord.clear();
+        Some(action)
+      }
+      ChordResolution::PendingPrefix => {
+        self.pending_chord = tentative;
+        None
+      }
+      ChordResolution::NoMatch if self.pending_chord.is_empty() => {
+        // Single stroke, no binding. Nothing to retry.
+        None
+      }
+      ChordResolution::NoMatch => {
+        // Mismatched continuation. Drop the in-flight prefix and
+        // retry the new stroke on its own so the user's keypress
+        // is not silently swallowed when it has a single-key
+        // binding (the `g j` case).
+        self.pending_chord.clear();
+        let single = vec![stroke];
+        match self.keymap.lookup(&single) {
+          ChordResolution::Matched(action) => Some(action),
+          ChordResolution::PendingPrefix => {
+            self.pending_chord = single;
+            None
+          }
+          ChordResolution::NoMatch => None,
+        }
+      }
+    };
+
+    self.sync_legacy_pending_flag();
+    outcome
+  }
+
+  /// Mirror the new `pending_chord` buffer into the legacy
+  /// `pending_g` boolean so pre-#87 tests that read it as a field
+  /// stay green. Removed when those tests migrate to
+  /// [`Self::pending_chord_is_empty`].
+  fn sync_legacy_pending_flag(&mut self) {
+    let g = KeyStroke::new(KeyCode::Char('g'), KeyModifiers::empty());
+    self.pending_g = self.pending_chord.len() == 1 && self.pending_chord[0] == g;
+  }
+
+  // ---- Command palette (issue #32) ----------------------------------------
+
+  /// Open the command palette overlay. Transitions the active view
+  /// to `View::CommandPalette` and arms the pure state machine on
+  /// `self.palette` with a fresh empty buffer. Status bar shows a
+  /// short hint so the user knows what to type.
+  pub fn open_command_palette(&mut self) {
+    self.palette.open();
+    self.view = View::CommandPalette;
+    self.status = "command palette — type, Enter to run, Esc to cancel".into();
+  }
+
+  /// Close the palette without firing anything. Called on `Esc` from
+  /// inside the overlay. Returns the view to `View::List` and drops
+  /// the buffer.
+  pub fn close_command_palette(&mut self) {
+    self.palette.close();
+    self.view = View::List;
+    self.status = "palette cancelled".into();
+  }
+
+  /// Append a character to the palette input buffer. The pure state
+  /// machine re-runs its fuzzy match and resets the highlight to 0.
+  pub fn palette_push_char(&mut self, c: char) {
+    self.palette.push_char(c);
+  }
+
+  /// Remove the trailing character from the palette input buffer.
+  pub fn palette_pop_char(&mut self) {
+    self.palette.pop_char();
+  }
+
+  /// Move the palette highlight one row down (wraps at the end).
+  pub fn palette_cycle_down(&mut self) {
+    self.palette.cycle_highlight_down();
+  }
+
+  /// Move the palette highlight one row up (wraps at the start).
+  pub fn palette_cycle_up(&mut self) {
+    self.palette.cycle_highlight_up();
+  }
+
+  /// Accept the highlighted entry. Returns the resolved `Action` and
+  /// drops the palette overlay; the caller (event loop) routes the
+  /// action through the same dispatcher branch as a keystroke so
+  /// palette + key fire identical side effects.
+  ///
+  /// When the input buffer matches nothing the palette stays open
+  /// and `None` is returned — the user can backspace and retry
+  /// without losing context.
+  pub fn accept_command_palette(&mut self) -> Option<Action> {
+    let action = self.palette.accept()?;
+    self.view = View::List;
+    self.status = format!("palette: {}", action.slug());
+    Some(action)
   }
 
   // ---- Sidebar ------------------------------------------------------------
@@ -404,6 +637,29 @@ impl App {
     } else {
       "sidebar hidden".into()
     };
+  }
+
+  /// Cycle the sidebar preview mode between Commits and Stashes
+  /// (issue #34). Drives the pure-state cycle on `SidebarState`
+  /// plus the status-bar copy: orchestrator-shaped because the
+  /// status bar is owned by `App`, not by the sub-struct.
+  pub fn cycle_sidebar_mode(&mut self) {
+    self.sidebar.cycle_mode();
+    self.status = format!("sidebar: {}", self.sidebar.mode.label());
+  }
+
+  /// Cycle the sidebar orientation `auto → side-by-side → stacked`
+  /// (issue #188). Orchestrator-shaped for the status-bar copy, like
+  /// [`Self::cycle_sidebar_mode`].
+  pub fn cycle_sidebar_layout(&mut self) {
+    self.sidebar.cycle_orientation();
+    self.status = format!("sidebar layout: {}", self.sidebar.orientation.label());
+  }
+
+  /// Flip the side-by-side sidebar position left ↔ right (issue #188).
+  pub fn toggle_sidebar_position(&mut self) {
+    self.sidebar.toggle_position();
+    self.status = format!("sidebar position: {}", self.sidebar.position.label());
   }
 
   pub fn toggle_focus(&mut self) {
@@ -660,7 +916,7 @@ impl App {
     )?;
     let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
-    let target = spec.worktree_path(&self.config.worktree, &self.repo_name)?;
+    let target = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
 
     // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
     // creating the worktree on disk (issue #95). A refusal here
@@ -703,6 +959,9 @@ impl App {
     }
     self.view = View::Confirm;
     self.confirm.reset();
+    // Start the loader animation from a deterministic frame each time
+    // the modal opens (#187).
+    self.spinner.reset();
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
@@ -1035,11 +1294,29 @@ impl App {
   pub fn refresh_github_status(&mut self) {
     use super::state::github_fetch::{FetchAction, FetchKey};
 
+    let slug = self.github.link_slug.clone();
+
+    // Drop a prior auto-detection so this refresh re-resolves it live
+    // (issue #181): a detected PR must not stick across `F` presses if
+    // the branch's PR changed. Explicit / branch-name links stay pinned.
+    self.github.clear_detected_pr();
+
+    // Auto-detect the selected branch's PR when none is linked (issue
+    // #181). Runs on the same synchronous F-refresh path as the issue/PR
+    // fetch; needs a remote, so it's a no-op without a slug. An explicit
+    // `gwm link --pr` wins — `apply_detected_pr` only fills an empty slot.
+    if self.github.link.pr.is_none() {
+      if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
+        let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
+        self.github.apply_detected_pr(detected);
+      }
+    }
+
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = "nothing linked — press L to link an issue or PR".into();
       return;
     }
-    let Some(slug) = self.github.link_slug.clone() else {
+    let Some(slug) = slug else {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };

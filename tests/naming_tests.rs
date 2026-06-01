@@ -82,8 +82,10 @@ fn renders_paths() {
   let spec = BranchSpec::new("feat", "10", "x").unwrap();
   assert_eq!(spec.branch_name(&cfg, "myrepo").unwrap(), "feat/#10-x");
   assert_eq!(spec.worktree_dirname(&cfg, "myrepo").unwrap(), "feat-10-x");
-  let p = spec.worktree_path(&cfg, "myrepo").unwrap();
-  assert!(p.to_string_lossy().ends_with("/cc-worktree/myrepo/feat-10-x"));
+  let p = spec
+    .worktree_path(&cfg, "myrepo", std::path::Path::new("/repos/myrepo"))
+    .unwrap();
+  assert!(p.ends_with(std::path::Path::new("cc-worktree").join("myrepo").join("feat-10-x")));
 }
 
 #[test]
@@ -153,6 +155,24 @@ fn renders_with_custom_patterns() {
   let spec = BranchSpec::new("fix", "7", "foo-bar").unwrap();
   assert_eq!(spec.branch_name(&cfg, "r").unwrap(), "release/fix-7");
   assert_eq!(spec.worktree_dirname(&cfg, "r").unwrap(), "fix_7_foo-bar");
-  let p = spec.worktree_path(&cfg, "r").unwrap();
-  assert_eq!(p.to_string_lossy(), "/tmp/r/fix_7_foo-bar");
+  let p = spec.worktree_path(&cfg, "r", std::path::Path::new("/repos/r")).unwrap();
+  assert_eq!(p, std::path::Path::new("/tmp/r").join("fix_7_foo-bar"));
+}
+
+#[test]
+fn worktree_path_resolves_repo_parent_base() {
+  // `{repo_parent}/worktrees` must land in the repo's sibling directory,
+  // matching an editor's `../worktrees` convention (Zed git.worktree_directory).
+  let cfg = WorktreeConfig {
+    base: "{repo_parent}/worktrees".into(),
+    path_pattern: "{type}-{issue}-{desc}".into(),
+    branch_pattern: "{type}/#{issue}-{desc}".into(),
+  };
+  let spec = BranchSpec::new("feat", "175", "repo-path").unwrap();
+  let repo_path = std::path::Path::new("/Users/me/Projects/Perso/gwm-cli");
+  let p = spec.worktree_path(&cfg, "gwm-cli", repo_path).unwrap();
+  assert_eq!(
+    p,
+    std::path::Path::new("/Users/me/Projects/Perso/worktrees/feat-175-repo-path")
+  );
 }

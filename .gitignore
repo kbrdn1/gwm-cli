@@ -6,3 +6,7 @@ Cargo.lock.bak
 .vscode/
 *.swp
 *.swo
+
+# Local agent/tool state
+.claude/
+.serena/

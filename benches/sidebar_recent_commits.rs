@@ -1,8 +1,9 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use git2::{Repository, Signature};
 use gwm::github::BranchLink;
 use gwm::tui::recent_commits_lines;
 use gwm::worktree::{BranchStatus, WorktreeInfo};
+use std::hint::black_box;
 use tempfile::TempDir;
 
 fn fixture_repo(commit_count: usize) -> (TempDir, Repository, WorktreeInfo) {

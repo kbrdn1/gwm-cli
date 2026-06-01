@@ -647,3 +647,95 @@ fn delete_label_refuses_dash_prefixed_remote_name_before_shelling_out() {
     msg
   );
 }
+
+// --- PR auto-detection (issue #181) --------------------------------------
+
+#[test]
+fn apply_detected_pr_sets_pr_with_detected_source_when_none_linked() {
+  // Branch carries an issue from its name but no PR link. Feeding a
+  // detected PR number stamps it with the `Detected` provenance.
+  let mut link = BranchLink {
+    issue: Some(42),
+    pr: None,
+    issue_source: LinkSource::BranchName,
+    pr_source: LinkSource::None,
+  };
+
+  github::apply_detected_pr(&mut link, Some(128));
+
+  assert_eq!(link.pr, Some(128));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  // The issue side is left untouched.
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_source, LinkSource::BranchName);
+}
+
+#[test]
+fn apply_detected_pr_leaves_explicit_pr_untouched() {
+  // An explicit `gwm link --pr` always wins: detection must not clobber it.
+  let mut link = BranchLink {
+    issue: None,
+    pr: Some(61),
+    issue_source: LinkSource::None,
+    pr_source: LinkSource::Explicit,
+  };
+
+  github::apply_detected_pr(&mut link, Some(128));
+
+  assert_eq!(link.pr, Some(61));
+  assert_eq!(link.pr_source, LinkSource::Explicit);
+}
+
+#[test]
+fn apply_detected_pr_is_noop_when_nothing_detected() {
+  let mut link = BranchLink::empty();
+
+  github::apply_detected_pr(&mut link, None);
+
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_source, LinkSource::None);
+}
+
+#[test]
+fn detected_pr_renders_in_summary_like_any_pr() {
+  let mut link = BranchLink::empty();
+  github::apply_detected_pr(&mut link, Some(128));
+  assert_eq!(link.summary(), "PR #128");
+}
+
+#[test]
+fn find_pr_argv_pins_the_gh_pr_list_contract() {
+  let argv = github::find_pr_argv("kbrdn1/gwm-cli", "feat/#181-auto-detect-pr");
+  assert_eq!(
+    argv,
+    vec![
+      "pr",
+      "list",
+      "--repo",
+      "kbrdn1/gwm-cli",
+      "--head",
+      "feat/#181-auto-detect-pr",
+      "--state",
+      "all",
+      "--json",
+      "number",
+      "--limit",
+      "1",
+    ]
+  );
+}
+
+#[test]
+fn parse_pr_list_number_returns_first_pr() {
+  assert_eq!(github::parse_pr_list_number(r#"[{"number":128}]"#).unwrap(), Some(128));
+}
+
+#[test]
+fn parse_pr_list_number_returns_none_for_empty_array() {
+  assert_eq!(github::parse_pr_list_number("[]").unwrap(), None);
+}
+
+#[test]
+fn parse_pr_list_number_errors_on_malformed_json() {
+  assert!(github::parse_pr_list_number("not json").is_err());
+}

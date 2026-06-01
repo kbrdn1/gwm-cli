@@ -6,10 +6,14 @@ mod app;
 /// actually depend on.
 #[doc(hidden)]
 pub mod commit_graph;
+pub mod keymap;
+pub mod palette;
 pub mod state;
+pub mod theme;
 mod ui;
 
 use crate::error::Result;
+use crate::tui::keymap::Action;
 use crossterm::{
   event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
   execute,
@@ -21,7 +25,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
-pub use state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
+pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
@@ -48,9 +52,11 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, branch_name_color, build_sidebar_sections, filled_cells_for_progress, freshness_color, header_title,
-  issue_badge_color, issue_summary_line, pr_badge_color, pr_summary_line, recent_commits_lines, table_marker,
-  tilde_compress_with_home, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  author_initials, badge_group_width, branch_name_color, build_sidebar_sections, ellipsize_middle,
+  filled_cells_for_progress, footer_line, freshness_color, header_line, header_title, help_lines, help_rows,
+  issue_badge_color, issue_summary_line, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
+  table_marker, tilde_compress_with_home, working_tree_status_line, HelpRow, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
+  RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
@@ -106,6 +112,24 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resu
   Ok(())
 }
 
+/// Confirm-side of the delete modal: arm/fire the destructive action.
+/// Shared by the `y` shortcut and the `Enter`-on-`[ Confirm ]` path so
+/// the arm-then-fire countdown semantics stay identical (#187). In
+/// countdown mode the first call arms (the loop ticks the bar), a second
+/// disarms; in classic mode it fires immediately.
+fn confirm_fire(app: &mut App) {
+  match app.confirm_press_y(Instant::now()) {
+    ConfirmKeyAction::FireNow => {
+      if let Err(e) = app.confirm_delete() {
+        app.status = format!("delete failed: {}", e);
+      }
+    }
+    // Armed / Disarmed update the status line; the loop keeps the modal
+    // open and lets the countdown tick (or wait for another y / Esc).
+    ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
+  }
+}
+
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
     terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -117,6 +141,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // doesn't fire a key event, stretching a 3s countdown by the
     // input-handling latency of every armed iteration.
     if app.view == View::Confirm {
+      // Advance the loader animation while the safety countdown is
+      // armed (#187). The 200ms poll re-enters this block every tick,
+      // so the spinner animates at the poll cadence; when idle (no
+      // countdown) the frame stays put.
+      if app.confirm.is_armed() {
+        app.spinner.tick();
+      }
       match app.tick_confirm_countdown(Instant::now()) {
         CountdownTickOutcome::ReadyToFire => {
           if let Err(e) = app.confirm_delete() {
@@ -171,78 +202,36 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ => {}
       },
       View::List => {
-        // Two-keystroke vim motion `gg`: any non-'g' keypress disarms it.
-        if !matches!(key.code, KeyCode::Char('g')) {
+        // Esc and Enter stay hard-coded because their semantics are
+        // *contextual* (filter state, picker mode, sticky filter) —
+        // folding them into the user-rebindable keymap would require
+        // a modal grammar the config language cannot express. Their
+        // pre-#87 behaviour is preserved verbatim; both also drop
+        // any in-flight chord so a stray `g` followed by Esc never
+        // leaks state into the next view.
+        if key.code == KeyCode::Esc {
           app.cancel_pending_motion();
-        }
-        match key.code {
-          KeyCode::Char('q') => break,
-          // Esc on the list clears a sticky filter first, then quits if the
-          // list is already in its plain state. Avoids the trap where a user
-          // hits Esc expecting to clear /-filter and accidentally exits.
-          KeyCode::Esc => {
-            if !app.filter.query().is_empty() {
-              app.exit_filter_cancel();
-            } else {
-              break;
-            }
+          if !app.filter.query().is_empty() {
+            app.exit_filter_cancel();
+          } else {
+            break;
           }
-          KeyCode::Char('?') => app.view = View::Help,
-          KeyCode::Char('j') | KeyCode::Down => app.next(),
-          KeyCode::Char('k') | KeyCode::Up => app.prev(),
-          KeyCode::Char('g') => app.handle_g(),
-          KeyCode::Char('G') => app.last(),
-          KeyCode::Char('v') => app.toggle_sidebar(),
-          KeyCode::Tab => app.toggle_focus(),
-          KeyCode::Char('/') => app.enter_filter(),
-          KeyCode::Char('l') => {
-            // Issue #75: `l` is driven by the configurable `[git_tui]`
-            // launcher pipeline (default `lazygit -p {path}`,
-            // fullscreen=true). Replaces the old hardcoded lazygit call.
-            if let Some(plan) = app.prepare_git_tui() {
-              run_launcher(terminal, plan, &mut app)?;
-            }
+        } else if key.code == KeyCode::Enter {
+          app.cancel_pending_motion();
+          if app.picker_mode {
+            app.picker_confirm();
+          } else {
+            app.copy_path_to_status();
           }
-          // Issue #75 keybinding reshuffle (was `r` → refresh worktree list).
-          // `f` is the new mnemonic; the `r` alias is kept for muscle memory.
-          KeyCode::Char('f') | KeyCode::Char('r') => app.refresh()?,
-          // Mutating actions are inert in picker mode — the issue explicitly
-          // calls for a stripped-down picker that only navigates and selects.
-          KeyCode::Char('n') if !app.picker_mode => app.enter_create(),
-          KeyCode::Char('d') if !app.picker_mode => app.enter_confirm_delete(),
-          KeyCode::Char('b') if !app.picker_mode => app.bootstrap_selected(),
-          KeyCode::Char('p') if !app.picker_mode => app.toggle_delete_branch(),
-          KeyCode::Char('y') => yank_selected_path_to_clipboard(&mut app),
-          KeyCode::Char('o') => match app.resolve_open_target() {
-            None => app.status = "nothing selected".into(),
-            Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
-            Some(OpenTarget::Shell { path, command }) => {
-              run_subshell(terminal, &command, &[], Some(&path), &mut app, "shell")?
-            }
-            Some(OpenTarget::Editor { path, command }) => {
-              let path_str = path.display().to_string();
-              run_subshell(terminal, &command, &[&path_str], None, &mut app, "editor")?
-            }
-          },
-          // Issue/PR linking (issue #67).
-          KeyCode::Char('O') if !app.picker_mode => app.enter_open_menu(),
-          KeyCode::Char('L') if !app.picker_mode => app.enter_link_prompt(),
-          // Issue #75 reshuffle: `F` is the new mnemonic for "fetch GitHub
-          // status" (was `R`). `R` now triggers the configured review tool.
-          KeyCode::Char('F') if !app.picker_mode => app.refresh_github_status(),
-          KeyCode::Char('R') if !app.picker_mode => {
-            if let Some(plan) = app.prepare_review() {
-              run_launcher(terminal, plan, &mut app)?;
-            }
+        } else if let Some(action) = app.dispatch_key(key) {
+          // Issue #87: the View::List binding table is driven by the
+          // resolved keymap. Routed through `run_action` so the
+          // palette overlay (issue #32) and the key path stay
+          // observationally identical: both call the same dispatch.
+          if matches!(action, Action::Quit) {
+            break;
           }
-          KeyCode::Enter => {
-            if app.picker_mode {
-              app.picker_confirm();
-            } else {
-              app.copy_path_to_status();
-            }
-          }
-          _ => {}
+          run_action(terminal, &mut app, action)?;
         }
       }
       View::Help => match key.code {
@@ -269,17 +258,21 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ => {}
       },
       View::Confirm => match key.code {
-        KeyCode::Char('y') | KeyCode::Enter => match app.confirm_press_y(Instant::now()) {
-          ConfirmKeyAction::FireNow => match app.confirm_delete() {
-            Ok(_) => {}
-            Err(e) => app.status = format!("delete failed: {}", e),
-          },
-          // Armed / Disarmed update the App's status line; the loop
-          // keeps the modal open and lets the countdown tick (or wait
-          // for another y / Esc).
-          ConfirmKeyAction::Armed | ConfirmKeyAction::Disarmed => {}
+        // `y` confirms directly regardless of which button is focused
+        // (unchanged muscle memory). `Enter` activates the *focused*
+        // button — and focus defaults to Cancel (#187), so a stray
+        // Enter on a freshly-opened modal cancels rather than deletes.
+        KeyCode::Char('y') => confirm_fire(&mut app),
+        KeyCode::Enter => match app.confirm.focused_button() {
+          ConfirmButton::Confirm => confirm_fire(&mut app),
+          ConfirmButton::Cancel => app.confirm_dismiss(),
         },
         KeyCode::Char('n') | KeyCode::Esc => app.confirm_dismiss(),
+        // Button focus navigation (#187). `←` / `h` → Confirm,
+        // `→` / `l` → Cancel, `Tab` toggles.
+        KeyCode::Left | KeyCode::Char('h') => app.confirm.focus_confirm(),
+        KeyCode::Right | KeyCode::Char('l') => app.confirm.focus_cancel(),
+        KeyCode::Tab => app.confirm.toggle_focus(),
         _ => {}
       },
       View::Report => match key.code {
@@ -316,6 +309,38 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
         _ => {}
       },
+      // Issue #32: command palette overlay. Palette entry names
+      // are restricted to `[a-z0-9_-]` (see
+      // `tests/palette_tests.rs::registry_names_are_unique_and_lowercase_words`),
+      // so only those characters can usefully reach the buffer —
+      // any other typed character would just shrink the match set
+      // to empty. The accepted-character set is enforced explicitly
+      // here so a stray `:` (the palette's own trigger) doesn't
+      // self-append, and so future overlays (themes / fuzzy
+      // search) that share the input bar don't inherit a "swallow
+      // everything" contract by accident. Esc / Enter / arrows /
+      // Tab still exit or navigate; Backspace edits.
+      View::CommandPalette => match key.code {
+        KeyCode::Esc => app.close_command_palette(),
+        KeyCode::Enter => {
+          if let Some(action) = app.accept_command_palette() {
+            run_palette_action(terminal, &mut app, action)?;
+          }
+        }
+        KeyCode::Up => app.palette_cycle_up(),
+        KeyCode::Down | KeyCode::Tab => app.palette_cycle_down(),
+        KeyCode::Backspace => app.palette_pop_char(),
+        KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+          app.palette_push_char(c);
+        }
+        // Any other char (including the palette trigger `:`, the
+        // help glyph `?`, uppercase letters) is dropped — there is
+        // no palette entry name that could match it. Silently
+        // ignoring is friendlier than appending and producing zero
+        // matches with no explanation.
+        KeyCode::Char(_) => {}
+        _ => {}
+      },
     }
 
     // Picker contract (Copilot PR #53): only break when the App has
@@ -324,6 +349,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // unconditional `break` after Enter that turned an empty-match
     // Enter into a surprise exit-1.
     if app.picker_should_exit {
+      break;
+    }
+    // Issue #32: `Action::Quit` fired from a non-keystroke path
+    // (the command palette accepting `:quit`) sets this flag via
+    // `run_action`. The keystroke path also breaks directly, so
+    // this branch only matters for palette / future-non-keystroke
+    // dispatchers.
+    if app.should_quit {
       break;
     }
   }
@@ -346,6 +379,104 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// on PR #76; the previous docstring claimed "run in the background"
 /// which `output()` does not.
 ///
+/// Apply a resolved `Action` (issue #87 dispatch) to `App`.
+///
+/// Centralised so the keystroke path (`View::List` → `dispatch_key`)
+/// and the command-palette path (issue #32: `View::CommandPalette` →
+/// `accept_command_palette`) fire identical side effects. Without
+/// this single funnel the two surfaces would inevitably drift: a
+/// future feature wired into one would silently miss the other.
+///
+/// `Action::Quit` raises `app.should_quit` so the event loop can
+/// honour it from any caller — the keystroke path can also just
+/// `break` directly, but the palette path delegates here and has
+/// no way to signal `break` through a `Result<()>`. The loop
+/// checks the flag at the top of every iteration (alongside
+/// `picker_should_exit`).
+fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, action: Action) -> Result<()> {
+  match action {
+    // Issue #32: signal quit via `app.should_quit` so the palette
+    // path (which can't `break` from inside `run_action` →
+    // `accept_command_palette` → event-loop match) still exits the
+    // TUI when the user types `:quit`. The keystroke path also
+    // matches on `Action::Quit` and `break`s directly before
+    // calling `run_action`, so this branch is observationally a
+    // no-op for the `q` key — both paths converge on the loop
+    // exit.
+    Action::Quit => app.should_quit = true,
+    Action::Down => app.next(),
+    Action::Up => app.prev(),
+    Action::Top => app.first(),
+    Action::Bottom => app.last(),
+    Action::ToggleSidebar => app.toggle_sidebar(),
+    // Issue #34: cycle the sidebar preview between commits and
+    // stashes. Lands here as the merge resolution between #166
+    // (which added the action) and #167 (which extracted run_action).
+    Action::ToggleSidebarMode => app.cycle_sidebar_mode(),
+    // Issue #188: responsive sidebar layout — cycle orientation and
+    // flip the side-by-side position.
+    Action::CycleSidebarLayout => app.cycle_sidebar_layout(),
+    Action::ToggleSidebarPosition => app.toggle_sidebar_position(),
+    Action::FocusSwap => app.toggle_focus(),
+    Action::Filter => app.enter_filter(),
+    Action::Refresh => app.refresh()?,
+    Action::Help => app.view = View::Help,
+    Action::Yank => yank_selected_path_to_clipboard(app),
+    Action::Open => match app.resolve_open_target() {
+      None => app.status = "nothing selected".into(),
+      Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
+      Some(OpenTarget::Shell { path, command }) => run_subshell(terminal, &command, &[], Some(&path), app, "shell")?,
+      Some(OpenTarget::Editor { path, command }) => {
+        let path_str = path.display().to_string();
+        run_subshell(terminal, &command, &[&path_str], None, app, "editor")?
+      }
+    },
+    Action::GitTui => {
+      if let Some(plan) = app.prepare_git_tui() {
+        run_launcher(terminal, plan, app)?;
+      }
+    }
+    Action::Create if !app.picker_mode => app.enter_create(),
+    Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
+    Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
+    Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
+    Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
+    Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
+    Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
+    Action::Review if !app.picker_mode => {
+      if let Some(plan) = app.prepare_review() {
+        run_launcher(terminal, plan, app)?;
+      }
+    }
+    // Issue #32: pressing `:` (or any user-rebound key for
+    // `Action::CommandPalette`) opens the palette overlay. Inside
+    // the palette, the user can type `:command-palette` to reopen
+    // it — harmless, but explicitly handled here so the palette →
+    // CommandPalette → run_action loop terminates cleanly (the
+    // overlay just stays open).
+    Action::CommandPalette => app.open_command_palette(),
+    // Picker-mode-gated actions fall through to no-op when the
+    // guard fails (i.e. the user pressed them inside `gwm switch`).
+    // Same fallthrough catches future actions not yet wired into
+    // the List view.
+    _ => {}
+  }
+  Ok(())
+}
+
+/// Dispatch an action accepted from the command palette (issue #32).
+/// Thin wrapper around [`run_action`] so the call site in
+/// `View::CommandPalette` reads symmetrically with the keystroke
+/// path. Distinct name keeps stack traces meaningful — if a feature
+/// fires only from the palette and breaks, the frame name names it.
+fn run_palette_action(
+  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  app: &mut App,
+  action: Action,
+) -> Result<()> {
+  run_action(terminal, app, action)
+}
+
 /// `LauncherPlan` is consumed by-value so the `{diff}` tempfile it
 /// carries lives at least until the child process has been waited on.
 /// Errors are never propagated — the user pressed a key in the TUI,

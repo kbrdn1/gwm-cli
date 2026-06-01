@@ -81,7 +81,8 @@ pub fn expand_command(template: &str, ctx: &LauncherContext<'_>) -> Result<Expan
     ));
   }
 
-  let path_str = ctx.worktree_path.to_string_lossy();
+  let worktree_path = ctx.worktree_path.to_string_lossy();
+  let path_str = shell_words::quote(&worktree_path);
   let mut expanded = template.replace("{path}", &path_str);
   if let Some(b) = ctx.base {
     expanded = expanded.replace("{base}", b);
@@ -103,7 +104,7 @@ pub fn expand_command(template: &str, ctx: &LauncherContext<'_>) -> Result<Expan
       GwmError::Config("template uses {diff} but no repo workdir was provided to the launcher".into())
     })?;
     let tmp = materialise_diff(workdir, b, h)?;
-    let diff_path = tmp.path().to_string_lossy().to_string();
+    let diff_path = shell_words::quote(&tmp.path().to_string_lossy()).into_owned();
     expanded = expanded.replace("{diff}", &diff_path);
     Some(tmp)
   } else {

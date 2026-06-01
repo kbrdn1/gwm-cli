@@ -1,6 +1,6 @@
 [package]
 name = "gwm"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
 # newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
@@ -15,6 +15,21 @@ repository = "https://github.com/kbrdn1/gwm-cli"
 readme = "README.md"
 keywords = ["git", "worktree", "tui", "cli", "ratatui"]
 categories = ["command-line-utilities", "development-tools"]
+
+# cargo-binstall (#27): pull the prebuilt binary from the GitHub
+# Release instead of compiling git2/vendored-libgit2 from source.
+# Mirrors the release workflows' artefact naming — `gwm-v{version}-
+# {target}.tar.gz` (`.zip` on windows) — and the in-archive layout
+# `gwm-v{version}-{target}/{gwm|gwm.exe}`. `tests/binstall_metadata_tests.rs`
+# pins this block against drift.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/gwm-v{ version }-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "gwm-v{ version }-{ target }/{ bin }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/gwm-v{ version }-{ target }.zip"
+pkg-fmt = "zip"
 
 [lib]
 name = "gwm"
@@ -32,7 +47,9 @@ crossterm = "0.29"
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+serde_yml = "0.0.12"
 toml = "1.1"
+toml_edit = "0.25"
 anyhow = "1"
 thiserror = "2"
 dirs = "6"
@@ -48,7 +65,7 @@ tempfile = "3"
 # trust ledger. Whitespace-sensitive on purpose — `rm -rf /tmp/` and
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /
@@ -58,8 +75,12 @@ libc = "0.2"
 
 [dev-dependencies]
 assert_cmd = "2"
-criterion = "0.5"
+criterion = "0.8"
 predicates = "3"
+# Parse our own Cargo.toml in tests/binstall_metadata_tests.rs (#27) so
+# the `[package.metadata.binstall]` contract is asserted structurally,
+# not by string-matching. Same `toml` major as the runtime dependency.
+toml = "1.1"
 
 [[bench]]
 name = "commit_graph"

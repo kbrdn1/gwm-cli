@@ -136,6 +136,92 @@ fn prune_returns_zero_when_clean() {
   assert_eq!(n, 0);
 }
 
+// --- Issue #31: dry-run plans for remove + prune -----------------------------
+
+#[test]
+fn prunable_worktrees_returns_empty_when_clean() {
+  // Empty case for `prunable_worktrees`: a brand-new repo has no
+  // worktree admin entries at all, so the plan list is empty. This
+  // backs `gwm prune --dry-run` reporting "0 worktree(s) to prune".
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let plan = worktree::prunable_worktrees(&repo).unwrap();
+  assert!(plan.is_empty());
+}
+
+#[test]
+fn prunable_worktrees_lists_orphaned_admin_entry() {
+  // When the working directory of a linked worktree is deleted out
+  // from under the admin entry (a "ghost worktree"), libgit2 flags it
+  // as prunable. `prunable_worktrees` must surface it with name, path,
+  // and reason — the three columns the `--dry-run` CLI prints.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-31-ghost");
+  worktree::add(&repo, "feat-31-ghost", &target, "feat/#31-ghost", false).unwrap();
+  std::fs::remove_dir_all(&target).unwrap();
+
+  let plan = worktree::prunable_worktrees(&repo).unwrap();
+  assert_eq!(plan.len(), 1, "ghost worktree must appear in the prune plan");
+  assert_eq!(plan[0].name, "feat-31-ghost");
+  assert!(
+    !plan[0].reason.is_empty(),
+    "every prunable entry must carry a human reason"
+  );
+
+  // Sanity: the dry-run plan must not have mutated libgit2's state.
+  assert!(
+    repo.find_worktree("feat-31-ghost").is_ok(),
+    "prunable_worktrees is read-only — the admin entry must still resolve"
+  );
+}
+
+#[test]
+fn prunable_worktrees_sorted_by_name() {
+  // Deterministic output is a hard requirement of the `--dry-run`
+  // contract — scripted callers diff stdout across runs. We pin the
+  // sort order to ascending by `name`.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let zeta = wt_root.path().join("feat-99-zeta");
+  let alpha = wt_root.path().join("feat-99-alpha");
+  worktree::add(&repo, "feat-99-zeta", &zeta, "feat/#99-zeta", false).unwrap();
+  worktree::add(&repo, "feat-99-alpha", &alpha, "feat/#99-alpha", false).unwrap();
+  std::fs::remove_dir_all(&zeta).unwrap();
+  std::fs::remove_dir_all(&alpha).unwrap();
+
+  let plan = worktree::prunable_worktrees(&repo).unwrap();
+  let names: Vec<&str> = plan.iter().map(|e| e.name.as_str()).collect();
+  assert_eq!(names, vec!["feat-99-alpha", "feat-99-zeta"]);
+}
+
+#[test]
+fn remove_with_dry_run_keeps_worktree_and_branch_intact() {
+  // The libgit2-level pin for `worktree::remove(.., dry_run=true)`:
+  // resolution still happens (the caller hands us a `name` that
+  // matched), but no admin prune, no rmdir, no branch deletion. The
+  // function must return Ok(()) so the CLI prints the plan and exits 0.
+  let (_dir, repo) = init_repo();
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-31-keep");
+  worktree::add(&repo, "feat-31-keep", &target, "feat/#31-keep", false).unwrap();
+  assert!(target.exists());
+
+  worktree::remove_dry_run(&repo, "feat-31-keep").unwrap();
+
+  assert!(target.exists(), "dry-run must not delete the worktree dir");
+  assert!(
+    repo.find_branch("feat/#31-keep", git2::BranchType::Local).is_ok(),
+    "dry-run must not delete the local branch"
+  );
+  assert!(
+    repo.find_worktree("feat-31-keep").is_ok(),
+    "dry-run must leave libgit2's worktree admin entry in place"
+  );
+}
+
 #[test]
 fn repo_name_derives_from_workdir() {
   let parent = TempDir::new().unwrap();
@@ -648,4 +734,78 @@ fn list_returns_none_age_for_main_worktree() {
     "main worktree on a trunk branch must report age = None, got {:?}",
     main.age
   );
+}
+
+// --- git_stash_list (issue #34) -----------------------------------------
+
+/// Create one stash on the given tempdir repo by writing a tracked file,
+/// staging an edit, then `git stash push -m <subject>`. Returns once the
+/// stash has been created so the caller can immediately `git_stash_list`.
+fn create_stash(path: &Path, file_rel: &str, subject: &str) {
+  // Seed a tracked file (commit) then mutate it so `git stash push`
+  // has a non-empty diff to capture. `git stash` on an empty diff is a
+  // no-op and would make the test pin the wrong contract.
+  let abs = path.join(file_rel);
+  std::fs::write(&abs, "v1\n").unwrap();
+  let run = |args: &[&str]| {
+    let status = std::process::Command::new("git")
+      .arg("-C")
+      .arg(path)
+      .args(args)
+      .status()
+      .unwrap();
+    assert!(status.success(), "git {:?} failed", args);
+  };
+  run(&["add", file_rel]);
+  run(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-m", "seed"]);
+  std::fs::write(&abs, "v2 dirty\n").unwrap();
+  run(&["stash", "push", "-m", subject]);
+}
+
+#[test]
+fn git_stash_list_empty_returns_empty_vec() {
+  // A fresh repo has no stashes; the helper must report that as an
+  // empty `Vec`, not an error. The sidebar renderer relies on this to
+  // distinguish "(no stashes)" from "git stash list failed".
+  let (dir, _) = init_repo();
+  let entries = worktree::git_stash_list(dir.path(), 10).unwrap();
+  assert!(entries.is_empty());
+}
+
+#[test]
+fn git_stash_list_parses_canonical_output() {
+  let (dir, _) = init_repo();
+  create_stash(dir.path(), "a.txt", "wip on auth refactor");
+  create_stash(dir.path(), "b.txt", "wip on docs");
+
+  let entries = worktree::git_stash_list(dir.path(), 10).unwrap();
+  assert_eq!(entries.len(), 2);
+  // git stashes are LIFO — the most recent push is `stash@{0}`.
+  assert_eq!(entries[0].ref_name, "stash@{0}");
+  assert!(
+    entries[0].subject.contains("wip on docs"),
+    "expected the latest stash subject, got: {}",
+    entries[0].subject
+  );
+  assert_eq!(entries[1].ref_name, "stash@{1}");
+  assert!(
+    entries[1].subject.contains("wip on auth refactor"),
+    "expected the earlier stash subject, got: {}",
+    entries[1].subject
+  );
+}
+
+#[test]
+fn git_stash_list_respects_limit() {
+  // The helper caps the returned vec at `limit` so the sidebar
+  // doesn't allocate an unbounded list on a repo with hundreds of
+  // stashes. The full list is still available through `git stash`
+  // directly — this is a preview-only cap.
+  let (dir, _) = init_repo();
+  create_stash(dir.path(), "a.txt", "first");
+  create_stash(dir.path(), "b.txt", "second");
+  create_stash(dir.path(), "c.txt", "third");
+
+  let limited = worktree::git_stash_list(dir.path(), 2).unwrap();
+  assert_eq!(limited.len(), 2, "limit must cap the result vec");
 }

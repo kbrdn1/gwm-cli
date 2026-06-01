@@ -92,18 +92,29 @@ impl BranchStatus {
   }
 }
 
-/// Compute the working-tree + upstream status of a single repo / linked worktree.
-fn compute_status(repo: &Repository) -> BranchStatus {
-  let mut out = BranchStatus::default();
-
-  // Dirty check
+/// True when the worktree at `repo` carries staged, unstaged, or
+/// untracked changes (ignored files excluded). Shares its
+/// `StatusOptions` shape with [`compute_status`] so the status column
+/// and `gwm sync`'s dirty-tree refusal (issue #24) agree on what
+/// "dirty" means.
+pub fn is_dirty(repo: &Repository) -> Result<bool> {
   let mut opts = StatusOptions::new();
   opts
     .include_untracked(true)
     .include_ignored(false)
     .recurse_untracked_dirs(true);
-  match repo.statuses(Some(&mut opts)) {
-    Ok(s) => out.is_dirty = !s.is_empty(),
+  let statuses = repo.statuses(Some(&mut opts))?;
+  Ok(!statuses.is_empty())
+}
+
+/// Compute the working-tree + upstream status of a single repo / linked worktree.
+fn compute_status(repo: &Repository) -> BranchStatus {
+  let mut out = BranchStatus::default();
+
+  // Dirty check — reuse the shared `is_dirty` scanner so the column
+  // and `gwm sync` can never disagree on dirtiness.
+  match is_dirty(repo) {
+    Ok(dirty) => out.is_dirty = dirty,
     Err(_) => out.unknown = true,
   }
 
@@ -358,19 +369,59 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
   Ok(())
 }
 
-/// Prune stale worktree admin entries (gwq cleanup equivalent).
-pub fn prune(repo: &Repository) -> Result<usize> {
+/// One prunable worktree entry as surfaced by `gwm prune --dry-run`
+/// (issue #31). The `reason` field is a human-readable rationale that
+/// is currently hard-coded to "working dir missing" — that is the only
+/// case `is_prunable(None)` flags today (working tree removed out from
+/// under the admin entry). Kept as a `String` rather than a literal
+/// in the CLI so future libgit2 versions can surface richer reasons
+/// (locked worktrees, broken HEAD, …) without breaking the CLI
+/// rendering contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrunableEntry {
+  pub name: String,
+  pub path: PathBuf,
+  pub reason: String,
+}
+
+/// Compute (without mutating) the list of worktree admin entries that
+/// `gwm prune` would drop. Used by `gwm prune --dry-run` (issue #31)
+/// and consumed by [`prune`] so the dry-run preview and the destructive
+/// pass can never drift on what "prunable" means. Output is sorted by
+/// name for deterministic stdout — scripted callers diff across runs.
+pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
   let names = repo.worktrees()?;
-  let mut pruned = 0usize;
+  let mut out = Vec::new();
   for name in names.iter().flatten() {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
     };
-    let prunable = matches!(wt.is_prunable(None), Ok(p) if p);
-    if !prunable {
+    if !matches!(wt.is_prunable(None), Ok(p) if p) {
       continue;
     }
+    out.push(PrunableEntry {
+      name: name.to_string(),
+      path: wt.path().to_path_buf(),
+      reason: "working dir missing".to_string(),
+    });
+  }
+  out.sort_by(|a, b| a.name.cmp(&b.name));
+  Ok(out)
+}
+
+/// Prune stale worktree admin entries (gwq cleanup equivalent).
+/// Consumes [`prunable_worktrees`] so what `--dry-run` shows is exactly
+/// what this destructive pass acts on — the two surfaces share the
+/// scanner, by construction.
+pub fn prune(repo: &Repository) -> Result<usize> {
+  let plan = prunable_worktrees(repo)?;
+  let mut pruned = 0usize;
+  for entry in plan {
+    let wt = match repo.find_worktree(&entry.name) {
+      Ok(w) => w,
+      Err(_) => continue,
+    };
     let mut opts = WorktreePruneOptions::new();
     opts.valid(true).locked(true).working_tree(true);
     if wt.prune(Some(&mut opts)).is_ok() {
@@ -378,6 +429,20 @@ pub fn prune(repo: &Repository) -> Result<usize> {
     }
   }
   Ok(pruned)
+}
+
+/// Read-only check that `name` resolves to a removable worktree —
+/// the libgit2 half of `gwm remove --dry-run` (issue #31). Errors on
+/// the same "worktree not found" path as `remove` so the dry-run
+/// surface and the destructive surface share an error contract;
+/// returns `Ok(())` when the worktree exists. The caller (the CLI)
+/// is responsible for rendering the plan; this function intentionally
+/// touches no filesystem state and emits no output.
+pub fn remove_dry_run(repo: &Repository, name: &str) -> Result<()> {
+  repo
+    .find_worktree(name)
+    .map_err(|_| GwmError::WorktreeNotFound(name.into()))?;
+  Ok(())
 }
 
 /// A commit row pulled from `git log` for the Recent Commits sidebar block.
@@ -523,6 +588,131 @@ pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
     )));
   }
   Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Shell out to `git log --pretty=- %s <base>..<head>` inside `path`
+/// and return raw stdout. Used by `gwm pr` to fill the `{commits}`
+/// placeholder in PR templates (issue #84) — each commit becomes a
+/// Markdown bullet so a list of commit subjects drops straight into a
+/// PR body without extra formatting.
+pub fn git_log_subject_between(path: &Path, base: &str, head: &str) -> Result<String> {
+  let range = format!("{}..{}", base, head);
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["log", "--pretty=format:- %s"])
+    .arg(&range)
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git log exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+}
+
+/// Shell out to `git diff --stat <base>..<head>` inside `path`. The
+/// output is truncated to `max_lines` lines so a sprawling diff stat
+/// doesn't blow up the PR body (issue #84: 30-line cap by convention).
+pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usize) -> Result<String> {
+  let range = format!("{}..{}", base, head);
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["diff", "--stat"])
+    .arg(&range)
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git diff failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git diff exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  let raw = String::from_utf8_lossy(&output.stdout);
+  let mut lines: Vec<&str> = raw.lines().collect();
+  let truncated = lines.len() > max_lines;
+  if truncated {
+    lines.truncate(max_lines);
+  }
+  let mut out = lines.join("\n");
+  if truncated {
+    out.push_str(&format!(
+      "\n… ({} more line{} trimmed)",
+      raw.lines().count() - max_lines,
+      if raw.lines().count() - max_lines == 1 { "" } else { "s" }
+    ));
+  }
+  Ok(out)
+}
+
+/// One row of `git stash list` (issue #34). Surfaced by the sidebar
+/// in stashes mode. Kept deliberately minimal — `ref_name` so the user
+/// can copy `stash@{N}` to the status bar, `subject` so they can tell
+/// which stash is which. Per-file diff numbers (`+/-`) live in a
+/// follow-up — the v1 contract is just "name + subject".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashEntry {
+  /// Canonical git stash reference (e.g. `stash@{0}`). Stable for the
+  /// lifetime of the panel — the user can paste it into `git stash
+  /// apply <ref>` from the surrounding shell.
+  pub ref_name: String,
+  /// Human-readable subject as written by `git stash push -m <msg>`
+  /// (or the auto-generated `WIP on <branch>: …` when no `-m` was
+  /// supplied).
+  pub subject: String,
+}
+
+/// Parse the worktree's stash list (issue #34). Returns up to `limit`
+/// entries in `git stash list` order (LIFO — `stash@{0}` is the most
+/// recent push).
+///
+/// Uses `--pretty=format:%gd<US>%s` (with `\x1f` as the unit
+/// separator) so subjects containing spaces, colons, or `:` round-trip
+/// safely. An empty stash list returns `Ok(Vec::new())`; only spawn /
+/// non-zero-exit failures surface as `GwmError::CommandFailed`.
+pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
+  // ASCII Unit Separator (0x1F) cannot occur in a normal shell argv
+  // or git ref name, so it's a safe per-field delimiter — same
+  // technique `git_log_with_author` uses with `\x1c` for record
+  // separation.
+  //
+  // Pass `-n <limit>` (a `git log` option `stash list` forwards
+  // through) so a repo with hundreds of stashes doesn't materialise
+  // the full list in stdout just for the panel to drop everything
+  // past the cap. Pre-review the limit was applied client-side after
+  // the full stdout was read.
+  let limit_arg = format!("-n{}", limit);
+  let output = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git stash list failed to spawn: {}", e)))?;
+  if !output.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git stash list exited {}: {}",
+      output.status,
+      String::from_utf8_lossy(&output.stderr).trim()
+    )));
+  }
+  let raw = String::from_utf8_lossy(&output.stdout);
+  let entries = raw
+    .lines()
+    .filter(|line| !line.is_empty())
+    .take(limit)
+    .filter_map(|line| {
+      let mut parts = line.splitn(2, '\x1f');
+      let ref_name = parts.next()?.to_string();
+      let subject = parts.next().unwrap_or("").to_string();
+      Some(StashEntry { ref_name, subject })
+    })
+    .collect();
+  Ok(entries)
 }
 
 /// Shell out to `git status --short` inside `path` and return raw stdout.
