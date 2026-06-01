@@ -199,6 +199,17 @@ impl GitHubFetch {
     self.inflight.clear();
   }
 
+  /// Stamp an auto-detected PR onto the resolved `link` when none is
+  /// already linked (issue #181). Pure: the `App` orchestrator owns the
+  /// `gh pr list --head <branch>` shell-out and feeds the detected number
+  /// here so the sidebar's `pr_fetch_state()` can resolve it. Delegates
+  /// to [`github::apply_detected_pr`], so an explicit `gwm link --pr`
+  /// (already on `link.pr`) always wins and the result is marked
+  /// `LinkSource::Detected` — never persisted.
+  pub fn apply_detected_pr(&mut self, detected: Option<u64>) {
+    github::apply_detected_pr(&mut self.link, detected);
+  }
+
   /// Decide what the orchestrator should do for `key`. Three cases:
   ///
   /// 1. The per-key cache holds a terminal `Loaded` or `Error` for

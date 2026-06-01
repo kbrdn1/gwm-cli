@@ -1376,6 +1376,57 @@ fn refresh_github_status_message_reflects_partial_failure() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // A branch with no issue number in its name and no explicit PR link.
+  // Pre-#181 refresh_github_status bailed with "nothing linked"; now it
+  // detects the branch's PR via `gh pr list` and surfaces it with
+  // source `Detected`. Gated #[cfg(unix)] — the cross-OS gh contract is
+  // covered by the pure github_tests + the cli_binary status E2E (which
+  // ships a Windows fake-gh too).
+  let (dir, repo, mut app) = make_app_on_branch("detect-me");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  // Re-resolve the slug now that the remote exists.
+  app.refresh_link();
+
+  let gh = dir.path().join("fake-gh");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":128}]'\n\
+     elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '%s' '{\"number\":128,\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/128\"}'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: this test is the sole GWM_GH mutator in this binary; the
+  // var is restored immediately after the call, before any assert.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+
+  app.refresh_github_status();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(app.current_link().pr, Some(128));
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+}
+
 // ---- Configurable launchers (issue #75) --------------------------------
 //
 // The `R` key in the worktree-list view now triggers the [review]

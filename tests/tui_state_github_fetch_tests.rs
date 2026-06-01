@@ -297,3 +297,37 @@ fn complete_pr_after_invalidate_drops_the_stale_result() {
     action
   );
 }
+
+// ---- PR auto-detection on the slice (issue #181) --------------------------
+
+#[test]
+fn apply_detected_pr_fills_empty_pr_slot_with_detected_source() {
+  let mut gh = GitHubFetch::new();
+  // Cold link: no PR.
+  assert_eq!(gh.link.pr, None);
+
+  gh.apply_detected_pr(Some(128));
+
+  assert_eq!(gh.link.pr, Some(128));
+  assert_eq!(gh.link.pr_source, gwm::github::LinkSource::Detected);
+}
+
+#[test]
+fn apply_detected_pr_does_not_override_explicit_pr() {
+  let mut gh = GitHubFetch::new();
+  gh.link.pr = Some(61);
+  gh.link.pr_source = gwm::github::LinkSource::Explicit;
+
+  gh.apply_detected_pr(Some(128));
+
+  assert_eq!(gh.link.pr, Some(61));
+  assert_eq!(gh.link.pr_source, gwm::github::LinkSource::Explicit);
+}
+
+#[test]
+fn apply_detected_pr_is_noop_when_nothing_detected() {
+  let mut gh = GitHubFetch::new();
+  gh.apply_detected_pr(None);
+  assert_eq!(gh.link.pr, None);
+  assert_eq!(gh.link.pr_source, gwm::github::LinkSource::None);
+}
