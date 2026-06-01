@@ -10,14 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Docs
-
-- 📝 Refresh the `docs/` tree to the full v0.8.0 surface and add a French i18n mirror under `docs/fr/` ([#199](https://github.com/kbrdn1/gwm-cli/issues/199)). Documents every v0.7.0 → v0.8.0 addition that was still missing or only listed as planned: `gwm commit-prefix`, `gwm hooks install commit-msg`, `gwm undo` / `gwm history`, `gwm theme list/show`, `gwm tui keys`, `gwm types --gitmoji`, and `--dry-run` on `gwm remove` / `gwm prune`; the role-based `[theme]` presets, the remappable `[tui.keys]` keymap with chord support, the `:` command palette, the sidebar stashes mode, and the rc.5 TUI chrome polish; the `[theme]` / `[tui.keys]` schema, the user-level global config (`~/.config/gwm/config.toml`), and the `{repo_path}` / `{repo_parent}` placeholders; the 8th `gwm doctor` keymap check, `cargo binstall` packaging, and the PR auto-detection provenance. Adds three pages (`tui/themes`, `tui/keymap-and-palette`, `configuration/global-config`), fixes typos / capitalisation / cross-links throughout, and ships a complete French translation (33 pages, English remains canonical).
+_Nothing yet. Entries land here as PRs merge into `dev`, then move into the
+per-version file under [`changelogs/`](changelogs/) when the release is cut._
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`0.8.0`](changelogs/0.8.0.md) — 2026-06-01
 - [`0.7.0`](changelogs/0.7.0.md) — 2026-05-23
 - [`0.6.0`](changelogs/0.6.0.md) — 2026-05-21
 - [`0.5.0`](changelogs/0.5.0.md) — 2026-05-20
