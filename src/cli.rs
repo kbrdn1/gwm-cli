@@ -496,7 +496,7 @@ pub enum ThemeAction {
   List,
   /// Print a preset as a copy-pasteable `[theme]` TOML block.
   Show {
-    /// Preset name (`catppuccin`, `gruvbox`, `tokyo-night`, …).
+    /// Preset name (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`, …).
     name: String,
   },
 }
