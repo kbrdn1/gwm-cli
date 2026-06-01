@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `{repo_path}` and `{repo_parent}` placeholders for `.gwm.toml` paths/patterns. `{repo_path}` expands to the main repo's absolute working directory and `{repo_parent}` to its parent, so a base can be expressed relative to the repo on disk — e.g. `base = "{repo_parent}/worktrees"` puts worktrees in a sibling `worktrees/` dir, matching an editor's `../worktrees` convention (Zed's `git.worktree_directory`) without a per-project editor config. Purely additive; existing `{home}`/`{repo}` bases are unchanged. (#175)
 
+### Changed
+
+- TUI statusline is now a single line. Key hints render as reverse-video badge chips (the key painted with the theme accent, followed by a short label) and the status message (action log) is pinned flush-right with absolute priority — when the terminal is too narrow, the hint list is truncated with an `…` marker while the log stays visible. Previously the footer occupied two rows and wrapped, which could push the log off-screen. No keybindings changed. (#180)
+
 ## Past releases
 
 In reverse chronological order:
