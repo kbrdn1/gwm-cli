@@ -683,6 +683,15 @@ pub fn global_config_path_in(config_home: &Path) -> PathBuf {
 /// (sandboxed CI / containers without `$HOME`), in which case loading
 /// degrades to repo-only. Issue #190.
 pub fn global_config_path() -> Option<PathBuf> {
+  // Opt-out: `GWM_NO_GLOBAL_CONFIG=1` reports no global path, forcing
+  // repo-only loading. `load_for_repo` reads the real user-level file,
+  // so this keeps `cargo test` / CI deterministic on a machine that
+  // happens to have a `~/.config/gwm/config.toml`, and lets a user pin
+  // strictly repo-local config. Uses the same truthy parsing as the
+  // other `GWM_*` flags (`GWM_ALLOW_BOOTSTRAP`). Issue #190.
+  if crate::trust::env_truthy("GWM_NO_GLOBAL_CONFIG") {
+    return None;
+  }
   if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
     if !xdg.is_empty() {
       return Some(global_config_path_in(Path::new(&xdg)));
