@@ -94,6 +94,106 @@ pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
   )
 }
 
+/// Styled, width-driven header builder (issue #185). Replaces the flat
+/// `header_title` string in the rendered TUI with a clear visual hierarchy
+/// that mirrors the #180 footer's chip language:
+///
+/// - **Version** — a reverse-video badge chip (` gwm v<version> `) painted on
+///   `accent`, the same treatment as the footer hint chips. The version still
+///   comes from `CARGO_PKG_VERSION`, so `gwm --version` parity is preserved.
+/// - **`picker`** — an accent-distinct (yellow) chip flagging a `gwm switch`
+///   picker session, kept right after the version so the mode is unmissable.
+/// - **Repo name** — bold, the primary emphasis.
+/// - **Working directory** — dimmed (`DarkGray`), parenthesised, secondary
+///   context that is the first thing dropped/truncated under width pressure.
+///
+/// Priority when the terminal is narrow: the version chip survives (clipped
+/// only if it alone exceeds `width`), then the picker chip, then the repo
+/// name (truncated), and the path is sacrificed first. Pure and measured with
+/// `chars().count()` so the contract is pinned by `tests/tui_header_tests.rs`
+/// without a ratatui backend; control chars are collapsed to spaces so a
+/// pathological path can never split the single row.
+pub fn header_line(
+  repo_name: &str,
+  workdir_display: &str,
+  picker_mode: bool,
+  width: usize,
+  accent: Color,
+) -> Line<'static> {
+  // A zero-width row can hold nothing — return an empty line rather than let
+  // `trunc` floor a 1-column `…` into existence.
+  if width == 0 {
+    return Line::default();
+  }
+
+  let sanitize = |s: &str| -> String { s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect() };
+  let repo = sanitize(repo_name);
+  let path = sanitize(workdir_display);
+
+  let chip_style = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  // Picker chip stays yellow (not the accent) so the mode warning reads as
+  // distinct from the always-present version chip.
+  let picker_style = Style::default()
+    .fg(Color::Yellow)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let repo_style = Style::default().add_modifier(Modifier::BOLD);
+  let path_style = Style::default().fg(Color::DarkGray);
+
+  let version_text = format!(" gwm v{} ", env!("CARGO_PKG_VERSION"));
+  let chip_w = version_text.chars().count();
+
+  // Priority floor: if even the version chip cannot fit, show it clipped
+  // alone — never an empty header.
+  if width < chip_w {
+    return Line::from(Span::styled(trunc(&version_text, width), chip_style));
+  }
+
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut used = chip_w;
+  spans.push(Span::styled(version_text, chip_style));
+
+  // Picker chip — mode-safety indicator, kept right after the version.
+  if picker_mode {
+    let picker_text = " picker ".to_string();
+    let need = 1 + picker_text.chars().count(); // leading space + chip
+    if used + need <= width {
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(picker_text, picker_style));
+      used += need;
+    }
+  }
+
+  // Repo name — bold, primary emphasis. Truncated to fit; the 2-space gap is
+  // only spent when at least one repo char survives.
+  let gap = 2usize;
+  if used + gap < width {
+    let avail = width - used - gap;
+    let repo_disp = trunc(&repo, avail);
+    if !repo_disp.is_empty() {
+      let w = repo_disp.chars().count();
+      spans.push(Span::raw("  "));
+      spans.push(Span::styled(repo_disp, repo_style));
+      used += gap + w;
+    }
+  }
+
+  // Path — dimmed secondary context in parens. ` (` + path + `)` ⇒ 3 fixed
+  // columns; dropped first under pressure.
+  let fixed = 3usize; // leading space + "(" + ")"
+  if used + fixed < width {
+    let avail = width - used - fixed;
+    let path_disp = trunc(&path, avail);
+    if !path_disp.is_empty() {
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!("({})", path_disp), path_style));
+    }
+  }
+
+  Line::from(spans)
+}
+
 /// Single-line filter bar rendered between the table and the footer.
 /// Mirrors Vim's `/` prompt: leading slash, the live query, and a block cursor
 /// while the user is actively typing.
@@ -137,18 +237,16 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
-  let title = header_title(&app.repo_name, &app.workdir.to_string_lossy());
-  let title_style = Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD);
-  let mut spans = vec![Span::styled(title, title_style)];
-  // Picker mode flags the header so the user can never confuse a `gwm switch`
-  // session with the full TUI — the action keybindings are different.
-  if app.picker_mode {
-    spans.push(Span::styled(
-      "[picker] ",
-      Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    ));
-  }
-  let p = Paragraph::new(Line::from(spans)).block(
+  // Tilde-compress the workdir so `$HOME`-rooted paths read as `~/…` — same
+  // treatment as the sidebar identity block. The styled, width-driven layout
+  // (version chip, bold repo, dimmed path, optional picker chip) lives in
+  // `header_line` (issue #185) so it can be pinned without a ratatui backend.
+  let workdir = tilde_compress(&app.workdir.to_string_lossy());
+  // The block borders steal one column on each side; hand the inner width to
+  // the builder so its truncation matches what actually renders.
+  let inner_width = area.width.saturating_sub(2) as usize;
+  let line = header_line(&app.repo_name, &workdir, app.picker_mode, inner_width, app.theme.accent);
+  let p = Paragraph::new(line).block(
     Block::default()
       .borders(Borders::ALL)
       .border_style(Style::default().fg(Color::DarkGray)),
