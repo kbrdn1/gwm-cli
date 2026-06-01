@@ -161,8 +161,8 @@ impl Theme {
       prunable: Color::Rgb(0xFF, 0x7A, 0x7A),     // Error red
       muted: Color::Rgb(0x99, 0x99, 0x99),        // Text muted
       selection_bg: Color::Rgb(0x38, 0x38, 0x38), // Surface 1 (active)
-      name: Color::Rgb(0xF5, 0xF4, 0xEF),         // Text (warm near-white)
-      path: Color::Rgb(0xC2, 0xBD, 0xB4),         // Text dim (warm path grey)
+      name: Color::Rgb(0xE0, 0xE0, 0xE0),         // --text (primary text)
+      path: Color::Rgb(0xB0, 0xB0, 0xB0),         // --text-dim (secondary text / Subtext 0)
       staged: Color::Rgb(0xD4, 0x82, 0x5D),       // = accent (preserves the borrowed look)
       modified: Color::Rgb(0xFF, 0xDF, 0x61),     // = dirty
       untracked: Color::Rgb(0x86, 0xE8, 0x9A),    // = clean

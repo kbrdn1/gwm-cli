@@ -88,6 +88,11 @@ fn claude_dark_preset_ports_the_palette() {
   assert_eq!(t.main, Color::Rgb(0xFF, 0xDF, 0x61), "warning yellow");
   assert_eq!(t.locked, Color::Rgb(0xC7, 0x9B, 0xFF), "special purple");
   assert_eq!(t.prunable, Color::Rgb(0xFF, 0x7A, 0x7A), "error red");
+  // #214: the chrome roles map to the palette's `--text` / `--text-dim`
+  // tokens, not the improvised warm greys #210 introduced (corrected before
+  // any release — both #210 and #214 land in the same unreleased cycle).
+  assert_eq!(t.name, Color::Rgb(0xE0, 0xE0, 0xE0), "--text (primary text)");
+  assert_eq!(t.path, Color::Rgb(0xB0, 0xB0, 0xB0), "--text-dim (secondary text)");
   // The alias `claude` resolves to the same theme.
   assert_eq!(Theme::preset("claude"), Some(t), "`claude` aliases `claude-dark`");
 }
