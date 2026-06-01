@@ -10,7 +10,21 @@ use gwm::tui::{
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// Process-global lock guarding every test in this binary that mutates
+/// `std::env`. `set_var` / `remove_var` are `unsafe` because the libc
+/// calls aren't thread-safe; under `cargo test`'s default thread pool,
+/// two env-mutating tests running in parallel can race and trigger UB.
+/// Every test fn here that touches env vars MUST take this lock before
+/// any `set_var` / `remove_var` (the trust-gate tests and the GitHub
+/// PR-detection refresh test, #181). Mirrors the same pattern in
+/// `trust_tests.rs` / `history_tests.rs`.
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 /// Build a synthetic worktree row for state-machine tests that need a known
 /// list shape (fuzzy filter ranking, multi-row navigation). Lets the test
@@ -1397,6 +1411,78 @@ fn refresh_github_status_message_reflects_partial_failure() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // A branch with no issue number in its name and no explicit PR link.
+  // Pre-#181 refresh_github_status bailed with "nothing linked"; now it
+  // detects the branch's PR via `gh pr list` and surfaces it with
+  // source `Detected`. Gated #[cfg(unix)] — the cross-OS gh contract is
+  // covered by the pure github_tests + the cli_binary status E2E (which
+  // ships a Windows fake-gh too).
+  let (dir, repo, mut app) = make_app_on_branch("detect-me");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  // Re-resolve the slug now that the remote exists.
+  app.refresh_link();
+
+  let gh = dir.path().join("fake-gh");
+  // Write a fake `gh` that detects PR `n` (both `pr list` and `pr view`).
+  let write_gh = |n: u64| {
+    std::fs::write(
+      &gh,
+      format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+           printf '%s' '[{{\"number\":{n}}}]'\n\
+         elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+           printf '%s' '{{\"number\":{n},\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/{n}\"}}'\n\
+         fi\n"
+      ),
+    )
+    .unwrap();
+    let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&gh, perms).unwrap();
+  };
+  write_gh(128);
+
+  // Serialise against the other env-mutating tests in this binary.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` above; GWM_GH is
+  // restored at the end of the test, before returning.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+
+  // First refresh: nothing linked → detect PR #128.
+  app.refresh_github_status();
+  assert_eq!(app.current_link().pr, Some(128));
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+
+  // The branch's PR changed (e.g. closed + reopened as #200). A detected
+  // link is "resolved live", so a second refresh must re-detect rather
+  // than stick to #128 (issue #181 — Copilot review on PR #184).
+  write_gh(200);
+  app.refresh_github_status();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(
+    app.current_link().pr,
+    Some(200),
+    "a detected PR must re-resolve on refresh"
+  );
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+}
+
 // ---- Configurable launchers (issue #75) --------------------------------
 //
 // The `R` key in the worktree-list view now triggers the [review]
@@ -1958,6 +2044,116 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
 
 fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+// ---- working_tree_status_line (issue #179) ---------------------------------
+// Colourisation of each `git status --short` entry in the Working Tree sidebar
+// block, with three distinct status colours so modified ≠ created at a glance:
+//   - staged (X column)        → cyan
+//   - modified (Y column)      → yellow
+//   - untracked (`??`)         → green
+// The file name takes the dominant status colour.
+use gwm::tui::working_tree_status_line;
+
+fn filename_span_fg(line: &ratatui::text::Line<'static>, needle: &str) -> Option<Color> {
+  line
+    .spans
+    .iter()
+    .find(|s| s.content.contains(needle))
+    .unwrap_or_else(|| panic!("no span carrying {:?} in {:?}", needle, section_text_single(line)))
+    .style
+    .fg
+}
+
+#[test]
+fn working_tree_status_line_preserves_raw_text() {
+  // Only Span styling is added — the rendered text must read back
+  // byte-for-byte identical to the raw `git status --short` line.
+  for raw in [
+    "A  staged.rs",
+    "AM both.rs",
+    " M tracked.rs",
+    "?? untracked.rs",
+    "R  old.rs -> new.rs",
+  ] {
+    assert_eq!(
+      section_text_single(&working_tree_status_line(raw)),
+      raw,
+      "raw text preserved for {:?}",
+      raw
+    );
+  }
+}
+
+#[test]
+fn working_tree_status_line_staged_only_is_cyan() {
+  let line = working_tree_status_line("A  staged.rs");
+  assert_eq!(line.spans[0].content.as_ref(), "A");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
+  assert_eq!(
+    filename_span_fg(&line, "staged.rs"),
+    Some(Color::Cyan),
+    "staged-only filename → cyan"
+  );
+}
+
+#[test]
+fn working_tree_status_line_unstaged_modified_is_yellow() {
+  let line = working_tree_status_line(" M tracked.rs");
+  assert_eq!(line.spans[1].content.as_ref(), "M");
+  assert_eq!(
+    line.spans[1].style.fg,
+    Some(Color::Yellow),
+    "Y column (modified) → yellow"
+  );
+  assert_eq!(
+    filename_span_fg(&line, "tracked.rs"),
+    Some(Color::Yellow),
+    "modified filename → yellow"
+  );
+}
+
+#[test]
+fn working_tree_status_line_untracked_is_green() {
+  let line = working_tree_status_line("?? untracked.rs");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
+  assert_eq!(
+    filename_span_fg(&line, "untracked.rs"),
+    Some(Color::Green),
+    "untracked filename → green"
+  );
+}
+
+#[test]
+fn working_tree_status_line_handles_multibyte_leading_chars() {
+  // The helper is `pub` (exported for these tests), so a non-git caller can
+  // feed it arbitrary input. Splitting on byte offsets (`raw[0..1]`) would
+  // panic mid-codepoint when the first chars are multi-byte UTF-8. Split on
+  // char boundaries instead — no panic, and the exact text is preserved.
+  let raw = "éM café.rs"; // X='é' (2 bytes), Y='M', sep=' ', path="café.rs"
+  let line = working_tree_status_line(raw);
+  assert_eq!(
+    section_text_single(&line),
+    raw,
+    "multi-byte text preserved without panic"
+  );
+}
+
+#[test]
+fn working_tree_status_line_partially_staged_splits_status_columns() {
+  // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
+  // dominant worktree colour (yellow) since it carries unstaged changes.
+  let line = working_tree_status_line("AM both.rs");
+  assert_eq!(line.spans[0].content.as_ref(), "A");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
+  assert_eq!(line.spans[1].content.as_ref(), "M");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y=M modified → yellow");
+  assert_eq!(
+    filename_span_fg(&line, "both.rs"),
+    Some(Color::Yellow),
+    "filename with modified change → yellow"
+  );
 }
 
 #[test]
@@ -2792,13 +2988,12 @@ fn tui_gate_refuses_untrusted_config_in_prompt_mode() {
   // at the CLI gate / env bypass.
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
-  // Hold the env lock + clean up afterwards to keep the harness
-  // hermetic against the trust_tests env-mutation test.
+  // Serialise against the other env-mutating tests in this binary
+  // (the PR-detection refresh test also mutates env, #181).
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
   let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
-  // SAFETY: this test is the sole env mutator inside this binary.
-  // The `trust_tests` env tests live in a separate test binary and
-  // run in their own process, so there's no cross-binary race.
+  // SAFETY: env mutation is guarded by `env_lock()` above.
   unsafe {
     std::env::set_var("GWM_TRUST_LEDGER", &ledger);
     std::env::remove_var("GWM_ALLOW_BOOTSTRAP");
@@ -2895,6 +3090,7 @@ fn tui_submit_create_aborts_on_untrusted_config() {
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
   let base_dir = tempfile::TempDir::new().unwrap();
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
   let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
   // SAFETY: see comment on `tui_gate_refuses_untrusted_config_in_prompt_mode`.
@@ -2964,6 +3160,7 @@ fn tui_bootstrap_selected_aborts_on_untrusted_config() {
   // (re-run bootstrap on an existing worktree) takes the same gate.
   let ledger_dir = tempfile::TempDir::new().unwrap();
   let ledger = ledger_dir.path().join("trust.toml");
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   let prior_ledger = std::env::var("GWM_TRUST_LEDGER").ok();
   let prior_allow = std::env::var("GWM_ALLOW_BOOTSTRAP").ok();
   // SAFETY: same rationale as the previous test.
@@ -3026,4 +3223,22 @@ fn link_target_is_canonical_across_cli_and_tui() {
   let from_tui: gwm::tui::LinkTarget = gwm::tui::LinkTarget::Pr;
   let from_cli: gwm::cli::LinkTarget = from_tui;
   assert_eq!(from_cli, gwm::cli::LinkTarget::Pr);
+}
+
+#[test]
+fn fresh_app_confirm_modal_focuses_cancel() {
+  // #187: the App wires the confirm modal's default button focus to
+  // Cancel, so the destructive `[ Confirm ]` is never the button a
+  // stray Enter lands on when the modal first opens.
+  use gwm::tui::ConfirmButton;
+  let (_dir, app) = make_app();
+  assert_eq!(app.confirm.focused_button(), ConfirmButton::Cancel);
+}
+
+#[test]
+fn fresh_app_spinner_starts_at_first_frame() {
+  // #187: the App owns a Spinner loader initialised to its first frame.
+  use gwm::tui::state::spinner::DOT_FRAMES;
+  let (_dir, app) = make_app();
+  assert_eq!(app.spinner.glyph(DOT_FRAMES), DOT_FRAMES[0]);
 }

@@ -6,6 +6,7 @@ use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
+use super::state::spinner::Spinner;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
@@ -198,6 +199,12 @@ pub struct App {
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
 
+  /// Animated loader for overlays (issue #187). Advanced by the event
+  /// loop's 200ms poll tick while the confirm countdown is armed and
+  /// read by the renderer; pure state lives in
+  /// [`super::state::spinner::Spinner`].
+  pub spinner: Spinner,
+
   // ---- Issue/PR linking (issue #67) -------------------------------------
   /// GitHub fetch state slice — owns the cached link for the currently
   /// selected worktree's branch, the repo slug parsed from `origin`,
@@ -286,6 +293,7 @@ impl App {
       picker_should_exit: false,
       should_quit: false,
       confirm: ConfirmModal::new(),
+      spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
@@ -916,6 +924,9 @@ impl App {
     }
     self.view = View::Confirm;
     self.confirm.reset();
+    // Start the loader animation from a deterministic frame each time
+    // the modal opens (#187).
+    self.spinner.reset();
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
@@ -1248,11 +1259,29 @@ impl App {
   pub fn refresh_github_status(&mut self) {
     use super::state::github_fetch::{FetchAction, FetchKey};
 
+    let slug = self.github.link_slug.clone();
+
+    // Drop a prior auto-detection so this refresh re-resolves it live
+    // (issue #181): a detected PR must not stick across `F` presses if
+    // the branch's PR changed. Explicit / branch-name links stay pinned.
+    self.github.clear_detected_pr();
+
+    // Auto-detect the selected branch's PR when none is linked (issue
+    // #181). Runs on the same synchronous F-refresh path as the issue/PR
+    // fetch; needs a remote, so it's a no-op without a slug. An explicit
+    // `gwm link --pr` wins — `apply_detected_pr` only fills an empty slot.
+    if self.github.link.pr.is_none() {
+      if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
+        let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
+        self.github.apply_detected_pr(detected);
+      }
+    }
+
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = "nothing linked — press L to link an issue or PR".into();
       return;
     }
-    let Some(slug) = self.github.link_slug.clone() else {
+    let Some(slug) = slug else {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };

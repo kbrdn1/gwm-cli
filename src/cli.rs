@@ -83,6 +83,12 @@ pub enum Command {
     /// Output format. `names` prints one worktree name per line (for shell completion).
     #[arg(long, value_enum, default_value_t = ListFormat::Table)]
     format: ListFormat,
+    /// Add a PR column, auto-detecting each worktree's pull request via
+    /// `gh pr list --head <branch>` (issue #181). Off by default: it
+    /// makes one `gh` call per worktree, so the plain listing stays
+    /// network-free. Ignored with `--format names`.
+    #[arg(long)]
+    detect_pr: bool,
   },
   /// Create a new worktree (and matching branch).
   Create {
@@ -732,7 +738,7 @@ pub fn run(cli: Cli) -> Result<()> {
 
   match cmd {
     Command::Init => cmd_init(),
-    Command::List { format } => cmd_list(format),
+    Command::List { format, detect_pr } => cmd_list(format, detect_pr),
     Command::Create {
       branch_type,
       issue,
@@ -961,7 +967,7 @@ fn cmd_init() -> Result<()> {
   Ok(())
 }
 
-fn cmd_list(format: ListFormat) -> Result<()> {
+fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
 
@@ -975,6 +981,26 @@ fn cmd_list(format: ListFormat) -> Result<()> {
     return Ok(());
   }
 
+  // PR auto-detection (issue #181): off by default to keep the listing
+  // network-free. When `--detect-pr` is set and a GitHub remote resolves,
+  // detect each branch's PR via `gh pr list --head <branch>` — one `gh`
+  // call per worktree. The detected number is rendered in an extra
+  // column; an explicit `gwm link --pr` still wins via `read_link`.
+  let detected_prs: Vec<Option<u64>> = if detect_pr {
+    let slug = github::repo_slug(&repo).ok();
+    trees
+      .iter()
+      .map(|w| {
+        let (branch, slug) = (w.branch.as_deref()?, slug.as_deref()?);
+        github::read_link_with_pr_detection(&repo, branch, slug)
+          .ok()
+          .and_then(|l| l.pr)
+      })
+      .collect()
+  } else {
+    Vec::new()
+  };
+
   // Dynamic widths based on observed content.
   let name_w = trees.iter().map(|w| w.name.len()).max().unwrap_or(4).clamp(4, 40);
   let branch_w = trees
@@ -984,31 +1010,64 @@ fn cmd_list(format: ListFormat) -> Result<()> {
     .unwrap_or(6)
     .clamp(6, 40);
   let status_w = 14;
+  let pr_w = 6;
 
-  println!(
-    "  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
-    "NAME",
-    "BRANCH",
-    "STATUS",
-    nw = name_w,
-    bw = branch_w,
-    sw = status_w,
-  );
-  for w in trees {
-    let mark = if w.is_main { "*" } else { " " };
-    let branch = w.branch.clone().unwrap_or_else(|| "-".into());
-    let status = format_status_text(&w);
+  if detect_pr {
     println!(
-      "{} {:<nw$}  {:<bw$}  {:<sw$}  {}",
-      mark,
-      w.name,
-      branch,
-      status,
-      w.path.display(),
+      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "NAME",
+      "BRANCH",
+      "STATUS",
+      "PR",
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
+      pw = pr_w,
+    );
+  } else {
+    println!(
+      "  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "NAME",
+      "BRANCH",
+      "STATUS",
       nw = name_w,
       bw = branch_w,
       sw = status_w,
     );
+  }
+  for (i, w) in trees.iter().enumerate() {
+    let mark = if w.is_main { "*" } else { " " };
+    let branch = w.branch.clone().unwrap_or_else(|| "-".into());
+    let status = format_status_text(w);
+    if detect_pr {
+      let pr = detected_prs.get(i).copied().flatten();
+      let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
+      println!(
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        mark,
+        w.name,
+        branch,
+        status,
+        pr_cell,
+        w.path.display(),
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+        pw = pr_w,
+      );
+    } else {
+      println!(
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        mark,
+        w.name,
+        branch,
+        status,
+        w.path.display(),
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+      );
+    }
   }
   Ok(())
 }
@@ -2006,11 +2065,17 @@ fn spawn_opener(url: &str) -> Result<()> {
 
 fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
-  let link = github::read_link(&repo, &branch)?;
 
   // Slug + fetched status are best-effort: if there's no GitHub remote
   // or `gh` isn't installed, we still print the local link.
   let slug = github::repo_slug(&repo).ok();
+  // When a remote is present, auto-detect the branch's PR if none is
+  // explicitly linked (issue #181). Falls back to the plain local read
+  // with no remote — keeping the "local link only" mode network-free.
+  let link = match slug.as_deref() {
+    Some(s) => github::read_link_with_pr_detection(&repo, &branch, s)?,
+    None => github::read_link(&repo, &branch)?,
+  };
   let (issue_status, pr_status) = fetch_link_status(&link, slug.as_deref());
 
   if json {
@@ -2052,6 +2117,7 @@ fn link_source_str(s: LinkSource) -> &'static str {
     LinkSource::None => "none",
     LinkSource::BranchName => "branch-name",
     LinkSource::Explicit => "explicit",
+    LinkSource::Detected => "detected",
   }
 }
 
