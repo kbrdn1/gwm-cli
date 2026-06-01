@@ -40,11 +40,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   // remains in effect (so they can see what's filtering the list).
   let filter_visible = app.filter.active || !app.filter.query().is_empty();
 
+  // Header is a single borderless row (#185) — same one-line treatment as the
+  // footer, so the worktree table gets two extra rows of vertical space.
   let chunks = if filter_visible {
     Layout::default()
       .direction(Direction::Vertical)
       .constraints([
-        Constraint::Length(3),
+        Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -53,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   } else {
     Layout::default()
       .direction(Direction::Vertical)
-      .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(1)])
+      .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
       .split(f.area())
   };
 
@@ -242,16 +244,17 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   // (version chip, bold repo, dimmed path, optional picker chip) lives in
   // `header_line` (issue #185) so it can be pinned without a ratatui backend.
   let workdir = tilde_compress(&app.workdir.to_string_lossy());
-  // The block borders steal one column on each side; hand the inner width to
-  // the builder so its truncation matches what actually renders.
-  let inner_width = area.width.saturating_sub(2) as usize;
-  let line = header_line(&app.repo_name, &workdir, app.picker_mode, inner_width, app.theme.accent);
-  let p = Paragraph::new(line).block(
-    Block::default()
-      .borders(Borders::ALL)
-      .border_style(Style::default().fg(Color::DarkGray)),
+  // Borderless single row (#185): the builder gets the full area width and the
+  // line renders flush, mirroring the footer. No `Wrap` — `header_line`
+  // guarantees one visual line clipped to `width`.
+  let line = header_line(
+    &app.repo_name,
+    &workdir,
+    app.picker_mode,
+    area.width as usize,
+    app.theme.accent,
   );
-  f.render_widget(p, area);
+  f.render_widget(Paragraph::new(line), area);
 }
 
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
