@@ -248,10 +248,20 @@ impl App {
   }
 
   pub fn new_at(start: Option<&Path>) -> Result<Self> {
+    Self::new_at_layered(start, crate::config::global_config_path().as_deref())
+  }
+
+  /// Injectable variant of [`Self::new_at`] (issue #194): `global_path`
+  /// is the user-level global config layered under the repo's `.gwm.toml`
+  /// (`None` = repo-only, no environment read). Tests pass `None` so `App`
+  /// construction never depends on the runner's real
+  /// `~/.config/gwm/config.toml`. `new_at` delegates with the real
+  /// `global_config_path()`, so runtime behaviour is unchanged.
+  pub fn new_at_layered(start: Option<&Path>, global_path: Option<&Path>) -> Result<Self> {
     let repo = worktree::discover_repo(start)?;
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
     let repo_name = worktree::repo_name(&repo);
-    let config = Config::load_for_repo(&workdir)?;
+    let config = Config::load_layered(&workdir, global_path)?;
     let branch_types = config.resolved_branch_types().types;
     // Resolve the keymap once at construction. Config::load_for_repo
     // already validated the overrides, so this should not surface a

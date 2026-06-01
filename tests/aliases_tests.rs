@@ -42,7 +42,7 @@ ll = "list --format names"
   )
   .unwrap();
 
-  let cfg = Config::load_for_repo(dir.path()).unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.aliases.len(), 2);
   assert_eq!(cfg.aliases.get("wip").map(String::as_str), Some("create feat 0 wip"));
   assert_eq!(cfg.aliases.get("ll").map(String::as_str), Some("list --format names"));
@@ -63,7 +63,7 @@ list = "create feat 0 wip"
   )
   .unwrap();
 
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   match err {
     GwmError::Config(msg) => {
       assert!(msg.contains("list"), "error must name the offending alias: {msg}");
@@ -92,7 +92,7 @@ fn config_aliases_rejects_shadow_of_visible_built_in_alias() {
       ),
     )
     .unwrap();
-    let err = Config::load_for_repo(dir.path()).unwrap_err();
+    let err = Config::load_layered(dir.path(), None).unwrap_err();
     match err {
       GwmError::Config(msg) => {
         assert!(msg.contains(shadow), "error must name '{shadow}': {msg}");
@@ -126,7 +126,7 @@ copy = "{bad_value}"
       ),
     )
     .unwrap();
-    let err = Config::load_for_repo(dir.path()).unwrap_err();
+    let err = Config::load_layered(dir.path(), None).unwrap_err();
     match err {
       GwmError::Config(msg) => {
         assert!(
@@ -152,7 +152,7 @@ wip = ""
 "#,
   )
   .unwrap();
-  let err = Config::load_for_repo(dir.path()).unwrap_err();
+  let err = Config::load_layered(dir.path(), None).unwrap_err();
   match err {
     GwmError::Config(msg) => assert!(msg.contains("wip"), "{msg}"),
     other => panic!("expected GwmError::Config, got {other:?}"),
@@ -168,7 +168,7 @@ fn resolved_aliases_contains_built_in_set() {
   // Empty repo + no user config still surfaces every visible-alias
   // entry from clap.
   let dir = TempDir::new().unwrap();
-  let resolved = aliases::load(Some(dir.path()), None).unwrap();
+  let resolved = aliases::load_layered(Some(dir.path()), None, None).unwrap();
   assert!(!resolved.built_in.is_empty());
   // Sanity: `s → switch` is the canonical example from issue #43;
   // it MUST live in the built-in list for the chain to be honest.
@@ -209,7 +209,7 @@ ll = "list --format names"
   .unwrap();
   let user_path = user_dir.path().join("aliases.toml");
 
-  let resolved = aliases::load(Some(repo_dir.path()), Some(&user_path)).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, Some(&user_path)).unwrap();
 
   // Repo entry present and wins for "copy".
   assert_eq!(resolved.repo.get("copy").map(String::as_str), Some("path bar"));
@@ -236,7 +236,7 @@ ll = "list --format names"
   .unwrap();
   let user_path = user_dir.path().join("aliases.toml");
 
-  let resolved = aliases::load(Some(repo_dir.path()), Some(&user_path)).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, Some(&user_path)).unwrap();
   assert!(resolved.repo.is_empty());
   assert_eq!(resolved.user.get("ll").map(String::as_str), Some("list --format names"));
 }
@@ -246,7 +246,12 @@ fn resolved_aliases_user_missing_file_is_no_op() {
   // An absent user file is the common case (fresh install). It must
   // not fail load, it must resolve to an empty user map.
   let repo_dir = TempDir::new().unwrap();
-  let resolved = aliases::load(Some(repo_dir.path()), Some(std::path::Path::new("/nope/aliases.toml"))).unwrap();
+  let resolved = aliases::load_layered(
+    Some(repo_dir.path()),
+    None,
+    Some(std::path::Path::new("/nope/aliases.toml")),
+  )
+  .unwrap();
   assert!(resolved.repo.is_empty());
   assert!(resolved.user.is_empty());
 }
@@ -266,7 +271,7 @@ copy = "path | pbcopy"
   )
   .unwrap();
   let user_path = user_dir.path().join("aliases.toml");
-  let err = aliases::load(None, Some(&user_path)).unwrap_err();
+  let err = aliases::load_layered(None, None, Some(&user_path)).unwrap_err();
   match err {
     GwmError::Config(msg) => {
       assert!(msg.contains("copy"), "{msg}");
@@ -288,7 +293,7 @@ list = "list --format names"
   )
   .unwrap();
   let user_path = user_dir.path().join("aliases.toml");
-  let err = aliases::load(None, Some(&user_path)).unwrap_err();
+  let err = aliases::load_layered(None, None, Some(&user_path)).unwrap_err();
   match err {
     GwmError::Config(msg) => assert!(msg.contains("list"), "{msg}"),
     other => panic!("expected GwmError::Config, got {other:?}"),
@@ -301,7 +306,7 @@ list = "list --format names"
 fn expand_argv_no_match_passes_through_unchanged() {
   // Argv that doesn't start with an alias is returned verbatim. The
   // dispatcher (clap) still sees what the user typed.
-  let resolved = aliases::load(None, None).unwrap();
+  let resolved = aliases::load_layered(None, None, None).unwrap();
   let argv = vec!["gwm".into(), "list".into(), "--format".into(), "names".into()];
   assert_eq!(aliases::expand_argv(argv.clone(), &resolved), argv);
 }
@@ -317,7 +322,7 @@ wip = "create feat 0 wip"
 "#,
   )
   .unwrap();
-  let resolved = aliases::load(Some(repo_dir.path()), None).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, None).unwrap();
   let argv = vec!["gwm".into(), "wip".into()];
   assert_eq!(
     aliases::expand_argv(argv, &resolved),
@@ -365,7 +370,7 @@ wip = "create feat 0 wip"
 "#,
   )
   .unwrap();
-  let resolved = aliases::load(Some(repo_dir.path()), None).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, None).unwrap();
   let argv = vec!["gwm".into(), "wip".into(), "--no-bootstrap".into()];
   assert_eq!(
     aliases::expand_argv(argv, &resolved),
@@ -388,7 +393,7 @@ wip = "create feat 0 wip"
   )
   .unwrap();
   let user_path = user_dir.path().join("aliases.toml");
-  let resolved = aliases::load(None, Some(&user_path)).unwrap();
+  let resolved = aliases::load_layered(None, None, Some(&user_path)).unwrap();
   let argv = vec!["gwm".into(), "create".into(), "feat".into(), "86".into(), "wip".into()];
   assert_eq!(aliases::expand_argv(argv.clone(), &resolved), argv);
 }
@@ -411,7 +416,7 @@ ll = "list --format names"
 "#,
   )
   .unwrap();
-  let resolved = aliases::load(Some(repo_dir.path()), None).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, None).unwrap();
   let argv = vec!["gwm".into(), "wip".into()];
   // After ONE expansion, argv[1] is `ll` — recursion would substitute
   // it again, but we explicitly don't.
@@ -421,7 +426,7 @@ ll = "list --format names"
 #[test]
 fn expand_argv_empty_argv_passes_through() {
   // `gwm` (no args, opens the TUI) must not be touched.
-  let resolved = aliases::load(None, None).unwrap();
+  let resolved = aliases::load_layered(None, None, None).unwrap();
   let argv = vec!["gwm".into()];
   assert_eq!(aliases::expand_argv(argv.clone(), &resolved), argv);
 }
@@ -443,7 +448,7 @@ wip = "create feat 0 wip"
 "#,
   )
   .unwrap();
-  let resolved = aliases::load(Some(repo_dir.path()), None).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, None).unwrap();
   let argv = vec!["gwm".into(), "--allow-bootstrap".into(), "wip".into()];
   assert_eq!(
     aliases::expand_argv(argv, &resolved),
@@ -470,7 +475,7 @@ wip = "create feat 0 wip"
 "#,
   )
   .unwrap();
-  let resolved = aliases::load(Some(repo_dir.path()), None).unwrap();
+  let resolved = aliases::load_layered(Some(repo_dir.path()), None, None).unwrap();
   let argv: Vec<OsString> = vec!["gwm".into(), "--allow-bootstrap".into(), "wip".into()];
   let expected: Vec<OsString> = vec![
     "gwm".into(),
@@ -492,7 +497,7 @@ fn expand_argv_os_passes_non_utf8_token_through_unchanged() {
   // let clap surface the unknown subcommand verbatim".
   use std::ffi::OsString;
   use std::os::unix::ffi::OsStringExt;
-  let resolved = aliases::load(None, None).unwrap();
+  let resolved = aliases::load_layered(None, None, None).unwrap();
   let bad: OsString = OsString::from_vec(vec![0xff, 0xfe, 0x80]);
   let argv: Vec<OsString> = vec!["gwm".into(), bad.clone()];
   let out = aliases::expand_argv_os(argv.clone(), &resolved);
@@ -512,7 +517,7 @@ fn expand_argv_os_expands_alias_after_non_utf8_flag_value() {
   // String), and argv flows through unchanged.
   use std::ffi::OsString;
   use std::os::unix::ffi::OsStringExt;
-  let resolved = aliases::load(None, None).unwrap();
+  let resolved = aliases::load_layered(None, None, None).unwrap();
   let bad: OsString = OsString::from_vec(vec![0xff]);
   let argv: Vec<OsString> = vec!["gwm".into(), "--verbose".into(), bad.clone()];
   let out = aliases::expand_argv_os(argv.clone(), &resolved);
