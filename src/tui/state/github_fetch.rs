@@ -210,6 +210,18 @@ impl GitHubFetch {
     github::apply_detected_pr(&mut self.link, detected);
   }
 
+  /// Drop a previously auto-detected PR so the next refresh re-resolves
+  /// it from GitHub (issue #181 — the detected link is "resolved live",
+  /// so a PR that was opened/closed/replaced while sitting on the same
+  /// worktree must not stick across `F` presses). A no-op for an
+  /// explicit (`gwm link --pr`) or branch-name link — those stay pinned.
+  pub fn clear_detected_pr(&mut self) {
+    if self.link.pr_source == github::LinkSource::Detected {
+      self.link.pr = None;
+      self.link.pr_source = github::LinkSource::None;
+    }
+  }
+
   /// Decide what the orchestrator should do for `key`. Three cases:
   ///
   /// 1. The per-key cache holds a terminal `Loaded` or `Error` for

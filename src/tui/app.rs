@@ -1250,6 +1250,11 @@ impl App {
 
     let slug = self.github.link_slug.clone();
 
+    // Drop a prior auto-detection so this refresh re-resolves it live
+    // (issue #181): a detected PR must not stick across `F` presses if
+    // the branch's PR changed. Explicit / branch-name links stay pinned.
+    self.github.clear_detected_pr();
+
     // Auto-detect the selected branch's PR when none is linked (issue
     // #181). Runs on the same synchronous F-refresh path as the issue/PR
     // fetch; needs a remote, so it's a no-op without a slug. An explicit

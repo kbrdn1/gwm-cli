@@ -331,3 +331,27 @@ fn apply_detected_pr_is_noop_when_nothing_detected() {
   assert_eq!(gh.link.pr, None);
   assert_eq!(gh.link.pr_source, gwm::github::LinkSource::None);
 }
+
+#[test]
+fn clear_detected_pr_drops_a_detected_link_so_it_re_resolves() {
+  let mut gh = GitHubFetch::new();
+  gh.apply_detected_pr(Some(128));
+  assert_eq!(gh.link.pr_source, gwm::github::LinkSource::Detected);
+
+  gh.clear_detected_pr();
+
+  assert_eq!(gh.link.pr, None);
+  assert_eq!(gh.link.pr_source, gwm::github::LinkSource::None);
+}
+
+#[test]
+fn clear_detected_pr_leaves_an_explicit_link_pinned() {
+  let mut gh = GitHubFetch::new();
+  gh.link.pr = Some(61);
+  gh.link.pr_source = gwm::github::LinkSource::Explicit;
+
+  gh.clear_detected_pr();
+
+  assert_eq!(gh.link.pr, Some(61));
+  assert_eq!(gh.link.pr_source, gwm::github::LinkSource::Explicit);
+}
