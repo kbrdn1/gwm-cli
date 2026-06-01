@@ -1,4 +1,12 @@
 # gwm config — copy this to your repo root as `.gwm.toml`
+#
+# Global config (issue #190): the same schema may live at
+# `~/.config/gwm/config.toml` ($XDG_CONFIG_HOME/gwm/config.toml). It is
+# merged UNDERNEATH this repo file — set a preference once (e.g.
+# `[theme] preset = "…"`) and every repo inherits it. The repo `.gwm.toml`
+# always wins on conflict: scalars override, tables merge key-by-key,
+# arrays ([[labels]], [[bootstrap.copy]], …) are replaced wholesale.
+#
 # placeholders supported in paths/patterns:
 #   {repo}        repo name              {home}    your home directory
 #   {repo_path}   repo's absolute dir    {repo_parent}  the dir *containing* the repo
