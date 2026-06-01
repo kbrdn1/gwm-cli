@@ -847,13 +847,14 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   let path_at = sep_at + sep.len_utf8();
   let untracked = x == '?' && y == '?';
 
-  // The three git-status families have no dedicated theme roles, so they
-  // borrow the nearest-colour role (preserving the pre-theme defaults):
-  // staged → `accent` (cyan), worktree-modified → `dirty` (yellow),
-  // untracked/created → `clean` (green).
-  let staged = Style::default().fg(theme.accent);
-  let modified = Style::default().fg(theme.dirty);
-  let created = Style::default().fg(theme.clean);
+  // The three git-status families paint through their own roles (issue
+  // #211; defaults cyan/yellow/green match the pre-#211 borrowed
+  // accent/dirty/clean, so a `[theme]`-less config is unchanged):
+  // staged → `staged`, worktree-modified → `modified`, untracked/created
+  // → `untracked`.
+  let staged = Style::default().fg(theme.staged);
+  let modified = Style::default().fg(theme.modified);
+  let created = Style::default().fg(theme.untracked);
   // X column: untracked `?` → created, other staged change → staged.
   let x_style = if x == '?' {
     created
