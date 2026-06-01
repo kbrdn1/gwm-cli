@@ -2189,10 +2189,12 @@ pub fn issue_summary_line(
     GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
     GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
-      let badge_color = match s.state {
-        IssueState::Open => theme.clean,
-        IssueState::Closed => theme.prunable,
-      };
+      // Mirror `issue_badge_color` exactly so the summary line and the
+      // sidebar header dot never disagree for the same issue: closed maps
+      // to `locked` ("moved on"), not `prunable` ("alarming"). Pre-#170
+      // this site hard-coded `Color::Red` while the dot used `Magenta` —
+      // a latent inconsistency the audit closes (Copilot review #209).
+      let badge_color = issue_badge_color(s.state, theme);
       let badge = match s.state {
         IssueState::Open => "open",
         IssueState::Closed => "closed",

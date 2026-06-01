@@ -197,6 +197,39 @@ fn working_tree_status_line_resolves_status_families_through_theme_roles() {
   );
 }
 
+#[test]
+fn issue_summary_line_closed_badge_agrees_with_the_header_dot() {
+  // Copilot review #209: the summary line must not paint a closed issue
+  // with a different role than `issue_badge_color` (the sidebar dot).
+  // Both resolve closed → `locked` ("moved on"), never `prunable`.
+  let t = audit_theme();
+  let status = gwm::github::IssueStatus {
+    number: 42,
+    title: "done".into(),
+    state: IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = gwm::tui::issue_summary_line(
+    42,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    fg_containing(&line, "closed"),
+    Some(t.locked),
+    "closed issue badge → locked, matching issue_badge_color"
+  );
+  assert_eq!(
+    fg_containing(&line, "closed"),
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "summary line and the header dot must use the same role for closed issues"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Header / footer chrome
 // ---------------------------------------------------------------------------
