@@ -1395,27 +1395,20 @@ fn draw_help(f: &mut Frame, app: &App) {
     }
   }
 
-  let block = Block::default()
-    .borders(Borders::ALL)
-    .title(Span::styled(" help ", heading_style))
-    .border_style(Style::default().fg(accent));
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block("help", accent)), area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
-  let area = centered(70, 60, f.area());
+  // Three bordered fields (3 rows each) + a 3-line preview, sized to fit
+  // with the rounded frame instead of a fixed 60%-tall box (#187).
+  let area = centered_h(70, 15, f.area());
   f.render_widget(Clear, area);
-
-  let block = Block::default()
-    .borders(Borders::ALL)
-    .title(" new worktree ")
-    .border_style(Style::default().fg(Color::Green));
-  f.render_widget(block, area);
+  f.render_widget(overlay_block("new worktree", app.theme.clean), area);
 
   let inner = Layout::default()
     .direction(Direction::Vertical)
-    .margin(2)
+    .margin(1)
     .constraints([
       Constraint::Length(3),
       Constraint::Length(3),
@@ -1430,11 +1423,15 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
+  let focus_color = app.theme.dirty;
+  let idle_color = app.theme.muted;
   f.render_widget(
     field_input(
       "type (↑/↓)",
       &format!("{} — {}", type_str, type_desc),
       app.create_form.field == Field::Type,
+      focus_color,
+      idle_color,
     ),
     inner[0],
   );
@@ -1443,6 +1440,8 @@ fn draw_create(f: &mut Frame, app: &App) {
       "issue (digits)",
       &app.create_form.issue,
       app.create_form.field == Field::Issue,
+      focus_color,
+      idle_color,
     ),
     inner[1],
   );
@@ -1451,6 +1450,8 @@ fn draw_create(f: &mut Frame, app: &App) {
       "description (kebab)",
       &app.create_form.desc,
       app.create_form.field == Field::Desc,
+      focus_color,
+      idle_color,
     ),
     inner[2],
   );
@@ -1459,29 +1460,30 @@ fn draw_create(f: &mut Frame, app: &App) {
   let branch = format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc);
   let dirname = format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc);
   let preview = vec![
-    Line::from(Span::styled("preview", Style::default().fg(Color::DarkGray))),
+    Line::from(Span::styled("preview", Style::default().fg(app.theme.muted))),
     Line::from(vec![
       Span::raw("  branch : "),
-      Span::styled(branch, Style::default().fg(Color::Green)),
+      Span::styled(branch, Style::default().fg(app.theme.branch)),
     ]),
     Line::from(vec![
       Span::raw("  dir    : "),
-      Span::styled(dirname, Style::default().fg(Color::Yellow)),
+      Span::styled(dirname, Style::default().fg(app.theme.dirty)),
     ]),
   ];
   f.render_widget(Paragraph::new(preview), inner[3]);
 }
 
-fn field_input(label: &str, value: &str, focused: bool) -> Paragraph<'static> {
+fn field_input(label: &str, value: &str, focused: bool, focus_color: Color, idle_color: Color) -> Paragraph<'static> {
   let border_style = if focused {
-    Style::default().fg(Color::Yellow)
+    Style::default().fg(focus_color)
   } else {
-    Style::default().fg(Color::DarkGray)
+    Style::default().fg(idle_color)
   };
   let title = format!(" {} ", label);
   Paragraph::new(value.to_string()).block(
     Block::default()
       .borders(Borders::ALL)
+      .border_type(BorderType::Rounded)
       .title(title)
       .border_style(border_style),
   )
@@ -1494,14 +1496,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // instead of the pre-#187 hard-coded `Red`.
   let danger = app.theme.prunable;
 
-  let block = Block::default()
-    .borders(Borders::ALL)
-    .border_type(BorderType::Rounded)
-    .title(Span::styled(
-      " confirm delete ",
-      Style::default().fg(danger).add_modifier(Modifier::BOLD),
-    ))
-    .border_style(Style::default().fg(danger));
+  let block = overlay_block("confirm delete", danger);
 
   let Some(w) = app.selected() else {
     let area = centered_h(40, 5, f.area());
@@ -1701,22 +1696,15 @@ pub fn filled_cells_for_progress(progress: f64, cells: usize) -> usize {
 }
 
 fn draw_report(f: &mut Frame, app: &App) {
-  let area = centered(80, 80, f.area());
-  f.render_widget(Clear, area);
-  let block = Block::default()
-    .borders(Borders::ALL)
-    .title(" bootstrap report ")
-    .border_style(Style::default().fg(Color::Cyan));
-
   let mut lines: Vec<Line> = Vec::new();
   if let Some(report) = &app.report {
     for step in &report.steps {
       let sigil = step.status.sigil();
       let color = match step.status {
-        StepStatus::Ok => Color::Green,
-        StepStatus::Skipped => Color::DarkGray,
-        StepStatus::Warning => Color::Yellow,
-        StepStatus::Failed => Color::Red,
+        StepStatus::Ok => app.theme.clean,
+        StepStatus::Skipped => app.theme.muted,
+        StepStatus::Warning => app.theme.dirty,
+        StepStatus::Failed => app.theme.prunable,
       };
       lines.push(Line::from(vec![
         Span::styled(
@@ -1735,10 +1723,21 @@ fn draw_report(f: &mut Frame, app: &App) {
   lines.push(Line::from(""));
   lines.push(Line::from(Span::styled(
     "Enter / Esc — close",
-    Style::default().fg(Color::DarkGray),
+    Style::default().fg(app.theme.muted),
   )));
 
-  f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+  // Size to the report length (+ border), capped at 80% of the screen so
+  // a long report stays on-screen rather than a fixed 80%-tall box (#187).
+  let term = f.area();
+  let height = (lines.len() as u16 + 2).min(term.height.saturating_mul(80) / 100);
+  let area = centered_h(80, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(
+    Paragraph::new(lines)
+      .block(overlay_block("bootstrap report", app.theme.accent))
+      .wrap(Wrap { trim: false }),
+    area,
+  );
 }
 
 fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
@@ -1770,6 +1769,21 @@ fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
   let x = area.x + area.width.saturating_sub(width) / 2;
   let y = area.y + area.height.saturating_sub(height) / 2;
   Rect { x, y, width, height }
+}
+
+/// A modal overlay frame: a rounded border plus a bold title, both in
+/// `color`. Shared by every overlay (#187) so the confirm / help / create
+/// / report / open / link / palette modals read consistently instead of
+/// each hard-coding its own border kind and colour.
+fn overlay_block(title: &str, color: Color) -> Block<'static> {
+  Block::default()
+    .borders(Borders::ALL)
+    .border_type(BorderType::Rounded)
+    .title(Span::styled(
+      format!(" {title} "),
+      Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))
+    .border_style(Style::default().fg(color))
 }
 
 /// Middle-ellipsize `s` to at most `max` display columns, keeping the
@@ -1806,46 +1820,38 @@ fn trunc(s: &str, max: usize) -> String {
 
 // ---- Issue/PR linking (issue #67) ---------------------------------------
 
-fn draw_open_menu(f: &mut Frame, _app: &App) {
-  let area = centered(40, 22, f.area());
-  f.render_widget(Clear, area);
-  let block = Block::default()
-    .borders(Borders::ALL)
-    .title(" open ")
-    .border_style(Style::default().fg(Color::Magenta));
+fn draw_open_menu(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
   let lines = vec![
     Line::from(Span::styled(
       "open in browser",
-      Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+      Style::default().fg(accent).add_modifier(Modifier::BOLD),
     )),
     Line::from(""),
     Line::from("  i   linked issue"),
     Line::from("  p   linked pull request"),
     Line::from(""),
-    Line::from(Span::styled("  esc to cancel", Style::default().fg(Color::DarkGray))),
+    Line::from(Span::styled("  esc to cancel", Style::default().fg(app.theme.muted))),
   ];
-  f.render_widget(Paragraph::new(lines).block(block), area);
+  let area = centered_h(40, lines.len() as u16 + 2, f.area());
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block("open", accent)), area);
 }
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
-  let area = centered(50, 30, f.area());
-  f.render_widget(Clear, area);
-  let block = Block::default()
-    .borders(Borders::ALL)
-    .title(" link ")
-    .border_style(Style::default().fg(Color::Yellow));
-
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => vec![
       Line::from(Span::styled(
         "link this worktree to:",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
       )),
       Line::from(""),
       Line::from("  i   a GitHub issue"),
       Line::from("  p   a pull request"),
       Line::from(""),
-      Line::from(Span::styled("  esc to cancel", Style::default().fg(Color::DarkGray))),
+      Line::from(Span::styled("  esc to cancel", Style::default().fg(muted))),
     ],
     LinkPromptStage::InputNumber => {
       let label = match app.link_prompt_target() {
@@ -1856,19 +1862,21 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       vec![
         Line::from(Span::styled(
           format!("type the {} number", label.trim_end_matches('#').trim()),
-          Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+          Style::default().fg(accent).add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(format!("  {}{}_", label, app.link_prompt_number_input())),
         Line::from(""),
         Line::from(Span::styled(
           "  enter confirms · esc cancels · backspace deletes",
-          Style::default().fg(Color::DarkGray),
+          Style::default().fg(muted),
         )),
       ]
     }
   };
-  f.render_widget(Paragraph::new(lines).block(block), area);
+  let area = centered_h(50, lines.len() as u16 + 2, f.area());
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block("link", accent)), area);
 }
 
 /// Render the command palette overlay (issue #32).
@@ -1883,10 +1891,8 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered(60, 50, f.area());
   f.render_widget(Clear, area);
 
-  let outer = Block::default()
-    .borders(Borders::ALL)
-    .title(" command palette ")
-    .border_style(Style::default().fg(Color::Cyan));
+  let accent = app.theme.accent;
+  let outer = overlay_block("command palette", accent);
   let inner = outer.inner(area);
   f.render_widget(outer, area);
 
@@ -1904,7 +1910,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     .map(|(i, entry)| {
       let prefix = if i == highlight { "▶ " } else { "  " };
       let name_style = if i == highlight {
-        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
       } else {
         Style::default().fg(Color::White)
       };
@@ -1912,22 +1918,22 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
         Span::raw(prefix),
         Span::styled(format!("{:<22}", entry.name), name_style),
         Span::raw("  "),
-        Span::styled(entry.description, Style::default().fg(Color::DarkGray)),
+        Span::styled(entry.description, Style::default().fg(app.theme.muted)),
       ])
     })
     .collect();
   if lines.is_empty() {
     lines.push(Line::from(Span::styled(
       "  (no matching command — backspace to broaden)",
-      Style::default().fg(Color::Red),
+      Style::default().fg(app.theme.prunable),
     )));
   }
   f.render_widget(Paragraph::new(lines), layout[0]);
 
   let input_line = Line::from(vec![
-    Span::styled(":", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+    Span::styled(":", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
     Span::raw(app.palette.buffer().to_string()),
-    Span::styled("_", Style::default().fg(Color::DarkGray)),
+    Span::styled("_", Style::default().fg(app.theme.muted)),
   ]);
   f.render_widget(Paragraph::new(input_line), layout[1]);
 }
