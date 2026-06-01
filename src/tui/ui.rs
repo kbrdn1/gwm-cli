@@ -640,12 +640,90 @@ fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
       "✓ clean".to_string(),
       Style::default().fg(Color::Green),
     ))],
-    Ok(s) => s.lines().map(|l| Line::from(l.to_string())).collect(),
+    Ok(s) => s.lines().map(working_tree_status_line).collect(),
     Err(e) => vec![Line::from(Span::styled(
       format!("! {}", e),
       Style::default().fg(Color::Red),
     ))],
   }
+}
+
+/// Colourise one `git status --short` porcelain line (issue #179).
+///
+/// The short format is `XY<space>PATH`, where `X` is the index (staged)
+/// status and `Y` the worktree status. Three distinct colours keep modified
+/// and created files visually apart:
+///
+/// - staged change (`X` column) → cyan,
+/// - modified-in-worktree (`Y` column) → yellow,
+/// - `??` (untracked / created) → green,
+/// - the **file name** → the dominant status colour: green when untracked,
+///   else yellow when the worktree side carries a change, else cyan when only
+///   the index side does.
+///
+/// The separator space is left unstyled. The rendered text is byte-for-byte
+/// identical to the input — only `Span` styling is added — so the sidebar
+/// keeps showing the exact `git status --short` codes it always did.
+pub fn working_tree_status_line(raw: &str) -> Line<'static> {
+  // Porcelain short output is always `XY<space>PATH` with ASCII status
+  // codes, but the helper is `pub` — a non-git caller could pass arbitrary
+  // input. Split on char boundaries (not byte offsets) so a multi-byte
+  // leading codepoint can never slice mid-character and panic. Anything
+  // shorter than the two status columns + separator is rendered verbatim.
+  let mut indices = raw.char_indices();
+  let (x_at, x) = match indices.next() {
+    Some(c) => c,
+    None => return Line::from(raw.to_string()),
+  };
+  let (y_at, y) = match indices.next() {
+    Some(c) => c,
+    None => return Line::from(raw.to_string()),
+  };
+  let (sep_at, sep) = match indices.next() {
+    Some(c) => c,
+    None => return Line::from(raw.to_string()),
+  };
+  // Byte offset where the path begins (just past the separator char).
+  let path_at = sep_at + sep.len_utf8();
+  let untracked = x == '?' && y == '?';
+
+  let cyan = Style::default().fg(Color::Cyan);
+  let yellow = Style::default().fg(Color::Yellow);
+  let green = Style::default().fg(Color::Green);
+  // X column: untracked `?` → green (created), other staged change → cyan.
+  let x_style = if x == '?' {
+    green
+  } else if x != ' ' {
+    cyan
+  } else {
+    Style::default()
+  };
+  // Y column: untracked `?` → green (created), worktree modification → yellow.
+  let y_style = if y == '?' {
+    green
+  } else if y != ' ' {
+    yellow
+  } else {
+    Style::default()
+  };
+  // File name takes the dominant status colour: created (green) wins, then a
+  // worktree modification (yellow), then a staged-only change (cyan).
+  let name_style = if untracked {
+    green
+  } else if y != ' ' {
+    yellow
+  } else if x != ' ' {
+    cyan
+  } else {
+    Style::default()
+  };
+
+  Line::from(vec![
+    Span::styled(raw[x_at..y_at].to_string(), x_style),
+    Span::styled(raw[y_at..sep_at].to_string(), y_style),
+    Span::raw(raw[sep_at..path_at].to_string()),
+    Span::styled(raw[path_at..].to_string(), name_style),
+  ])
 }
 
 /// Default number of commits pulled into the Recent Commits block — chosen
