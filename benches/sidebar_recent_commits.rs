@@ -2,6 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use git2::{Repository, Signature};
 use gwm::github::BranchLink;
 use gwm::tui::recent_commits_lines;
+use gwm::tui::theme::Theme;
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::hint::black_box;
 use tempfile::TempDir;
@@ -61,8 +62,9 @@ fn fixture_repo(commit_count: usize) -> (TempDir, Repository, WorktreeInfo) {
 
 fn sidebar_recent_commits(c: &mut Criterion) {
   let (_dir, _repo, info) = fixture_repo(300);
+  let theme = Theme::default();
   c.bench_function("recent_commits_lines_300_rows", |b| {
-    b.iter(|| recent_commits_lines(black_box(&info), black_box(300)));
+    b.iter(|| recent_commits_lines(black_box(&info), black_box(300), black_box(&theme)));
   });
 }
 

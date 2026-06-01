@@ -65,8 +65,8 @@ fn focused_panel_border_wears_the_theme_focus_colour() {
   );
   assert_eq!(
     panel_border_color(false, &theme),
-    Color::DarkGray,
-    "unfocused panel stays muted"
+    theme.muted,
+    "unfocused panel wears the theme muted role (#170)"
   );
 }
 
@@ -1654,7 +1654,7 @@ fn branch_name_color_codes_synced_branch_as_green() {
     behind: 0,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&synced), Color::Green);
+  assert_eq!(branch_name_color(&synced, &Theme::default()), Color::Green);
 }
 
 #[test]
@@ -1670,7 +1670,7 @@ fn branch_name_color_codes_dirty_branch_as_red() {
     behind: 0,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&dirty), Color::Red);
+  assert_eq!(branch_name_color(&dirty, &Theme::default()), Color::Red);
 }
 
 #[test]
@@ -1689,8 +1689,8 @@ fn branch_name_color_codes_ahead_or_behind_as_yellow() {
     behind: 2,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&ahead), Color::Yellow);
-  assert_eq!(branch_name_color(&behind), Color::Yellow);
+  assert_eq!(branch_name_color(&ahead, &Theme::default()), Color::Yellow);
+  assert_eq!(branch_name_color(&behind, &Theme::default()), Color::Yellow);
 }
 
 #[test]
@@ -1706,7 +1706,7 @@ fn branch_name_color_codes_unpublished_branch_as_magenta() {
     behind: 0,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&unpublished), Color::Magenta);
+  assert_eq!(branch_name_color(&unpublished, &Theme::default()), Color::Magenta);
 }
 
 #[test]
@@ -1715,25 +1715,34 @@ fn branch_name_color_codes_unknown_status_as_darkgray() {
     unknown: true,
     ..BranchStatus::default()
   };
-  assert_eq!(branch_name_color(&unknown), Color::DarkGray);
+  assert_eq!(branch_name_color(&unknown, &Theme::default()), Color::DarkGray);
 }
 
 #[test]
 fn freshness_color_picks_green_for_recent_branches() {
-  assert_eq!(freshness_color(Duration::from_secs(0)), Color::Green);
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 3)), Color::Green);
+  assert_eq!(freshness_color(Duration::from_secs(0), &Theme::default()), Color::Green);
   assert_eq!(
-    freshness_color(Duration::from_secs(86_400 * 6 + 3600 * 23)),
+    freshness_color(Duration::from_secs(86_400 * 3), &Theme::default()),
+    Color::Green
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 6 + 3600 * 23), &Theme::default()),
     Color::Green
   );
 }
 
 #[test]
 fn freshness_color_picks_yellow_for_one_to_four_week_branches() {
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 7)), Color::Yellow);
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 15)), Color::Yellow);
   assert_eq!(
-    freshness_color(Duration::from_secs(86_400 * 29 + 3600 * 23)),
+    freshness_color(Duration::from_secs(86_400 * 7), &Theme::default()),
+    Color::Yellow
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 15), &Theme::default()),
+    Color::Yellow
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 29 + 3600 * 23), &Theme::default()),
     Color::Yellow
   );
 }
@@ -1742,8 +1751,14 @@ fn freshness_color_picks_yellow_for_one_to_four_week_branches() {
 fn freshness_color_picks_darkgray_for_stale_branches() {
   // Branches older than a month read as "stale" — gwm encourages cleanup
   // via `gwm doctor`, so the colour reinforces the prompt.
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 30)), Color::DarkGray);
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 365)), Color::DarkGray);
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 30), &Theme::default()),
+    Color::DarkGray
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 365), &Theme::default()),
+    Color::DarkGray
+  );
 }
 
 #[test]
@@ -1752,10 +1767,10 @@ fn pr_badge_color_maps_each_state_to_its_lazygit_palette() {
   // draft=darkgray, merged=magenta, closed=red. The actual lazygit RGB
   // shades are slightly off-palette for terminal themes; we use the
   // 16-color names so the dots respect the user's colour scheme.
-  assert_eq!(pr_badge_color(PrState::Open), Color::Green);
-  assert_eq!(pr_badge_color(PrState::Draft), Color::DarkGray);
-  assert_eq!(pr_badge_color(PrState::Merged), Color::Magenta);
-  assert_eq!(pr_badge_color(PrState::Closed), Color::Red);
+  assert_eq!(pr_badge_color(PrState::Open, &Theme::default()), Color::Green);
+  assert_eq!(pr_badge_color(PrState::Draft, &Theme::default()), Color::DarkGray);
+  assert_eq!(pr_badge_color(PrState::Merged, &Theme::default()), Color::Magenta);
+  assert_eq!(pr_badge_color(PrState::Closed, &Theme::default()), Color::Red);
 }
 
 // Ensure the IssueState variants stay accessible — once `branch_name_color`
@@ -1869,7 +1884,7 @@ fn table_marker_for_main_worktree_is_yellow_star() {
   let mut w = worktree_fixture("main");
   w.is_main = true;
   w.link = BranchLink::empty();
-  let (label, color) = gwm::tui::table_marker(&w);
+  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
   assert_eq!(label, "★");
   assert_eq!(color, Color::Yellow);
 }
@@ -1889,7 +1904,7 @@ fn table_marker_for_linked_non_main_is_neutral_dot() {
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
-  let (label, color) = gwm::tui::table_marker(&w);
+  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
   assert_eq!(label, "●");
   assert_eq!(color, Color::Cyan);
 }
@@ -1900,7 +1915,7 @@ fn table_marker_for_unlinked_non_main_is_blank() {
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
   w.link = BranchLink::empty();
-  let (label, _color) = gwm::tui::table_marker(&w);
+  let (label, _color) = gwm::tui::table_marker(&w, &Theme::default());
   assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
 }
 
@@ -1965,7 +1980,7 @@ fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
 #[test]
 fn sidebar_sections_omit_commands_block() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -1995,7 +2010,7 @@ fn sidebar_sections_omit_inline_section_headers() {
   // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
   // disappear from the content lines.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -2010,7 +2025,7 @@ fn sidebar_sections_omit_inline_section_headers() {
 #[test]
 fn sidebar_worktree_section_is_compact_identity() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let text = section_text(&sections.worktree);
 
   assert!(text.contains("api-rest"), "name on top line: {}", text);
@@ -2033,7 +2048,7 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
   // Compact identity block: name, branch · head, badges, path → 4 lines target.
   // Allow ≤5 to leave headroom for variable badges.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   assert!(
     sections.worktree.len() <= 5,
     "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
@@ -2077,7 +2092,7 @@ fn working_tree_status_line_preserves_raw_text() {
     "R  old.rs -> new.rs",
   ] {
     assert_eq!(
-      section_text_single(&working_tree_status_line(raw)),
+      section_text_single(&working_tree_status_line(raw, &Theme::default())),
       raw,
       "raw text preserved for {:?}",
       raw
@@ -2087,7 +2102,7 @@ fn working_tree_status_line_preserves_raw_text() {
 
 #[test]
 fn working_tree_status_line_staged_only_is_cyan() {
-  let line = working_tree_status_line("A  staged.rs");
+  let line = working_tree_status_line("A  staged.rs", &Theme::default());
   assert_eq!(line.spans[0].content.as_ref(), "A");
   assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
   assert_eq!(
@@ -2099,7 +2114,7 @@ fn working_tree_status_line_staged_only_is_cyan() {
 
 #[test]
 fn working_tree_status_line_unstaged_modified_is_yellow() {
-  let line = working_tree_status_line(" M tracked.rs");
+  let line = working_tree_status_line(" M tracked.rs", &Theme::default());
   assert_eq!(line.spans[1].content.as_ref(), "M");
   assert_eq!(
     line.spans[1].style.fg,
@@ -2115,7 +2130,7 @@ fn working_tree_status_line_unstaged_modified_is_yellow() {
 
 #[test]
 fn working_tree_status_line_untracked_is_green() {
-  let line = working_tree_status_line("?? untracked.rs");
+  let line = working_tree_status_line("?? untracked.rs", &Theme::default());
   assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
   assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
   assert_eq!(
@@ -2132,7 +2147,7 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
   // panic mid-codepoint when the first chars are multi-byte UTF-8. Split on
   // char boundaries instead — no panic, and the exact text is preserved.
   let raw = "éM café.rs"; // X='é' (2 bytes), Y='M', sep=' ', path="café.rs"
-  let line = working_tree_status_line(raw);
+  let line = working_tree_status_line(raw, &Theme::default());
   assert_eq!(
     section_text_single(&line),
     raw,
@@ -2144,7 +2159,7 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
 fn working_tree_status_line_partially_staged_splits_status_columns() {
   // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
   // dominant worktree colour (yellow) since it carries unstaged changes.
-  let line = working_tree_status_line("AM both.rs");
+  let line = working_tree_status_line("AM both.rs", &Theme::default());
   assert_eq!(line.spans[0].content.as_ref(), "A");
   assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
   assert_eq!(line.spans[1].content.as_ref(), "M");
@@ -2162,7 +2177,7 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
   // those flags — only the ones that are true add visual noise.
   let mut w = detailed_worktree_fixture();
   w.is_main = false;
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let text = section_text(&sections.worktree);
   assert!(
     !text.contains("★ main"),
@@ -2195,7 +2210,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     behind: 0,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -2215,7 +2230,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     behind: 3,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -2231,7 +2246,7 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
   // synced label *should* still display `✓`. Guards against an over-eager
   // fix that would drop the sigil everywhere.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
   assert!(badge.contains("synced"), "label must still say synced: {}", badge);
@@ -2303,6 +2318,7 @@ fn issue_summary_line_truncates_loaded_state_to_budget() {
     gwm::github::LinkSource::BranchName,
     &GitHubFetchState::Loaded(status),
     30,
+    &Theme::default(),
   );
   let width = line_visible_width(&line);
   assert!(
@@ -2332,6 +2348,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     gwm::github::LinkSource::BranchName,
     &GitHubFetchState::Loaded(status),
     35,
+    &Theme::default(),
   );
   let width = line_visible_width(&line);
   assert!(
@@ -2358,6 +2375,7 @@ fn issue_summary_line_keeps_short_title_intact() {
     gwm::github::LinkSource::Explicit,
     &GitHubFetchState::Loaded(status),
     80,
+    &Theme::default(),
   );
   let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
@@ -2381,6 +2399,7 @@ fn issue_summary_line_truncates_error_state_to_budget() {
       "gh: API rate limit exceeded for user, retry after 60s with exponential backoff please".into(),
     ),
     30,
+    &Theme::default(),
   );
   let width = line_visible_width(&line);
   assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
@@ -2423,7 +2442,7 @@ fn recent_commits_lines_respects_limit_when_repo_has_more() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 14); // 15 total commits (1 seed + 14)
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 5);
+  let lines = recent_commits_lines(&w, 5, &Theme::default());
   assert_eq!(
     lines.len(),
     5,
@@ -2436,7 +2455,7 @@ fn recent_commits_lines_respects_limit_when_repo_has_more() {
 fn recent_commits_lines_returns_all_when_under_limit() {
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 100);
+  let lines = recent_commits_lines(&w, 100, &Theme::default());
   assert_eq!(
     lines.len(),
     1,
@@ -2452,7 +2471,7 @@ fn recent_commits_lines_reuses_cached_rows_for_unchanged_head() {
   let mut w = worktree_pointing_at_dir(dir.path());
   w.head = Some(repo.head().unwrap().target().unwrap().to_string());
 
-  let first = recent_commits_lines(&w, 4);
+  let first = recent_commits_lines(&w, 4, &Theme::default());
   let first_text: Vec<String> = first
     .iter()
     .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
@@ -2460,7 +2479,7 @@ fn recent_commits_lines_reuses_cached_rows_for_unchanged_head() {
   drop(repo);
 
   std::fs::rename(dir.path().join(".git"), dir.path().join(".git.hidden")).unwrap();
-  let second = recent_commits_lines(&w, 4);
+  let second = recent_commits_lines(&w, 4, &Theme::default());
   let second_text: Vec<String> = second
     .iter()
     .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
@@ -2478,14 +2497,14 @@ fn recent_commits_cache_is_scoped_to_worktree_path() {
   let mut cached = worktree_pointing_at_dir(dir.path());
   cached.head = Some(repo.head().unwrap().target().unwrap().to_string());
 
-  let first = recent_commits_lines(&cached, 1);
+  let first = recent_commits_lines(&cached, 1, &Theme::default());
   let first_text: String = first[0].spans.iter().map(|span| span.content.as_ref()).collect();
 
   let other = tempfile::TempDir::new().unwrap();
   let mut same_oid_different_path = worktree_pointing_at_dir(other.path());
   same_oid_different_path.head = cached.head.clone();
 
-  let second = recent_commits_lines(&same_oid_different_path, 1);
+  let second = recent_commits_lines(&same_oid_different_path, 1, &Theme::default());
   let second_text: String = second[0].spans.iter().map(|span| span.content.as_ref()).collect();
 
   assert!(
@@ -2522,7 +2541,7 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 30); // 31 total commits
   let w = worktree_pointing_at_dir(dir.path());
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   assert_eq!(
     sections.recent_commits.len(),
     31,
@@ -2658,7 +2677,7 @@ fn recent_commits_line_marks_merge_commit_with_bullseye() {
   let (dir, repo) = init_repo();
   add_merge_commit(&repo);
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 10);
+  let lines = recent_commits_lines(&w, 10, &Theme::default());
   // Find the merge commit row by subject; assert it carries ◎ somewhere.
   let merge = lines
     .iter()
@@ -2725,7 +2744,7 @@ fn graph_glyph_table_matches_lazygit_truth_table() {
 fn graph_linear_history_emits_single_column_circles() {
   // Three commits, each pointing at the next: c (parent b) → b (parent a) → a (no parent).
   let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
-  let graphs = render_commits(&rows);
+  let graphs = render_commits(&rows, &Theme::default());
   assert_eq!(graphs.len(), 3);
   // Each row should be a 2-cell render (one column → 2 chars).
   for (idx, g) in graphs.iter().enumerate() {
@@ -2752,7 +2771,7 @@ fn graph_merge_commit_carries_bullseye_and_branch_corners() {
   //   b (parent a)         ← side branch
   //   a (no parent)        ← trunk root
   let rows = vec![test_row("c", &["a", "b"]), test_row("b", &["a"]), test_row("a", &[])];
-  let graphs = render_commits(&rows);
+  let graphs = render_commits(&rows, &Theme::default());
   // Row 0 = merge commit, must carry ◎.
   let merge_text = spans_to_text(&graphs[0]);
   assert!(merge_text.contains('◎'), "merge row must carry ◎, got {:?}", merge_text);
@@ -2801,7 +2820,7 @@ fn graph_pipe_set_merge_commit_emits_extra_starts_per_parent() {
 
 #[test]
 fn graph_render_pipe_set_empty_input_returns_empty() {
-  let graphs = render_commits(&[]);
+  let graphs = render_commits(&[], &Theme::default());
   assert!(graphs.is_empty());
 }
 
@@ -2811,7 +2830,7 @@ fn graph_row_width_is_deterministic_on_commit_list() {
   // topology — it must NOT depend on terminal width or external state.
   // Snapshot the linear-history width so a regression caught quickly.
   let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
-  let graphs = render_commits(&rows);
+  let graphs = render_commits(&rows, &Theme::default());
   for g in &graphs {
     let text = spans_to_text(g);
     let chars = text.chars().count();
@@ -2836,7 +2855,7 @@ fn graph_render_pipe_set_handles_single_pipe_starts() {
     to_hash: to.hash,
     kind: PipeKind::Starts,
   }];
-  let spans = render_pipe_set(&pipes);
+  let spans = render_pipe_set(&pipes, &Theme::default());
   let text = spans_to_text(&spans);
   // Cell 0: ○ + filler (space, since right has no neighbor)
   assert!(text.starts_with('○'), "expected ○ glyph at column 0, got {:?}", text);
@@ -2846,7 +2865,7 @@ fn graph_render_pipe_set_handles_single_pipe_starts() {
 fn recent_commits_line_marks_normal_commit_with_open_circle() {
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
     joined.contains('○'),
@@ -2866,7 +2885,7 @@ fn recent_commits_line_starts_with_short_hash() {
   // COMMIT_HASH_DISPLAY_LEN hex chars (8 by default, matching lazygit).
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   assert_eq!(lines.len(), 1, "init_repo should produce 1 commit");
   let head_span = lines[0]
     .spans
@@ -2892,7 +2911,7 @@ fn recent_commits_line_includes_author_initials_after_hash() {
   // init_repo signs commits as "gwm-test" — a single token → first 2 chars.
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   // Initials live as a styled span after the hash + double space.
   assert!(
@@ -2909,7 +2928,7 @@ fn recent_commits_line_carries_subject_unclipped() {
   // sidebars would lose information). Verify the full subject is preserved.
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
     joined.contains("init"),

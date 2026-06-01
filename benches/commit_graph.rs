@@ -1,5 +1,6 @@
 use criterion::{criterion_group, criterion_main, Criterion};
 use gwm::tui::commit_graph::{render_commits, test_row};
+use gwm::tui::theme::Theme;
 use std::hint::black_box;
 
 fn graph_rows(count: usize) -> Vec<gwm::worktree::CommitRow> {
@@ -21,8 +22,9 @@ fn graph_rows(count: usize) -> Vec<gwm::worktree::CommitRow> {
 
 fn render_commit_graph(c: &mut Criterion) {
   let rows = graph_rows(300);
+  let theme = Theme::default();
   c.bench_function("render_commits_300_rows", |b| {
-    b.iter(|| render_commits(black_box(&rows)));
+    b.iter(|| render_commits(black_box(&rows), black_box(&theme)));
   });
 }
 

@@ -2,6 +2,7 @@ use super::app::{App, GitHubFetchState, LinkPromptStage, View};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
 use super::state::spinner::DOT_FRAMES;
+use super::theme::Theme;
 use crate::bootstrap::StepStatus;
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
@@ -118,7 +119,7 @@ pub fn header_line(
   workdir_display: &str,
   picker_mode: bool,
   width: usize,
-  accent: Color,
+  theme: &Theme,
 ) -> Line<'static> {
   // A zero-width row can hold nothing — return an empty line rather than let
   // `trunc` floor a 1-column `…` into existence.
@@ -131,15 +132,16 @@ pub fn header_line(
   let path = sanitize(workdir_display);
 
   let chip_style = Style::default()
-    .fg(accent)
+    .fg(theme.accent)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  // Picker chip stays yellow (not the accent) so the mode warning reads as
-  // distinct from the always-present version chip.
+  // Picker chip uses the `dirty` role (not the accent) so the mode warning
+  // reads as distinct from the always-present version chip — pre-theme this
+  // was a hard-coded `Color::Yellow`.
   let picker_style = Style::default()
-    .fg(Color::Yellow)
+    .fg(theme.dirty)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
   let repo_style = Style::default().add_modifier(Modifier::BOLD);
-  let path_style = Style::default().fg(Color::DarkGray);
+  let path_style = Style::default().fg(theme.muted);
 
   let version_text = format!(" gwm v{} ", env!("CARGO_PKG_VERSION"));
   let chip_w = version_text.chars().count();
@@ -198,20 +200,22 @@ pub fn header_line(
 /// Mirrors Vim's `/` prompt: leading slash, the live query, and a block cursor
 /// while the user is actively typing.
 fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
+  // The `/` prompt and the block cursor use the `dirty` role (their
+  // historical `Color::Yellow`); the sticky-filter hint uses `muted`.
   let mut spans = vec![
-    Span::styled("/", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+    Span::styled("/", Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
     Span::raw(app.filter.query()),
   ];
   if app.filter.active {
     spans.push(Span::styled(
       "█",
-      Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK),
+      Style::default().fg(app.theme.dirty).add_modifier(Modifier::SLOW_BLINK),
     ));
   } else {
     // Sticky filter: hint how to clear / refine without re-entering the bar.
     spans.push(Span::styled(
       "   (sticky — / to refine, esc on list to clear)",
-      Style::default().fg(Color::DarkGray),
+      Style::default().fg(app.theme.muted),
     ));
   }
   f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -282,7 +286,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     &workdir,
     app.picker_mode,
     area.width as usize,
-    app.theme.accent,
+    &app.theme,
   );
   f.render_widget(Paragraph::new(line), area);
 }
@@ -296,7 +300,7 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   if focused {
     theme.focus
   } else {
-    Color::DarkGray
+    theme.muted
   }
 }
 
@@ -311,6 +315,10 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // of length ≤ worktrees.len().
   let filtered: Vec<usize> = app.filtered_indices().to_vec();
   let visible: Vec<&WorktreeInfo> = filtered.iter().filter_map(|&i| app.worktrees.get(i)).collect();
+  // `Theme` is `Copy`; snapshot it so the row/header builders below can
+  // read roles without conflicting with the mutable `app.list_state`
+  // borrow handed to `render_stateful_widget`.
+  let theme = app.theme;
 
   // Dynamic column widths derived from the visible subset so columns fit the
   // rows actually on screen. The path column is always last and absorbs the
@@ -330,11 +338,11 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Cell::from("STATUS"),
     Cell::from("PATH"),
   ])
-  .style(Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD));
+  .style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
 
   let rows: Vec<Row> = visible
     .iter()
-    .map(|w| build_row(w, name_w, branch_w, status_w))
+    .map(|w| build_row(w, name_w, branch_w, status_w, &theme))
     .collect();
 
   // ratatui's Layout solver squeezes the FIRST `Length` column to
@@ -377,7 +385,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
         .title(title)
         .border_style(Style::default().fg(border_color)),
     )
-    .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+    .row_highlight_style(Style::default().bg(theme.selection_bg).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
   f.render_stateful_widget(table, area, &mut app.list_state);
@@ -391,6 +399,9 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let border_color = panel_border_color(app.sidebar.focused, &app.theme);
+  // `Theme` is `Copy`; snapshot it so the cached section builder can read
+  // roles while `app.sidebar.cache` is mutably borrowed below.
+  let theme = app.theme;
 
   // Resolve (or populate) the cached worktree sections for the current
   // selection. Issue / PR block is rebuilt every frame (its fetch state
@@ -409,7 +420,10 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         None => true,
       };
       if needs_refresh {
-        app.sidebar.cache = Some(((w.path.clone(), active_mode), build_sidebar_sections(&w, active_mode)));
+        app.sidebar.cache = Some((
+          (w.path.clone(), active_mode),
+          build_sidebar_sections(&w, active_mode, &theme),
+        ));
       }
       let mut cached = app.sidebar.cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
       let mut worktree = vec![sidebar_header_line(&w, app)];
@@ -586,18 +600,19 @@ fn sidebar_header_line(w: &WorktreeInfo, app: &App) -> Line<'static> {
 /// alignment stays consistent across rows.
 fn sidebar_status_dot(app: &App) -> (&'static str, Color) {
   if let GitHubFetchState::Loaded(pr) = app.pr_fetch_state() {
-    return ("● ", pr_badge_color(pr.state));
+    return ("● ", pr_badge_color(pr.state, &app.theme));
   }
   if let GitHubFetchState::Loaded(issue) = app.issue_fetch_state() {
-    return ("● ", issue_badge_color(issue.state));
+    return ("● ", issue_badge_color(issue.state, &app.theme));
   }
   let link = app.current_link();
   if link.pr.is_some() || link.issue.is_some() {
     // Link exists but not fetched yet — neutral white so the user sees
-    // there's *something* to refresh with `F`.
+    // there's *something* to refresh with `F`. White carries no theme
+    // role (it is "not yet known", not a status), so it stays white.
     return ("● ", Color::White);
   }
-  ("● ", Color::DarkGray)
+  ("● ", app.theme.muted)
 }
 
 /// Build the per-section content of the details sidebar for one worktree.
@@ -609,27 +624,31 @@ fn sidebar_status_dot(app: &App) -> (&'static str, Color) {
 /// The `●` status-dot header is intentionally NOT in `worktree` here either —
 /// it's rebuilt fresh by `draw_sidebar` on every frame so the dot tracks
 /// live PR / issue fetch state without invalidating this cached payload.
-pub fn build_sidebar_sections(w: &WorktreeInfo, mode: super::state::sidebar::SidebarMode) -> SidebarSections {
+pub fn build_sidebar_sections(
+  w: &WorktreeInfo,
+  mode: super::state::sidebar::SidebarMode,
+  theme: &Theme,
+) -> SidebarSections {
   use super::state::sidebar::SidebarMode;
   let body = match mode {
     // Pre-#34 behaviour. The `Working Tree` section is unconditionally
     // rendered alongside; both come from `git log` / `git status` and
     // share a single cache invalidation cycle.
-    SidebarMode::Commits => recent_commits_lines(w, RECENT_COMMITS_LIMIT),
+    SidebarMode::Commits => recent_commits_lines(w, RECENT_COMMITS_LIMIT, theme),
     // Stashes view (issue #34). `working_tree` is left empty: the
     // user's current dirty state has nothing to do with the stashed
     // contents they're auditing, so a separate `git status` block
     // alongside would only distract. A per-stash file summary
     // (`+/-` counts via `git diff-tree --numstat`) is on the
     // follow-up list; v1 ships `<ref>  <subject>` only.
-    SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT),
+    SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
   let working_tree = match mode {
-    SidebarMode::Commits => working_tree_lines(w),
+    SidebarMode::Commits => working_tree_lines(w, theme),
     SidebarMode::Stashes => Vec::new(),
   };
   SidebarSections {
-    worktree: worktree_identity_lines(w),
+    worktree: worktree_identity_lines(w, theme),
     working_tree,
     recent_commits: body,
   }
@@ -647,17 +666,19 @@ pub const STASHES_DISPLAY_LIMIT: usize = 10;
 /// colourisation). When the worktree has no stashes the renderer
 /// shows a single muted "(no stashes)" line so the panel never reads
 /// as broken on a fresh worktree.
-fn stash_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
+fn stash_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
   match crate::worktree::git_stash_list(&w.path, limit) {
-    Ok(stashes) if stashes.is_empty() => vec![Line::from(Span::styled(
-      "(no stashes)",
-      Style::default().fg(Color::DarkGray),
-    ))],
+    Ok(stashes) if stashes.is_empty() => {
+      vec![Line::from(Span::styled(
+        "(no stashes)",
+        Style::default().fg(theme.muted),
+      ))]
+    }
     Ok(stashes) => stashes
       .into_iter()
       .map(|s| {
         Line::from(vec![
-          Span::styled(s.ref_name, Style::default().fg(Color::Yellow)),
+          Span::styled(s.ref_name, Style::default().fg(theme.dirty)),
           Span::raw("  "),
           Span::raw(s.subject),
         ])
@@ -665,7 +686,7 @@ fn stash_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
       .collect(),
     Err(e) => vec![Line::from(Span::styled(
       format!("git stash list failed: {}", e),
-      Style::default().fg(Color::Red),
+      Style::default().fg(theme.prunable),
     ))],
   }
 }
@@ -676,7 +697,7 @@ fn stash_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
 /// not cached here, so the dot can track GitHub fetch state without
 /// invalidating the git-preview cache. Skips badges whose flags are
 /// false to avoid visual noise.
-fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
+fn worktree_identity_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
   let mut out: Vec<Line<'static>> = Vec::with_capacity(4);
 
   // Line 1 — "<branch> · <short head>". Branch colour follows the
@@ -684,12 +705,12 @@ fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   // ahead/behind → yellow, unpublished → magenta, synced → green,
   // unknown → dark gray) so the most actionable signal stays at eye
   // level.
-  let branch_color = branch_name_color(&w.status);
+  let branch_color = branch_name_color(&w.status, theme);
   let branch = w.branch.clone().unwrap_or_else(|| "-".into());
   let mut spans = vec![Span::styled(branch, Style::default().fg(branch_color))];
   if let Some(head) = w.head.as_deref() {
-    spans.push(Span::styled("  ·  ".to_string(), Style::default().fg(Color::DarkGray)));
-    spans.push(Span::styled(short_oid(head), Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("  ·  ".to_string(), Style::default().fg(theme.muted)));
+    spans.push(Span::styled(short_oid(head), Style::default().fg(theme.dirty)));
   }
   out.push(Line::from(spans));
 
@@ -697,18 +718,18 @@ fn worktree_identity_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   // by freshness — PR #73). Skipped when the branch has no measurable
   // age (trunk, detached HEAD, or repo open failure).
   out.push(Line::from(vec![
-    Span::styled("Created: ".to_string(), Style::default().fg(Color::DarkGray)),
-    Span::styled(branch_age_label(w), Style::default().fg(branch_age_color(w))),
+    Span::styled("Created: ".to_string(), Style::default().fg(theme.muted)),
+    Span::styled(branch_age_label(w), Style::default().fg(branch_age_color(w, theme))),
   ]));
 
   // Line 3 — status badge + optional flag badges. Only renders the badges
   // that are *true* / *interesting*; the false cases stay invisible.
-  out.push(badges_line(w));
+  out.push(badges_line(w, theme));
 
   // Line 4 — path, tilde-compressed for compactness.
   out.push(Line::from(Span::styled(
     tilde_compress(&w.path.display().to_string()),
-    Style::default().fg(Color::DarkGray),
+    Style::default().fg(theme.muted),
   )));
 
   out
@@ -726,11 +747,11 @@ fn branch_age_label(w: &WorktreeInfo) -> String {
     .unwrap_or_else(|| "-".into())
 }
 
-fn branch_age_color(w: &WorktreeInfo) -> Color {
-  w.age.map(freshness_color).unwrap_or(Color::DarkGray)
+fn branch_age_color(w: &WorktreeInfo, theme: &Theme) -> Color {
+  w.age.map(|age| freshness_color(age, theme)).unwrap_or(theme.muted)
 }
 
-fn badges_line(w: &WorktreeInfo) -> Line<'static> {
+fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   let mut spans: Vec<Span<'static>> = Vec::new();
   // Status sigil:
   //   `?`     — unknown
@@ -740,7 +761,7 @@ fn badges_line(w: &WorktreeInfo) -> Line<'static> {
   //             `↓M` / `↑N ↓M`. Prefixing `✓` here would lie about
   //             divergence (raised by PR #70 Copilot review).
   let status_label = branch_status_label(&w.status);
-  let status_color = branch_status_color(&w.status);
+  let status_color = branch_status_color(&w.status, theme);
   let is_diverged = w.status.has_upstream && (w.status.ahead > 0 || w.status.behind > 0);
   let badge_text = if w.status.unknown {
     format!("? {}", status_label)
@@ -753,35 +774,37 @@ fn badges_line(w: &WorktreeInfo) -> Line<'static> {
   };
   spans.push(Span::styled(badge_text, Style::default().fg(status_color)));
 
-  let sep = || Span::styled("  ".to_string(), Style::default().fg(Color::DarkGray));
+  let sep = || Span::styled("  ".to_string(), Style::default().fg(theme.muted));
   if w.is_main {
     spans.push(sep());
-    spans.push(Span::styled("★ main".to_string(), Style::default().fg(Color::Yellow)));
+    spans.push(Span::styled("★ main".to_string(), Style::default().fg(theme.main)));
   }
   if w.is_locked {
     spans.push(sep());
-    spans.push(Span::styled(
-      "🔒 locked".to_string(),
-      Style::default().fg(Color::Magenta),
-    ));
+    spans.push(Span::styled("🔒 locked".to_string(), Style::default().fg(theme.locked)));
   }
   if w.is_prunable {
     spans.push(sep());
-    spans.push(Span::styled("⚠ prunable".to_string(), Style::default().fg(Color::Red)));
+    spans.push(Span::styled(
+      "⚠ prunable".to_string(),
+      Style::default().fg(theme.prunable),
+    ));
   }
   Line::from(spans)
 }
 
-fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
+fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
   match worktree::git_status_short(&w.path) {
-    Ok(s) if s.trim().is_empty() => vec![Line::from(Span::styled(
-      "✓ clean".to_string(),
-      Style::default().fg(Color::Green),
-    ))],
-    Ok(s) => s.lines().map(working_tree_status_line).collect(),
+    Ok(s) if s.trim().is_empty() => {
+      vec![Line::from(Span::styled(
+        "✓ clean".to_string(),
+        Style::default().fg(theme.clean),
+      ))]
+    }
+    Ok(s) => s.lines().map(|line| working_tree_status_line(line, theme)).collect(),
     Err(e) => vec![Line::from(Span::styled(
       format!("! {}", e),
-      Style::default().fg(Color::Red),
+      Style::default().fg(theme.prunable),
     ))],
   }
 }
@@ -802,7 +825,7 @@ fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
 /// The separator space is left unstyled. The rendered text is byte-for-byte
 /// identical to the input — only `Span` styling is added — so the sidebar
 /// keeps showing the exact `git status --short` codes it always did.
-pub fn working_tree_status_line(raw: &str) -> Line<'static> {
+pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   // Porcelain short output is always `XY<space>PATH` with ASCII status
   // codes, but the helper is `pub` — a non-git caller could pass arbitrary
   // input. Split on char boundaries (not byte offsets) so a multi-byte
@@ -825,33 +848,37 @@ pub fn working_tree_status_line(raw: &str) -> Line<'static> {
   let path_at = sep_at + sep.len_utf8();
   let untracked = x == '?' && y == '?';
 
-  let cyan = Style::default().fg(Color::Cyan);
-  let yellow = Style::default().fg(Color::Yellow);
-  let green = Style::default().fg(Color::Green);
-  // X column: untracked `?` → green (created), other staged change → cyan.
+  // The three git-status families have no dedicated theme roles, so they
+  // borrow the nearest-colour role (preserving the pre-theme defaults):
+  // staged → `accent` (cyan), worktree-modified → `dirty` (yellow),
+  // untracked/created → `clean` (green).
+  let staged = Style::default().fg(theme.accent);
+  let modified = Style::default().fg(theme.dirty);
+  let created = Style::default().fg(theme.clean);
+  // X column: untracked `?` → created, other staged change → staged.
   let x_style = if x == '?' {
-    green
+    created
   } else if x != ' ' {
-    cyan
+    staged
   } else {
     Style::default()
   };
-  // Y column: untracked `?` → green (created), worktree modification → yellow.
+  // Y column: untracked `?` → created, worktree modification → modified.
   let y_style = if y == '?' {
-    green
+    created
   } else if y != ' ' {
-    yellow
+    modified
   } else {
     Style::default()
   };
-  // File name takes the dominant status colour: created (green) wins, then a
-  // worktree modification (yellow), then a staged-only change (cyan).
+  // File name takes the dominant status colour: created wins, then a
+  // worktree modification, then a staged-only change.
   let name_style = if untracked {
-    green
+    created
   } else if y != ' ' {
-    yellow
+    modified
   } else if x != ' ' {
-    cyan
+    staged
   } else {
     Style::default()
   };
@@ -892,37 +919,37 @@ pub const COMMIT_HASH_DISPLAY_LEN: usize = 8;
 /// ratatui's view-level hard-clip (no `Wrap`) to match lazygit's gocui
 /// behaviour: one commit per visual line, overflow cut at the right
 /// edge without `…`.
-pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize) -> Vec<Line<'static>> {
+pub fn recent_commits_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'static>> {
   match worktree::recent_commits_cached(w, limit) {
     Ok(rows) if !rows.is_empty() => {
-      let graphs = super::commit_graph::render_commits(&rows);
+      let graphs = super::commit_graph::render_commits(&rows, theme);
       rows
         .into_iter()
         .zip(graphs)
-        .map(|(row, graph_spans)| commit_row_line(row, graph_spans))
+        .map(|(row, graph_spans)| commit_row_line(row, graph_spans, theme))
         .collect()
     }
     Ok(_) => vec![Line::from(Span::styled(
       "(no commits)".to_string(),
-      Style::default().fg(Color::DarkGray),
+      Style::default().fg(theme.muted),
     ))],
     Err(e) => vec![Line::from(Span::styled(
       format!("! {}", e),
-      Style::default().fg(Color::Red),
+      Style::default().fg(theme.prunable),
     ))],
   }
 }
 
-fn commit_row_line(row: worktree::CommitRow, graph: Vec<Span<'static>>) -> Line<'static> {
+fn commit_row_line(row: worktree::CommitRow, graph: Vec<Span<'static>>, theme: &Theme) -> Line<'static> {
   let mut short_hash = row.hash.to_string();
   short_hash.truncate(COMMIT_HASH_DISPLAY_LEN);
   let initials = author_initials(&row.author);
   let mut spans: Vec<Span<'static>> = Vec::with_capacity(5 + graph.len());
-  spans.push(Span::styled(short_hash, Style::default().fg(Color::Yellow)));
+  spans.push(Span::styled(short_hash, Style::default().fg(theme.dirty)));
   spans.push(Span::raw("  "));
   spans.push(Span::styled(
     format!("{:<2}", initials),
-    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
   ));
   spans.push(Span::raw("  "));
   spans.extend(graph);
@@ -1031,15 +1058,15 @@ fn branch_status_label(s: &BranchStatus) -> String {
   }
 }
 
-fn branch_status_color(s: &BranchStatus) -> Color {
+fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
   if s.unknown {
-    Color::DarkGray
+    theme.muted
   } else if s.is_dirty || s.behind > 0 {
-    Color::Yellow
+    theme.dirty
   } else if s.ahead > 0 {
-    Color::Cyan
+    theme.accent
   } else {
-    Color::Green
+    theme.clean
   }
 }
 
@@ -1049,19 +1076,21 @@ fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) ->
   observed.clamp(min, max)
 }
 
-fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row<'static> {
-  let (marker_label, marker_color) = table_marker(w);
+fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
+  let (marker_label, marker_color) = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
+  // `Color::White` has no semantic theme role — the worktree name is the
+  // primary text of the row, not a status signal — so it stays white.
   let name_cell =
     Cell::from(trunc(&w.name, name_w as usize)).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
 
   // Issue #73: branch column tracks the worst-state colour so the
   // colour-coded signal is visible without expanding the sidebar.
   let branch_cell =
-    Cell::from(trunc(&branch_text, branch_w as usize)).style(Style::default().fg(branch_name_color(&w.status)));
+    Cell::from(trunc(&branch_text, branch_w as usize)).style(Style::default().fg(branch_name_color(&w.status, theme)));
 
-  let status_cell = build_status_cell(w, status_w as usize);
+  let status_cell = build_status_cell(w, status_w as usize, theme);
 
   // PR #74 follow-up: surface branch age right in the table so it stays
   // visible when the sidebar is hidden (<120 cols or `v` collapsed).
@@ -1072,8 +1101,10 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16) -> Row
   // more important BRANCH-status colour, so we keep it muted in the table
   // and let the sidebar's `Created:` row carry the colour-coded signal.
   let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
-  let age_cell = Cell::from(age_label).style(Style::default().fg(Color::DarkGray));
+  let age_cell = Cell::from(age_label).style(Style::default().fg(theme.muted));
 
+  // `Color::Gray` has no matching theme role (it is distinct from
+  // `muted`/`DarkGray`); the path stays on the structural mid-grey.
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
 
   Row::new(vec![
@@ -1094,24 +1125,24 @@ fn format_relative_duration_str(d: std::time::Duration) -> String {
   worktree::format_relative_duration(d)
 }
 
-fn build_status_cell(w: &WorktreeInfo, width: usize) -> Cell<'static> {
+fn build_status_cell(w: &WorktreeInfo, width: usize, theme: &Theme) -> Cell<'static> {
   // Priority: prunable > locked > dirty/sync info.
   if w.is_prunable {
-    return Cell::from("prunable").style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD));
+    return Cell::from("prunable").style(Style::default().fg(theme.prunable).add_modifier(Modifier::BOLD));
   }
   if w.is_locked {
-    return Cell::from("locked").style(Style::default().fg(Color::Magenta));
+    return Cell::from("locked").style(Style::default().fg(theme.locked));
   }
 
   let s = &w.status;
-  let (label, color) = format_status(s, width);
+  let (label, color) = format_status(s, width, theme);
   Cell::from(label).style(Style::default().fg(color))
 }
 
 /// Pick a compact label + accent colour for a `BranchStatus`.
-fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
+fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Color) {
   if s.unknown {
-    return ("unknown".into(), Color::DarkGray);
+    return ("unknown".into(), theme.muted);
   }
 
   let mut parts: Vec<String> = Vec::new();
@@ -1135,13 +1166,13 @@ fn format_status(s: &BranchStatus, width: usize) -> (String, Color) {
   let joined = parts.join(" ");
   let label = trunc(&joined, width.max(4));
 
-  // Worst-status colour: dirty/behind = yellow, ahead-only = cyan, synced/clean = green.
+  // Worst-status colour: dirty/behind = dirty, ahead-only = accent, synced/clean = clean.
   let color = if s.is_dirty || s.behind > 0 {
-    Color::Yellow
+    theme.dirty
   } else if s.ahead > 0 {
-    Color::Cyan
+    theme.accent
   } else {
-    Color::Green
+    theme.clean
   };
   (label, color)
 }
@@ -1206,12 +1237,12 @@ const PICKER_FOOTER_HINTS: &[(&str, &str)] = &[
 /// `tests/tui_footer_tests.rs` without spinning up a ratatui backend. Widths
 /// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
 /// labels and the bracketed status are ASCII / single-width in practice).
-pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, accent: Color) -> Line<'static> {
+pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
   let chip_style = Style::default()
-    .fg(accent)
+    .fg(theme.accent)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let label_style = Style::default().fg(Color::DarkGray);
-  let status_style = Style::default().fg(Color::Yellow);
+  let label_style = Style::default().fg(theme.muted);
+  let status_style = Style::default().fg(theme.dirty);
 
   // A zero-width row can hold nothing — return an empty line rather than let
   // the `trunc()` floor below emit a 1-column `…`.
@@ -1284,7 +1315,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   } else {
     FOOTER_HINTS
   };
-  let line = footer_line(hints, &app.status, area.width as usize, app.theme.accent);
+  let line = footer_line(hints, &app.status, area.width as usize, &app.theme);
   // No `Wrap`: the footer is a single hard-clipped row (issue #180).
   f.render_widget(Paragraph::new(line), area);
 }
@@ -1673,7 +1704,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let mut content: Vec<Line> = vec![
     Line::from(vec![
       Span::raw("delete "),
-      Span::styled(name, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+      Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
     ]),
     Line::from(Span::styled(format!("at {path}"), Style::default().fg(muted))),
   ];
@@ -2097,7 +2128,7 @@ pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'stat
   if link.issue.is_none() && link.pr.is_none() {
     lines.push(Line::from(Span::styled(
       trunc("no link · press L to link", max_width),
-      Style::default().fg(Color::DarkGray),
+      Style::default().fg(app.theme.muted),
     )));
     return lines;
   }
@@ -2108,16 +2139,23 @@ pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'stat
       link.issue_source,
       app.issue_fetch_state(),
       max_width,
+      &app.theme,
     ));
   }
   if let Some(n) = link.pr {
-    lines.push(pr_summary_line(n, link.pr_source, app.pr_fetch_state(), max_width));
+    lines.push(pr_summary_line(
+      n,
+      link.pr_source,
+      app.pr_fetch_state(),
+      max_width,
+      &app.theme,
+    ));
   }
   if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
   {
     lines.push(Line::from(Span::styled(
       trunc("press R to fetch status", max_width),
-      Style::default().fg(Color::DarkGray),
+      Style::default().fg(app.theme.muted),
     )));
   }
   lines
@@ -2142,16 +2180,21 @@ pub fn issue_summary_line(
   src: LinkSource,
   state: &GitHubFetchState<crate::github::IssueStatus>,
   max_width: usize,
+  theme: &Theme,
 ) -> Line<'static> {
   let head = format!("Issue #{}{}", n, source_marker(src));
+  // The `head` carries no status signal — it stays `Color::White` (no
+  // matching theme role) while the badge colour tracks the theme.
   match state {
     GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
     GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
-      let badge_color = match s.state {
-        IssueState::Open => Color::Green,
-        IssueState::Closed => Color::Red,
-      };
+      // Mirror `issue_badge_color` exactly so the summary line and the
+      // sidebar header dot never disagree for the same issue: closed maps
+      // to `locked` ("moved on"), not `prunable` ("alarming"). Pre-#170
+      // this site hard-coded `Color::Red` while the dot used `Magenta` —
+      // a latent inconsistency the audit closes (Copilot review #209).
+      let badge_color = issue_badge_color(s.state, theme);
       let badge = match s.state {
         IssueState::Open => "open",
         IssueState::Closed => "closed",
@@ -2185,7 +2228,7 @@ pub fn issue_summary_line(
       Line::from(vec![
         Span::styled(head, Style::default().fg(Color::White)),
         Span::raw(" "),
-        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(Color::Red)),
+        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
       ])
     }
   }
@@ -2200,17 +2243,20 @@ pub fn pr_summary_line(
   src: LinkSource,
   state: &GitHubFetchState<crate::github::PrStatus>,
   max_width: usize,
+  theme: &Theme,
 ) -> Line<'static> {
   let head = format!("PR    #{}{}", n, source_marker(src));
+  // The `head` carries no status signal — it stays `Color::White` (no
+  // matching theme role) while the badge colour tracks the theme.
   match state {
     GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
     GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
       let (badge, badge_color) = match s.state {
-        PrState::Open => ("open", Color::Green),
-        PrState::Draft => ("draft", Color::DarkGray),
-        PrState::Closed => ("closed", Color::Red),
-        PrState::Merged => ("merged", Color::Magenta),
+        PrState::Open => ("open", theme.clean),
+        PrState::Draft => ("draft", theme.muted),
+        PrState::Closed => ("closed", theme.prunable),
+        PrState::Merged => ("merged", theme.locked),
       };
       let checks = if s.checks_total > 0 {
         format!(" · checks {}/{}", s.checks_passed, s.checks_total)
@@ -2244,7 +2290,7 @@ pub fn pr_summary_line(
       Line::from(vec![
         Span::styled(head, Style::default().fg(Color::White)),
         Span::raw(" "),
-        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(Color::Red)),
+        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
       ])
     }
   }
@@ -2264,38 +2310,38 @@ pub fn pr_summary_line(
 /// one local addition: `dirty` lands on red because for a worktree
 /// manager the most actionable "do something" signal is uncommitted
 /// work.
-pub fn branch_name_color(s: &BranchStatus) -> Color {
+pub fn branch_name_color(s: &BranchStatus, theme: &Theme) -> Color {
   if s.unknown {
-    return Color::DarkGray;
+    return theme.muted;
   }
   if s.is_dirty {
-    return Color::Red;
+    return theme.prunable;
   }
   if s.ahead > 0 || s.behind > 0 {
-    return Color::Yellow;
+    return theme.dirty;
   }
   if !s.has_upstream {
     // Lazygit's `?` marker — branch never pushed yet. Distinct from
     // synced so the user knows whether they need to run `git push`.
-    return Color::Magenta;
+    return theme.locked;
   }
-  Color::Green
+  theme.branch
 }
 
 /// Map a branch age to a freshness colour: green < 7d, yellow < 30d,
 /// darkgray otherwise. Cutoffs are wide on purpose — a 6-day branch
 /// is "fresh", a 4-week one is "ageing", a 5-week one is "stale" —
 /// so the colour shift registers as signal rather than noise.
-pub fn freshness_color(age: Duration) -> Color {
+pub fn freshness_color(age: Duration, theme: &Theme) -> Color {
   const WEEK: u64 = 7 * 86_400;
   const MONTH: u64 = 30 * 86_400;
   let s = age.as_secs();
   if s < WEEK {
-    Color::Green
+    theme.clean
   } else if s < MONTH {
-    Color::Yellow
+    theme.dirty
   } else {
-    Color::DarkGray
+    theme.muted
   }
 }
 
@@ -2303,22 +2349,22 @@ pub fn freshness_color(age: Duration) -> Color {
 /// Ports the lazygit `WithPrColor` palette (open=green, draft=gray,
 /// merged=magenta, closed=red) but uses 16-colour names instead of
 /// hex RGB so the badge respects the user's terminal theme.
-pub fn pr_badge_color(state: PrState) -> Color {
+pub fn pr_badge_color(state: PrState, theme: &Theme) -> Color {
   match state {
-    PrState::Open => Color::Green,
-    PrState::Draft => Color::DarkGray,
-    PrState::Merged => Color::Magenta,
-    PrState::Closed => Color::Red,
+    PrState::Open => theme.clean,
+    PrState::Draft => theme.muted,
+    PrState::Merged => theme.locked,
+    PrState::Closed => theme.prunable,
   }
 }
 
 /// Same idea as [`pr_badge_color`] but for a linked issue. Closed maps
 /// to magenta (treated as "moved on") rather than red so a routinely
 /// resolved issue doesn't read as alarming.
-pub fn issue_badge_color(state: IssueState) -> Color {
+pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
   match state {
-    IssueState::Open => Color::Green,
-    IssueState::Closed => Color::Magenta,
+    IssueState::Open => theme.clean,
+    IssueState::Closed => theme.locked,
   }
 }
 
@@ -2331,12 +2377,15 @@ pub fn issue_badge_color(state: IssueState) -> Color {
 /// table dot signals "has link" rather than a specific status. The
 /// colour-coded `●` lives in the sidebar header where the fetch state
 /// is available.
-pub fn table_marker(w: &WorktreeInfo) -> (&'static str, Color) {
+pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> (&'static str, Color) {
   if w.is_main {
-    return ("★", Color::Yellow);
+    return ("★", theme.main);
   }
   if w.link.issue.is_some() || w.link.pr.is_some() {
-    return ("●", Color::Cyan);
+    return ("●", theme.accent);
   }
+  // No semantic role: an unlinked, non-main row carries no signal, so
+  // it stays on the terminal default rather than borrowing a theme
+  // colour that would read as "claimed".
   (" ", Color::Reset)
 }
