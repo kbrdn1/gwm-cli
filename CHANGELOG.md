@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Ephemeral **PR auto-detection** for a branch's pull request. When no PR is explicitly linked (`gwm link --pr`), gwm now resolves the branch's PR from GitHub (`gh pr list --head <branch> --state all`) and surfaces it marked `detected` — never written to git config, so it stays fresh and an explicit link always wins. Wired into `gwm status` (always, one worktree), the TUI sidebar (on the `F` refresh, marked " (detected)"), and a new opt-in `gwm list --detect-pr` flag that adds a `PR` column (one `gh` call per worktree; plain `gwm list` stays network-free). New `LinkSource::Detected` provenance alongside `branch-name` / `explicit`. (#181)
 - `{repo_path}` and `{repo_parent}` placeholders for `.gwm.toml` paths/patterns. `{repo_path}` expands to the main repo's absolute working directory and `{repo_parent}` to its parent, so a base can be expressed relative to the repo on disk — e.g. `base = "{repo_parent}/worktrees"` puts worktrees in a sibling `worktrees/` dir, matching an editor's `../worktrees` convention (Zed's `git.worktree_directory`) without a per-project editor config. Purely additive; existing `{home}`/`{repo}` bases are unchanged. (#175)
 
 ### Changed
