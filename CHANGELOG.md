@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI header is now a single borderless row with a clear visual hierarchy instead of a boxed, flat cyan string. The version renders as a reverse-video badge chip (matching the #180 footer chips), the repo name is bold, and the working directory is tilde-compressed and dimmed as secondary context. The `picker` flag is now its own reverse-video chip. The layout is width-driven: under width pressure the path is truncated/dropped first, the repo name next, and the version chip survives last. Dropping the border reclaims two rows for the worktree table. `gwm --version` parity is preserved (version still sourced from `CARGO_PKG_VERSION`). (#185)
 - Default theme "main colour" (the `focus` + `accent` roles) moved off the terminal's muted ANSI `Cyan` onto the Claude dark palette's orange — `accent` is the primary orange `#D4825D`, `focus` the darker focused-border orange `#C15F3C`. All other roles keep their previous ANSI values, so only the brand colour changes; users with an explicit `[theme]` block are unaffected. (#185)
 
+### Fixed
+
+- The focused panel border (worktree list ↔ sidebar, toggled with `Tab`) now paints with the theme `focus` role instead of a hardcoded `Color::Cyan`, so the active "tab" honours the configured palette (e.g. the new Claude orange default). (#185)
+
 ## Past releases
 
 In reverse chronological order:
