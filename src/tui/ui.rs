@@ -257,6 +257,19 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   f.render_widget(Paragraph::new(line), area);
 }
 
+/// Border colour for a focus-swappable panel (worktree list ↔ sidebar,
+/// toggled with `Tab`): the theme `focus` role when the panel holds focus,
+/// else a muted `DarkGray`. Extracted as a pure fn so the focus→theme wiring
+/// is pinned by `tests/tui_app_tests.rs` without a ratatui backend — and so a
+/// regression hardcoding a colour (the pre-#185 `Color::Cyan`) is caught.
+pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
+  if focused {
+    theme.focus
+  } else {
+    Color::DarkGray
+  }
+}
+
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Filter-aware: the visible rows are the filtered subset (issue #21). When
   // there is no active filter, this is the identity over `app.worktrees`.
@@ -317,7 +330,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   ];
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
-  let border_color = if list_has_focus { Color::Cyan } else { Color::DarkGray };
+  let border_color = panel_border_color(list_has_focus, &app.theme);
 
   let title = if app.filter.query().is_empty() {
     format!(" worktrees ({}) ", app.worktrees.len())
@@ -347,11 +360,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
 /// underlying `git log` / `git status` only run when the selection changes
 /// or `refresh()` invalidates the cache.
 fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
-  let border_color = if app.sidebar.focused {
-    Color::Cyan
-  } else {
-    Color::DarkGray
-  };
+  let border_color = panel_border_color(app.sidebar.focused, &app.theme);
 
   // Resolve (or populate) the cached worktree sections for the current
   // selection. Issue / PR block is rebuilt every frame (its fetch state

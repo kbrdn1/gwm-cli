@@ -2,9 +2,10 @@ mod common;
 
 use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
+use gwm::tui::theme::Theme;
 use gwm::tui::{
-  branch_name_color, filled_cells_for_progress, freshness_color, header_title, pr_badge_color, App, ConfirmKeyAction,
-  CountdownTickOutcome, Field, View,
+  branch_name_color, filled_cells_for_progress, freshness_color, header_title, panel_border_color, pr_badge_color, App,
+  ConfirmKeyAction, CountdownTickOutcome, Field, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::Color;
@@ -33,6 +34,26 @@ fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
   let app = App::new_at(Some(dir.path())).unwrap();
   (dir, app)
+}
+
+#[test]
+fn focused_panel_border_wears_the_theme_focus_colour() {
+  // #185: the focus-swappable panel borders (worktree list ↔ sidebar,
+  // toggled with Tab) must paint with the theme `focus` role, not a
+  // hardcoded cyan — otherwise the focused "tab" ignores the active
+  // palette (e.g. the Claude orange default). Unfocused panels stay
+  // muted.
+  let theme = Theme::default();
+  assert_eq!(
+    panel_border_color(true, &theme),
+    theme.focus,
+    "focused panel must wear the theme focus colour"
+  );
+  assert_eq!(
+    panel_border_color(false, &theme),
+    Color::DarkGray,
+    "unfocused panel stays muted"
+  );
 }
 
 #[test]
