@@ -880,6 +880,8 @@ fn cmd_theme_show(name: &str) -> Result<()> {
   println!("prunable     = {}", color_str(theme.prunable));
   println!("muted        = {}", color_str(theme.muted));
   println!("selection_bg = {}", color_str(theme.selection_bg));
+  println!("name         = {}", color_str(theme.name));
+  println!("path         = {}", color_str(theme.path));
   Ok(())
 }
 
