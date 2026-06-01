@@ -646,17 +646,18 @@ fn working_tree_lines(w: &WorktreeInfo) -> Vec<Line<'static>> {
   }
 }
 
-/// Colourise one `git status --short` porcelain line git-style (issue #179).
+/// Colourise one `git status --short` porcelain line (issue #179).
 ///
 /// The short format is `XY<space>PATH`, where `X` is the index (staged)
-/// status and `Y` the worktree (unstaged) status. Mirroring `git status -s`:
+/// status and `Y` the worktree status. Three distinct colours keep modified
+/// and created files visually apart:
 ///
-/// - `X` column → green when it carries a staged change,
-/// - `Y` column → red when it carries an unstaged change,
-/// - `??` (untracked) → both columns red,
-/// - the **file name** → the dominant status colour: red when the worktree
-///   side carries any change (unstaged or untracked), green when only the
-///   index side does.
+/// - staged change (`X` column) → cyan,
+/// - modified-in-worktree (`Y` column) → yellow,
+/// - `??` (untracked / created) → green,
+/// - the **file name** → the dominant status colour: green when untracked,
+///   else yellow when the worktree side carries a change, else cyan when only
+///   the index side does.
 ///
 /// The separator space is left unstyled. The rendered text is byte-for-byte
 /// identical to the input — only `Span` styling is added — so the sidebar
@@ -684,20 +685,33 @@ pub fn working_tree_status_line(raw: &str) -> Line<'static> {
   let path_at = sep_at + sep.len_utf8();
   let untracked = x == '?' && y == '?';
 
+  let cyan = Style::default().fg(Color::Cyan);
+  let yellow = Style::default().fg(Color::Yellow);
   let green = Style::default().fg(Color::Green);
-  let red = Style::default().fg(Color::Red);
+  // X column: untracked `?` → green (created), other staged change → cyan.
   let x_style = if x == '?' {
-    red
-  } else if x != ' ' {
     green
+  } else if x != ' ' {
+    cyan
   } else {
     Style::default()
   };
-  let y_style = if y != ' ' { red } else { Style::default() };
-  let name_style = if untracked || y != ' ' {
-    red
-  } else if x != ' ' {
+  // Y column: untracked `?` → green (created), worktree modification → yellow.
+  let y_style = if y == '?' {
     green
+  } else if y != ' ' {
+    yellow
+  } else {
+    Style::default()
+  };
+  // File name takes the dominant status colour: created (green) wins, then a
+  // worktree modification (yellow), then a staged-only change (cyan).
+  let name_style = if untracked {
+    green
+  } else if y != ' ' {
+    yellow
+  } else if x != ' ' {
+    cyan
   } else {
     Style::default()
   };

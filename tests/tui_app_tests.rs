@@ -1940,9 +1940,12 @@ fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
 }
 
 // ---- working_tree_status_line (issue #179) ---------------------------------
-// Git-style colourisation of each `git status --short` entry in the Working
-// Tree sidebar block: X column (staged) green, Y column (unstaged) red,
-// untracked `??` red, file name in the dominant status colour.
+// Colourisation of each `git status --short` entry in the Working Tree sidebar
+// block, with three distinct status colours so modified ≠ created at a glance:
+//   - staged (X column)        → cyan
+//   - modified (Y column)      → yellow
+//   - untracked (`??`)         → green
+// The file name takes the dominant status colour.
 use gwm::tui::working_tree_status_line;
 
 fn filename_span_fg(line: &ratatui::text::Line<'static>, needle: &str) -> Option<Color> {
@@ -1971,27 +1974,27 @@ fn working_tree_status_line_preserves_raw_text() {
 }
 
 #[test]
-fn working_tree_status_line_staged_only_is_green() {
+fn working_tree_status_line_staged_only_is_cyan() {
   let line = working_tree_status_line("A  staged.rs");
   assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "X column (staged) → green");
-  assert_eq!(filename_span_fg(&line, "staged.rs"), Some(Color::Green), "staged-only filename → green");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
+  assert_eq!(filename_span_fg(&line, "staged.rs"), Some(Color::Cyan), "staged-only filename → cyan");
 }
 
 #[test]
-fn working_tree_status_line_unstaged_modified_is_red() {
+fn working_tree_status_line_unstaged_modified_is_yellow() {
   let line = working_tree_status_line(" M tracked.rs");
   assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Red), "Y column (unstaged) → red");
-  assert_eq!(filename_span_fg(&line, "tracked.rs"), Some(Color::Red), "unstaged filename → red");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y column (modified) → yellow");
+  assert_eq!(filename_span_fg(&line, "tracked.rs"), Some(Color::Yellow), "modified filename → yellow");
 }
 
 #[test]
-fn working_tree_status_line_untracked_is_red() {
+fn working_tree_status_line_untracked_is_green() {
   let line = working_tree_status_line("?? untracked.rs");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Red), "untracked `?` (X) → red");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Red), "untracked `?` (Y) → red");
-  assert_eq!(filename_span_fg(&line, "untracked.rs"), Some(Color::Red), "untracked filename → red");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
+  assert_eq!(filename_span_fg(&line, "untracked.rs"), Some(Color::Green), "untracked filename → green");
 }
 
 #[test]
@@ -2007,14 +2010,14 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
 
 #[test]
 fn working_tree_status_line_partially_staged_splits_status_columns() {
-  // `AM`: index add (green) + worktree modify (red). The file name takes the
-  // dominant worktree colour (red) since it carries unstaged changes.
+  // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
+  // dominant worktree colour (yellow) since it carries unstaged changes.
   let line = working_tree_status_line("AM both.rs");
   assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "X=A staged → green");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
   assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Red), "Y=M unstaged → red");
-  assert_eq!(filename_span_fg(&line, "both.rs"), Some(Color::Red), "filename with unstaged change → red");
+  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y=M modified → yellow");
+  assert_eq!(filename_span_fg(&line, "both.rs"), Some(Color::Yellow), "filename with modified change → yellow");
 }
 
 #[test]
