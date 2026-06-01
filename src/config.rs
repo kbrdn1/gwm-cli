@@ -635,16 +635,103 @@ fn default_confirm_countdown_secs() -> u32 {
   3
 }
 
-impl Config {
-  /// Look for `.gwm.toml` in the given repo root.
-  /// Falls back to defaults when missing.
-  pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
-    let path = repo_root.join(CONFIG_FILE);
-    if !path.exists() {
-      return Ok(Self::default());
+/// Read a config file as a raw `toml::Value` (always a table at the
+/// document root). Kept separate from `toml::from_str::<Config>` so the
+/// two layers can be deep-merged at the value level before a single
+/// `deny_unknown_fields` deserialization runs on the result. Issue #190.
+fn read_config_value(path: &Path) -> Result<toml::Value> {
+  let raw = std::fs::read_to_string(path)?;
+  let val: toml::Value = toml::from_str(&raw)?;
+  Ok(val)
+}
+
+/// Deep-merge `over` onto `base`: two tables merge key-by-key
+/// recursively (so disjoint sections from both files coexist and a
+/// nested table override keeps the untouched sibling keys); for every
+/// other shape — scalars AND arrays — `over` wins wholesale. Arrays are
+/// intentionally replaced, never element-wise unioned, so a repo's
+/// `[[labels]]` fully supersedes the global set rather than producing a
+/// confusing concatenation. Issue #190.
+fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
+  match (base, over) {
+    (toml::Value::Table(mut b), toml::Value::Table(o)) => {
+      for (k, ov) in o {
+        let merged = match b.remove(&k) {
+          Some(bv) => merge_toml(bv, ov),
+          None => ov,
+        };
+        b.insert(k, merged);
+      }
+      toml::Value::Table(b)
     }
-    let raw = std::fs::read_to_string(&path)?;
-    let cfg: Config = toml::from_str(&raw)?;
+    (_, over) => over,
+  }
+}
+
+/// On-disk location of the user-level global config under a given
+/// XDG config-home directory: `<config_home>/gwm/config.toml`. Pure
+/// (no env / FS access) so the path contract is unit-testable. Issue
+/// #190.
+pub fn global_config_path_in(config_home: &Path) -> PathBuf {
+  config_home.join("gwm").join("config.toml")
+}
+
+/// Resolve the user-level global config path, honouring
+/// `$XDG_CONFIG_HOME` first and falling back to `dirs::config_dir()` —
+/// the same resolution order as `~/.config/gwm/aliases.toml` and the
+/// trust ledger. Returns `None` on systems where neither resolves
+/// (sandboxed CI / containers without `$HOME`), in which case loading
+/// degrades to repo-only. Issue #190.
+pub fn global_config_path() -> Option<PathBuf> {
+  if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+    if !xdg.is_empty() {
+      return Some(global_config_path_in(Path::new(&xdg)));
+    }
+  }
+  dirs::config_dir().map(|p| global_config_path_in(&p))
+}
+
+impl Config {
+  /// Look for `.gwm.toml` in the given repo root, layered over the
+  /// user-level global config at [`global_config_path`] (issue #190).
+  /// Falls back to defaults when neither exists.
+  pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
+    Self::load_layered(repo_root, global_config_path().as_deref())
+  }
+
+  /// Load the effective config by deep-merging the user-level global
+  /// config (`global_path`, the base) under the repo's `.gwm.toml`
+  /// (the override). Issue #190.
+  ///
+  /// Merge rule: the repo wins on conflicting scalars; tables merge
+  /// key-by-key recursively; arrays are replaced wholesale by the repo
+  /// when present. Validation runs on the merged result, so a bad
+  /// value from either layer fails at load. When neither file exists
+  /// the bare default is returned — identical to the pre-#190
+  /// behaviour, which the absent-global case preserves byte-for-byte.
+  ///
+  /// `global_path` is injected (rather than resolved internally) so
+  /// the merge contract can be pinned by a test without touching the
+  /// runner's real `$HOME` / `$XDG_CONFIG_HOME`.
+  pub fn load_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
+    let repo_path = repo_root.join(CONFIG_FILE);
+    let global_val = match global_path {
+      Some(p) if p.exists() => Some(read_config_value(p)?),
+      _ => None,
+    };
+    let repo_val = if repo_path.exists() {
+      Some(read_config_value(&repo_path)?)
+    } else {
+      None
+    };
+
+    let cfg: Config = match (global_val, repo_val) {
+      (None, None) => return Ok(Self::default()),
+      (Some(g), None) => g.try_into()?,
+      (None, Some(r)) => r.try_into()?,
+      (Some(g), Some(r)) => merge_toml(g, r).try_into()?,
+    };
+
     cfg.validate_branch_types()?;
     cfg.validate_bootstrap_paths()?;
     cfg.validate_bootstrap_guards()?;
