@@ -13,12 +13,12 @@ use ratatui::style::Color;
 #[test]
 fn app_theme_defaults_when_no_config() {
   // Fresh repo with no `.gwm.toml` → `App.theme == Theme::default()`.
-  // Since #185 the default main colour is the Claude orange-dark
-  // (focus), not ANSI `Cyan`.
+  // The pre-#33 hardcoded palette is preserved verbatim (the Claude
+  // orange is opt-in via the `claude-dark` preset, not the default).
   let (dir, _) = init_repo();
   let app = App::new_at(Some(dir.path())).unwrap();
   assert_eq!(app.theme, Theme::default());
-  assert_eq!(app.theme.focus, Color::Rgb(0xC1, 0x5F, 0x3C));
+  assert_eq!(app.theme.focus, Color::Cyan);
 }
 
 #[test]

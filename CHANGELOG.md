@@ -19,11 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - TUI statusline is now a single line. Key hints render as reverse-video badge chips (the key painted with the theme accent, followed by a short label) and the status message (action log) is pinned flush-right with absolute priority — when the terminal is too narrow, the hint list is truncated with an `…` marker while the log stays visible. Previously the footer occupied two rows and wrapped, which could push the log off-screen. No keybindings changed. (#180)
 - TUI header is now a single borderless row with a clear visual hierarchy instead of a boxed, flat cyan string. The version renders as a reverse-video badge chip (matching the #180 footer chips), the repo name is bold, and the working directory is tilde-compressed and dimmed as secondary context. The `picker` flag is now its own reverse-video chip. The layout is width-driven: under width pressure the path is truncated/dropped first, the repo name next, and the version chip survives last. Dropping the border reclaims two rows for the worktree table. `gwm --version` parity is preserved (version still sourced from `CARGO_PKG_VERSION`). (#185)
-- Default theme "main colour" (the `focus` + `accent` roles) moved off the terminal's muted ANSI `Cyan` onto the Claude dark palette's orange — `accent` is the primary orange `#D4825D`, `focus` the darker focused-border orange `#C15F3C`. All other roles keep their previous ANSI values, so only the brand colour changes; users with an explicit `[theme]` block are unaffected. (#185)
-
 ### Fixed
 
-- The focused panel border (worktree list ↔ sidebar, toggled with `Tab`) now paints with the theme `focus` role instead of a hardcoded `Color::Cyan`, so the active "tab" honours the configured palette (e.g. the new Claude orange default). (#185)
+- The focused panel border (worktree list ↔ sidebar, toggled with `Tab`) now paints with the theme `focus` role instead of a hardcoded `Color::Cyan`, so the active "tab" honours the configured palette (e.g. the `claude-dark` preset's orange) rather than always rendering cyan. The default theme is unchanged (`focus` is still `Cyan`), so default-theme users see no difference. (#185)
 
 ## Past releases
 

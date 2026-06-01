@@ -77,15 +77,14 @@ pub struct Theme {
 }
 
 impl Default for Theme {
-  /// Pre-#33 hardcoded scheme, except the "main colour" (focus +
-  /// accent) which moved off the muted ANSI `Cyan` onto the Claude
-  /// dark palette's orange (#185): `accent` is the primary orange and
-  /// `focus` the darker "focused borders" orange. Every other role
-  /// keeps its pre-#33 ANSI value so only the brand colour changes.
+  /// Pre-#33 hardcoded scheme. Documented field-by-field above. A
+  /// non-default look (e.g. the Claude orange) is opt-in via a
+  /// `[theme] preset = "claude-dark"` block — not baked into the
+  /// default, so users who never write a `[theme]` block see no change.
   fn default() -> Self {
     Self {
-      focus: Color::Rgb(0xC1, 0x5F, 0x3C),  // Claude orange-dark (focused borders)
-      accent: Color::Rgb(0xD4, 0x82, 0x5D), // Claude primary orange
+      focus: Color::Cyan,
+      accent: Color::Cyan,
       branch: Color::Green,
       clean: Color::Green,
       dirty: Color::Yellow,

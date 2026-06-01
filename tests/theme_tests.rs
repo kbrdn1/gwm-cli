@@ -13,15 +13,17 @@ use ratatui::style::Color;
 // ---------------------------------------------------------------------------
 
 #[test]
-fn default_theme_uses_the_claude_orange_as_the_main_colour() {
-  // #185: the default "main colour" (focus + accent) moved off the
-  // terminal's muted ANSI `Cyan` onto the Claude dark palette's
-  // orange — `accent` = primary orange `#D4825D`, `focus` = the
-  // darker "focused borders" orange `#C15F3C`. The remaining roles
-  // keep their pre-#33 ANSI values so only the brand colour changes.
+fn default_theme_matches_pre_issue_33_scheme() {
+  // The hardcoded palette pre-#33 was: cyan for focus/accent, green
+  // for branch/clean, yellow for dirty/main, magenta for locked,
+  // red for prunable, dark gray for muted. The default Theme must
+  // be observationally equivalent so users who never write a
+  // `[theme]` block see no change — a different look (e.g. the
+  // Claude orange) is opt-in via the `claude-dark` preset, not the
+  // default.
   let t = Theme::default();
-  assert_eq!(t.accent, Color::Rgb(0xD4, 0x82, 0x5D), "accent = Claude orange");
-  assert_eq!(t.focus, Color::Rgb(0xC1, 0x5F, 0x3C), "focus = Claude orange-dark");
+  assert_eq!(t.focus, Color::Cyan);
+  assert_eq!(t.accent, Color::Cyan);
   assert_eq!(t.branch, Color::Green);
   assert_eq!(t.clean, Color::Green);
   assert_eq!(t.dirty, Color::Yellow);
@@ -110,8 +112,8 @@ fn apply_override_replaces_a_single_role() {
   let mut t = Theme::default();
   t.apply_override("focus", "red").unwrap();
   assert_eq!(t.focus, Color::Red, "override must win for the targeted role");
-  // Other roles untouched (accent keeps the default Claude orange).
-  assert_eq!(t.accent, Color::Rgb(0xD4, 0x82, 0x5D));
+  // Other roles untouched.
+  assert_eq!(t.accent, Color::Cyan);
   assert_eq!(t.branch, Color::Green);
 }
 

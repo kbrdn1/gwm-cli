@@ -1647,18 +1647,15 @@ down = []
 // --- [theme] section (issue #33) ----------------------------------------
 
 #[test]
-fn theme_default_resolves_to_the_claude_orange_main_colour() {
-  // No `[theme]` block → the resolved theme matches `Theme::default`.
-  // Since #185 the main colour (focus) is the Claude orange-dark
-  // rather than ANSI `Cyan`; the rest of the scheme keeps its pre-#33
-  // ANSI values. Pinned at the config layer so a regression in the
-  // loader is caught here rather than as a surprise palette in
-  // someone's screenshot.
+fn theme_default_is_pre_issue_33_scheme() {
+  // No `[theme]` block → the resolved theme matches the pre-#33
+  // hardcoded scheme verbatim. Pinned at the config layer so a
+  // regression in the loader is caught here rather than as a
+  // surprise palette in someone's screenshot.
   use ratatui::style::Color;
   let cfg = Config::default();
   let theme = cfg.theme.resolve().unwrap();
-  assert_eq!(theme.focus, Color::Rgb(0xC1, 0x5F, 0x3C));
-  assert_eq!(theme.accent, Color::Rgb(0xD4, 0x82, 0x5D));
+  assert_eq!(theme.focus, Color::Cyan);
   assert_eq!(theme.branch, Color::Green);
 }
 
