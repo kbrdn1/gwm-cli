@@ -587,10 +587,9 @@ fn render_section(
 /// expensive git preview cache underneath.
 fn sidebar_header_line(w: &WorktreeInfo, app: &App) -> Line<'static> {
   let (dot, dot_color) = sidebar_status_dot(app);
-  let name_style = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
   Line::from(vec![
     Span::styled(dot, Style::default().fg(dot_color).add_modifier(Modifier::BOLD)),
-    Span::styled(w.name.clone(), name_style),
+    Span::styled(w.name.clone(), worktree_name_style(&app.theme)),
   ])
 }
 
@@ -1076,14 +1075,31 @@ fn column_width<'a>(items: impl Iterator<Item = &'a str>, min: u16, max: u16) ->
   observed.clamp(min, max)
 }
 
+/// Style for the worktree *name* — the row's primary identity text in
+/// the table and the sidebar header. Uses the `name` role (default
+/// `White`, issue #210), rendered bold so the name anchors each row.
+/// Extracted so the role wiring is unit-testable (`build_row` /
+/// `sidebar_header_line` are private render code).
+pub fn worktree_name_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.name).add_modifier(Modifier::BOLD)
+}
+
+/// Style for the table's worktree *path* column. Uses the `path` role
+/// (default `Gray`, issue #210) — a structural mid-grey distinct from
+/// `muted` (`DarkGray`). Extracted alongside [`worktree_name_style`]
+/// for the same testability reason.
+pub fn worktree_path_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.path)
+}
+
 fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
   let (marker_label, marker_color) = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
-  // `Color::White` has no semantic theme role — the worktree name is the
-  // primary text of the row, not a status signal — so it stays white.
-  let name_cell =
-    Cell::from(trunc(&w.name, name_w as usize)).style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+  // The worktree name is the row's primary identity text. It paints with
+  // the `name` role (issue #210; default `White`, bold) so a `[theme]`
+  // override / preset can recolour it.
+  let name_cell = Cell::from(trunc(&w.name, name_w as usize)).style(worktree_name_style(theme));
 
   // Issue #73: branch column tracks the worst-state colour so the
   // colour-coded signal is visible without expanding the sidebar.
@@ -1103,9 +1119,9 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme:
   let age_label = w.age.map(format_relative_duration_str).unwrap_or_else(|| "-".into());
   let age_cell = Cell::from(age_label).style(Style::default().fg(theme.muted));
 
-  // `Color::Gray` has no matching theme role (it is distinct from
-  // `muted`/`DarkGray`); the path stays on the structural mid-grey.
-  let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(Style::default().fg(Color::Gray));
+  // The path column paints with the `path` role (issue #210; default
+  // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
+  let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(worktree_path_style(theme));
 
   Row::new(vec![
     age_cell,
@@ -2183,10 +2199,11 @@ pub fn issue_summary_line(
   theme: &Theme,
 ) -> Line<'static> {
   let head = format!("Issue #{}{}", n, source_marker(src));
-  // The `head` carries no status signal — it stays `Color::White` (no
-  // matching theme role) while the badge colour tracks the theme.
+  // The `head` carries no status signal, only identity — it paints with
+  // the `name` role (issue #210; default `White`) while the badge colour
+  // tracks the issue state.
   match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
+    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
     GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
       // Mirror `issue_badge_color` exactly so the summary line and the
@@ -2212,7 +2229,7 @@ pub fn issue_summary_line(
       }
       let budget = max_width - fixed;
       Line::from(vec![
-        Span::styled(head, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(head, Style::default().fg(theme.name).add_modifier(Modifier::BOLD)),
         Span::raw(" ["),
         Span::styled(
           badge.to_string(),
@@ -2226,7 +2243,7 @@ pub fn issue_summary_line(
       let fixed = head.chars().count() + 2; // " " + "!"
       let budget = max_width.saturating_sub(fixed);
       Line::from(vec![
-        Span::styled(head, Style::default().fg(Color::White)),
+        Span::styled(head, Style::default().fg(theme.name)),
         Span::raw(" "),
         Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
       ])
@@ -2246,10 +2263,11 @@ pub fn pr_summary_line(
   theme: &Theme,
 ) -> Line<'static> {
   let head = format!("PR    #{}{}", n, source_marker(src));
-  // The `head` carries no status signal — it stays `Color::White` (no
-  // matching theme role) while the badge colour tracks the theme.
+  // The `head` carries no status signal, only identity — it paints with
+  // the `name` role (issue #210; default `White`) while the badge colour
+  // tracks the PR state.
   match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(Color::White))),
+    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
     GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
     GitHubFetchState::Loaded(s) => {
       let (badge, badge_color) = match s.state {
@@ -2272,7 +2290,7 @@ pub fn pr_summary_line(
       }
       let budget = max_width - fixed;
       Line::from(vec![
-        Span::styled(head, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(head, Style::default().fg(theme.name).add_modifier(Modifier::BOLD)),
         Span::raw(" ["),
         Span::styled(
           badge.to_string(),
@@ -2288,7 +2306,7 @@ pub fn pr_summary_line(
       let fixed = head.chars().count() + 2; // " " + "!"
       let budget = max_width.saturating_sub(fixed);
       Line::from(vec![
-        Span::styled(head, Style::default().fg(Color::White)),
+        Span::styled(head, Style::default().fg(theme.name)),
         Span::raw(" "),
         Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
       ])
