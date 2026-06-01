@@ -3900,7 +3900,24 @@ fn theme_list_includes_builtin_presets() {
     .args(["theme", "list"])
     .assert()
     .success()
-    .stdout(predicate::str::contains("catppuccin"));
+    .stdout(predicate::str::contains("catppuccin"))
+    .stdout(predicate::str::contains("claude-dark"));
+}
+
+#[test]
+fn theme_show_claude_dark_emits_the_orange_accent_as_hex() {
+  // The Claude dark port (#185) is RGB-based, so `theme show` must
+  // render its accent as a copy-pasteable `#RRGGBB` string that
+  // round-trips through the `[theme]` parser.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["theme", "show", "claude-dark"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[theme]"))
+    .stdout(predicate::str::contains("#d4825d"));
 }
 
 #[test]
