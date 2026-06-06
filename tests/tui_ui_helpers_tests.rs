@@ -4,7 +4,9 @@
 //! overlay's per-chord key badges.
 
 use gwm::tui::ConfirmButton;
-use gwm::tui::{badge_group_width, confirm_buttons_line, ellipsize_middle, pane_counter, worktrees_pane_title};
+use gwm::tui::{
+  badge_group_width, confirm_buttons_line, ellipsize_middle, pane_counter, status_pane_title, worktrees_pane_title,
+};
 use ratatui::style::{Color, Modifier};
 
 #[test]
@@ -86,6 +88,13 @@ fn worktrees_pane_title_filtered_shows_visible_over_total() {
   // Active filter → `(visible/total)` so the user sees how much the filter
   // narrowed the list.
   assert_eq!(worktrees_pane_title(false, 3, 5), " [1] Worktrees (3/5) ");
+}
+
+#[test]
+fn status_pane_title_carries_the_focus_index() {
+  // The sidebar reads as the `[2] Status` pane (focusable with `2`),
+  // mirroring `[1] Worktrees`.
+  assert_eq!(status_pane_title(), " [2] Status ");
 }
 
 #[test]

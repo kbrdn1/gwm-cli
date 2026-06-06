@@ -32,8 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the worktrees table), and the split ratios are tuned per axis —
   42% / 58% stacked, 55% / 45% side-by-side. The orientation cycle
   (`V`) is unchanged. (#217)
-- TUI: panes are labelled `[1] Worktrees (N)` and the help overlay is
-  titled `Keybindings` with a centred context subtitle. (#217)
+- TUI: panes are labelled `[1] Worktrees (N)` and `[2] Status` (the focus
+  mnemonics for the `1` / `2` keys), and the help overlay is titled
+  `Keybindings` with a centred context subtitle. (#217)
 - TUI: modal overlays centre their titles and gain internal padding; the
   confirm-delete buttons render as flat coloured chips (` Confirm ` /
   ` Cancel `) instead of `[ Confirm ]` / `[ Cancel ]`. (#217)

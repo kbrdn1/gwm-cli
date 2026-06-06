@@ -323,6 +323,15 @@ pub fn worktrees_pane_title(query_empty: bool, visible: usize, total: usize) -> 
   }
 }
 
+/// Title for the head section of the status (sidebar) pane (issue #217).
+/// Carries the `[2]` focus mnemonic (focusable with the `2` key), mirroring
+/// [`worktrees_pane_title`]'s `[1]`. The sidebar is a stack of sub-sections;
+/// this labels the first one so the pane reads as `[2] Status` without
+/// nesting an extra bordered frame.
+pub fn status_pane_title() -> &'static str {
+  " [2] Status "
+}
+
 /// Bottom-right `selected of visible` counter for a pane footer (issue
 /// #217), lazygit-style. `selected` is the 1-based cursor position;
 /// `visible` is the count of rows currently on screen. Returns `None` when
@@ -511,7 +520,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     .constraints(constraints)
     .split(area);
 
-  render_section(f, chunks[0], " Worktree ", sections.worktree, border_color, 0, None);
+  render_section(
+    f,
+    chunks[0],
+    status_pane_title(),
+    sections.worktree,
+    border_color,
+    0,
+    None,
+  );
   render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0, None);
   if !sections.working_tree.is_empty() {
     render_section(

@@ -1423,10 +1423,18 @@ impl App {
   fn spawn_github_fetch(&self, key: super::state::github_fetch::FetchKey, slug: String) {
     use super::state::github_fetch::FetchKey;
     let tx = self.github_tx.clone();
+    // Resolve the `gh` program on THIS (main) thread and hand it to the
+    // worker, so the worker never reads `GWM_GH` / the process environment
+    // concurrently with env-mutating code elsewhere (the `env_lock`
+    // unsoundness the worker would otherwise reintroduce — issue #217).
+    let program = github::gh_program();
     std::thread::spawn(move || {
       let msg = match key {
-        FetchKey::Issue(n) => GithubFetchMsg::Issue(n, github::fetch_issue(&slug, n).map_err(|e| e.to_string())),
-        FetchKey::Pr(n) => GithubFetchMsg::Pr(n, github::fetch_pr(&slug, n).map_err(|e| e.to_string())),
+        FetchKey::Issue(n) => GithubFetchMsg::Issue(
+          n,
+          github::fetch_issue_with(&program, &slug, n).map_err(|e| e.to_string()),
+        ),
+        FetchKey::Pr(n) => GithubFetchMsg::Pr(n, github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string())),
       };
       let _ = tx.send(msg);
     });
