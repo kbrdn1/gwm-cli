@@ -19,10 +19,14 @@
 //! the background behind the modal, the test asserts a body-unique label
 //! instead (see the confirm case).
 //!
-//! The terminal is sized 100×40: wide enough that no modal needs to clip
-//! its content, but `< 120` columns so `draw_sidebar` stays hidden and
-//! the render path never shells out to `git` — keeping these tests
-//! deterministic and offline.
+//! The terminal is sized 100×40 — wide enough that no modal needs to
+//! clip its content. `make_app` also closes the sidebar (`open = false`),
+//! so `draw_body` renders the worktree table full-area with no sidebar:
+//! this keeps the render path from shelling out to `git` (deterministic /
+//! offline) and stops sidebar labels (e.g. `Path`, `Branch`) from leaking
+//! into the buffer behind the modal and masking a regression. (Width
+//! alone would not hide the sidebar — its default orientation is
+//! `Stacked`, which renders even below 120 columns.)
 //!
 //! The point is a safety net so the upcoming `ui.rs` refactors (plan
 //! items P3-P8) cannot silently regress modal layout.
@@ -41,7 +45,17 @@ const TERM_H: u16 = 40;
 
 fn make_app() -> (tempfile::TempDir, App) {
   let (dir, _) = init_repo();
-  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  // Close the sidebar so `draw_body` renders the worktree table full-area
+  // with no sidebar pane. Two reasons: (1) the sidebar shells out to
+  // `git status` / `git log`, so leaving it open would make these tests
+  // touch git — closing it keeps them deterministic and offline; (2) the
+  // sidebar paints labels such as `Path` and `Branch` *behind* the modal,
+  // and `buffer_contains` scans the whole buffer, so those would mask a
+  // modal regression. NOTE: the default is `open = true` with the
+  // `Stacked` orientation, which renders even at < 120 cols — terminal
+  // width alone does NOT hide the sidebar; only `open = false` does.
+  app.sidebar.open = false;
   (dir, app)
 }
 
@@ -225,11 +239,11 @@ fn command_palette_modal_renders_title_and_entries() {
   let buf = render(&mut app);
   assert_present(&buf, "Command Palette", "palette title");
   // The palette has no buttons; its observable surface is the entry
-  // list. With an empty query the palette shows every command, so the
-  // input prompt sigil plus at least one entry must be visible. Assert
-  // the always-present input sigil and that the matches pane is not the
-  // empty-fallback notice.
-  assert_present(&buf, ":", "palette input sigil");
+  // list. With an empty query it lists every command, so a real entry
+  // from `palette_entries()` must be painted — `create` is the first
+  // entry's name. Asserting the input sigil alone would stay green even
+  // if every command row regressed (clipped, empty, or skipped).
+  assert_present(&buf, "create", "palette lists the 'create' command entry");
   assert!(
     !buffer_contains(&buf, "no matching command"),
     "palette with empty query must list commands, not the empty notice — buffer rows:\n{}",
