@@ -1,4 +1,4 @@
-use super::app::{App, GitHubFetchState, LinkPromptStage, View};
+use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
 use super::state::spinner::DOT_FRAMES;
@@ -1375,7 +1375,11 @@ impl HintContext {
         Hint::Lit("Esc", "cancel"),
       ],
       HintContext::Report => &[Hint::Lit("Enter/Esc", "close")],
-      HintContext::Help => &[Hint::Lit("Esc/q", "close")],
+      HintContext::Help => &[
+        Hint::Lit("j/k", "scroll"),
+        Hint::Lit("h/l", "pan"),
+        Hint::Lit("Esc/q", "close"),
+      ],
     }
   }
 
@@ -1712,10 +1716,12 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     HelpRow::Subtitle(ctx.label().to_string()),
     HelpRow::Blank,
     HelpRow::Section("Global".to_string()),
+    HelpRow::Blank,
     entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
     fixed("Ctrl-C", "force quit (hard-coded escape hatch)"),
     HelpRow::Blank,
     HelpRow::Section("List View".to_string()),
+    HelpRow::Blank,
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
     entry(Action::Top, "jump to first worktree"),
@@ -1759,6 +1765,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
     rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
+    rows.push(HelpRow::Blank);
     rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
     rows.push(entry(
       Action::LinkPrompt,
@@ -1773,13 +1780,15 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.extend([
       HelpRow::Blank,
       HelpRow::Section("Create Form".to_string()),
+      HelpRow::Blank,
       fixed("←/→ ↑/↓", "change branch type"),
       fixed("Tab/Shift-Tab", "next/prev field"),
       fixed("Enter (desc)", "submit"),
       fixed("Esc", "cancel"),
       HelpRow::Blank,
-      HelpRow::Section("Confirm Delete".to_string()),
-      fixed("←/→ Tab", "move focus between [ Confirm ] / [ Cancel ]"),
+      HelpRow::Section("Delete Worktree".to_string()),
+      HelpRow::Blank,
+      fixed("←/→ Tab", "move focus between Confirm / Cancel"),
       fixed("Enter", "activate the focused button (defaults to Cancel)"),
       fixed("y", "confirm"),
       fixed("n / Esc", "cancel"),
@@ -1884,7 +1893,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
       HelpRow::Section(t) => {
         lines.push(Line::from(Span::styled(
           t,
-          help_section_style(accent, app.theme.branch),
+          help_section_style(accent, help_body_section_color(&app.theme)),
         )));
       }
       HelpRow::Blank => lines.push(Line::from(String::new())),
@@ -1915,13 +1924,19 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // the only place that knows both the content length and the inner height,
   // so it clamps the offset here too.
   let block = overlay_block(accent);
-  let viewport = block.inner(area).height as usize;
+  let inner_area = block.inner(area);
+  let viewport = inner_area.height as usize;
   app.help_max_scroll = (lines.len().saturating_sub(viewport)) as u16;
   app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+  let viewport_width = inner_area.width as usize;
+  let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
+  app.help_max_x_scroll = content_width.saturating_sub(viewport_width) as u16;
+  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
   let scroll = app.help_scroll;
+  let x_scroll = app.help_x_scroll;
 
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
+  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
@@ -2116,15 +2131,18 @@ pub fn field_input_line(
 /// muted. `key` is the direct-pick shortcut (`i` / `p`). Pure so the
 /// highlight contract is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, muted: Color) -> Line<'static> {
+  const BUTTON_WIDTH: usize = 17; // " p  Pull Request "
+  let button = format!(" {key}  {label} ");
+  let button = format!("{button:<BUTTON_WIDTH$}");
   if selected {
     let chip = Style::default()
       .fg(accent)
       .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-    return Line::from(vec![Span::raw("  "), Span::styled(format!(" {key}  {label} "), chip)]);
+    return Line::from(vec![Span::raw("  "), Span::styled(button, chip)]);
   }
 
   let idle = Style::default().fg(muted);
-  Line::from(vec![Span::raw("  "), Span::styled(format!("{key}  {label}"), idle)])
+  Line::from(vec![Span::raw("  "), Span::styled(button, idle)])
 }
 
 /// Modal width for the Link prompt. Pure so the visual budget remains pinned
@@ -2156,6 +2174,64 @@ pub fn confirm_detail_line(
   ])
 }
 
+pub fn delete_worktree_title() -> &'static str {
+  "Delete Worktree"
+}
+
+pub fn confirm_delete_branch_line(
+  enabled: bool,
+  key: &str,
+  label_width: usize,
+  accent: Color,
+  muted: Color,
+) -> Line<'static> {
+  let key_style = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let value_style = Style::default()
+    .fg(if enabled { accent } else { muted })
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  Line::from(vec![
+    Span::styled(
+      format!("{:<label_width$}  ", "Delete Branch", label_width = label_width),
+      Style::default().fg(muted),
+    ),
+    Span::styled(format!(" {key} "), key_style),
+    Span::raw("  "),
+    Span::styled(format!(" {enabled} "), value_style),
+  ])
+}
+
+pub fn help_body_section_color(theme: &Theme) -> Color {
+  theme.locked
+}
+
+fn line_text(line: &Line<'static>) -> String {
+  line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let mut lines = overlay_title_lines(title, accent);
+  lines.extend(
+    github_status_lines(app, 36)
+      .into_iter()
+      .filter(|line| !line_text(line).starts_with("press ")),
+  );
+  lines.push(Line::from(""));
+  lines.push(link_target_line("i", "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
+  lines.push(link_target_line("p", "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
+  let refresh_key = app
+    .keymap
+    .primary_chord(super::keymap::Action::FetchGithub)
+    .unwrap_or_else(|| "F".to_string());
+  lines.push(link_target_line(&refresh_key, "Refresh", false, accent, muted).centered());
+  lines.push(Line::from(""));
+  lines.push(Line::from(Span::styled(link_choose_hint(), Style::default().fg(muted))).centered());
+  lines
+}
+
 fn draw_confirm(f: &mut Frame, app: &App) {
   let muted = app.theme.muted;
   // The destructive modal reads in the theme's "danger" colour (the
@@ -2166,7 +2242,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let block = overlay_block(danger);
 
   let Some(w) = app.selected() else {
-    let mut lines = overlay_title_lines("Confirm Delete", danger);
+    let mut lines = overlay_title_lines(delete_worktree_title(), danger);
     lines.push(Line::from("nothing selected").centered());
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
     let area = centered_h(40, height, f.area());
@@ -2181,7 +2257,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let term = f.area();
   let outer_w = term.width.saturating_mul(62) / 100;
   let text_w = outer_w.saturating_sub(6) as usize;
-  let label_w = "delete branch".chars().count();
+  let label_w = "Delete Branch".chars().count();
   let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
   let name = ellipsize_middle(&w.name, value_w);
@@ -2189,16 +2265,16 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
   // Title stays centred; details use an aligned label/value grid so the
   // destructive target is easier to scan (#220 visual follow-up).
-  let mut content: Vec<Line> = overlay_title_lines("Confirm Delete", danger);
+  let mut content: Vec<Line> = overlay_title_lines(delete_worktree_title(), danger);
   content.push(confirm_detail_line(
-    "worktree",
+    "Worktree",
     name,
     label_w,
     muted,
     Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
   ));
   content.push(confirm_detail_line(
-    "path",
+    "Path",
     path,
     label_w,
     muted,
@@ -2207,7 +2283,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   if let Some(b) = &w.branch {
     let branch = ellipsize_middle(b, value_w);
     content.push(confirm_detail_line(
-      "branch",
+      "Branch",
       branch,
       label_w,
       muted,
@@ -2215,17 +2291,12 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     ));
   }
   content.push(Line::from(""));
-  let delete_branch_style = if app.delete_branch_on_remove {
-    Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)
-  } else {
-    Style::default().fg(muted)
-  };
-  content.push(confirm_detail_line(
-    "delete branch",
-    format!("{}  p toggles", app.delete_branch_on_remove),
+  content.push(confirm_delete_branch_line(
+    app.delete_branch_on_remove,
+    "p",
     label_w,
+    app.theme.accent,
     muted,
-    delete_branch_style,
   ));
 
   // Size the modal to its content: the title + description rows plus the
@@ -2535,15 +2606,16 @@ fn trunc(s: &str, max: usize) -> String {
 
 fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let mut lines = overlay_title_lines("Open in Browser", accent);
-  lines.push(Line::from("  i   linked issue"));
-  lines.push(Line::from("  p   linked pull request"));
-  lines.push(Line::from(""));
-  lines.push(Line::from(Span::styled(
-    "  esc to cancel",
-    Style::default().fg(app.theme.muted),
-  )));
-  let area = centered_h(40, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
+  let lines = link_open_modal_lines(app, "Open in Browser", None);
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let term = f.area();
+  let width = link_prompt_modal_width(term.width).min(term.width);
+  let area = Rect {
+    x: term.x + term.width.saturating_sub(width) / 2,
+    y: term.y + term.height.saturating_sub(height) / 2,
+    width,
+    height: height.min(term.height),
+  };
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
@@ -2557,21 +2629,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       // links the highlighted row, i/p stay direct picks. The highlighted
       // row reads in the accent.
       let selected = app.link_prompt_selected();
-      let mut lines = overlay_title_lines("Link", accent);
-      lines.push(link_target_line("i", "Issue", selected == super::app::LinkTarget::Issue, accent, muted).centered());
-      lines.push(
-        link_target_line(
-          "p",
-          "Pull Request",
-          selected == super::app::LinkTarget::Pr,
-          accent,
-          muted,
-        )
-        .centered(),
-      );
-      lines.push(Line::from(""));
-      lines.push(Line::from(Span::styled(link_choose_hint(), Style::default().fg(muted))).centered());
-      lines
+      link_open_modal_lines(app, "Link", Some(selected))
     }
     LinkPromptStage::InputNumber => {
       let label = match app.link_prompt_target() {

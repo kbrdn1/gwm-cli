@@ -333,9 +333,18 @@ fn help_rows_structures_title_sections_and_entries() {
   assert!(
     rows
       .iter()
-      .any(|r| matches!(r, HelpRow::Section(s) if s == "Confirm Delete")),
-    "expected a `Confirm Delete` section header"
+      .any(|r| matches!(r, HelpRow::Section(s) if s == "Delete Worktree")),
+    "expected a `Delete Worktree` section header"
   );
+  for pair in rows.windows(2) {
+    if matches!(pair[0], HelpRow::Section(_)) {
+      assert!(
+        matches!(pair[1], HelpRow::Blank),
+        "section headings should be followed by a visual gap, got {:?}",
+        pair
+      );
+    }
+  }
   // The `Down` action's default `j` binding must surface as an Entry
   // with the resolved chord in its `keys`, not baked into a string.
   let keys = km

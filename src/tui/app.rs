@@ -105,6 +105,8 @@ pub enum LinkPromptKey {
   Handled,
   /// `Enter` on the number field — the loop should run `link_prompt_submit`.
   Submit,
+  /// The resolved `fetch_github` key — the loop should refresh status.
+  Refresh,
   /// `Esc` — the loop should close the prompt back to the list.
   Cancel,
 }
@@ -167,10 +169,14 @@ pub struct App {
   /// Keybindings (help) overlay scroll offset, in rows. Reset to 0 every
   /// time the overlay opens; clamped to `help_max_scroll` (#217).
   pub help_scroll: u16,
+  /// Keybindings (help) overlay horizontal scroll offset, in columns (#222).
+  pub help_x_scroll: u16,
   /// Maximum help scroll offset, republished by [`super::ui::draw_help`]
   /// each frame as `content_rows.saturating_sub(viewport_rows)` so the
   /// offset can never scroll past the last line into the void.
   pub help_max_scroll: u16,
+  /// Maximum horizontal help scroll offset, republished by the renderer.
+  pub help_max_x_scroll: u16,
 
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
@@ -350,7 +356,9 @@ impl App {
       branch_types,
       report: None,
       help_scroll: 0,
+      help_x_scroll: 0,
       help_max_scroll: 0,
+      help_max_x_scroll: 0,
       sidebar: SidebarState::new(),
       pending_g: false,
       pending_chord: Vec::new(),
@@ -623,6 +631,13 @@ impl App {
     outcome
   }
 
+  pub fn key_matches_action(&self, key: KeyEvent, action: Action) -> bool {
+    matches!(
+      self.keymap.lookup(&[KeyStroke::from_event(&key)]),
+      ChordResolution::Matched(found) if found == action
+    )
+  }
+
   /// Mirror the new `pending_chord` buffer into the legacy
   /// `pending_g` boolean so pre-#87 tests that read it as a field
   /// stay green. Removed when those tests migrate to
@@ -798,6 +813,7 @@ impl App {
   pub fn enter_help(&mut self) {
     self.view = View::Help;
     self.help_scroll = 0;
+    self.help_x_scroll = 0;
   }
 
   /// Scroll the help overlay down one row, clamped to the renderer-published
@@ -809,6 +825,14 @@ impl App {
   /// Scroll the help overlay up one row, clamped at the top.
   pub fn help_scroll_up(&mut self) {
     self.help_scroll = self.help_scroll.saturating_sub(1);
+  }
+
+  pub fn help_scroll_right(&mut self) {
+    self.help_x_scroll = (self.help_x_scroll + 1).min(self.help_max_x_scroll);
+  }
+
+  pub fn help_scroll_left(&mut self) {
+    self.help_x_scroll = self.help_x_scroll.saturating_sub(1);
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -1708,6 +1732,9 @@ impl App {
   /// (submit shell-out, view transition).
   pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
     use crate::tui::state::link_prompt::LinkPromptStage;
+    if self.key_matches_action(key, Action::FetchGithub) {
+      return LinkPromptKey::Refresh;
+    }
     match (self.link_prompt.stage, key.code) {
       (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
       // ChooseTarget: a vertical selectable list. j/k (and arrows) move the

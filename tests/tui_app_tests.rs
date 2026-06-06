@@ -1236,6 +1236,34 @@ fn open_menu_pick_returns_none_when_no_link() {
 }
 
 #[test]
+fn link_open_modal_lines_include_available_links_and_refresh_button() {
+  use gwm::tui::{link_open_modal_lines, LinkTarget};
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("random-branch", &head, false).unwrap();
+  }
+  repo.set_head("refs/heads/random-branch").unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.random-branch.gwm-issue", "42").unwrap();
+    cfg.set_str("branch.random-branch.gwm-pr", "7").unwrap();
+  }
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let text = link_open_modal_lines(&app, "Open in Browser", Some(LinkTarget::Issue))
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(text.contains("Issue #42"), "Issue summary missing: {text:?}");
+  assert!(text.contains("PR"), "PR summary missing: {text:?}");
+  assert!(text.contains("#7"), "PR number missing: {text:?}");
+  assert!(text.contains("Refresh"), "Refresh action missing: {text:?}");
+}
+
+#[test]
 fn enter_link_prompt_starts_at_choose_target() {
   let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
   app.enter_link_prompt();
@@ -1418,6 +1446,18 @@ fn link_prompt_key_esc_requests_cancel() {
   assert!(matches!(
     app.handle_link_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
     LinkPromptKey::Cancel
+  ));
+}
+
+#[test]
+fn link_prompt_key_fetch_requests_refresh() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE)),
+    LinkPromptKey::Refresh
   ));
 }
 
@@ -3598,6 +3638,30 @@ fn help_scroll_clamps_between_zero_and_max() {
   app.help_scroll = 2;
   app.enter_help();
   assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
+}
+
+#[test]
+fn help_horizontal_scroll_clamps_between_zero_and_max() {
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  assert_eq!(app.help_x_scroll, 0);
+
+  app.help_max_x_scroll = 2;
+  app.help_scroll_right();
+  assert_eq!(app.help_x_scroll, 1);
+  app.help_scroll_right();
+  app.help_scroll_right();
+  assert_eq!(app.help_x_scroll, 2, "scroll-right clamps at the published max");
+
+  app.help_scroll_left();
+  assert_eq!(app.help_x_scroll, 1);
+  app.help_scroll_left();
+  app.help_scroll_left();
+  assert_eq!(app.help_x_scroll, 0, "scroll-left clamps at the left edge");
+
+  app.help_x_scroll = 2;
+  app.enter_help();
+  assert_eq!(app.help_x_scroll, 0, "(re)opening help returns to the left edge");
 }
 
 #[test]
