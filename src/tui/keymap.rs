@@ -108,6 +108,8 @@ define_actions! {
   CycleSidebarLayout => "cycle_sidebar_layout",
   ToggleSidebarPosition => "toggle_sidebar_position",
   FocusSwap         => "focus_swap",
+  FocusWorktrees    => "focus_worktrees",
+  FocusStatus       => "focus_status",
   // Filter
   Filter            => "filter",
   // Lifecycle / mutating
@@ -386,6 +388,8 @@ impl Keymap {
       def(Action::CycleSidebarLayout, &["V"]),
       def(Action::ToggleSidebarPosition, &["H"]),
       def(Action::FocusSwap, &["Tab"]),
+      def(Action::FocusWorktrees, &["1"]),
+      def(Action::FocusStatus, &["2"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),
       def(Action::Create, &["n"]),
@@ -523,6 +527,22 @@ impl Keymap {
   /// rendered table stays stable across runs.
   pub fn list(&self) -> Vec<Binding> {
     self.entries.clone()
+  }
+
+  /// The canonical rendering of the **first** chord bound to `action`,
+  /// or `None` when the action is unbound. Used by UI copy that names a
+  /// key inline (e.g. the sidebar's "press F to fetch status" prompt,
+  /// issue #217) so the hint tracks user overrides under `[tui.keys]`
+  /// instead of hard-coding a default that may have been rebound. A
+  /// multi-chord action returns its first chord in declaration order,
+  /// matching what `gwm tui keys` lists first.
+  pub fn primary_chord(&self, action: Action) -> Option<String> {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .and_then(|b| b.chords.first())
+      .map(|chord| format_chord(chord))
   }
 }
 

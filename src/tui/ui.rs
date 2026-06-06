@@ -10,7 +10,7 @@ use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
   Frame,
 };
 use std::time::{Duration, Instant};
@@ -226,21 +226,25 @@ fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
 /// left-or-right side are decided by the pure
 /// [`SidebarState::resolve_layout`](super::state::sidebar::SidebarState::resolve_layout),
 /// so this function only translates that decision into ratatui splits
-/// (issue #188). The table keeps 60% of the split, the sidebar 40%, in
-/// both orientations.
+/// (issue #188). The table/sidebar ratio is per-axis (issue #217): 55/45
+/// side-by-side, 42/58 stacked — see
+/// [`ResolvedSidebarLayout::split_percentages`](super::state::sidebar::ResolvedSidebarLayout::split_percentages).
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
   use super::state::sidebar::ResolvedSidebarLayout as Resolved;
 
-  // Table 60% / sidebar 40% — shared by both split orientations.
-  let table_pct = Constraint::Percentage(60);
-  let sidebar_pct = Constraint::Percentage(40);
-
-  match app.sidebar.resolve_layout(area.width) {
-    Resolved::Hidden => {
+  let layout = app.sidebar.resolve_layout(area.width);
+  let (table_pct, sidebar_pct) = match layout.split_percentages() {
+    Some((t, s)) => (Constraint::Percentage(t), Constraint::Percentage(s)),
+    None => {
       // Sidebar not rendered → no scrollable surface → no max scroll to track.
       app.sidebar.max_scroll = 0;
       draw_list(f, area, app);
+      return;
     }
+  };
+
+  match layout {
+    Resolved::Hidden => unreachable!("Hidden returns None from split_percentages, handled above"),
     Resolved::SideBySide { sidebar_left } => {
       let split = Layout::default()
         .direction(Direction::Horizontal)
@@ -259,9 +263,9 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       draw_sidebar(f, sidebar_area, app);
     }
     Resolved::Stacked => {
-      // Table on top, sidebar below — the narrow-terminal fallback that
-      // replaces pre-#188 hiding. The left/right position does not apply
-      // to a vertical stack.
+      // Table on top, sidebar below — the default layout (issue #217) and the
+      // narrow-terminal fallback. The left/right position does not apply to a
+      // vertical stack.
       let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([table_pct, sidebar_pct])
@@ -301,6 +305,44 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
     theme.focus
   } else {
     theme.muted
+  }
+}
+
+/// Title for the worktree pane block (issue #217). Carries the `[1]` focus
+/// mnemonic (the pane is focusable with the `1` key) and a `(N)` /
+/// `(visible/total)` counter. `query_empty` switches between the two counter
+/// forms: when no filter is active the full worktree count is shown, otherwise
+/// the visible-over-total ratio so the user sees how much the filter narrowed
+/// the list. Pure + width-free so the copy is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn worktrees_pane_title(query_empty: bool, visible: usize, total: usize) -> String {
+  if query_empty {
+    format!(" [1] Worktrees ({}) ", total)
+  } else {
+    format!(" [1] Worktrees ({}/{}) ", visible, total)
+  }
+}
+
+/// Title for the head section of the status (sidebar) pane (issue #217).
+/// Carries the `[2]` focus mnemonic (focusable with the `2` key), mirroring
+/// [`worktrees_pane_title`]'s `[1]`. The sidebar is a stack of sub-sections;
+/// this labels the first one so the pane reads as `[2] Status` without
+/// nesting an extra bordered frame.
+pub fn status_pane_title() -> &'static str {
+  " [2] Status "
+}
+
+/// Bottom-right `selected of visible` counter for a pane footer (issue
+/// #217), lazygit-style. `selected` is the 1-based cursor position;
+/// `visible` is the count of rows currently on screen. Returns `None` when
+/// the pane is empty so the footer disappears instead of rendering ` 0 of 0 `
+/// — mirroring the Recent Commits section, which also drops its counter when
+/// there is nothing to scroll.
+pub fn pane_counter(selected: usize, visible: usize) -> Option<String> {
+  if visible == 0 {
+    None
+  } else {
+    Some(format!(" {} of {} ", selected, visible))
   }
 }
 
@@ -370,21 +412,26 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
 
-  let title = if app.filter.query().is_empty() {
-    format!(" worktrees ({}) ", app.worktrees.len())
-  } else {
-    format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
-  };
+  let title = worktrees_pane_title(app.filter.query().is_empty(), visible.len(), app.worktrees.len());
+
+  // Bottom-right `selected of visible` counter (issue #217), mirroring the
+  // Recent Commits footer. `list_state.selected()` is 0-based; render it
+  // 1-based. Blank when nothing is visible so the footer disappears.
+  let selected_1based = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
+  let counter = pane_counter(selected_1based, visible.len());
+
+  let mut block = Block::default()
+    .borders(Borders::ALL)
+    .title(title)
+    .border_style(Style::default().fg(border_color));
+  if let Some(counter) = counter {
+    block = block.title_bottom(Line::from(counter).right_aligned());
+  }
 
   let table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
-    .block(
-      Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(border_color)),
-    )
+    .block(block)
     .row_highlight_style(Style::default().bg(theme.selection_bg).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
@@ -473,7 +520,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     .constraints(constraints)
     .split(area);
 
-  render_section(f, chunks[0], " Worktree ", sections.worktree, border_color, 0, None);
+  render_section(
+    f,
+    chunks[0],
+    status_pane_title(),
+    sections.worktree,
+    border_color,
+    0,
+    None,
+  );
   render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0, None);
   if !sections.working_tree.is_empty() {
     render_section(
@@ -1194,45 +1249,152 @@ fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Colo
   (label, color)
 }
 
-/// `(key, label)` hints advertised in the full TUI footer, in display order.
-/// Picker mode hides the mutating actions (n/d/b/F) — they're inert in the
-/// picker event loop, so advertising them would be a lie.
-const FOOTER_HINTS: &[(&str, &str)] = &[
-  ("n", "new"),
-  ("d", "del"),
-  ("b", "boot"),
-  ("o", "open"),
-  ("y", "yank"),
-  ("l", "git"),
-  ("R", "review"),
-  ("v", "sidebar"),
-  ("Tab", "focus"),
-  ("/", "filter"),
-  ("gg/G", "top/bot"),
-  ("j/k", "nav"),
-  ("f", "refresh"),
-  ("F", "gh"),
-  ("?", "help"),
-  ("q", "quit"),
-];
+/// One statusbar hint specification (issue #217). Either a rebindable
+/// keymap [`Action`](super::keymap::Action) whose key is resolved live from
+/// the keymap, or a fixed literal for keys that are hard-coded contextual
+/// escape hatches (Esc / Enter / digits inside a modal) and so cannot be
+/// rebound.
+#[derive(Debug, Clone, Copy)]
+enum Hint {
+  /// Resolve the displayed key from the keymap (honours `[tui.keys]`).
+  Key(super::keymap::Action, &'static str),
+  /// A fixed key + label for a non-rebindable contextual keystroke.
+  Lit(&'static str, &'static str),
+}
 
-/// Picker-mode footer hints — `enter`/`esc` select/cancel instead of the
-/// mutating actions, matching the picker event loop.
-const PICKER_FOOTER_HINTS: &[(&str, &str)] = &[
-  ("enter", "select"),
-  ("esc", "cancel"),
-  ("o", "open"),
-  ("y", "yank"),
-  ("l", "git"),
-  ("v", "sidebar"),
-  ("Tab", "focus"),
-  ("/", "filter"),
-  ("gg/G", "top/bot"),
-  ("j/k", "nav"),
-  ("f", "refresh"),
-  ("?", "help"),
-  ("q", "quit"),
-];
+/// Which pane / mode / overlay the TUI is in — the single source the help
+/// overlay subtitle and the contextual statusbar both read (issue #217).
+/// Keeping them on one enum means the discoverable hints (`?`) and the
+/// always-on statusbar chips can never advertise a different verb set for
+/// the same context. An open modal takes priority over the pane focus (see
+/// [`App::hint_context`](super::app::App::hint_context)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintContext {
+  /// Worktree table focused — the default list-view context.
+  Worktrees,
+  /// Status (sidebar) pane focused — `j` / `k` scroll the preview.
+  Status,
+  /// `gwm switch` picker — mutating verbs are inert, Enter/Esc pick/cancel.
+  Picker,
+  /// Create-worktree form modal.
+  Create,
+  /// Confirm-delete modal.
+  Confirm,
+  /// Open issue/PR URL menu.
+  OpenMenu,
+  /// Two-stage issue/PR link prompt.
+  LinkPrompt,
+  /// Command palette overlay.
+  CommandPalette,
+  /// Bootstrap report overlay.
+  Report,
+  /// Keybindings help overlay.
+  Help,
+}
+
+impl HintContext {
+  /// Short label rendered into the statusbar context chip and the help
+  /// overlay subtitle.
+  pub fn label(self) -> &'static str {
+    match self {
+      HintContext::Worktrees => "worktrees",
+      HintContext::Status => "status",
+      HintContext::Picker => "switch",
+      HintContext::Create => "create",
+      HintContext::Confirm => "confirm",
+      HintContext::OpenMenu => "open",
+      HintContext::LinkPrompt => "link",
+      HintContext::CommandPalette => "command",
+      HintContext::Report => "report",
+      HintContext::Help => "help",
+    }
+  }
+
+  /// Static hint specs for this context. List-view contexts use rebindable
+  /// [`Hint::Key`] verbs (resolved live by [`Self::resolve`]); modal /
+  /// overlay contexts use [`Hint::Lit`] because their keys are hard-coded
+  /// contextual escape hatches (Esc / Enter / digits), not keymap actions.
+  fn hint_specs(self) -> &'static [Hint] {
+    use super::keymap::Action::*;
+    match self {
+      HintContext::Worktrees => &[
+        Hint::Key(Create, "new"),
+        Hint::Key(DeleteConfirm, "del"),
+        Hint::Key(Bootstrap, "boot"),
+        Hint::Key(Open, "open"),
+        Hint::Key(Yank, "yank"),
+        Hint::Key(GitTui, "git"),
+        Hint::Key(Review, "review"),
+        Hint::Key(FocusStatus, "status"),
+        Hint::Key(Filter, "filter"),
+        Hint::Key(Help, "help"),
+        Hint::Key(Quit, "quit"),
+      ],
+      HintContext::Status => &[
+        Hint::Key(Down, "scroll"),
+        Hint::Key(ToggleSidebarMode, "mode"),
+        Hint::Key(CycleSidebarLayout, "layout"),
+        Hint::Key(FetchGithub, "fetch"),
+        Hint::Key(FocusWorktrees, "worktrees"),
+        Hint::Key(Filter, "filter"),
+        Hint::Key(Help, "help"),
+        Hint::Key(Quit, "quit"),
+      ],
+      HintContext::Picker => &[
+        Hint::Lit("Enter", "select"),
+        Hint::Lit("Esc", "cancel"),
+        Hint::Key(Open, "open"),
+        Hint::Key(Yank, "yank"),
+        Hint::Key(GitTui, "git"),
+        Hint::Key(Filter, "filter"),
+        Hint::Key(Help, "help"),
+        Hint::Key(Quit, "quit"),
+      ],
+      HintContext::Create => &[
+        Hint::Lit("Tab", "field"),
+        Hint::Lit("↑/↓", "type"),
+        Hint::Lit("Enter", "submit"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::Confirm => &[
+        Hint::Lit("y", "confirm"),
+        Hint::Lit("←/→", "move"),
+        Hint::Lit("Enter", "activate"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::OpenMenu => &[Hint::Lit("i", "issue"), Hint::Lit("p", "pr"), Hint::Lit("Esc", "close")],
+      HintContext::LinkPrompt => &[
+        Hint::Lit("j/k", "move"),
+        Hint::Lit("i/p", "kind"),
+        Hint::Lit("Enter", "link"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::CommandPalette => &[
+        Hint::Lit("↑/↓", "move"),
+        Hint::Lit("Enter", "run"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::Report => &[Hint::Lit("Enter/Esc", "close")],
+      HintContext::Help => &[Hint::Lit("Esc/q", "close")],
+    }
+  }
+
+  /// Resolve this context's hints to `(key, label)` pairs for the statusbar,
+  /// reading the live keymap so rebindable verbs show the user's actual
+  /// binding (issue #217 review) — the same `primary_chord` source the help
+  /// overlay and the Issue/PR prompt use. An unbound action is dropped from
+  /// the row rather than advertised with a phantom key.
+  pub fn resolve(self, keymap: &super::keymap::Keymap) -> Vec<(String, String)> {
+    self
+      .hint_specs()
+      .iter()
+      .filter_map(|h| match h {
+        Hint::Key(action, label) => keymap.primary_chord(*action).map(|k| (k, label.to_string())),
+        Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
+      })
+      .collect()
+  }
+}
 
 /// Build the single-line statusline (issue #180).
 ///
@@ -1326,14 +1488,136 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   Line::from(spans)
 }
 
+/// Contextual statusbar (issue #217) — a superset of [`footer_line`] that
+/// leads with a context chip and an optional loading spinner. Layout,
+/// left-to-right:
+///
+/// ```text
+///  worktrees  ⠋  n  new  d  del  …                       [<status>]
+/// ```
+///
+/// Priority when space is tight, from most to least protected: the status
+/// log (right, clipped only if it alone overflows), the context chip and
+/// spinner (left, the load-bearing "where am I / am I busy" signals), then
+/// the hints (truncated with `…`). Pure + width-driven so the contract is
+/// pinned by `tests/tui_footer_tests.rs`; `footer_line` is kept intact for
+/// its own callers and tests.
+pub fn status_line(
+  context: &str,
+  hints: &[(&str, &str)],
+  status: &str,
+  spinner: Option<&str>,
+  width: usize,
+  theme: &Theme,
+) -> Line<'static> {
+  let chip_style = Style::default()
+    .fg(theme.accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let label_style = Style::default().fg(theme.muted);
+  let status_style = Style::default().fg(theme.dirty);
+  let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+
+  if width == 0 {
+    return Line::default();
+  }
+
+  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+  let status_text = format!("[{}]", status);
+  let status_w = status_text.chars().count();
+
+  // Priority floor: if even the status cannot fit, show a clipped status
+  // alone — never a chip or hint at the log's expense.
+  if width <= status_w {
+    return Line::from(Span::styled(trunc(&status_text, width), status_style));
+  }
+
+  let avail = width - status_w; // columns to the left of the right-pinned status
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut used = 0usize;
+
+  // Context chip — load-bearing, kept whenever it fits at all.
+  let ctx_chip = format!(" {} ", context);
+  let ctx_w = ctx_chip.chars().count();
+  if ctx_w <= avail {
+    spans.push(Span::styled(ctx_chip, chip_style));
+    used += ctx_w;
+  }
+
+  // Loading spinner — optional, rendered right after the chip when present
+  // and there is room.
+  if let Some(glyph) = spinner {
+    let padded = format!(" {} ", glyph);
+    let gw = padded.chars().count();
+    if used + gw <= avail {
+      spans.push(Span::styled(padded, spinner_style));
+      used += gw;
+    }
+  }
+
+  // Hint badges fill whatever is left, minus one column for the `…` marker.
+  let hint_budget = avail.saturating_sub(used).saturating_sub(1);
+  let mut truncated = false;
+  let mut hint_used = 0usize;
+  for (i, (key, label)) in hints.iter().enumerate() {
+    // A separating space before every badge except the very first one when
+    // there is no left cluster.
+    let sep = usize::from(i > 0 || used > 0);
+    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    if hint_used + sep + badge_w > hint_budget {
+      truncated = true;
+      break;
+    }
+    if sep == 1 {
+      spans.push(Span::raw(" "));
+      hint_used += 1;
+    }
+    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled(format!(" {}", label), label_style));
+    hint_used += badge_w;
+  }
+  used += hint_used;
+  if truncated {
+    if used > 0 {
+      spans.push(Span::raw(" "));
+      used += 1;
+    }
+    spans.push(Span::styled("…", label_style));
+    used += 1;
+  }
+
+  let pad = width.saturating_sub(used + status_w);
+  if pad > 0 {
+    spans.push(Span::raw(" ".repeat(pad)));
+  }
+  spans.push(Span::styled(status_text, status_style));
+  Line::from(spans)
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  let hints = if app.picker_mode {
-    PICKER_FOOTER_HINTS
+  let ctx = app.hint_context();
+  // Spinner shows only while a GitHub fetch is inflight (issue #217). The
+  // frame advances at the poll cadence once the fetch runs off-thread
+  // (#217 async path); with a blocking fetch the Loading state is too brief
+  // to paint, which is exactly why the async path matters.
+  let spinner = if app.is_github_loading() {
+    Some(app.spinner.glyph(DOT_FRAMES))
   } else {
-    FOOTER_HINTS
+    None
   };
-  let line = footer_line(hints, &app.status, area.width as usize, &app.theme);
-  // No `Wrap`: the footer is a single hard-clipped row (issue #180).
+  // Resolve the rebindable hint keys against the live keymap (issue #217
+  // review) so a user override shows through, then borrow into the slice
+  // `status_line` expects.
+  let resolved = ctx.resolve(&app.keymap);
+  let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  let line = status_line(
+    ctx.label(),
+    &hints,
+    &app.status,
+    spinner,
+    area.width as usize,
+    &app.theme,
+  );
+  // No `Wrap`: the statusbar is a single hard-clipped row (issue #180).
   f.render_widget(Paragraph::new(line), area);
 }
 
@@ -1349,6 +1633,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 pub enum HelpRow {
   /// Overlay title — always the first row.
   Title(String),
+  /// Context subtitle under the title (`worktrees` / `status` / `switch`),
+  /// issue #217. Reflects the focused pane / mode when `?` was opened.
+  Subtitle(String),
   /// Section header (`global`, `list view`, `issue / PR (#67)`, …).
   Section(String),
   /// Blank spacer row.
@@ -1371,8 +1658,15 @@ pub enum HelpRow {
 ///
 /// Exposed as `pub` (and re-exported through `tui::help_rows`) so the
 /// renderer and the state-machine tests share one source of truth.
-pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> {
+///
+/// `ctx` (issue #217) drives the title's context subtitle and whether the
+/// picker-only / non-picker sections render. `HintContext::Picker` is the
+/// `gwm switch` overlay; `Worktrees` / `Status` are the two list-view panes
+/// (same body, the subtitle just names the focused pane).
+pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   use super::keymap::Action;
+
+  let picker_mode = matches!(ctx, HintContext::Picker);
 
   // Snapshot the keymap once. The pre-#87-review version called
   // `km.list()` inside `keys_for`, which cloned the entire bindings
@@ -1413,20 +1707,15 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
     }
   };
 
-  let title_text = if picker_mode {
-    "gwm switch — keys"
-  } else {
-    "gwm — keys"
-  };
-
   let mut rows: Vec<HelpRow> = vec![
-    HelpRow::Title(title_text.to_string()),
+    HelpRow::Title("Keybindings".to_string()),
+    HelpRow::Subtitle(ctx.label().to_string()),
     HelpRow::Blank,
-    HelpRow::Section("global".to_string()),
+    HelpRow::Section("Global".to_string()),
     entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
     fixed("Ctrl-C", "force quit (hard-coded escape hatch)"),
     HelpRow::Blank,
-    HelpRow::Section("list view".to_string()),
+    HelpRow::Section("List View".to_string()),
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
     entry(Action::Top, "jump to first worktree"),
@@ -1456,6 +1745,8 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
     "toggle sidebar position (left / right)",
   ));
   rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
+  rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
+  rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
@@ -1467,9 +1758,12 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
-    rows.push(HelpRow::Section("issue / PR (#67)".to_string()));
+    rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
     rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
-    rows.push(entry(Action::LinkPrompt, "link prompt — i / p then digits"));
+    rows.push(entry(
+      Action::LinkPrompt,
+      "link prompt — j/k + enter, or i/p, then digits",
+    ));
   }
   rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
@@ -1478,13 +1772,13 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
   if !picker_mode {
     rows.extend([
       HelpRow::Blank,
-      HelpRow::Section("create form".to_string()),
-      fixed("↑/↓", "change branch type"),
+      HelpRow::Section("Create Form".to_string()),
+      fixed("←/→ ↑/↓", "change branch type"),
       fixed("Tab/Shift-Tab", "next/prev field"),
       fixed("Enter (desc)", "submit"),
       fixed("Esc", "cancel"),
       HelpRow::Blank,
-      HelpRow::Section("confirm delete".to_string()),
+      HelpRow::Section("Confirm Delete".to_string()),
       fixed("←/→ Tab", "move focus between [ Confirm ] / [ Cancel ]"),
       fixed("Enter", "activate the focused button (defaults to Cancel)"),
       fixed("y", "confirm"),
@@ -1500,10 +1794,18 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
 /// `  {keys:<13} {label}`, sections / title as their bare text, blanks
 /// as empty strings. The width 13 is wide enough for `Ctrl+Shift+Tab`.
 pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
-  help_rows(km, picker_mode)
+  // The bool signature is kept for `gwm tui keys` and the chord tests; map
+  // it to the context enum (issue #217). The list-view help body is the same
+  // for either pane, so `Worktrees` stands in for the non-picker case.
+  let ctx = if picker_mode {
+    HintContext::Picker
+  } else {
+    HintContext::Worktrees
+  };
+  help_rows(km, ctx)
     .into_iter()
     .map(|row| match row {
-      HelpRow::Title(s) | HelpRow::Section(s) => s,
+      HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
       HelpRow::Blank => String::new(),
       HelpRow::Entry { keys, label } => {
         let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
@@ -1528,9 +1830,12 @@ pub fn badge_group_width(keys: &str) -> usize {
   badges + chords.len().saturating_sub(1)
 }
 
-fn draw_help(f: &mut Frame, app: &App) {
+fn draw_help(f: &mut Frame, app: &mut App) {
   let area = centered(60, 60, f.area());
-  let rows = help_rows(&app.keymap, app.picker_mode);
+  // Use the underlying pane context, not the view-priority `hint_context`
+  // (which would be `Help` while this overlay is up) — `?` documents the
+  // pane you opened it from, and the picker gating depends on it.
+  let rows = help_rows(&app.keymap, app.pane_hint_context());
 
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
@@ -1560,10 +1865,23 @@ fn draw_help(f: &mut Frame, app: &App) {
     .max()
     .unwrap_or(0);
 
+  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
+  // italic, so the context name is clearly a different colour from both the
+  // bold title and the muted key labels (issue #217 follow-up).
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
+
   let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
   for row in rows {
     match row {
-      HelpRow::Title(t) | HelpRow::Section(t) => {
+      // Title + subtitle are centred (issue #217); section headers stay
+      // left-aligned so they anchor their groups lazygit-style.
+      HelpRow::Title(t) => {
+        lines.push(Line::from(Span::styled(t, heading_style)).centered());
+      }
+      HelpRow::Subtitle(t) => {
+        lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
+      }
+      HelpRow::Section(t) => {
         lines.push(Line::from(Span::styled(t, heading_style)));
       }
       HelpRow::Blank => lines.push(Line::from(String::new())),
@@ -1589,27 +1907,25 @@ fn draw_help(f: &mut Frame, app: &App) {
     }
   }
 
+  // Publish the scroll bound against the actual viewport so the Keybindings
+  // overlay can scroll when it outgrows the modal (#217). The renderer is
+  // the only place that knows both the content length and the inner height,
+  // so it clamps the offset here too.
+  let block = overlay_block(accent);
+  let viewport = block.inner(area).height as usize;
+  app.help_max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+  let scroll = app.help_scroll;
+
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block("help", accent)), area);
+  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
-  // Three bordered fields (3 rows each) + a 3-line preview, sized to fit
-  // with the rounded frame instead of a fixed 60%-tall box (#187).
-  let area = centered_h(70, 15, f.area());
-  f.render_widget(Clear, area);
-  f.render_widget(overlay_block("new worktree", app.theme.clean), area);
-
-  let inner = Layout::default()
-    .direction(Direction::Vertical)
-    .margin(1)
-    .constraints([
-      Constraint::Length(3),
-      Constraint::Length(3),
-      Constraint::Length(3),
-      Constraint::Min(0),
-    ])
-    .split(area);
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let clean = app.theme.clean;
+  let surface = app.theme.selection_bg;
 
   let (type_str, type_desc) = app
     .branch_types
@@ -1617,70 +1933,196 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let focus_color = app.theme.dirty;
-  let idle_color = app.theme.muted;
-  f.render_widget(
-    field_input(
-      "type (↑/↓)",
-      &format!("{} — {}", type_str, type_desc),
-      app.create_form.field == Field::Type,
-      focus_color,
-      idle_color,
-    ),
-    inner[0],
+  // The modal is a single Paragraph of per-line-aligned rows (the title /
+  // buttons / hint centre themselves, the fields stay left) — no manual
+  // Layout split, the rounded frame's `Padding` owns the breathing room
+  // (issue #217). Height is the fixed row count plus the border + padding
+  // rows, so the box hugs its content; the width is capped so the input
+  // surfaces don't span a wide terminal.
+  const ROWS: u16 = 13; // title(2) + type + gap + 2 preview + gap + issue + gap + desc + gap + buttons + hint
+  let height = ROWS + 2 /* border */ + 2 /* vertical padding */;
+  let area = centered_box(70, 72, height, f.area());
+  let block = overlay_block(clean);
+  let inner_w = block.inner(area).width as usize;
+
+  // Width of the background-filled value field: the inner width minus the
+  // `  label  ` gutter (2 indent + label column + 2 gap).
+  let label_w = 5usize;
+  let gutter = 2 + label_w + 2;
+  let value_w = inner_w.saturating_sub(gutter);
+
+  let label = |s: &str| format!("{:<label_w$}", s);
+  let branch = ellipsize_middle(
+    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Branch : ".len()),
   );
-  f.render_widget(
-    field_input(
-      "issue (digits)",
-      &app.create_form.issue,
-      app.create_form.field == Field::Issue,
-      focus_color,
-      idle_color,
-    ),
-    inner[1],
-  );
-  f.render_widget(
-    field_input(
-      "description (kebab)",
-      &app.create_form.desc,
-      app.create_form.field == Field::Desc,
-      focus_color,
-      idle_color,
-    ),
-    inner[2],
+  let dirname = ellipsize_middle(
+    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Dir    : ".len()),
   );
 
-  // Preview line
-  let branch = format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc);
-  let dirname = format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc);
-  let preview = vec![
-    Line::from(Span::styled("preview", Style::default().fg(app.theme.muted))),
-    Line::from(vec![
-      Span::raw("  branch : "),
-      Span::styled(branch, Style::default().fg(app.theme.branch)),
-    ]),
-    Line::from(vec![
-      Span::raw("  dir    : "),
-      Span::styled(dirname, Style::default().fg(app.theme.dirty)),
-    ]),
-  ];
-  f.render_widget(Paragraph::new(preview), inner[3]);
+  let mut lines = overlay_title_lines("New Worktree", clean);
+  // Type selector first, then the live preview, then the editable fields —
+  // the preview sits above the inputs so the resulting names stay in view
+  // while typing (issue #217 follow-up).
+  lines.push(type_selector_line(
+    &label("Type"),
+    type_str,
+    type_desc,
+    app.create_form.field == Field::Type,
+    accent,
+    muted,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(vec![
+    Span::raw("  Branch : "),
+    Span::styled(branch, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(vec![
+    Span::raw("  Dir    : "),
+    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Issue"),
+    &app.create_form.issue,
+    app.create_form.field == Field::Issue,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Desc"),
+    &app.create_form.desc,
+    app.create_form.field == Field::Desc,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(create_buttons_line(accent, muted).centered());
+  lines.push(
+    Line::from(Span::styled(
+      "Tab: field · ←/→: type · Enter: create · Esc: cancel",
+      Style::default().fg(muted),
+    ))
+    .centered(),
+  );
+
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn field_input(label: &str, value: &str, focused: bool, focus_color: Color, idle_color: Color) -> Paragraph<'static> {
-  let border_style = if focused {
-    Style::default().fg(focus_color)
+/// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).
+/// Mirrors [`confirm_buttons_line`]'s flat coloured chips, but — the create
+/// action being non-destructive — primes `Create` as the reversed-accent
+/// chip rather than defaulting focus to Cancel. Pure so the chip contract
+/// is pinned by `tests/tui_ui_helpers_tests.rs`.
+pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  let primary = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
+  Line::from(vec![
+    Span::styled(" Create ", primary),
+    Span::raw("   "),
+    Span::styled(" Cancel ", idle),
+  ])
+}
+
+/// A horizontal `‹ name ›` branch-type selector row for the create overlay
+/// (issue #217 — replaces the bordered up/down box). `label` leads the row
+/// muted; the arrows + selected name read in the accent when focused, and
+/// the type's description trails muted. Pure for
+/// `tests/tui_ui_helpers_tests.rs`.
+pub fn type_selector_line(
+  label: &str,
+  name: &str,
+  desc: &str,
+  focused: bool,
+  accent: Color,
+  muted: Color,
+) -> Line<'static> {
+  let arrow_style = if focused {
+    Style::default().fg(accent).add_modifier(Modifier::BOLD)
   } else {
-    Style::default().fg(idle_color)
+    Style::default().fg(muted)
   };
-  let title = format!(" {} ", label);
-  Paragraph::new(value.to_string()).block(
-    Block::default()
-      .borders(Borders::ALL)
-      .border_type(BorderType::Rounded)
-      .title(title)
-      .border_style(border_style),
-  )
+  // Focused, the selected value reads as a reversed-accent chip (the same
+  // badge style as the buttons) so it stands out as an editable control;
+  // idle it is plain white text between muted arrows.
+  let name_style = if focused {
+    Style::default()
+      .fg(accent)
+      .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+  } else {
+    Style::default().fg(Color::White)
+  };
+  Line::from(vec![
+    Span::raw("  "),
+    Span::styled(label.to_string(), Style::default().fg(muted)),
+    Span::raw("  "),
+    Span::styled("‹ ", arrow_style),
+    Span::styled(format!(" {name} "), name_style),
+    Span::styled(" ›", arrow_style),
+    Span::raw("  "),
+    Span::styled(desc.to_string(), Style::default().fg(muted)),
+  ])
+}
+
+/// A single-row labelled input with a background surface for the create
+/// overlay (issue #217 — replaces the 3-row bordered field). `label` leads
+/// muted; the value sits in a `value_width`-wide background-filled field so
+/// it reads as one input row. The focused field brightens to the accent
+/// background and shows a `_` cursor. Pure for
+/// `tests/tui_ui_helpers_tests.rs`.
+pub fn field_input_line(
+  label: &str,
+  value: &str,
+  focused: bool,
+  value_width: usize,
+  accent: Color,
+  muted: Color,
+  surface: Color,
+) -> Line<'static> {
+  let cursor = if focused { "_" } else { "" };
+  let mut field = format!(" {value}{cursor}");
+  let len = field.chars().count();
+  if len < value_width {
+    field.push_str(&" ".repeat(value_width - len));
+  }
+  let field_style = if focused {
+    Style::default().fg(Color::Black).bg(accent)
+  } else {
+    Style::default().fg(Color::White).bg(surface)
+  };
+  Line::from(vec![
+    Span::raw("  "),
+    Span::styled(label.to_string(), Style::default().fg(muted)),
+    Span::raw("  "),
+    Span::styled(field, field_style),
+  ])
+}
+
+/// A single selectable row of the link prompt's `ChooseTarget` picker
+/// (issue #217): a `‹key›  Label` line whose highlighted variant reads in
+/// the accent (bold) with a `›` marker, and whose idle variant reads
+/// muted. `key` is the direct-pick shortcut (`i` / `p`). Pure so the
+/// highlight contract is pinned by `tests/tui_ui_helpers_tests.rs`.
+pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, muted: Color) -> Line<'static> {
+  let (marker, style) = if selected {
+    ("› ", Style::default().fg(accent).add_modifier(Modifier::BOLD))
+  } else {
+    ("  ", Style::default().fg(muted))
+  };
+  Line::from(vec![
+    Span::styled(marker, style),
+    Span::styled(format!("{key}  "), style),
+    Span::styled(label.to_string(), style),
+  ])
 }
 
 fn draw_confirm(f: &mut Frame, app: &App) {
@@ -1690,26 +2132,24 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // instead of the pre-#187 hard-coded `Red`.
   let danger = app.theme.prunable;
 
-  let block = overlay_block("confirm delete", danger);
+  let block = overlay_block(danger);
 
   let Some(w) = app.selected() else {
-    let area = centered_h(40, 5, f.area());
+    let mut lines = overlay_title_lines("Confirm Delete", danger);
+    lines.push(Line::from("nothing selected").centered());
+    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_h(40, height, f.area());
     f.render_widget(Clear, area);
-    f.render_widget(
-      Paragraph::new("nothing selected")
-        .block(block)
-        .alignment(Alignment::Center),
-      area,
-    );
+    f.render_widget(Paragraph::new(lines).block(block), area);
     return;
   };
 
   // Width first (a fixed % of the terminal) so a long path / name can be
   // middle-ellipsized to one line instead of wrapping mid-path (#187
-  // review). `text_w` is the room inside the 1-col margins.
+  // review). `text_w` is the room inside the border + padding.
   let term = f.area();
   let outer_w = term.width.saturating_mul(62) / 100;
-  let text_w = outer_w.saturating_sub(2) as usize;
+  let text_w = outer_w.saturating_sub(6) as usize;
 
   let name = ellipsize_middle(&w.name, text_w.saturating_sub("delete ".len()));
   let path = ellipsize_middle(
@@ -1717,14 +2157,16 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     text_w.saturating_sub("at ".len()),
   );
 
-  // --- description (centred) ---
-  let mut content: Vec<Line> = vec![
-    Line::from(vec![
-      Span::raw("delete "),
-      Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
-    ]),
-    Line::from(Span::styled(format!("at {path}"), Style::default().fg(muted))),
-  ];
+  // --- title + description (centred) ---
+  let mut content: Vec<Line> = overlay_title_lines("Confirm Delete", danger);
+  content.push(Line::from(vec![
+    Span::raw("delete "),
+    Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
+  ]));
+  content.push(Line::from(Span::styled(
+    format!("at {path}"),
+    Style::default().fg(muted),
+  )));
   if let Some(b) = &w.branch {
     let branch = ellipsize_middle(b, text_w.saturating_sub("branch: ".len()));
     content.push(Line::from(vec![
@@ -1738,27 +2180,28 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     app.delete_branch_on_remove
   )));
 
-  // Size the modal to its content: the description rows plus the three
-  // fixed rows (loader / buttons / hint) and the rounded border — no
-  // more fixed 44%-tall box that dwarfed its few lines (#187 review).
-  let height = content.len() as u16 + 3 + 2;
+  // Size the modal to its content: the title + description rows plus the
+  // three fixed rows (loader / buttons / hint), the rounded border and the
+  // shared interior padding — no more fixed 44%-tall box that dwarfed its
+  // few lines (#187 review).
+  let height = content.len() as u16 + 3 + 2 /* border */ + 2 /* padding */;
   let area = centered_h(62, height, term);
   f.render_widget(Clear, area);
 
-  // Four stacked regions inside the border: the description, a
-  // loader/countdown row, the button row, and a muted key hint. The
+  // Four stacked regions inside the padded frame: the title + description,
+  // a loader/countdown row, the button row, and a muted key hint. The
   // loader row stays reserved (Length 1) even when idle so the buttons
-  // never jump as the countdown arms.
+  // never jump as the countdown arms. Split `block.inner` so the shared
+  // padding owns the breathing room (issue #217).
   let inner = Layout::default()
     .direction(Direction::Vertical)
-    .margin(1)
     .constraints([
-      Constraint::Min(1),    // description
+      Constraint::Min(1),    // title + description
       Constraint::Length(1), // loader / countdown
       Constraint::Length(1), // buttons
       Constraint::Length(1), // hint
     ])
-    .split(area);
+    .split(block.inner(area));
   f.render_widget(block, area);
 
   f.render_widget(
@@ -1813,12 +2256,14 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   );
 }
 
-/// The `[ Confirm ] [ Cancel ]` button row (#187). The focused button
-/// gets the reversed-bold accent chip — the same badge style as the
-/// bottom statusline and the help overlay — while the idle button reads
-/// muted-bold. Focus defaults to Cancel, so the destructive button is
-/// never the one a stray `Enter` lands on.
-fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
+/// The ` Confirm ` ` Cancel ` button row (#187, restyled in #217). The
+/// buttons are flat coloured chips — no square brackets: the focused one
+/// gets the reversed-bold accent chip (the same badge style as the bottom
+/// statusline and the help overlay), the idle one reads muted-bold. Focus
+/// defaults to Cancel, so the destructive button is never the one a stray
+/// `Enter` lands on. Pure so the chip contract is pinned by
+/// `tests/tui_ui_helpers_tests.rs`.
+pub fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
   let focused = Style::default()
     .fg(accent)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -1828,9 +2273,9 @@ fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Li
     ConfirmButton::Cancel => (idle, focused),
   };
   Line::from(vec![
-    Span::styled(" [ Confirm ] ", confirm_style),
+    Span::styled(" Confirm ", confirm_style),
     Span::raw("   "),
-    Span::styled(" [ Cancel ] ", cancel_style),
+    Span::styled(" Cancel ", cancel_style),
   ])
 }
 
@@ -1890,7 +2335,7 @@ pub fn filled_cells_for_progress(progress: f64, cells: usize) -> usize {
 }
 
 fn draw_report(f: &mut Frame, app: &App) {
-  let mut lines: Vec<Line> = Vec::new();
+  let mut lines: Vec<Line> = overlay_title_lines("Bootstrap Report", app.theme.accent);
   if let Some(report) = &app.report {
     for step in &report.steps {
       let sigil = step.status.sigil();
@@ -1920,15 +2365,16 @@ fn draw_report(f: &mut Frame, app: &App) {
     Style::default().fg(app.theme.muted),
   )));
 
-  // Size to the report length (+ border), capped at 80% of the screen so
-  // a long report stays on-screen rather than a fixed 80%-tall box (#187).
+  // Size to the report length (+ border + padding), capped at 80% of the
+  // screen so a long report stays on-screen rather than a fixed 80%-tall
+  // box (#187).
   let term = f.area();
-  let height = (lines.len() as u16 + 2).min(term.height.saturating_mul(80) / 100);
+  let height = (lines.len() as u16 + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
   let area = centered_h(80, height, term);
   f.render_widget(Clear, area);
   f.render_widget(
     Paragraph::new(lines)
-      .block(overlay_block("bootstrap report", app.theme.accent))
+      .block(overlay_block(app.theme.accent))
       .wrap(Wrap { trim: false }),
     area,
   );
@@ -1965,19 +2411,49 @@ fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
   Rect { x, y, width, height }
 }
 
-/// A modal overlay frame: a rounded border plus a bold title, both in
-/// `color`. Shared by every overlay (#187) so the confirm / help / create
-/// / report / open / link / palette modals read consistently instead of
-/// each hard-coding its own border kind and colour.
-fn overlay_block(title: &str, color: Color) -> Block<'static> {
+/// Like [`centered_h`] but also caps the width at `max_width` columns so a
+/// form modal does not stretch edge-to-edge on a wide terminal (issue #217
+/// — the create overlay's input surfaces spanned the whole screen).
+fn centered_box(width_pct: u16, max_width: u16, height: u16, area: Rect) -> Rect {
+  let height = height.min(area.height);
+  let width = (area.width.saturating_mul(width_pct) / 100)
+    .min(max_width)
+    .min(area.width);
+  let x = area.x + area.width.saturating_sub(width) / 2;
+  let y = area.y + area.height.saturating_sub(height) / 2;
+  Rect { x, y, width, height }
+}
+
+/// A modal overlay frame: a rounded border in `color` with interior
+/// padding on every side. Shared by every overlay (#187) so the confirm /
+/// help / create / report / open / link / palette modals read consistently.
+/// The title is *not* embedded in the border any more (issue #217): it
+/// lives inside the frame as its own centred line via [`overlay_title_lines`]
+/// so the border stays clean and no content hugs the edge. The padding
+/// (2 cols horizontal, 1 row vertical) is the breathing room callers must
+/// account for when sizing — inner height shrinks by 2 rows, inner width by
+/// 4 cols, on top of the 2-cell border.
+fn overlay_block(color: Color) -> Block<'static> {
   Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
-    .title(Span::styled(
-      format!(" {title} "),
+    .padding(Padding::symmetric(2, 1))
+    .border_style(Style::default().fg(color))
+}
+
+/// The detached modal title: a centred bold line in `color` followed by a
+/// blank spacer row, prepended to a modal's content so the title sits
+/// inside the rounded frame rather than embedded in the top border
+/// (issue #217). Returns two lines, so callers sizing to content add 2.
+fn overlay_title_lines(title: &str, color: Color) -> Vec<Line<'static>> {
+  vec![
+    Line::from(Span::styled(
+      title.to_string(),
       Style::default().fg(color).add_modifier(Modifier::BOLD),
     ))
-    .border_style(Style::default().fg(color))
+    .centered(),
+    Line::from(String::new()),
+  ]
 }
 
 /// Middle-ellipsize `s` to at most `max` display columns, keeping the
@@ -2016,61 +2492,76 @@ fn trunc(s: &str, max: usize) -> String {
 
 fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let lines = vec![
-    Line::from(Span::styled(
-      "open in browser",
-      Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    )),
-    Line::from(""),
-    Line::from("  i   linked issue"),
-    Line::from("  p   linked pull request"),
-    Line::from(""),
-    Line::from(Span::styled("  esc to cancel", Style::default().fg(app.theme.muted))),
-  ];
-  let area = centered_h(40, lines.len() as u16 + 2, f.area());
+  let mut lines = overlay_title_lines("Open in Browser", accent);
+  lines.push(Line::from("  i   linked issue"));
+  lines.push(Line::from("  p   linked pull request"));
+  lines.push(Line::from(""));
+  lines.push(Line::from(Span::styled(
+    "  esc to cancel",
+    Style::default().fg(app.theme.muted),
+  )));
+  let area = centered_h(40, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block("open", accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let lines = match app.link_prompt_stage() {
-    LinkPromptStage::ChooseTarget => vec![
-      Line::from(Span::styled(
-        "link this worktree to:",
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-      )),
-      Line::from(""),
-      Line::from("  i   a GitHub issue"),
-      Line::from("  p   a pull request"),
-      Line::from(""),
-      Line::from(Span::styled("  esc to cancel", Style::default().fg(muted))),
-    ],
+    LinkPromptStage::ChooseTarget => {
+      // A vertical selectable list (#217): j/k move the highlight, Enter
+      // links the highlighted row, i/p stay direct picks. The highlighted
+      // row reads in the accent.
+      let selected = app.link_prompt_selected();
+      let mut lines = overlay_title_lines("Link", accent);
+      lines.push(link_target_line("i", "Issue", selected == super::app::LinkTarget::Issue, accent, muted).centered());
+      lines.push(
+        link_target_line(
+          "p",
+          "Pull Request",
+          selected == super::app::LinkTarget::Pr,
+          accent,
+          muted,
+        )
+        .centered(),
+      );
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled(link_choose_hint(), Style::default().fg(muted))).centered());
+      lines
+    }
     LinkPromptStage::InputNumber => {
       let label = match app.link_prompt_target() {
         Some(super::app::LinkTarget::Issue) => "issue #",
         Some(super::app::LinkTarget::Pr) => "PR #",
         None => "#",
       };
-      vec![
-        Line::from(Span::styled(
-          format!("type the {} number", label.trim_end_matches('#').trim()),
-          Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(format!("  {}{}_", label, app.link_prompt_number_input())),
-        Line::from(""),
-        Line::from(Span::styled(
-          "  enter confirms · esc cancels · backspace deletes",
-          Style::default().fg(muted),
-        )),
-      ]
+      let mut lines = overlay_title_lines(
+        &format!("type the {} number", label.trim_end_matches('#').trim()),
+        accent,
+      );
+      lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled(link_input_hint(), Style::default().fg(muted))));
+      lines
     }
   };
-  let area = centered_h(50, lines.len() as u16 + 2, f.area());
+  let area = centered_h(50, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block("link", accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Compact control hint for the Link prompt target picker. The Link modal is
+/// 50% wide; on an 80-col terminal the padded inner width is 34 cells, so the
+/// hint must stay terse enough not to clip.
+pub fn link_choose_hint() -> &'static str {
+  "j/k move · Enter/i/p pick · Esc"
+}
+
+/// Compact control hint for the Link prompt number input. Same width budget as
+/// [`link_choose_hint`].
+pub fn link_input_hint() -> &'static str {
+  "digits · Enter link · Esc cancel"
 }
 
 /// Render the command palette overlay (issue #32).
@@ -2086,15 +2577,33 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   f.render_widget(Clear, area);
 
   let accent = app.theme.accent;
-  let outer = overlay_block("command palette", accent);
+  let outer = overlay_block(accent);
   let inner = outer.inner(area);
   f.render_widget(outer, area);
 
-  // Two rows: matches list (flex) + input bar (height 1).
+  // Four rows: a detached centred title, a blank spacer, the matches list
+  // (flex), and the input bar pinned to the bottom (issue #217 — the title
+  // moved off the border into the frame).
   let layout = Layout::default()
     .direction(Direction::Vertical)
-    .constraints([Constraint::Min(3), Constraint::Length(1)])
+    .constraints([
+      Constraint::Length(1), // title
+      Constraint::Length(1), // spacer
+      Constraint::Min(3),    // matches
+      Constraint::Length(1), // input bar
+    ])
     .split(inner);
+
+  f.render_widget(
+    Paragraph::new(
+      Line::from(Span::styled(
+        "Command Palette",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      ))
+      .centered(),
+    ),
+    layout[0],
+  );
 
   let entries = app.palette.matches();
   let highlight = app.palette.highlight();
@@ -2122,14 +2631,14 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       Style::default().fg(app.theme.prunable),
     )));
   }
-  f.render_widget(Paragraph::new(lines), layout[0]);
+  f.render_widget(Paragraph::new(lines), layout[2]);
 
   let input_line = Line::from(vec![
     Span::styled(":", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
     Span::raw(app.palette.buffer().to_string()),
     Span::styled("_", Style::default().fg(app.theme.muted)),
   ]);
-  f.render_widget(Paragraph::new(input_line), layout[1]);
+  f.render_widget(Paragraph::new(input_line), layout[3]);
 }
 
 /// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)
@@ -2138,7 +2647,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
 /// width of the Issue / PR block (chunk width minus 2 borders and the
 /// 1-char left padding applied by [`render_section`]); summary lines
 /// trim their variable parts so total visible width ≤ `max_width`.
-pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
+pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   let link = app.current_link();
   let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -2170,8 +2679,15 @@ pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'stat
   }
   if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
   {
+    // Resolve the live `FetchGithub` binding instead of hard-coding a key
+    // (issue #217). Pre-fix this read `press R`, but `R` is `Review`; the
+    // fetch action defaults to `F` and is rebindable under `[tui.keys]`.
+    let chord = app
+      .keymap
+      .primary_chord(super::keymap::Action::FetchGithub)
+      .unwrap_or_else(|| "F".to_string());
     lines.push(Line::from(Span::styled(
-      trunc("press R to fetch status", max_width),
+      trunc(&format!("press {} to fetch status", chord), max_width),
       Style::default().fg(app.theme.muted),
     )));
   }

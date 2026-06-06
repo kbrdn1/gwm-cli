@@ -6,7 +6,7 @@
 //! side-effecting `submit_create` which wires the form's resolved values
 //! into `BranchSpec` + `worktree::add` + `bootstrap::run`.
 
-use gwm::tui::state::create_form::{CreateForm, Field};
+use gwm::tui::state::create_form::{CreateForm, Field, MAX_DESC_LEN, MAX_ISSUE_LEN};
 
 #[test]
 fn reset_returns_form_to_initial_state() {
@@ -134,4 +134,38 @@ fn pop_char_on_empty_is_noop() {
   form.field = Field::Desc;
   form.pop_char();
   assert!(form.desc.is_empty());
+}
+
+#[test]
+fn push_char_caps_the_issue_field_length() {
+  // Issue #217 follow-up: the inputs grow a length cap so the resolved
+  // branch name stays within GitHub's git-ref limits. The issue number is
+  // bounded to `MAX_ISSUE_LEN` digits.
+  let mut form = CreateForm::new();
+  form.field = Field::Issue;
+  for _ in 0..(MAX_ISSUE_LEN + 20) {
+    form.push_char('9');
+  }
+  assert_eq!(
+    form.issue.chars().count(),
+    MAX_ISSUE_LEN,
+    "issue must not grow past the cap"
+  );
+}
+
+#[test]
+fn push_char_caps_the_desc_field_length() {
+  // The description (slug) is bounded to `MAX_DESC_LEN` so the
+  // `<type>/#<issue>-<desc>` branch name stays under the 255-byte git ref
+  // limit.
+  let mut form = CreateForm::new();
+  form.field = Field::Desc;
+  for _ in 0..(MAX_DESC_LEN + 50) {
+    form.push_char('a');
+  }
+  assert_eq!(
+    form.desc.chars().count(),
+    MAX_DESC_LEN,
+    "desc must not grow past the cap"
+  );
 }

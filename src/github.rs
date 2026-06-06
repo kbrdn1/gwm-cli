@@ -394,20 +394,35 @@ const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusChe
 
 /// Run `gh issue view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
-  let stdout = run_gh([
-    "issue",
-    "view",
-    &number.to_string(),
-    "--repo",
-    slug,
-    "--json",
-    ISSUE_JSON_FIELDS,
-  ])?;
+  fetch_issue_with(&gh_program(), slug, number)
+}
+
+/// [`fetch_issue`] with an explicitly resolved `gh` program path. Used by
+/// the TUI's off-thread fetch (issue #217): the program is resolved on the
+/// main thread via [`gh_program`] and handed to the worker thread, so the
+/// thread never touches `GWM_GH` / the process environment concurrently
+/// with env-mutating callers.
+pub fn fetch_issue_with(program: &OsStr, slug: &str, number: u64) -> Result<IssueStatus> {
+  let stdout = run_gh_with(
+    program,
+    [
+      "issue",
+      "view",
+      &number.to_string(),
+      "--repo",
+      slug,
+      "--json",
+      ISSUE_JSON_FIELDS,
+    ],
+  )?;
   parse_issue_json(&stdout)
 }
 
-fn gh_command() -> Command {
-  Command::new(std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into()))
+/// Resolve the `gh` program to invoke: `$GWM_GH` when set (test / override
+/// hook), else `gh` on `PATH`. Read once on the calling thread so off-thread
+/// fetches can capture it without re-reading the environment.
+pub fn gh_program() -> OsString {
+  std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into())
 }
 
 pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
@@ -484,15 +499,25 @@ pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
 
 /// Run `gh pr view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
-  let stdout = run_gh([
-    "pr",
-    "view",
-    &number.to_string(),
-    "--repo",
-    slug,
-    "--json",
-    PR_JSON_FIELDS,
-  ])?;
+  fetch_pr_with(&gh_program(), slug, number)
+}
+
+/// [`fetch_pr`] with an explicitly resolved `gh` program path — PR-side
+/// counterpart to [`fetch_issue_with`], used by the TUI off-thread fetch
+/// (issue #217).
+pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatus> {
+  let stdout = run_gh_with(
+    program,
+    [
+      "pr",
+      "view",
+      &number.to_string(),
+      "--repo",
+      slug,
+      "--json",
+      PR_JSON_FIELDS,
+    ],
+  )?;
   parse_pr_json(&stdout)
 }
 
@@ -549,7 +574,18 @@ where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  let output = gh_command()
+  run_gh_with(&gh_program(), args)
+}
+
+/// [`run_gh`] against an explicitly resolved `gh` program. Lets callers on
+/// a worker thread (issue #217) avoid re-reading `GWM_GH` / the process
+/// environment concurrently with env-mutating code on other threads.
+fn run_gh_with<I, S>(program: &OsStr, args: I) -> Result<String>
+where
+  I: IntoIterator<Item = S>,
+  S: AsRef<OsStr>,
+{
+  let output = Command::new(program)
     .args(args)
     .output()
     .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;

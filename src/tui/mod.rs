@@ -24,7 +24,9 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{
+  App, CreateKey, GithubFetchMsg, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
+};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -52,11 +54,13 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, badge_group_width, branch_name_color, build_sidebar_sections, ellipsize_middle,
-  filled_cells_for_progress, footer_line, freshness_color, header_line, header_title, help_lines, help_rows,
-  issue_badge_color, issue_summary_line, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
-  table_marker, tilde_compress_with_home, working_tree_status_line, worktree_name_style, worktree_path_style, HelpRow,
-  SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  author_initials, badge_group_width, branch_name_color, build_sidebar_sections, confirm_buttons_line,
+  create_buttons_line, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, freshness_color,
+  github_status_lines, header_line, header_title, help_lines, help_rows, issue_badge_color, issue_summary_line,
+  link_choose_hint, link_input_hint, link_target_line, pane_counter, panel_border_color, pr_badge_color,
+  pr_summary_line, recent_commits_lines, status_line, status_pane_title, table_marker, tilde_compress_with_home,
+  type_selector_line, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
+  HelpRow, HintContext, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
@@ -132,6 +136,16 @@ fn confirm_fire(app: &mut App) {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
+    // Background GitHub fetch (issue #217): apply any results that arrived
+    // off-thread since the last iteration, and advance the loader while a
+    // fetch is still inflight so the statusbar spinner animates at the
+    // 200ms poll cadence. Drained before the draw so the frame reflects the
+    // freshly-applied results.
+    app.drain_github_results();
+    if app.is_github_loading() {
+      app.spinner.tick();
+    }
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before
@@ -236,26 +250,23 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       }
       View::Help => match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.view = View::List,
+        // Scroll the Keybindings overlay when it outgrows the modal (#217).
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll_up(),
+        KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
+        KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
         _ => {}
       },
-      View::Create => match key.code {
-        KeyCode::Esc => app.view = View::List,
-        KeyCode::Tab => app.create_next_field(),
-        KeyCode::BackTab => app.create_prev_field(),
-        KeyCode::Enter => {
-          if app.create_form.field == Field::Desc {
-            if let Err(e) = app.submit_create() {
-              app.status = format!("error: {}", e);
-            }
-          } else {
-            app.create_next_field();
+      // Create-overlay keys live in a testable `App` method (issue #217);
+      // the loop only owns the two side effects (submit / close).
+      View::Create => match app.handle_create_key(key) {
+        CreateKey::Submit => {
+          if let Err(e) = app.submit_create() {
+            app.status = format!("error: {}", e);
           }
         }
-        KeyCode::Up if app.create_form.field == Field::Type => app.create_prev_type(),
-        KeyCode::Down if app.create_form.field == Field::Type => app.create_next_type(),
-        KeyCode::Char(c) if app.create_form.field != Field::Type => app.create_push_char(c),
-        KeyCode::Backspace if app.create_form.field != Field::Type => app.create_pop_char(),
-        _ => {}
+        CreateKey::Cancel => app.view = View::List,
+        CreateKey::Handled => {}
       },
       View::Confirm => match key.code {
         // `y` confirms directly regardless of which button is focused
@@ -296,18 +307,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         }
         _ => {}
       },
-      View::LinkPrompt => match (app.link_prompt_stage(), key.code) {
-        (_, KeyCode::Esc) => app.link_prompt_cancel(),
-        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => app.link_prompt_choose(LinkTarget::Issue),
-        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => app.link_prompt_choose(LinkTarget::Pr),
-        (app::LinkPromptStage::InputNumber, KeyCode::Enter) => {
+      // Link-prompt keys live in a testable `App` method (issue #217); the
+      // loop only owns the two side effects (submit shell-out / close).
+      View::LinkPrompt => match app.handle_link_prompt_key(key) {
+        LinkPromptKey::Submit => {
           if let Err(e) = app.link_prompt_submit() {
             app.status = format!("link failed: {}", e);
           }
         }
-        (app::LinkPromptStage::InputNumber, KeyCode::Char(c)) => app.link_prompt_push_char(c),
-        (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
-        _ => {}
+        LinkPromptKey::Cancel => app.link_prompt_cancel(),
+        LinkPromptKey::Handled => {}
       },
       // Issue #32: command palette overlay. Palette entry names
       // are restricted to `[a-z0-9_-]` (see
@@ -418,9 +427,11 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::CycleSidebarLayout => app.cycle_sidebar_layout(),
     Action::ToggleSidebarPosition => app.toggle_sidebar_position(),
     Action::FocusSwap => app.toggle_focus(),
+    Action::FocusWorktrees => app.focus_worktrees(),
+    Action::FocusStatus => app.focus_status(),
     Action::Filter => app.enter_filter(),
     Action::Refresh => app.refresh()?,
-    Action::Help => app.view = View::Help,
+    Action::Help => app.enter_help(),
     Action::Yank => yank_selected_path_to_clipboard(app),
     Action::Open => match app.resolve_open_target() {
       None => app.status = "nothing selected".into(),

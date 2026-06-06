@@ -1,7 +1,7 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
-use super::state::create_form::CreateForm;
+use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
@@ -20,6 +20,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 // Re-export the GitHub fetch state enum at its historical path
@@ -28,6 +29,17 @@ use std::time::{Duration, Instant};
 // `state::github_fetch` re-export landed) keep compiling. The owning
 // module is now `tui::state::github_fetch` — see #128.
 pub use super::state::github_fetch::GitHubFetchState;
+
+/// Result of an off-thread `gh issue view` / `gh pr view` shell-out
+/// (issue #217). The background fetch thread sends one of these back to
+/// the event loop over [`App::github_rx`]; [`App::drain_github_results`]
+/// applies it through the existing `GitHubFetch::complete_*` guards (so the
+/// #138 stale-result drop still holds). Carries owned, `Send` data only —
+/// no `git2::Repository` crosses the thread boundary.
+pub enum GithubFetchMsg {
+  Issue(u64, std::result::Result<IssueStatus, String>),
+  Pr(u64, std::result::Result<PrStatus, String>),
+}
 
 /// Spawnable launcher plan handed to the event loop by
 /// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
@@ -66,6 +78,35 @@ pub enum View {
   /// / `palette_cycle_*` / `accept_command_palette` /
   /// `close_command_palette`.
   CommandPalette,
+}
+
+/// What the run loop must do after [`App::handle_create_key`] processes a
+/// key in the create overlay (issue #217). Keeps the side effects
+/// (worktree creation, view transition) in the loop while the form
+/// mutations stay in the testable handler.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CreateKey {
+  /// The key mutated form state (or was ignored); stay in the overlay.
+  Handled,
+  /// `Enter` on the description field — the loop should run `submit_create`.
+  Submit,
+  /// `Esc` — the loop should close the overlay back to the list.
+  Cancel,
+}
+
+/// What the run loop must do after [`App::handle_link_prompt_key`] processes
+/// a key in the link prompt (issue #217). Mirrors [`CreateKey`]: the testable
+/// handler owns the picker / digit-buffer mutations, the loop owns the two
+/// side effects (the `github::link_*` shell-out, the view transition).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkPromptKey {
+  /// The key moved the highlight, committed a target, or edited the number
+  /// buffer (or was ignored); stay in the prompt.
+  Handled,
+  /// `Enter` on the number field — the loop should run `link_prompt_submit`.
+  Submit,
+  /// `Esc` — the loop should close the prompt back to the list.
+  Cancel,
 }
 
 /// Target of an open / link action. Canonical definition lives in
@@ -122,6 +163,14 @@ pub struct App {
 
   // Bootstrap report
   pub report: Option<BootstrapReport>,
+
+  /// Keybindings (help) overlay scroll offset, in rows. Reset to 0 every
+  /// time the overlay opens; clamped to `help_max_scroll` (#217).
+  pub help_scroll: u16,
+  /// Maximum help scroll offset, republished by [`super::ui::draw_help`]
+  /// each frame as `content_rows.saturating_sub(viewport_rows)` so the
+  /// offset can never scroll past the last line into the void.
+  pub help_max_scroll: u16,
 
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
@@ -240,6 +289,13 @@ pub struct App {
   /// default when callers construct `App` directly, e.g. tests that
   /// don't care about the gate).
   pub trust_mode: crate::trust::TrustMode,
+
+  /// Sender cloned into each background GitHub fetch thread (issue #217).
+  github_tx: mpsc::Sender<GithubFetchMsg>,
+  /// Receiver drained by [`Self::drain_github_results`] each event-loop
+  /// tick. Held for the lifetime of the `App`; when the `App` drops, any
+  /// still-running fetch thread's `send` simply fails and is ignored.
+  github_rx: mpsc::Receiver<GithubFetchMsg>,
 }
 
 impl App {
@@ -279,6 +335,7 @@ impl App {
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
+    let (github_tx, github_rx) = mpsc::channel();
     let mut out = Self {
       repo,
       repo_name,
@@ -292,6 +349,8 @@ impl App {
       create_form: CreateForm::new(),
       branch_types,
       report: None,
+      help_scroll: 0,
+      help_max_scroll: 0,
       sidebar: SidebarState::new(),
       pending_g: false,
       pending_chord: Vec::new(),
@@ -308,6 +367,8 @@ impl App {
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
+      github_tx,
+      github_rx,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -666,12 +727,88 @@ impl App {
     self.sidebar.toggle_focus();
   }
 
+  /// Direct-focus the worktree table (issue #217, `1`). Orchestrator-shaped
+  /// for the status-bar copy, like the sidebar toggles.
+  pub fn focus_worktrees(&mut self) {
+    self.sidebar.focus_table();
+    self.status = "focus: worktrees".into();
+  }
+
+  /// Direct-focus the status (sidebar) pane (issue #217, `2`). Opens the
+  /// sidebar if needed and moves focus onto it.
+  pub fn focus_status(&mut self) {
+    self.sidebar.focus_panel();
+    self.status = "focus: status".into();
+  }
+
+  /// The live UI context driving the statusbar chip + help subtitle (issue
+  /// #217). An open modal / overlay wins over the pane focus (issue #217
+  /// review P2): when the create form is up, the statusbar must advertise
+  /// the form's keys, not the worktrees pane's `n new` — pressing `n` there
+  /// types text. Only `View::List` falls through to the pane context
+  /// (`Picker` in `gwm switch`, `Status` when the sidebar holds focus, else
+  /// `Worktrees`).
+  pub fn hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.view {
+      View::Create => HintContext::Create,
+      View::Confirm => HintContext::Confirm,
+      View::OpenMenu => HintContext::OpenMenu,
+      View::LinkPrompt => HintContext::LinkPrompt,
+      View::CommandPalette => HintContext::CommandPalette,
+      View::Report => HintContext::Report,
+      View::Help => HintContext::Help,
+      View::List => self.pane_hint_context(),
+    }
+  }
+
+  /// The underlying list-view pane context (issue #217), ignoring any open
+  /// overlay. Drives the help overlay's subtitle + picker-section gating:
+  /// `?` documents the keys for the pane you were on, so it must NOT collapse
+  /// to the `Help` context that [`Self::hint_context`] returns while the
+  /// overlay is up.
+  pub fn pane_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    if self.picker_mode {
+      HintContext::Picker
+    } else if self.sidebar.open && self.sidebar.focused {
+      HintContext::Status
+    } else {
+      HintContext::Worktrees
+    }
+  }
+
+  /// `true` while a GitHub issue / PR fetch for the current link is inflight
+  /// (issue #217) — drives the statusbar loading spinner.
+  pub fn is_github_loading(&self) -> bool {
+    matches!(self.issue_fetch_state(), GitHubFetchState::Loading)
+      || matches!(self.pr_fetch_state(), GitHubFetchState::Loading)
+  }
+
   pub fn sidebar_scroll_down(&mut self) {
     self.sidebar.scroll_down();
   }
 
   pub fn sidebar_scroll_up(&mut self) {
     self.sidebar.scroll_up();
+  }
+
+  /// Open the Keybindings (help) overlay from the top (#217). Resetting
+  /// the scroll offset here keeps re-opens predictable.
+  pub fn enter_help(&mut self) {
+    self.view = View::Help;
+    self.help_scroll = 0;
+  }
+
+  /// Scroll the help overlay down one row, clamped to the renderer-published
+  /// `help_max_scroll` so it never scrolls past the last line.
+  pub fn help_scroll_down(&mut self) {
+    self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+  }
+
+  /// Scroll the help overlay up one row, clamped at the top.
+  pub fn help_scroll_up(&mut self) {
+    self.help_scroll = self.help_scroll.saturating_sub(1);
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -875,6 +1012,11 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
+    // Open focused on Issue rather than the cycle-only Type field (#217 UX):
+    // the first keypress then edits text instead of being a silent no-op on
+    // Type. The type keeps its `reset()` default and stays reachable via
+    // Shift-Tab / the field rotation.
+    self.create_form.field = Field::Issue;
     self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
   }
 
@@ -900,6 +1042,37 @@ impl App {
 
   pub fn create_pop_char(&mut self) {
     self.create_form.pop_char();
+  }
+
+  /// Handle one key in the create overlay and report what the run loop must
+  /// do next. Extracted from the inline `View::Create` match (issue #217)
+  /// so the input path — typing, type cycling, submit/cancel — is
+  /// unit-testable rather than only reachable through a live terminal.
+  ///
+  /// `h` / `l` mirror the `←` / `→` horizontal type selector, but **only**
+  /// when the Type field is focused; on a text field they are literal input
+  /// so the letters are never swallowed.
+  pub fn handle_create_key(&mut self, key: KeyEvent) -> CreateKey {
+    let on_type = self.create_form.field == Field::Type;
+    match key.code {
+      KeyCode::Esc => return CreateKey::Cancel,
+      KeyCode::Tab => self.create_next_field(),
+      KeyCode::BackTab => self.create_prev_field(),
+      KeyCode::Enter => {
+        if self.create_form.field == Field::Desc {
+          return CreateKey::Submit;
+        }
+        self.create_next_field();
+      }
+      KeyCode::Up | KeyCode::Left if on_type => self.create_prev_type(),
+      KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
+      KeyCode::Char('h') if on_type => self.create_prev_type(),
+      KeyCode::Char('l') if on_type => self.create_next_type(),
+      KeyCode::Char(c) if !on_type => self.create_push_char(c),
+      KeyCode::Backspace if !on_type => self.create_pop_char(),
+      _ => {}
+    }
+    CreateKey::Handled
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
@@ -1281,19 +1454,24 @@ impl App {
     }
   }
 
-  /// Drive the issue/PR fetch synchronously. Called from the event loop
-  /// when the user presses `F` (refresh GitHub status). Routes through
-  /// the [`GitHubFetch`] dedupe layer: `request(key)` claims the
-  /// per-target inflight slot and flips `*_state = Loading`, the
-  /// shell-out runs, `complete_{issue,pr}` clears the slot and
-  /// stamps the result.
+  /// Kick off the issue/PR fetch. Called from the event loop when the
+  /// user presses `F` (refresh GitHub status). Routes through the
+  /// [`GitHubFetch`] dedupe layer: `request(key)` claims the per-target
+  /// inflight slot and flips `*_state = Loading`, then the `gh issue view`
+  /// / `gh pr view` shell-out runs **off-thread** (issue #217) so the TUI
+  /// stays responsive and the statusbar spinner can animate. Each thread
+  /// reports back over [`Self::github_tx`]; the event loop applies the
+  /// result via [`Self::drain_github_results`], which calls
+  /// `complete_{issue,pr}` — keeping the #128 dedupe and #138 stale-drop
+  /// guarantees intact.
   ///
-  /// This call path is the explicit user-initiated refresh, so it
-  /// flushes the cache via [`GitHubFetch::invalidate`] first — the
-  /// user just asked for fresh data, a `HitCache` short-circuit here
-  /// would be a bug. The inflight slot is still claimed via
-  /// `request`, so any concurrent visit-driven `request` for the
-  /// same key dedupes correctly (load-bearing payoff of #128).
+  /// The PR auto-detection (`gh pr list`, issue #181) stays synchronous:
+  /// it mutates `link` which the very next render needs, and it is a single
+  /// cheap call rather than the two `view` shell-outs the spinner is for.
+  ///
+  /// This call path is the explicit user-initiated refresh, so it flushes
+  /// the cache via [`GitHubFetch::invalidate`] first — the user just asked
+  /// for fresh data, a `HitCache` short-circuit here would be a bug.
   pub fn refresh_github_status(&mut self) {
     use super::state::github_fetch::{FetchAction, FetchKey};
 
@@ -1305,9 +1483,9 @@ impl App {
     self.github.clear_detected_pr();
 
     // Auto-detect the selected branch's PR when none is linked (issue
-    // #181). Runs on the same synchronous F-refresh path as the issue/PR
-    // fetch; needs a remote, so it's a no-op without a slug. An explicit
-    // `gwm link --pr` wins — `apply_detected_pr` only fills an empty slot.
+    // #181). Synchronous (see method doc); needs a remote, so it's a no-op
+    // without a slug. An explicit `gwm link --pr` wins — `apply_detected_pr`
+    // only fills an empty slot.
     if self.github.link.pr.is_none() {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
         let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
@@ -1327,19 +1505,94 @@ impl App {
     // request loop so `request` returns `Spawn` instead of `HitCache`
     // for previously-loaded keys.
     self.github.invalidate();
+    let mut spawned = 0u32;
     if let Some(n) = self.github.link.issue {
       if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
-        let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
-        self.github.complete_issue(n, r);
+        self.spawn_github_fetch(FetchKey::Issue(n), slug.clone());
+        spawned += 1;
       }
     }
     if let Some(n) = self.github.link.pr {
       if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
-        let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
-        self.github.complete_pr(n, r);
+        self.spawn_github_fetch(FetchKey::Pr(n), slug.clone());
+        spawned += 1;
       }
     }
-    self.report_github_refresh_status();
+    if spawned > 0 {
+      // Loading state is live; the spinner animates until `drain` applies
+      // the results and re-reports the outcome.
+      self.spinner.reset();
+      self.status = "fetching GitHub status…".into();
+    } else {
+      // Nothing actually spawned (all keys already terminal in cache) —
+      // report the current outcome immediately.
+      self.report_github_refresh_status();
+    }
+  }
+
+  /// Spawn one background `gh` shell-out for `key` and wire its result back
+  /// over the channel (issue #217). Deliberately a thin shell: it owns only
+  /// the off-thread dispatch + send, no state logic — the contract lives in
+  /// `request` / `complete_*` (tested in `tui_state_github_fetch_tests.rs`)
+  /// and in [`Self::drain_github_results`] (tested in `tui_app_tests.rs`).
+  /// A `send` failure (the `App`/receiver was dropped) is ignored: there is
+  /// no longer anyone to apply the result.
+  fn spawn_github_fetch(&self, key: super::state::github_fetch::FetchKey, slug: String) {
+    use super::state::github_fetch::FetchKey;
+    let tx = self.github_tx.clone();
+    // Resolve the `gh` program on THIS (main) thread and hand it to the
+    // worker, so the worker never reads `GWM_GH` / the process environment
+    // concurrently with env-mutating code elsewhere (the `env_lock`
+    // unsoundness the worker would otherwise reintroduce — issue #217).
+    let program = github::gh_program();
+    std::thread::spawn(move || {
+      let msg = match key {
+        FetchKey::Issue(n) => GithubFetchMsg::Issue(
+          n,
+          github::fetch_issue_with(&program, &slug, n).map_err(|e| e.to_string()),
+        ),
+        FetchKey::Pr(n) => GithubFetchMsg::Pr(n, github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string())),
+      };
+      let _ = tx.send(msg);
+    });
+  }
+
+  /// Apply every GitHub fetch result that has arrived since the last call
+  /// (issue #217), draining the channel without blocking. Each result goes
+  /// through `complete_{issue,pr}`, so a result whose inflight slot was
+  /// cleared by an intervening navigation/`invalidate` is dropped (#138).
+  /// Returns `true` if at least one result was applied, so the event loop
+  /// can force a redraw. When the last inflight fetch lands, re-reports the
+  /// aggregate outcome on the status bar.
+  pub fn drain_github_results(&mut self) -> bool {
+    let mut applied = false;
+    while let Ok(msg) = self.github_rx.try_recv() {
+      // Only count results `complete_*` actually applied — a result whose
+      // inflight slot was invalidated mid-flight (#138) is dropped and must
+      // NOT trigger a status report over the current message (issue #217
+      // review P2).
+      let did_apply = match msg {
+        GithubFetchMsg::Issue(n, r) => self.github.complete_issue(n, r),
+        GithubFetchMsg::Pr(n, r) => self.github.complete_pr(n, r),
+      };
+      applied |= did_apply;
+    }
+    // Once nothing is left loading, swap the "fetching…" placeholder for the
+    // real outcome (refreshed / partial failure / failure).
+    if applied && !self.is_github_loading() {
+      self.report_github_refresh_status();
+    }
+    applied
+  }
+
+  /// A clone of the channel sender background fetch threads report over
+  /// (issue #217). Exposed so the async-apply path
+  /// ([`Self::drain_github_results`]) can be driven deterministically —
+  /// inject a [`GithubFetchMsg`] exactly as a thread would, then drain —
+  /// without spawning an OS thread or a real `gh` (the advisor-flagged
+  /// flaky-thread-test trap). `spawn_github_fetch` uses the same channel.
+  pub fn github_result_sender(&self) -> mpsc::Sender<GithubFetchMsg> {
+    self.github_tx.clone()
   }
 
   /// Compute the post-refresh status line message based on the actual
@@ -1437,7 +1690,43 @@ impl App {
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
     self.link_prompt.reset();
-    self.status = "link: [i]ssue / [p]r · esc cancels".into();
+    self.status = "pick".into();
+  }
+
+  /// Highlighted row in the `ChooseTarget` picker (for the renderer).
+  pub fn link_prompt_selected(&self) -> LinkTarget {
+    self.link_prompt.selected
+  }
+
+  /// Testable key handler for the link prompt (issue #217), mirroring
+  /// [`App::handle_create_key`]. The picker / digit-buffer mutations and
+  /// the per-stage status copy stay here; the loop only acts on the
+  /// returned [`LinkPromptKey`] for the two genuine side effects
+  /// (submit shell-out, view transition).
+  pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
+    use crate::tui::state::link_prompt::LinkPromptStage;
+    match (self.link_prompt.stage, key.code) {
+      (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
+      // ChooseTarget: a vertical selectable list. j/k (and arrows) move the
+      // highlight, Enter links the highlighted row, i/p stay direct picks.
+      // With exactly two targets, up and down land on the same other row, so
+      // a single flip serves j/k/Up/Down alike.
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up) => {
+        self.link_prompt.toggle_selection()
+      }
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => self.link_prompt_choose(LinkTarget::Issue),
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => self.link_prompt_choose(LinkTarget::Pr),
+      (LinkPromptStage::ChooseTarget, KeyCode::Enter) => {
+        let target = self.link_prompt.selected;
+        self.link_prompt_choose(target);
+      }
+      // InputNumber: type the digits, Enter submits, Backspace deletes.
+      (LinkPromptStage::InputNumber, KeyCode::Enter) => return LinkPromptKey::Submit,
+      (LinkPromptStage::InputNumber, KeyCode::Char(c)) => self.link_prompt_push_char(c),
+      (LinkPromptStage::InputNumber, KeyCode::Backspace) => self.link_prompt_pop_char(),
+      _ => {}
+    }
+    LinkPromptKey::Handled
   }
 
   pub fn link_prompt_cancel(&mut self) {
@@ -1460,8 +1749,7 @@ impl App {
   pub fn link_prompt_choose(&mut self, target: LinkTarget) {
     self.link_prompt.commit_target(target);
     self.status = match target {
-      LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
-      LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
+      LinkTarget::Issue | LinkTarget::Pr => "num".into(),
     };
   }
 

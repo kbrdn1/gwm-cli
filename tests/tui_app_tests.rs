@@ -51,6 +51,41 @@ fn make_app() -> (tempfile::TempDir, App) {
 }
 
 #[test]
+fn focus_status_opens_and_focuses_the_sidebar() {
+  // Issue #217: pressing `2` (focus_status) must open the sidebar if it was
+  // closed and move the navigation focus onto it.
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+  app.sidebar.focused = false;
+  app.focus_status();
+  assert!(app.sidebar.open, "focus_status must open a closed sidebar");
+  assert!(app.sidebar.focused, "focus_status must focus the sidebar");
+}
+
+#[test]
+fn focus_worktrees_releases_sidebar_focus() {
+  // Pressing `1` (focus_worktrees) returns navigation focus to the table so
+  // `j` / `k` walk the worktree list, leaving the sidebar open but unfocused.
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
+  app.focus_worktrees();
+  assert!(!app.sidebar.focused, "focus_worktrees must release sidebar focus");
+}
+
+#[test]
+fn hint_context_follows_focus() {
+  // Issue #217: the statusbar chip + help subtitle read the live focus. The
+  // worktrees pane is the default; focusing the sidebar switches to Status.
+  use gwm::tui::HintContext;
+  let (_dir, mut app) = make_app();
+  app.focus_worktrees();
+  assert_eq!(app.hint_context(), HintContext::Worktrees);
+  app.focus_status();
+  assert_eq!(app.hint_context(), HintContext::Status);
+}
+
+#[test]
 fn focused_panel_border_wears_the_theme_focus_colour() {
   // #185: the focus-swappable panel borders (worktree list ↔ sidebar,
   // toggled with Tab) must paint with the theme `focus` role, not a
@@ -111,11 +146,17 @@ fn new_loads_main_worktree() {
 }
 
 #[test]
-fn enter_create_initializes_form() {
+fn enter_create_opens_focused_on_the_issue_field() {
+  // Issue #217 UX: the modal opens focused on Issue (not the cycle-only
+  // Type field) so the very first keypress edits text instead of being a
+  // silent no-op — the trap that read as "typing is broken". The Type
+  // field keeps its sensible default (index 0) and stays reachable via
+  // Shift-Tab / the field rotation.
   let (_dir, mut app) = make_app();
   app.enter_create();
   assert_eq!(app.view, View::Create);
-  assert_eq!(app.create_form.field, Field::Type);
+  assert_eq!(app.create_form.field, Field::Issue);
+  assert_eq!(app.create_form.type_index, 0, "type keeps its default");
   assert!(app.create_form.issue.is_empty());
   assert!(app.create_form.desc.is_empty());
 }
@@ -124,6 +165,9 @@ fn enter_create_initializes_form() {
 fn create_field_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
+  // Pin the start to Type so this exercises the full rotation contract
+  // independently of where the modal opens its focus (#217).
+  app.create_form.field = Field::Type;
   app.create_next_field();
   assert_eq!(app.create_form.field, Field::Issue);
   app.create_next_field();
@@ -1201,6 +1245,37 @@ fn enter_link_prompt_starts_at_choose_target() {
 }
 
 #[test]
+fn link_prompt_status_copy_stays_footer_sized() {
+  // The statusbar pins `app.status` at the right edge. Long modal-control
+  // prose gets clipped at 80 columns, so Link prompt status copy should stay
+  // short; the modal itself owns the detailed key hints.
+  const MAX_STATUS_CHARS: usize = 4;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+
+  app.enter_link_prompt();
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "choose-target status is too long for the footer: {:?}",
+    app.status
+  );
+
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "issue-input status is too long for the footer: {:?}",
+    app.status
+  );
+
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Pr);
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "pr-input status is too long for the footer: {:?}",
+    app.status
+  );
+}
+
+#[test]
 fn link_prompt_choose_issue_advances_to_input() {
   let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
   app.enter_link_prompt();
@@ -1241,6 +1316,109 @@ fn link_prompt_cancel_returns_to_list() {
   app.enter_link_prompt();
   app.link_prompt_cancel();
   assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn enter_link_prompt_opens_with_issue_highlighted() {
+  // Issue #217: ChooseTarget is a vertical selectable list that opens
+  // highlighting Issue (the common case).
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue);
+}
+
+#[test]
+fn link_prompt_key_jk_moves_the_highlight_without_committing() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    LinkPromptKey::Handled
+  ));
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Pr, "j moves the highlight down");
+  assert_eq!(
+    app.link_prompt_stage(),
+    LinkPromptStage::ChooseTarget,
+    "moving commits nothing"
+  );
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue, "k moves it back");
+}
+
+#[test]
+fn link_prompt_key_enter_links_the_highlighted_target() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)); // highlight Pr
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    LinkPromptKey::Handled
+  ));
+  assert_eq!(
+    app.link_prompt_stage(),
+    LinkPromptStage::InputNumber,
+    "Enter commits + advances"
+  );
+  assert_eq!(
+    app.link_prompt_target(),
+    Some(LinkTarget::Pr),
+    "it links the highlighted row"
+  );
+}
+
+#[test]
+fn link_prompt_key_i_and_p_remain_direct_picks() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+  assert_eq!(app.link_prompt_target(), Some(LinkTarget::Pr), "p picks PR directly");
+
+  app.enter_link_prompt(); // reset
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+  assert_eq!(
+    app.link_prompt_target(),
+    Some(LinkTarget::Issue),
+    "i picks Issue directly"
+  );
+}
+
+#[test]
+fn link_prompt_key_digits_then_enter_requests_submit() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // link highlighted Issue
+  for c in "4a2".chars() {
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  assert_eq!(
+    app.link_prompt_number_input(),
+    "42",
+    "non-digits dropped during InputNumber"
+  );
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    LinkPromptKey::Submit
+  ));
+}
+
+#[test]
+fn link_prompt_key_esc_requests_cancel() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    LinkPromptKey::Cancel
+  ));
 }
 
 #[test]
@@ -1285,6 +1463,111 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     GitHubFetchState::Loaded(_) => {}
     other => panic!("expected Loaded for stamped pr 61, got {:?}", other),
   }
+}
+
+fn sample_issue(n: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number: n,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  }
+}
+
+#[test]
+fn drain_applies_async_github_result() {
+  // Issue #217: a result delivered off-thread (over the channel) is applied
+  // by `drain_github_results`, flipping the inflight Loading state to Loaded.
+  use gwm::tui::{FetchKey, GithubFetchMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // Claim the inflight slot exactly as `refresh_github_status` would.
+  app.github.request(FetchKey::Issue(42));
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loading));
+  assert!(app.is_github_loading(), "request must mark the app as loading");
+
+  // A background thread reports back; we inject through the same channel.
+  app
+    .github_result_sender()
+    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .unwrap();
+  let applied = app.drain_github_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)));
+  assert!(!app.is_github_loading(), "no fetch should be inflight after draining");
+}
+
+#[test]
+fn drain_drops_async_result_invalidated_mid_flight() {
+  // Issue #217 keeps the #138 guarantee on the async path: a result whose
+  // inflight slot was cleared by an intervening navigation/invalidate is
+  // dropped rather than stamped into the now-active worktree's cache.
+  use gwm::tui::{FetchKey, GithubFetchMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.github.request(FetchKey::Issue(42));
+  // User navigates away → the cache + inflight set are flushed.
+  app.github.invalidate();
+  // The late shell-out result arrives after the invalidate.
+  app
+    .github_result_sender()
+    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .unwrap();
+  app.drain_github_results();
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Idle),
+    "a result invalidated mid-flight must be dropped, not applied"
+  );
+}
+
+#[test]
+fn drain_is_a_noop_with_no_pending_results() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  assert!(!app.drain_github_results(), "empty channel must report nothing applied");
+}
+
+#[test]
+fn drain_does_not_report_when_only_stale_results_arrive() {
+  // Issue #217 review (P2): a result whose inflight slot was invalidated
+  // (the user navigated away) is dropped by `complete_*`; the drain must NOT
+  // then stamp "github status refreshed" over the current status message.
+  use gwm::tui::{FetchKey, GithubFetchMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.github.request(FetchKey::Issue(42));
+  app.github.invalidate(); // navigated away → inflight cleared
+  app.status = "path: /somewhere/else".into();
+  app
+    .github_result_sender()
+    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .unwrap();
+
+  let applied = app.drain_github_results();
+
+  assert!(!applied, "a dropped stale result must not count as applied");
+  assert_eq!(
+    app.status, "path: /somewhere/else",
+    "a stale result must not overwrite the current status message"
+  );
+}
+
+#[test]
+fn hint_context_prioritises_an_open_modal_over_pane_focus() {
+  // Issue #217 review (P2): when a modal is open the statusbar must show the
+  // modal's context, not the pane behind it. Pressing `n` in the create form
+  // types text — advertising the worktrees `n new` hint there is misleading.
+  use gwm::tui::{HintContext, View};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.focus_status(); // pane focus would otherwise resolve to Status
+  app.view = View::Create;
+  assert_eq!(app.hint_context(), HintContext::Create);
+  app.view = View::Confirm;
+  assert_eq!(app.hint_context(), HintContext::Confirm);
+  app.view = View::CommandPalette;
+  assert_eq!(app.hint_context(), HintContext::CommandPalette);
+  // Back on the list, the pane focus is honoured again.
+  app.view = View::List;
+  assert_eq!(app.hint_context(), HintContext::Status);
 }
 
 #[test]
@@ -2296,6 +2579,29 @@ fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
 }
 
 #[test]
+fn github_status_idle_prompt_resolves_fetch_binding_not_r() {
+  // Issue #217: the sidebar's Issue/PR block showed `press R to fetch
+  // status`, but `R` is bound to `Review` — the real fetch binding is `F`
+  // (`Action::FetchGithub`). The prompt must resolve the live keymap, never
+  // hard-code a key.
+  let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
+  let lines = gwm::tui::github_status_lines(&app, 80);
+  let text: String = lines
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert!(
+    text.contains("press F to fetch status"),
+    "idle prompt must resolve the FetchGithub binding (F): {text}"
+  );
+  assert!(
+    !text.contains("press R"),
+    "stale `R` prompt leaked into the sidebar: {text}"
+  );
+}
+
+#[test]
 fn issue_summary_line_truncates_loaded_state_to_budget() {
   // Regression: with a 48-column sidebar, a fully-loaded issue line was
   // `#67 (auto) [open] <40-char title>` ≈ 58 chars, overflowing the
@@ -3260,4 +3566,109 @@ fn fresh_app_spinner_starts_at_first_frame() {
   use gwm::tui::state::spinner::DOT_FRAMES;
   let (_dir, app) = make_app();
   assert_eq!(app.spinner.glyph(DOT_FRAMES), DOT_FRAMES[0]);
+}
+
+#[test]
+fn help_scroll_clamps_between_zero_and_max() {
+  // Issue #217 follow-up: the Keybindings overlay scrolls when the help
+  // outgrows the modal. `help_max_scroll` is published by the renderer
+  // each frame; the offset clamps to `[0, max]` and resets on (re)open.
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  assert_eq!(app.view, View::Help);
+  assert_eq!(app.help_scroll, 0, "a freshly opened help starts at the top");
+
+  // Simulate the renderer having measured 3 rows of overflow.
+  app.help_max_scroll = 3;
+  app.help_scroll_down();
+  app.help_scroll_down();
+  assert_eq!(app.help_scroll, 2);
+  app.help_scroll_down();
+  app.help_scroll_down();
+  assert_eq!(app.help_scroll, 3, "scroll-down clamps at the published max");
+
+  app.help_scroll_up();
+  assert_eq!(app.help_scroll, 2);
+  for _ in 0..10 {
+    app.help_scroll_up();
+  }
+  assert_eq!(app.help_scroll, 0, "scroll-up clamps at the top");
+
+  // Re-opening help resets the offset.
+  app.help_scroll = 2;
+  app.enter_help();
+  assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
+}
+
+#[test]
+fn create_key_typing_appends_to_the_focused_text_field() {
+  // Issue #217 follow-up: the create key handling is an `App` method so the
+  // typing path is unit-testable (not just `push_char` in isolation).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  for c in "my-feat".chars() {
+    assert!(matches!(
+      app.handle_create_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+      CreateKey::Handled
+    ));
+  }
+  assert_eq!(app.create_form.desc, "my-feat");
+}
+
+#[test]
+fn create_key_hl_cycles_the_type_only_when_type_is_focused() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  // h/l type cycling only fires while the Type field is focused; pin it
+  // here since the modal now opens on Issue (#217).
+  app.create_form.field = Field::Type;
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.type_index, 1, "l advances the type");
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.type_index, 0, "h steps back");
+  // On a text field, h / l are literal input, not type cycling — otherwise
+  // we'd recreate the very "can't type these letters" bug we're avoiding.
+  app.create_form.field = Field::Desc;
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.desc, "hl");
+  assert_eq!(app.create_form.type_index, 0, "type stays put while editing desc");
+}
+
+#[test]
+fn create_key_enter_advances_then_submits_on_desc() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Issue;
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert_eq!(
+    app.create_form.field,
+    Field::Desc,
+    "Enter off the desc field advances focus"
+  );
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Submit
+  ));
+}
+
+#[test]
+fn create_key_esc_requests_cancel() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    CreateKey::Cancel
+  ));
 }
