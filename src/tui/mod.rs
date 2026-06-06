@@ -24,7 +24,9 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, CreateKey, GithubFetchMsg, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{
+  App, CreateKey, GithubFetchMsg, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
+};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -55,8 +57,8 @@ pub use ui::{
   author_initials, badge_group_width, branch_name_color, build_sidebar_sections, confirm_buttons_line,
   create_buttons_line, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, freshness_color,
   github_status_lines, header_line, header_title, help_lines, help_rows, issue_badge_color, issue_summary_line,
-  pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines, status_line,
-  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
+  link_target_line, pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
+  status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
   worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
   COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
@@ -305,18 +307,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         }
         _ => {}
       },
-      View::LinkPrompt => match (app.link_prompt_stage(), key.code) {
-        (_, KeyCode::Esc) => app.link_prompt_cancel(),
-        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => app.link_prompt_choose(LinkTarget::Issue),
-        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => app.link_prompt_choose(LinkTarget::Pr),
-        (app::LinkPromptStage::InputNumber, KeyCode::Enter) => {
+      // Link-prompt keys live in a testable `App` method (issue #217); the
+      // loop only owns the two side effects (submit shell-out / close).
+      View::LinkPrompt => match app.handle_link_prompt_key(key) {
+        LinkPromptKey::Submit => {
           if let Err(e) = app.link_prompt_submit() {
             app.status = format!("link failed: {}", e);
           }
         }
-        (app::LinkPromptStage::InputNumber, KeyCode::Char(c)) => app.link_prompt_push_char(c),
-        (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
-        _ => {}
+        LinkPromptKey::Cancel => app.link_prompt_cancel(),
+        LinkPromptKey::Handled => {}
       },
       // Issue #32: command palette overlay. Palette entry names
       // are restricted to `[a-z0-9_-]` (see

@@ -5,8 +5,8 @@
 
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, pane_counter,
-  status_pane_title, type_selector_line, worktrees_pane_title,
+  badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, link_target_line,
+  pane_counter, status_pane_title, type_selector_line, worktrees_pane_title,
 };
 use ratatui::style::{Color, Modifier};
 
@@ -260,4 +260,27 @@ fn field_input_fills_a_single_row_with_a_background() {
     .find(|s| s.content.contains("123"))
     .expect("a value span");
   assert_eq!(fval.style.bg, Some(Color::Magenta), "focused input bg = accent");
+}
+
+#[test]
+fn link_target_line_highlights_the_selected_row() {
+  // The link prompt's ChooseTarget step is a vertical selectable list
+  // (#217): each row shows its direct-pick key + label, and the
+  // highlighted row reads in the accent while the others stay muted.
+  let selected = link_target_line("i", "Issue", true, Color::Magenta, Color::Gray);
+  let stext: String = selected.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(stext.contains("Issue"), "label missing: {stext:?}");
+  assert!(stext.contains('i'), "pick key missing: {stext:?}");
+  assert!(
+    selected.spans.iter().any(|s| s.style.fg == Some(Color::Magenta)),
+    "the selected row must read in the accent: {stext:?}"
+  );
+
+  let idle = link_target_line("p", "Pull Request", false, Color::Magenta, Color::Gray);
+  let itext: String = idle.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(itext.contains("Pull Request"), "label missing: {itext:?}");
+  assert!(
+    idle.spans.iter().all(|s| s.style.fg != Some(Color::Magenta)),
+    "an unselected row must not wear the accent: {itext:?}"
+  );
 }

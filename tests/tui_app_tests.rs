@@ -1288,6 +1288,109 @@ fn link_prompt_cancel_returns_to_list() {
 }
 
 #[test]
+fn enter_link_prompt_opens_with_issue_highlighted() {
+  // Issue #217: ChooseTarget is a vertical selectable list that opens
+  // highlighting Issue (the common case).
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue);
+}
+
+#[test]
+fn link_prompt_key_jk_moves_the_highlight_without_committing() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    LinkPromptKey::Handled
+  ));
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Pr, "j moves the highlight down");
+  assert_eq!(
+    app.link_prompt_stage(),
+    LinkPromptStage::ChooseTarget,
+    "moving commits nothing"
+  );
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue, "k moves it back");
+}
+
+#[test]
+fn link_prompt_key_enter_links_the_highlighted_target() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)); // highlight Pr
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    LinkPromptKey::Handled
+  ));
+  assert_eq!(
+    app.link_prompt_stage(),
+    LinkPromptStage::InputNumber,
+    "Enter commits + advances"
+  );
+  assert_eq!(
+    app.link_prompt_target(),
+    Some(LinkTarget::Pr),
+    "it links the highlighted row"
+  );
+}
+
+#[test]
+fn link_prompt_key_i_and_p_remain_direct_picks() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+  assert_eq!(app.link_prompt_target(), Some(LinkTarget::Pr), "p picks PR directly");
+
+  app.enter_link_prompt(); // reset
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+  assert_eq!(
+    app.link_prompt_target(),
+    Some(LinkTarget::Issue),
+    "i picks Issue directly"
+  );
+}
+
+#[test]
+fn link_prompt_key_digits_then_enter_requests_submit() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // link highlighted Issue
+  for c in "4a2".chars() {
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  assert_eq!(
+    app.link_prompt_number_input(),
+    "42",
+    "non-digits dropped during InputNumber"
+  );
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    LinkPromptKey::Submit
+  ));
+}
+
+#[test]
+fn link_prompt_key_esc_requests_cancel() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    LinkPromptKey::Cancel
+  ));
+}
+
+#[test]
 fn github_fetch_state_default_is_idle() {
   let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));

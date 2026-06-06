@@ -1364,8 +1364,8 @@ impl HintContext {
       ],
       HintContext::OpenMenu => &[Hint::Lit("i", "issue"), Hint::Lit("p", "pr"), Hint::Lit("Esc", "close")],
       HintContext::LinkPrompt => &[
+        Hint::Lit("j/k", "move"),
         Hint::Lit("i/p", "kind"),
-        Hint::Lit("0-9", "number"),
         Hint::Lit("Enter", "link"),
         Hint::Lit("Esc", "cancel"),
       ],
@@ -1760,7 +1760,10 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(HelpRow::Blank);
     rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
     rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
-    rows.push(entry(Action::LinkPrompt, "link prompt — i / p then digits"));
+    rows.push(entry(
+      Action::LinkPrompt,
+      "link prompt — j/k + enter, or i/p, then digits",
+    ));
   }
   rows.push(entry(Action::Help, "this help"));
   if !picker_mode {
@@ -2101,6 +2104,24 @@ pub fn field_input_line(
     Span::styled(label.to_string(), Style::default().fg(muted)),
     Span::raw("  "),
     Span::styled(field, field_style),
+  ])
+}
+
+/// A single selectable row of the link prompt's `ChooseTarget` picker
+/// (issue #217): a `‹key›  Label` line whose highlighted variant reads in
+/// the accent (bold) with a `›` marker, and whose idle variant reads
+/// muted. `key` is the direct-pick shortcut (`i` / `p`). Pure so the
+/// highlight contract is pinned by `tests/tui_ui_helpers_tests.rs`.
+pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, muted: Color) -> Line<'static> {
+  let (marker, style) = if selected {
+    ("› ", Style::default().fg(accent).add_modifier(Modifier::BOLD))
+  } else {
+    ("  ", Style::default().fg(muted))
+  };
+  Line::from(vec![
+    Span::styled(marker, style),
+    Span::styled(format!("{key}  "), style),
+    Span::styled(label.to_string(), style),
   ])
 }
 
@@ -2489,11 +2510,30 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   let muted = app.theme.muted;
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => {
-      let mut lines = overlay_title_lines("Link This Worktree To:", accent);
-      lines.push(Line::from("  i   a GitHub issue"));
-      lines.push(Line::from("  p   a pull request"));
+      // A vertical selectable list (#217): j/k move the highlight, Enter
+      // links the highlighted row, i/p stay direct picks. The highlighted
+      // row reads in the accent.
+      let selected = app.link_prompt_selected();
+      let mut lines = overlay_title_lines("Link", accent);
+      lines.push(link_target_line("i", "Issue", selected == super::app::LinkTarget::Issue, accent, muted).centered());
+      lines.push(
+        link_target_line(
+          "p",
+          "Pull Request",
+          selected == super::app::LinkTarget::Pr,
+          accent,
+          muted,
+        )
+        .centered(),
+      );
       lines.push(Line::from(""));
-      lines.push(Line::from(Span::styled("  esc to cancel", Style::default().fg(muted))));
+      lines.push(
+        Line::from(Span::styled(
+          "j/k move · enter links · i/p direct · esc cancels",
+          Style::default().fg(muted),
+        ))
+        .centered(),
+      );
       lines
     }
     LinkPromptStage::InputNumber => {

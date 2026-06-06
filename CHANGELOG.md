@@ -56,6 +56,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than the cycle-only Type field, so the first keypress edits text
   instead of being a silent no-op (the branch type keeps its default and
   stays reachable via Shift-Tab). (#217)
+- TUI: the link prompt's target step is reworked into a titled (`Link`)
+  vertical selectable list — `j`/`k` (or arrows) move the highlight and
+  `Enter` links the highlighted row, while `i`/`p` stay direct picks. The
+  picker state machine and its key handler are extracted into a testable
+  `App::handle_link_prompt_key` (mirroring the create modal). (#217)
 
 ### Fixed
 

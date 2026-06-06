@@ -94,6 +94,21 @@ pub enum CreateKey {
   Cancel,
 }
 
+/// What the run loop must do after [`App::handle_link_prompt_key`] processes
+/// a key in the link prompt (issue #217). Mirrors [`CreateKey`]: the testable
+/// handler owns the picker / digit-buffer mutations, the loop owns the two
+/// side effects (the `github::link_*` shell-out, the view transition).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkPromptKey {
+  /// The key moved the highlight, committed a target, or edited the number
+  /// buffer (or was ignored); stay in the prompt.
+  Handled,
+  /// `Enter` on the number field — the loop should run `link_prompt_submit`.
+  Submit,
+  /// `Esc` — the loop should close the prompt back to the list.
+  Cancel,
+}
+
 /// Target of an open / link action. Canonical definition lives in
 /// `crate::cli::LinkTarget` (it carries the `clap::ValueEnum` derive
 /// for the CLI surface); the TUI re-exports the same type so a value
@@ -1675,7 +1690,43 @@ impl App {
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
     self.link_prompt.reset();
-    self.status = "link: [i]ssue / [p]r · esc cancels".into();
+    self.status = "link: j/k move · enter links · i/p direct · esc cancels".into();
+  }
+
+  /// Highlighted row in the `ChooseTarget` picker (for the renderer).
+  pub fn link_prompt_selected(&self) -> LinkTarget {
+    self.link_prompt.selected
+  }
+
+  /// Testable key handler for the link prompt (issue #217), mirroring
+  /// [`App::handle_create_key`]. The picker / digit-buffer mutations and
+  /// the per-stage status copy stay here; the loop only acts on the
+  /// returned [`LinkPromptKey`] for the two genuine side effects
+  /// (submit shell-out, view transition).
+  pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
+    use crate::tui::state::link_prompt::LinkPromptStage;
+    match (self.link_prompt.stage, key.code) {
+      (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
+      // ChooseTarget: a vertical selectable list. j/k (and arrows) move the
+      // highlight, Enter links the highlighted row, i/p stay direct picks.
+      // With exactly two targets, up and down land on the same other row, so
+      // a single flip serves j/k/Up/Down alike.
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up) => {
+        self.link_prompt.toggle_selection()
+      }
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => self.link_prompt_choose(LinkTarget::Issue),
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => self.link_prompt_choose(LinkTarget::Pr),
+      (LinkPromptStage::ChooseTarget, KeyCode::Enter) => {
+        let target = self.link_prompt.selected;
+        self.link_prompt_choose(target);
+      }
+      // InputNumber: type the digits, Enter submits, Backspace deletes.
+      (LinkPromptStage::InputNumber, KeyCode::Enter) => return LinkPromptKey::Submit,
+      (LinkPromptStage::InputNumber, KeyCode::Char(c)) => self.link_prompt_push_char(c),
+      (LinkPromptStage::InputNumber, KeyCode::Backspace) => self.link_prompt_pop_char(),
+      _ => {}
+    }
+    LinkPromptKey::Handled
   }
 
   pub fn link_prompt_cancel(&mut self) {
