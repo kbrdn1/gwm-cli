@@ -10,7 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
+### Changed
+
+- Sidebar rendering no longer deep-clones the cached sections on every frame.
+  The warm-cache draw path now renders the cached lines by reference; on a
+  300-commit sidebar this is ~19% faster per frame (no perceptible change
+  otherwise). ([#238](https://github.com/kbrdn1/gwm-cli/issues/238))
 
 ## Past releases
 
