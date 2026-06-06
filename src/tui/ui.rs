@@ -469,33 +469,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // commits / stashes re-shells the right git command instead of
   // serving the previous mode's pre-rendered lines.
   let active_mode = app.sidebar.mode;
-  let sections = match app.selected().cloned() {
-    Some(w) => {
-      let needs_refresh = match &app.sidebar.cache {
-        Some(((p, m), _)) => *p != w.path || *m != active_mode,
-        None => true,
-      };
-      if needs_refresh {
-        app.sidebar.cache = Some((
-          (w.path.clone(), active_mode),
-          build_sidebar_sections(&w, active_mode, &theme),
-        ));
-      }
-      let mut cached = app.sidebar.cache.as_ref().map(|(_, s)| s.clone()).unwrap_or_default();
-      let mut worktree = vec![sidebar_header_line(&w, app)];
-      worktree.append(&mut cached.worktree);
-      SidebarSections {
-        worktree,
-        working_tree: cached.working_tree,
-        recent_commits: cached.recent_commits,
-      }
-    }
-    None => SidebarSections {
-      worktree: vec![Line::from("(nothing selected)")],
-      working_tree: vec![],
-      recent_commits: vec![],
-    },
-  };
+
   // Inner width = block area − 2 border columns − 1 leading-padding column
   // (applied by `render_section`). Summary lines trim their variable parts
   // (title / error blob) so the total visible width fits — without this,
@@ -503,7 +477,88 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // wrapped onto a second visual row that the `Constraint::Length` below
   // never budgeted for, breaking the layout.
   let issue_pr_inner_width = area.width.saturating_sub(3) as usize;
+
+  let Some(w) = app.selected().cloned() else {
+    // Nothing selected: render the placeholder and bail. No cache to read,
+    // so the borrow gymnastics below don't apply.
+    let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
+    let placeholder = [Line::from("(nothing selected)")];
+    let h = |lines: usize| (lines as u16).saturating_add(2);
+    let constraints = [
+      Constraint::Length(h(placeholder.len())),
+      Constraint::Length(h(issue_pr_lines.len())),
+      Constraint::Length(0),
+      Constraint::Min(3),
+    ];
+    let chunks = Layout::default()
+      .direction(Direction::Vertical)
+      .constraints(constraints)
+      .split(area);
+    app.sidebar.max_scroll = 0;
+    app.sidebar.scroll = 0;
+    render_section(
+      f,
+      chunks[0],
+      status_pane_title(),
+      SectionBody::new(&placeholder),
+      border_color,
+      0,
+      None,
+    );
+    render_section(
+      f,
+      chunks[1],
+      issue_pr_pane_title(&app.keymap),
+      SectionBody::new(&issue_pr_lines),
+      border_color,
+      0,
+      None,
+    );
+    render_section(
+      f,
+      chunks[3],
+      recent_items_pane_title(active_mode, &app.keymap),
+      SectionBody::new(&[]),
+      border_color,
+      0,
+      None,
+    );
+    return;
+  };
+
+  // Populate (or refresh) the cache for the current selection. After this
+  // short mutable borrow ends, `app.sidebar.cache` is guaranteed `Some`.
+  let needs_refresh = match &app.sidebar.cache {
+    Some(((p, m), _)) => *p != w.path || *m != active_mode,
+    None => true,
+  };
+  if needs_refresh {
+    app.sidebar.cache = Some((
+      (w.path.clone(), active_mode),
+      build_sidebar_sections(&w, active_mode, &theme),
+    ));
+  }
+
+  // The live header line and the per-frame Issue / PR block are built BEFORE
+  // the long cache borrow so they don't overlap it. The header is the only
+  // line that is rebuilt fresh each frame (issue #73) — it's prefixed onto
+  // the cached worktree section at render time instead of being spliced into
+  // a cloned vec.
+  let header_line = sidebar_header_line(&w, app);
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
+
+  // Read the cached section lengths via a short immutable borrow so the
+  // layout solver and scroll clamp can run before the render borrow. The
+  // worktree section gains +1 row for the live header prefix.
+  let (worktree_len, working_tree_len, commits_len) = {
+    let cache = app.sidebar.cache.as_ref();
+    let s = cache.map(|(_, s)| s);
+    (
+      s.map(|s| s.worktree.len()).unwrap_or(0) + 1,
+      s.map(|s| s.working_tree.len()).unwrap_or(0),
+      s.map(|s| s.recent_commits.len()).unwrap_or(0) as u16,
+    )
+  };
 
   // Per-section block height = content rows + 2 border lines. Fixed
   // for the small sections (worktree / issue-PR / working-tree);
@@ -513,13 +568,9 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // 0 so the empty titled block disappears instead of leaving a
   // bordered void.
   let h = |lines: usize| (lines as u16).saturating_add(2);
-  let working_tree_height = if sections.working_tree.is_empty() {
-    0
-  } else {
-    h(sections.working_tree.len())
-  };
+  let working_tree_height = if working_tree_len == 0 { 0 } else { h(working_tree_len) };
   let constraints = [
-    Constraint::Length(h(sections.worktree.len())),
+    Constraint::Length(h(worktree_len)),
     Constraint::Length(h(issue_pr_lines.len())),
     Constraint::Length(working_tree_height),
     Constraint::Min(3),
@@ -529,48 +580,17 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     .constraints(constraints)
     .split(area);
 
-  render_section(
-    f,
-    chunks[0],
-    status_pane_title(),
-    sections.worktree,
-    border_color,
-    0,
-    None,
-  );
-  render_section(
-    f,
-    chunks[1],
-    issue_pr_pane_title(&app.keymap),
-    issue_pr_lines,
-    border_color,
-    0,
-    None,
-  );
-  if !sections.working_tree.is_empty() {
-    render_section(
-      f,
-      chunks[2],
-      working_tree_pane_title(&app.keymap),
-      sections.working_tree,
-      border_color,
-      0,
-      None,
-    );
-  }
-
   // Recent Commits is the only scrollable section. Clamp the scroll
   // offset to its visible area so `j` / `k` can't scroll past the end.
-  // The block's bottom-right title mirrors lazygit's footer
-  // ("<i+1> of <N>") so the user can tell at a glance how much history
-  // is queued and where the viewport sits.
+  // Done before the render borrow so no mutable `app` access overlaps it.
   let commits_area = chunks[3];
   let commits_visible = commits_area.height.saturating_sub(2);
-  let commits_len = sections.recent_commits.len() as u16;
   app.sidebar.max_scroll = commits_len.saturating_sub(commits_visible);
   if app.sidebar.scroll > app.sidebar.max_scroll {
     app.sidebar.scroll = app.sidebar.max_scroll;
   }
+  let scroll = app.sidebar.scroll;
+
   // Issue #34: surface the active mode in the bottom-scrollable
   // panel title. The footer keeps the `i of N` counter; the bottom
   // hint switches to "Enter: copy stash@{N}" in stashes mode.
@@ -580,7 +600,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       let footer = if commits_len == 0 {
         None
       } else {
-        let bottom = app.sidebar.scroll.saturating_add(commits_visible).min(commits_len);
+        let bottom = scroll.saturating_add(commits_visible).min(commits_len);
         Some(format!(" {} of {} ", bottom, commits_len))
       };
       (title, footer)
@@ -599,15 +619,89 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       (title, footer)
     }
   };
-  render_section(
-    f,
-    commits_area,
-    panel_title,
-    sections.recent_commits,
-    border_color,
-    app.sidebar.scroll,
-    panel_footer,
-  );
+  let issue_pr_title = issue_pr_pane_title(&app.keymap);
+  let working_tree_title = working_tree_pane_title(&app.keymap);
+
+  // The render borrow: cached sections are read by reference and never
+  // cloned (issue #238). On a cache hit this copies zero commit text — the
+  // up-to-300 `git log` lines stay put in `app.sidebar.cache`; `render_section`
+  // only rebuilds the thin padded `Vec<Span>` per visible row, borrowing the
+  // span content. `app` is only read immutably from here on (all mutation
+  // already happened above), so this long borrow is conflict-free. The
+  // `if let` is guaranteed to bind (the cache was populated above for the
+  // selected worktree) — matching rather than `unwrap()` keeps the render
+  // path panic-free per the house rules.
+  if let Some((_, cache)) = app.sidebar.cache.as_ref() {
+    render_section(
+      f,
+      chunks[0],
+      status_pane_title(),
+      SectionBody::with_prefix(&header_line, &cache.worktree),
+      border_color,
+      0,
+      None,
+    );
+    render_section(
+      f,
+      chunks[1],
+      issue_pr_title,
+      SectionBody::new(&issue_pr_lines),
+      border_color,
+      0,
+      None,
+    );
+    if !cache.working_tree.is_empty() {
+      render_section(
+        f,
+        chunks[2],
+        working_tree_title,
+        SectionBody::new(&cache.working_tree),
+        border_color,
+        0,
+        None,
+      );
+    }
+    render_section(
+      f,
+      commits_area,
+      panel_title,
+      SectionBody::new(&cache.recent_commits),
+      border_color,
+      scroll,
+      panel_footer,
+    );
+  }
+}
+
+/// Borrowed content for one [`render_section`] block (issue #238).
+///
+/// `lines` are rendered straight out of their owner — for the sidebar that
+/// is `app.sidebar.cache`, so a warm-cache frame copies none of the up-to-300
+/// commit `Line`s (each holding owned `String` spans) that the previous code
+/// deep-cloned every frame just to dodge a borrow conflict. `prefix` carries
+/// the single live line (the `● <name>` header) that must lead the worktree
+/// section; it's rebuilt fresh per frame anyway, so passing it separately
+/// costs nothing and keeps the cached `worktree` vec immutable.
+struct SectionBody<'a> {
+  prefix: Option<&'a Line<'a>>,
+  lines: &'a [Line<'a>],
+}
+
+impl<'a> SectionBody<'a> {
+  /// Section body with no leading live line (Issue / PR, Working Tree,
+  /// Recent Commits, and the `(nothing selected)` placeholder).
+  fn new(lines: &'a [Line<'a>]) -> Self {
+    Self { prefix: None, lines }
+  }
+
+  /// Section body whose first row is a per-frame live line — the worktree
+  /// identity block, led by the `● <name>` status-dot header.
+  fn with_prefix(prefix: &'a Line<'a>, lines: &'a [Line<'a>]) -> Self {
+    Self {
+      prefix: Some(prefix),
+      lines,
+    }
+  }
 }
 
 fn render_section(
@@ -622,11 +716,12 @@ fn render_section(
   // `String`. Pre-review the signature was `impl Into<String>`,
   // which copied every static literal on every render frame.
   title: impl Into<ratatui::text::Line<'static>>,
-  lines: Vec<Line<'static>>,
+  body: SectionBody<'_>,
   border_color: Color,
   scroll: u16,
   footer: Option<String>,
 ) {
+  let SectionBody { prefix, lines } = body;
   let mut block = Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
@@ -636,16 +731,17 @@ fn render_section(
     block = block.title_bottom(ratatui::text::Line::from(f).right_aligned());
   }
   // Pad content with one leading space per line for breathing room against
-  // the left border. Cheap and avoids per-call `format!` churn.
-  let padded: Vec<Line<'static>> = lines
-    .into_iter()
-    .map(|l| {
-      let mut spans = Vec::with_capacity(l.spans.len() + 1);
-      spans.push(Span::raw(" "));
-      spans.extend(l.spans);
-      Line::from(spans)
-    })
-    .collect();
+  // the left border. Each padded line BORROWS its span content from the
+  // source line (`Span::styled(&str, style)` yields a `Cow::Borrowed`, zero
+  // allocation) so a warm cache hit copies no commit text — only the thin
+  // per-row `Vec<Span>` is rebuilt, which the old code did anyway.
+  fn pad<'a>(l: &'a Line<'_>) -> Line<'a> {
+    let mut spans = Vec::with_capacity(l.spans.len() + 1);
+    spans.push(Span::raw(" "));
+    spans.extend(l.spans.iter().map(|s| Span::styled(s.content.as_ref(), s.style)));
+    Line::from(spans)
+  }
+  let padded: Vec<Line<'_>> = prefix.into_iter().chain(lines.iter()).map(pad).collect();
   // No `Wrap`: every section now relies on ratatui's view-level hard-clip,
   // matching lazygit's commits panel and ensuring 1 logical row = 1 visual
   // row (so the layout's `Constraint::Length` always matches what we draw).
@@ -2582,7 +2678,7 @@ fn draw_report(f: &mut Frame, app: &App) {
     ),
     layout[0],
   );
-  render_section(f, layout[2], " Logs ", logs, accent, 0, None);
+  render_section(f, layout[2], " Logs ", SectionBody::new(&logs), accent, 0, None);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(HintContext::Report, &app.keymap, &app.theme)),
     layout[4],
