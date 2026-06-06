@@ -20,6 +20,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 // Re-export the GitHub fetch state enum at its historical path
@@ -28,6 +29,17 @@ use std::time::{Duration, Instant};
 // `state::github_fetch` re-export landed) keep compiling. The owning
 // module is now `tui::state::github_fetch` — see #128.
 pub use super::state::github_fetch::GitHubFetchState;
+
+/// Result of an off-thread `gh issue view` / `gh pr view` shell-out
+/// (issue #217). The background fetch thread sends one of these back to
+/// the event loop over [`App::github_rx`]; [`App::drain_github_results`]
+/// applies it through the existing `GitHubFetch::complete_*` guards (so the
+/// #138 stale-result drop still holds). Carries owned, `Send` data only —
+/// no `git2::Repository` crosses the thread boundary.
+pub enum GithubFetchMsg {
+  Issue(u64, std::result::Result<IssueStatus, String>),
+  Pr(u64, std::result::Result<PrStatus, String>),
+}
 
 /// Spawnable launcher plan handed to the event loop by
 /// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
@@ -240,6 +252,13 @@ pub struct App {
   /// default when callers construct `App` directly, e.g. tests that
   /// don't care about the gate).
   pub trust_mode: crate::trust::TrustMode,
+
+  /// Sender cloned into each background GitHub fetch thread (issue #217).
+  github_tx: mpsc::Sender<GithubFetchMsg>,
+  /// Receiver drained by [`Self::drain_github_results`] each event-loop
+  /// tick. Held for the lifetime of the `App`; when the `App` drops, any
+  /// still-running fetch thread's `send` simply fails and is ignored.
+  github_rx: mpsc::Receiver<GithubFetchMsg>,
 }
 
 impl App {
@@ -279,6 +298,7 @@ impl App {
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
+    let (github_tx, github_rx) = mpsc::channel();
     let mut out = Self {
       repo,
       repo_name,
@@ -308,6 +328,8 @@ impl App {
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
+      github_tx,
+      github_rx,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -1315,19 +1337,24 @@ impl App {
     }
   }
 
-  /// Drive the issue/PR fetch synchronously. Called from the event loop
-  /// when the user presses `F` (refresh GitHub status). Routes through
-  /// the [`GitHubFetch`] dedupe layer: `request(key)` claims the
-  /// per-target inflight slot and flips `*_state = Loading`, the
-  /// shell-out runs, `complete_{issue,pr}` clears the slot and
-  /// stamps the result.
+  /// Kick off the issue/PR fetch. Called from the event loop when the
+  /// user presses `F` (refresh GitHub status). Routes through the
+  /// [`GitHubFetch`] dedupe layer: `request(key)` claims the per-target
+  /// inflight slot and flips `*_state = Loading`, then the `gh issue view`
+  /// / `gh pr view` shell-out runs **off-thread** (issue #217) so the TUI
+  /// stays responsive and the statusbar spinner can animate. Each thread
+  /// reports back over [`Self::github_tx`]; the event loop applies the
+  /// result via [`Self::drain_github_results`], which calls
+  /// `complete_{issue,pr}` — keeping the #128 dedupe and #138 stale-drop
+  /// guarantees intact.
   ///
-  /// This call path is the explicit user-initiated refresh, so it
-  /// flushes the cache via [`GitHubFetch::invalidate`] first — the
-  /// user just asked for fresh data, a `HitCache` short-circuit here
-  /// would be a bug. The inflight slot is still claimed via
-  /// `request`, so any concurrent visit-driven `request` for the
-  /// same key dedupes correctly (load-bearing payoff of #128).
+  /// The PR auto-detection (`gh pr list`, issue #181) stays synchronous:
+  /// it mutates `link` which the very next render needs, and it is a single
+  /// cheap call rather than the two `view` shell-outs the spinner is for.
+  ///
+  /// This call path is the explicit user-initiated refresh, so it flushes
+  /// the cache via [`GitHubFetch::invalidate`] first — the user just asked
+  /// for fresh data, a `HitCache` short-circuit here would be a bug.
   pub fn refresh_github_status(&mut self) {
     use super::state::github_fetch::{FetchAction, FetchKey};
 
@@ -1339,9 +1366,9 @@ impl App {
     self.github.clear_detected_pr();
 
     // Auto-detect the selected branch's PR when none is linked (issue
-    // #181). Runs on the same synchronous F-refresh path as the issue/PR
-    // fetch; needs a remote, so it's a no-op without a slug. An explicit
-    // `gwm link --pr` wins — `apply_detected_pr` only fills an empty slot.
+    // #181). Synchronous (see method doc); needs a remote, so it's a no-op
+    // without a slug. An explicit `gwm link --pr` wins — `apply_detected_pr`
+    // only fills an empty slot.
     if self.github.link.pr.is_none() {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
         let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
@@ -1361,19 +1388,82 @@ impl App {
     // request loop so `request` returns `Spawn` instead of `HitCache`
     // for previously-loaded keys.
     self.github.invalidate();
+    let mut spawned = 0u32;
     if let Some(n) = self.github.link.issue {
       if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
-        let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
-        self.github.complete_issue(n, r);
+        self.spawn_github_fetch(FetchKey::Issue(n), slug.clone());
+        spawned += 1;
       }
     }
     if let Some(n) = self.github.link.pr {
       if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
-        let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
-        self.github.complete_pr(n, r);
+        self.spawn_github_fetch(FetchKey::Pr(n), slug.clone());
+        spawned += 1;
       }
     }
-    self.report_github_refresh_status();
+    if spawned > 0 {
+      // Loading state is live; the spinner animates until `drain` applies
+      // the results and re-reports the outcome.
+      self.spinner.reset();
+      self.status = "fetching GitHub status…".into();
+    } else {
+      // Nothing actually spawned (all keys already terminal in cache) —
+      // report the current outcome immediately.
+      self.report_github_refresh_status();
+    }
+  }
+
+  /// Spawn one background `gh` shell-out for `key` and wire its result back
+  /// over the channel (issue #217). Deliberately a thin shell: it owns only
+  /// the off-thread dispatch + send, no state logic — the contract lives in
+  /// `request` / `complete_*` (tested in `tui_state_github_fetch_tests.rs`)
+  /// and in [`Self::drain_github_results`] (tested in `tui_app_tests.rs`).
+  /// A `send` failure (the `App`/receiver was dropped) is ignored: there is
+  /// no longer anyone to apply the result.
+  fn spawn_github_fetch(&self, key: super::state::github_fetch::FetchKey, slug: String) {
+    use super::state::github_fetch::FetchKey;
+    let tx = self.github_tx.clone();
+    std::thread::spawn(move || {
+      let msg = match key {
+        FetchKey::Issue(n) => GithubFetchMsg::Issue(n, github::fetch_issue(&slug, n).map_err(|e| e.to_string())),
+        FetchKey::Pr(n) => GithubFetchMsg::Pr(n, github::fetch_pr(&slug, n).map_err(|e| e.to_string())),
+      };
+      let _ = tx.send(msg);
+    });
+  }
+
+  /// Apply every GitHub fetch result that has arrived since the last call
+  /// (issue #217), draining the channel without blocking. Each result goes
+  /// through `complete_{issue,pr}`, so a result whose inflight slot was
+  /// cleared by an intervening navigation/`invalidate` is dropped (#138).
+  /// Returns `true` if at least one result was applied, so the event loop
+  /// can force a redraw. When the last inflight fetch lands, re-reports the
+  /// aggregate outcome on the status bar.
+  pub fn drain_github_results(&mut self) -> bool {
+    let mut applied = false;
+    while let Ok(msg) = self.github_rx.try_recv() {
+      applied = true;
+      match msg {
+        GithubFetchMsg::Issue(n, r) => self.github.complete_issue(n, r),
+        GithubFetchMsg::Pr(n, r) => self.github.complete_pr(n, r),
+      }
+    }
+    // Once nothing is left loading, swap the "fetching…" placeholder for the
+    // real outcome (refreshed / partial failure / failure).
+    if applied && !self.is_github_loading() {
+      self.report_github_refresh_status();
+    }
+    applied
+  }
+
+  /// A clone of the channel sender background fetch threads report over
+  /// (issue #217). Exposed so the async-apply path
+  /// ([`Self::drain_github_results`]) can be driven deterministically —
+  /// inject a [`GithubFetchMsg`] exactly as a thread would, then drain —
+  /// without spawning an OS thread or a real `gh` (the advisor-flagged
+  /// flaky-thread-test trap). `spawn_github_fetch` uses the same channel.
+  pub fn github_result_sender(&self) -> mpsc::Sender<GithubFetchMsg> {
+    self.github_tx.clone()
   }
 
   /// Compute the post-refresh status line message based on the actual

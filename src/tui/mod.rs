@@ -24,7 +24,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{App, GithubFetchMsg, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -133,6 +133,16 @@ fn confirm_fire(app: &mut App) {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
+    // Background GitHub fetch (issue #217): apply any results that arrived
+    // off-thread since the last iteration, and advance the loader while a
+    // fetch is still inflight so the statusbar spinner animates at the
+    // 200ms poll cadence. Drained before the draw so the frame reflects the
+    // freshly-applied results.
+    app.drain_github_results();
+    if app.is_github_loading() {
+      app.spinner.tick();
+    }
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before

@@ -1322,6 +1322,68 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
   }
 }
 
+fn sample_issue(n: u64) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number: n,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  }
+}
+
+#[test]
+fn drain_applies_async_github_result() {
+  // Issue #217: a result delivered off-thread (over the channel) is applied
+  // by `drain_github_results`, flipping the inflight Loading state to Loaded.
+  use gwm::tui::{FetchKey, GithubFetchMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // Claim the inflight slot exactly as `refresh_github_status` would.
+  app.github.request(FetchKey::Issue(42));
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loading));
+  assert!(app.is_github_loading(), "request must mark the app as loading");
+
+  // A background thread reports back; we inject through the same channel.
+  app
+    .github_result_sender()
+    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .unwrap();
+  let applied = app.drain_github_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)));
+  assert!(!app.is_github_loading(), "no fetch should be inflight after draining");
+}
+
+#[test]
+fn drain_drops_async_result_invalidated_mid_flight() {
+  // Issue #217 keeps the #138 guarantee on the async path: a result whose
+  // inflight slot was cleared by an intervening navigation/invalidate is
+  // dropped rather than stamped into the now-active worktree's cache.
+  use gwm::tui::{FetchKey, GithubFetchMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.github.request(FetchKey::Issue(42));
+  // User navigates away → the cache + inflight set are flushed.
+  app.github.invalidate();
+  // The late shell-out result arrives after the invalidate.
+  app
+    .github_result_sender()
+    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .unwrap();
+  app.drain_github_results();
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Idle),
+    "a result invalidated mid-flight must be dropped, not applied"
+  );
+}
+
+#[test]
+fn drain_is_a_noop_with_no_pending_results() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  assert!(!app.drain_github_results(), "empty channel must report nothing applied");
+}
+
 #[test]
 fn apply_fetch_error_stores_error_state() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
