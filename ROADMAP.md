@@ -90,7 +90,8 @@ If an issue still shows `open` on GitHub even though its work shipped, it's a tr
 
 Larger investments with strategic payoff. Gated by user demand or a concrete first consumer.
 
-- [#35](https://github.com/kbrdn1/gwm-cli/issues/35) — **PTY-embedded lazygit panel** — render lazygit live in a right-hand pane (`portable-pty` + `tui-term`), beside the worktree list and the Details sidebar. Distinct from the existing `l` launcher: this one would render lazygit **inside** gwm rather than handing the alt-screen over.
+- [#35](https://github.com/kbrdn1/gwm-cli/issues/35) — **PTY-embedded lazygit overlay** — render lazygit live inside gwm (`portable-pty` + `tui-term`) as a **~90% fullscreen modal overlay** over the worktree list (not a beside / side pane), drawn like the other modals and outside the `Tab` focus cycle. Distinct from the existing `l` launcher: this one renders lazygit **inside** gwm rather than handing the alt-screen over.
+- [#226](https://github.com/kbrdn1/gwm-cli/issues/226) — **Command Logs modal (lazygit-style)** — a scrollable transcript of every command gwm runs (argv, timing, exit, output), hidden by default and opened on a dedicated key (`3`), as a ~90% fullscreen modal overlay (same pattern as #35) outside the `Tab` cycle. Complements the single-line statusbar action log (#217) with the full scrollback.
 - [#36](https://github.com/kbrdn1/gwm-cli/issues/36) — **Multi-repo workspace mode** — `gwm --workspace ~/Projects` shows worktrees across every child repo in one TUI.
 - [#37](https://github.com/kbrdn1/gwm-cli/issues/37) — **Configuration presets** — `gwm init --preset laravel / nuxt / rust / go / python-uv` seeds an opinionated `.gwm.toml` for known stacks instead of the generic default.
 - [#38](https://github.com/kbrdn1/gwm-cli/issues/38) — **JSON-RPC / gRPC API + daemon mode** — `--format=json` on key commands, then a long-running daemon over `$XDG_RUNTIME_DIR/gwm.sock` for editor / statusbar integration.
