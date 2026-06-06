@@ -997,6 +997,11 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
+    // Open focused on Issue rather than the cycle-only Type field (#217 UX):
+    // the first keypress then edits text instead of being a silent no-op on
+    // Type. The type keeps its `reset()` default and stays reachable via
+    // Shift-Tab / the field rotation.
+    self.create_form.field = Field::Issue;
     self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
   }
 

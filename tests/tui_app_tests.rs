@@ -146,11 +146,17 @@ fn new_loads_main_worktree() {
 }
 
 #[test]
-fn enter_create_initializes_form() {
+fn enter_create_opens_focused_on_the_issue_field() {
+  // Issue #217 UX: the modal opens focused on Issue (not the cycle-only
+  // Type field) so the very first keypress edits text instead of being a
+  // silent no-op — the trap that read as "typing is broken". The Type
+  // field keeps its sensible default (index 0) and stays reachable via
+  // Shift-Tab / the field rotation.
   let (_dir, mut app) = make_app();
   app.enter_create();
   assert_eq!(app.view, View::Create);
-  assert_eq!(app.create_form.field, Field::Type);
+  assert_eq!(app.create_form.field, Field::Issue);
+  assert_eq!(app.create_form.type_index, 0, "type keeps its default");
   assert!(app.create_form.issue.is_empty());
   assert!(app.create_form.desc.is_empty());
 }
@@ -159,6 +165,9 @@ fn enter_create_initializes_form() {
 fn create_field_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
+  // Pin the start to Type so this exercises the full rotation contract
+  // independently of where the modal opens its focus (#217).
+  app.create_form.field = Field::Type;
   app.create_next_field();
   assert_eq!(app.create_form.field, Field::Issue);
   app.create_next_field();
@@ -3480,7 +3489,9 @@ fn create_key_hl_cycles_the_type_only_when_type_is_focused() {
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   let (_dir, mut app) = make_app();
   app.enter_create();
-  assert_eq!(app.create_form.field, Field::Type);
+  // h/l type cycling only fires while the Type field is focused; pin it
+  // here since the modal now opens on Issue (#217).
+  app.create_form.field = Field::Type;
   app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
   assert_eq!(app.create_form.type_index, 1, "l advances the type");
   app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));

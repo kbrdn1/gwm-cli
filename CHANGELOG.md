@@ -52,6 +52,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   control hint. The branch type also cycles with `h` / `l` (vim), and the
   issue/description fields are length-capped so the resolved branch name
   stays within git's ref limit. (#217)
+- TUI: the create-worktree modal opens focused on the Issue field rather
+  than the cycle-only Type field, so the first keypress edits text
+  instead of being a silent no-op (the branch type keeps its default and
+  stays reachable via Shift-Tab). (#217)
 
 ### Fixed
 
