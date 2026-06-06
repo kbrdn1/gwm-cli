@@ -1882,7 +1882,10 @@ fn draw_help(f: &mut Frame, app: &mut App) {
         lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
       }
       HelpRow::Section(t) => {
-        lines.push(Line::from(Span::styled(t, heading_style)));
+        lines.push(Line::from(Span::styled(
+          t,
+          help_section_style(accent, app.theme.branch),
+        )));
       }
       HelpRow::Blank => lines.push(Line::from(String::new())),
       HelpRow::Entry { keys, label } => {
@@ -2108,20 +2111,48 @@ pub fn field_input_line(
 }
 
 /// A single selectable row of the link prompt's `ChooseTarget` picker
-/// (issue #217): a `‹key›  Label` line whose highlighted variant reads in
-/// the accent (bold) with a `›` marker, and whose idle variant reads
+/// (issue #217, polished in #220): the selected row uses the same
+/// reversed-bold accent chip treatment as modal buttons; idle rows stay
 /// muted. `key` is the direct-pick shortcut (`i` / `p`). Pure so the
 /// highlight contract is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, muted: Color) -> Line<'static> {
-  let (marker, style) = if selected {
-    ("› ", Style::default().fg(accent).add_modifier(Modifier::BOLD))
-  } else {
-    ("  ", Style::default().fg(muted))
-  };
+  if selected {
+    let chip = Style::default()
+      .fg(accent)
+      .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    return Line::from(vec![Span::raw("  "), Span::styled(format!(" {key}  {label} "), chip)]);
+  }
+
+  let idle = Style::default().fg(muted);
+  Line::from(vec![Span::raw("  "), Span::styled(format!("{key}  {label}"), idle)])
+}
+
+/// Modal width for the Link prompt. Pure so the visual budget remains pinned
+/// without a terminal renderer in `tests/tui_ui_helpers_tests.rs`.
+pub fn link_prompt_modal_width(term_width: u16) -> u16 {
+  (term_width.saturating_mul(50) / 100).min(42).min(term_width)
+}
+
+/// Section-heading style for the Keybindings overlay body. Kept pure so the
+/// title/body colour split is pinned outside the ratatui renderer.
+pub fn help_section_style(_accent: Color, section: Color) -> Style {
+  Style::default().fg(section).add_modifier(Modifier::BOLD)
+}
+
+/// One aligned detail row for destructive confirmation summaries.
+pub fn confirm_detail_line(
+  label: &str,
+  value: impl Into<String>,
+  label_width: usize,
+  label_color: Color,
+  value_style: Style,
+) -> Line<'static> {
   Line::from(vec![
-    Span::styled(marker, style),
-    Span::styled(format!("{key}  "), style),
-    Span::styled(label.to_string(), style),
+    Span::styled(
+      format!("{label:<label_width$}  ", label_width = label_width),
+      Style::default().fg(label_color),
+    ),
+    Span::styled(value.into(), value_style),
   ])
 }
 
@@ -2150,35 +2181,52 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let term = f.area();
   let outer_w = term.width.saturating_mul(62) / 100;
   let text_w = outer_w.saturating_sub(6) as usize;
+  let label_w = "delete branch".chars().count();
+  let value_w = text_w.saturating_sub(label_w + 2).max(1);
 
-  let name = ellipsize_middle(&w.name, text_w.saturating_sub("delete ".len()));
-  let path = ellipsize_middle(
-    &tilde_compress(&w.path.display().to_string()),
-    text_w.saturating_sub("at ".len()),
-  );
+  let name = ellipsize_middle(&w.name, value_w);
+  let path = ellipsize_middle(&tilde_compress(&w.path.display().to_string()), value_w);
 
-  // --- title + description (centred) ---
+  // Title stays centred; details use an aligned label/value grid so the
+  // destructive target is easier to scan (#220 visual follow-up).
   let mut content: Vec<Line> = overlay_title_lines("Confirm Delete", danger);
-  content.push(Line::from(vec![
-    Span::raw("delete "),
-    Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
-  ]));
-  content.push(Line::from(Span::styled(
-    format!("at {path}"),
+  content.push(confirm_detail_line(
+    "worktree",
+    name,
+    label_w,
+    muted,
+    Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD),
+  ));
+  content.push(confirm_detail_line(
+    "path",
+    path,
+    label_w,
+    muted,
     Style::default().fg(muted),
-  )));
+  ));
   if let Some(b) = &w.branch {
-    let branch = ellipsize_middle(b, text_w.saturating_sub("branch: ".len()));
-    content.push(Line::from(vec![
-      Span::raw("branch: "),
-      Span::styled(branch, Style::default().fg(app.theme.branch)),
-    ]));
+    let branch = ellipsize_middle(b, value_w);
+    content.push(confirm_detail_line(
+      "branch",
+      branch,
+      label_w,
+      muted,
+      Style::default().fg(app.theme.branch),
+    ));
   }
   content.push(Line::from(""));
-  content.push(Line::from(format!(
-    "delete branch too: {}  (press p to toggle)",
-    app.delete_branch_on_remove
-  )));
+  let delete_branch_style = if app.delete_branch_on_remove {
+    Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)
+  } else {
+    Style::default().fg(muted)
+  };
+  content.push(confirm_detail_line(
+    "delete branch",
+    format!("{}  p toggles", app.delete_branch_on_remove),
+    label_w,
+    muted,
+    delete_branch_style,
+  ));
 
   // Size the modal to its content: the title + description rows plus the
   // three fixed rows (loader / buttons / hint), the rounded border and the
@@ -2204,12 +2252,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     .split(block.inner(area));
   f.render_widget(block, area);
 
-  f.render_widget(
-    Paragraph::new(content)
-      .alignment(Alignment::Center)
-      .wrap(Wrap { trim: false }),
-    inner[0],
-  );
+  f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
   // --- loader + countdown (only while the safety countdown is armed) ---
   if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
@@ -2242,13 +2285,13 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // --- key hint ---
   let hint = if app.confirm_is_countdown_mode() {
     if app.confirm.is_armed() {
-      "y: cancel countdown   ←/→ Tab: move   Enter: activate   n/Esc: cancel".to_string()
+      "y cancel countdown · Tab move · Enter · Esc cancel".to_string()
     } else {
       let total = app.confirm_countdown_total().as_secs();
-      format!("y: arm {total}s countdown   ←/→ Tab: move   Enter: activate   n/Esc: cancel")
+      format!("y arm {total}s · Tab move · Enter · Esc cancel")
     }
   } else {
-    "y: confirm   ←/→ Tab: move   Enter: activate   n/Esc: cancel".to_string()
+    "y confirm · Tab move · Enter · Esc cancel".to_string()
   };
   f.render_widget(
     Paragraph::new(Span::styled(hint, Style::default().fg(muted))).alignment(Alignment::Center),
@@ -2546,7 +2589,15 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       lines
     }
   };
-  let area = centered_h(50, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let term = f.area();
+  let width = link_prompt_modal_width(term.width).min(term.width);
+  let area = Rect {
+    x: term.x + term.width.saturating_sub(width) / 2,
+    y: term.y + term.height.saturating_sub(height) / 2,
+    width,
+    height: height.min(term.height),
+  };
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }

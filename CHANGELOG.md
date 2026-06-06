@@ -64,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TUI: polish modal follow-ups after the statusbar pass — compact Link
+  prompt with chip selection, clearer create Issue feedback, distinct
+  Keybindings section colour, and aligned Confirm Delete details. (#220)
 - TUI: the sidebar Issue/PR block prompted `press R to fetch status`,
   but `R` runs the review launcher — it now resolves the live
   `fetch_github` binding (`F` by default). (#217)

@@ -55,12 +55,13 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, branch_name_color, build_sidebar_sections, confirm_buttons_line,
-  create_buttons_line, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, freshness_color,
-  github_status_lines, header_line, header_title, help_lines, help_rows, issue_badge_color, issue_summary_line,
-  link_choose_hint, link_input_hint, link_target_line, pane_counter, panel_border_color, pr_badge_color,
-  pr_summary_line, recent_commits_lines, status_line, status_pane_title, table_marker, tilde_compress_with_home,
-  type_selector_line, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  confirm_detail_line, create_buttons_line, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line,
+  freshness_color, github_status_lines, header_line, header_title, help_lines, help_rows, help_section_style,
+  issue_badge_color, issue_summary_line, link_choose_hint, link_input_hint, link_prompt_modal_width, link_target_line,
+  pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines, status_line,
+  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {

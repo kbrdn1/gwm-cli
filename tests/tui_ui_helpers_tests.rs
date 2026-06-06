@@ -6,9 +6,11 @@
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, link_choose_hint,
-  link_input_hint, link_target_line, pane_counter, status_pane_title, type_selector_line, worktrees_pane_title,
+  link_input_hint, link_prompt_modal_width, link_target_line, pane_counter, status_pane_title, type_selector_line,
+  worktrees_pane_title,
 };
-use ratatui::style::{Color, Modifier};
+use gwm::tui::{confirm_detail_line, help_section_style};
+use ratatui::style::{Color, Modifier, Style};
 
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
@@ -275,6 +277,19 @@ fn link_target_line_highlights_the_selected_row() {
     selected.spans.iter().any(|s| s.style.fg == Some(Color::Magenta)),
     "the selected row must read in the accent: {stext:?}"
   );
+  let selected_chip = selected
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Issue"))
+    .expect("selected label span");
+  assert!(
+    selected_chip.style.add_modifier.contains(Modifier::REVERSED),
+    "selected link row must use the same reversed chip treatment as modal buttons: {selected_chip:?}"
+  );
+  assert!(
+    !stext.contains('›'),
+    "the selected link row should read as a chip, not a marker-prefixed list item: {stext:?}"
+  );
 
   let idle = link_target_line("p", "Pull Request", false, Color::Magenta, Color::Gray);
   let itext: String = idle.spans.iter().map(|s| s.content.as_ref()).collect();
@@ -286,11 +301,21 @@ fn link_target_line_highlights_the_selected_row() {
 }
 
 #[test]
+fn link_prompt_width_stays_compact_on_wide_terminals() {
+  assert_eq!(link_prompt_modal_width(80), 40);
+  assert_eq!(
+    link_prompt_modal_width(120),
+    42,
+    "Link prompt should cap instead of growing to half the terminal"
+  );
+}
+
+#[test]
 fn link_prompt_hints_fit_the_80_col_modal_budget() {
-  // The Link modal uses `centered_h(50, ...)`: at 80 columns its outer
-  // width is 40, and the rounded border + horizontal padding leave 34 cells
-  // for content. The visual smoke caught the previous long hints clipping at
-  // exactly this common terminal width.
+  // At 80 columns the compact Link modal remains 40 columns wide, and the
+  // rounded border + horizontal padding leave 34 cells for content. The
+  // visual smoke caught the previous long hints clipping at exactly this
+  // common terminal width.
   const INNER_WIDTH_AT_80_COLS: usize = 34;
 
   for hint in [link_choose_hint(), link_input_hint()] {
@@ -299,4 +324,25 @@ fn link_prompt_hints_fit_the_80_col_modal_budget() {
       "Link prompt hint clips at 80 cols: {hint:?}"
     );
   }
+}
+
+#[test]
+fn help_section_style_uses_body_section_colour() {
+  let style = help_section_style(Color::Magenta, Color::Green);
+  assert_eq!(
+    style.fg,
+    Some(Color::Green),
+    "body section headings should not reuse the modal title accent"
+  );
+  assert!(style.add_modifier.contains(Modifier::BOLD));
+}
+
+#[test]
+fn confirm_detail_line_aligns_label_column() {
+  let value_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+  let line = confirm_detail_line("branch", "feat/#220", 8, Color::Gray, value_style);
+  assert_eq!(line.spans[0].content.as_ref(), "branch    ");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Gray));
+  assert_eq!(line.spans[1].content.as_ref(), "feat/#220");
+  assert_eq!(line.spans[1].style, value_style);
 }
