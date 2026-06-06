@@ -64,8 +64,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TUI: polish pane/modal follow-ups — Bootstrap Report logs now sit in a
+  pane, sidebar titles surface their live bindings, GitHub loading uses
+  an animated loader, Link/Open modals are wider without a Refresh button,
+  modal hints use statusbar-style badges, and Delete Worktree honours the
+  delete-branch toggle binding while open. (#224)
 - TUI: polish remaining modal follow-ups — Delete Worktree casing and
-  toggle badges, shared Link/Open Issue/PR layouts with Refresh, and
+  toggle badges, shared Link/Open Issue/PR layouts, and
   horizontal Keybindings scrolling with clearer section spacing. (#222)
 - TUI: polish modal follow-ups after the statusbar pass — compact Link
   prompt with chip selection, clearer create Issue feedback, distinct

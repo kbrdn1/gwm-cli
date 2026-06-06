@@ -30,7 +30,7 @@ fn span_with<'a, 'b>(line: &'a Line<'b>, needle: &str) -> Option<&'a Span<'b>> {
 }
 
 fn version_token() -> String {
-  format!("v{}", env!("CARGO_PKG_VERSION"))
+  env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[test]
@@ -66,7 +66,7 @@ fn version_renders_as_a_reverse_video_chip_on_the_accent_colour() {
       ..Theme::default()
     },
   );
-  let chip = span_with(&line, "gwm v").expect("version chip span present");
+  let chip = span_with(&line, "gwm ").expect("version chip span present");
   assert_eq!(chip.style.fg, Some(Color::Magenta), "chip not painted on accent");
   assert!(
     chip.style.add_modifier.contains(Modifier::REVERSED),
@@ -79,18 +79,32 @@ fn version_renders_as_a_reverse_video_chip_on_the_accent_colour() {
 }
 
 #[test]
-fn repo_name_is_bold_and_path_is_dimmed() {
+fn current_dir_name_is_a_leading_badge_and_path_is_dimmed() {
   let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
   let repo = span_with(&line, "gwm-cli").expect("repo span present");
   assert!(
+    repo.style.add_modifier.contains(Modifier::REVERSED),
+    "current dir name must render as a leading badge"
+  );
+  assert!(
     repo.style.add_modifier.contains(Modifier::BOLD),
-    "repo name must be bold"
+    "current dir name badge must be bold"
   );
   let path = span_with(&line, "/Users/me/Projects/gwm-cli").expect("path span present");
   assert_eq!(
     path.style.fg,
     Some(Color::DarkGray),
     "path must be dimmed as secondary context"
+  );
+}
+
+#[test]
+fn version_chip_is_pinned_to_the_end_when_wide() {
+  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
+  let text = plain(&line);
+  assert!(
+    text.trim_end().ends_with(&format!("gwm {}", version_token())),
+    "version chip must end the header row: {text:?}"
   );
 }
 
@@ -113,7 +127,7 @@ fn picker_chip_present_only_in_picker_mode() {
 #[test]
 fn narrow_width_drops_path_but_keeps_version_chip_and_repo() {
   // Wide enough for the version chip + repo name, but not the long path.
-  let width = format!(" gwm {} ", version_token()).chars().count() + 2 + "gwm-cli".len() + 4;
+  let width = format!(" gwm {} ", version_token()).chars().count() + 2 + " gwm-cli ".len() + 4;
   let line = header_line(
     "gwm-cli",
     "/Users/me/some/really/long/path/that/will/not/fit/gwm-cli",

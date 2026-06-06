@@ -107,12 +107,10 @@ fn focused_panel_border_wears_the_theme_focus_colour() {
 
 #[test]
 fn header_title_includes_running_version_repo_and_workdir() {
-  // The TUI header surfaces `gwm v<version> — <repo> (<workdir>)`.
+  // The TUI header surfaces `<repo> <workdir> gwm <version>`.
   // Cross-check both halves: the version comes from CARGO_PKG_VERSION
-  // (the same string `gwm --version` prints) and the format wraps
-  // each piece exactly as the docstring describes — so a regression
-  // dropping the `v` prefix, the em-dash, or the repo name fails the
-  // test for the right reason.
+  // (the same string `gwm --version` prints) and the format keeps the
+  // current-dir name first and the version last.
   let title = header_title("gwm-cli", "/Users/kbrdn1/Projects/Perso/gwm-cli");
   assert!(title.contains("gwm-cli"), "missing repo name: {}", title);
   assert!(
@@ -120,9 +118,9 @@ fn header_title_includes_running_version_repo_and_workdir() {
     "missing workdir: {}",
     title
   );
-  let version_token = format!("v{}", env!("CARGO_PKG_VERSION"));
+  let version_token = env!("CARGO_PKG_VERSION");
   assert!(
-    title.contains(&version_token),
+    title.contains(version_token),
     "missing running version `{}`: {}",
     version_token,
     title
@@ -132,7 +130,7 @@ fn header_title_includes_running_version_repo_and_workdir() {
   assert_eq!(
     title,
     format!(
-      " gwm v{} — gwm-cli (/Users/kbrdn1/Projects/Perso/gwm-cli) ",
+      " gwm-cli /Users/kbrdn1/Projects/Perso/gwm-cli gwm {} ",
       env!("CARGO_PKG_VERSION")
     )
   );
@@ -1210,6 +1208,17 @@ fn enter_open_menu_transitions_view() {
 }
 
 #[test]
+fn open_menu_selection_toggles_like_link_prompt() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_open_menu();
+  assert_eq!(app.open_menu_selected, LinkTarget::Issue);
+  app.open_menu_toggle_selection();
+  assert_eq!(app.open_menu_selected, LinkTarget::Pr);
+  app.open_menu_toggle_selection();
+  assert_eq!(app.open_menu_selected, LinkTarget::Issue);
+}
+
+#[test]
 fn open_menu_choose_issue_returns_url_when_linked_and_slug_available() {
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
@@ -1236,7 +1245,7 @@ fn open_menu_pick_returns_none_when_no_link() {
 }
 
 #[test]
-fn link_open_modal_lines_include_available_links_and_refresh_button() {
+fn link_open_modal_lines_include_available_links_without_refresh_button() {
   use gwm::tui::{link_open_modal_lines, LinkTarget};
   let (dir, repo) = init_repo();
   {
@@ -1260,7 +1269,10 @@ fn link_open_modal_lines_include_available_links_and_refresh_button() {
   assert!(text.contains("Issue #42"), "Issue summary missing: {text:?}");
   assert!(text.contains("PR"), "PR summary missing: {text:?}");
   assert!(text.contains("#7"), "PR number missing: {text:?}");
-  assert!(text.contains("Refresh"), "Refresh action missing: {text:?}");
+  assert!(
+    !text.contains("Refresh"),
+    "refresh should be advertised in the hint row, not as a third action button: {text:?}"
+  );
 }
 
 #[test]
@@ -2619,11 +2631,9 @@ fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
 }
 
 #[test]
-fn github_status_idle_prompt_resolves_fetch_binding_not_r() {
-  // Issue #217: the sidebar's Issue/PR block showed `press R to fetch
-  // status`, but `R` is bound to `Review` — the real fetch binding is `F`
-  // (`Action::FetchGithub`). The prompt must resolve the live keymap, never
-  // hard-code a key.
+fn github_status_idle_body_does_not_render_fetch_prompt() {
+  // The fetch affordance lives in the pane title (`Issue / PR [F]`) and in
+  // statusbar/modal hints, not as a body row competing with issue/PR data.
   let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
   let lines = gwm::tui::github_status_lines(&app, 80);
   let text: String = lines
@@ -2632,13 +2642,31 @@ fn github_status_idle_prompt_resolves_fetch_binding_not_r() {
     .collect::<Vec<_>>()
     .join(" ");
   assert!(
-    text.contains("press F to fetch status"),
-    "idle prompt must resolve the FetchGithub binding (F): {text}"
+    !text.contains("press "),
+    "fetch prompt should not render inside the Issue/PR body: {text}"
   );
-  assert!(
-    !text.contains("press R"),
-    "stale `R` prompt leaked into the sidebar: {text}"
-  );
+}
+
+#[test]
+fn github_status_loading_uses_the_animated_spinner_frame() {
+  use gwm::tui::FetchKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.github.request(FetchKey::Issue(42));
+
+  let first = gwm::tui::github_status_lines(&app, 80)
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+  app.spinner.tick();
+  let second = gwm::tui::github_status_lines(&app, 80)
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(first.contains("loading"), "loading label missing: {first:?}");
+  assert_ne!(first, second, "loading rows should animate with the App spinner");
 }
 
 #[test]

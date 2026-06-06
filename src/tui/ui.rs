@@ -1,9 +1,11 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
+use super::keymap::{Action, Keymap};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
+use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
-use crate::bootstrap::StepStatus;
+use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
@@ -79,7 +81,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   }
 }
 
-/// Format the TUI header title `" gwm v<version> — <repo> (<path>) "`.
+/// Format the TUI header title `" <repo> <path> gwm <version> "`.
 /// The version comes from `CARGO_PKG_VERSION` so it stays in lockstep
 /// with `gwm --version` without a second source of truth — important
 /// for users juggling multiple installs (a `cargo install`-ed gwm next
@@ -87,30 +89,25 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// the format can be pinned by a unit test without spinning up the
 /// ratatui backend.
 pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
-  format!(
-    " gwm v{} — {} ({}) ",
-    env!("CARGO_PKG_VERSION"),
-    repo_name,
-    workdir_display
-  )
+  format!(" {} {} gwm {} ", repo_name, workdir_display, env!("CARGO_PKG_VERSION"))
 }
 
 /// Styled, width-driven header builder (issue #185). Replaces the flat
 /// `header_title` string in the rendered TUI with a clear visual hierarchy
 /// that mirrors the #180 footer's chip language:
 ///
-/// - **Version** — a reverse-video badge chip (` gwm v<version> `) painted on
-///   `accent`, the same treatment as the footer hint chips. The version still
-///   comes from `CARGO_PKG_VERSION`, so `gwm --version` parity is preserved.
+/// - **Current directory** — a leading reverse-video badge.
+/// - **Working directory** — dimmed (`DarkGray`), stable after the badge and
+///   dropped/truncated under width pressure.
 /// - **`picker`** — an accent-distinct (yellow) chip flagging a `gwm switch`
-///   picker session, kept right after the version so the mode is unmissable.
-/// - **Repo name** — bold, the primary emphasis.
-/// - **Working directory** — dimmed (`DarkGray`), parenthesised, secondary
-///   context that is the first thing dropped/truncated under width pressure.
+///   picker session.
+/// - **Version** — a right-pinned reverse-video badge (` gwm <version> `)
+///   painted on `accent`. The version still comes from `CARGO_PKG_VERSION`,
+///   so `gwm --version` parity is preserved.
 ///
 /// Priority when the terminal is narrow: the version chip survives (clipped
-/// only if it alone exceeds `width`), then the picker chip, then the repo
-/// name (truncated), and the path is sacrificed first. Pure and measured with
+/// only if it alone exceeds `width`), then the current-dir badge, then the
+/// picker chip, and the path is sacrificed first. Pure and measured with
 /// `chars().count()` so the contract is pinned by `tests/tui_header_tests.rs`
 /// without a ratatui backend; control chars are collapsed to spaces so a
 /// pathological path can never split the single row.
@@ -131,8 +128,11 @@ pub fn header_line(
   let repo = sanitize(repo_name);
   let path = sanitize(workdir_display);
 
-  let chip_style = Style::default()
+  let version_style = Style::default()
     .fg(theme.accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let dir_badge_style = Style::default()
+    .fg(theme.name)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
   // Picker chip uses the `dirty` role (not the accent) so the mode warning
   // reads as distinct from the always-present version chip — pre-theme this
@@ -140,58 +140,67 @@ pub fn header_line(
   let picker_style = Style::default()
     .fg(theme.dirty)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let repo_style = Style::default().add_modifier(Modifier::BOLD);
   let path_style = Style::default().fg(theme.muted);
 
-  let version_text = format!(" gwm v{} ", env!("CARGO_PKG_VERSION"));
-  let chip_w = version_text.chars().count();
+  let version_text = format!(" gwm {} ", env!("CARGO_PKG_VERSION"));
+  let version_w = version_text.chars().count();
+  let dir_text = format!(" {} ", repo);
+  let dir_w = dir_text.chars().count();
 
-  // Priority floor: if even the version chip cannot fit, show it clipped
-  // alone — never an empty header.
-  if width < chip_w {
-    return Line::from(Span::styled(trunc(&version_text, width), chip_style));
+  // Priority floor: if even the right-pinned version chip cannot fit, show it
+  // clipped alone — never an empty header.
+  if width < version_w {
+    return Line::from(Span::styled(trunc(&version_text, width), version_style));
   }
 
   let mut spans: Vec<Span<'static>> = Vec::new();
-  let mut used = chip_w;
-  spans.push(Span::styled(version_text, chip_style));
+  let mut used = 0usize;
 
-  // Picker chip — mode-safety indicator, kept right after the version.
+  // Current-directory badge first. If the row is too narrow for the full
+  // badge plus the pinned version, trim the badge rather than move the path
+  // or version around.
+  let dir_budget = width.saturating_sub(version_w + 1);
+  if dir_w <= dir_budget {
+    spans.push(Span::styled(dir_text, dir_badge_style));
+    used += dir_w;
+  } else if dir_budget > 0 {
+    let clipped = trunc(&dir_text, dir_budget);
+    used += clipped.chars().count();
+    spans.push(Span::styled(clipped, dir_badge_style));
+  }
+
+  // Picker chip — mode-safety indicator, kept right after the current-dir
+  // badge when there is room.
   if picker_mode {
     let picker_text = " picker ".to_string();
     let need = 1 + picker_text.chars().count(); // leading space + chip
-    if used + need <= width {
+    if used + need + version_w < width {
       spans.push(Span::raw(" "));
       spans.push(Span::styled(picker_text, picker_style));
       used += need;
     }
   }
 
-  // Repo name — bold, primary emphasis. Truncated to fit; the 2-space gap is
-  // only spent when at least one repo char survives.
-  let gap = 2usize;
-  if used + gap < width {
-    let avail = width - used - gap;
-    let repo_disp = trunc(&repo, avail);
-    if !repo_disp.is_empty() {
-      let w = repo_disp.chars().count();
+  // Path — dimmed secondary context. It stays immediately after the current
+  // directory badge and is dropped/truncated under pressure; the version chip
+  // remains pinned at the end of the row.
+  let path_gap = 2usize;
+  if used + path_gap + version_w < width {
+    let avail = width - used - path_gap - version_w;
+    let path_disp = trunc(&path, avail);
+    if !path_disp.is_empty() {
+      let w = path_disp.chars().count();
       spans.push(Span::raw("  "));
-      spans.push(Span::styled(repo_disp, repo_style));
-      used += gap + w;
+      spans.push(Span::styled(path_disp, path_style));
+      used += path_gap + w;
     }
   }
 
-  // Path — dimmed secondary context in parens. ` (` + path + `)` ⇒ 3 fixed
-  // columns; dropped first under pressure.
-  let fixed = 3usize; // leading space + "(" + ")"
-  if used + fixed < width {
-    let avail = width - used - fixed;
-    let path_disp = trunc(&path, avail);
-    if !path_disp.is_empty() {
-      spans.push(Span::raw(" "));
-      spans.push(Span::styled(format!("({})", path_disp), path_style));
-    }
+  let pad = width.saturating_sub(used + version_w);
+  if pad > 0 {
+    spans.push(Span::raw(" ".repeat(pad)));
   }
+  spans.push(Span::styled(version_text, version_style));
 
   Line::from(spans)
 }
@@ -529,12 +538,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     0,
     None,
   );
-  render_section(f, chunks[1], " Issue / PR ", issue_pr_lines, border_color, 0, None);
+  render_section(
+    f,
+    chunks[1],
+    issue_pr_pane_title(&app.keymap),
+    issue_pr_lines,
+    border_color,
+    0,
+    None,
+  );
   if !sections.working_tree.is_empty() {
     render_section(
       f,
       chunks[2],
-      " Working Tree ",
+      working_tree_pane_title(&app.keymap),
       sections.working_tree,
       border_color,
       0,
@@ -559,7 +576,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // hint switches to "Enter: copy stash@{N}" in stashes mode.
   let (panel_title, panel_footer) = match active_mode {
     super::state::sidebar::SidebarMode::Commits => {
-      let title = " Recent Commits — commits ".to_string();
+      let title = recent_items_pane_title(active_mode, &app.keymap);
       let footer = if commits_len == 0 {
         None
       } else {
@@ -569,7 +586,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       (title, footer)
     }
     super::state::sidebar::SidebarMode::Stashes => {
-      let title = " Stashes — stashes ".to_string();
+      let title = recent_items_pane_title(active_mode, &app.keymap);
       // The "Enter on stash …" hint from the issue is the operative
       // affordance in this mode — it's worth more than the i/N
       // counter because the user needs to know they can paste the
@@ -753,38 +770,51 @@ fn stash_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'stati
 /// false to avoid visual noise.
 fn worktree_identity_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
   let mut out: Vec<Line<'static>> = Vec::with_capacity(4);
+  let label_w = "Created".chars().count();
+  let label_style = Style::default().fg(theme.muted);
 
-  // Line 1 — "<branch> · <short head>". Branch colour follows the
+  // Line 1 — "Branch  <branch> · <short head>". Branch colour follows the
   // lazygit scheme (PR #73): worst-state wins (dirty → red,
   // ahead/behind → yellow, unpublished → magenta, synced → green,
   // unknown → dark gray) so the most actionable signal stays at eye
   // level.
   let branch_color = branch_name_color(&w.status, theme);
   let branch = w.branch.clone().unwrap_or_else(|| "-".into());
-  let mut spans = vec![Span::styled(branch, Style::default().fg(branch_color))];
+  let mut spans = vec![
+    Span::styled(format!("{:<label_w$}  ", "Branch", label_w = label_w), label_style),
+    Span::styled(branch, Style::default().fg(branch_color)),
+  ];
   if let Some(head) = w.head.as_deref() {
     spans.push(Span::styled("  ·  ".to_string(), Style::default().fg(theme.muted)));
     spans.push(Span::styled(short_oid(head), Style::default().fg(theme.dirty)));
   }
   out.push(Line::from(spans));
 
-  // Line 2 — "Created: <age>" (compact relative duration, colour-coded
+  // Line 2 — "Created  <age>" (compact relative duration, colour-coded
   // by freshness — PR #73). Skipped when the branch has no measurable
   // age (trunk, detached HEAD, or repo open failure).
   out.push(Line::from(vec![
-    Span::styled("Created: ".to_string(), Style::default().fg(theme.muted)),
+    Span::styled(format!("{:<label_w$}  ", "Created", label_w = label_w), label_style),
     Span::styled(branch_age_label(w), Style::default().fg(branch_age_color(w, theme))),
   ]));
 
-  // Line 3 — status badge + optional flag badges. Only renders the badges
+  // Line 3 — "State  <badges>" with optional flag badges. Only renders the badges
   // that are *true* / *interesting*; the false cases stay invisible.
-  out.push(badges_line(w, theme));
+  let mut state_spans = vec![Span::styled(
+    format!("{:<label_w$}  ", "State", label_w = label_w),
+    label_style,
+  )];
+  state_spans.extend(badges_line(w, theme).spans);
+  out.push(Line::from(state_spans));
 
-  // Line 4 — path, tilde-compressed for compactness.
-  out.push(Line::from(Span::styled(
-    tilde_compress(&w.path.display().to_string()),
-    Style::default().fg(theme.muted),
-  )));
+  // Line 4 — "Path  <path>", tilde-compressed for compactness.
+  out.push(Line::from(vec![
+    Span::styled(format!("{:<label_w$}  ", "Path", label_w = label_w), label_style),
+    Span::styled(
+      tilde_compress(&w.path.display().to_string()),
+      Style::default().fg(theme.muted),
+    ),
+  ]));
 
   out
 }
@@ -1358,15 +1388,22 @@ impl HintContext {
       ],
       HintContext::Confirm => &[
         Hint::Lit("y", "confirm"),
+        Hint::Key(ToggleDeleteBranch, "branch"),
         Hint::Lit("←/→", "move"),
         Hint::Lit("Enter", "activate"),
         Hint::Lit("Esc", "cancel"),
       ],
-      HintContext::OpenMenu => &[Hint::Lit("i", "issue"), Hint::Lit("p", "pr"), Hint::Lit("Esc", "close")],
+      HintContext::OpenMenu => &[
+        Hint::Lit("i", "issue"),
+        Hint::Lit("p", "pr"),
+        Hint::Key(FetchGithub, "fetch"),
+        Hint::Lit("Esc", "close"),
+      ],
       HintContext::LinkPrompt => &[
         Hint::Lit("j/k", "move"),
         Hint::Lit("i/p", "kind"),
         Hint::Lit("Enter", "link"),
+        Hint::Key(FetchGithub, "fetch"),
         Hint::Lit("Esc", "cancel"),
       ],
       HintContext::CommandPalette => &[
@@ -1398,6 +1435,52 @@ impl HintContext {
       })
       .collect()
   }
+}
+
+fn action_chord(keymap: &Keymap, action: Action, fallback: &str) -> String {
+  keymap.primary_chord(action).unwrap_or_else(|| fallback.to_string())
+}
+
+pub fn issue_pr_pane_title(keymap: &Keymap) -> String {
+  format!(" Issue / PR [{}] ", action_chord(keymap, Action::FetchGithub, "F"))
+}
+
+pub fn working_tree_pane_title(keymap: &Keymap) -> String {
+  format!(" Working Tree [{}] ", action_chord(keymap, Action::Review, "R"))
+}
+
+pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
+  match mode {
+    SidebarMode::Commits => format!(" Recent Commits [{}] ", action_chord(keymap, Action::GitTui, "l")),
+    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::GitTui, "l")),
+  }
+}
+
+pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
+  let chip_style = Style::default()
+    .fg(theme.accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let label_style = Style::default().fg(theme.muted);
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  for (i, (key, label)) in hints.iter().enumerate() {
+    if i > 0 {
+      spans.push(Span::raw(" "));
+    }
+    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled(format!(" {}", label), label_style));
+  }
+  Line::from(spans).centered()
+}
+
+fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, theme: &Theme) -> Line<'static> {
+  let resolved = ctx.resolve(keymap);
+  let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  modal_hint_line(&hints, theme)
+}
+
+fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Keymap, theme: &Theme) {
+  lines.push(Line::from(String::new()));
+  lines.push(modal_hint_for_context(ctx, keymap, theme));
 }
 
 /// Build the single-line statusline (issue #180).
@@ -1514,6 +1597,9 @@ pub fn status_line(
   width: usize,
   theme: &Theme,
 ) -> Line<'static> {
+  let context_style = Style::default()
+    .fg(theme.focus)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
   let chip_style = Style::default()
     .fg(theme.accent)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -1543,7 +1629,7 @@ pub fn status_line(
   let ctx_chip = format!(" {} ", context);
   let ctx_w = ctx_chip.chars().count();
   if ctx_w <= avail {
-    spans.push(Span::styled(ctx_chip, chip_style));
+    spans.push(Span::styled(ctx_chip, context_style));
     used += ctx_w;
   }
 
@@ -1918,6 +2004,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
       }
     }
   }
+  push_modal_hint(&mut lines, HintContext::Help, &app.keymap, &app.theme);
 
   // Publish the scroll bound against the actual viewport so the Keybindings
   // overlay can scroll when it outgrows the modal (#217). The renderer is
@@ -1957,7 +2044,7 @@ fn draw_create(f: &mut Frame, app: &App) {
   // (issue #217). Height is the fixed row count plus the border + padding
   // rows, so the box hugs its content; the width is capped so the input
   // surfaces don't span a wide terminal.
-  const ROWS: u16 = 13; // title(2) + type + gap + 2 preview + gap + issue + gap + desc + gap + buttons + hint
+  const ROWS: u16 = 14; // title(2) + type + gap + 2 preview + gap + issue + gap + desc + gap + buttons + gap + hint
   let height = ROWS + 2 /* border */ + 2 /* vertical padding */;
   let area = centered_box(70, 72, height, f.area());
   let block = overlay_block(clean);
@@ -2022,13 +2109,7 @@ fn draw_create(f: &mut Frame, app: &App) {
   ));
   lines.push(Line::from(String::new()));
   lines.push(create_buttons_line(accent, muted).centered());
-  lines.push(
-    Line::from(Span::styled(
-      "Tab: field · ←/→: type · Enter: create · Esc: cancel",
-      Style::default().fg(muted),
-    ))
-    .centered(),
-  );
+  push_modal_hint(&mut lines, HintContext::Create, &app.keymap, &app.theme);
 
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(block), area);
@@ -2148,7 +2229,12 @@ pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, m
 /// Modal width for the Link prompt. Pure so the visual budget remains pinned
 /// without a terminal renderer in `tests/tui_ui_helpers_tests.rs`.
 pub fn link_prompt_modal_width(term_width: u16) -> u16 {
-  (term_width.saturating_mul(50) / 100).min(42).min(term_width)
+  let width = if term_width <= 80 {
+    term_width.saturating_mul(80) / 100
+  } else {
+    term_width.saturating_mul(60) / 100
+  };
+  width.min(72).min(term_width)
 }
 
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
@@ -2206,29 +2292,20 @@ pub fn help_body_section_color(theme: &Theme) -> Color {
   theme.locked
 }
 
-fn line_text(line: &Line<'static>) -> String {
-  line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
-
 pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let mut lines = overlay_title_lines(title, accent);
-  lines.extend(
-    github_status_lines(app, 36)
-      .into_iter()
-      .filter(|line| !line_text(line).starts_with("press ")),
-  );
+  lines.extend(github_status_lines(app, 56));
   lines.push(Line::from(""));
   lines.push(link_target_line("i", "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
   lines.push(link_target_line("p", "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
-  let refresh_key = app
-    .keymap
-    .primary_chord(super::keymap::Action::FetchGithub)
-    .unwrap_or_else(|| "F".to_string());
-  lines.push(link_target_line(&refresh_key, "Refresh", false, accent, muted).centered());
-  lines.push(Line::from(""));
-  lines.push(Line::from(Span::styled(link_choose_hint(), Style::default().fg(muted))).centered());
+  let ctx = if title == "Link" {
+    HintContext::LinkPrompt
+  } else {
+    HintContext::OpenMenu
+  };
+  push_modal_hint(&mut lines, ctx, &app.keymap, &app.theme);
   lines
 }
 
@@ -2300,15 +2377,15 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   ));
 
   // Size the modal to its content: the title + description rows plus the
-  // three fixed rows (loader / buttons / hint), the rounded border and the
+  // fixed rows (loader / buttons / hint gap / hint), the rounded border and the
   // shared interior padding — no more fixed 44%-tall box that dwarfed its
   // few lines (#187 review).
-  let height = content.len() as u16 + 3 + 2 /* border */ + 2 /* padding */;
+  let height = content.len() as u16 + 4 + 2 /* border */ + 2 /* padding */;
   let area = centered_h(62, height, term);
   f.render_widget(Clear, area);
 
-  // Four stacked regions inside the padded frame: the title + description,
-  // a loader/countdown row, the button row, and a muted key hint. The
+  // Five stacked regions inside the padded frame: the title + description,
+  // a loader/countdown row, the button row, a gap, and a statusbar-style hint. The
   // loader row stays reserved (Length 1) even when idle so the buttons
   // never jump as the countdown arms. Split `block.inner` so the shared
   // padding owns the breathing room (issue #217).
@@ -2318,6 +2395,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
       Constraint::Min(1),    // title + description
       Constraint::Length(1), // loader / countdown
       Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
     .split(block.inner(area));
@@ -2353,20 +2431,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     inner[2],
   );
 
-  // --- key hint ---
-  let hint = if app.confirm_is_countdown_mode() {
-    if app.confirm.is_armed() {
-      "y cancel countdown · Tab move · Enter · Esc cancel".to_string()
-    } else {
-      let total = app.confirm_countdown_total().as_secs();
-      format!("y arm {total}s · Tab move · Enter · Esc cancel")
-    }
-  } else {
-    "y confirm · Tab move · Enter · Esc cancel".to_string()
-  };
   f.render_widget(
-    Paragraph::new(Span::styled(hint, Style::default().fg(muted))).alignment(Alignment::Center),
-    inner[3],
+    Paragraph::new(modal_hint_for_context(HintContext::Confirm, &app.keymap, &app.theme)),
+    inner[4],
   );
 }
 
@@ -2448,49 +2515,77 @@ pub fn filled_cells_for_progress(progress: f64, cells: usize) -> usize {
   raw.min(cells.saturating_sub(1))
 }
 
-fn draw_report(f: &mut Frame, app: &App) {
-  let mut lines: Vec<Line> = overlay_title_lines("Bootstrap Report", app.theme.accent);
-  if let Some(report) = &app.report {
+pub fn bootstrap_report_lines(report: Option<&BootstrapReport>, theme: &Theme) -> Vec<Line<'static>> {
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  if let Some(report) = report {
     for step in &report.steps {
       let sigil = step.status.sigil();
       let color = match step.status {
-        StepStatus::Ok => app.theme.clean,
-        StepStatus::Skipped => app.theme.muted,
-        StepStatus::Warning => app.theme.dirty,
-        StepStatus::Failed => app.theme.prunable,
+        StepStatus::Ok => theme.clean,
+        StepStatus::Skipped => theme.muted,
+        StepStatus::Warning => theme.dirty,
+        StepStatus::Failed => theme.prunable,
       };
       lines.push(Line::from(vec![
         Span::styled(
           format!(" {} ", sigil),
           Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(step.label.clone(), Style::default().fg(Color::White)),
+        Span::styled(step.label.clone(), Style::default().fg(theme.name)),
       ]));
       for detail_line in step.detail.lines() {
-        lines.push(Line::from(format!("      {}", detail_line)));
+        lines.push(Line::from(Span::styled(
+          format!("      {}", detail_line),
+          Style::default().fg(theme.muted),
+        )));
       }
     }
   } else {
     lines.push(Line::from("(no report)"));
   }
-  lines.push(Line::from(""));
-  lines.push(Line::from(Span::styled(
-    "Enter / Esc — close",
-    Style::default().fg(app.theme.muted),
-  )));
+  lines
+}
+
+fn draw_report(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let logs = bootstrap_report_lines(app.report.as_ref(), &app.theme);
 
   // Size to the report length (+ border + padding), capped at 80% of the
   // screen so a long report stays on-screen rather than a fixed 80%-tall
   // box (#187).
   let term = f.area();
-  let height = (lines.len() as u16 + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
+  let logs_height = (logs.len() as u16 + 2/* nested border */).max(3);
+  let height = (2 /* title */ + logs_height + 2 /* gap + hint */ + 2 /* border */ + 2/* padding */)
+    .min(term.height.saturating_mul(80) / 100);
   let area = centered_h(80, height, term);
+  let block = overlay_block(accent);
+  let inner = block.inner(area);
+  let layout = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Length(1), // title
+      Constraint::Length(1), // title gap
+      Constraint::Min(3),    // logs pane
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(inner);
   f.render_widget(Clear, area);
+  f.render_widget(block, area);
   f.render_widget(
-    Paragraph::new(lines)
-      .block(overlay_block(app.theme.accent))
-      .wrap(Wrap { trim: false }),
-    area,
+    Paragraph::new(
+      Line::from(Span::styled(
+        "Bootstrap Report",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      ))
+      .centered(),
+    ),
+    layout[0],
+  );
+  render_section(f, layout[2], " Logs ", logs, accent, 0, None);
+  f.render_widget(
+    Paragraph::new(modal_hint_for_context(HintContext::Report, &app.keymap, &app.theme)),
+    layout[4],
   );
 }
 
@@ -2606,7 +2701,7 @@ fn trunc(s: &str, max: usize) -> String {
 
 fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let lines = link_open_modal_lines(app, "Open in Browser", None);
+  let lines = link_open_modal_lines(app, "Open in Browser", Some(app.open_menu_selected));
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let term = f.area();
   let width = link_prompt_modal_width(term.width).min(term.width);
@@ -2622,7 +2717,6 @@ fn draw_open_menu(f: &mut Frame, app: &App) {
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let muted = app.theme.muted;
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => {
       // A vertical selectable list (#217): j/k move the highlight, Enter
@@ -2642,8 +2736,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
         accent,
       );
       lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
-      lines.push(Line::from(""));
-      lines.push(Line::from(Span::styled(link_input_hint(), Style::default().fg(muted))));
+      push_modal_hint(&mut lines, HintContext::LinkPrompt, &app.keymap, &app.theme);
       lines
     }
   };
@@ -2660,17 +2753,17 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
-/// Compact control hint for the Link prompt target picker. The Link modal is
-/// 50% wide; on an 80-col terminal the padded inner width is 34 cells, so the
-/// hint must stay terse enough not to clip.
+/// Compact legacy control hint for the Link prompt target picker. The live
+/// modal now renders statusbar-style badges from [`HintContext::LinkPrompt`],
+/// but this helper stays exported for callers that still need a plain string.
 pub fn link_choose_hint() -> &'static str {
-  "j/k move · Enter/i/p pick · Esc"
+  "j/k move · F fetch · Enter/i/p pick · Esc"
 }
 
-/// Compact control hint for the Link prompt number input. Same width budget as
-/// [`link_choose_hint`].
+/// Compact legacy control hint for the Link prompt number input. Same width
+/// budget as [`link_choose_hint`].
 pub fn link_input_hint() -> &'static str {
-  "digits · Enter link · Esc cancel"
+  "digits · F fetch · Enter link · Esc cancel"
 }
 
 /// Render the command palette overlay (issue #32).
@@ -2690,8 +2783,8 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   let inner = outer.inner(area);
   f.render_widget(outer, area);
 
-  // Four rows: a detached centred title, a blank spacer, the matches list
-  // (flex), and the input bar pinned to the bottom (issue #217 — the title
+  // Six rows: a detached centred title, a blank spacer, the matches list
+  // (flex), a hint gap, statusbar-style hints, and the input bar pinned to the bottom (issue #217 — the title
   // moved off the border into the frame).
   let layout = Layout::default()
     .direction(Direction::Vertical)
@@ -2699,6 +2792,8 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       Constraint::Length(1), // title
       Constraint::Length(1), // spacer
       Constraint::Min(3),    // matches
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
       Constraint::Length(1), // input bar
     ])
     .split(inner);
@@ -2741,13 +2836,21 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     )));
   }
   f.render_widget(Paragraph::new(lines), layout[2]);
+  f.render_widget(
+    Paragraph::new(modal_hint_for_context(
+      HintContext::CommandPalette,
+      &app.keymap,
+      &app.theme,
+    )),
+    layout[4],
+  );
 
   let input_line = Line::from(vec![
     Span::styled(":", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
     Span::raw(app.palette.buffer().to_string()),
     Span::styled("_", Style::default().fg(app.theme.muted)),
   ]);
-  f.render_widget(Paragraph::new(input_line), layout[3]);
+  f.render_widget(Paragraph::new(input_line), layout[5]);
 }
 
 /// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)
@@ -2769,36 +2872,26 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   }
 
   if let Some(n) = link.issue {
-    lines.push(issue_summary_line(
+    let spinner = app.spinner.glyph(DOT_FRAMES);
+    lines.push(issue_summary_line_with_spinner(
       n,
       link.issue_source,
       app.issue_fetch_state(),
       max_width,
       &app.theme,
+      Some(spinner),
     ));
   }
   if let Some(n) = link.pr {
-    lines.push(pr_summary_line(
+    let spinner = app.spinner.glyph(DOT_FRAMES);
+    lines.push(pr_summary_line_with_spinner(
       n,
       link.pr_source,
       app.pr_fetch_state(),
       max_width,
       &app.theme,
+      Some(spinner),
     ));
-  }
-  if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
-  {
-    // Resolve the live `FetchGithub` binding instead of hard-coding a key
-    // (issue #217). Pre-fix this read `press R`, but `R` is `Review`; the
-    // fetch action defaults to `F` and is rebindable under `[tui.keys]`.
-    let chord = app
-      .keymap
-      .primary_chord(super::keymap::Action::FetchGithub)
-      .unwrap_or_else(|| "F".to_string());
-    lines.push(Line::from(Span::styled(
-      trunc(&format!("press {} to fetch status", chord), max_width),
-      Style::default().fg(app.theme.muted),
-    )));
   }
   lines
 }
@@ -2824,13 +2917,27 @@ pub fn issue_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
+  issue_summary_line_with_spinner(n, src, state, max_width, theme, None)
+}
+
+fn issue_summary_line_with_spinner(
+  n: u64,
+  src: LinkSource,
+  state: &GitHubFetchState<crate::github::IssueStatus>,
+  max_width: usize,
+  theme: &Theme,
+  spinner: Option<&str>,
+) -> Line<'static> {
   let head = format!("Issue #{}{}", n, source_marker(src));
   // The `head` carries no status signal, only identity — it paints with
   // the `name` role (issue #210; default `White`) while the badge colour
   // tracks the issue state.
   match state {
     GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
-    GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
+    GitHubFetchState::Loading => {
+      let glyph = spinner.unwrap_or("…");
+      Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
+    }
     GitHubFetchState::Loaded(s) => {
       // Mirror `issue_badge_color` exactly so the summary line and the
       // sidebar header dot never disagree for the same issue: closed maps
@@ -2888,13 +2995,27 @@ pub fn pr_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
+  pr_summary_line_with_spinner(n, src, state, max_width, theme, None)
+}
+
+fn pr_summary_line_with_spinner(
+  n: u64,
+  src: LinkSource,
+  state: &GitHubFetchState<crate::github::PrStatus>,
+  max_width: usize,
+  theme: &Theme,
+  spinner: Option<&str>,
+) -> Line<'static> {
   let head = format!("PR    #{}{}", n, source_marker(src));
   // The `head` carries no status signal, only identity — it paints with
   // the `name` role (issue #210; default `White`) while the badge colour
   // tracks the PR state.
   match state {
     GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
-    GitHubFetchState::Loading => Line::from(trunc(&format!("{} …loading", head), max_width)),
+    GitHubFetchState::Loading => {
+      let glyph = spinner.unwrap_or("…");
+      Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
+    }
     GitHubFetchState::Loaded(s) => {
       let (badge, badge_color) = match s.state {
         PrState::Open => ("open", theme.clean),

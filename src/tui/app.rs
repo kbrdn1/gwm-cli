@@ -152,6 +152,7 @@ pub struct App {
   pub view: View,
   pub status: String,
   pub delete_branch_on_remove: bool,
+  pub open_menu_selected: LinkTarget,
 
   // Create form state
   /// Create-worktree overlay state (extracted per #123). Holds field
@@ -352,6 +353,7 @@ impl App {
       view: View::List,
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
+      open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
       branch_types,
       report: None,
@@ -1672,11 +1674,19 @@ impl App {
     // Re-resolve link + slug in case the user just linked something
     // (`gwm link …` from a parallel terminal) or moved the origin remote.
     self.refresh_link();
+    self.open_menu_selected = LinkTarget::Issue;
     self.view = View::OpenMenu;
   }
 
   pub fn exit_open_menu(&mut self) {
     self.view = View::List;
+  }
+
+  pub fn open_menu_toggle_selection(&mut self) {
+    self.open_menu_selected = match self.open_menu_selected {
+      LinkTarget::Issue => LinkTarget::Pr,
+      LinkTarget::Pr => LinkTarget::Issue,
+    };
   }
 
   /// Pick a target from the open menu. Returns the URL to open, or `None`

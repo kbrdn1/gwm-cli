@@ -148,6 +148,7 @@ fn status_line_shows_context_chip_at_the_left() {
     120,
     &Theme {
       accent: Color::Magenta,
+      focus: Color::Green,
       ..Theme::default()
     },
   );
@@ -160,10 +161,18 @@ fn status_line_shows_context_chip_at_the_left() {
   // …and it is a reversed accent chip, like the hint badges.
   let has_ctx_chip = line.spans.iter().any(|s| {
     s.style.add_modifier.contains(Modifier::REVERSED)
-      && s.style.fg == Some(Color::Magenta)
+      && s.style.fg == Some(Color::Green)
       && s.content.contains("worktrees")
   });
-  assert!(has_ctx_chip, "context label is not a reversed accent chip: {text:?}");
+  assert!(has_ctx_chip, "context label is not a reversed focus chip: {text:?}");
+  assert!(
+    line
+      .spans
+      .iter()
+      .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
+      .any(|s| s.style.fg == Some(Color::Magenta) && s.content.contains(" n ")),
+    "hint key badges should keep the accent colour while context uses focus: {text:?}"
+  );
 }
 
 #[test]
@@ -263,5 +272,15 @@ fn status_hints_resolve_user_rebindings() {
   assert!(
     !resolved.iter().any(|(k, _)| k == "F"),
     "the stale default `F` must not linger after the rebind: {resolved:?}"
+  );
+}
+
+#[test]
+fn confirm_hints_include_delete_branch_toggle_binding() {
+  use gwm::tui::keymap::Keymap;
+  let resolved = HintContext::Confirm.resolve(&Keymap::defaults());
+  assert!(
+    resolved.iter().any(|(k, l)| k == "p" && l == "branch"),
+    "Delete Worktree hints should advertise the branch toggle binding: {resolved:?}"
   );
 }
