@@ -54,15 +54,16 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, badge_group_width, branch_name_color, build_sidebar_sections, confirm_buttons_line,
-  confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle,
-  field_input_line, filled_cells_for_progress, footer_line, freshness_color, github_status_lines, header_line,
-  header_title, help_body_section_color, help_lines, help_rows, help_section_style, issue_badge_color,
-  issue_summary_line, link_choose_hint, link_input_hint, link_open_modal_lines, link_prompt_modal_width,
-  link_target_line, pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
-  status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
-  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
-  COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, build_sidebar_sections,
+  confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title,
+  ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, freshness_color, github_status_lines,
+  header_line, header_title, help_body_section_color, help_lines, help_rows, help_section_style, issue_badge_color,
+  issue_pr_pane_title, issue_summary_line, link_choose_hint, link_input_hint, link_open_modal_lines,
+  link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, panel_border_color, pr_badge_color,
+  pr_summary_line, recent_commits_lines, recent_items_pane_title, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_pane_title, working_tree_status_line, worktree_name_style,
+  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
+  RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
@@ -283,6 +284,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           ConfirmButton::Cancel => app.confirm_dismiss(),
         },
         KeyCode::Char('n') | KeyCode::Esc => app.confirm_dismiss(),
+        _ if app.key_matches_action(key, Action::ToggleDeleteBranch) => app.toggle_delete_branch(),
         // Button focus navigation (#187). `←` / `h` → Confirm,
         // `→` / `l` → Cancel, `Tab` toggles.
         KeyCode::Left | KeyCode::Char('h') => app.confirm.focus_confirm(),
@@ -299,6 +301,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       },
       View::OpenMenu => match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.exit_open_menu(),
+        KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up => app.open_menu_toggle_selection(),
+        KeyCode::Enter => {
+          if let Some(url) = app.open_menu_pick(app.open_menu_selected) {
+            open_url(&url, &mut app);
+          }
+        }
         KeyCode::Char('i') => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
             open_url(&url, &mut app);

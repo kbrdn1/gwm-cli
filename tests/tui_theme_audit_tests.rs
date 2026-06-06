@@ -337,7 +337,8 @@ fn summary_line_heads_resolve_through_name_role() {
 fn header_line_resolves_chrome_through_theme_roles() {
   let t = audit_theme();
   let line = header_line("repo", "/home/u/repo", true, 120, &t);
-  assert_eq!(fg_containing(&line, "gwm v"), Some(t.accent), "version chip → accent");
+  assert_eq!(fg_containing(&line, "gwm "), Some(t.accent), "version chip → accent");
+  assert_eq!(fg_containing(&line, "repo"), Some(t.name), "current-dir badge → name");
   assert_eq!(fg_containing(&line, "picker"), Some(t.dirty), "picker chip → dirty");
   assert_eq!(fg_containing(&line, "/home/u/repo"), Some(t.muted), "path → muted");
 }

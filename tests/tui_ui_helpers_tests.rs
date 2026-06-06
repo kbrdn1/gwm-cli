@@ -3,15 +3,20 @@
 //! the confirm modal, and the badge-group width used to align the help
 //! overlay's per-chord key badges.
 
+use gwm::bootstrap::{BootstrapReport, StepResult};
+use gwm::tui::keymap::{Action, KeyStroke, Keymap};
+use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, link_choose_hint,
-  link_input_hint, link_prompt_modal_width, link_target_line, pane_counter, status_pane_title, type_selector_line,
+  badge_group_width, bootstrap_report_lines, confirm_buttons_line, create_buttons_line, ellipsize_middle,
+  field_input_line, link_choose_hint, link_input_hint, link_prompt_modal_width, link_target_line, modal_hint_line,
+  pane_counter, recent_items_pane_title, status_pane_title, type_selector_line, working_tree_pane_title,
   worktrees_pane_title,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_section_style,
+  issue_pr_pane_title,
 };
 use ratatui::style::{Color, Modifier, Style};
 
@@ -104,6 +109,31 @@ fn status_pane_title_carries_the_focus_index() {
 }
 
 #[test]
+fn sidebar_subpane_titles_surface_live_bindings() {
+  let mut km = Keymap::defaults();
+  assert_eq!(issue_pr_pane_title(&km), " Issue / PR [F] ");
+  assert_eq!(working_tree_pane_title(&km), " Working Tree [R] ");
+  assert_eq!(
+    recent_items_pane_title(SidebarMode::Commits, &km),
+    " Recent Commits [l] "
+  );
+
+  km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
+    .unwrap();
+  km.apply_override(Action::Review, vec![KeyStroke::parse_chord("Ctrl+r").unwrap()])
+    .unwrap();
+  km.apply_override(Action::GitTui, vec![KeyStroke::parse_chord("Ctrl+l").unwrap()])
+    .unwrap();
+
+  assert_eq!(issue_pr_pane_title(&km), " Issue / PR [Ctrl+g] ");
+  assert_eq!(working_tree_pane_title(&km), " Working Tree [Ctrl+r] ");
+  assert_eq!(
+    recent_items_pane_title(SidebarMode::Commits, &km),
+    " Recent Commits [Ctrl+l] "
+  );
+}
+
+#[test]
 fn pane_counter_is_blank_when_nothing_visible() {
   // Empty list → no `N of M` footer at all (mirrors the Recent Commits
   // section, which drops its counter when there is nothing to scroll).
@@ -153,6 +183,42 @@ fn confirm_buttons_render_as_chips_without_brackets() {
     !confirm.style.add_modifier.contains(Modifier::REVERSED),
     "idle Confirm button must not be reversed"
   );
+}
+
+#[test]
+fn modal_hint_line_uses_statusbar_badge_treatment() {
+  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &Theme::default());
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("fetch"), "hint label missing: {text:?}");
+  let fetch = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("F"))
+    .expect("fetch key badge");
+  assert!(
+    fetch.style.add_modifier.contains(Modifier::REVERSED),
+    "modal key hints should use statusbar-like badges"
+  );
+}
+
+#[test]
+fn bootstrap_report_lines_keep_step_logs_as_pane_rows() {
+  let report = BootstrapReport {
+    steps: vec![
+      StepResult::ok_with_detail("cargo fetch", "done"),
+      StepResult::skipped("direnv allow", "when false"),
+    ],
+  };
+  let lines = bootstrap_report_lines(Some(&report), &Theme::default());
+  let text: String = lines
+    .iter()
+    .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(text.contains("cargo fetch"), "step label missing: {text:?}");
+  assert!(text.contains("done"), "step detail missing: {text:?}");
+  assert!(text.contains("direnv allow"), "skipped label missing: {text:?}");
 }
 
 // ---------------------------------------------------------------------------
@@ -305,21 +371,19 @@ fn link_target_line_highlights_the_selected_row() {
 
 #[test]
 fn link_prompt_width_stays_compact_on_wide_terminals() {
-  assert_eq!(link_prompt_modal_width(80), 40);
+  assert_eq!(link_prompt_modal_width(80), 64);
   assert_eq!(
     link_prompt_modal_width(120),
-    42,
-    "Link prompt should cap instead of growing to half the terminal"
+    72,
+    "Link/Open prompts should be wide enough for Issue/PR summaries but still cap on wide terminals"
   );
 }
 
 #[test]
 fn link_prompt_hints_fit_the_80_col_modal_budget() {
-  // At 80 columns the compact Link modal remains 40 columns wide, and the
-  // rounded border + horizontal padding leave 34 cells for content. The
-  // visual smoke caught the previous long hints clipping at exactly this
-  // common terminal width.
-  const INNER_WIDTH_AT_80_COLS: usize = 34;
+  // At 80 columns the Link/Open modal is 64 columns wide, and the rounded
+  // border + horizontal padding leave 58 cells for content.
+  const INNER_WIDTH_AT_80_COLS: usize = 58;
 
   for hint in [link_choose_hint(), link_input_hint()] {
     assert!(

@@ -531,8 +531,8 @@ impl Keymap {
 
   /// The canonical rendering of the **first** chord bound to `action`,
   /// or `None` when the action is unbound. Used by UI copy that names a
-  /// key inline (e.g. the sidebar's "press F to fetch status" prompt,
-  /// issue #217) so the hint tracks user overrides under `[tui.keys]`
+  /// key inline (e.g. pane titles such as `Issue / PR [F]`,
+  /// issue #224) so the hint tracks user overrides under `[tui.keys]`
   /// instead of hard-coding a default that may have been rebound. A
   /// multi-chord action returns its first chord in declaration order,
   /// matching what `gwm tui keys` lists first.
