@@ -86,12 +86,20 @@ For reference (each linked to its closing PR):
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
+## Next up
+
+Near-term TUI work, listed in **rough implementation order** — each item builds on the one above it. This is a dependency ordering, not a date commitment.
+
+1. [#231](https://github.com/kbrdn1/gwm-cli/issues/231) — **Async-task layer + better loader render** — the foundation. Generalise #217's off-thread GitHub fetch into a shared worker-thread + loader so list refresh (`f`), `sync`, bootstrap (`b`), and launcher spawns stop blocking the event loop, all rendering through one consistent loader widget. Everything below shows its loading state through this layer.
+2. [#226](https://github.com/kbrdn1/gwm-cli/issues/226) — **Command Logs modal (`3`)** — first consumer of the modal-on-a-number-key pattern; a scrollable transcript of every command gwm runs (argv, timing, exit, output), streamed through the new loader. Completes the `1`/`2`/`3` panel family and gives the single-line statusbar action log (#217) a full scrollback.
+3. [#232](https://github.com/kbrdn1/gwm-cli/issues/232) — **Configuration panel (`4`)** — the next pane in the family; a ~90% fullscreen modal (same pattern as #226 / #35, outside the `Tab` cycle) showing the **resolved** `.gwm.toml` (repo deep-merged with the user-level config, with a source column), reusing the merge logic already behind `gwm config list`.
+4. [#233](https://github.com/kbrdn1/gwm-cli/issues/233) — **Open docs in the browser (`.`)** — dependency-free quick win; a `.` key that opens the docs, reusing the `O` / `gwm open` browser-spawn path. Can land at any point.
+
 ## Ambitious
 
 Larger investments with strategic payoff. Gated by user demand or a concrete first consumer.
 
 - [#35](https://github.com/kbrdn1/gwm-cli/issues/35) — **PTY-embedded lazygit overlay** — render lazygit live inside gwm (`portable-pty` + `tui-term`) as a **~90% fullscreen modal overlay** over the worktree list (not a beside / side pane), drawn like the other modals and outside the `Tab` focus cycle. Distinct from the existing `l` launcher: this one renders lazygit **inside** gwm rather than handing the alt-screen over.
-- [#226](https://github.com/kbrdn1/gwm-cli/issues/226) — **Command Logs modal (lazygit-style)** — a scrollable transcript of every command gwm runs (argv, timing, exit, output), hidden by default and opened on a dedicated key (`3`), as a ~90% fullscreen modal overlay (same pattern as #35) outside the `Tab` cycle. Complements the single-line statusbar action log (#217) with the full scrollback.
 - [#36](https://github.com/kbrdn1/gwm-cli/issues/36) — **Multi-repo workspace mode** — `gwm --workspace ~/Projects` shows worktrees across every child repo in one TUI.
 - [#37](https://github.com/kbrdn1/gwm-cli/issues/37) — **Configuration presets** — `gwm init --preset laravel / nuxt / rust / go / python-uv` seeds an opinionated `.gwm.toml` for known stacks instead of the generic default.
 - [#38](https://github.com/kbrdn1/gwm-cli/issues/38) — **JSON-RPC / gRPC API + daemon mode** — `--format=json` on key commands, then a long-running daemon over `$XDG_RUNTIME_DIR/gwm.sock` for editor / statusbar integration.
