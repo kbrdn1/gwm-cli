@@ -49,13 +49,15 @@ pub const SIDEBAR_MIN_WIDTH: u16 = 120;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SidebarOrientation {
   /// Width-driven: side-by-side at `>= SIDEBAR_MIN_WIDTH`, stacked
-  /// below it. Default — restores a usable sidebar on narrow terminals
-  /// where it was previously hidden entirely.
-  #[default]
+  /// below it. Restores a usable sidebar on narrow terminals where it
+  /// was previously hidden entirely.
   Auto,
   /// Always beside the table (table | sidebar), even when narrow.
   SideBySide,
   /// Always stacked (table on top, sidebar below), even when wide.
+  /// Default since issue #217: the status pane reads best under the
+  /// worktrees table, where it gets the full terminal width.
+  #[default]
   Stacked,
 }
 
@@ -94,6 +96,22 @@ pub enum ResolvedSidebarLayout {
   SideBySide { sidebar_left: bool },
   /// Stacked split — table on top, sidebar below.
   Stacked,
+}
+
+impl ResolvedSidebarLayout {
+  /// The `(table_pct, sidebar_pct)` split this layout draws, or `None`
+  /// when the sidebar is hidden (the table takes the whole area). Issue
+  /// #217 tuned the ratios per axis: stacked vertically the status pane
+  /// gets the larger share (42% table / 58% status) so commits + issue/PR
+  /// have room; side-by-side the table stays dominant (55% / 45%). Pure +
+  /// ratatui-free so the contract is pinned without a backend.
+  pub fn split_percentages(self) -> Option<(u16, u16)> {
+    match self {
+      ResolvedSidebarLayout::Hidden => None,
+      ResolvedSidebarLayout::SideBySide { .. } => Some((55, 45)),
+      ResolvedSidebarLayout::Stacked => Some((42, 58)),
+    }
+  }
 }
 
 /// Which content the sidebar previews (issue #34).

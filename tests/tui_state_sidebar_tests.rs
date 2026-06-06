@@ -243,12 +243,13 @@ fn invalidate_drops_cache_keeps_scroll() {
 // ---- Responsive layout + position (issue #188) ----------------------------
 
 #[test]
-fn default_position_is_right_orientation_is_auto() {
-  // Pre-#188 behaviour: sidebar on the right, width-driven layout. `App`
+fn default_position_is_right_orientation_is_stacked() {
+  // Sidebar on the right; default orientation is now `Stacked` (issue #217)
+  // so the status pane sits under the worktrees table by default. `App`
   // overrides `position` from `[tui] sidebar_position` at construction.
   let s = SidebarState::new();
   assert_eq!(s.position, SidebarPosition::Right);
-  assert_eq!(s.orientation, SidebarOrientation::Auto);
+  assert_eq!(s.orientation, SidebarOrientation::Stacked);
 }
 
 #[test]
@@ -261,7 +262,8 @@ fn resolve_layout_hidden_when_closed_regardless_of_width() {
 
 #[test]
 fn resolve_layout_auto_is_side_by_side_at_or_above_min_width() {
-  let s = SidebarState::new(); // open, Auto, Right
+  let mut s = SidebarState::new(); // open, Right
+  s.orientation = SidebarOrientation::Auto; // opt into width-driven layout
   assert_eq!(
     s.resolve_layout(SIDEBAR_MIN_WIDTH),
     ResolvedSidebarLayout::SideBySide { sidebar_left: false },
@@ -277,7 +279,8 @@ fn resolve_layout_auto_is_side_by_side_at_or_above_min_width() {
 fn resolve_layout_auto_stacks_below_min_width() {
   // The headline #188 change: narrow no longer hides the sidebar, it
   // stacks it under the table.
-  let s = SidebarState::new();
+  let mut s = SidebarState::new();
+  s.orientation = SidebarOrientation::Auto;
   assert_eq!(s.resolve_layout(SIDEBAR_MIN_WIDTH - 1), ResolvedSidebarLayout::Stacked);
   assert_eq!(s.resolve_layout(0), ResolvedSidebarLayout::Stacked);
 }
@@ -285,6 +288,7 @@ fn resolve_layout_auto_stacks_below_min_width() {
 #[test]
 fn resolve_layout_auto_honours_left_position() {
   let mut s = SidebarState::new();
+  s.orientation = SidebarOrientation::Auto;
   s.position = SidebarPosition::Left;
   assert_eq!(
     s.resolve_layout(SIDEBAR_MIN_WIDTH),
@@ -318,14 +322,20 @@ fn resolve_layout_forced_stacked_ignores_wide_width() {
 
 #[test]
 fn cycle_orientation_walks_auto_side_by_side_stacked_and_wraps() {
+  // The cycle order itself is unchanged (Auto → SideBySide → Stacked → …);
+  // only the default starting point moved to `Stacked` (issue #217).
   let mut s = SidebarState::new();
+  assert_eq!(s.orientation, SidebarOrientation::Stacked);
+  s.cycle_orientation();
   assert_eq!(s.orientation, SidebarOrientation::Auto);
   s.cycle_orientation();
   assert_eq!(s.orientation, SidebarOrientation::SideBySide);
   s.cycle_orientation();
-  assert_eq!(s.orientation, SidebarOrientation::Stacked);
-  s.cycle_orientation();
-  assert_eq!(s.orientation, SidebarOrientation::Auto, "cycle wraps back to Auto");
+  assert_eq!(
+    s.orientation,
+    SidebarOrientation::Stacked,
+    "cycle wraps back to Stacked"
+  );
 }
 
 #[test]
@@ -336,6 +346,24 @@ fn toggle_position_flips_left_right() {
   assert_eq!(s.position, SidebarPosition::Left);
   s.toggle_position();
   assert_eq!(s.position, SidebarPosition::Right);
+}
+
+#[test]
+fn split_percentages_favour_the_status_pane_vertically_and_the_table_horizontally() {
+  // Issue #217 ratios: stacked (vertical) gives the status pane the lion's
+  // share (42% table / 58% status) so commits + issue/PR breathe; side-by-side
+  // keeps the table dominant (55% / 45%). Hidden has no split.
+  assert_eq!(ResolvedSidebarLayout::Stacked.split_percentages(), Some((42, 58)));
+  assert_eq!(
+    ResolvedSidebarLayout::SideBySide { sidebar_left: false }.split_percentages(),
+    Some((55, 45))
+  );
+  assert_eq!(
+    ResolvedSidebarLayout::SideBySide { sidebar_left: true }.split_percentages(),
+    Some((55, 45)),
+    "the table/sidebar ratio is independent of which side the sidebar sits on"
+  );
+  assert_eq!(ResolvedSidebarLayout::Hidden.split_percentages(), None);
 }
 
 #[test]

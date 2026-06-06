@@ -226,21 +226,25 @@ fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
 /// left-or-right side are decided by the pure
 /// [`SidebarState::resolve_layout`](super::state::sidebar::SidebarState::resolve_layout),
 /// so this function only translates that decision into ratatui splits
-/// (issue #188). The table keeps 60% of the split, the sidebar 40%, in
-/// both orientations.
+/// (issue #188). The table/sidebar ratio is per-axis (issue #217): 55/45
+/// side-by-side, 42/58 stacked — see
+/// [`ResolvedSidebarLayout::split_percentages`](super::state::sidebar::ResolvedSidebarLayout::split_percentages).
 fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
   use super::state::sidebar::ResolvedSidebarLayout as Resolved;
 
-  // Table 60% / sidebar 40% — shared by both split orientations.
-  let table_pct = Constraint::Percentage(60);
-  let sidebar_pct = Constraint::Percentage(40);
-
-  match app.sidebar.resolve_layout(area.width) {
-    Resolved::Hidden => {
+  let layout = app.sidebar.resolve_layout(area.width);
+  let (table_pct, sidebar_pct) = match layout.split_percentages() {
+    Some((t, s)) => (Constraint::Percentage(t), Constraint::Percentage(s)),
+    None => {
       // Sidebar not rendered → no scrollable surface → no max scroll to track.
       app.sidebar.max_scroll = 0;
       draw_list(f, area, app);
+      return;
     }
+  };
+
+  match layout {
+    Resolved::Hidden => unreachable!("Hidden returns None from split_percentages, handled above"),
     Resolved::SideBySide { sidebar_left } => {
       let split = Layout::default()
         .direction(Direction::Horizontal)
@@ -259,9 +263,9 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
       draw_sidebar(f, sidebar_area, app);
     }
     Resolved::Stacked => {
-      // Table on top, sidebar below — the narrow-terminal fallback that
-      // replaces pre-#188 hiding. The left/right position does not apply
-      // to a vertical stack.
+      // Table on top, sidebar below — the default layout (issue #217) and the
+      // narrow-terminal fallback. The left/right position does not apply to a
+      // vertical stack.
       let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([table_pct, sidebar_pct])
