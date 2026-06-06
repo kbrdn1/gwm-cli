@@ -8,8 +8,8 @@
 //! `footer_line` is a pure builder (like `header_title` / `help_lines`) so the
 //! layout contract is pinned here without spinning up a ratatui backend.
 
-use gwm::tui::footer_line;
 use gwm::tui::theme::Theme;
+use gwm::tui::{footer_line, status_line, HintContext};
 use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 
@@ -130,4 +130,85 @@ fn zero_width_emits_an_empty_line_without_overflowing() {
     "footer overflowed a zero width: {:?}",
     plain(&line)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Contextual statusbar (issue #217): a context chip on the left, an optional
+// loading spinner, the contextual hints in the middle, and the action log
+// pinned right with absolute priority.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn status_line_shows_context_chip_at_the_left() {
+  let line = status_line(
+    "worktrees",
+    HINTS,
+    "ready",
+    None,
+    120,
+    &Theme {
+      accent: Color::Magenta,
+      ..Theme::default()
+    },
+  );
+  let text = plain(&line);
+  // The context label leads the row.
+  assert!(
+    text.trim_start().starts_with("worktrees") || text.contains("worktrees"),
+    "context chip missing at the left: {text:?}"
+  );
+  // …and it is a reversed accent chip, like the hint badges.
+  let has_ctx_chip = line.spans.iter().any(|s| {
+    s.style.add_modifier.contains(Modifier::REVERSED)
+      && s.style.fg == Some(Color::Magenta)
+      && s.content.contains("worktrees")
+  });
+  assert!(has_ctx_chip, "context label is not a reversed accent chip: {text:?}");
+}
+
+#[test]
+fn status_line_renders_the_loading_spinner_when_present() {
+  let with = status_line("status", HINTS, "loading", Some("⠋"), 120, &Theme::default());
+  assert!(plain(&with).contains('⠋'), "spinner glyph missing when loading");
+  // Absent when not loading.
+  let without = status_line("status", HINTS, "idle", None, 120, &Theme::default());
+  assert!(!plain(&without).contains('⠋'), "spinner glyph leaked when not loading");
+}
+
+#[test]
+fn status_line_pins_the_log_right_and_fits_width() {
+  let line = status_line("worktrees", HINTS, "opened foo", None, 120, &Theme::default());
+  let text = plain(&line);
+  assert!(display_width(&line) <= 120, "overflowed 120: {text:?}");
+  assert!(!text.contains('\n'), "statusline must stay one row");
+  assert!(
+    text.trim_end().ends_with("[opened foo]"),
+    "log not pinned at end: {text:?}"
+  );
+}
+
+#[test]
+fn status_line_keeps_context_and_log_when_narrow_dropping_hints() {
+  // Tight width: hints get truncated but both the context chip and the log
+  // survive — they are the load-bearing signals.
+  let line = status_line("worktrees", HINTS, "busy", Some("⠙"), 44, &Theme::default());
+  let text = plain(&line);
+  assert!(display_width(&line) <= 44, "overflowed 44: {text:?}");
+  assert!(text.contains("worktrees"), "context dropped under pressure: {text:?}");
+  assert!(text.contains("[busy]"), "log dropped under pressure: {text:?}");
+}
+
+#[test]
+fn hint_context_exposes_label_and_hints() {
+  // The same context source feeds the help subtitle and the statusbar chip.
+  assert_eq!(HintContext::Worktrees.label(), "worktrees");
+  assert_eq!(HintContext::Status.label(), "status");
+  assert_eq!(HintContext::Picker.label(), "switch");
+  for ctx in [HintContext::Worktrees, HintContext::Status, HintContext::Picker] {
+    assert!(
+      !ctx.hints().is_empty(),
+      "context {:?} must advertise hints",
+      ctx.label()
+    );
+  }
 }

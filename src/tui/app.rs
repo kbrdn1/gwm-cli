@@ -680,6 +680,26 @@ impl App {
     self.status = "focus: status".into();
   }
 
+  /// The live UI context driving the statusbar chip + help subtitle (issue
+  /// #217): `Picker` in `gwm switch`, `Status` when the sidebar holds focus,
+  /// `Worktrees` otherwise.
+  pub fn hint_context(&self) -> super::ui::HintContext {
+    if self.picker_mode {
+      super::ui::HintContext::Picker
+    } else if self.sidebar.open && self.sidebar.focused {
+      super::ui::HintContext::Status
+    } else {
+      super::ui::HintContext::Worktrees
+    }
+  }
+
+  /// `true` while a GitHub issue / PR fetch for the current link is inflight
+  /// (issue #217) — drives the statusbar loading spinner.
+  pub fn is_github_loading(&self) -> bool {
+    matches!(self.issue_fetch_state(), GitHubFetchState::Loading)
+      || matches!(self.pr_fetch_state(), GitHubFetchState::Loading)
+  }
+
   pub fn sidebar_scroll_down(&mut self) {
     self.sidebar.scroll_down();
   }

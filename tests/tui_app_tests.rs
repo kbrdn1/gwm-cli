@@ -74,6 +74,18 @@ fn focus_worktrees_releases_sidebar_focus() {
 }
 
 #[test]
+fn hint_context_follows_focus() {
+  // Issue #217: the statusbar chip + help subtitle read the live focus. The
+  // worktrees pane is the default; focusing the sidebar switches to Status.
+  use gwm::tui::HintContext;
+  let (_dir, mut app) = make_app();
+  app.focus_worktrees();
+  assert_eq!(app.hint_context(), HintContext::Worktrees);
+  app.focus_status();
+  assert_eq!(app.hint_context(), HintContext::Status);
+}
+
+#[test]
 fn focused_panel_border_wears_the_theme_focus_colour() {
   // #185: the focus-swappable panel borders (worktree list ↔ sidebar,
   // toggled with Tab) must paint with the theme `focus` role, not a

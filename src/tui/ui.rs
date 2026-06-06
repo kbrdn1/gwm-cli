@@ -1232,45 +1232,76 @@ fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Colo
   (label, color)
 }
 
-/// `(key, label)` hints advertised in the full TUI footer, in display order.
-/// Picker mode hides the mutating actions (n/d/b/F) — they're inert in the
-/// picker event loop, so advertising them would be a lie.
-const FOOTER_HINTS: &[(&str, &str)] = &[
-  ("n", "new"),
-  ("d", "del"),
-  ("b", "boot"),
-  ("o", "open"),
-  ("y", "yank"),
-  ("l", "git"),
-  ("R", "review"),
-  ("v", "sidebar"),
-  ("Tab", "focus"),
-  ("/", "filter"),
-  ("gg/G", "top/bot"),
-  ("j/k", "nav"),
-  ("f", "refresh"),
-  ("F", "gh"),
-  ("?", "help"),
-  ("q", "quit"),
-];
+/// Which pane / mode the TUI is in, the single source the help overlay
+/// subtitle and the contextual statusbar both read (issue #217). Keeping
+/// them on one enum means the discoverable hints (`?`) and the always-on
+/// statusbar chips can never advertise a different verb set for the same
+/// context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HintContext {
+  /// Worktree table focused — the default list-view context.
+  Worktrees,
+  /// Status (sidebar) pane focused — `j` / `k` scroll the preview.
+  Status,
+  /// `gwm switch` picker — mutating verbs are inert, Enter/Esc pick/cancel.
+  Picker,
+}
 
-/// Picker-mode footer hints — `enter`/`esc` select/cancel instead of the
-/// mutating actions, matching the picker event loop.
-const PICKER_FOOTER_HINTS: &[(&str, &str)] = &[
-  ("enter", "select"),
-  ("esc", "cancel"),
-  ("o", "open"),
-  ("y", "yank"),
-  ("l", "git"),
-  ("v", "sidebar"),
-  ("Tab", "focus"),
-  ("/", "filter"),
-  ("gg/G", "top/bot"),
-  ("j/k", "nav"),
-  ("f", "refresh"),
-  ("?", "help"),
-  ("q", "quit"),
-];
+impl HintContext {
+  /// Short label rendered into the statusbar context chip and the help
+  /// overlay subtitle.
+  pub fn label(self) -> &'static str {
+    match self {
+      HintContext::Worktrees => "worktrees",
+      HintContext::Status => "status",
+      HintContext::Picker => "switch",
+    }
+  }
+
+  /// Compact `(key, label)` hints for the statusbar, tuned per context so
+  /// the row advertises the verbs that actually do something *here* rather
+  /// than a fixed global list. The keys are the default bindings; a user
+  /// override changes the dispatch but not this advisory copy (the help
+  /// overlay carries the authoritative, keymap-resolved bindings).
+  pub fn hints(self) -> &'static [(&'static str, &'static str)] {
+    match self {
+      HintContext::Worktrees => &[
+        ("n", "new"),
+        ("d", "del"),
+        ("b", "boot"),
+        ("o", "open"),
+        ("y", "yank"),
+        ("l", "git"),
+        ("R", "review"),
+        ("2", "status"),
+        ("/", "filter"),
+        ("?", "help"),
+        ("q", "quit"),
+      ],
+      HintContext::Status => &[
+        ("j/k", "scroll"),
+        ("s", "mode"),
+        ("V", "layout"),
+        ("F", "fetch"),
+        ("1", "worktrees"),
+        ("/", "filter"),
+        ("?", "help"),
+        ("q", "quit"),
+      ],
+      HintContext::Picker => &[
+        ("enter", "select"),
+        ("esc", "cancel"),
+        ("o", "open"),
+        ("y", "yank"),
+        ("l", "git"),
+        ("Tab", "focus"),
+        ("/", "filter"),
+        ("?", "help"),
+        ("q", "quit"),
+      ],
+    }
+  }
+}
 
 /// Build the single-line statusline (issue #180).
 ///
@@ -1364,14 +1395,131 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   Line::from(spans)
 }
 
+/// Contextual statusbar (issue #217) — a superset of [`footer_line`] that
+/// leads with a context chip and an optional loading spinner. Layout,
+/// left-to-right:
+///
+/// ```text
+///  worktrees  ⠋  n  new  d  del  …                       [<status>]
+/// ```
+///
+/// Priority when space is tight, from most to least protected: the status
+/// log (right, clipped only if it alone overflows), the context chip and
+/// spinner (left, the load-bearing "where am I / am I busy" signals), then
+/// the hints (truncated with `…`). Pure + width-driven so the contract is
+/// pinned by `tests/tui_footer_tests.rs`; `footer_line` is kept intact for
+/// its own callers and tests.
+pub fn status_line(
+  context: &str,
+  hints: &[(&str, &str)],
+  status: &str,
+  spinner: Option<&str>,
+  width: usize,
+  theme: &Theme,
+) -> Line<'static> {
+  let chip_style = Style::default()
+    .fg(theme.accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let label_style = Style::default().fg(theme.muted);
+  let status_style = Style::default().fg(theme.dirty);
+  let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
+
+  if width == 0 {
+    return Line::default();
+  }
+
+  let status: String = status.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+  let status_text = format!("[{}]", status);
+  let status_w = status_text.chars().count();
+
+  // Priority floor: if even the status cannot fit, show a clipped status
+  // alone — never a chip or hint at the log's expense.
+  if width <= status_w {
+    return Line::from(Span::styled(trunc(&status_text, width), status_style));
+  }
+
+  let avail = width - status_w; // columns to the left of the right-pinned status
+  let mut spans: Vec<Span<'static>> = Vec::new();
+  let mut used = 0usize;
+
+  // Context chip — load-bearing, kept whenever it fits at all.
+  let ctx_chip = format!(" {} ", context);
+  let ctx_w = ctx_chip.chars().count();
+  if ctx_w <= avail {
+    spans.push(Span::styled(ctx_chip, chip_style));
+    used += ctx_w;
+  }
+
+  // Loading spinner — optional, rendered right after the chip when present
+  // and there is room.
+  if let Some(glyph) = spinner {
+    let padded = format!(" {} ", glyph);
+    let gw = padded.chars().count();
+    if used + gw <= avail {
+      spans.push(Span::styled(padded, spinner_style));
+      used += gw;
+    }
+  }
+
+  // Hint badges fill whatever is left, minus one column for the `…` marker.
+  let hint_budget = avail.saturating_sub(used).saturating_sub(1);
+  let mut truncated = false;
+  let mut hint_used = 0usize;
+  for (i, (key, label)) in hints.iter().enumerate() {
+    // A separating space before every badge except the very first one when
+    // there is no left cluster.
+    let sep = usize::from(i > 0 || used > 0);
+    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    if hint_used + sep + badge_w > hint_budget {
+      truncated = true;
+      break;
+    }
+    if sep == 1 {
+      spans.push(Span::raw(" "));
+      hint_used += 1;
+    }
+    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled(format!(" {}", label), label_style));
+    hint_used += badge_w;
+  }
+  used += hint_used;
+  if truncated {
+    if used > 0 {
+      spans.push(Span::raw(" "));
+      used += 1;
+    }
+    spans.push(Span::styled("…", label_style));
+    used += 1;
+  }
+
+  let pad = width.saturating_sub(used + status_w);
+  if pad > 0 {
+    spans.push(Span::raw(" ".repeat(pad)));
+  }
+  spans.push(Span::styled(status_text, status_style));
+  Line::from(spans)
+}
+
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
-  let hints = if app.picker_mode {
-    PICKER_FOOTER_HINTS
+  let ctx = app.hint_context();
+  // Spinner shows only while a GitHub fetch is inflight (issue #217). The
+  // frame advances at the poll cadence once the fetch runs off-thread
+  // (#217 async path); with a blocking fetch the Loading state is too brief
+  // to paint, which is exactly why the async path matters.
+  let spinner = if app.is_github_loading() {
+    Some(app.spinner.glyph(DOT_FRAMES))
   } else {
-    FOOTER_HINTS
+    None
   };
-  let line = footer_line(hints, &app.status, area.width as usize, &app.theme);
-  // No `Wrap`: the footer is a single hard-clipped row (issue #180).
+  let line = status_line(
+    ctx.label(),
+    ctx.hints(),
+    &app.status,
+    spinner,
+    area.width as usize,
+    &app.theme,
+  );
+  // No `Wrap`: the statusbar is a single hard-clipped row (issue #180).
   f.render_widget(Paragraph::new(line), area);
 }
 
@@ -1387,6 +1535,9 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
 pub enum HelpRow {
   /// Overlay title — always the first row.
   Title(String),
+  /// Context subtitle under the title (`worktrees` / `status` / `switch`),
+  /// issue #217. Reflects the focused pane / mode when `?` was opened.
+  Subtitle(String),
   /// Section header (`global`, `list view`, `issue / PR (#67)`, …).
   Section(String),
   /// Blank spacer row.
@@ -1409,8 +1560,15 @@ pub enum HelpRow {
 ///
 /// Exposed as `pub` (and re-exported through `tui::help_rows`) so the
 /// renderer and the state-machine tests share one source of truth.
-pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> {
+///
+/// `ctx` (issue #217) drives the title's context subtitle and whether the
+/// picker-only / non-picker sections render. `HintContext::Picker` is the
+/// `gwm switch` overlay; `Worktrees` / `Status` are the two list-view panes
+/// (same body, the subtitle just names the focused pane).
+pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   use super::keymap::Action;
+
+  let picker_mode = matches!(ctx, HintContext::Picker);
 
   // Snapshot the keymap once. The pre-#87-review version called
   // `km.list()` inside `keys_for`, which cloned the entire bindings
@@ -1451,14 +1609,9 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
     }
   };
 
-  let title_text = if picker_mode {
-    "gwm switch — keys"
-  } else {
-    "gwm — keys"
-  };
-
   let mut rows: Vec<HelpRow> = vec![
-    HelpRow::Title(title_text.to_string()),
+    HelpRow::Title("Keybindings".to_string()),
+    HelpRow::Subtitle(ctx.label().to_string()),
     HelpRow::Blank,
     HelpRow::Section("global".to_string()),
     entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
@@ -1540,10 +1693,18 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
 /// `  {keys:<13} {label}`, sections / title as their bare text, blanks
 /// as empty strings. The width 13 is wide enough for `Ctrl+Shift+Tab`.
 pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
-  help_rows(km, picker_mode)
+  // The bool signature is kept for `gwm tui keys` and the chord tests; map
+  // it to the context enum (issue #217). The list-view help body is the same
+  // for either pane, so `Worktrees` stands in for the non-picker case.
+  let ctx = if picker_mode {
+    HintContext::Picker
+  } else {
+    HintContext::Worktrees
+  };
+  help_rows(km, ctx)
     .into_iter()
     .map(|row| match row {
-      HelpRow::Title(s) | HelpRow::Section(s) => s,
+      HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
       HelpRow::Blank => String::new(),
       HelpRow::Entry { keys, label } => {
         let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
@@ -1570,7 +1731,7 @@ pub fn badge_group_width(keys: &str) -> usize {
 
 fn draw_help(f: &mut Frame, app: &App) {
   let area = centered(60, 60, f.area());
-  let rows = help_rows(&app.keymap, app.picker_mode);
+  let rows = help_rows(&app.keymap, app.hint_context());
 
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
@@ -1600,10 +1761,22 @@ fn draw_help(f: &mut Frame, app: &App) {
     .max()
     .unwrap_or(0);
 
+  // Subtitle reads muted + italic so the context name sits quietly under the
+  // bold title (issue #217).
+  let subtitle_style = Style::default().fg(muted).add_modifier(Modifier::ITALIC);
+
   let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
   for row in rows {
     match row {
-      HelpRow::Title(t) | HelpRow::Section(t) => {
+      // Title + subtitle are centred (issue #217); section headers stay
+      // left-aligned so they anchor their groups lazygit-style.
+      HelpRow::Title(t) => {
+        lines.push(Line::from(Span::styled(t, heading_style)).centered());
+      }
+      HelpRow::Subtitle(t) => {
+        lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
+      }
+      HelpRow::Section(t) => {
         lines.push(Line::from(Span::styled(t, heading_style)));
       }
       HelpRow::Blank => lines.push(Line::from(String::new())),
