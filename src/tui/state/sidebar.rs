@@ -320,4 +320,20 @@ impl SidebarState {
     }
     self.focused = !self.focused;
   }
+
+  /// Direct-focus the worktree table (issue #217, `1`). Releases the
+  /// sidebar's navigation focus so `j` / `k` walk the worktree list. The
+  /// sidebar stays open — `1` is about *where the cursor is*, not
+  /// visibility (that's `v` / [`Self::toggle_open`]).
+  pub fn focus_table(&mut self) {
+    self.focused = false;
+  }
+
+  /// Direct-focus the status (sidebar) pane (issue #217, `2`). Opens the
+  /// sidebar if it was closed and moves the navigation focus onto it, so a
+  /// single keystroke both reveals and targets the pane.
+  pub fn focus_panel(&mut self) {
+    self.open = true;
+    self.focused = true;
+  }
 }

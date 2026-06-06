@@ -132,6 +132,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "swap focus between worktree list and sidebar",
     },
     PaletteEntry {
+      action: Action::FocusWorktrees,
+      name: "focus-worktrees",
+      description: "focus the worktrees pane",
+    },
+    PaletteEntry {
+      action: Action::FocusStatus,
+      name: "focus-status",
+      description: "focus the status pane (opens it if hidden)",
+    },
+    PaletteEntry {
       action: Action::Top,
       name: "top",
       description: "jump to the first worktree",

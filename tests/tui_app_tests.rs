@@ -51,6 +51,29 @@ fn make_app() -> (tempfile::TempDir, App) {
 }
 
 #[test]
+fn focus_status_opens_and_focuses_the_sidebar() {
+  // Issue #217: pressing `2` (focus_status) must open the sidebar if it was
+  // closed and move the navigation focus onto it.
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+  app.sidebar.focused = false;
+  app.focus_status();
+  assert!(app.sidebar.open, "focus_status must open a closed sidebar");
+  assert!(app.sidebar.focused, "focus_status must focus the sidebar");
+}
+
+#[test]
+fn focus_worktrees_releases_sidebar_focus() {
+  // Pressing `1` (focus_worktrees) returns navigation focus to the table so
+  // `j` / `k` walk the worktree list, leaving the sidebar open but unfocused.
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
+  app.focus_worktrees();
+  assert!(!app.sidebar.focused, "focus_worktrees must release sidebar focus");
+}
+
+#[test]
 fn focused_panel_border_wears_the_theme_focus_colour() {
   // #185: the focus-swappable panel borders (worktree list ↔ sidebar,
   // toggled with Tab) must paint with the theme `focus` role, not a

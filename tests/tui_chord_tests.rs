@@ -146,6 +146,60 @@ fn uppercase_binding_matches_shift_modifier_variants() {
 }
 
 #[test]
+fn digit_keys_dispatch_pane_focus_actions() {
+  // Issue #217: `1` focuses the worktrees pane, `2` the status (sidebar)
+  // pane. Both are rebindable verbs so they route through the keymap.
+  let (_dir, mut app) = make_app();
+  assert_eq!(app.dispatch_key(press('1')), Some(Action::FocusWorktrees));
+  assert_eq!(app.dispatch_key(press('2')), Some(Action::FocusStatus));
+}
+
+#[test]
+fn focus_actions_respect_user_keymap_override() {
+  // `[tui.keys]` must be able to rebind the new focus verbs like any other
+  // action — the override replaces the default `2`.
+  let (dir, _) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[tui.keys]
+focus_status = ["F2"]
+"#,
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  assert_eq!(
+    app.dispatch_key(press('2')),
+    None,
+    "default 2 must be replaced by the override"
+  );
+  assert_eq!(
+    app.dispatch_key(press_named(KeyCode::F(2))),
+    Some(Action::FocusStatus),
+    "the F2 override must fire focus_status"
+  );
+}
+
+#[test]
+fn help_overlay_lists_pane_focus_bindings() {
+  use gwm::tui::help_lines;
+  use gwm::tui::keymap::Keymap;
+
+  let km = Keymap::defaults();
+  let lines = help_lines(&km, false);
+  assert!(
+    lines.iter().any(|l| l.starts_with("  1 ")),
+    "expected the default `1` focus binding in the help overlay:\n{}",
+    lines.join("\n")
+  );
+  assert!(
+    lines.iter().any(|l| l.starts_with("  2 ")),
+    "expected the default `2` focus binding in the help overlay:\n{}",
+    lines.join("\n")
+  );
+}
+
+#[test]
 fn s_dispatches_toggle_sidebar_mode() {
   // Issue #34: pressing `s` in the list view must cycle the sidebar
   // preview mode (Commits ↔ Stashes). The binding is wired through

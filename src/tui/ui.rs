@@ -1490,6 +1490,8 @@ pub fn help_rows(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<HelpRow> 
     "toggle sidebar position (left / right)",
   ));
   rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
+  rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
+  rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",

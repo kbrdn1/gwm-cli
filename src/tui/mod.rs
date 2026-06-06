@@ -418,6 +418,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::CycleSidebarLayout => app.cycle_sidebar_layout(),
     Action::ToggleSidebarPosition => app.toggle_sidebar_position(),
     Action::FocusSwap => app.toggle_focus(),
+    Action::FocusWorktrees => app.focus_worktrees(),
+    Action::FocusStatus => app.focus_status(),
     Action::Filter => app.enter_filter(),
     Action::Refresh => app.refresh()?,
     Action::Help => app.view = View::Help,

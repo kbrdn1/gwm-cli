@@ -666,6 +666,20 @@ impl App {
     self.sidebar.toggle_focus();
   }
 
+  /// Direct-focus the worktree table (issue #217, `1`). Orchestrator-shaped
+  /// for the status-bar copy, like the sidebar toggles.
+  pub fn focus_worktrees(&mut self) {
+    self.sidebar.focus_table();
+    self.status = "focus: worktrees".into();
+  }
+
+  /// Direct-focus the status (sidebar) pane (issue #217, `2`). Opens the
+  /// sidebar if needed and moves focus onto it.
+  pub fn focus_status(&mut self) {
+    self.sidebar.focus_panel();
+    self.status = "focus: status".into();
+  }
+
   pub fn sidebar_scroll_down(&mut self) {
     self.sidebar.scroll_down();
   }

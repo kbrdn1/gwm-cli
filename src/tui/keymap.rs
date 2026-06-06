@@ -108,6 +108,8 @@ define_actions! {
   CycleSidebarLayout => "cycle_sidebar_layout",
   ToggleSidebarPosition => "toggle_sidebar_position",
   FocusSwap         => "focus_swap",
+  FocusWorktrees    => "focus_worktrees",
+  FocusStatus       => "focus_status",
   // Filter
   Filter            => "filter",
   // Lifecycle / mutating
@@ -386,6 +388,8 @@ impl Keymap {
       def(Action::CycleSidebarLayout, &["V"]),
       def(Action::ToggleSidebarPosition, &["H"]),
       def(Action::FocusSwap, &["Tab"]),
+      def(Action::FocusWorktrees, &["1"]),
+      def(Action::FocusStatus, &["2"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),
       def(Action::Create, &["n"]),
