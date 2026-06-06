@@ -578,24 +578,38 @@ fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
   Ok(rows)
 }
 
+/// Run `git -C <dir> <args>`, returning stdout verbatim on success or a
+/// [`GwmError::CommandFailed`] carrying the verb and git's stderr on a
+/// non-zero exit (or the spawn error if `git` could not be launched).
+///
+/// This is the single shell-out helper for the read-side git invocations
+/// (sidebar previews, PR-body fillers) and for `gwm sync`'s mutating steps
+/// (issue #237 deduped five hand-rolled copies of this exact pattern).
+/// Callers that need trimming, truncation, or field parsing post-process the
+/// returned `String` themselves.
+pub fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
+  let out = Command::new("git")
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
+  if !out.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git {} exited {}: {}",
+      args.join(" "),
+      out.status,
+      String::from_utf8_lossy(&out.stderr).trim()
+    )));
+  }
+  Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Shell out to `git log --oneline -n <n>` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview recent commits of the selected worktree.
 pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["log", "--oneline", "-n"])
-    .arg(n.to_string())
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git log exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+  let n = n.to_string();
+  run_git(path, &["log", "--oneline", "-n", &n])
 }
 
 /// Shell out to `git log --pretty=- %s <base>..<head>` inside `path`
@@ -605,21 +619,8 @@ pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
 /// PR body without extra formatting.
 pub fn git_log_subject_between(path: &Path, base: &str, head: &str) -> Result<String> {
   let range = format!("{}..{}", base, head);
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["log", "--pretty=format:- %s"])
-    .arg(&range)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git log exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+  let out = run_git(path, &["log", "--pretty=format:- %s", &range])?;
+  Ok(out.trim_end().to_string())
 }
 
 /// Shell out to `git diff --stat <base>..<head>` inside `path`. The
@@ -627,21 +628,7 @@ pub fn git_log_subject_between(path: &Path, base: &str, head: &str) -> Result<St
 /// doesn't blow up the PR body (issue #84: 30-line cap by convention).
 pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usize) -> Result<String> {
   let range = format!("{}..{}", base, head);
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["diff", "--stat"])
-    .arg(&range)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git diff failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git diff exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  let raw = String::from_utf8_lossy(&output.stdout);
+  let raw = run_git(path, &["diff", "--stat", &range])?;
   let mut lines: Vec<&str> = raw.lines().collect();
   let truncated = lines.len() > max_lines;
   if truncated {
@@ -695,20 +682,7 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   // past the cap. Pre-review the limit was applied client-side after
   // the full stdout was read.
   let limit_arg = format!("-n{}", limit);
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git stash list failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git stash list exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  let raw = String::from_utf8_lossy(&output.stdout);
+  let raw = run_git(path, &["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])?;
   let entries = raw
     .lines()
     .filter(|line| !line.is_empty())
@@ -726,20 +700,7 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
 /// Shell out to `git status --short` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview the working-tree state.
 pub fn git_status_short(path: &Path) -> Result<String> {
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["status", "--short"])
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git status exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+  run_git(path, &["status", "--short"])
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a
