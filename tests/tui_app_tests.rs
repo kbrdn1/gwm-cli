@@ -2296,6 +2296,29 @@ fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
 }
 
 #[test]
+fn github_status_idle_prompt_resolves_fetch_binding_not_r() {
+  // Issue #217: the sidebar's Issue/PR block showed `press R to fetch
+  // status`, but `R` is bound to `Review` — the real fetch binding is `F`
+  // (`Action::FetchGithub`). The prompt must resolve the live keymap, never
+  // hard-code a key.
+  let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
+  let lines = gwm::tui::github_status_lines(&app, 80);
+  let text: String = lines
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert!(
+    text.contains("press F to fetch status"),
+    "idle prompt must resolve the FetchGithub binding (F): {text}"
+  );
+  assert!(
+    !text.contains("press R"),
+    "stale `R` prompt leaked into the sidebar: {text}"
+  );
+}
+
+#[test]
 fn issue_summary_line_truncates_loaded_state_to_budget() {
   // Regression: with a 48-column sidebar, a fully-loaded issue line was
   // `#67 (auto) [open] <40-char title>` ≈ 58 chars, overflowing the

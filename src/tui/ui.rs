@@ -304,6 +304,35 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
+/// Title for the worktree pane block (issue #217). Carries the `[1]` focus
+/// mnemonic (the pane is focusable with the `1` key) and a `(N)` /
+/// `(visible/total)` counter. `query_empty` switches between the two counter
+/// forms: when no filter is active the full worktree count is shown, otherwise
+/// the visible-over-total ratio so the user sees how much the filter narrowed
+/// the list. Pure + width-free so the copy is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn worktrees_pane_title(query_empty: bool, visible: usize, total: usize) -> String {
+  if query_empty {
+    format!(" [1] Worktrees ({}) ", total)
+  } else {
+    format!(" [1] Worktrees ({}/{}) ", visible, total)
+  }
+}
+
+/// Bottom-right `selected of visible` counter for a pane footer (issue
+/// #217), lazygit-style. `selected` is the 1-based cursor position;
+/// `visible` is the count of rows currently on screen. Returns `None` when
+/// the pane is empty so the footer disappears instead of rendering ` 0 of 0 `
+/// — mirroring the Recent Commits section, which also drops its counter when
+/// there is nothing to scroll.
+pub fn pane_counter(selected: usize, visible: usize) -> Option<String> {
+  if visible == 0 {
+    None
+  } else {
+    Some(format!(" {} of {} ", selected, visible))
+  }
+}
+
 fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // Filter-aware: the visible rows are the filtered subset (issue #21). When
   // there is no active filter, this is the identity over `app.worktrees`.
@@ -370,21 +399,26 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
 
-  let title = if app.filter.query().is_empty() {
-    format!(" worktrees ({}) ", app.worktrees.len())
-  } else {
-    format!(" worktrees ({}/{}) ", visible.len(), app.worktrees.len())
-  };
+  let title = worktrees_pane_title(app.filter.query().is_empty(), visible.len(), app.worktrees.len());
+
+  // Bottom-right `selected of visible` counter (issue #217), mirroring the
+  // Recent Commits footer. `list_state.selected()` is 0-based; render it
+  // 1-based. Blank when nothing is visible so the footer disappears.
+  let selected_1based = app.list_state.selected().map(|i| i + 1).unwrap_or(0);
+  let counter = pane_counter(selected_1based, visible.len());
+
+  let mut block = Block::default()
+    .borders(Borders::ALL)
+    .title(title)
+    .border_style(Style::default().fg(border_color));
+  if let Some(counter) = counter {
+    block = block.title_bottom(Line::from(counter).right_aligned());
+  }
 
   let table = Table::new(rows, widths)
     .header(header)
     .column_spacing(1)
-    .block(
-      Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(border_color)),
-    )
+    .block(block)
     .row_highlight_style(Style::default().bg(theme.selection_bg).add_modifier(Modifier::BOLD))
     .highlight_symbol("▶ ");
 
@@ -2138,7 +2172,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
 /// width of the Issue / PR block (chunk width minus 2 borders and the
 /// 1-char left padding applied by [`render_section`]); summary lines
 /// trim their variable parts so total visible width ≤ `max_width`.
-pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
+pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   let link = app.current_link();
   let mut lines: Vec<Line<'static>> = Vec::new();
 
@@ -2170,8 +2204,15 @@ pub(super) fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'stat
   }
   if matches!(app.issue_fetch_state(), GitHubFetchState::Idle) && matches!(app.pr_fetch_state(), GitHubFetchState::Idle)
   {
+    // Resolve the live `FetchGithub` binding instead of hard-coding a key
+    // (issue #217). Pre-fix this read `press R`, but `R` is `Review`; the
+    // fetch action defaults to `F` and is rebindable under `[tui.keys]`.
+    let chord = app
+      .keymap
+      .primary_chord(super::keymap::Action::FetchGithub)
+      .unwrap_or_else(|| "F".to_string());
     lines.push(Line::from(Span::styled(
-      trunc("press R to fetch status", max_width),
+      trunc(&format!("press {} to fetch status", chord), max_width),
       Style::default().fg(app.theme.muted),
     )));
   }

@@ -274,6 +274,33 @@ fn chord_that_is_strict_prefix_of_existing_binding_is_rejected() {
 }
 
 #[test]
+fn primary_chord_resolves_first_default_binding() {
+  // Issue #217: the sidebar's "press <key> to fetch status" prompt must
+  // resolve the live binding instead of hard-coding `R`. `primary_chord`
+  // returns the first chord bound to an action, rendered canonically.
+  let km = Keymap::defaults();
+  assert_eq!(km.primary_chord(Action::FetchGithub).as_deref(), Some("F"));
+  assert_eq!(km.primary_chord(Action::Help).as_deref(), Some("?"));
+  // Multi-chord actions return the first chord in declaration order.
+  assert_eq!(km.primary_chord(Action::Refresh).as_deref(), Some("f"));
+}
+
+#[test]
+fn primary_chord_follows_user_override() {
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
+    .unwrap();
+  assert_eq!(km.primary_chord(Action::FetchGithub).as_deref(), Some("Ctrl+g"));
+}
+
+#[test]
+fn primary_chord_is_none_for_unbound_action() {
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::FetchGithub, vec![]).unwrap();
+  assert_eq!(km.primary_chord(Action::FetchGithub), None);
+}
+
+#[test]
 fn list_returns_entries_with_source() {
   let mut km = Keymap::defaults();
   km.apply_override(Action::Down, vec![KeyStroke::parse_chord("J").unwrap()])

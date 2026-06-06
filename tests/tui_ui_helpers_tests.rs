@@ -3,7 +3,7 @@
 //! the confirm modal, and the badge-group width used to align the help
 //! overlay's per-chord key badges.
 
-use gwm::tui::{badge_group_width, ellipsize_middle};
+use gwm::tui::{badge_group_width, ellipsize_middle, pane_counter, worktrees_pane_title};
 
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
@@ -65,4 +65,37 @@ fn badge_group_width_unbound_renders_one_muted_badge() {
   let expected = "(unbound)".chars().count() + 2;
   assert_eq!(badge_group_width("(unbound)"), expected);
   assert_eq!(badge_group_width(""), expected);
+}
+
+// ---------------------------------------------------------------------------
+// Worktrees pane title + counter (issue #217)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn worktrees_pane_title_unfiltered_shows_total_with_focus_index() {
+  // No active filter → the `(N)` counter is the full worktree count, and the
+  // pane carries the `[1]` focus mnemonic (focusable with the `1` key). The
+  // casing is fixed to `Worktrees` (was lowercase `worktrees`).
+  assert_eq!(worktrees_pane_title(true, 5, 5), " [1] Worktrees (5) ");
+}
+
+#[test]
+fn worktrees_pane_title_filtered_shows_visible_over_total() {
+  // Active filter → `(visible/total)` so the user sees how much the filter
+  // narrowed the list.
+  assert_eq!(worktrees_pane_title(false, 3, 5), " [1] Worktrees (3/5) ");
+}
+
+#[test]
+fn pane_counter_is_blank_when_nothing_visible() {
+  // Empty list → no `N of M` footer at all (mirrors the Recent Commits
+  // section, which drops its counter when there is nothing to scroll).
+  assert_eq!(pane_counter(0, 0), None);
+}
+
+#[test]
+fn pane_counter_formats_selected_of_visible() {
+  // Bottom-right footer of the worktrees pane, lazygit-style: the 1-based
+  // selected position over the visible count (e.g. `3 of 12`).
+  assert_eq!(pane_counter(3, 12).as_deref(), Some(" 3 of 12 "));
 }
