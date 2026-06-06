@@ -248,6 +248,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       }
       View::Help => match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.view = View::List,
+        // Scroll the Keybindings overlay when it outgrows the modal (#217).
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll_up(),
+        KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
+        KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
         _ => {}
       },
       View::Create => match key.code {
@@ -436,7 +441,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::FocusStatus => app.focus_status(),
     Action::Filter => app.enter_filter(),
     Action::Refresh => app.refresh()?,
-    Action::Help => app.view = View::Help,
+    Action::Help => app.enter_help(),
     Action::Yank => yank_selected_path_to_clipboard(app),
     Action::Open => match app.resolve_open_target() {
       None => app.status = "nothing selected".into(),

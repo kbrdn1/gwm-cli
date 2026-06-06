@@ -327,14 +327,14 @@ fn help_rows_structures_title_sections_and_entries() {
     "expected a `worktrees` context subtitle"
   );
   assert!(
-    rows.iter().any(|r| matches!(r, HelpRow::Section(s) if s == "global")),
-    "expected a `global` section header"
+    rows.iter().any(|r| matches!(r, HelpRow::Section(s) if s == "Global")),
+    "expected a `Global` section header"
   );
   assert!(
     rows
       .iter()
-      .any(|r| matches!(r, HelpRow::Section(s) if s == "confirm delete")),
-    "expected a `confirm delete` section header"
+      .any(|r| matches!(r, HelpRow::Section(s) if s == "Confirm Delete")),
+    "expected a `Confirm Delete` section header"
   );
   // The `Down` action's default `j` binding must surface as an Entry
   // with the resolved chord in its `keys`, not baked into a string.

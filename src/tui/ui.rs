@@ -1711,11 +1711,11 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     HelpRow::Title("Keybindings".to_string()),
     HelpRow::Subtitle(ctx.label().to_string()),
     HelpRow::Blank,
-    HelpRow::Section("global".to_string()),
+    HelpRow::Section("Global".to_string()),
     entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
     fixed("Ctrl-C", "force quit (hard-coded escape hatch)"),
     HelpRow::Blank,
-    HelpRow::Section("list view".to_string()),
+    HelpRow::Section("List View".to_string()),
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
     entry(Action::Top, "jump to first worktree"),
@@ -1758,7 +1758,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
-    rows.push(HelpRow::Section("issue / PR (#67)".to_string()));
+    rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
     rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
     rows.push(entry(Action::LinkPrompt, "link prompt — i / p then digits"));
   }
@@ -1769,13 +1769,13 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   if !picker_mode {
     rows.extend([
       HelpRow::Blank,
-      HelpRow::Section("create form".to_string()),
-      fixed("↑/↓", "change branch type"),
+      HelpRow::Section("Create Form".to_string()),
+      fixed("←/→ ↑/↓", "change branch type"),
       fixed("Tab/Shift-Tab", "next/prev field"),
       fixed("Enter (desc)", "submit"),
       fixed("Esc", "cancel"),
       HelpRow::Blank,
-      HelpRow::Section("confirm delete".to_string()),
+      HelpRow::Section("Confirm Delete".to_string()),
       fixed("←/→ Tab", "move focus between [ Confirm ] / [ Cancel ]"),
       fixed("Enter", "activate the focused button (defaults to Cancel)"),
       fixed("y", "confirm"),
@@ -1827,7 +1827,7 @@ pub fn badge_group_width(keys: &str) -> usize {
   badges + chords.len().saturating_sub(1)
 }
 
-fn draw_help(f: &mut Frame, app: &App) {
+fn draw_help(f: &mut Frame, app: &mut App) {
   let area = centered(60, 60, f.area());
   // Use the underlying pane context, not the view-priority `hint_context`
   // (which would be `Help` while this overlay is up) — `?` documents the
@@ -1862,9 +1862,10 @@ fn draw_help(f: &mut Frame, app: &App) {
     .max()
     .unwrap_or(0);
 
-  // Subtitle reads muted + italic so the context name sits quietly under the
-  // bold title (issue #217).
-  let subtitle_style = Style::default().fg(muted).add_modifier(Modifier::ITALIC);
+  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
+  // italic, so the context name is clearly a different colour from both the
+  // bold title and the muted key labels (issue #217 follow-up).
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
   let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
   for row in rows {
@@ -1903,8 +1904,18 @@ fn draw_help(f: &mut Frame, app: &App) {
     }
   }
 
+  // Publish the scroll bound against the actual viewport so the Keybindings
+  // overlay can scroll when it outgrows the modal (#217). The renderer is
+  // the only place that knows both the content length and the inner height,
+  // so it clamps the offset here too.
+  let block = overlay_block(accent);
+  let viewport = block.inner(area).height as usize;
+  app.help_max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+  let scroll = app.help_scroll;
+
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, 0)), area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
@@ -1923,10 +1934,11 @@ fn draw_create(f: &mut Frame, app: &App) {
   // buttons / hint centre themselves, the fields stay left) — no manual
   // Layout split, the rounded frame's `Padding` owns the breathing room
   // (issue #217). Height is the fixed row count plus the border + padding
-  // rows, so the box hugs its content.
-  const ROWS: u16 = 11; // title(2) + 3 fields + blank + 2 preview + blank + buttons + hint
+  // rows, so the box hugs its content; the width is capped so the input
+  // surfaces don't span a wide terminal.
+  const ROWS: u16 = 13; // title(2) + type + gap + 2 preview + gap + issue + gap + desc + gap + buttons + hint
   let height = ROWS + 2 /* border */ + 2 /* vertical padding */;
-  let area = centered_h(70, height, f.area());
+  let area = centered_box(70, 72, height, f.area());
   let block = overlay_block(clean);
   let inner_w = block.inner(area).width as usize;
 
@@ -1939,24 +1951,37 @@ fn draw_create(f: &mut Frame, app: &App) {
   let label = |s: &str| format!("{:<label_w$}", s);
   let branch = ellipsize_middle(
     &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  branch : ".len()),
+    inner_w.saturating_sub("  Branch : ".len()),
   );
   let dirname = ellipsize_middle(
     &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  dir    : ".len()),
+    inner_w.saturating_sub("  Dir    : ".len()),
   );
 
-  let mut lines = overlay_title_lines("new worktree", clean);
+  let mut lines = overlay_title_lines("New Worktree", clean);
+  // Type selector first, then the live preview, then the editable fields —
+  // the preview sits above the inputs so the resulting names stay in view
+  // while typing (issue #217 follow-up).
   lines.push(type_selector_line(
-    &label("type"),
+    &label("Type"),
     type_str,
     type_desc,
     app.create_form.field == Field::Type,
     accent,
     muted,
   ));
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(vec![
+    Span::raw("  Branch : "),
+    Span::styled(branch, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(vec![
+    Span::raw("  Dir    : "),
+    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
+  ]));
+  lines.push(Line::from(String::new()));
   lines.push(field_input_line(
-    &label("issue"),
+    &label("Issue"),
     &app.create_form.issue,
     app.create_form.field == Field::Issue,
     value_w,
@@ -1964,8 +1989,9 @@ fn draw_create(f: &mut Frame, app: &App) {
     muted,
     surface,
   ));
+  lines.push(Line::from(String::new()));
   lines.push(field_input_line(
-    &label("desc"),
+    &label("Desc"),
     &app.create_form.desc,
     app.create_form.field == Field::Desc,
     value_w,
@@ -1973,15 +1999,6 @@ fn draw_create(f: &mut Frame, app: &App) {
     muted,
     surface,
   ));
-  lines.push(Line::from(String::new()));
-  lines.push(Line::from(vec![
-    Span::raw("  branch : "),
-    Span::styled(branch, Style::default().fg(app.theme.branch)),
-  ]));
-  lines.push(Line::from(vec![
-    Span::raw("  dir    : "),
-    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
-  ]));
   lines.push(Line::from(String::new()));
   lines.push(create_buttons_line(accent, muted).centered());
   lines.push(
@@ -2027,12 +2044,17 @@ pub fn type_selector_line(
   muted: Color,
 ) -> Line<'static> {
   let arrow_style = if focused {
-    Style::default().fg(accent)
+    Style::default().fg(accent).add_modifier(Modifier::BOLD)
   } else {
     Style::default().fg(muted)
   };
+  // Focused, the selected value reads as a reversed-accent chip (the same
+  // badge style as the buttons) so it stands out as an editable control;
+  // idle it is plain white text between muted arrows.
   let name_style = if focused {
-    Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    Style::default()
+      .fg(accent)
+      .add_modifier(Modifier::REVERSED | Modifier::BOLD)
   } else {
     Style::default().fg(Color::White)
   };
@@ -2041,7 +2063,7 @@ pub fn type_selector_line(
     Span::styled(label.to_string(), Style::default().fg(muted)),
     Span::raw("  "),
     Span::styled("‹ ", arrow_style),
-    Span::styled(name.to_string(), name_style),
+    Span::styled(format!(" {name} "), name_style),
     Span::styled(" ›", arrow_style),
     Span::raw("  "),
     Span::styled(desc.to_string(), Style::default().fg(muted)),
@@ -2092,7 +2114,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   let block = overlay_block(danger);
 
   let Some(w) = app.selected() else {
-    let mut lines = overlay_title_lines("confirm delete", danger);
+    let mut lines = overlay_title_lines("Confirm Delete", danger);
     lines.push(Line::from("nothing selected").centered());
     let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
     let area = centered_h(40, height, f.area());
@@ -2115,7 +2137,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   );
 
   // --- title + description (centred) ---
-  let mut content: Vec<Line> = overlay_title_lines("confirm delete", danger);
+  let mut content: Vec<Line> = overlay_title_lines("Confirm Delete", danger);
   content.push(Line::from(vec![
     Span::raw("delete "),
     Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
@@ -2292,7 +2314,7 @@ pub fn filled_cells_for_progress(progress: f64, cells: usize) -> usize {
 }
 
 fn draw_report(f: &mut Frame, app: &App) {
-  let mut lines: Vec<Line> = overlay_title_lines("bootstrap report", app.theme.accent);
+  let mut lines: Vec<Line> = overlay_title_lines("Bootstrap Report", app.theme.accent);
   if let Some(report) = &app.report {
     for step in &report.steps {
       let sigil = step.status.sigil();
@@ -2368,6 +2390,19 @@ fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
   Rect { x, y, width, height }
 }
 
+/// Like [`centered_h`] but also caps the width at `max_width` columns so a
+/// form modal does not stretch edge-to-edge on a wide terminal (issue #217
+/// — the create overlay's input surfaces spanned the whole screen).
+fn centered_box(width_pct: u16, max_width: u16, height: u16, area: Rect) -> Rect {
+  let height = height.min(area.height);
+  let width = (area.width.saturating_mul(width_pct) / 100)
+    .min(max_width)
+    .min(area.width);
+  let x = area.x + area.width.saturating_sub(width) / 2;
+  let y = area.y + area.height.saturating_sub(height) / 2;
+  Rect { x, y, width, height }
+}
+
 /// A modal overlay frame: a rounded border in `color` with interior
 /// padding on every side. Shared by every overlay (#187) so the confirm /
 /// help / create / report / open / link / palette modals read consistently.
@@ -2436,7 +2471,7 @@ fn trunc(s: &str, max: usize) -> String {
 
 fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let mut lines = overlay_title_lines("open in browser", accent);
+  let mut lines = overlay_title_lines("Open in Browser", accent);
   lines.push(Line::from("  i   linked issue"));
   lines.push(Line::from("  p   linked pull request"));
   lines.push(Line::from(""));
@@ -2454,7 +2489,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   let muted = app.theme.muted;
   let lines = match app.link_prompt_stage() {
     LinkPromptStage::ChooseTarget => {
-      let mut lines = overlay_title_lines("link this worktree to:", accent);
+      let mut lines = overlay_title_lines("Link This Worktree To:", accent);
       lines.push(Line::from("  i   a GitHub issue"));
       lines.push(Line::from("  p   a pull request"));
       lines.push(Line::from(""));
@@ -2518,7 +2553,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   f.render_widget(
     Paragraph::new(
       Line::from(Span::styled(
-        "command palette",
+        "Command Palette",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
       ))
       .centered(),

@@ -3424,3 +3424,35 @@ fn fresh_app_spinner_starts_at_first_frame() {
   let (_dir, app) = make_app();
   assert_eq!(app.spinner.glyph(DOT_FRAMES), DOT_FRAMES[0]);
 }
+
+#[test]
+fn help_scroll_clamps_between_zero_and_max() {
+  // Issue #217 follow-up: the Keybindings overlay scrolls when the help
+  // outgrows the modal. `help_max_scroll` is published by the renderer
+  // each frame; the offset clamps to `[0, max]` and resets on (re)open.
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  assert_eq!(app.view, View::Help);
+  assert_eq!(app.help_scroll, 0, "a freshly opened help starts at the top");
+
+  // Simulate the renderer having measured 3 rows of overflow.
+  app.help_max_scroll = 3;
+  app.help_scroll_down();
+  app.help_scroll_down();
+  assert_eq!(app.help_scroll, 2);
+  app.help_scroll_down();
+  app.help_scroll_down();
+  assert_eq!(app.help_scroll, 3, "scroll-down clamps at the published max");
+
+  app.help_scroll_up();
+  assert_eq!(app.help_scroll, 2);
+  for _ in 0..10 {
+    app.help_scroll_up();
+  }
+  assert_eq!(app.help_scroll, 0, "scroll-up clamps at the top");
+
+  // Re-opening help resets the offset.
+  app.help_scroll = 2;
+  app.enter_help();
+  assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
+}

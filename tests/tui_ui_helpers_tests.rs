@@ -213,6 +213,12 @@ fn type_selector_shows_horizontal_arrows_and_focus_accent() {
     name.style.add_modifier.contains(Modifier::BOLD),
     "focused type name is bold"
   );
+  // The focused selection reads as a reversed-accent chip (like the
+  // confirm / create buttons) so it stands out as an editable control.
+  assert!(
+    name.style.add_modifier.contains(Modifier::REVERSED),
+    "focused type name is a reversed chip"
+  );
 
   // Idle → the name is not painted in the accent.
   let idle = type_selector_line("type", "feat", "x", false, Color::Magenta, Color::Gray);

@@ -135,6 +135,14 @@ pub struct App {
   // Bootstrap report
   pub report: Option<BootstrapReport>,
 
+  /// Keybindings (help) overlay scroll offset, in rows. Reset to 0 every
+  /// time the overlay opens; clamped to `help_max_scroll` (#217).
+  pub help_scroll: u16,
+  /// Maximum help scroll offset, republished by [`super::ui::draw_help`]
+  /// each frame as `content_rows.saturating_sub(viewport_rows)` so the
+  /// offset can never scroll past the last line into the void.
+  pub help_max_scroll: u16,
+
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
   /// cached pre-rendered sections keyed by the selected worktree's
@@ -312,6 +320,8 @@ impl App {
       create_form: CreateForm::new(),
       branch_types,
       report: None,
+      help_scroll: 0,
+      help_max_scroll: 0,
       sidebar: SidebarState::new(),
       pending_g: false,
       pending_chord: Vec::new(),
@@ -752,6 +762,24 @@ impl App {
 
   pub fn sidebar_scroll_up(&mut self) {
     self.sidebar.scroll_up();
+  }
+
+  /// Open the Keybindings (help) overlay from the top (#217). Resetting
+  /// the scroll offset here keeps re-opens predictable.
+  pub fn enter_help(&mut self) {
+    self.view = View::Help;
+    self.help_scroll = 0;
+  }
+
+  /// Scroll the help overlay down one row, clamped to the renderer-published
+  /// `help_max_scroll` so it never scrolls past the last line.
+  pub fn help_scroll_down(&mut self) {
+    self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+  }
+
+  /// Scroll the help overlay up one row, clamped at the top.
+  pub fn help_scroll_up(&mut self) {
+    self.help_scroll = self.help_scroll.saturating_sub(1);
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
