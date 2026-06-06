@@ -5,7 +5,8 @@
 
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, confirm_buttons_line, ellipsize_middle, pane_counter, status_pane_title, worktrees_pane_title,
+  badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, pane_counter,
+  status_pane_title, type_selector_line, worktrees_pane_title,
 };
 use ratatui::style::{Color, Modifier};
 
@@ -147,4 +148,110 @@ fn confirm_buttons_render_as_chips_without_brackets() {
     !confirm.style.add_modifier.contains(Modifier::REVERSED),
     "idle Confirm button must not be reversed"
   );
+}
+
+// ---------------------------------------------------------------------------
+// Create modal: buttons, horizontal type selector, single-line bg inputs
+// (issue #217 follow-up — the modal polish pass)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn create_buttons_render_as_chips_with_create_highlighted() {
+  // The create overlay grows a button row mirroring the confirm modal's
+  // flat coloured chips (no `[ ]` brackets). Unlike confirm — whose safe
+  // default is Cancel — the non-destructive create primes `Create` as the
+  // reversed-accent chip; `Cancel` reads muted.
+  let line = create_buttons_line(Color::Magenta, Color::Gray);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("Create"), "missing Create label: {text:?}");
+  assert!(text.contains("Cancel"), "missing Cancel label: {text:?}");
+  assert!(!text.contains('['), "square bracket leaked into a chip: {text:?}");
+  assert!(!text.contains(']'), "square bracket leaked into a chip: {text:?}");
+
+  let create = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Create"))
+    .expect("a Create span");
+  assert!(
+    create.style.add_modifier.contains(Modifier::REVERSED),
+    "primary Create button must be the reversed chip"
+  );
+  assert_eq!(create.style.fg, Some(Color::Magenta), "Create chip carries the accent");
+  let cancel = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Cancel"))
+    .expect("a Cancel span");
+  assert!(
+    !cancel.style.add_modifier.contains(Modifier::REVERSED),
+    "idle Cancel button must not be reversed"
+  );
+}
+
+#[test]
+fn type_selector_shows_horizontal_arrows_and_focus_accent() {
+  // The branch-type field is a horizontal `‹ name ›` selector (was a
+  // bordered up/down box). Focused, the selected type reads in the accent.
+  let focused = type_selector_line("type", "feat", "a new feature", true, Color::Magenta, Color::Gray);
+  let text: String = focused.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    text.contains('‹') && text.contains('›'),
+    "horizontal arrows missing: {text:?}"
+  );
+  assert!(text.contains("type"), "field label missing: {text:?}");
+  assert!(text.contains("feat"), "type name missing: {text:?}");
+  assert!(text.contains("a new feature"), "description missing: {text:?}");
+
+  let name = focused
+    .spans
+    .iter()
+    .find(|s| s.content.contains("feat"))
+    .expect("a type-name span");
+  assert_eq!(name.style.fg, Some(Color::Magenta), "focused type reads in the accent");
+  assert!(
+    name.style.add_modifier.contains(Modifier::BOLD),
+    "focused type name is bold"
+  );
+
+  // Idle → the name is not painted in the accent.
+  let idle = type_selector_line("type", "feat", "x", false, Color::Magenta, Color::Gray);
+  let iname = idle
+    .spans
+    .iter()
+    .find(|s| s.content.contains("feat"))
+    .expect("a type-name span");
+  assert_ne!(
+    iname.style.fg,
+    Some(Color::Magenta),
+    "idle type must not wear the accent"
+  );
+}
+
+#[test]
+fn field_input_fills_a_single_row_with_a_background() {
+  // The issue / description fields are single-row inputs with a background
+  // surface (was a 3-row bordered box). Idle shows the surface bg and no
+  // cursor; focused brightens to the accent bg and shows a `_` cursor.
+  let idle = field_input_line("issue", "123", false, 20, Color::Magenta, Color::Gray, Color::DarkGray);
+  let text: String = idle.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("issue"), "label missing: {text:?}");
+  assert!(text.contains("123"), "value missing: {text:?}");
+  assert!(!text.contains('_'), "idle field must not show a cursor: {text:?}");
+  let val = idle
+    .spans
+    .iter()
+    .find(|s| s.content.contains("123"))
+    .expect("a value span");
+  assert_eq!(val.style.bg, Some(Color::DarkGray), "idle input wears the surface bg");
+
+  let focused = field_input_line("issue", "123", true, 20, Color::Magenta, Color::Gray, Color::DarkGray);
+  let ftext: String = focused.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(ftext.contains('_'), "focused field shows a cursor: {ftext:?}");
+  let fval = focused
+    .spans
+    .iter()
+    .find(|s| s.content.contains("123"))
+    .expect("a value span");
+  assert_eq!(fval.style.bg, Some(Color::Magenta), "focused input bg = accent");
 }

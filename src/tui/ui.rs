@@ -1904,26 +1904,14 @@ fn draw_help(f: &mut Frame, app: &App) {
   }
 
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block("help", accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
-  // Three bordered fields (3 rows each) + a 3-line preview, sized to fit
-  // with the rounded frame instead of a fixed 60%-tall box (#187).
-  let area = centered_h(70, 15, f.area());
-  f.render_widget(Clear, area);
-  f.render_widget(overlay_block("new worktree", app.theme.clean), area);
-
-  let inner = Layout::default()
-    .direction(Direction::Vertical)
-    .margin(1)
-    .constraints([
-      Constraint::Length(3),
-      Constraint::Length(3),
-      Constraint::Length(3),
-      Constraint::Min(0),
-    ])
-    .split(area);
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let clean = app.theme.clean;
+  let surface = app.theme.selection_bg;
 
   let (type_str, type_desc) = app
     .branch_types
@@ -1931,70 +1919,167 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  let focus_color = app.theme.dirty;
-  let idle_color = app.theme.muted;
-  f.render_widget(
-    field_input(
-      "type (↑/↓)",
-      &format!("{} — {}", type_str, type_desc),
-      app.create_form.field == Field::Type,
-      focus_color,
-      idle_color,
-    ),
-    inner[0],
+  // The modal is a single Paragraph of per-line-aligned rows (the title /
+  // buttons / hint centre themselves, the fields stay left) — no manual
+  // Layout split, the rounded frame's `Padding` owns the breathing room
+  // (issue #217). Height is the fixed row count plus the border + padding
+  // rows, so the box hugs its content.
+  const ROWS: u16 = 11; // title(2) + 3 fields + blank + 2 preview + blank + buttons + hint
+  let height = ROWS + 2 /* border */ + 2 /* vertical padding */;
+  let area = centered_h(70, height, f.area());
+  let block = overlay_block(clean);
+  let inner_w = block.inner(area).width as usize;
+
+  // Width of the background-filled value field: the inner width minus the
+  // `  label  ` gutter (2 indent + label column + 2 gap).
+  let label_w = 5usize;
+  let gutter = 2 + label_w + 2;
+  let value_w = inner_w.saturating_sub(gutter);
+
+  let label = |s: &str| format!("{:<label_w$}", s);
+  let branch = ellipsize_middle(
+    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  branch : ".len()),
   );
-  f.render_widget(
-    field_input(
-      "issue (digits)",
-      &app.create_form.issue,
-      app.create_form.field == Field::Issue,
-      focus_color,
-      idle_color,
-    ),
-    inner[1],
-  );
-  f.render_widget(
-    field_input(
-      "description (kebab)",
-      &app.create_form.desc,
-      app.create_form.field == Field::Desc,
-      focus_color,
-      idle_color,
-    ),
-    inner[2],
+  let dirname = ellipsize_middle(
+    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  dir    : ".len()),
   );
 
-  // Preview line
-  let branch = format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc);
-  let dirname = format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc);
-  let preview = vec![
-    Line::from(Span::styled("preview", Style::default().fg(app.theme.muted))),
-    Line::from(vec![
-      Span::raw("  branch : "),
-      Span::styled(branch, Style::default().fg(app.theme.branch)),
-    ]),
-    Line::from(vec![
-      Span::raw("  dir    : "),
-      Span::styled(dirname, Style::default().fg(app.theme.dirty)),
-    ]),
-  ];
-  f.render_widget(Paragraph::new(preview), inner[3]);
+  let mut lines = overlay_title_lines("new worktree", clean);
+  lines.push(type_selector_line(
+    &label("type"),
+    type_str,
+    type_desc,
+    app.create_form.field == Field::Type,
+    accent,
+    muted,
+  ));
+  lines.push(field_input_line(
+    &label("issue"),
+    &app.create_form.issue,
+    app.create_form.field == Field::Issue,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(field_input_line(
+    &label("desc"),
+    &app.create_form.desc,
+    app.create_form.field == Field::Desc,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(vec![
+    Span::raw("  branch : "),
+    Span::styled(branch, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(vec![
+    Span::raw("  dir    : "),
+    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(create_buttons_line(accent, muted).centered());
+  lines.push(
+    Line::from(Span::styled(
+      "Tab: field · ←/→: type · Enter: create · Esc: cancel",
+      Style::default().fg(muted),
+    ))
+    .centered(),
+  );
+
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn field_input(label: &str, value: &str, focused: bool, focus_color: Color, idle_color: Color) -> Paragraph<'static> {
-  let border_style = if focused {
-    Style::default().fg(focus_color)
+/// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).
+/// Mirrors [`confirm_buttons_line`]'s flat coloured chips, but — the create
+/// action being non-destructive — primes `Create` as the reversed-accent
+/// chip rather than defaulting focus to Cancel. Pure so the chip contract
+/// is pinned by `tests/tui_ui_helpers_tests.rs`.
+pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  let primary = Style::default()
+    .fg(accent)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
+  Line::from(vec![
+    Span::styled(" Create ", primary),
+    Span::raw("   "),
+    Span::styled(" Cancel ", idle),
+  ])
+}
+
+/// A horizontal `‹ name ›` branch-type selector row for the create overlay
+/// (issue #217 — replaces the bordered up/down box). `label` leads the row
+/// muted; the arrows + selected name read in the accent when focused, and
+/// the type's description trails muted. Pure for
+/// `tests/tui_ui_helpers_tests.rs`.
+pub fn type_selector_line(
+  label: &str,
+  name: &str,
+  desc: &str,
+  focused: bool,
+  accent: Color,
+  muted: Color,
+) -> Line<'static> {
+  let arrow_style = if focused {
+    Style::default().fg(accent)
   } else {
-    Style::default().fg(idle_color)
+    Style::default().fg(muted)
   };
-  let title = format!(" {} ", label);
-  Paragraph::new(value.to_string()).block(
-    Block::default()
-      .borders(Borders::ALL)
-      .border_type(BorderType::Rounded)
-      .title(title)
-      .border_style(border_style),
-  )
+  let name_style = if focused {
+    Style::default().fg(accent).add_modifier(Modifier::BOLD)
+  } else {
+    Style::default().fg(Color::White)
+  };
+  Line::from(vec![
+    Span::raw("  "),
+    Span::styled(label.to_string(), Style::default().fg(muted)),
+    Span::raw("  "),
+    Span::styled("‹ ", arrow_style),
+    Span::styled(name.to_string(), name_style),
+    Span::styled(" ›", arrow_style),
+    Span::raw("  "),
+    Span::styled(desc.to_string(), Style::default().fg(muted)),
+  ])
+}
+
+/// A single-row labelled input with a background surface for the create
+/// overlay (issue #217 — replaces the 3-row bordered field). `label` leads
+/// muted; the value sits in a `value_width`-wide background-filled field so
+/// it reads as one input row. The focused field brightens to the accent
+/// background and shows a `_` cursor. Pure for
+/// `tests/tui_ui_helpers_tests.rs`.
+pub fn field_input_line(
+  label: &str,
+  value: &str,
+  focused: bool,
+  value_width: usize,
+  accent: Color,
+  muted: Color,
+  surface: Color,
+) -> Line<'static> {
+  let cursor = if focused { "_" } else { "" };
+  let mut field = format!(" {value}{cursor}");
+  let len = field.chars().count();
+  if len < value_width {
+    field.push_str(&" ".repeat(value_width - len));
+  }
+  let field_style = if focused {
+    Style::default().fg(Color::Black).bg(accent)
+  } else {
+    Style::default().fg(Color::White).bg(surface)
+  };
+  Line::from(vec![
+    Span::raw("  "),
+    Span::styled(label.to_string(), Style::default().fg(muted)),
+    Span::raw("  "),
+    Span::styled(field, field_style),
+  ])
 }
 
 fn draw_confirm(f: &mut Frame, app: &App) {
@@ -2004,26 +2089,24 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   // instead of the pre-#187 hard-coded `Red`.
   let danger = app.theme.prunable;
 
-  let block = overlay_block("confirm delete", danger);
+  let block = overlay_block(danger);
 
   let Some(w) = app.selected() else {
-    let area = centered_h(40, 5, f.area());
+    let mut lines = overlay_title_lines("confirm delete", danger);
+    lines.push(Line::from("nothing selected").centered());
+    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_h(40, height, f.area());
     f.render_widget(Clear, area);
-    f.render_widget(
-      Paragraph::new("nothing selected")
-        .block(block)
-        .alignment(Alignment::Center),
-      area,
-    );
+    f.render_widget(Paragraph::new(lines).block(block), area);
     return;
   };
 
   // Width first (a fixed % of the terminal) so a long path / name can be
   // middle-ellipsized to one line instead of wrapping mid-path (#187
-  // review). `text_w` is the room inside the 1-col margins.
+  // review). `text_w` is the room inside the border + padding.
   let term = f.area();
   let outer_w = term.width.saturating_mul(62) / 100;
-  let text_w = outer_w.saturating_sub(2) as usize;
+  let text_w = outer_w.saturating_sub(6) as usize;
 
   let name = ellipsize_middle(&w.name, text_w.saturating_sub("delete ".len()));
   let path = ellipsize_middle(
@@ -2031,14 +2114,16 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     text_w.saturating_sub("at ".len()),
   );
 
-  // --- description (centred) ---
-  let mut content: Vec<Line> = vec![
-    Line::from(vec![
-      Span::raw("delete "),
-      Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
-    ]),
-    Line::from(Span::styled(format!("at {path}"), Style::default().fg(muted))),
-  ];
+  // --- title + description (centred) ---
+  let mut content: Vec<Line> = overlay_title_lines("confirm delete", danger);
+  content.push(Line::from(vec![
+    Span::raw("delete "),
+    Span::styled(name, Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
+  ]));
+  content.push(Line::from(Span::styled(
+    format!("at {path}"),
+    Style::default().fg(muted),
+  )));
   if let Some(b) = &w.branch {
     let branch = ellipsize_middle(b, text_w.saturating_sub("branch: ".len()));
     content.push(Line::from(vec![
@@ -2052,27 +2137,28 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     app.delete_branch_on_remove
   )));
 
-  // Size the modal to its content: the description rows plus the three
-  // fixed rows (loader / buttons / hint) and the rounded border — no
-  // more fixed 44%-tall box that dwarfed its few lines (#187 review).
-  let height = content.len() as u16 + 3 + 2;
+  // Size the modal to its content: the title + description rows plus the
+  // three fixed rows (loader / buttons / hint), the rounded border and the
+  // shared interior padding — no more fixed 44%-tall box that dwarfed its
+  // few lines (#187 review).
+  let height = content.len() as u16 + 3 + 2 /* border */ + 2 /* padding */;
   let area = centered_h(62, height, term);
   f.render_widget(Clear, area);
 
-  // Four stacked regions inside the border: the description, a
-  // loader/countdown row, the button row, and a muted key hint. The
+  // Four stacked regions inside the padded frame: the title + description,
+  // a loader/countdown row, the button row, and a muted key hint. The
   // loader row stays reserved (Length 1) even when idle so the buttons
-  // never jump as the countdown arms.
+  // never jump as the countdown arms. Split `block.inner` so the shared
+  // padding owns the breathing room (issue #217).
   let inner = Layout::default()
     .direction(Direction::Vertical)
-    .margin(1)
     .constraints([
-      Constraint::Min(1),    // description
+      Constraint::Min(1),    // title + description
       Constraint::Length(1), // loader / countdown
       Constraint::Length(1), // buttons
       Constraint::Length(1), // hint
     ])
-    .split(area);
+    .split(block.inner(area));
   f.render_widget(block, area);
 
   f.render_widget(
@@ -2206,7 +2292,7 @@ pub fn filled_cells_for_progress(progress: f64, cells: usize) -> usize {
 }
 
 fn draw_report(f: &mut Frame, app: &App) {
-  let mut lines: Vec<Line> = Vec::new();
+  let mut lines: Vec<Line> = overlay_title_lines("bootstrap report", app.theme.accent);
   if let Some(report) = &app.report {
     for step in &report.steps {
       let sigil = step.status.sigil();
@@ -2236,15 +2322,16 @@ fn draw_report(f: &mut Frame, app: &App) {
     Style::default().fg(app.theme.muted),
   )));
 
-  // Size to the report length (+ border), capped at 80% of the screen so
-  // a long report stays on-screen rather than a fixed 80%-tall box (#187).
+  // Size to the report length (+ border + padding), capped at 80% of the
+  // screen so a long report stays on-screen rather than a fixed 80%-tall
+  // box (#187).
   let term = f.area();
-  let height = (lines.len() as u16 + 2).min(term.height.saturating_mul(80) / 100);
+  let height = (lines.len() as u16 + 2 /* border */ + 2/* padding */).min(term.height.saturating_mul(80) / 100);
   let area = centered_h(80, height, term);
   f.render_widget(Clear, area);
   f.render_widget(
     Paragraph::new(lines)
-      .block(overlay_block("bootstrap report", app.theme.accent))
+      .block(overlay_block(app.theme.accent))
       .wrap(Wrap { trim: false }),
     area,
   );
@@ -2281,28 +2368,36 @@ fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
   Rect { x, y, width, height }
 }
 
-/// A modal overlay frame: a rounded border plus a bold title, both in
-/// `color`. Shared by every overlay (#187) so the confirm / help / create
-/// / report / open / link / palette modals read consistently instead of
-/// each hard-coding its own border kind and colour.
-fn overlay_block(title: &str, color: Color) -> Block<'static> {
+/// A modal overlay frame: a rounded border in `color` with interior
+/// padding on every side. Shared by every overlay (#187) so the confirm /
+/// help / create / report / open / link / palette modals read consistently.
+/// The title is *not* embedded in the border any more (issue #217): it
+/// lives inside the frame as its own centred line via [`overlay_title_lines`]
+/// so the border stays clean and no content hugs the edge. The padding
+/// (2 cols horizontal, 1 row vertical) is the breathing room callers must
+/// account for when sizing — inner height shrinks by 2 rows, inner width by
+/// 4 cols, on top of the 2-cell border.
+fn overlay_block(color: Color) -> Block<'static> {
   Block::default()
     .borders(Borders::ALL)
     .border_type(BorderType::Rounded)
-    .title(Span::styled(
-      format!(" {title} "),
+    .padding(Padding::symmetric(2, 1))
+    .border_style(Style::default().fg(color))
+}
+
+/// The detached modal title: a centred bold line in `color` followed by a
+/// blank spacer row, prepended to a modal's content so the title sits
+/// inside the rounded frame rather than embedded in the top border
+/// (issue #217). Returns two lines, so callers sizing to content add 2.
+fn overlay_title_lines(title: &str, color: Color) -> Vec<Line<'static>> {
+  vec![
+    Line::from(Span::styled(
+      title.to_string(),
       Style::default().fg(color).add_modifier(Modifier::BOLD),
     ))
-    // Centre the title (issue #217) so every overlay reads consistently —
-    // matches the centred body content of the confirm / create modals.
-    .title_alignment(Alignment::Center)
-    // One column of horizontal breathing room inside the rounded frame for
-    // overlays that render their content straight into `block.inner()`
-    // (help / open / link / report / palette). The confirm / create modals
-    // position content with their own `margin(1)` layout, so this is inert
-    // for them.
-    .padding(Padding::horizontal(1))
-    .border_style(Style::default().fg(color))
+    .centered(),
+    Line::from(String::new()),
+  ]
 }
 
 /// Middle-ellipsize `s` to at most `max` display columns, keeping the
@@ -2341,61 +2436,53 @@ fn trunc(s: &str, max: usize) -> String {
 
 fn draw_open_menu(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let lines = vec![
-    Line::from(Span::styled(
-      "open in browser",
-      Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    )),
-    Line::from(""),
-    Line::from("  i   linked issue"),
-    Line::from("  p   linked pull request"),
-    Line::from(""),
-    Line::from(Span::styled("  esc to cancel", Style::default().fg(app.theme.muted))),
-  ];
-  let area = centered_h(40, lines.len() as u16 + 2, f.area());
+  let mut lines = overlay_title_lines("open in browser", accent);
+  lines.push(Line::from("  i   linked issue"));
+  lines.push(Line::from("  p   linked pull request"));
+  lines.push(Line::from(""));
+  lines.push(Line::from(Span::styled(
+    "  esc to cancel",
+    Style::default().fg(app.theme.muted),
+  )));
+  let area = centered_h(40, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block("open", accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
 fn draw_link_prompt(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let lines = match app.link_prompt_stage() {
-    LinkPromptStage::ChooseTarget => vec![
-      Line::from(Span::styled(
-        "link this worktree to:",
-        Style::default().fg(accent).add_modifier(Modifier::BOLD),
-      )),
-      Line::from(""),
-      Line::from("  i   a GitHub issue"),
-      Line::from("  p   a pull request"),
-      Line::from(""),
-      Line::from(Span::styled("  esc to cancel", Style::default().fg(muted))),
-    ],
+    LinkPromptStage::ChooseTarget => {
+      let mut lines = overlay_title_lines("link this worktree to:", accent);
+      lines.push(Line::from("  i   a GitHub issue"));
+      lines.push(Line::from("  p   a pull request"));
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled("  esc to cancel", Style::default().fg(muted))));
+      lines
+    }
     LinkPromptStage::InputNumber => {
       let label = match app.link_prompt_target() {
         Some(super::app::LinkTarget::Issue) => "issue #",
         Some(super::app::LinkTarget::Pr) => "PR #",
         None => "#",
       };
-      vec![
-        Line::from(Span::styled(
-          format!("type the {} number", label.trim_end_matches('#').trim()),
-          Style::default().fg(accent).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(format!("  {}{}_", label, app.link_prompt_number_input())),
-        Line::from(""),
-        Line::from(Span::styled(
-          "  enter confirms · esc cancels · backspace deletes",
-          Style::default().fg(muted),
-        )),
-      ]
+      let mut lines = overlay_title_lines(
+        &format!("type the {} number", label.trim_end_matches('#').trim()),
+        accent,
+      );
+      lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
+      lines.push(Line::from(""));
+      lines.push(Line::from(Span::styled(
+        "  enter confirms · esc cancels · backspace deletes",
+        Style::default().fg(muted),
+      )));
+      lines
     }
   };
-  let area = centered_h(50, lines.len() as u16 + 2, f.area());
+  let area = centered_h(50, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(overlay_block("link", accent)), area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
 /// Render the command palette overlay (issue #32).
@@ -2411,15 +2498,33 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   f.render_widget(Clear, area);
 
   let accent = app.theme.accent;
-  let outer = overlay_block("command palette", accent);
+  let outer = overlay_block(accent);
   let inner = outer.inner(area);
   f.render_widget(outer, area);
 
-  // Two rows: matches list (flex) + input bar (height 1).
+  // Four rows: a detached centred title, a blank spacer, the matches list
+  // (flex), and the input bar pinned to the bottom (issue #217 — the title
+  // moved off the border into the frame).
   let layout = Layout::default()
     .direction(Direction::Vertical)
-    .constraints([Constraint::Min(3), Constraint::Length(1)])
+    .constraints([
+      Constraint::Length(1), // title
+      Constraint::Length(1), // spacer
+      Constraint::Min(3),    // matches
+      Constraint::Length(1), // input bar
+    ])
     .split(inner);
+
+  f.render_widget(
+    Paragraph::new(
+      Line::from(Span::styled(
+        "command palette",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      ))
+      .centered(),
+    ),
+    layout[0],
+  );
 
   let entries = app.palette.matches();
   let highlight = app.palette.highlight();
@@ -2447,14 +2552,14 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       Style::default().fg(app.theme.prunable),
     )));
   }
-  f.render_widget(Paragraph::new(lines), layout[0]);
+  f.render_widget(Paragraph::new(lines), layout[2]);
 
   let input_line = Line::from(vec![
     Span::styled(":", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
     Span::raw(app.palette.buffer().to_string()),
     Span::styled("_", Style::default().fg(app.theme.muted)),
   ]);
-  f.render_widget(Paragraph::new(input_line), layout[1]);
+  f.render_widget(Paragraph::new(input_line), layout[3]);
 }
 
 /// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)

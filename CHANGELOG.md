@@ -35,9 +35,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - TUI: panes are labelled `[1] Worktrees (N)` and `[2] Status` (the focus
   mnemonics for the `1` / `2` keys), and the help overlay is titled
   `Keybindings` with a centred context subtitle. (#217)
-- TUI: modal overlays centre their titles and gain internal padding; the
-  confirm-delete buttons render as flat coloured chips (` Confirm ` /
-  ` Cancel `) instead of `[ Confirm ]` / `[ Cancel ]`. (#217)
+- TUI: modal overlays lift their title off the border into the frame as a
+  centred line and gain interior padding on every side, so no content hugs
+  the edge; the confirm-delete buttons render as flat coloured chips
+  (` Confirm ` / ` Cancel `) instead of `[ Confirm ]` / `[ Cancel ]`. (#217)
+- TUI: the create-worktree modal is reworked — the branch type is a
+  horizontal `‹ name ›` selector (Left/Right or Up/Down), the issue and
+  description fields are single-row inputs with a background surface
+  (was 3-row bordered boxes), and the modal grows a ` Create ` / ` Cancel `
+  button row plus a control hint. (#217)
 
 ### Fixed
 

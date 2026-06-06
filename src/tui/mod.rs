@@ -53,11 +53,12 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, branch_name_color, build_sidebar_sections, confirm_buttons_line,
-  ellipsize_middle, filled_cells_for_progress, footer_line, freshness_color, github_status_lines, header_line,
-  header_title, help_lines, help_rows, issue_badge_color, issue_summary_line, pane_counter, panel_border_color,
-  pr_badge_color, pr_summary_line, recent_commits_lines, status_line, status_pane_title, table_marker,
-  tilde_compress_with_home, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  create_buttons_line, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, freshness_color,
+  github_status_lines, header_line, header_title, help_lines, help_rows, issue_badge_color, issue_summary_line,
+  pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines, status_line,
+  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
@@ -262,8 +263,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
             app.create_next_field();
           }
         }
-        KeyCode::Up if app.create_form.field == Field::Type => app.create_prev_type(),
-        KeyCode::Down if app.create_form.field == Field::Type => app.create_next_type(),
+        // The branch type is now a horizontal `‹ ›` selector, so Left/Right
+        // cycle it too (issue #217); Up/Down stay bound for muscle memory.
+        KeyCode::Up | KeyCode::Left if app.create_form.field == Field::Type => app.create_prev_type(),
+        KeyCode::Down | KeyCode::Right if app.create_form.field == Field::Type => app.create_next_type(),
         KeyCode::Char(c) if app.create_form.field != Field::Type => app.create_push_char(c),
         KeyCode::Backspace if app.create_form.field != Field::Type => app.create_pop_char(),
         _ => {}
