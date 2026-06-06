@@ -2527,13 +2527,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
         .centered(),
       );
       lines.push(Line::from(""));
-      lines.push(
-        Line::from(Span::styled(
-          "j/k move · enter links · i/p direct · esc cancels",
-          Style::default().fg(muted),
-        ))
-        .centered(),
-      );
+      lines.push(Line::from(Span::styled(link_choose_hint(), Style::default().fg(muted))).centered());
       lines
     }
     LinkPromptStage::InputNumber => {
@@ -2548,16 +2542,26 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       );
       lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
       lines.push(Line::from(""));
-      lines.push(Line::from(Span::styled(
-        "  enter confirms · esc cancels · backspace deletes",
-        Style::default().fg(muted),
-      )));
+      lines.push(Line::from(Span::styled(link_input_hint(), Style::default().fg(muted))));
       lines
     }
   };
   let area = centered_h(50, lines.len() as u16 + 2 /* border */ + 2 /* padding */, f.area());
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Compact control hint for the Link prompt target picker. The Link modal is
+/// 50% wide; on an 80-col terminal the padded inner width is 34 cells, so the
+/// hint must stay terse enough not to clip.
+pub fn link_choose_hint() -> &'static str {
+  "j/k move · Enter/i/p pick · Esc"
+}
+
+/// Compact control hint for the Link prompt number input. Same width budget as
+/// [`link_choose_hint`].
+pub fn link_input_hint() -> &'static str {
+  "digits · Enter link · Esc cancel"
 }
 
 /// Render the command palette overlay (issue #32).

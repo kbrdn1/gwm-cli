@@ -199,6 +199,20 @@ fn status_line_keeps_context_and_log_when_narrow_dropping_hints() {
 }
 
 #[test]
+fn link_prompt_status_line_keeps_short_log_at_80_cols() {
+  use gwm::tui::keymap::Keymap;
+  let km = Keymap::defaults();
+  let resolved = HintContext::LinkPrompt.resolve(&km);
+  let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+
+  let line = status_line("link", &hints, "pick", None, 80, &Theme::default());
+  let text = plain(&line);
+
+  assert!(display_width(&line) <= 80, "overflowed 80: {text:?}");
+  assert!(text.contains("[pick]"), "short Link status was clipped: {text:?}");
+}
+
+#[test]
 fn hint_context_exposes_label_and_hints() {
   use gwm::tui::keymap::Keymap;
   // The same context source feeds the help subtitle and the statusbar chip.

@@ -1690,7 +1690,7 @@ impl App {
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
     self.link_prompt.reset();
-    self.status = "link: j/k move · enter links · i/p direct · esc cancels".into();
+    self.status = "pick".into();
   }
 
   /// Highlighted row in the `ChooseTarget` picker (for the renderer).
@@ -1749,8 +1749,7 @@ impl App {
   pub fn link_prompt_choose(&mut self, target: LinkTarget) {
     self.link_prompt.commit_target(target);
     self.status = match target {
-      LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
-      LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
+      LinkTarget::Issue | LinkTarget::Pr => "num".into(),
     };
   }
 

@@ -1245,6 +1245,37 @@ fn enter_link_prompt_starts_at_choose_target() {
 }
 
 #[test]
+fn link_prompt_status_copy_stays_footer_sized() {
+  // The statusbar pins `app.status` at the right edge. Long modal-control
+  // prose gets clipped at 80 columns, so Link prompt status copy should stay
+  // short; the modal itself owns the detailed key hints.
+  const MAX_STATUS_CHARS: usize = 4;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+
+  app.enter_link_prompt();
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "choose-target status is too long for the footer: {:?}",
+    app.status
+  );
+
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "issue-input status is too long for the footer: {:?}",
+    app.status
+  );
+
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Pr);
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "pr-input status is too long for the footer: {:?}",
+    app.status
+  );
+}
+
+#[test]
 fn link_prompt_choose_issue_advances_to_input() {
   let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
   app.enter_link_prompt();

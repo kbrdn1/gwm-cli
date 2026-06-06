@@ -5,8 +5,8 @@
 
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, link_target_line,
-  pane_counter, status_pane_title, type_selector_line, worktrees_pane_title,
+  badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, link_choose_hint,
+  link_input_hint, link_target_line, pane_counter, status_pane_title, type_selector_line, worktrees_pane_title,
 };
 use ratatui::style::{Color, Modifier};
 
@@ -283,4 +283,20 @@ fn link_target_line_highlights_the_selected_row() {
     idle.spans.iter().all(|s| s.style.fg != Some(Color::Magenta)),
     "an unselected row must not wear the accent: {itext:?}"
   );
+}
+
+#[test]
+fn link_prompt_hints_fit_the_80_col_modal_budget() {
+  // The Link modal uses `centered_h(50, ...)`: at 80 columns its outer
+  // width is 40, and the rounded border + horizontal padding leave 34 cells
+  // for content. The visual smoke caught the previous long hints clipping at
+  // exactly this common terminal width.
+  const INNER_WIDTH_AT_80_COLS: usize = 34;
+
+  for hint in [link_choose_hint(), link_input_hint()] {
+    assert!(
+      hint.chars().count() <= INNER_WIDTH_AT_80_COLS,
+      "Link prompt hint clips at 80 cols: {hint:?}"
+    );
+  }
 }
