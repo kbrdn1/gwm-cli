@@ -7,6 +7,16 @@
 //! effects in `submit_create` (it composes `BranchSpec` from the form's
 //! values, then drives `worktree::add` + `bootstrap::run`).
 
+/// Max digits accepted in the issue-number field. Seven digits covers any
+/// realistic GitHub issue/PR number (up to 9,999,999) while keeping the
+/// resolved branch name well within git's 255-byte ref limit (#217).
+pub const MAX_ISSUE_LEN: usize = 7;
+
+/// Max characters accepted in the description (slug) field. Bounded so the
+/// `<type>/#<issue>-<desc>` branch name cannot exceed git's 255-byte ref
+/// limit even with the longest configured branch type (#217).
+pub const MAX_DESC_LEN: usize = 200;
+
 /// Which input is currently focused inside the create overlay. Selected
 /// via Tab / Shift-Tab; the Type field is special — it's cycled via
 /// `next_type` / `prev_type` rather than typed into.
@@ -90,8 +100,8 @@ impl CreateForm {
   /// downstream in `BranchSpec`). Type is no-op (cycled, not typed).
   pub fn push_char(&mut self, c: char) {
     match self.field {
-      Field::Issue if c.is_ascii_digit() => self.issue.push(c),
-      Field::Desc => self.desc.push(c),
+      Field::Issue if c.is_ascii_digit() && self.issue.chars().count() < MAX_ISSUE_LEN => self.issue.push(c),
+      Field::Desc if self.desc.chars().count() < MAX_DESC_LEN => self.desc.push(c),
       _ => {}
     }
   }

@@ -3456,3 +3456,74 @@ fn help_scroll_clamps_between_zero_and_max() {
   app.enter_help();
   assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
 }
+
+#[test]
+fn create_key_typing_appends_to_the_focused_text_field() {
+  // Issue #217 follow-up: the create key handling is an `App` method so the
+  // typing path is unit-testable (not just `push_char` in isolation).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  for c in "my-feat".chars() {
+    assert!(matches!(
+      app.handle_create_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+      CreateKey::Handled
+    ));
+  }
+  assert_eq!(app.create_form.desc, "my-feat");
+}
+
+#[test]
+fn create_key_hl_cycles_the_type_only_when_type_is_focused() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert_eq!(app.create_form.field, Field::Type);
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.type_index, 1, "l advances the type");
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.type_index, 0, "h steps back");
+  // On a text field, h / l are literal input, not type cycling — otherwise
+  // we'd recreate the very "can't type these letters" bug we're avoiding.
+  app.create_form.field = Field::Desc;
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.desc, "hl");
+  assert_eq!(app.create_form.type_index, 0, "type stays put while editing desc");
+}
+
+#[test]
+fn create_key_enter_advances_then_submits_on_desc() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Issue;
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert_eq!(
+    app.create_form.field,
+    Field::Desc,
+    "Enter off the desc field advances focus"
+  );
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Submit
+  ));
+}
+
+#[test]
+fn create_key_esc_requests_cancel() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    CreateKey::Cancel
+  ));
+}

@@ -1,7 +1,7 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
-use super::state::create_form::CreateForm;
+use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::GitHubFetch;
 use super::state::link_prompt::LinkPrompt;
@@ -78,6 +78,20 @@ pub enum View {
   /// / `palette_cycle_*` / `accept_command_palette` /
   /// `close_command_palette`.
   CommandPalette,
+}
+
+/// What the run loop must do after [`App::handle_create_key`] processes a
+/// key in the create overlay (issue #217). Keeps the side effects
+/// (worktree creation, view transition) in the loop while the form
+/// mutations stay in the testable handler.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CreateKey {
+  /// The key mutated form state (or was ignored); stay in the overlay.
+  Handled,
+  /// `Enter` on the description field — the loop should run `submit_create`.
+  Submit,
+  /// `Esc` — the loop should close the overlay back to the list.
+  Cancel,
 }
 
 /// Target of an open / link action. Canonical definition lives in
@@ -1008,6 +1022,37 @@ impl App {
 
   pub fn create_pop_char(&mut self) {
     self.create_form.pop_char();
+  }
+
+  /// Handle one key in the create overlay and report what the run loop must
+  /// do next. Extracted from the inline `View::Create` match (issue #217)
+  /// so the input path — typing, type cycling, submit/cancel — is
+  /// unit-testable rather than only reachable through a live terminal.
+  ///
+  /// `h` / `l` mirror the `←` / `→` horizontal type selector, but **only**
+  /// when the Type field is focused; on a text field they are literal input
+  /// so the letters are never swallowed.
+  pub fn handle_create_key(&mut self, key: KeyEvent) -> CreateKey {
+    let on_type = self.create_form.field == Field::Type;
+    match key.code {
+      KeyCode::Esc => return CreateKey::Cancel,
+      KeyCode::Tab => self.create_next_field(),
+      KeyCode::BackTab => self.create_prev_field(),
+      KeyCode::Enter => {
+        if self.create_form.field == Field::Desc {
+          return CreateKey::Submit;
+        }
+        self.create_next_field();
+      }
+      KeyCode::Up | KeyCode::Left if on_type => self.create_prev_type(),
+      KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
+      KeyCode::Char('h') if on_type => self.create_prev_type(),
+      KeyCode::Char('l') if on_type => self.create_next_type(),
+      KeyCode::Char(c) if !on_type => self.create_push_char(c),
+      KeyCode::Backspace if !on_type => self.create_pop_char(),
+      _ => {}
+    }
+    CreateKey::Handled
   }
 
   pub fn submit_create(&mut self) -> Result<()> {

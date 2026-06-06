@@ -24,7 +24,7 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, GithubFetchMsg, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{App, CreateKey, GithubFetchMsg, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -255,26 +255,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
         _ => {}
       },
-      View::Create => match key.code {
-        KeyCode::Esc => app.view = View::List,
-        KeyCode::Tab => app.create_next_field(),
-        KeyCode::BackTab => app.create_prev_field(),
-        KeyCode::Enter => {
-          if app.create_form.field == Field::Desc {
-            if let Err(e) = app.submit_create() {
-              app.status = format!("error: {}", e);
-            }
-          } else {
-            app.create_next_field();
+      // Create-overlay keys live in a testable `App` method (issue #217);
+      // the loop only owns the two side effects (submit / close).
+      View::Create => match app.handle_create_key(key) {
+        CreateKey::Submit => {
+          if let Err(e) = app.submit_create() {
+            app.status = format!("error: {}", e);
           }
         }
-        // The branch type is now a horizontal `‹ ›` selector, so Left/Right
-        // cycle it too (issue #217); Up/Down stay bound for muscle memory.
-        KeyCode::Up | KeyCode::Left if app.create_form.field == Field::Type => app.create_prev_type(),
-        KeyCode::Down | KeyCode::Right if app.create_form.field == Field::Type => app.create_next_type(),
-        KeyCode::Char(c) if app.create_form.field != Field::Type => app.create_push_char(c),
-        KeyCode::Backspace if app.create_form.field != Field::Type => app.create_pop_char(),
-        _ => {}
+        CreateKey::Cancel => app.view = View::List,
+        CreateKey::Handled => {}
       },
       View::Confirm => match key.code {
         // `y` confirms directly regardless of which button is focused

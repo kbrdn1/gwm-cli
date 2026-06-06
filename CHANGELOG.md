@@ -49,7 +49,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with vertical gaps between rows, the live branch/dir preview sits above
   the inputs, the modal width is capped so it doesn't span a wide
   terminal, and it grows a ` Create ` / ` Cancel ` button row plus a
-  control hint. (#217)
+  control hint. The branch type also cycles with `h` / `l` (vim), and the
+  issue/description fields are length-capped so the resolved branch name
+  stays within git's ref limit. (#217)
 
 ### Fixed
 
