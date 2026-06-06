@@ -66,6 +66,15 @@ pub use ui::{
   RECENT_COMMITS_LIMIT,
 };
 
+/// The single TUI render entry point. **Not part of the public SemVer
+/// surface** — exposed only so the modal render net in `tests/` (issue
+/// #235) can drive each overlay through the same `draw` path the event
+/// loop uses, pinning modal layout against future `ui.rs` refactors. The
+/// per-modal `draw_*` helpers stay private; this mirrors the
+/// `#[doc(hidden)] pub mod commit_graph` convention above.
+#[doc(hidden)]
+pub use ui::draw;
+
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config
   // load fails (e.g. not inside a git repo), the user's terminal stays in
