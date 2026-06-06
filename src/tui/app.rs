@@ -1068,6 +1068,9 @@ impl App {
       KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
       KeyCode::Char('h') if on_type => self.create_prev_type(),
       KeyCode::Char('l') if on_type => self.create_next_type(),
+      KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
+        self.status = "issue accepts digits only".into();
+      }
       KeyCode::Char(c) if !on_type => self.create_push_char(c),
       KeyCode::Backspace if !on_type => self.create_pop_char(),
       _ => {}

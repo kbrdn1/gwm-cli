@@ -3619,6 +3619,37 @@ fn create_key_typing_appends_to_the_focused_text_field() {
 }
 
 #[test]
+fn create_key_rejects_issue_letters_with_status_feedback() {
+  // Issue #220 visual pass: the modal opens on the digits-only Issue field.
+  // A stray letter must not leak into Desc, but it also must not look like
+  // typing is broken; the status bar explains the contract.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert_eq!(app.create_form.field, Field::Issue);
+
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert!(app.create_form.issue.is_empty());
+  assert!(
+    app.create_form.desc.is_empty(),
+    "non-digit Issue input must stay on Issue and never append to Desc"
+  );
+  assert!(
+    app.status.contains("digits"),
+    "status should explain the digits-only Issue field, got {:?}",
+    app.status
+  );
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.issue, "7");
+  assert!(app.create_form.desc.is_empty());
+}
+
+#[test]
 fn create_key_hl_cycles_the_type_only_when_type_is_focused() {
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   let (_dir, mut app) = make_app();
