@@ -10,7 +10,7 @@ use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap},
+  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
   Frame,
 };
 use std::time::{Duration, Instant};
@@ -1853,12 +1853,14 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   );
 }
 
-/// The `[ Confirm ] [ Cancel ]` button row (#187). The focused button
-/// gets the reversed-bold accent chip — the same badge style as the
-/// bottom statusline and the help overlay — while the idle button reads
-/// muted-bold. Focus defaults to Cancel, so the destructive button is
-/// never the one a stray `Enter` lands on.
-fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
+/// The ` Confirm ` ` Cancel ` button row (#187, restyled in #217). The
+/// buttons are flat coloured chips — no square brackets: the focused one
+/// gets the reversed-bold accent chip (the same badge style as the bottom
+/// statusline and the help overlay), the idle one reads muted-bold. Focus
+/// defaults to Cancel, so the destructive button is never the one a stray
+/// `Enter` lands on. Pure so the chip contract is pinned by
+/// `tests/tui_ui_helpers_tests.rs`.
+pub fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
   let focused = Style::default()
     .fg(accent)
     .add_modifier(Modifier::REVERSED | Modifier::BOLD);
@@ -1868,9 +1870,9 @@ fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Li
     ConfirmButton::Cancel => (idle, focused),
   };
   Line::from(vec![
-    Span::styled(" [ Confirm ] ", confirm_style),
+    Span::styled(" Confirm ", confirm_style),
     Span::raw("   "),
-    Span::styled(" [ Cancel ] ", cancel_style),
+    Span::styled(" Cancel ", cancel_style),
   ])
 }
 
@@ -2017,6 +2019,15 @@ fn overlay_block(title: &str, color: Color) -> Block<'static> {
       format!(" {title} "),
       Style::default().fg(color).add_modifier(Modifier::BOLD),
     ))
+    // Centre the title (issue #217) so every overlay reads consistently —
+    // matches the centred body content of the confirm / create modals.
+    .title_alignment(Alignment::Center)
+    // One column of horizontal breathing room inside the rounded frame for
+    // overlays that render their content straight into `block.inner()`
+    // (help / open / link / report / palette). The confirm / create modals
+    // position content with their own `margin(1)` layout, so this is inert
+    // for them.
+    .padding(Padding::horizontal(1))
     .border_style(Style::default().fg(color))
 }
 

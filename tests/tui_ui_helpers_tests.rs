@@ -3,7 +3,9 @@
 //! the confirm modal, and the badge-group width used to align the help
 //! overlay's per-chord key badges.
 
-use gwm::tui::{badge_group_width, ellipsize_middle, pane_counter, worktrees_pane_title};
+use gwm::tui::ConfirmButton;
+use gwm::tui::{badge_group_width, confirm_buttons_line, ellipsize_middle, pane_counter, worktrees_pane_title};
+use ratatui::style::{Color, Modifier};
 
 #[test]
 fn ellipsize_middle_returns_input_when_it_fits() {
@@ -98,4 +100,42 @@ fn pane_counter_formats_selected_of_visible() {
   // Bottom-right footer of the worktrees pane, lazygit-style: the 1-based
   // selected position over the visible count (e.g. `3 of 12`).
   assert_eq!(pane_counter(3, 12).as_deref(), Some(" 3 of 12 "));
+}
+
+// ---------------------------------------------------------------------------
+// Confirm modal buttons (issue #217)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn confirm_buttons_render_as_chips_without_brackets() {
+  // Issue #217: the confirm modal buttons are flat coloured chips
+  // (` Confirm ` / ` Cancel `), not the pre-#217 `[ Confirm ]` / `[ Cancel ]`
+  // bracket pairs. The focused button wears the reversed-accent chip; the
+  // idle one reads muted.
+  let line = confirm_buttons_line(ConfirmButton::Cancel, Color::Magenta, Color::Gray);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("Confirm"), "missing Confirm label: {text:?}");
+  assert!(text.contains("Cancel"), "missing Cancel label: {text:?}");
+  assert!(!text.contains('['), "square bracket leaked into a chip: {text:?}");
+  assert!(!text.contains(']'), "square bracket leaked into a chip: {text:?}");
+
+  // The focused button (Cancel here — the safe default) is the reversed chip.
+  let cancel = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Cancel"))
+    .expect("a Cancel span");
+  assert!(
+    cancel.style.add_modifier.contains(Modifier::REVERSED),
+    "focused Cancel button must be a reversed chip"
+  );
+  let confirm = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Confirm"))
+    .expect("a Confirm span");
+  assert!(
+    !confirm.style.add_modifier.contains(Modifier::REVERSED),
+    "idle Confirm button must not be reversed"
+  );
 }
