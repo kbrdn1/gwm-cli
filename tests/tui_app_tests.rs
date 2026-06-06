@@ -1385,6 +1385,49 @@ fn drain_is_a_noop_with_no_pending_results() {
 }
 
 #[test]
+fn drain_does_not_report_when_only_stale_results_arrive() {
+  // Issue #217 review (P2): a result whose inflight slot was invalidated
+  // (the user navigated away) is dropped by `complete_*`; the drain must NOT
+  // then stamp "github status refreshed" over the current status message.
+  use gwm::tui::{FetchKey, GithubFetchMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.github.request(FetchKey::Issue(42));
+  app.github.invalidate(); // navigated away → inflight cleared
+  app.status = "path: /somewhere/else".into();
+  app
+    .github_result_sender()
+    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .unwrap();
+
+  let applied = app.drain_github_results();
+
+  assert!(!applied, "a dropped stale result must not count as applied");
+  assert_eq!(
+    app.status, "path: /somewhere/else",
+    "a stale result must not overwrite the current status message"
+  );
+}
+
+#[test]
+fn hint_context_prioritises_an_open_modal_over_pane_focus() {
+  // Issue #217 review (P2): when a modal is open the statusbar must show the
+  // modal's context, not the pane behind it. Pressing `n` in the create form
+  // types text — advertising the worktrees `n new` hint there is misleading.
+  use gwm::tui::{HintContext, View};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.focus_status(); // pane focus would otherwise resolve to Status
+  app.view = View::Create;
+  assert_eq!(app.hint_context(), HintContext::Create);
+  app.view = View::Confirm;
+  assert_eq!(app.hint_context(), HintContext::Confirm);
+  app.view = View::CommandPalette;
+  assert_eq!(app.hint_context(), HintContext::CommandPalette);
+  // Back on the list, the pane focus is honoured again.
+  app.view = View::List;
+  assert_eq!(app.hint_context(), HintContext::Status);
+}
+
+#[test]
 fn apply_fetch_error_stores_error_state() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.apply_issue_fetch_result(Err("gh not found".into()));

@@ -703,15 +703,39 @@ impl App {
   }
 
   /// The live UI context driving the statusbar chip + help subtitle (issue
-  /// #217): `Picker` in `gwm switch`, `Status` when the sidebar holds focus,
-  /// `Worktrees` otherwise.
+  /// #217). An open modal / overlay wins over the pane focus (issue #217
+  /// review P2): when the create form is up, the statusbar must advertise
+  /// the form's keys, not the worktrees pane's `n new` — pressing `n` there
+  /// types text. Only `View::List` falls through to the pane context
+  /// (`Picker` in `gwm switch`, `Status` when the sidebar holds focus, else
+  /// `Worktrees`).
   pub fn hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.view {
+      View::Create => HintContext::Create,
+      View::Confirm => HintContext::Confirm,
+      View::OpenMenu => HintContext::OpenMenu,
+      View::LinkPrompt => HintContext::LinkPrompt,
+      View::CommandPalette => HintContext::CommandPalette,
+      View::Report => HintContext::Report,
+      View::Help => HintContext::Help,
+      View::List => self.pane_hint_context(),
+    }
+  }
+
+  /// The underlying list-view pane context (issue #217), ignoring any open
+  /// overlay. Drives the help overlay's subtitle + picker-section gating:
+  /// `?` documents the keys for the pane you were on, so it must NOT collapse
+  /// to the `Help` context that [`Self::hint_context`] returns while the
+  /// overlay is up.
+  pub fn pane_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
     if self.picker_mode {
-      super::ui::HintContext::Picker
+      HintContext::Picker
     } else if self.sidebar.open && self.sidebar.focused {
-      super::ui::HintContext::Status
+      HintContext::Status
     } else {
-      super::ui::HintContext::Worktrees
+      HintContext::Worktrees
     }
   }
 
@@ -1450,11 +1474,15 @@ impl App {
   pub fn drain_github_results(&mut self) -> bool {
     let mut applied = false;
     while let Ok(msg) = self.github_rx.try_recv() {
-      applied = true;
-      match msg {
+      // Only count results `complete_*` actually applied — a result whose
+      // inflight slot was invalidated mid-flight (#138) is dropped and must
+      // NOT trigger a status report over the current message (issue #217
+      // review P2).
+      let did_apply = match msg {
         GithubFetchMsg::Issue(n, r) => self.github.complete_issue(n, r),
         GithubFetchMsg::Pr(n, r) => self.github.complete_pr(n, r),
-      }
+      };
+      applied |= did_apply;
     }
     // Once nothing is left loading, swap the "fetching…" placeholder for the
     // real outcome (refreshed / partial failure / failure).

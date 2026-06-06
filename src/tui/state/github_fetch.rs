@@ -279,24 +279,31 @@ impl GitHubFetch {
   ///    `request(Issue(number))` returns `HitCache` instead of
   ///    re-spawning — see the module docs for the cache-on-error
   ///    rationale.
-  pub fn complete_issue(&mut self, number: u64, result: std::result::Result<IssueStatus, String>) {
+  ///
+  /// Returns `true` when the result was applied, `false` when dropped by
+  /// guard 1. Async callers use this to skip reporting a refresh outcome
+  /// for a result they silently discarded (issue #217 review).
+  pub fn complete_issue(&mut self, number: u64, result: std::result::Result<IssueStatus, String>) -> bool {
     // #138 guard: if invalidate() cleared the slot mid-flight, drop
     // the late result. Stamping it would corrupt the now-active
     // worktree's cache with the previous worktree's data.
     if !self.inflight.remove(&FetchKey::Issue(number)) {
-      return;
+      return false;
     }
     self.issue_cache.insert(number, into_state(result));
+    true
   }
 
   /// PR-side counterpart to [`Self::complete_issue`]. Same #138 guard
   /// applies: a late result whose inflight slot was cleared by an
-  /// intervening [`Self::invalidate`] is dropped.
-  pub fn complete_pr(&mut self, number: u64, result: std::result::Result<PrStatus, String>) {
+  /// intervening [`Self::invalidate`] is dropped. Returns `true` when the
+  /// result was applied, `false` when dropped.
+  pub fn complete_pr(&mut self, number: u64, result: std::result::Result<PrStatus, String>) -> bool {
     if !self.inflight.remove(&FetchKey::Pr(number)) {
-      return;
+      return false;
     }
     self.pr_cache.insert(number, into_state(result));
+    true
   }
 
   /// Stamp the issue fetch state from a fetch result. `Ok(s)` →

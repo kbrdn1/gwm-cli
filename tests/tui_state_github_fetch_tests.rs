@@ -355,3 +355,30 @@ fn clear_detected_pr_leaves_an_explicit_link_pinned() {
   assert_eq!(gh.link.pr, Some(61));
   assert_eq!(gh.link.pr_source, gwm::github::LinkSource::Explicit);
 }
+
+#[test]
+fn complete_reports_whether_the_result_was_applied() {
+  // Issue #217 review (P2): `complete_*` must signal whether it actually
+  // stamped the result, so the async drain can avoid reporting "refreshed"
+  // for a result it silently dropped (#138 stale-drop).
+  let mut gh = GitHubFetch::new();
+  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
+  assert!(
+    gh.complete_issue(42, Ok(sample_issue(42))),
+    "a result for an inflight key must report applied=true"
+  );
+
+  // A second completion for the same (now-terminal) key has no inflight slot.
+  assert!(
+    !gh.complete_issue(42, Ok(sample_issue(42))),
+    "a result with no inflight slot must report applied=false"
+  );
+
+  // PR side, dropped after invalidate.
+  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
+  gh.invalidate();
+  assert!(
+    !gh.complete_pr(7, Ok(sample_pr(7))),
+    "a result invalidated mid-flight must report applied=false"
+  );
+}

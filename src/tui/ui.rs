@@ -1249,11 +1249,25 @@ fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Colo
   (label, color)
 }
 
-/// Which pane / mode the TUI is in, the single source the help overlay
-/// subtitle and the contextual statusbar both read (issue #217). Keeping
-/// them on one enum means the discoverable hints (`?`) and the always-on
-/// statusbar chips can never advertise a different verb set for the same
-/// context.
+/// One statusbar hint specification (issue #217). Either a rebindable
+/// keymap [`Action`](super::keymap::Action) whose key is resolved live from
+/// the keymap, or a fixed literal for keys that are hard-coded contextual
+/// escape hatches (Esc / Enter / digits inside a modal) and so cannot be
+/// rebound.
+#[derive(Debug, Clone, Copy)]
+enum Hint {
+  /// Resolve the displayed key from the keymap (honours `[tui.keys]`).
+  Key(super::keymap::Action, &'static str),
+  /// A fixed key + label for a non-rebindable contextual keystroke.
+  Lit(&'static str, &'static str),
+}
+
+/// Which pane / mode / overlay the TUI is in — the single source the help
+/// overlay subtitle and the contextual statusbar both read (issue #217).
+/// Keeping them on one enum means the discoverable hints (`?`) and the
+/// always-on statusbar chips can never advertise a different verb set for
+/// the same context. An open modal takes priority over the pane focus (see
+/// [`App::hint_context`](super::app::App::hint_context)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HintContext {
   /// Worktree table focused — the default list-view context.
@@ -1262,6 +1276,20 @@ pub enum HintContext {
   Status,
   /// `gwm switch` picker — mutating verbs are inert, Enter/Esc pick/cancel.
   Picker,
+  /// Create-worktree form modal.
+  Create,
+  /// Confirm-delete modal.
+  Confirm,
+  /// Open issue/PR URL menu.
+  OpenMenu,
+  /// Two-stage issue/PR link prompt.
+  LinkPrompt,
+  /// Command palette overlay.
+  CommandPalette,
+  /// Bootstrap report overlay.
+  Report,
+  /// Keybindings help overlay.
+  Help,
 }
 
 impl HintContext {
@@ -1272,51 +1300,99 @@ impl HintContext {
       HintContext::Worktrees => "worktrees",
       HintContext::Status => "status",
       HintContext::Picker => "switch",
+      HintContext::Create => "create",
+      HintContext::Confirm => "confirm",
+      HintContext::OpenMenu => "open",
+      HintContext::LinkPrompt => "link",
+      HintContext::CommandPalette => "command",
+      HintContext::Report => "report",
+      HintContext::Help => "help",
     }
   }
 
-  /// Compact `(key, label)` hints for the statusbar, tuned per context so
-  /// the row advertises the verbs that actually do something *here* rather
-  /// than a fixed global list. The keys are the default bindings; a user
-  /// override changes the dispatch but not this advisory copy (the help
-  /// overlay carries the authoritative, keymap-resolved bindings).
-  pub fn hints(self) -> &'static [(&'static str, &'static str)] {
+  /// Static hint specs for this context. List-view contexts use rebindable
+  /// [`Hint::Key`] verbs (resolved live by [`Self::resolve`]); modal /
+  /// overlay contexts use [`Hint::Lit`] because their keys are hard-coded
+  /// contextual escape hatches (Esc / Enter / digits), not keymap actions.
+  fn hint_specs(self) -> &'static [Hint] {
+    use super::keymap::Action::*;
     match self {
       HintContext::Worktrees => &[
-        ("n", "new"),
-        ("d", "del"),
-        ("b", "boot"),
-        ("o", "open"),
-        ("y", "yank"),
-        ("l", "git"),
-        ("R", "review"),
-        ("2", "status"),
-        ("/", "filter"),
-        ("?", "help"),
-        ("q", "quit"),
+        Hint::Key(Create, "new"),
+        Hint::Key(DeleteConfirm, "del"),
+        Hint::Key(Bootstrap, "boot"),
+        Hint::Key(Open, "open"),
+        Hint::Key(Yank, "yank"),
+        Hint::Key(GitTui, "git"),
+        Hint::Key(Review, "review"),
+        Hint::Key(FocusStatus, "status"),
+        Hint::Key(Filter, "filter"),
+        Hint::Key(Help, "help"),
+        Hint::Key(Quit, "quit"),
       ],
       HintContext::Status => &[
-        ("j/k", "scroll"),
-        ("s", "mode"),
-        ("V", "layout"),
-        ("F", "fetch"),
-        ("1", "worktrees"),
-        ("/", "filter"),
-        ("?", "help"),
-        ("q", "quit"),
+        Hint::Key(Down, "scroll"),
+        Hint::Key(ToggleSidebarMode, "mode"),
+        Hint::Key(CycleSidebarLayout, "layout"),
+        Hint::Key(FetchGithub, "fetch"),
+        Hint::Key(FocusWorktrees, "worktrees"),
+        Hint::Key(Filter, "filter"),
+        Hint::Key(Help, "help"),
+        Hint::Key(Quit, "quit"),
       ],
       HintContext::Picker => &[
-        ("enter", "select"),
-        ("esc", "cancel"),
-        ("o", "open"),
-        ("y", "yank"),
-        ("l", "git"),
-        ("Tab", "focus"),
-        ("/", "filter"),
-        ("?", "help"),
-        ("q", "quit"),
+        Hint::Lit("Enter", "select"),
+        Hint::Lit("Esc", "cancel"),
+        Hint::Key(Open, "open"),
+        Hint::Key(Yank, "yank"),
+        Hint::Key(GitTui, "git"),
+        Hint::Key(Filter, "filter"),
+        Hint::Key(Help, "help"),
+        Hint::Key(Quit, "quit"),
       ],
+      HintContext::Create => &[
+        Hint::Lit("Tab", "field"),
+        Hint::Lit("↑/↓", "type"),
+        Hint::Lit("Enter", "submit"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::Confirm => &[
+        Hint::Lit("y", "confirm"),
+        Hint::Lit("←/→", "move"),
+        Hint::Lit("Enter", "activate"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::OpenMenu => &[Hint::Lit("i", "issue"), Hint::Lit("p", "pr"), Hint::Lit("Esc", "close")],
+      HintContext::LinkPrompt => &[
+        Hint::Lit("i/p", "kind"),
+        Hint::Lit("0-9", "number"),
+        Hint::Lit("Enter", "link"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::CommandPalette => &[
+        Hint::Lit("↑/↓", "move"),
+        Hint::Lit("Enter", "run"),
+        Hint::Lit("Esc", "cancel"),
+      ],
+      HintContext::Report => &[Hint::Lit("Enter/Esc", "close")],
+      HintContext::Help => &[Hint::Lit("Esc/q", "close")],
     }
+  }
+
+  /// Resolve this context's hints to `(key, label)` pairs for the statusbar,
+  /// reading the live keymap so rebindable verbs show the user's actual
+  /// binding (issue #217 review) — the same `primary_chord` source the help
+  /// overlay and the Issue/PR prompt use. An unbound action is dropped from
+  /// the row rather than advertised with a phantom key.
+  pub fn resolve(self, keymap: &super::keymap::Keymap) -> Vec<(String, String)> {
+    self
+      .hint_specs()
+      .iter()
+      .filter_map(|h| match h {
+        Hint::Key(action, label) => keymap.primary_chord(*action).map(|k| (k, label.to_string())),
+        Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
+      })
+      .collect()
   }
 }
 
@@ -1528,9 +1604,14 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   } else {
     None
   };
+  // Resolve the rebindable hint keys against the live keymap (issue #217
+  // review) so a user override shows through, then borrow into the slice
+  // `status_line` expects.
+  let resolved = ctx.resolve(&app.keymap);
+  let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   let line = status_line(
     ctx.label(),
-    ctx.hints(),
+    &hints,
     &app.status,
     spinner,
     area.width as usize,
@@ -1748,7 +1829,10 @@ pub fn badge_group_width(keys: &str) -> usize {
 
 fn draw_help(f: &mut Frame, app: &App) {
   let area = centered(60, 60, f.area());
-  let rows = help_rows(&app.keymap, app.hint_context());
+  // Use the underlying pane context, not the view-priority `hint_context`
+  // (which would be `Help` while this overlay is up) — `?` documents the
+  // pane you opened it from, and the picker gating depends on it.
+  let rows = help_rows(&app.keymap, app.pane_hint_context());
 
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).

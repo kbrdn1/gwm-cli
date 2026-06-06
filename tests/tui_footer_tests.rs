@@ -200,15 +200,54 @@ fn status_line_keeps_context_and_log_when_narrow_dropping_hints() {
 
 #[test]
 fn hint_context_exposes_label_and_hints() {
+  use gwm::tui::keymap::Keymap;
   // The same context source feeds the help subtitle and the statusbar chip.
   assert_eq!(HintContext::Worktrees.label(), "worktrees");
   assert_eq!(HintContext::Status.label(), "status");
   assert_eq!(HintContext::Picker.label(), "switch");
-  for ctx in [HintContext::Worktrees, HintContext::Status, HintContext::Picker] {
+  assert_eq!(HintContext::Create.label(), "create");
+  assert_eq!(HintContext::Confirm.label(), "confirm");
+  let km = Keymap::defaults();
+  for ctx in [
+    HintContext::Worktrees,
+    HintContext::Status,
+    HintContext::Picker,
+    HintContext::Create,
+    HintContext::Confirm,
+    HintContext::OpenMenu,
+    HintContext::LinkPrompt,
+    HintContext::CommandPalette,
+  ] {
     assert!(
-      !ctx.hints().is_empty(),
+      !ctx.resolve(&km).is_empty(),
       "context {:?} must advertise hints",
       ctx.label()
     );
   }
+}
+
+#[test]
+fn status_hints_resolve_user_rebindings() {
+  // Issue #217 review (P2): the statusbar must show the *live* binding, not
+  // the hard-coded default — the keymap actions are rebindable. `fetch` is
+  // `F` by default; rebind it and the resolved hint follows.
+  use gwm::tui::keymap::{Action, KeyStroke, Keymap};
+  let mut km = Keymap::defaults();
+  let default = HintContext::Status.resolve(&km);
+  assert!(
+    default.iter().any(|(k, l)| k == "F" && l == "fetch"),
+    "default status hints should advertise the `F` fetch binding: {default:?}"
+  );
+
+  km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
+    .unwrap();
+  let resolved = HintContext::Status.resolve(&km);
+  assert!(
+    resolved.iter().any(|(k, l)| k == "Ctrl+g" && l == "fetch"),
+    "rebinding fetch_github must change the statusbar hint key: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(k, _)| k == "F"),
+    "the stale default `F` must not linger after the rebind: {resolved:?}"
+  );
 }
