@@ -3,13 +3,16 @@
 //! the confirm modal, and the badge-group width used to align the help
 //! overlay's per-chord key badges.
 
+use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, confirm_buttons_line, create_buttons_line, ellipsize_middle, field_input_line, link_choose_hint,
   link_input_hint, link_prompt_modal_width, link_target_line, pane_counter, status_pane_title, type_selector_line,
   worktrees_pane_title,
 };
-use gwm::tui::{confirm_detail_line, help_section_style};
+use gwm::tui::{
+  confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_section_style,
+};
 use ratatui::style::{Color, Modifier, Style};
 
 #[test]
@@ -345,4 +348,64 @@ fn confirm_detail_line_aligns_label_column() {
   assert_eq!(line.spans[0].style.fg, Some(Color::Gray));
   assert_eq!(line.spans[1].content.as_ref(), "feat/#220");
   assert_eq!(line.spans[1].style, value_style);
+}
+
+#[test]
+fn delete_worktree_title_replaces_confirm_delete() {
+  assert_eq!(delete_worktree_title(), "Delete Worktree");
+}
+
+#[test]
+fn confirm_delete_branch_line_renders_title_case_key_and_value_badges() {
+  let line = confirm_delete_branch_line(false, "p", 13, Color::Magenta, Color::Gray);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    text.starts_with("Delete Branch"),
+    "delete branch label should be Title Case: {text:?}"
+  );
+  let key = line.spans.iter().find(|s| s.content.contains("p")).expect("key badge");
+  assert!(
+    key.style.add_modifier.contains(Modifier::REVERSED),
+    "toggle key should render as a badge: {key:?}"
+  );
+  let value = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("false"))
+    .expect("value badge");
+  assert!(
+    value.style.add_modifier.contains(Modifier::REVERSED),
+    "boolean state should render as a badge: {value:?}"
+  );
+}
+
+#[test]
+fn link_target_buttons_keep_equal_visual_widths() {
+  let issue = link_target_line("i", "Issue", true, Color::Magenta, Color::Gray);
+  let pr = link_target_line("p", "Pull Request", true, Color::Magenta, Color::Gray);
+  let issue_chip = issue
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Issue"))
+    .expect("issue chip");
+  let pr_chip = pr
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Pull Request"))
+    .expect("pr chip");
+  assert_eq!(
+    issue_chip.content.chars().count(),
+    pr_chip.content.chars().count(),
+    "Link/Open action buttons should align to the same width"
+  );
+}
+
+#[test]
+fn help_body_section_colour_is_distinct_from_subtitle_colour() {
+  let theme = Theme {
+    branch: Color::Green,
+    locked: Color::Blue,
+    ..Theme::default()
+  };
+  assert_eq!(help_body_section_color(&theme), Color::Blue);
 }

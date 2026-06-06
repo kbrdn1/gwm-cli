@@ -55,11 +55,12 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, branch_name_color, build_sidebar_sections, confirm_buttons_line,
-  confirm_detail_line, create_buttons_line, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line,
-  freshness_color, github_status_lines, header_line, header_title, help_lines, help_rows, help_section_style,
-  issue_badge_color, issue_summary_line, link_choose_hint, link_input_hint, link_prompt_modal_width, link_target_line,
-  pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines, status_line,
-  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
+  confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle,
+  field_input_line, filled_cells_for_progress, footer_line, freshness_color, github_status_lines, header_line,
+  header_title, help_body_section_color, help_lines, help_rows, help_section_style, issue_badge_color,
+  issue_summary_line, link_choose_hint, link_input_hint, link_open_modal_lines, link_prompt_modal_width,
+  link_target_line, pane_counter, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
+  status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_status_line,
   worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
   COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
@@ -254,6 +255,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         // Scroll the Keybindings overlay when it outgrows the modal (#217).
         KeyCode::Down | KeyCode::Char('j') => app.help_scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.help_scroll_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.help_scroll_right(),
+        KeyCode::Left | KeyCode::Char('h') => app.help_scroll_left(),
         KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
         KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
         _ => {}
@@ -306,6 +309,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
             open_url(&url, &mut app);
           }
         }
+        _ if app.key_matches_action(key, Action::FetchGithub) => app.refresh_github_status(),
         _ => {}
       },
       // Link-prompt keys live in a testable `App` method (issue #217); the
@@ -316,6 +320,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
             app.status = format!("link failed: {}", e);
           }
         }
+        LinkPromptKey::Refresh => app.refresh_github_status(),
         LinkPromptKey::Cancel => app.link_prompt_cancel(),
         LinkPromptKey::Handled => {}
       },

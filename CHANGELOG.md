@@ -64,6 +64,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TUI: polish remaining modal follow-ups — Delete Worktree casing and
+  toggle badges, shared Link/Open Issue/PR layouts with Refresh, and
+  horizontal Keybindings scrolling with clearer section spacing. (#222)
 - TUI: polish modal follow-ups after the statusbar pass — compact Link
   prompt with chip selection, clearer create Issue feedback, distinct
   Keybindings section colour, and aligned Confirm Delete details. (#220)
