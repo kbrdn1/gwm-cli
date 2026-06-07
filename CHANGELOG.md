@@ -12,6 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TUI `sync` action: press `S` to run `gwm sync` on the selected worktree —
+  fetch + rebase its branch onto the configured upstream — without leaving the
+  TUI. Runs off-thread on the shared async-task spine (statusbar spinner +
+  `syncing…` label, `q` / `Esc` stay responsive), then refreshes the list so
+  the new ahead/behind state shows and reports the outcome (up-to-date /
+  rebased N commits / dirty-refused / conflict). Default key is `S` (`s` is
+  the sidebar-mode toggle); rebindable via `[tui.keys] sync` and reachable by
+  name through `:sync`. ([#258](https://github.com/kbrdn1/gwm-cli/issues/258))
+
 - Configuration panel: press `4` to open a ~90% fullscreen, scrollable
   view of the **resolved** `.gwm.toml` — the user-level global config
   (`~/.config/gwm/config.toml`) deep-merged under the repo file, exactly
