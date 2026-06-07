@@ -1549,9 +1549,13 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
 }
 
 fn sample_issue(n: u64) -> gwm::github::IssueStatus {
+  sample_issue_titled(n, "x")
+}
+
+fn sample_issue_titled(n: u64, title: &str) -> gwm::github::IssueStatus {
   gwm::github::IssueStatus {
     number: n,
-    title: "x".into(),
+    title: title.into(),
     state: gwm::github::IssueState::Open,
     url: String::new(),
     labels: vec![],
@@ -1559,23 +1563,119 @@ fn sample_issue(n: u64) -> gwm::github::IssueStatus {
   }
 }
 
+/// Drive the spine exactly as `refresh_github_status` does for one issue
+/// fetch: claim a generation and flip the cache to `Loading`. Returns the
+/// generation the (simulated) worker must tag its result with. Mirrors the
+/// real spawn path without an OS thread or a real `gh`.
+fn request_github_issue(app: &mut gwm::tui::App, n: u64) -> u64 {
+  use gwm::tui::{FetchKey, TaskKind};
+  let generation = app
+    .tasks
+    .request(TaskKind::GithubIssue(n))
+    .expect("a cold GitHub issue slot must hand out a generation");
+  app.github.mark_loading(FetchKey::Issue(n));
+  generation
+}
+
+/// Invalidate the GitHub side exactly as navigation / explicit `F` does:
+/// drop any in-flight worker on the spine AND flush the result cache (the
+/// navigation invariant — the two always move together).
+fn invalidate_github_for_test(app: &mut gwm::tui::App) {
+  use gwm::tui::TaskKind;
+  app.tasks.invalidate_matching(TaskKind::is_github);
+  app.github.invalidate();
+}
+
+#[test]
+fn stale_github_fetch_result_loses_to_a_newer_generation() {
+  // Codex adversarial-review (PR #260) finding, fixed by #255: pre-spine the
+  // GitHub fetch deduped on a per-key `inflight` HashSet with NO generation,
+  // so two workers for the SAME key (request → invalidate → request) were
+  // indistinguishable. Whichever result drained first claimed the single
+  // slot; if the STALE worker reported before the FRESH one, the stale data
+  // was stamped and the fresh result dropped. On the spine each fetch owns a
+  // generation, so the fresh (newer-generation) result wins regardless of
+  // arrival order.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+
+  // Worker A claims the first generation for Issue(42).
+  let gen_a = request_github_issue(&mut app, 42);
+  // User navigates away and back (or presses F again): the slot is freed and
+  // the generation bumped, then Worker B claims a fresh generation.
+  invalidate_github_for_test(&mut app);
+  let gen_b = request_github_issue(&mut app, 42);
+  assert_ne!(gen_a, gen_b, "the second fetch must own a distinct generation");
+
+  // Both workers finish. Drain FRESH (B) FIRST, STALE (A) LAST — the
+  // discriminating order: plain last-write-wins would let the stale result
+  // clobber the fresh one, so only a working generation guard (drop A as
+  // superseded) yields FRESH. The reverse order would pass even with a
+  // broken always-apply guard, so it can't catch a regression.
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::GithubIssue(gen_b, 42, Ok(sample_issue_titled(42, "FRESH"))))
+    .unwrap();
+  tx.send(TaskMsg::GithubIssue(gen_a, 42, Ok(sample_issue_titled(42, "STALE"))))
+    .unwrap();
+  app.drain_task_results();
+
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(s) => assert_eq!(
+      s.title, "FRESH",
+      "the fresh (newer-generation) result must win the retry race, not the stale one"
+    ),
+    other => panic!("expected Loaded(FRESH), got {:?}", other),
+  }
+}
+
+#[test]
+fn a_simultaneous_refresh_keeps_its_status_over_the_github_report() {
+  // Behaviour-preserving guard (issue #255): pre-spine the event loop drained
+  // the GitHub channel before the task channel, so when a worktree refresh and
+  // a GitHub fetch completed on the same tick, `apply_refreshed_worktrees`'
+  // "refreshed — N" message ran last and stood. Now both drain in one pass; the
+  // post-loop GitHub report is gated on `!refresh_applied` to preserve that.
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+
+  // A GitHub fetch and a worktree refresh are both in flight.
+  let g_gen = request_github_issue(&mut app, 42);
+  let r_gen = app
+    .tasks
+    .request(TaskKind::RefreshWorktrees)
+    .expect("a cold refresh slot must hand out a generation");
+
+  // Both land on the same drain.
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::GithubIssue(g_gen, 42, Ok(sample_issue(42)))).unwrap();
+  tx.send(TaskMsg::RefreshWorktrees(r_gen, Ok(Vec::new()))).unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.status.starts_with("refreshed —"),
+    "the refresh message must win a simultaneous completion (pre-#255 order), got {:?}",
+    app.status
+  );
+}
+
 #[test]
 fn drain_applies_async_github_result() {
-  // Issue #217: a result delivered off-thread (over the channel) is applied
-  // by `drain_github_results`, flipping the inflight Loading state to Loaded.
-  use gwm::tui::{FetchKey, GithubFetchMsg};
+  // Issue #217 (threading on the spine since #255): a result delivered
+  // off-thread (over the task channel) is applied by `drain_task_results`,
+  // flipping the Loading state to Loaded.
+  use gwm::tui::TaskMsg;
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  // Claim the inflight slot exactly as `refresh_github_status` would.
-  app.github.request(FetchKey::Issue(42));
+  // Claim a generation + mark Loading exactly as `refresh_github_status` would.
+  let generation = request_github_issue(&mut app, 42);
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loading));
   assert!(app.is_github_loading(), "request must mark the app as loading");
 
-  // A background thread reports back; we inject through the same channel.
+  // A background worker reports back; we inject through the same channel.
   app
-    .github_result_sender()
-    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
     .unwrap();
-  let applied = app.drain_github_results();
+  let applied = app.drain_task_results();
 
   assert!(applied, "drain must report it applied a result");
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)));
@@ -1584,20 +1684,21 @@ fn drain_applies_async_github_result() {
 
 #[test]
 fn drain_drops_async_result_invalidated_mid_flight() {
-  // Issue #217 keeps the #138 guarantee on the async path: a result whose
-  // inflight slot was cleared by an intervening navigation/invalidate is
-  // dropped rather than stamped into the now-active worktree's cache.
-  use gwm::tui::{FetchKey, GithubFetchMsg};
+  // The #138 guarantee on the spine (issue #255): a result whose generation
+  // was bumped by an intervening navigation/invalidate is dropped rather
+  // than stamped into the now-active worktree's cache.
+  use gwm::tui::TaskMsg;
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  app.github.request(FetchKey::Issue(42));
-  // User navigates away → the cache + inflight set are flushed.
-  app.github.invalidate();
-  // The late shell-out result arrives after the invalidate.
+  let generation = request_github_issue(&mut app, 42);
+  // User navigates away → the cache is flushed and the spine slot bumped.
+  invalidate_github_for_test(&mut app);
+  // The late shell-out result arrives after the invalidate, tagged with the
+  // now-stale generation.
   app
-    .github_result_sender()
-    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
     .unwrap();
-  app.drain_github_results();
+  app.drain_task_results();
   assert!(
     matches!(app.issue_fetch_state(), GitHubFetchState::Idle),
     "a result invalidated mid-flight must be dropped, not applied"
@@ -1607,25 +1708,26 @@ fn drain_drops_async_result_invalidated_mid_flight() {
 #[test]
 fn drain_is_a_noop_with_no_pending_results() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  assert!(!app.drain_github_results(), "empty channel must report nothing applied");
+  assert!(!app.drain_task_results(), "empty channel must report nothing applied");
 }
 
 #[test]
 fn drain_does_not_report_when_only_stale_results_arrive() {
-  // Issue #217 review (P2): a result whose inflight slot was invalidated
-  // (the user navigated away) is dropped by `complete_*`; the drain must NOT
-  // then stamp "github status refreshed" over the current status message.
-  use gwm::tui::{FetchKey, GithubFetchMsg};
+  // Issue #217 review (P2), preserved on the spine: a result whose
+  // generation was bumped (the user navigated away) is dropped by the
+  // generation guard; the drain must NOT then stamp "github status
+  // refreshed" over the current status message.
+  use gwm::tui::TaskMsg;
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  app.github.request(FetchKey::Issue(42));
-  app.github.invalidate(); // navigated away → inflight cleared
+  let generation = request_github_issue(&mut app, 42);
+  invalidate_github_for_test(&mut app); // navigated away → slot bumped
   app.status = "path: /somewhere/else".into();
   app
-    .github_result_sender()
-    .send(GithubFetchMsg::Issue(42, Ok(sample_issue(42))))
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
     .unwrap();
 
-  let applied = app.drain_github_results();
+  let applied = app.drain_task_results();
 
   assert!(!applied, "a dropped stale result must not count as applied");
   assert_eq!(
@@ -2682,7 +2784,7 @@ fn github_status_idle_body_does_not_render_fetch_prompt() {
 fn github_status_loading_uses_the_animated_spinner_frame() {
   use gwm::tui::FetchKey;
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  app.github.request(FetchKey::Issue(42));
+  app.github.mark_loading(FetchKey::Issue(42));
 
   let first = gwm::tui::github_status_lines(&app, 80)
     .into_iter()
