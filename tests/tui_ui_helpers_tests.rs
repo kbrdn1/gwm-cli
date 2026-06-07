@@ -10,9 +10,8 @@ use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, bootstrap_report_lines, confirm_buttons_line, create_buttons_line, ellipsize_middle,
-  field_input_line, link_choose_hint, link_input_hint, link_prompt_modal_width, link_target_line, modal_hint_line,
-  pane_counter, recent_items_pane_title, status_pane_title, type_selector_line, working_tree_pane_title,
-  worktrees_pane_title,
+  field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, recent_items_pane_title,
+  status_pane_title, type_selector_line, working_tree_pane_title, worktrees_pane_title,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_section_style,
@@ -380,22 +379,8 @@ fn link_prompt_width_stays_compact_on_wide_terminals() {
 }
 
 #[test]
-fn link_prompt_hints_fit_the_80_col_modal_budget() {
-  // At 80 columns the Link/Open modal is 64 columns wide, and the rounded
-  // border + horizontal padding leave 58 cells for content.
-  const INNER_WIDTH_AT_80_COLS: usize = 58;
-
-  for hint in [link_choose_hint(), link_input_hint()] {
-    assert!(
-      hint.chars().count() <= INNER_WIDTH_AT_80_COLS,
-      "Link prompt hint clips at 80 cols: {hint:?}"
-    );
-  }
-}
-
-#[test]
 fn help_section_style_uses_body_section_colour() {
-  let style = help_section_style(Color::Magenta, Color::Green);
+  let style = help_section_style(Color::Green);
   assert_eq!(
     style.fg,
     Some(Color::Green),

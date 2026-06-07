@@ -81,19 +81,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
   }
 }
 
-/// Format the TUI header title `" <repo> <path> gwm <version> "`.
-/// The version comes from `CARGO_PKG_VERSION` so it stays in lockstep
-/// with `gwm --version` without a second source of truth — important
-/// for users juggling multiple installs (a `cargo install`-ed gwm next
-/// to a worktree-built dev binary). Extracted from `draw_header` so
-/// the format can be pinned by a unit test without spinning up the
-/// ratatui backend.
-pub fn header_title(repo_name: &str, workdir_display: &str) -> String {
-  format!(" {} {} gwm {} ", repo_name, workdir_display, env!("CARGO_PKG_VERSION"))
-}
-
 /// Styled, width-driven header builder (issue #185). Replaces the flat
-/// `header_title` string in the rendered TUI with a clear visual hierarchy
+/// header-title string in the rendered TUI with a clear visual hierarchy
 /// that mirrors the #180 footer's chip language:
 ///
 /// - **Current directory** — a leading reverse-video badge.
@@ -2099,7 +2088,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
       HelpRow::Section(t) => {
         lines.push(Line::from(Span::styled(
           t,
-          help_section_style(accent, help_body_section_color(&app.theme)),
+          help_section_style(help_body_section_color(&app.theme)),
         )));
       }
       HelpRow::Blank => lines.push(Line::from(String::new())),
@@ -2353,7 +2342,7 @@ pub fn link_prompt_modal_width(term_width: u16) -> u16 {
 
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
-pub fn help_section_style(_accent: Color, section: Color) -> Style {
+pub fn help_section_style(section: Color) -> Style {
   Style::default().fg(section).add_modifier(Modifier::BOLD)
 }
 
@@ -2859,19 +2848,6 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   };
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
-}
-
-/// Compact legacy control hint for the Link prompt target picker. The live
-/// modal now renders statusbar-style badges from [`HintContext::LinkPrompt`],
-/// but this helper stays exported for callers that still need a plain string.
-pub fn link_choose_hint() -> &'static str {
-  "j/k move · F fetch · Enter/i/p pick · Esc"
-}
-
-/// Compact legacy control hint for the Link prompt number input. Same width
-/// budget as [`link_choose_hint`].
-pub fn link_input_hint() -> &'static str {
-  "digits · F fetch · Enter link · Esc cancel"
 }
 
 /// Render the command palette overlay (issue #32).
