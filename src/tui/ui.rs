@@ -2705,16 +2705,26 @@ fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     .split(v[1])[1]
 }
 
+/// Center a box of an **absolute** `width`/`height` (in cells) inside `area`,
+/// clamping each dimension to the area so an oversized modal cannot overflow
+/// the frame. Shared by the open-menu and link-prompt modals (issue #243) and
+/// the percentage-based [`centered_h`], unifying the three centering paths.
+pub fn centered_abs(width: u16, height: u16, area: Rect) -> Rect {
+  let width = width.min(area.width);
+  let height = height.min(area.height);
+  let x = area.x + area.width.saturating_sub(width) / 2;
+  let y = area.y + area.height.saturating_sub(height) / 2;
+  Rect { x, y, width, height }
+}
+
 /// Centre a box of `width_pct`% width and a fixed `height` (rows) in
 /// `area`. Unlike [`centered`], the height is absolute so an overlay can
 /// size itself to its content rather than a fixed percentage of the
 /// screen (#187 — the confirm modal was far taller than its few lines).
+/// Delegates the centering arithmetic to [`centered_abs`].
 fn centered_h(width_pct: u16, height: u16, area: Rect) -> Rect {
-  let height = height.min(area.height);
   let width = area.width.saturating_mul(width_pct) / 100;
-  let x = area.x + area.width.saturating_sub(width) / 2;
-  let y = area.y + area.height.saturating_sub(height) / 2;
-  Rect { x, y, width, height }
+  centered_abs(width, height, area)
 }
 
 /// Like [`centered_h`] but also caps the width at `max_width` columns so a
@@ -2801,13 +2811,8 @@ fn draw_open_menu(f: &mut Frame, app: &App) {
   let lines = link_open_modal_lines(app, "Open in Browser", Some(app.open_menu_selected));
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let term = f.area();
-  let width = link_prompt_modal_width(term.width).min(term.width);
-  let area = Rect {
-    x: term.x + term.width.saturating_sub(width) / 2,
-    y: term.y + term.height.saturating_sub(height) / 2,
-    width,
-    height: height.min(term.height),
-  };
+  let width = link_prompt_modal_width(term.width);
+  let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
@@ -2839,13 +2844,8 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   };
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let term = f.area();
-  let width = link_prompt_modal_width(term.width).min(term.width);
-  let area = Rect {
-    x: term.x + term.width.saturating_sub(width) / 2,
-    y: term.y + term.height.saturating_sub(height) / 2,
-    width,
-    height: height.min(term.height),
-  };
+  let width = link_prompt_modal_width(term.width);
+  let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
