@@ -1935,6 +1935,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
   rows.push(entry(Action::Open, "open per [tui.open] — shell / editor / finder"));
+  rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
   rows.push(entry(Action::Yank, "yank selected path to system clipboard"));
   rows.push(entry(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
   rows.push(entry(Action::ToggleSidebar, "toggle git preview sidebar"));

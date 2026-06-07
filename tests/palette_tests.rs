@@ -68,6 +68,25 @@ fn registry_lookup_by_name_returns_action() {
   assert_eq!(create.action, Action::Create);
 }
 
+#[test]
+fn open_docs_entry_is_named_and_reachable() {
+  // Issue #233: `.` / `:open-docs` opens the documentation in the browser.
+  let entries = palette_entries();
+  let docs = entries
+    .iter()
+    .find(|e| e.name == "open-docs")
+    .expect("expected an `open-docs` entry");
+  assert_eq!(docs.action, Action::OpenDocs);
+}
+
+#[test]
+fn docs_url_points_at_the_repository_docs() {
+  // The `.` key opens this URL (issue #233). It is derived from the crate's
+  // `repository` so a fork resolves to its own docs; pin the canonical shape
+  // (repo + docs tree on the default branch) so a typo in the path is caught.
+  assert_eq!(gwm::tui::DOCS_URL, "https://github.com/kbrdn1/gwm-cli/tree/main/docs");
+}
+
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------

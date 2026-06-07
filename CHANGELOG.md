@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Open docs in the browser: press `.` in the TUI to open the gwm
+  documentation in your default browser, reusing the same OS-opener path
+  as the `O` issue/PR open menu. The target is the repo's `docs/` tree on
+  GitHub, derived from the crate's `repository` so a fork resolves to its
+  own docs; rebindable via `[tui.keys] open_docs` and reachable by name
+  through `:open-docs`. ([#233](https://github.com/kbrdn1/gwm-cli/issues/233))
+
 ### Changed
 
 - Off-thread bootstrap: pressing `b` to re-run bootstrap on the selected

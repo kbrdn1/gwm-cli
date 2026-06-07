@@ -234,6 +234,31 @@ fn default_keymap_binds_sync_to_uppercase_s() {
 }
 
 #[test]
+fn default_keymap_binds_open_docs_to_dot() {
+  // Issue #233: `.` opens the gwm documentation in the browser, reusing the
+  // OpenMenu browser-spawn path. Rebindable as `open_docs` under `[tui.keys]`.
+  let km = Keymap::defaults();
+  let dot = KeyStroke::parse_chord(".").unwrap();
+  assert!(matches!(km.lookup(&dot), ChordResolution::Matched(Action::OpenDocs)));
+}
+
+#[test]
+fn open_docs_is_rebindable_like_any_action() {
+  // The new action takes a user override exactly like the rest of the keymap.
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::OpenDocs, vec![KeyStroke::parse_chord("Ctrl+d").unwrap()])
+    .unwrap();
+  let rebound = KeyStroke::parse_chord("Ctrl+d").unwrap();
+  assert!(matches!(
+    km.lookup(&rebound),
+    ChordResolution::Matched(Action::OpenDocs)
+  ));
+  // The default `.` no longer resolves to OpenDocs once overridden.
+  let dot = KeyStroke::parse_chord(".").unwrap();
+  assert!(!matches!(km.lookup(&dot), ChordResolution::Matched(Action::OpenDocs)));
+}
+
+#[test]
 fn default_keymap_binds_command_logs_to_3() {
   // Issue #226: `3` opens the Command Logs modal, completing the `1` / `2`
   // / `3` pane-key family (focus_worktrees / focus_status / command_logs).
