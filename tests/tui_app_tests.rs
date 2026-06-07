@@ -3741,6 +3741,156 @@ run  = "echo trapped"
   }
 }
 
+// ---- Issue #256: bootstrap on the async-task spine ----------------------
+//
+// `bootstrap_selected` claims a `TaskKind::Bootstrap` generation and spawns
+// a worker (after the synchronous TOFU gate above); the worker's
+// `TaskMsg::Bootstrap` is applied by `drain_task_results`. These tests pin
+// the drain side — the result handling and late-drop guard — without a real
+// OS thread, mirroring the GitHub / sync drain tests.
+
+#[test]
+fn bootstrap_selected_with_no_selection_reports_and_does_not_load() {
+  // The early guard runs before the trust gate and the spawn: with nothing
+  // selected there is no worktree to bootstrap, so no generation is claimed.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.bootstrap_selected();
+  assert_eq!(app.status, "nothing selected");
+  assert!(!app.is_task_loading(), "no worktree selected → no task claimed");
+}
+
+#[test]
+fn drain_applies_async_bootstrap_report_and_flips_to_report_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  // Claim a generation exactly as `bootstrap_selected` would after the gate.
+  let generation = app
+    .tasks
+    .request(TaskKind::Bootstrap)
+    .expect("a cold bootstrap slot must hand out a generation");
+  assert!(app.is_task_loading(), "request must mark the app as loading");
+
+  let report = BootstrapReport {
+    steps: vec![StepResult::ok("copy .env"), StepResult::ok("post_create hook")],
+  };
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(generation, Ok(report)))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a live bootstrap result must be applied");
+  assert_eq!(app.view, View::Report, "completion flips to the Report view");
+  assert!(app.report.is_some(), "the report is stored for the Report view");
+  assert_eq!(app.status, "bootstrap ok");
+  assert!(!app.is_task_loading(), "completion clears the in-flight slot");
+}
+
+#[test]
+fn drain_bootstrap_report_with_a_failed_step_says_had_failures() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  let generation = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  let report = BootstrapReport {
+    steps: vec![
+      StepResult::ok("copy .env"),
+      StepResult::failed("post_create hook", "exit 1"),
+    ],
+  };
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(generation, Ok(report)))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Report, "a partial failure still shows the report");
+  assert_eq!(app.status, "bootstrap had failures");
+}
+
+#[test]
+fn a_late_bootstrap_result_is_dropped_and_keeps_the_list_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  // A worker is in flight, then an invalidate bumps the generation (e.g. a
+  // second `b` press coalesced after an invalidate) — the stale worker's
+  // result must not flip the view to its now-superseded report.
+  let stale = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  app.tasks.invalidate(TaskKind::Bootstrap);
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(
+      stale,
+      Ok(BootstrapReport {
+        steps: vec![StepResult::ok("stale")],
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::List, "a dropped late result must not flip the view");
+  assert!(app.report.is_none(), "a dropped late result must not store a report");
+}
+
+#[test]
+fn drain_bootstrap_error_reports_status_and_does_not_flip_to_report() {
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  let generation = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(generation, Err("disk full".into())))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "a failed bootstrap stays on the list, no Report to show"
+  );
+  assert!(app.report.is_none());
+  assert_eq!(app.status, "bootstrap error: disk full");
+}
+
+#[test]
+fn drain_bootstrap_report_flips_to_report_even_from_another_view() {
+  // The bootstrap is async now (issue #256): between the `b` press and the
+  // result, the user may have navigated elsewhere (e.g. opened the create
+  // form). A live result still flips to the Report view — the user asked for
+  // the bootstrap, so its outcome takes the screen. This pins the
+  // always-flip choice (vs only flipping from the list view); a behaviour
+  // change from the old synchronous path, which had no such window.
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  let generation = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  app.view = View::Create;
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(
+      generation,
+      Ok(BootstrapReport {
+        steps: vec![StepResult::ok("copy .env")],
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(
+    app.view,
+    View::Report,
+    "a live bootstrap result takes the screen even mid-create"
+  );
+}
+
 // ---- Issue #106: LinkTarget canonical location --------------------------
 //
 // The `LinkTarget` enum was duplicated between `cli.rs` and
