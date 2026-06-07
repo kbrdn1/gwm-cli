@@ -10,31 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- Open docs in the browser: press `.` in the TUI to open the gwm
-  documentation in your default browser, reusing the same OS-opener path
-  as the `O` issue/PR open menu. The target is the repo's `docs/` tree on
-  GitHub, derived from the crate's `repository` so a fork resolves to its
-  own docs; rebindable via `[tui.keys] open_docs` and reachable by name
-  through `:open-docs`. ([#233](https://github.com/kbrdn1/gwm-cli/issues/233))
-
-### Changed
-
-- Off-thread bootstrap: pressing `b` to re-run bootstrap on the selected
-  worktree now runs `bootstrap::run` (file copies, guards, command hooks)
-  on the shared async-task spine instead of blocking the event loop, so a
-  slow bootstrap no longer freezes the TUI. The statusbar spinner animates
-  with a `bootstrapping…` label and `q` / `Esc` stay responsive while it
-  runs; the Report view opens when it finishes. The TOFU trust gate still
-  runs synchronously on the main thread before the worker spawns, and a
-  second `b` press while one is in flight coalesces (no double run).
-  ([#256](https://github.com/kbrdn1/gwm-cli/issues/256))
+_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`0.9.0`](changelogs/0.9.0.md) — 2026-06-07
 - [`0.8.0`](changelogs/0.8.0.md) — 2026-06-01
 - [`0.7.0`](changelogs/0.7.0.md) — 2026-05-23
 - [`0.6.0`](changelogs/0.6.0.md) — 2026-05-21

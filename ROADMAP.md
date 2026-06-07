@@ -4,9 +4,9 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v0.8.0
+## Current state — v0.9.0
 
-The 0.8.x line ships:
+The 0.9.x line ships:
 
 - **Native worktree ops via libgit2 (vendored)** — single binary, no `gwq` / `git` CLI dependency.
 - **CLI + ratatui TUI** — `gwm <subcommand>` for scripts, `gwm` alone opens the interactive interface.
@@ -18,7 +18,9 @@ The 0.8.x line ships:
 - **Safety daily** — `--dry-run` on `gwm remove` / `gwm prune` (preview before destroying); `gwm undo` + `gwm history` backed by an operation journal at `$XDG_DATA_HOME/gwm/history.toml` (100-entry rotation, per-repo filtering) to recover a misfired removal without `git reflog`.
 - **`gwm sync [<pattern>] [--merge]`** — fetch a worktree's upstream and rebase (or merge) its branch onto it; refuses a dirty tree or missing upstream, aborts a conflicting rebase/merge to keep the worktree usable.
 - **Bootstrap hardening for hostile clones** — TOFU trust ledger on `.gwm.toml`, `--allow-bootstrap` / `--deny-bootstrap`, path-traversal rejection, symlink-safe copy/write primitives, load-time regex validation for deny patterns.
-- **Bootstrap hardening for hostile clones** — TOFU trust ledger on `.gwm.toml`, `--allow-bootstrap` / `--deny-bootstrap`, path-traversal rejection, symlink-safe copy/write primitives, load-time regex validation for deny patterns.
+- **Async-task spine (new in 0.9.0)** — a generic off-thread worker (coalescing + late-result drop) keeps the event loop responsive: the worktree list refresh (`f` / `r`), the GitHub issue/PR fetch (`F`, per-key generation guard fixes a stale-data race), `gwm sync` (`S`), and bootstrap (`b`) all run on it, animating the statusbar spinner instead of blocking. The TOFU gate stays synchronous before any bootstrap spawn.
+- **In-TUI pane-key family `1` / `2` / `3` / `4` (new in 0.9.0)** — `1` / `2` focus the worktrees / status panes; `3` opens a lazygit-style Command Logs overlay (scrollable transcript of the external commands gwm ran); `4` opens a Configuration panel showing the **resolved** `.gwm.toml` with a per-row source column (repo / user / default). `.` opens the docs in the browser.
+- **Full theme-role coverage (new in 0.9.0)** — the resolved `[theme]` is threaded through every `draw_*` site, with dedicated `name` / `path` chrome roles and `staged` / `modified` / `untracked` working-tree roles; all defaults preserved, pinned by `tests/tui_theme_audit_tests.rs`.
 - **Lazygit-style details sidebar** — four bordered subsections (Worktree / Issue · PR / Working Tree / Recent Commits), status-coloured branch names, header status dot tracking linked PR / issue state, 300-commit Recent Commits buffer with the full topology renderer (`○ ◎ │ ╮ ╭ ╯ ╰ ┴ ┬ ─`).
 - **Measured TUI sidebar perf pass** — branch age is cached on `WorktreeInfo`, `filtered_indices` is memoised on `FilterState`, Recent Commits uses a cached libgit2 revwalk keyed by `(worktree path, head OID, limit)`, and commit-graph pipes store `git2::Oid` instead of heap-allocated hash strings.
 - **Configurable launchers** — `[git_tui]` drives `l` (default `lazygit -p {path}`), `[review]` drives `R` (presets: `lumen` / `claude` / `codex` / `aider` / `gh`, plus free-form `command =`). Placeholders `{base} {head} {path} {diff}` with lazy diff materialisation.
@@ -38,7 +40,7 @@ The 0.8.x line ships:
 - **Release pipeline** — `release.yml` on `vX.Y.Z` tags, `pre-release.yml` on `-rc.N` / `-alpha.N` / `-beta.N` tags, 5-target build matrix (Linux x86_64 + aarch64, macOS Intel + Apple Silicon, Windows x86_64), GitHub Release assets published through the `gh` CLI with the workflow token ([#146](https://github.com/kbrdn1/gwm-cli/issues/146) resolved), per-version changelog body sourced from `changelogs/<version>.md` (hard-fails if missing), pre-release `[Unreleased]` dupe guard, Homebrew tap update job on stable releases, `cargo binstall` support, Nix flake at the repo root. CI test matrix runs on `ubuntu-latest` / `macos-latest` / `windows-latest`.
 - **1000+ tests** — integration and state-machine tests covering config (repo + global layering), aliases, gitmoji, hooks, config CLI, naming, bootstrap, doctor, GitHub linking + PR auto-detection, launcher, multiplexer, homebrew formula, binstall metadata, pre-commit hook, TUI state slices (keymap / palette / theme / sidebar), undo/history journal, worktree libgit2 integration, release workflow guards, and CLI end-to-end.
 
-See [`changelogs/0.8.0.md`](changelogs/0.8.0.md) for the full v0.8.0 release notes, and [`changelogs/`](changelogs/) for the per-version archive.
+See [`changelogs/0.9.0.md`](changelogs/0.9.0.md) for the full v0.9.0 release notes, and [`changelogs/`](changelogs/) for the per-version archive.
 
 ## Shipped highlights
 
@@ -84,6 +86,7 @@ For reference (each linked to its closing PR):
 | [#170](https://github.com/kbrdn1/gwm-cli/issues/170) / [#210](https://github.com/kbrdn1/gwm-cli/issues/210) / [#211](https://github.com/kbrdn1/gwm-cli/issues/211) / [#214](https://github.com/kbrdn1/gwm-cli/issues/214) / [#169](https://github.com/kbrdn1/gwm-cli/issues/169) | v0.9.0-rc.1 | Theme-role coverage finish: `[theme]` threaded through every `draw_*` site, dedicated `name` / `path` roles for the chrome and `staged` / `modified` / `untracked` roles for the working-tree panel (all defaults preserved, pinned by `tests/tui_theme_audit_tests.rs`); `git2` `0.20` → `0.21` source migration |
 | [#217](https://github.com/kbrdn1/gwm-cli/issues/217) / [#220](https://github.com/kbrdn1/gwm-cli/issues/220) / [#222](https://github.com/kbrdn1/gwm-cli/issues/222) / [#224](https://github.com/kbrdn1/gwm-cli/issues/224) | v0.9.0-rc.2 | TUI statusbar / layout / modal polish: contextual statusbar (context chip + animated GitHub-fetch spinner + action log), direct pane-focus keys (`1` / `2`, rebindable `focus_worktrees` / `focus_status`), off-thread GitHub `F` fetch, reworked create-worktree / link / confirm-delete / Issue-PR modals, stacked-by-default sidebar with per-axis split ratios |
 | [#231](https://github.com/kbrdn1/gwm-cli/issues/231) / [#226](https://github.com/kbrdn1/gwm-cli/issues/226) / [#232](https://github.com/kbrdn1/gwm-cli/issues/232) / [#255](https://github.com/kbrdn1/gwm-cli/issues/255) / [#258](https://github.com/kbrdn1/gwm-cli/issues/258) / [#262](https://github.com/kbrdn1/gwm-cli/issues/262) | v0.9.0-rc.3 | Async-task spine: generic off-thread worker (coalescing + late-result drop), off-thread worktree refresh (`f` / `r`) and GitHub `F` fetch (per-key generation fixes a stale-data race) on the shared spine; in-TUI Command Logs overlay (`3`), Configuration panel (`4`, per-row source attribution), and `sync` action (`S`, off-thread rebase) completing the `1`/`2`/`3`/`4` pane-key family; fuzzy-filter-in-pane-title + command-palette input polish; internal refactor / perf sweep (#235–#244, per-frame sidebar clone dropped) |
+| [#256](https://github.com/kbrdn1/gwm-cli/issues/256) / [#233](https://github.com/kbrdn1/gwm-cli/issues/233) / [#248](https://github.com/kbrdn1/gwm-cli/issues/248) | v0.9.0 | Stable delta: off-thread bootstrap (`b`) on the spine (trust gate stays synchronous; Report on completion), open the docs in the browser (`.`, rebindable `open_docs`), and a CI-flaky GitHub-detect test fixed at the root (distinct write-once fake-`gh` scripts) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -91,15 +94,10 @@ If an issue still shows `open` on GitHub even though its work shipped, it's a tr
 
 Near-term TUI work, listed in **rough implementation order** — each item builds on the one above it. This is a dependency ordering, not a date commitment.
 
-**Landed on `dev`** (unreleased — moves into the shipped table when the next version is cut):
+The 0.9.0 async-task train (the spine #231, GitHub-fetch-on-spine #255, sync `S` #258, bootstrap `b` #256, Command Logs `3` #226, Configuration panel `4` #232, open-docs `.` #233) has shipped — see the Shipped highlights table above. The near-term queue is now:
 
-- [#231](https://github.com/kbrdn1/gwm-cli/issues/231) — **Async-task layer** — the foundation. A generic off-thread spine (`TaskRunner`: coalescing + late-result drop) that moved the worktree list refresh (`f` / `r`) off the event loop, rendering its loading state through the statusbar spinner. ([PR #254](https://github.com/kbrdn1/gwm-cli/pull/254)) Follow-ups: [#255](https://github.com/kbrdn1/gwm-cli/issues/255) (migrate the GitHub fetch onto the spine), [#256](https://github.com/kbrdn1/gwm-cli/issues/256) (bootstrap `b` off-thread), [#257](https://github.com/kbrdn1/gwm-cli/issues/257) (standalone loader widget — deferred to land with its first real consumer, #232 / #4), [#258](https://github.com/kbrdn1/gwm-cli/issues/258) (expose `gwm sync` as a TUI action).
-- [#226](https://github.com/kbrdn1/gwm-cli/issues/226) — **Command Logs modal (`3`)** — a lazygit-style, scrollable transcript of the external commands gwm ran (`gh` calls, bootstrap shell steps, lifecycle hooks) with resolved argv, timing, exit status, and captured output, newest-first over a ~90% fullscreen modal. Completes the `1`/`2`/`3` pane-key family and gives the single-line statusbar action log (#217) a full scrollback. ([PR #259](https://github.com/kbrdn1/gwm-cli/pull/259))
-
-**Queued**, in rough implementation order:
-
-1. [#232](https://github.com/kbrdn1/gwm-cli/issues/232) — **Configuration panel (`4`)** — the next pane in the family; a ~90% fullscreen modal (same pattern as #226 / #35, outside the `Tab` cycle) showing the **resolved** `.gwm.toml` (repo deep-merged with the user-level config, with a source column), reusing the merge logic already behind `gwm config list`. The natural first home for the standalone loader widget ([#257](https://github.com/kbrdn1/gwm-cli/issues/257)), which has a genuine async loading area here.
-2. [#233](https://github.com/kbrdn1/gwm-cli/issues/233) — **Open docs in the browser (`.`)** — dependency-free quick win; a `.` key that opens the docs, reusing the `O` / `gwm open` browser-spawn path. Can land at any point.
+1. [#267](https://github.com/kbrdn1/gwm-cli/issues/267) — **Graceful shutdown for in-flight mutating spine tasks** — quitting the TUI (`q` / `Esc`) currently abandons a detached `bootstrap` / `sync` worker mid-operation. Add `TaskKind::is_mutating()` and gate the quit path so a mutating task is awaited (or cancelled safely) before exit; read-only tasks (refresh / GitHub fetch) still exit immediately. Covers both `spawn_bootstrap` (#256) and `spawn_sync` (#258).
+2. [#257](https://github.com/kbrdn1/gwm-cli/issues/257) — **Standalone loader widget** — *blocked*: its intended consumers (#226 Command Logs, #232 Configuration panel) shipped without a dedicated async loading area (both open instantly), so building it now would be dead code. Deferred until a panel with a genuinely slow, dedicated-area data source lands (e.g. #35 embedded lazygit PTY, #36 multi-repo listing).
 
 ## Ambitious
 
