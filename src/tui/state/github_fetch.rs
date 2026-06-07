@@ -1,5 +1,6 @@
 //! GitHub fetch state for the TUI (issue #128, part 6/6 of the
-//! `tui::app::App` decomposition #102).
+//! `tui::app::App` decomposition #102; threading migrated onto the
+//! shared async-task spine in #255).
 //!
 //! Owns the slice of `App` state that tracks issue / PR linking + the
 //! cached results of the `gh issue view` / `gh pr view` shell-outs:
@@ -12,51 +13,48 @@
 //! - `issue_cache` / `pr_cache` — per-(target, number) caches keyed
 //!   by issue / PR number. Each entry is a [`GitHubFetchState`]: cold
 //!   entries are simply absent from the map (treated as `Idle` by
-//!   the accessors), `Loading` while a shell-out is inflight,
+//!   the accessors), `Loading` while a shell-out is in flight,
 //!   `Loaded(T)` on success, `Error(msg)` on failure. Per-key identity
 //!   matters: pre-#138 the cache was a single per-target slot, so
 //!   completing `Issue(42)` falsely "warmed" `Issue(43)` (the cache
 //!   identity ignored the number).
-//! - `inflight` — an internal `HashSet<FetchKey>` that is the
-//!   load-bearing payoff of #128: it dedupes concurrent visit events
-//!   so two near-simultaneous calls into [`GitHubFetch::request`] for
-//!   the same `(target, number)` only spawn one `gh` subprocess.
 //!
-//! The orchestrator pattern: `App` does NOT shell out directly anymore
-//! on the dedupe path. It calls `self.github.request(key)`; if the
-//! return is [`FetchAction::Spawn`], the caller actually invokes
-//! `crate::github::fetch_{issue,pr}` and then reports the outcome via
-//! `self.github.complete_{issue,pr}(number, result)`. On
-//! [`FetchAction::HitCache`] the cached state is already in the
-//! per-key map; on [`FetchAction::AlreadyInflight`] a previous request
-//! is still in flight and the caller is expected to be a no-op.
+//! **What this module is, post-#255:** a *result cache* + link state.
+//! It deliberately no longer owns the off-thread coalescing / dedupe /
+//! late-result-drop — that machinery is now the generic
+//! [`super::async_task::TaskRunner`] spine, shared with the worktree
+//! refresh, so there is one off-thread mechanism instead of two. Pre-
+//! #255 this module also held an `inflight: HashSet<FetchKey>` that
+//! deduped concurrent fetches and gated the #138 late-drop, but it had
+//! **no per-fetch generation**: two workers for the same key (the
+//! request → invalidate → request retry path) were indistinguishable,
+//! so a stale worker that reported first could win the slot and a fresh
+//! result be dropped (Codex adversarial-review finding on PR #260). The
+//! spine's per-key generation counter fixes that race.
 //!
-//! Why an explicit dedupe layer? Pre-#128, every event that called
-//! `refresh_github_status` (worktree navigation, explicit `F` key,
-//! visit-driven refresh) would unconditionally spawn `gh issue view`
-//! and `gh pr view`. A user rapidly arrow-keying through five
-//! worktrees would queue ten `gh` subprocesses in flight, and the
-//! shell-out cost dominates the TUI redraw cost. The new contract:
-//! every spawn goes through `request(key)`, and a concurrent visit
-//! event to a still-loading target is dropped at the state boundary
-//! instead of all the way down in the shell.
+//! The orchestrator pattern (post-#255): `App` checks
+//! [`GitHubFetch::is_cached`] for a terminal hit; on a miss it claims a
+//! generation from the spine ([`TaskRunner::request`]), marks the cache
+//! [`GitHubFetchState::Loading`] via [`GitHubFetch::mark_loading`], and
+//! spawns the `gh` worker tagged with that generation. The worker posts
+//! a `TaskMsg::Github{Issue,Pr}` back; the event loop applies it only
+//! when [`TaskRunner::complete`] confirms the generation is still
+//! authoritative, then stamps the terminal result here via
+//! [`GitHubFetch::complete_issue`] / [`GitHubFetch::complete_pr`] (pure
+//! cache writes — the drop decision lives on the spine now).
 //!
 //! The explicit user-initiated refresh (`F` key →
-//! `App::refresh_github_status`) still bypasses the cache via
-//! [`GitHubFetch::invalidate`] before its `request` loop — the user
-//! just asked for fresh data, so a `HitCache` short-circuit there
-//! would be a bug. The inflight slot is still claimed so a
-//! concurrent visit-driven `request` dedupes correctly.
-//!
-//! Late-result handling (issue #138): `complete_*` checks whether the
-//! inflight slot survived an intervening `invalidate()` and silently
-//! drops the result if not. Pre-fix, a shell-out that completed after
-//! the user navigated away (and `invalidate()` cleared the slot)
-//! would stamp stale data into the now-active worktree's cache.
+//! `App::refresh_github_status`) flushes the cache via
+//! [`GitHubFetch::invalidate`] before re-requesting — the user just
+//! asked for fresh data, so a `HitCache` short-circuit there would be a
+//! bug — and the `App` pairs that flush with a spine
+//! `invalidate_matching(is_github)` so any in-flight worker's late
+//! result is dropped (the navigation invariant: cache clear and spine
+//! generation-bump always move together).
 
 use crate::github::{self, BranchLink, IssueStatus, PrStatus};
 use git2::Repository;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// State of a background GitHub fetch (issue or PR). Generic over `T`
 /// so the same enum drives both `IssueStatus` and `PrStatus`. The
@@ -100,33 +98,15 @@ pub enum FetchKey {
   Pr(u64),
 }
 
-/// Outcome of [`GitHubFetch::request`]. Three states, decided by the
-/// state of the per-key cache + the inflight set:
-///
-/// - [`Self::HitCache`] — the per-key cache already carries a terminal
-///   `Loaded` or `Error` variant for this key. The caller is a no-op;
-///   the rendered UI reads the cached state via the keyed accessors.
-/// - [`Self::AlreadyInflight`] — the cache holds `Loading` AND the key
-///   is in the inflight set. A previous `request` is still pending
-///   its `complete` call. The caller is a no-op (no shell-out, no UI
-///   change).
-/// - [`Self::Spawn`] — cold cache. The caller owns the side-effecting
-///   `gh` shell-out; the [`FetchKey`] payload tells it which
-///   subcommand to dispatch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FetchAction {
-  HitCache,
-  AlreadyInflight,
-  Spawn(FetchKey),
-}
-
-/// GitHub fetch state slice of the TUI `App` (issue #128).
+/// GitHub fetch state slice of the TUI `App` (issue #128; threading on
+/// the async-task spine since #255).
 ///
 /// See the module docs for the full contract; the short version is:
-/// `App` calls [`Self::request`] before any `gh` shell-out, branches
-/// on the returned [`FetchAction`], and reports the result back via
-/// [`Self::complete_issue`] / [`Self::complete_pr`] so the next
-/// `request` for the same key hits the cache instead of re-spawning.
+/// `App` checks [`Self::is_cached`], marks [`Self::mark_loading`] before
+/// spawning the `gh` worker on the [`super::async_task::TaskRunner`]
+/// spine, and stamps the terminal result back via
+/// [`Self::complete_issue`] / [`Self::complete_pr`] once the spine
+/// confirms the worker's generation is still authoritative.
 pub struct GitHubFetch {
   pub link: BranchLink,
   pub link_slug: Option<String>,
@@ -136,14 +116,6 @@ pub struct GitHubFetch {
   issue_cache: HashMap<u64, GitHubFetchState<IssueStatus>>,
   /// PR-side counterpart to [`Self::issue_cache`].
   pr_cache: HashMap<u64, GitHubFetchState<PrStatus>>,
-  /// Dedupe set: keys whose `gh` shell-out is currently inflight (the
-  /// caller got `Spawn` and hasn't called `complete_*` yet). A
-  /// concurrent `request` for a key in this set returns
-  /// `AlreadyInflight` — the load-bearing fix for #128. Also acts as
-  /// the "still authoritative" gate for `complete_*` (#138): a result
-  /// arriving for a key not in `inflight` was invalidated mid-flight
-  /// and gets dropped.
-  inflight: HashSet<FetchKey>,
 }
 
 impl Default for GitHubFetch {
@@ -153,27 +125,26 @@ impl Default for GitHubFetch {
 }
 
 impl GitHubFetch {
-  /// Construct an empty `GitHubFetch` with no link, no slug, empty
-  /// per-key caches, and an empty inflight set. The `App` constructor
-  /// calls this once and then immediately runs [`Self::refresh_link`]
-  /// against the repo so the cold state lasts only as long as the
-  /// constructor itself.
+  /// Construct an empty `GitHubFetch` with no link, no slug, and empty
+  /// per-key caches. The `App` constructor calls this once and then
+  /// immediately runs [`Self::refresh_link`] against the repo so the
+  /// cold state lasts only as long as the constructor itself.
   pub fn new() -> Self {
     Self {
       link: BranchLink::empty(),
       link_slug: None,
       issue_cache: HashMap::new(),
       pr_cache: HashMap::new(),
-      inflight: HashSet::new(),
     }
   }
 
   /// Re-read the link for `branch` against `repo`, re-resolve the
   /// repo slug from the `origin` remote, and reset every cached
-  /// fetch state + inflight slot. Called by `App::refresh_link`
-  /// after the user navigates to a different worktree — the cached
-  /// state refers to a different `(issue, pr)` tuple and would be
-  /// misleading if reused.
+  /// fetch state. Called by `App::refresh_link` after the user
+  /// navigates to a different worktree — the cached state refers to a
+  /// different `(issue, pr)` tuple and would be misleading if reused.
+  /// (`App::refresh_link` separately drops any in-flight GitHub worker
+  /// on the spine — see [`Self::invalidate`] for the pairing.)
   pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>) {
     self.link = branch
       .and_then(|b| github::read_link(repo, b).ok())
@@ -182,21 +153,23 @@ impl GitHubFetch {
     self.invalidate();
   }
 
-  /// Flush every cached fetch state + inflight slot. Equivalent to
-  /// "the cached `(issue, pr)` tuples are no longer authoritative".
-  /// Called by [`Self::refresh_link`]; exposed standalone for
-  /// callers (e.g. an explicit "force refresh" key like `F`) that
-  /// want to wipe the cache without re-reading the link.
+  /// Flush every cached fetch state. Equivalent to "the cached
+  /// `(issue, pr)` tuples are no longer authoritative". Called by
+  /// [`Self::refresh_link`]; exposed standalone for callers (e.g. an
+  /// explicit "force refresh" key like `F`) that want to wipe the cache
+  /// without re-reading the link.
   ///
-  /// Clearing `inflight` here is load-bearing for #138: any `gh`
-  /// shell-out still in flight will report back via `complete_*`,
-  /// and the empty inflight set is how `complete_*` knows to drop
-  /// that late result instead of stamping it into the freshly-active
-  /// worktree's cache.
+  /// Post-#255 this clears only the result cache. Dropping any *in-
+  /// flight* worker's late result is the spine's job: the `App` pairs
+  /// every `invalidate()` with a
+  /// [`TaskRunner::invalidate_matching(is_github)`](super::async_task::TaskRunner::invalidate_matching)
+  /// so the stale generation is bumped and its result discarded by
+  /// [`TaskRunner::complete`](super::async_task::TaskRunner::complete).
+  /// That pairing is the navigation invariant — cache clear and spine
+  /// generation-bump always move together.
   pub fn invalidate(&mut self) {
     self.issue_cache.clear();
     self.pr_cache.clear();
-    self.inflight.clear();
   }
 
   /// Stamp an auto-detected PR onto the resolved `link` when none is
@@ -222,40 +195,14 @@ impl GitHubFetch {
     }
   }
 
-  /// Decide what the orchestrator should do for `key`. Three cases:
-  ///
-  /// 1. The per-key cache holds a terminal `Loaded` or `Error` for
-  ///    this key — return [`FetchAction::HitCache`]. The caller is a
-  ///    no-op; the renderer reads the cached state via the keyed
-  ///    accessors.
-  /// 2. The key is in the inflight set — return
-  ///    [`FetchAction::AlreadyInflight`]. The caller is a no-op; a
-  ///    previous `request(key)` is still pending its `complete`.
-  /// 3. Otherwise — cold cache. Insert `Loading` at the key, claim
-  ///    the inflight slot, return [`FetchAction::Spawn(key)`]. The
-  ///    caller owns the shell-out and MUST call
-  ///    `complete_{issue,pr}` to clear the inflight slot.
-  ///
-  /// The (target, number) tuple is the dedupe identity: `Issue(42)`
-  /// and `Pr(42)` are independent slots; `Issue(42)` and `Issue(43)`
-  /// are independent slots (the per-key cache enforces this, post-
-  /// #138). See `tests/tui_state_github_fetch_tests.rs` for the
-  /// pinned contract.
-  pub fn request(&mut self, key: FetchKey) -> FetchAction {
-    // Cache hit: prior `complete_*` already populated the per-key
-    // entry with a terminal variant. No shell-out, no inflight change.
-    if self.is_cached(key) {
-      return FetchAction::HitCache;
-    }
-    // Inflight: a prior `request(key)` is still pending its
-    // `complete_*`. Dedupe — the redundant `gh` shell-out is exactly
-    // what #128 closes.
-    if self.inflight.contains(&key) {
-      return FetchAction::AlreadyInflight;
-    }
-    // Cold cache: flip to Loading, claim the inflight slot, hand the
-    // caller the key so it knows which subcommand to dispatch.
-    self.inflight.insert(key);
+  /// Flip the per-key cache entry for `key` to
+  /// [`GitHubFetchState::Loading`] (issue #255). Called by the `App`
+  /// after it has claimed a generation from the spine and is about to
+  /// spawn the `gh` worker, so the sidebar paints a "…loading" badge and
+  /// [`App::is_github_loading`](crate::tui::App) reads `true` until the
+  /// terminal result lands. Pure: coalescing (skip the spawn if a worker
+  /// is already running) is the spine's call, not this module's.
+  pub fn mark_loading(&mut self, key: FetchKey) {
     match key {
       FetchKey::Issue(n) => {
         self.issue_cache.insert(n, GitHubFetchState::Loading);
@@ -264,49 +211,44 @@ impl GitHubFetch {
         self.pr_cache.insert(n, GitHubFetchState::Loading);
       }
     }
-    FetchAction::Spawn(key)
   }
 
-  /// Report the outcome of an issue fetch. The contract has two
-  /// guards (post-#138):
+  /// `true` when the per-key cache already carries a terminal `Loaded`
+  /// or `Error` for `key` (issue #255). The `App` consults this before
+  /// claiming a spine generation so an explicit-but-already-warm key
+  /// skips a redundant `gh` spawn. The `(target, number)` identity is
+  /// the cache key: `Issue(42)` / `Pr(42)` / `Issue(43)` are all
+  /// independent (post-#138).
+  pub fn is_cached(&self, key: FetchKey) -> bool {
+    self.has_terminal(key)
+  }
+
+  /// Stamp the terminal outcome of an issue fetch into the per-key cache
+  /// (issue #255). Pure cache write — `Ok` → `Loaded`, `Err` → `Error`,
+  /// keyed by `number`. After this call,
+  /// [`Self::is_cached(Issue(number))`](Self::is_cached) returns `true`.
   ///
-  /// 1. If the inflight slot for `Issue(number)` was already cleared
-  ///    (typically by an intervening [`Self::invalidate`]), the
-  ///    result is dropped — the user has navigated away and the
-  ///    late shell-out result is no longer authoritative.
-  /// 2. Otherwise, the per-key cache entry is stamped with `Loaded`
-  ///    on `Ok` or `Error` on `Err`. After this call,
-  ///    `request(Issue(number))` returns `HitCache` instead of
-  ///    re-spawning — see the module docs for the cache-on-error
-  ///    rationale.
+  /// Post-#255 there is no late-result guard here: the drop decision for
+  /// a superseded worker lives on the spine
+  /// ([`TaskRunner::complete`](super::async_task::TaskRunner::complete)),
+  /// which the `App` checks *before* calling this. So by the time we
+  /// stamp, the result is already known authoritative.
   pub fn complete_issue(&mut self, number: u64, result: std::result::Result<IssueStatus, String>) {
-    // #138 guard: if invalidate() cleared the slot mid-flight, drop
-    // the late result. Stamping it would corrupt the now-active
-    // worktree's cache with the previous worktree's data.
-    if !self.inflight.remove(&FetchKey::Issue(number)) {
-      return;
-    }
     self.issue_cache.insert(number, into_state(result));
   }
 
-  /// PR-side counterpart to [`Self::complete_issue`]. Same #138 guard
-  /// applies: a late result whose inflight slot was cleared by an
-  /// intervening [`Self::invalidate`] is dropped.
+  /// PR-side counterpart to [`Self::complete_issue`] — pure cache write,
+  /// no late-result guard (the spine owns that since #255).
   pub fn complete_pr(&mut self, number: u64, result: std::result::Result<PrStatus, String>) {
-    if !self.inflight.remove(&FetchKey::Pr(number)) {
-      return;
-    }
     self.pr_cache.insert(number, into_state(result));
   }
 
   /// Stamp the issue fetch state from a fetch result. `Ok(s)` →
   /// `Loaded(s)` (keyed by `s.number`), `Err(msg)` → `Error(msg)`
   /// (keyed by the current `link.issue` if any). Test-friendly
-  /// wrapper used by `App::apply_issue_fetch_result`; does NOT
-  /// touch the inflight set (that's [`Self::complete_issue`]'s job)
-  /// and does NOT honour the late-result drop, because there's no
-  /// inflight slot to consult — the helper is for tests that stamp
-  /// state directly without going through `request → complete`.
+  /// wrapper used by `App::apply_issue_fetch_result`; the helper is for
+  /// tests that stamp state directly without going through the spine's
+  /// `request → complete` generation flow.
   ///
   /// If `Err` is given and no link issue is set, the helper is a
   /// no-op (there's no number to key by). Tests that exercise the
@@ -356,11 +298,11 @@ impl GitHubFetch {
   }
 
   /// `true` when the per-key cache carries a terminal variant
-  /// (`Loaded` or `Error`) for `key`. Used by [`Self::request`] to
-  /// decide between `HitCache` and the cold-cache branch. Post-#138
-  /// the cache is keyed by number, so `is_cached(Issue(43))` after
-  /// a `complete_issue(42, …)` correctly returns `false`.
-  fn is_cached(&self, key: FetchKey) -> bool {
+  /// (`Loaded` or `Error`) for `key`. Backs the public
+  /// [`Self::is_cached`]. Post-#138 the cache is keyed by number, so
+  /// `has_terminal(Issue(43))` after a `complete_issue(42, …)` correctly
+  /// returns `false`.
+  fn has_terminal(&self, key: FetchKey) -> bool {
     match key {
       FetchKey::Issue(n) => matches!(
         self.issue_cache.get(&n),

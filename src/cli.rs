@@ -880,6 +880,11 @@ fn cmd_theme_show(name: &str) -> Result<()> {
   println!("prunable     = {}", color_str(theme.prunable));
   println!("muted        = {}", color_str(theme.muted));
   println!("selection_bg = {}", color_str(theme.selection_bg));
+  println!("name         = {}", color_str(theme.name));
+  println!("path         = {}", color_str(theme.path));
+  println!("staged       = {}", color_str(theme.staged));
+  println!("modified     = {}", color_str(theme.modified));
+  println!("untracked    = {}", color_str(theme.untracked));
   Ok(())
 }
 
@@ -1103,6 +1108,45 @@ fn format_status_text(w: &worktree::WorktreeInfo) -> String {
   parts.join(" ")
 }
 
+/// The repo prelude shared by most CLI subcommands: an open
+/// [`Repository`], its working directory, and the resolved
+/// [`Config`]. Owned values so call sites keep borrowing `&repo`,
+/// `&workdir`, `&config` exactly as they did when the triplet was
+/// inlined.
+pub struct RepoContext {
+  pub repo: Repository,
+  pub workdir: PathBuf,
+  pub config: Config,
+}
+
+/// Discover the repo, resolve its workdir, and load `.gwm.toml`.
+///
+/// `start` mirrors [`worktree::discover_repo`]: `None` discovers from
+/// the current directory (the behaviour every CLI call site relies
+/// on), `Some(path)` discovers from an explicit root (used by tests).
+///
+/// Surfaces [`GwmError::NotInGitRepo`] outside a repo or in a bare
+/// repo (no workdir), and propagates any `.gwm.toml` parse error from
+/// [`Config::load_for_repo`].
+pub fn repo_context(start: Option<&Path>) -> Result<RepoContext> {
+  let repo = worktree::discover_repo(start)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let config = Config::load_for_repo(&workdir)?;
+  Ok(RepoContext { repo, workdir, config })
+}
+
+/// Like [`repo_context`], but tolerates a missing or malformed
+/// `.gwm.toml` by falling back to [`Config::default`]. The repo and
+/// workdir gates stay strict — only the config *load* is lenient.
+/// Used by `gwm doctor`, which must run even when the config it is
+/// about to diagnose is broken.
+pub fn repo_context_lenient(start: Option<&Path>) -> Result<RepoContext> {
+  let repo = worktree::discover_repo(start)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let config = Config::load_for_repo(&workdir).unwrap_or_default();
+  Ok(RepoContext { repo, workdir, config })
+}
+
 fn cmd_create(
   branch_type: String,
   issue: String,
@@ -1112,11 +1156,9 @@ fn cmd_create(
   skip_hooks: Option<String>,
   trust_mode: TrustMode,
 ) -> Result<()> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let RepoContext { repo, workdir, config } = repo_context(None)?;
   let repo_name = worktree::repo_name(&repo);
 
-  let config = Config::load_for_repo(&workdir)?;
   let resolved_types = config.resolved_branch_types();
   let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
   let branch = spec.branch_name(&config.worktree, &repo_name)?;
@@ -1182,10 +1224,8 @@ fn cmd_new(
   skip_hooks: Option<String>,
   trust_mode: TrustMode,
 ) -> Result<()> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let RepoContext { repo, config, .. } = repo_context(None)?;
   let repo_name = worktree::repo_name(&repo);
-  let config = Config::load_for_repo(&workdir)?;
   let resolved_types = config.resolved_branch_types();
   let spec = BranchSpec::new_with_types(branch_type.clone(), "0", desc, &resolved_types.types)?;
   let draft = issue_templates::render_issue_draft(&repo, &config, &spec.type_, &spec.desc)?;
@@ -1233,9 +1273,7 @@ fn cmd_new(
 const PR_FILES_CHANGED_MAX_LINES: usize = 30;
 
 fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Result<()> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  let config = Config::load_for_repo(&workdir)?;
+  let RepoContext { repo, workdir, config } = repo_context(None)?;
   let head_name = current_branch(&repo)?;
   let branch_spec = parse_branch(&head_name);
 
@@ -1247,7 +1285,7 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
   let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();
 
   let base = base_override
-    .or_else(|| resolve_pr_base(&repo, &config.doctor.trunks))
+    .or_else(|| worktree::resolve_trunk(&repo, &config.doctor.trunks))
     .unwrap_or_else(|| "main".into());
 
   let commits = worktree::git_log_subject_between(&workdir, &base, &head_name)
@@ -1315,32 +1353,6 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
     eprintln!("note: could not record gwm-pr config for {}: {}", head_name, e);
   }
   Ok(())
-}
-
-/// Pick a base ref for `gwm pr` by walking the configured `[doctor].trunks`
-/// list first, then the common defaults (`main`, `master`, `dev`,
-/// `develop`, `trunk`) so a repo whose local trunk is `master` and which
-/// hasn't customised `[doctor]` doesn't fall back to a non-existent
-/// `"main"`. Returns `None` only if none of the candidates resolve to a
-/// local branch — the caller then uses `"main"` as a last resort so the
-/// downstream `gh pr create --base main` produces a clean error message
-/// instead of a panic.
-fn resolve_pr_base(repo: &Repository, trunks: &[String]) -> Option<String> {
-  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
-  for trunk in trunks {
-    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
-      return Some(trunk.clone());
-    }
-  }
-  for trunk in COMMON_TRUNKS {
-    if trunks.iter().any(|t| t == trunk) {
-      continue; // already tried as a configured trunk above
-    }
-    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
-      return Some((*trunk).to_string());
-    }
-  }
-  None
 }
 
 fn pr_title(ctx: &PrTemplateContext) -> String {
@@ -1539,9 +1551,7 @@ fn cmd_path(pattern: String) -> Result<()> {
 }
 
 fn cmd_bootstrap(target: Option<String>, skip_hooks: Option<String>, trust_mode: TrustMode) -> Result<()> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  let config = Config::load_for_repo(&workdir)?;
+  let RepoContext { repo, workdir, config } = repo_context(None)?;
 
   let mut worktree_branch: Option<String> = None;
   let worktree_path: PathBuf = match target {
@@ -1659,9 +1669,7 @@ fn cmd_prune(dry_run: bool) -> Result<()> {
 }
 
 fn cmd_doctor() -> Result<()> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  let config = Config::load_for_repo(&workdir).unwrap_or_default();
+  let RepoContext { repo, workdir, config } = repo_context_lenient(None)?;
 
   let ctx = DoctorCtx {
     repo_workdir: &workdir,
@@ -1976,6 +1984,7 @@ fn current_branch(repo: &Repository) -> Result<String> {
   })?;
   head
     .shorthand()
+    .ok()
     .map(|s| s.to_string())
     .ok_or_else(|| GwmError::UnbornHead {
       reason: "HEAD has no shorthand (detached?)".into(),
@@ -2303,9 +2312,7 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
 /// push`; both surface a uniform "not inside a git repository" error
 /// before they touch network or config-resolve logic.
 fn load_labels_config() -> Result<Config> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  Config::load_for_repo(&workdir)
+  Ok(repo_context(None)?.config)
 }
 
 /// Resolve the `origin` remote slug. Called *after* `resolve_labels`
@@ -2419,9 +2426,7 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
 /// push`; both surface a uniform "not inside a git repository" error
 /// before they touch network or config-resolve logic.
 fn load_milestones_config() -> Result<Config> {
-  let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  Config::load_for_repo(&workdir)
+  Ok(repo_context(None)?.config)
 }
 
 /// Resolve the `origin` remote slug. Called *after* `resolve_milestones`
@@ -2620,7 +2625,7 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 fn origin_url_for_repo(repo: Option<&Repository>) -> Option<String> {
   let r = repo?;
   let remote = r.find_remote("origin").ok()?;
-  remote.url().map(|s| s.to_string())
+  remote.url().ok().map(|s| s.to_string())
 }
 
 /// Interactive y/N/show loop. Prints a one-shot summary of the

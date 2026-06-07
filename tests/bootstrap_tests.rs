@@ -318,6 +318,36 @@ fn command_runs_when_condition_satisfied() {
 }
 
 #[test]
+fn command_step_is_recorded_on_the_command_log() {
+  // Issue #226: a bootstrap shell step is one of the external commands gwm
+  // runs, so it must land on the Command Logs transcript. Unique sentinel
+  // keeps the assertion robust against entries a sibling test recorded
+  // concurrently (presence, not count).
+  let sentinel = "gwm-bootstrap-cmdlog-3e8f";
+  let (main, wt, mut cfg) = dirs();
+  cfg.bootstrap.command.push(CommandStep {
+    name: "echo".into(),
+    run: format!("echo {sentinel}"),
+    when: None,
+    env: HashMap::new(),
+  });
+  let ctx = BootstrapCtx {
+    main_repo: main.path(),
+    worktree: wt.path(),
+    config: &cfg,
+  };
+  bootstrap::run(&ctx).unwrap();
+
+  let recorded = gwm::command_log::snapshot();
+  let mine = recorded
+    .iter()
+    .find(|e| e.command.contains(sentinel))
+    .expect("bootstrap shell step recorded on the command log");
+  assert!(mine.is_success(), "the echo step exited cleanly");
+  assert!(mine.output.contains(sentinel), "captured stdout is stored");
+}
+
+#[test]
 fn command_failure_recorded() {
   let (main, wt, mut cfg) = dirs();
   cfg.bootstrap.command.push(CommandStep {

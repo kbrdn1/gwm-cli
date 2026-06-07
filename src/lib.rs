@@ -6,6 +6,7 @@
 pub mod aliases;
 pub mod bootstrap;
 pub mod cli;
+pub mod command_log;
 pub mod config;
 pub mod config_cli;
 pub mod doctor;

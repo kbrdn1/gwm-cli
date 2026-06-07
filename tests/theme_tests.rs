@@ -31,6 +31,47 @@ fn default_theme_matches_pre_issue_33_scheme() {
   assert_eq!(t.locked, Color::Magenta);
   assert_eq!(t.prunable, Color::Red);
   assert_eq!(t.muted, Color::DarkGray);
+  // #210: the chrome roles default to their pre-#170 structural literals
+  // so a `[theme]`-less config still paints the worktree name white and
+  // the table path grey.
+  assert_eq!(t.name, Color::White, "name role default → White");
+  assert_eq!(t.path, Color::Gray, "path role default → Gray");
+  // #211: the git-status families default to the cyan/yellow/green they
+  // used to borrow from accent/dirty/clean, so the working-tree panel is
+  // unchanged for a `[theme]`-less config.
+  assert_eq!(t.staged, Color::Cyan, "staged role default → Cyan");
+  assert_eq!(t.modified, Color::Yellow, "modified role default → Yellow");
+  assert_eq!(t.untracked, Color::Green, "untracked role default → Green");
+}
+
+#[test]
+fn apply_override_replaces_git_status_roles() {
+  // #211: the git-status families must be overridable independently of the
+  // accent/dirty/clean roles they used to borrow.
+  let mut t = Theme::default();
+  t.apply_override("staged", "magenta").unwrap();
+  t.apply_override("modified", "#123456").unwrap();
+  t.apply_override("untracked", "200").unwrap();
+  assert_eq!(t.staged, Color::Magenta, "staged override wins");
+  assert_eq!(t.modified, Color::Rgb(0x12, 0x34, 0x56), "modified override wins");
+  assert_eq!(t.untracked, Color::Indexed(200), "untracked override wins");
+  // The roles they used to borrow are untouched — proving the decoupling.
+  assert_eq!(t.accent, Color::Cyan, "accent untouched by staged override");
+  assert_eq!(t.dirty, Color::Yellow, "dirty untouched by modified override");
+  assert_eq!(t.clean, Color::Green, "clean untouched by untracked override");
+}
+
+#[test]
+fn apply_override_replaces_name_and_path_roles() {
+  // #210: the new chrome roles must be overridable like any other role.
+  let mut t = Theme::default();
+  t.apply_override("name", "#abcdef").unwrap();
+  t.apply_override("path", "240").unwrap();
+  assert_eq!(t.name, Color::Rgb(0xab, 0xcd, 0xef), "name override wins");
+  assert_eq!(t.path, Color::Indexed(240), "path override wins");
+  // Other roles untouched.
+  assert_eq!(t.focus, Color::Cyan);
+  assert_eq!(t.muted, Color::DarkGray);
 }
 
 #[test]
@@ -47,6 +88,11 @@ fn claude_dark_preset_ports_the_palette() {
   assert_eq!(t.main, Color::Rgb(0xFF, 0xDF, 0x61), "warning yellow");
   assert_eq!(t.locked, Color::Rgb(0xC7, 0x9B, 0xFF), "special purple");
   assert_eq!(t.prunable, Color::Rgb(0xFF, 0x7A, 0x7A), "error red");
+  // #214: the chrome roles map to the palette's `--text` / `--text-dim`
+  // tokens, not the improvised warm greys #210 introduced (corrected before
+  // any release — both #210 and #214 land in the same unreleased cycle).
+  assert_eq!(t.name, Color::Rgb(0xE0, 0xE0, 0xE0), "--text (primary text)");
+  assert_eq!(t.path, Color::Rgb(0xB0, 0xB0, 0xB0), "--text-dim (secondary text)");
   // The alias `claude` resolves to the same theme.
   assert_eq!(Theme::preset("claude"), Some(t), "`claude` aliases `claude-dark`");
 }

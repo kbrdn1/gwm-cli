@@ -15,6 +15,7 @@ use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -197,6 +198,7 @@ pub fn repo_slug(repo: &Repository) -> Result<String> {
     .map_err(|_| GwmError::Other("no 'origin' remote configured".into()))?;
   let url = remote
     .url()
+    .ok()
     .ok_or_else(|| GwmError::Other("origin remote has no URL (non-utf8?)".into()))?
     .to_string();
   parse_github_slug(&url)
@@ -393,20 +395,35 @@ const PR_JSON_FIELDS: &str = "number,title,state,isDraft,url,updatedAt,statusChe
 
 /// Run `gh issue view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
-  let stdout = run_gh([
-    "issue",
-    "view",
-    &number.to_string(),
-    "--repo",
-    slug,
-    "--json",
-    ISSUE_JSON_FIELDS,
-  ])?;
+  fetch_issue_with(&gh_program(), slug, number)
+}
+
+/// [`fetch_issue`] with an explicitly resolved `gh` program path. Used by
+/// the TUI's off-thread fetch (issue #217): the program is resolved on the
+/// main thread via [`gh_program`] and handed to the worker thread, so the
+/// thread never touches `GWM_GH` / the process environment concurrently
+/// with env-mutating callers.
+pub fn fetch_issue_with(program: &OsStr, slug: &str, number: u64) -> Result<IssueStatus> {
+  let stdout = run_gh_with(
+    program,
+    [
+      "issue",
+      "view",
+      &number.to_string(),
+      "--repo",
+      slug,
+      "--json",
+      ISSUE_JSON_FIELDS,
+    ],
+  )?;
   parse_issue_json(&stdout)
 }
 
-fn gh_command() -> Command {
-  Command::new(std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into()))
+/// Resolve the `gh` program to invoke: `$GWM_GH` when set (test / override
+/// hook), else `gh` on `PATH`. Read once on the calling thread so off-thread
+/// fetches can capture it without re-reading the environment.
+pub fn gh_program() -> OsString {
+  std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into())
 }
 
 pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
@@ -483,15 +500,25 @@ pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
 
 /// Run `gh pr view <n> --repo <slug> --json …` and parse the result.
 pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
-  let stdout = run_gh([
-    "pr",
-    "view",
-    &number.to_string(),
-    "--repo",
-    slug,
-    "--json",
-    PR_JSON_FIELDS,
-  ])?;
+  fetch_pr_with(&gh_program(), slug, number)
+}
+
+/// [`fetch_pr`] with an explicitly resolved `gh` program path — PR-side
+/// counterpart to [`fetch_issue_with`], used by the TUI off-thread fetch
+/// (issue #217).
+pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatus> {
+  let stdout = run_gh_with(
+    program,
+    [
+      "pr",
+      "view",
+      &number.to_string(),
+      "--repo",
+      slug,
+      "--json",
+      PR_JSON_FIELDS,
+    ],
+  )?;
   parse_pr_json(&stdout)
 }
 
@@ -548,9 +575,44 @@ where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  let output = gh_command()
-    .args(args)
-    .output()
+  run_gh_with(&gh_program(), args)
+}
+
+/// Build the human-readable command line stored on the Command Logs
+/// transcript (issue #226) for a `gh` invocation: the program's *file name*
+/// (so a `GWM_GH=/usr/bin/gh` override still reads as `gh issue view …`
+/// rather than leaking the full path) followed by the resolved args. Kept
+/// pure and `pub` so its argv format is unit-testable without spawning `gh`
+/// (which CI runners do not have).
+pub fn gh_command_line(program: &OsStr, args: &[OsString]) -> String {
+  let name = Path::new(program)
+    .file_name()
+    .map(|n| n.to_string_lossy().into_owned())
+    .unwrap_or_else(|| program.to_string_lossy().into_owned());
+  let mut line = name;
+  for arg in args {
+    line.push(' ');
+    line.push_str(&arg.to_string_lossy());
+  }
+  line
+}
+
+/// [`run_gh`] against an explicitly resolved `gh` program. Lets callers on
+/// a worker thread (issue #217) avoid re-reading `GWM_GH` / the process
+/// environment concurrently with env-mutating code on other threads.
+fn run_gh_with<I, S>(program: &OsStr, args: I) -> Result<String>
+where
+  I: IntoIterator<Item = S>,
+  S: AsRef<OsStr>,
+{
+  // Collect the args once so they can both drive the spawn and build the
+  // human-readable command line stored on the Command Logs transcript
+  // (issue #226): the resolved `gh <args…>`, not an opaque handle.
+  let collected: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
+  let cmdline = gh_command_line(program, &collected);
+  let mut cmd = Command::new(program);
+  cmd.args(&collected);
+  let output = crate::command_log::run_logged(&mut cmd, cmdline)
     .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;
   if !output.status.success() {
     return Err(GwmError::CommandFailed(format!(

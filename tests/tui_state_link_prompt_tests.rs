@@ -17,27 +17,45 @@ use gwm::tui::state::link_prompt::{LinkPrompt, LinkPromptStage};
 use gwm::tui::LinkTarget;
 
 #[test]
-fn new_starts_in_choose_target_with_empty_buffer_and_no_target() {
+fn new_starts_in_choose_target_with_empty_buffer_no_target_and_issue_selected() {
   let prompt = LinkPrompt::new();
   assert_eq!(prompt.stage, LinkPromptStage::ChooseTarget);
   assert!(prompt.number.is_empty());
-  assert_eq!(prompt.target, None);
+  assert_eq!(prompt.target, None, "no target is committed until commit_target");
+  assert_eq!(
+    prompt.selected,
+    LinkTarget::Issue,
+    "the vertical picker opens highlighting Issue (the common case)"
+  );
 }
 
 #[test]
-fn toggle_target_rotates_issue_to_pr_and_back() {
-  // The two-stage prompt's ChooseTarget step lets the user flip between
-  // Issue and Pr without committing. Starts with Issue as the default
-  // hint so a single Enter on a fresh prompt lands on the most common
-  // case.
+fn toggle_selection_flips_the_highlight_between_issue_and_pr() {
+  // ChooseTarget is now a vertical selectable list (#217): j/k move the
+  // highlight, Enter links the highlighted item. The highlight is a
+  // separate `selected` field — `target` stays None until a commit — so
+  // moving it never looks like a half-committed choice.
   let mut prompt = LinkPrompt::new();
-  assert_eq!(prompt.target, None);
-  prompt.toggle_target();
-  assert_eq!(prompt.target, Some(LinkTarget::Issue));
-  prompt.toggle_target();
-  assert_eq!(prompt.target, Some(LinkTarget::Pr));
-  prompt.toggle_target();
-  assert_eq!(prompt.target, Some(LinkTarget::Issue), "wraps back to Issue");
+  assert_eq!(prompt.selected, LinkTarget::Issue);
+  prompt.toggle_selection();
+  assert_eq!(prompt.selected, LinkTarget::Pr);
+  prompt.toggle_selection();
+  assert_eq!(prompt.selected, LinkTarget::Issue, "wraps back to Issue");
+  assert_eq!(prompt.target, None, "moving the highlight commits nothing");
+}
+
+#[test]
+fn toggle_selection_is_noop_during_input_number() {
+  // Once a target is committed and the user is typing the number, a stray
+  // j/k must not flip the selection underneath them.
+  let mut prompt = LinkPrompt::new();
+  prompt.commit_target(LinkTarget::Pr);
+  prompt.toggle_selection();
+  assert_eq!(
+    prompt.selected,
+    LinkTarget::Issue,
+    "selection is frozen during InputNumber (still its open default)"
+  );
 }
 
 #[test]
@@ -113,6 +131,7 @@ fn pop_char_is_noop_during_choose_target_stage() {
 #[test]
 fn reset_returns_prompt_to_initial_state() {
   let mut prompt = LinkPrompt::new();
+  prompt.toggle_selection(); // move highlight off the default
   prompt.commit_target(LinkTarget::Issue);
   prompt.push_char('4');
   prompt.push_char('2');
@@ -120,4 +139,5 @@ fn reset_returns_prompt_to_initial_state() {
   assert_eq!(prompt.stage, LinkPromptStage::ChooseTarget);
   assert!(prompt.number.is_empty());
   assert_eq!(prompt.target, None);
+  assert_eq!(prompt.selected, LinkTarget::Issue, "highlight resets to Issue");
 }

@@ -14,7 +14,6 @@ use crate::error::{GwmError, Result};
 use crate::worktree;
 use git2::{BranchType, Repository};
 use std::path::Path;
-use std::process::Command;
 
 /// How `gwm sync` reconciles the local branch when it is behind its
 /// upstream. Defaults to rebase (linear history, the repo convention);
@@ -102,11 +101,12 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   }
   let branch_short = head
     .shorthand()
+    .ok()
     .ok_or_else(|| GwmError::UnbornHead {
       reason: "sync: HEAD has no branch name".into(),
     })?
     .to_string();
-  let head_refname = head.name().map(|s| s.to_string());
+  let head_refname = head.name().ok().map(|s| s.to_string());
 
   let local = repo
     .find_branch(&branch_short, BranchType::Local)
@@ -129,13 +129,13 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   let remote = head_refname
     .as_deref()
     .and_then(|rn| repo.branch_upstream_remote(rn).ok())
-    .and_then(|buf| buf.as_str().map(|s| s.to_string()));
+    .and_then(|buf| buf.as_str().ok().map(|s| s.to_string()));
 
   // 3. Fetch. After this the in-memory `repo` ref cache is stale, so
   //    everything past here re-resolves against a freshly opened repo.
   match &remote {
-    Some(r) => run_git(&workdir, &["fetch", r])?,
-    None => run_git(&workdir, &["fetch"])?,
+    Some(r) => worktree::run_git(&workdir, &["fetch", r])?,
+    None => worktree::run_git(&workdir, &["fetch"])?,
   };
 
   // 4. Recompute ahead/behind against the now-updated upstream.
@@ -156,8 +156,8 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   // 5. Integrate. On failure (conflicts), abort so the worktree is
   //    not left mid-rebase/merge, then surface a conflict error.
   let integrate = match strategy {
-    SyncStrategy::Rebase => run_git(&workdir, &["rebase", &upstream_short]),
-    SyncStrategy::Merge => run_git(&workdir, &["merge", "--no-edit", &upstream_short]),
+    SyncStrategy::Rebase => worktree::run_git(&workdir, &["rebase", &upstream_short]),
+    SyncStrategy::Merge => worktree::run_git(&workdir, &["merge", "--no-edit", &upstream_short]),
   };
   if let Err(e) = integrate {
     // Distinguish a genuine conflict from any other failure (a failing
@@ -170,7 +170,7 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
       .and_then(|r| r.index().ok())
       .map(|idx| idx.has_conflicts())
       .unwrap_or(false);
-    let _ = run_git(&workdir, &[strategy.verb(), "--abort"]);
+    let _ = worktree::run_git(&workdir, &[strategy.verb(), "--abort"]);
     if conflicted {
       return Err(GwmError::Other(format!(
         "{} onto {} hit conflicts and was aborted; reconcile manually with `git {} {}`",
@@ -219,24 +219,4 @@ fn ahead_behind(repo: &Repository, branch: &str) -> Result<(usize, usize)> {
     .ok_or_else(|| GwmError::Other("sync: upstream has no commit".into()))?;
   let (ahead, behind) = repo.graph_ahead_behind(local_oid, up_oid)?;
   Ok((ahead, behind))
-}
-
-/// Run `git -C <dir> <args>`, returning stdout on success or a
-/// `CommandFailed` error carrying the verb and stderr on failure.
-fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
-  let out = Command::new("git")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
-  if !out.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git {} exited {}: {}",
-      args.join(" "),
-      out.status,
-      String::from_utf8_lossy(&out.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

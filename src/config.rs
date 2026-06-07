@@ -708,6 +708,138 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
   }
 }
 
+/// Flatten a (possibly nested) TOML value into `key = display` rows,
+/// dotted for tables and `name[i]` for arrays-of-tables, leaving scalar
+/// leaves as-is. Shared by `gwm config list` (the CLI surface) and the
+/// in-TUI Configuration panel (issue #232) so neither can drift from the
+/// other's key shape. Pure — pushes onto `rows` in table-iteration order
+/// (`toml::Value::Table` is a `BTreeMap`, so keys come out sorted).
+pub(crate) fn flatten_value(prefix: &str, value: &toml::Value, rows: &mut Vec<(String, String)>) {
+  match value {
+    toml::Value::Table(table) => {
+      for (key, value) in table {
+        let next = if prefix.is_empty() {
+          key.to_string()
+        } else {
+          format!("{}.{}", prefix, key)
+        };
+        flatten_value(&next, value, rows);
+      }
+    }
+    toml::Value::Array(values) if values.iter().all(toml::Value::is_table) => {
+      for (i, value) in values.iter().enumerate() {
+        flatten_value(&format!("{}[{}]", prefix, i), value, rows);
+      }
+    }
+    _ => rows.push((prefix.to_string(), format_list_value(value))),
+  }
+}
+
+/// Which configuration layer a resolved value came from (issue #232).
+/// Ordered by precedence so the panel can colour the strongest source
+/// distinctly: a repo `.gwm.toml` overrides the user-level global, which
+/// overrides the built-in defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSource {
+  /// The value is a built-in default — set in neither config file.
+  Default,
+  /// The value comes from the user-level global config
+  /// (`~/.config/gwm/config.toml`).
+  User,
+  /// The value comes from the repo's `.gwm.toml`.
+  Repo,
+}
+
+impl ConfigSource {
+  /// Stable lowercase label for the panel's source column and tests.
+  pub fn label(self) -> &'static str {
+    match self {
+      ConfigSource::Default => "default",
+      ConfigSource::User => "user",
+      ConfigSource::Repo => "repo",
+    }
+  }
+}
+
+/// One resolved configuration row: the flattened `key`, its `value`
+/// rendered exactly as `gwm config list` prints it, and the layer that
+/// `source`d it. Consumed by the in-TUI Configuration panel (issue #232).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigRow {
+  pub key: String,
+  pub value: String,
+  pub source: ConfigSource,
+}
+
+/// Flatten the raw (un-defaulted) TOML at `path` into the set of keys it
+/// literally declares — the membership probe behind source attribution.
+/// An absent file contributes no keys (every value then comes from a
+/// lower layer). Issue #232.
+fn declared_keys(path: &Path) -> Result<std::collections::HashSet<String>> {
+  if !path.exists() {
+    return Ok(std::collections::HashSet::new());
+  }
+  let value = read_config_value(path)?;
+  let mut rows = Vec::new();
+  flatten_value("", &value, &mut rows);
+  Ok(rows.into_iter().map(|(key, _)| key).collect())
+}
+
+/// Resolve the effective configuration the way `gwm config list` does
+/// (user-level global deep-merged under the repo `.gwm.toml`, defaults
+/// filled), then attribute each flattened key to the layer that provided
+/// it — repo over user over default. `global_path` is injected so the
+/// attribution can be pinned by a test without touching the real
+/// `$HOME` / `$XDG_CONFIG_HOME` (mirrors [`Config::load_layered`]).
+/// Issue #232.
+pub fn resolved_rows(repo_root: &Path, global_path: Option<&Path>) -> Result<Vec<ConfigRow>> {
+  // The merged + defaulted config, serialised back to a value so the
+  // key/value shape is identical to `gwm config list`.
+  let cfg = Config::load_layered(repo_root, global_path)?;
+  let value = toml::Value::try_from(cfg).map_err(|e| GwmError::Config(e.to_string()))?;
+  let mut flat = Vec::new();
+  flatten_value("", &value, &mut flat);
+
+  // Per-layer declared keys probe which layer owns each merged key. Both
+  // layers and the merged value flow through the same `flatten_value`, so
+  // a key present in a layer's raw file matches the merged key verbatim.
+  let repo_keys = declared_keys(&repo_root.join(CONFIG_FILE))?;
+  let user_keys = match global_path {
+    Some(p) => declared_keys(p)?,
+    None => std::collections::HashSet::new(),
+  };
+
+  Ok(
+    flat
+      .into_iter()
+      .map(|(key, value)| {
+        let source = if repo_keys.contains(&key) {
+          ConfigSource::Repo
+        } else if user_keys.contains(&key) {
+          ConfigSource::User
+        } else {
+          ConfigSource::Default
+        };
+        ConfigRow { key, value, source }
+      })
+      .collect(),
+  )
+}
+
+/// Render a single TOML scalar (or non-table aggregate) the way
+/// `gwm config list` does: strings quoted, scalars bare, arrays/tables
+/// via their `Display`. Shared with the Configuration panel (issue #232).
+pub(crate) fn format_list_value(value: &toml::Value) -> String {
+  match value {
+    toml::Value::String(s) => format!("{:?}", s),
+    toml::Value::Integer(i) => i.to_string(),
+    toml::Value::Float(f) => f.to_string(),
+    toml::Value::Boolean(b) => b.to_string(),
+    toml::Value::Datetime(d) => d.to_string(),
+    toml::Value::Array(_) | toml::Value::Table(_) => value.to_string(),
+  }
+}
+
 /// On-disk location of the user-level global config under a given
 /// XDG config-home directory: `<config_home>/gwm/config.toml`. Pure
 /// (no env / FS access) so the path contract is unit-testable. Issue

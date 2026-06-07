@@ -215,6 +215,75 @@ fn default_keymap_binds_sidebar_layout_and_position() {
 }
 
 #[test]
+fn default_keymap_binds_sync_to_uppercase_s() {
+  // Issue #258: `S` runs `gwm sync` on the selected worktree. It must be
+  // uppercase `S` because lowercase `s` is already ToggleSidebarMode — the
+  // mnemonic sits with the other uppercase lifecycle verbs (`F`, `R`).
+  let km = Keymap::defaults();
+
+  let sync = KeyStroke::parse_chord("S").unwrap();
+  assert!(matches!(km.lookup(&sync), ChordResolution::Matched(Action::Sync)));
+
+  // Guard the conflict that motivated the choice: lowercase `s` stays the
+  // sidebar-mode toggle, untouched.
+  let sidebar_mode = KeyStroke::parse_chord("s").unwrap();
+  assert!(matches!(
+    km.lookup(&sidebar_mode),
+    ChordResolution::Matched(Action::ToggleSidebarMode)
+  ));
+}
+
+#[test]
+fn default_keymap_binds_open_docs_to_dot() {
+  // Issue #233: `.` opens the gwm documentation in the browser, reusing the
+  // OpenMenu browser-spawn path. Rebindable as `open_docs` under `[tui.keys]`.
+  let km = Keymap::defaults();
+  let dot = KeyStroke::parse_chord(".").unwrap();
+  assert!(matches!(km.lookup(&dot), ChordResolution::Matched(Action::OpenDocs)));
+}
+
+#[test]
+fn open_docs_is_rebindable_like_any_action() {
+  // The new action takes a user override exactly like the rest of the keymap.
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::OpenDocs, vec![KeyStroke::parse_chord("Ctrl+d").unwrap()])
+    .unwrap();
+  let rebound = KeyStroke::parse_chord("Ctrl+d").unwrap();
+  assert!(matches!(
+    km.lookup(&rebound),
+    ChordResolution::Matched(Action::OpenDocs)
+  ));
+  // The default `.` no longer resolves to OpenDocs once overridden.
+  let dot = KeyStroke::parse_chord(".").unwrap();
+  assert!(!matches!(km.lookup(&dot), ChordResolution::Matched(Action::OpenDocs)));
+}
+
+#[test]
+fn default_keymap_binds_command_logs_to_3() {
+  // Issue #226: `3` opens the Command Logs modal, completing the `1` / `2`
+  // / `3` pane-key family (focus_worktrees / focus_status / command_logs).
+  let km = Keymap::defaults();
+  let three = KeyStroke::parse_chord("3").unwrap();
+  assert!(matches!(
+    km.lookup(&three),
+    ChordResolution::Matched(Action::CommandLogs)
+  ));
+}
+
+#[test]
+fn default_keymap_binds_config_panel_to_4() {
+  // Issue #232: `4` opens the Configuration panel, extending the `1` / `2`
+  // / `3` / `4` pane-key family (focus_worktrees / focus_status /
+  // command_logs / config_panel).
+  let km = Keymap::defaults();
+  let four = KeyStroke::parse_chord("4").unwrap();
+  assert!(matches!(
+    km.lookup(&four),
+    ChordResolution::Matched(Action::ConfigPanel)
+  ));
+}
+
+#[test]
 fn user_override_replaces_default_for_one_action() {
   let mut km = Keymap::defaults();
   km.apply_override(Action::Down, vec![KeyStroke::parse_chord("Ctrl+n").unwrap()])
@@ -271,6 +340,33 @@ fn chord_that_is_strict_prefix_of_existing_binding_is_rejected() {
     err.to_string().to_lowercase().contains("prefix"),
     "expected prefix-collision error, got: {err}"
   );
+}
+
+#[test]
+fn primary_chord_resolves_first_default_binding() {
+  // Issue #217: the sidebar's "press <key> to fetch status" prompt must
+  // resolve the live binding instead of hard-coding `R`. `primary_chord`
+  // returns the first chord bound to an action, rendered canonically.
+  let km = Keymap::defaults();
+  assert_eq!(km.primary_chord(Action::FetchGithub).as_deref(), Some("F"));
+  assert_eq!(km.primary_chord(Action::Help).as_deref(), Some("?"));
+  // Multi-chord actions return the first chord in declaration order.
+  assert_eq!(km.primary_chord(Action::Refresh).as_deref(), Some("f"));
+}
+
+#[test]
+fn primary_chord_follows_user_override() {
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
+    .unwrap();
+  assert_eq!(km.primary_chord(Action::FetchGithub).as_deref(), Some("Ctrl+g"));
+}
+
+#[test]
+fn primary_chord_is_none_for_unbound_action() {
+  let mut km = Keymap::defaults();
+  km.apply_override(Action::FetchGithub, vec![]).unwrap();
+  assert_eq!(km.primary_chord(Action::FetchGithub), None);
 }
 
 #[test]

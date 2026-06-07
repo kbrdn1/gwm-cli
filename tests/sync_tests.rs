@@ -234,3 +234,76 @@ fn sync_aborts_and_errors_on_conflict() {
     "sync must abort the rebase so the worktree is left usable"
   );
 }
+
+// ---- TUI sync action drain (issue #258) -----------------------------------
+
+#[test]
+fn tui_sync_action_relists_to_the_rebased_state_from_disk() {
+  // End-to-end guard for the #258 TUI action: after a real `sync` rebases the
+  // branch (a subprocess `git rebase` + `git fetch` mutate refs on disk), the
+  // App's post-sync re-list in `drain_task_results` must reflect the rebased
+  // HEAD and the fetched upstream's ahead/behind. (libgit2 re-reads refs from
+  // disk on each lookup, so the synchronous refresh through the long-lived
+  // repo is not stale — this pins that the count is right whichever way the
+  // re-list is implemented.)
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::App;
+
+  let (td, origin, local) = local_tracking_origin();
+  // Upstream advances by one commit...
+  push_upstream_commit(td.path(), &origin, "up.txt", "upstream\n", "ahead");
+  // ...and the local branch has its own commit, so the sync genuinely rebases
+  // (HEAD must move to a new OID, not just fast-forward in place).
+  write(&local.join("local.txt"), "local\n");
+  git(&local, &["add", "-A"]);
+  git(&local, &["commit", "-m", "local work"]);
+
+  // Build the App on the local repo and snapshot the pre-sync HEAD.
+  let mut app = App::new_at_layered(Some(&local), None).unwrap();
+  let head_before = app.worktrees[0].head.clone();
+
+  // Claim a sync slot (as `request_sync` would) and run the real sync.
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  let report = sync::sync(&local, SyncStrategy::Rebase).unwrap();
+  assert_eq!(report.action, SyncAction::Integrated, "the behind branch must rebase");
+
+  // Feed the worker's result through the drain exactly as the OS thread would.
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(generation, "local".into(), Ok(report)))
+    .unwrap();
+  app.drain_task_results();
+
+  // The re-listed HEAD must be the rebased one — different from before, and
+  // matching what git reports on disk.
+  let head_after = app.worktrees[0].head.clone();
+  let disk_head = git_out(&local, &["rev-parse", "HEAD"]);
+  assert_ne!(
+    head_after, head_before,
+    "post-sync re-list must show the rebased HEAD, not the stale pre-sync one"
+  );
+  assert_eq!(
+    head_after.as_deref(),
+    Some(disk_head.as_str()),
+    "the re-listed HEAD must match the on-disk HEAD after the rebase"
+  );
+  // The ahead/behind must reflect the *fetched* upstream. The worker's `git
+  // fetch` advanced the remote-tracking `origin/main`; reading it through the
+  // App's long-lived `self.repo` (whose ref cache predates the fetch) would
+  // miscount the ahead side. After the rebase the branch is exactly one commit
+  // ahead of the updated upstream and zero behind. This is the dimension
+  // `sync.rs` flags as stale-prone, so it is what makes the fresh-repo re-list
+  // load-bearing rather than cosmetic.
+  let status = &app.worktrees[0].status;
+  assert_eq!(status.behind, 0, "rebased branch must be 0 behind the fetched upstream");
+  assert_eq!(
+    status.ahead, 1,
+    "rebased branch is exactly 1 ahead of the fetched upstream (a stale origin/main read overcounts)"
+  );
+  // And the status line reports the sync outcome, not the refresh line.
+  assert!(
+    app.status.contains("rebased"),
+    "status must report the sync outcome: {:?}",
+    app.status
+  );
+}

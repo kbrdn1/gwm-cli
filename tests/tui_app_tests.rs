@@ -4,7 +4,7 @@ use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
-  branch_name_color, filled_cells_for_progress, freshness_color, header_title, panel_border_color, pr_badge_color, App,
+  branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
   ConfirmKeyAction, CountdownTickOutcome, Field, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
@@ -51,6 +51,103 @@ fn make_app() -> (tempfile::TempDir, App) {
 }
 
 #[test]
+fn focus_status_opens_and_focuses_the_sidebar() {
+  // Issue #217: pressing `2` (focus_status) must open the sidebar if it was
+  // closed and move the navigation focus onto it.
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+  app.sidebar.focused = false;
+  app.focus_status();
+  assert!(app.sidebar.open, "focus_status must open a closed sidebar");
+  assert!(app.sidebar.focused, "focus_status must focus the sidebar");
+}
+
+#[test]
+fn focus_worktrees_releases_sidebar_focus() {
+  // Pressing `1` (focus_worktrees) returns navigation focus to the table so
+  // `j` / `k` walk the worktree list, leaving the sidebar open but unfocused.
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = true;
+  app.sidebar.focused = true;
+  app.focus_worktrees();
+  assert!(!app.sidebar.focused, "focus_worktrees must release sidebar focus");
+}
+
+#[test]
+fn enter_command_logs_opens_the_overlay_syncs_and_resets_scroll() {
+  // Issue #226: `3` opens the Command Logs modal. Opening must (1) switch
+  // to the overlay view, (2) sync the global command log into owned state,
+  // and (3) reset the scroll cursor so a previously-scrolled session starts
+  // fresh at the top.
+  use gwm::command_log::{self, CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  let sentinel = "gwm-enter-cmdlog-9a1c";
+  command_log::record(CommandLogEntry {
+    command: format!("gh pr list # {sentinel}"),
+    duration: Duration::from_millis(1),
+    status: CommandStatus::Exited(Some(0)),
+    output: String::new(),
+  });
+
+  let (_dir, mut app) = make_app();
+  app.command_logs.scroll = 9;
+  app.command_logs.x_scroll = 3;
+  app.enter_command_logs();
+
+  assert_eq!(app.view, View::CommandLogs);
+  assert_eq!(app.command_logs.scroll, 0, "scroll resets on open");
+  assert_eq!(app.command_logs.x_scroll, 0, "horizontal scroll resets on open");
+  assert!(
+    app.command_logs.entries.iter().any(|e| e.command.contains(sentinel)),
+    "opening the overlay snapshots the global command log"
+  );
+}
+
+#[test]
+fn enter_config_panel_opens_resolves_rows_and_resets_scroll() {
+  // Issue #232: `4` opens the Configuration panel. Opening must (1) switch
+  // to the overlay view, (2) resolve the effective config into owned rows,
+  // and (3) reset the scroll cursor so a previously-scrolled session starts
+  // fresh at the top.
+  use gwm::config::ConfigSource;
+
+  let (_dir, mut app) = make_app();
+  app.config_panel.scroll = 9;
+  app.config_panel.x_scroll = 3;
+  app.enter_config_panel();
+
+  assert_eq!(app.view, View::Config);
+  assert_eq!(app.config_panel.scroll, 0, "scroll resets on open");
+  assert_eq!(app.config_panel.x_scroll, 0, "horizontal scroll resets on open");
+  assert!(
+    !app.config_panel.rows.is_empty(),
+    "opening resolves the effective config into rows"
+  );
+  // The fixture has no repo `.gwm.toml` and no global config, so every
+  // resolved value is a built-in default.
+  let base = app
+    .config_panel
+    .rows
+    .iter()
+    .find(|r| r.key == "worktree.base")
+    .expect("worktree.base resolved");
+  assert_eq!(base.source, ConfigSource::Default);
+}
+
+#[test]
+fn hint_context_follows_focus() {
+  // Issue #217: the statusbar chip + help subtitle read the live focus. The
+  // worktrees pane is the default; focusing the sidebar switches to Status.
+  use gwm::tui::HintContext;
+  let (_dir, mut app) = make_app();
+  app.focus_worktrees();
+  assert_eq!(app.hint_context(), HintContext::Worktrees);
+  app.focus_status();
+  assert_eq!(app.hint_context(), HintContext::Status);
+}
+
+#[test]
 fn focused_panel_border_wears_the_theme_focus_colour() {
   // #185: the focus-swappable panel borders (worktree list ↔ sidebar,
   // toggled with Tab) must paint with the theme `focus` role, not a
@@ -65,41 +162,8 @@ fn focused_panel_border_wears_the_theme_focus_colour() {
   );
   assert_eq!(
     panel_border_color(false, &theme),
-    Color::DarkGray,
-    "unfocused panel stays muted"
-  );
-}
-
-#[test]
-fn header_title_includes_running_version_repo_and_workdir() {
-  // The TUI header surfaces `gwm v<version> — <repo> (<workdir>)`.
-  // Cross-check both halves: the version comes from CARGO_PKG_VERSION
-  // (the same string `gwm --version` prints) and the format wraps
-  // each piece exactly as the docstring describes — so a regression
-  // dropping the `v` prefix, the em-dash, or the repo name fails the
-  // test for the right reason.
-  let title = header_title("gwm-cli", "/Users/kbrdn1/Projects/Perso/gwm-cli");
-  assert!(title.contains("gwm-cli"), "missing repo name: {}", title);
-  assert!(
-    title.contains("/Users/kbrdn1/Projects/Perso/gwm-cli"),
-    "missing workdir: {}",
-    title
-  );
-  let version_token = format!("v{}", env!("CARGO_PKG_VERSION"));
-  assert!(
-    title.contains(&version_token),
-    "missing running version `{}`: {}",
-    version_token,
-    title
-  );
-  // Pin the exact layout so a refactor moving the version pre/post
-  // would have to update this assertion deliberately.
-  assert_eq!(
-    title,
-    format!(
-      " gwm v{} — gwm-cli (/Users/kbrdn1/Projects/Perso/gwm-cli) ",
-      env!("CARGO_PKG_VERSION")
-    )
+    theme.muted,
+    "unfocused panel wears the theme muted role (#170)"
   );
 }
 
@@ -111,11 +175,17 @@ fn new_loads_main_worktree() {
 }
 
 #[test]
-fn enter_create_initializes_form() {
+fn enter_create_opens_focused_on_the_issue_field() {
+  // Issue #217 UX: the modal opens focused on Issue (not the cycle-only
+  // Type field) so the very first keypress edits text instead of being a
+  // silent no-op — the trap that read as "typing is broken". The Type
+  // field keeps its sensible default (index 0) and stays reachable via
+  // Shift-Tab / the field rotation.
   let (_dir, mut app) = make_app();
   app.enter_create();
   assert_eq!(app.view, View::Create);
-  assert_eq!(app.create_form.field, Field::Type);
+  assert_eq!(app.create_form.field, Field::Issue);
+  assert_eq!(app.create_form.type_index, 0, "type keeps its default");
   assert!(app.create_form.issue.is_empty());
   assert!(app.create_form.desc.is_empty());
 }
@@ -124,6 +194,9 @@ fn enter_create_initializes_form() {
 fn create_field_navigation_loops() {
   let (_dir, mut app) = make_app();
   app.enter_create();
+  // Pin the start to Type so this exercises the full rotation contract
+  // independently of where the modal opens its focus (#217).
+  app.create_form.field = Field::Type;
   app.create_next_field();
   assert_eq!(app.create_form.field, Field::Issue);
   app.create_next_field();
@@ -1166,6 +1239,17 @@ fn enter_open_menu_transitions_view() {
 }
 
 #[test]
+fn open_menu_selection_toggles_like_link_prompt() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.enter_open_menu();
+  assert_eq!(app.open_menu_selected, LinkTarget::Issue);
+  app.open_menu_toggle_selection();
+  assert_eq!(app.open_menu_selected, LinkTarget::Pr);
+  app.open_menu_toggle_selection();
+  assert_eq!(app.open_menu_selected, LinkTarget::Issue);
+}
+
+#[test]
 fn open_menu_choose_issue_returns_url_when_linked_and_slug_available() {
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
@@ -1192,12 +1276,74 @@ fn open_menu_pick_returns_none_when_no_link() {
 }
 
 #[test]
+fn link_open_modal_lines_include_available_links_without_refresh_button() {
+  use gwm::tui::{link_open_modal_lines, LinkTarget};
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("random-branch", &head, false).unwrap();
+  }
+  repo.set_head("refs/heads/random-branch").unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.random-branch.gwm-issue", "42").unwrap();
+    cfg.set_str("branch.random-branch.gwm-pr", "7").unwrap();
+  }
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let text = link_open_modal_lines(&app, "Open in Browser", Some(LinkTarget::Issue))
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(text.contains("Issue #42"), "Issue summary missing: {text:?}");
+  assert!(text.contains("PR"), "PR summary missing: {text:?}");
+  assert!(text.contains("#7"), "PR number missing: {text:?}");
+  assert!(
+    !text.contains("Refresh"),
+    "refresh should be advertised in the hint row, not as a third action button: {text:?}"
+  );
+}
+
+#[test]
 fn enter_link_prompt_starts_at_choose_target() {
   let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
   app.enter_link_prompt();
   assert_eq!(app.view, View::LinkPrompt);
   assert_eq!(app.link_prompt_stage(), LinkPromptStage::ChooseTarget);
   assert!(app.link_prompt_number_input().is_empty());
+}
+
+#[test]
+fn link_prompt_status_copy_stays_footer_sized() {
+  // The statusbar pins `app.status` at the right edge. Long modal-control
+  // prose gets clipped at 80 columns, so Link prompt status copy should stay
+  // short; the modal itself owns the detailed key hints.
+  const MAX_STATUS_CHARS: usize = 4;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+
+  app.enter_link_prompt();
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "choose-target status is too long for the footer: {:?}",
+    app.status
+  );
+
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "issue-input status is too long for the footer: {:?}",
+    app.status
+  );
+
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Pr);
+  assert!(
+    app.status.chars().count() <= MAX_STATUS_CHARS,
+    "pr-input status is too long for the footer: {:?}",
+    app.status
+  );
 }
 
 #[test]
@@ -1244,6 +1390,121 @@ fn link_prompt_cancel_returns_to_list() {
 }
 
 #[test]
+fn enter_link_prompt_opens_with_issue_highlighted() {
+  // Issue #217: ChooseTarget is a vertical selectable list that opens
+  // highlighting Issue (the common case).
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue);
+}
+
+#[test]
+fn link_prompt_key_jk_moves_the_highlight_without_committing() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    LinkPromptKey::Handled
+  ));
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Pr, "j moves the highlight down");
+  assert_eq!(
+    app.link_prompt_stage(),
+    LinkPromptStage::ChooseTarget,
+    "moving commits nothing"
+  );
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+  assert_eq!(app.link_prompt_selected(), LinkTarget::Issue, "k moves it back");
+}
+
+#[test]
+fn link_prompt_key_enter_links_the_highlighted_target() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)); // highlight Pr
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    LinkPromptKey::Handled
+  ));
+  assert_eq!(
+    app.link_prompt_stage(),
+    LinkPromptStage::InputNumber,
+    "Enter commits + advances"
+  );
+  assert_eq!(
+    app.link_prompt_target(),
+    Some(LinkTarget::Pr),
+    "it links the highlighted row"
+  );
+}
+
+#[test]
+fn link_prompt_key_i_and_p_remain_direct_picks() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+  assert_eq!(app.link_prompt_target(), Some(LinkTarget::Pr), "p picks PR directly");
+
+  app.enter_link_prompt(); // reset
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+  assert_eq!(
+    app.link_prompt_target(),
+    Some(LinkTarget::Issue),
+    "i picks Issue directly"
+  );
+}
+
+#[test]
+fn link_prompt_key_digits_then_enter_requests_submit() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // link highlighted Issue
+  for c in "4a2".chars() {
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+  }
+  assert_eq!(
+    app.link_prompt_number_input(),
+    "42",
+    "non-digits dropped during InputNumber"
+  );
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    LinkPromptKey::Submit
+  ));
+}
+
+#[test]
+fn link_prompt_key_esc_requests_cancel() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    LinkPromptKey::Cancel
+  ));
+}
+
+#[test]
+fn link_prompt_key_fetch_requests_refresh() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert!(matches!(
+    app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE)),
+    LinkPromptKey::Refresh
+  ));
+}
+
+#[test]
 fn github_fetch_state_default_is_idle() {
   let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
@@ -1285,6 +1546,213 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     GitHubFetchState::Loaded(_) => {}
     other => panic!("expected Loaded for stamped pr 61, got {:?}", other),
   }
+}
+
+fn sample_issue(n: u64) -> gwm::github::IssueStatus {
+  sample_issue_titled(n, "x")
+}
+
+fn sample_issue_titled(n: u64, title: &str) -> gwm::github::IssueStatus {
+  gwm::github::IssueStatus {
+    number: n,
+    title: title.into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  }
+}
+
+/// Drive the spine exactly as `refresh_github_status` does for one issue
+/// fetch: claim a generation and flip the cache to `Loading`. Returns the
+/// generation the (simulated) worker must tag its result with. Mirrors the
+/// real spawn path without an OS thread or a real `gh`.
+fn request_github_issue(app: &mut gwm::tui::App, n: u64) -> u64 {
+  use gwm::tui::{FetchKey, TaskKind};
+  let generation = app
+    .tasks
+    .request(TaskKind::GithubIssue(n))
+    .expect("a cold GitHub issue slot must hand out a generation");
+  app.github.mark_loading(FetchKey::Issue(n));
+  generation
+}
+
+/// Invalidate the GitHub side exactly as navigation / explicit `F` does:
+/// drop any in-flight worker on the spine AND flush the result cache (the
+/// navigation invariant — the two always move together).
+fn invalidate_github_for_test(app: &mut gwm::tui::App) {
+  use gwm::tui::TaskKind;
+  app.tasks.invalidate_matching(TaskKind::is_github);
+  app.github.invalidate();
+}
+
+#[test]
+fn stale_github_fetch_result_loses_to_a_newer_generation() {
+  // Codex adversarial-review (PR #260) finding, fixed by #255: pre-spine the
+  // GitHub fetch deduped on a per-key `inflight` HashSet with NO generation,
+  // so two workers for the SAME key (request → invalidate → request) were
+  // indistinguishable. Whichever result drained first claimed the single
+  // slot; if the STALE worker reported before the FRESH one, the stale data
+  // was stamped and the fresh result dropped. On the spine each fetch owns a
+  // generation, so the fresh (newer-generation) result wins regardless of
+  // arrival order.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+
+  // Worker A claims the first generation for Issue(42).
+  let gen_a = request_github_issue(&mut app, 42);
+  // User navigates away and back (or presses F again): the slot is freed and
+  // the generation bumped, then Worker B claims a fresh generation.
+  invalidate_github_for_test(&mut app);
+  let gen_b = request_github_issue(&mut app, 42);
+  assert_ne!(gen_a, gen_b, "the second fetch must own a distinct generation");
+
+  // Both workers finish. Drain FRESH (B) FIRST, STALE (A) LAST — the
+  // discriminating order: plain last-write-wins would let the stale result
+  // clobber the fresh one, so only a working generation guard (drop A as
+  // superseded) yields FRESH. The reverse order would pass even with a
+  // broken always-apply guard, so it can't catch a regression.
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::GithubIssue(gen_b, 42, Ok(sample_issue_titled(42, "FRESH"))))
+    .unwrap();
+  tx.send(TaskMsg::GithubIssue(gen_a, 42, Ok(sample_issue_titled(42, "STALE"))))
+    .unwrap();
+  app.drain_task_results();
+
+  match app.issue_fetch_state() {
+    GitHubFetchState::Loaded(s) => assert_eq!(
+      s.title, "FRESH",
+      "the fresh (newer-generation) result must win the retry race, not the stale one"
+    ),
+    other => panic!("expected Loaded(FRESH), got {:?}", other),
+  }
+}
+
+#[test]
+fn a_simultaneous_refresh_keeps_its_status_over_the_github_report() {
+  // Behaviour-preserving guard (issue #255): pre-spine the event loop drained
+  // the GitHub channel before the task channel, so when a worktree refresh and
+  // a GitHub fetch completed on the same tick, `apply_refreshed_worktrees`'
+  // "refreshed — N" message ran last and stood. Now both drain in one pass; the
+  // post-loop GitHub report is gated on `!refresh_applied` to preserve that.
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+
+  // A GitHub fetch and a worktree refresh are both in flight.
+  let g_gen = request_github_issue(&mut app, 42);
+  let r_gen = app
+    .tasks
+    .request(TaskKind::RefreshWorktrees)
+    .expect("a cold refresh slot must hand out a generation");
+
+  // Both land on the same drain.
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::GithubIssue(g_gen, 42, Ok(sample_issue(42)))).unwrap();
+  tx.send(TaskMsg::RefreshWorktrees(r_gen, Ok(Vec::new()))).unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.status.starts_with("refreshed —"),
+    "the refresh message must win a simultaneous completion (pre-#255 order), got {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_applies_async_github_result() {
+  // Issue #217 (threading on the spine since #255): a result delivered
+  // off-thread (over the task channel) is applied by `drain_task_results`,
+  // flipping the Loading state to Loaded.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // Claim a generation + mark Loading exactly as `refresh_github_status` would.
+  let generation = request_github_issue(&mut app, 42);
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loading));
+  assert!(app.is_github_loading(), "request must mark the app as loading");
+
+  // A background worker reports back; we inject through the same channel.
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Loaded(_)));
+  assert!(!app.is_github_loading(), "no fetch should be inflight after draining");
+}
+
+#[test]
+fn drain_drops_async_result_invalidated_mid_flight() {
+  // The #138 guarantee on the spine (issue #255): a result whose generation
+  // was bumped by an intervening navigation/invalidate is dropped rather
+  // than stamped into the now-active worktree's cache.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let generation = request_github_issue(&mut app, 42);
+  // User navigates away → the cache is flushed and the spine slot bumped.
+  invalidate_github_for_test(&mut app);
+  // The late shell-out result arrives after the invalidate, tagged with the
+  // now-stale generation.
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
+    .unwrap();
+  app.drain_task_results();
+  assert!(
+    matches!(app.issue_fetch_state(), GitHubFetchState::Idle),
+    "a result invalidated mid-flight must be dropped, not applied"
+  );
+}
+
+#[test]
+fn drain_is_a_noop_with_no_pending_results() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  assert!(!app.drain_task_results(), "empty channel must report nothing applied");
+}
+
+#[test]
+fn drain_does_not_report_when_only_stale_results_arrive() {
+  // Issue #217 review (P2), preserved on the spine: a result whose
+  // generation was bumped (the user navigated away) is dropped by the
+  // generation guard; the drain must NOT then stamp "github status
+  // refreshed" over the current status message.
+  use gwm::tui::TaskMsg;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let generation = request_github_issue(&mut app, 42);
+  invalidate_github_for_test(&mut app); // navigated away → slot bumped
+  app.status = "path: /somewhere/else".into();
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubIssue(generation, 42, Ok(sample_issue(42))))
+    .unwrap();
+
+  let applied = app.drain_task_results();
+
+  assert!(!applied, "a dropped stale result must not count as applied");
+  assert_eq!(
+    app.status, "path: /somewhere/else",
+    "a stale result must not overwrite the current status message"
+  );
+}
+
+#[test]
+fn hint_context_prioritises_an_open_modal_over_pane_focus() {
+  // Issue #217 review (P2): when a modal is open the statusbar must show the
+  // modal's context, not the pane behind it. Pressing `n` in the create form
+  // types text — advertising the worktrees `n new` hint there is misleading.
+  use gwm::tui::{HintContext, View};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.focus_status(); // pane focus would otherwise resolve to Status
+  app.view = View::Create;
+  assert_eq!(app.hint_context(), HintContext::Create);
+  app.view = View::Confirm;
+  assert_eq!(app.hint_context(), HintContext::Confirm);
+  app.view = View::CommandPalette;
+  assert_eq!(app.hint_context(), HintContext::CommandPalette);
+  // Back on the list, the pane focus is honoured again.
+  app.view = View::List;
+  assert_eq!(app.hint_context(), HintContext::Status);
 }
 
 #[test]
@@ -1427,11 +1895,16 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   // Re-resolve the slug now that the remote exists.
   app.refresh_link();
 
-  let gh = dir.path().join("fake-gh");
-  // Write a fake `gh` that detects PR `n` (both `pr list` and `pr view`).
-  let write_gh = |n: u64| {
+  // Write a fake `gh` (detecting PR `n` via both `pr list` and `pr view`)
+  // to its own path. Two distinct scripts — never one rewritten in place —
+  // because the first refresh spawns an off-thread `pr view` worker (issue
+  // #255) that may still be executing its script when the second refresh
+  // fires. Truncating a script mid-exec raced that worker (`ETXTBSY` on
+  // Linux → the re-detect's spawn fails → `None`): the #248 flake. Keeping
+  // every script write-once / exec-many removes the race on any OS.
+  let write_gh = |path: &std::path::Path, n: u64| {
     std::fs::write(
-      &gh,
+      path,
       format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
@@ -1442,11 +1915,14 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
       ),
     )
     .unwrap();
-    let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&gh, perms).unwrap();
+    std::fs::set_permissions(path, perms).unwrap();
   };
-  write_gh(128);
+  let gh_first = dir.path().join("fake-gh-128");
+  let gh_second = dir.path().join("fake-gh-200");
+  write_gh(&gh_first, 128);
+  write_gh(&gh_second, 200);
 
   // Serialise against the other env-mutating tests in this binary.
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -1454,7 +1930,7 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   // SAFETY: env mutation is guarded by `env_lock()` above; GWM_GH is
   // restored at the end of the test, before returning.
   unsafe {
-    std::env::set_var("GWM_GH", &gh);
+    std::env::set_var("GWM_GH", &gh_first);
   }
 
   // First refresh: nothing linked → detect PR #128.
@@ -1464,8 +1940,12 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
 
   // The branch's PR changed (e.g. closed + reopened as #200). A detected
   // link is "resolved live", so a second refresh must re-detect rather
-  // than stick to #128 (issue #181 — Copilot review on PR #184).
-  write_gh(200);
+  // than stick to #128 (issue #181 — Copilot review on PR #184). Point at
+  // the second script — written once, never the file the first refresh's
+  // worker is still execing — so the re-detect can't race that exec.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_second);
+  }
   app.refresh_github_status();
 
   unsafe {
@@ -1654,7 +2134,7 @@ fn branch_name_color_codes_synced_branch_as_green() {
     behind: 0,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&synced), Color::Green);
+  assert_eq!(branch_name_color(&synced, &Theme::default()), Color::Green);
 }
 
 #[test]
@@ -1670,7 +2150,7 @@ fn branch_name_color_codes_dirty_branch_as_red() {
     behind: 0,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&dirty), Color::Red);
+  assert_eq!(branch_name_color(&dirty, &Theme::default()), Color::Red);
 }
 
 #[test]
@@ -1689,8 +2169,8 @@ fn branch_name_color_codes_ahead_or_behind_as_yellow() {
     behind: 2,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&ahead), Color::Yellow);
-  assert_eq!(branch_name_color(&behind), Color::Yellow);
+  assert_eq!(branch_name_color(&ahead, &Theme::default()), Color::Yellow);
+  assert_eq!(branch_name_color(&behind, &Theme::default()), Color::Yellow);
 }
 
 #[test]
@@ -1706,7 +2186,7 @@ fn branch_name_color_codes_unpublished_branch_as_magenta() {
     behind: 0,
     unknown: false,
   };
-  assert_eq!(branch_name_color(&unpublished), Color::Magenta);
+  assert_eq!(branch_name_color(&unpublished, &Theme::default()), Color::Magenta);
 }
 
 #[test]
@@ -1715,25 +2195,34 @@ fn branch_name_color_codes_unknown_status_as_darkgray() {
     unknown: true,
     ..BranchStatus::default()
   };
-  assert_eq!(branch_name_color(&unknown), Color::DarkGray);
+  assert_eq!(branch_name_color(&unknown, &Theme::default()), Color::DarkGray);
 }
 
 #[test]
 fn freshness_color_picks_green_for_recent_branches() {
-  assert_eq!(freshness_color(Duration::from_secs(0)), Color::Green);
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 3)), Color::Green);
+  assert_eq!(freshness_color(Duration::from_secs(0), &Theme::default()), Color::Green);
   assert_eq!(
-    freshness_color(Duration::from_secs(86_400 * 6 + 3600 * 23)),
+    freshness_color(Duration::from_secs(86_400 * 3), &Theme::default()),
+    Color::Green
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 6 + 3600 * 23), &Theme::default()),
     Color::Green
   );
 }
 
 #[test]
 fn freshness_color_picks_yellow_for_one_to_four_week_branches() {
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 7)), Color::Yellow);
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 15)), Color::Yellow);
   assert_eq!(
-    freshness_color(Duration::from_secs(86_400 * 29 + 3600 * 23)),
+    freshness_color(Duration::from_secs(86_400 * 7), &Theme::default()),
+    Color::Yellow
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 15), &Theme::default()),
+    Color::Yellow
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 29 + 3600 * 23), &Theme::default()),
     Color::Yellow
   );
 }
@@ -1742,8 +2231,14 @@ fn freshness_color_picks_yellow_for_one_to_four_week_branches() {
 fn freshness_color_picks_darkgray_for_stale_branches() {
   // Branches older than a month read as "stale" — gwm encourages cleanup
   // via `gwm doctor`, so the colour reinforces the prompt.
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 30)), Color::DarkGray);
-  assert_eq!(freshness_color(Duration::from_secs(86_400 * 365)), Color::DarkGray);
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 30), &Theme::default()),
+    Color::DarkGray
+  );
+  assert_eq!(
+    freshness_color(Duration::from_secs(86_400 * 365), &Theme::default()),
+    Color::DarkGray
+  );
 }
 
 #[test]
@@ -1752,10 +2247,10 @@ fn pr_badge_color_maps_each_state_to_its_lazygit_palette() {
   // draft=darkgray, merged=magenta, closed=red. The actual lazygit RGB
   // shades are slightly off-palette for terminal themes; we use the
   // 16-color names so the dots respect the user's colour scheme.
-  assert_eq!(pr_badge_color(PrState::Open), Color::Green);
-  assert_eq!(pr_badge_color(PrState::Draft), Color::DarkGray);
-  assert_eq!(pr_badge_color(PrState::Merged), Color::Magenta);
-  assert_eq!(pr_badge_color(PrState::Closed), Color::Red);
+  assert_eq!(pr_badge_color(PrState::Open, &Theme::default()), Color::Green);
+  assert_eq!(pr_badge_color(PrState::Draft, &Theme::default()), Color::DarkGray);
+  assert_eq!(pr_badge_color(PrState::Merged, &Theme::default()), Color::Magenta);
+  assert_eq!(pr_badge_color(PrState::Closed, &Theme::default()), Color::Red);
 }
 
 // Ensure the IssueState variants stay accessible — once `branch_name_color`
@@ -1869,7 +2364,7 @@ fn table_marker_for_main_worktree_is_yellow_star() {
   let mut w = worktree_fixture("main");
   w.is_main = true;
   w.link = BranchLink::empty();
-  let (label, color) = gwm::tui::table_marker(&w);
+  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
   assert_eq!(label, "★");
   assert_eq!(color, Color::Yellow);
 }
@@ -1889,7 +2384,7 @@ fn table_marker_for_linked_non_main_is_neutral_dot() {
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
-  let (label, color) = gwm::tui::table_marker(&w);
+  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
   assert_eq!(label, "●");
   assert_eq!(color, Color::Cyan);
 }
@@ -1900,7 +2395,7 @@ fn table_marker_for_unlinked_non_main_is_blank() {
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
   w.link = BranchLink::empty();
-  let (label, _color) = gwm::tui::table_marker(&w);
+  let (label, _color) = gwm::tui::table_marker(&w, &Theme::default());
   assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
 }
 
@@ -1965,7 +2460,7 @@ fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
 #[test]
 fn sidebar_sections_omit_commands_block() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -1995,7 +2490,7 @@ fn sidebar_sections_omit_inline_section_headers() {
   // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
   // disappear from the content lines.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -2010,7 +2505,7 @@ fn sidebar_sections_omit_inline_section_headers() {
 #[test]
 fn sidebar_worktree_section_is_compact_identity() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let text = section_text(&sections.worktree);
 
   assert!(text.contains("api-rest"), "name on top line: {}", text);
@@ -2033,7 +2528,7 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
   // Compact identity block: name, branch · head, badges, path → 4 lines target.
   // Allow ≤5 to leave headroom for variable badges.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   assert!(
     sections.worktree.len() <= 5,
     "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
@@ -2077,7 +2572,7 @@ fn working_tree_status_line_preserves_raw_text() {
     "R  old.rs -> new.rs",
   ] {
     assert_eq!(
-      section_text_single(&working_tree_status_line(raw)),
+      section_text_single(&working_tree_status_line(raw, &Theme::default())),
       raw,
       "raw text preserved for {:?}",
       raw
@@ -2087,7 +2582,7 @@ fn working_tree_status_line_preserves_raw_text() {
 
 #[test]
 fn working_tree_status_line_staged_only_is_cyan() {
-  let line = working_tree_status_line("A  staged.rs");
+  let line = working_tree_status_line("A  staged.rs", &Theme::default());
   assert_eq!(line.spans[0].content.as_ref(), "A");
   assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
   assert_eq!(
@@ -2099,7 +2594,7 @@ fn working_tree_status_line_staged_only_is_cyan() {
 
 #[test]
 fn working_tree_status_line_unstaged_modified_is_yellow() {
-  let line = working_tree_status_line(" M tracked.rs");
+  let line = working_tree_status_line(" M tracked.rs", &Theme::default());
   assert_eq!(line.spans[1].content.as_ref(), "M");
   assert_eq!(
     line.spans[1].style.fg,
@@ -2115,7 +2610,7 @@ fn working_tree_status_line_unstaged_modified_is_yellow() {
 
 #[test]
 fn working_tree_status_line_untracked_is_green() {
-  let line = working_tree_status_line("?? untracked.rs");
+  let line = working_tree_status_line("?? untracked.rs", &Theme::default());
   assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
   assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
   assert_eq!(
@@ -2132,7 +2627,7 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
   // panic mid-codepoint when the first chars are multi-byte UTF-8. Split on
   // char boundaries instead — no panic, and the exact text is preserved.
   let raw = "éM café.rs"; // X='é' (2 bytes), Y='M', sep=' ', path="café.rs"
-  let line = working_tree_status_line(raw);
+  let line = working_tree_status_line(raw, &Theme::default());
   assert_eq!(
     section_text_single(&line),
     raw,
@@ -2144,7 +2639,7 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
 fn working_tree_status_line_partially_staged_splits_status_columns() {
   // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
   // dominant worktree colour (yellow) since it carries unstaged changes.
-  let line = working_tree_status_line("AM both.rs");
+  let line = working_tree_status_line("AM both.rs", &Theme::default());
   assert_eq!(line.spans[0].content.as_ref(), "A");
   assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
   assert_eq!(line.spans[1].content.as_ref(), "M");
@@ -2162,7 +2657,7 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
   // those flags — only the ones that are true add visual noise.
   let mut w = detailed_worktree_fixture();
   w.is_main = false;
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let text = section_text(&sections.worktree);
   assert!(
     !text.contains("★ main"),
@@ -2195,7 +2690,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     behind: 0,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -2215,7 +2710,7 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     behind: 3,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -2231,7 +2726,7 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
   // synced label *should* still display `✓`. Guards against an over-eager
   // fix that would drop the sigil everywhere.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
   assert!(badge.contains("synced"), "label must still say synced: {}", badge);
@@ -2281,6 +2776,45 @@ fn line_visible_width(line: &ratatui::text::Line<'static>) -> usize {
 }
 
 #[test]
+fn github_status_idle_body_does_not_render_fetch_prompt() {
+  // The fetch affordance lives in the pane title (`Issue / PR [F]`) and in
+  // statusbar/modal hints, not as a body row competing with issue/PR data.
+  let (_dir, _repo, app) = make_app_on_branch("feat/#42-tui-search");
+  let lines = gwm::tui::github_status_lines(&app, 80);
+  let text: String = lines
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+    .collect::<Vec<_>>()
+    .join(" ");
+  assert!(
+    !text.contains("press "),
+    "fetch prompt should not render inside the Issue/PR body: {text}"
+  );
+}
+
+#[test]
+fn github_status_loading_uses_the_animated_spinner_frame() {
+  use gwm::tui::FetchKey;
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.github.mark_loading(FetchKey::Issue(42));
+
+  let first = gwm::tui::github_status_lines(&app, 80)
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+  app.spinner.tick();
+  let second = gwm::tui::github_status_lines(&app, 80)
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(first.contains("loading"), "loading label missing: {first:?}");
+  assert_ne!(first, second, "loading rows should animate with the App spinner");
+}
+
+#[test]
 fn issue_summary_line_truncates_loaded_state_to_budget() {
   // Regression: with a 48-column sidebar, a fully-loaded issue line was
   // `#67 (auto) [open] <40-char title>` ≈ 58 chars, overflowing the
@@ -2303,6 +2837,7 @@ fn issue_summary_line_truncates_loaded_state_to_budget() {
     gwm::github::LinkSource::BranchName,
     &GitHubFetchState::Loaded(status),
     30,
+    &Theme::default(),
   );
   let width = line_visible_width(&line);
   assert!(
@@ -2332,6 +2867,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     gwm::github::LinkSource::BranchName,
     &GitHubFetchState::Loaded(status),
     35,
+    &Theme::default(),
   );
   let width = line_visible_width(&line);
   assert!(
@@ -2358,6 +2894,7 @@ fn issue_summary_line_keeps_short_title_intact() {
     gwm::github::LinkSource::Explicit,
     &GitHubFetchState::Loaded(status),
     80,
+    &Theme::default(),
   );
   let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
@@ -2381,6 +2918,7 @@ fn issue_summary_line_truncates_error_state_to_budget() {
       "gh: API rate limit exceeded for user, retry after 60s with exponential backoff please".into(),
     ),
     30,
+    &Theme::default(),
   );
   let width = line_visible_width(&line);
   assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
@@ -2423,7 +2961,7 @@ fn recent_commits_lines_respects_limit_when_repo_has_more() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 14); // 15 total commits (1 seed + 14)
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 5);
+  let lines = recent_commits_lines(&w, 5, &Theme::default());
   assert_eq!(
     lines.len(),
     5,
@@ -2436,7 +2974,7 @@ fn recent_commits_lines_respects_limit_when_repo_has_more() {
 fn recent_commits_lines_returns_all_when_under_limit() {
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 100);
+  let lines = recent_commits_lines(&w, 100, &Theme::default());
   assert_eq!(
     lines.len(),
     1,
@@ -2452,7 +2990,7 @@ fn recent_commits_lines_reuses_cached_rows_for_unchanged_head() {
   let mut w = worktree_pointing_at_dir(dir.path());
   w.head = Some(repo.head().unwrap().target().unwrap().to_string());
 
-  let first = recent_commits_lines(&w, 4);
+  let first = recent_commits_lines(&w, 4, &Theme::default());
   let first_text: Vec<String> = first
     .iter()
     .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
@@ -2460,7 +2998,7 @@ fn recent_commits_lines_reuses_cached_rows_for_unchanged_head() {
   drop(repo);
 
   std::fs::rename(dir.path().join(".git"), dir.path().join(".git.hidden")).unwrap();
-  let second = recent_commits_lines(&w, 4);
+  let second = recent_commits_lines(&w, 4, &Theme::default());
   let second_text: Vec<String> = second
     .iter()
     .map(|line| line.spans.iter().map(|span| span.content.as_ref()).collect())
@@ -2478,14 +3016,14 @@ fn recent_commits_cache_is_scoped_to_worktree_path() {
   let mut cached = worktree_pointing_at_dir(dir.path());
   cached.head = Some(repo.head().unwrap().target().unwrap().to_string());
 
-  let first = recent_commits_lines(&cached, 1);
+  let first = recent_commits_lines(&cached, 1, &Theme::default());
   let first_text: String = first[0].spans.iter().map(|span| span.content.as_ref()).collect();
 
   let other = tempfile::TempDir::new().unwrap();
   let mut same_oid_different_path = worktree_pointing_at_dir(other.path());
   same_oid_different_path.head = cached.head.clone();
 
-  let second = recent_commits_lines(&same_oid_different_path, 1);
+  let second = recent_commits_lines(&same_oid_different_path, 1, &Theme::default());
   let second_text: String = second[0].spans.iter().map(|span| span.content.as_ref()).collect();
 
   assert!(
@@ -2522,7 +3060,7 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 30); // 31 total commits
   let w = worktree_pointing_at_dir(dir.path());
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits);
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
   assert_eq!(
     sections.recent_commits.len(),
     31,
@@ -2658,7 +3196,7 @@ fn recent_commits_line_marks_merge_commit_with_bullseye() {
   let (dir, repo) = init_repo();
   add_merge_commit(&repo);
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 10);
+  let lines = recent_commits_lines(&w, 10, &Theme::default());
   // Find the merge commit row by subject; assert it carries ◎ somewhere.
   let merge = lines
     .iter()
@@ -2725,7 +3263,7 @@ fn graph_glyph_table_matches_lazygit_truth_table() {
 fn graph_linear_history_emits_single_column_circles() {
   // Three commits, each pointing at the next: c (parent b) → b (parent a) → a (no parent).
   let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
-  let graphs = render_commits(&rows);
+  let graphs = render_commits(&rows, &Theme::default());
   assert_eq!(graphs.len(), 3);
   // Each row should be a 2-cell render (one column → 2 chars).
   for (idx, g) in graphs.iter().enumerate() {
@@ -2752,7 +3290,7 @@ fn graph_merge_commit_carries_bullseye_and_branch_corners() {
   //   b (parent a)         ← side branch
   //   a (no parent)        ← trunk root
   let rows = vec![test_row("c", &["a", "b"]), test_row("b", &["a"]), test_row("a", &[])];
-  let graphs = render_commits(&rows);
+  let graphs = render_commits(&rows, &Theme::default());
   // Row 0 = merge commit, must carry ◎.
   let merge_text = spans_to_text(&graphs[0]);
   assert!(merge_text.contains('◎'), "merge row must carry ◎, got {:?}", merge_text);
@@ -2801,7 +3339,7 @@ fn graph_pipe_set_merge_commit_emits_extra_starts_per_parent() {
 
 #[test]
 fn graph_render_pipe_set_empty_input_returns_empty() {
-  let graphs = render_commits(&[]);
+  let graphs = render_commits(&[], &Theme::default());
   assert!(graphs.is_empty());
 }
 
@@ -2811,7 +3349,7 @@ fn graph_row_width_is_deterministic_on_commit_list() {
   // topology — it must NOT depend on terminal width or external state.
   // Snapshot the linear-history width so a regression caught quickly.
   let rows = vec![test_row("c", &["b"]), test_row("b", &["a"]), test_row("a", &[])];
-  let graphs = render_commits(&rows);
+  let graphs = render_commits(&rows, &Theme::default());
   for g in &graphs {
     let text = spans_to_text(g);
     let chars = text.chars().count();
@@ -2836,7 +3374,7 @@ fn graph_render_pipe_set_handles_single_pipe_starts() {
     to_hash: to.hash,
     kind: PipeKind::Starts,
   }];
-  let spans = render_pipe_set(&pipes);
+  let spans = render_pipe_set(&pipes, &Theme::default());
   let text = spans_to_text(&spans);
   // Cell 0: ○ + filler (space, since right has no neighbor)
   assert!(text.starts_with('○'), "expected ○ glyph at column 0, got {:?}", text);
@@ -2846,7 +3384,7 @@ fn graph_render_pipe_set_handles_single_pipe_starts() {
 fn recent_commits_line_marks_normal_commit_with_open_circle() {
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
     joined.contains('○'),
@@ -2866,7 +3404,7 @@ fn recent_commits_line_starts_with_short_hash() {
   // COMMIT_HASH_DISPLAY_LEN hex chars (8 by default, matching lazygit).
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   assert_eq!(lines.len(), 1, "init_repo should produce 1 commit");
   let head_span = lines[0]
     .spans
@@ -2892,7 +3430,7 @@ fn recent_commits_line_includes_author_initials_after_hash() {
   // init_repo signs commits as "gwm-test" — a single token → first 2 chars.
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   // Initials live as a styled span after the hash + double space.
   assert!(
@@ -2909,7 +3447,7 @@ fn recent_commits_line_carries_subject_unclipped() {
   // sidebars would lose information). Verify the full subject is preserved.
   let (dir, _repo) = init_repo();
   let w = worktree_pointing_at_dir(dir.path());
-  let lines = recent_commits_lines(&w, 1);
+  let lines = recent_commits_lines(&w, 1, &Theme::default());
   let joined: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
     joined.contains("init"),
@@ -3203,6 +3741,156 @@ run  = "echo trapped"
   }
 }
 
+// ---- Issue #256: bootstrap on the async-task spine ----------------------
+//
+// `bootstrap_selected` claims a `TaskKind::Bootstrap` generation and spawns
+// a worker (after the synchronous TOFU gate above); the worker's
+// `TaskMsg::Bootstrap` is applied by `drain_task_results`. These tests pin
+// the drain side — the result handling and late-drop guard — without a real
+// OS thread, mirroring the GitHub / sync drain tests.
+
+#[test]
+fn bootstrap_selected_with_no_selection_reports_and_does_not_load() {
+  // The early guard runs before the trust gate and the spawn: with nothing
+  // selected there is no worktree to bootstrap, so no generation is claimed.
+  let (_dir, mut app) = make_app();
+  app.worktrees.clear();
+  app.bootstrap_selected();
+  assert_eq!(app.status, "nothing selected");
+  assert!(!app.is_task_loading(), "no worktree selected → no task claimed");
+}
+
+#[test]
+fn drain_applies_async_bootstrap_report_and_flips_to_report_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  // Claim a generation exactly as `bootstrap_selected` would after the gate.
+  let generation = app
+    .tasks
+    .request(TaskKind::Bootstrap)
+    .expect("a cold bootstrap slot must hand out a generation");
+  assert!(app.is_task_loading(), "request must mark the app as loading");
+
+  let report = BootstrapReport {
+    steps: vec![StepResult::ok("copy .env"), StepResult::ok("post_create hook")],
+  };
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(generation, Ok(report)))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a live bootstrap result must be applied");
+  assert_eq!(app.view, View::Report, "completion flips to the Report view");
+  assert!(app.report.is_some(), "the report is stored for the Report view");
+  assert_eq!(app.status, "bootstrap ok");
+  assert!(!app.is_task_loading(), "completion clears the in-flight slot");
+}
+
+#[test]
+fn drain_bootstrap_report_with_a_failed_step_says_had_failures() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  let generation = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  let report = BootstrapReport {
+    steps: vec![
+      StepResult::ok("copy .env"),
+      StepResult::failed("post_create hook", "exit 1"),
+    ],
+  };
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(generation, Ok(report)))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Report, "a partial failure still shows the report");
+  assert_eq!(app.status, "bootstrap had failures");
+}
+
+#[test]
+fn a_late_bootstrap_result_is_dropped_and_keeps_the_list_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  // A worker is in flight, then an invalidate bumps the generation (e.g. a
+  // second `b` press coalesced after an invalidate) — the stale worker's
+  // result must not flip the view to its now-superseded report.
+  let stale = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  app.tasks.invalidate(TaskKind::Bootstrap);
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(
+      stale,
+      Ok(BootstrapReport {
+        steps: vec![StepResult::ok("stale")],
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::List, "a dropped late result must not flip the view");
+  assert!(app.report.is_none(), "a dropped late result must not store a report");
+}
+
+#[test]
+fn drain_bootstrap_error_reports_status_and_does_not_flip_to_report() {
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  let generation = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(generation, Err("disk full".into())))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(
+    app.view,
+    View::List,
+    "a failed bootstrap stays on the list, no Report to show"
+  );
+  assert!(app.report.is_none());
+  assert_eq!(app.status, "bootstrap error: disk full");
+}
+
+#[test]
+fn drain_bootstrap_report_flips_to_report_even_from_another_view() {
+  // The bootstrap is async now (issue #256): between the `b` press and the
+  // result, the user may have navigated elsewhere (e.g. opened the create
+  // form). A live result still flips to the Report view — the user asked for
+  // the bootstrap, so its outcome takes the screen. This pins the
+  // always-flip choice (vs only flipping from the list view); a behaviour
+  // change from the old synchronous path, which had no such window.
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-x");
+
+  let generation = app.tasks.request(TaskKind::Bootstrap).unwrap();
+  app.view = View::Create;
+  app
+    .task_result_sender()
+    .send(TaskMsg::Bootstrap(
+      generation,
+      Ok(BootstrapReport {
+        steps: vec![StepResult::ok("copy .env")],
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(
+    app.view,
+    View::Report,
+    "a live bootstrap result takes the screen even mid-create"
+  );
+}
+
 // ---- Issue #106: LinkTarget canonical location --------------------------
 //
 // The `LinkTarget` enum was duplicated between `cli.rs` and
@@ -3241,4 +3929,410 @@ fn fresh_app_spinner_starts_at_first_frame() {
   use gwm::tui::state::spinner::DOT_FRAMES;
   let (_dir, app) = make_app();
   assert_eq!(app.spinner.glyph(DOT_FRAMES), DOT_FRAMES[0]);
+}
+
+#[test]
+fn help_scroll_clamps_between_zero_and_max() {
+  // Issue #217 follow-up: the Keybindings overlay scrolls when the help
+  // outgrows the modal. `help_max_scroll` is published by the renderer
+  // each frame; the offset clamps to `[0, max]` and resets on (re)open.
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  assert_eq!(app.view, View::Help);
+  assert_eq!(app.help_scroll, 0, "a freshly opened help starts at the top");
+
+  // Simulate the renderer having measured 3 rows of overflow.
+  app.help_max_scroll = 3;
+  app.help_scroll_down();
+  app.help_scroll_down();
+  assert_eq!(app.help_scroll, 2);
+  app.help_scroll_down();
+  app.help_scroll_down();
+  assert_eq!(app.help_scroll, 3, "scroll-down clamps at the published max");
+
+  app.help_scroll_up();
+  assert_eq!(app.help_scroll, 2);
+  for _ in 0..10 {
+    app.help_scroll_up();
+  }
+  assert_eq!(app.help_scroll, 0, "scroll-up clamps at the top");
+
+  // Re-opening help resets the offset.
+  app.help_scroll = 2;
+  app.enter_help();
+  assert_eq!(app.help_scroll, 0, "(re)opening help returns to the top");
+}
+
+#[test]
+fn help_horizontal_scroll_clamps_between_zero_and_max() {
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  assert_eq!(app.help_x_scroll, 0);
+
+  app.help_max_x_scroll = 2;
+  app.help_scroll_right();
+  assert_eq!(app.help_x_scroll, 1);
+  app.help_scroll_right();
+  app.help_scroll_right();
+  assert_eq!(app.help_x_scroll, 2, "scroll-right clamps at the published max");
+
+  app.help_scroll_left();
+  assert_eq!(app.help_x_scroll, 1);
+  app.help_scroll_left();
+  app.help_scroll_left();
+  assert_eq!(app.help_x_scroll, 0, "scroll-left clamps at the left edge");
+
+  app.help_x_scroll = 2;
+  app.enter_help();
+  assert_eq!(app.help_x_scroll, 0, "(re)opening help returns to the left edge");
+}
+
+#[test]
+fn create_key_typing_appends_to_the_focused_text_field() {
+  // Issue #217 follow-up: the create key handling is an `App` method so the
+  // typing path is unit-testable (not just `push_char` in isolation).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  for c in "my-feat".chars() {
+    assert!(matches!(
+      app.handle_create_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE)),
+      CreateKey::Handled
+    ));
+  }
+  assert_eq!(app.create_form.desc, "my-feat");
+}
+
+#[test]
+fn create_key_rejects_issue_letters_with_status_feedback() {
+  // Issue #220 visual pass: the modal opens on the digits-only Issue field.
+  // A stray letter must not leak into Desc, but it also must not look like
+  // typing is broken; the status bar explains the contract.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert_eq!(app.create_form.field, Field::Issue);
+
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert!(app.create_form.issue.is_empty());
+  assert!(
+    app.create_form.desc.is_empty(),
+    "non-digit Issue input must stay on Issue and never append to Desc"
+  );
+  assert!(
+    app.status.contains("digits"),
+    "status should explain the digits-only Issue field, got {:?}",
+    app.status
+  );
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.issue, "7");
+  assert!(app.create_form.desc.is_empty());
+}
+
+#[test]
+fn create_key_hl_cycles_the_type_only_when_type_is_focused() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  // h/l type cycling only fires while the Type field is focused; pin it
+  // here since the modal now opens on Issue (#217).
+  app.create_form.field = Field::Type;
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.type_index, 1, "l advances the type");
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.type_index, 0, "h steps back");
+  // On a text field, h / l are literal input, not type cycling — otherwise
+  // we'd recreate the very "can't type these letters" bug we're avoiding.
+  app.create_form.field = Field::Desc;
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE));
+  assert_eq!(app.create_form.desc, "hl");
+  assert_eq!(app.create_form.type_index, 0, "type stays put while editing desc");
+}
+
+#[test]
+fn create_key_enter_advances_then_submits_on_desc() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Issue;
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  ));
+  assert_eq!(
+    app.create_form.field,
+    Field::Desc,
+    "Enter off the desc field advances focus"
+  );
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Submit
+  ));
+}
+
+#[test]
+fn create_key_esc_requests_cancel() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert!(matches!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    CreateKey::Cancel
+  ));
+}
+
+// ---------------------------------------------------------------------------
+// Async-task layer — off-thread worktree refresh (issue #231)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn drain_applies_async_refresh_result() {
+  // Issue #231: a worktree list refresh delivered off-thread (over the task
+  // channel) is applied by `drain_task_results`, swapping in the fresh list
+  // and clearing the loading slot — the deterministic analogue of the
+  // background worker, with no real OS thread (the flaky-thread-test trap).
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  // Claim the slot exactly as `request_refresh` would, without spawning.
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  assert!(app.is_task_loading(), "request must mark the app as loading");
+
+  let fresh = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(generation, Ok(fresh)))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert_eq!(app.worktrees.len(), 2, "the fresh list replaces the old one");
+  assert!(!app.is_task_loading(), "no task should be inflight after draining");
+  assert!(
+    app.status.contains("refreshed"),
+    "status reports the refresh outcome: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_async_refresh_invalidated_mid_flight() {
+  // Issue #231 carries the #138 guarantee onto the generic spine: a refresh
+  // result whose generation was bumped by an intervening invalidate is
+  // dropped, leaving the current list untouched.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let before = app.worktrees.len();
+  let stale = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  // The run is superseded (e.g. a fresh `f` or a future invalidation hook).
+  app.tasks.invalidate(TaskKind::RefreshWorktrees);
+  // The late worker reports back after the bump.
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(stale, Ok(vec![worktree_fixture("ghost")])))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.worktrees.len(),
+    before,
+    "a refresh invalidated mid-flight must be dropped, not applied"
+  );
+}
+
+#[test]
+fn drain_async_refresh_failure_surfaces_status_without_touching_the_list() {
+  // Off-thread refresh converts what used to be a fatal `refresh()?` (which
+  // tore down the event loop) into a graceful status message; the list is
+  // left as-is so the UI keeps showing the last good state.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let before = app.worktrees.len();
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(generation, Err("boom".into())))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a failure still counts as a drained result");
+  assert_eq!(app.worktrees.len(), before, "a failed refresh leaves the list intact");
+  assert!(!app.is_task_loading(), "the slot clears even on failure");
+  assert!(
+    app.status.contains("boom"),
+    "the error reaches the status bar: {:?}",
+    app.status
+  );
+}
+
+fn sync_report_integrated(behind: usize) -> gwm::sync::SyncReport {
+  gwm::sync::SyncReport {
+    branch: "feat/#258-x".into(),
+    upstream: "origin/main".into(),
+    strategy: gwm::sync::SyncStrategy::Rebase,
+    ahead_before: 0,
+    behind_before: behind,
+    action: gwm::sync::SyncAction::Integrated,
+  }
+}
+
+#[test]
+fn drain_applies_sync_report_and_reports_the_outcome() {
+  // Issue #258: a `gwm sync` result delivered off-thread is applied by
+  // `drain_task_results`, which re-lists the worktrees (so the new
+  // ahead/behind shows) and reports the sync outcome on the status bar.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  // Claim the Sync slot exactly as `request_sync` would, without spawning.
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  assert!(app.is_task_loading(), "request must mark the app as loading");
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(generation, "alpha".into(), Ok(sync_report_integrated(3))))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert!(!app.is_task_loading(), "the sync slot clears after draining");
+  assert!(
+    app.status.contains("rebased 3 commits"),
+    "status reports the sync outcome, not the refresh line: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_sync_failure_surfaces_on_the_status_bar() {
+  // A refused/failed sync (dirty tree, no upstream, conflicts) surfaces as a
+  // status message rather than tearing anything down.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(
+      generation,
+      "alpha".into(),
+      Err("branch 'feat/#258-x' has no upstream configured".into()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a failure still counts as a drained result");
+  assert!(!app.is_task_loading(), "the slot clears even on failure");
+  assert!(
+    app.status.contains("sync failed") && app.status.contains("no upstream"),
+    "the sync error reaches the status bar: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_a_superseded_sync_result() {
+  // The #138 guard on the sync path: a worker whose generation was bumped by
+  // an intervening invalidate is dropped, leaving the status untouched.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::Sync).unwrap();
+  app.tasks.invalidate(TaskKind::Sync);
+  app.status = "untouched".into();
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(stale, "alpha".into(), Ok(sync_report_integrated(2))))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.status, "untouched",
+    "a sync result invalidated mid-flight must be dropped, not reported"
+  );
+}
+
+#[test]
+fn request_sync_coalesces_onto_an_inflight_run() {
+  // A second `S` press while a sync is already in flight must not spawn a
+  // second rebase — `request_sync` coalesces and returns early (zero threads).
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  // The main worktree is selected by default, so request_sync gets past the
+  // selection check and reaches the coalesce branch.
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  app.request_sync(); // coalesced — no panic, no second worker
+  assert!(app.is_task_loading());
+  assert!(
+    app.tasks.complete(TaskKind::Sync, generation),
+    "the original sync is still authoritative after a coalesced press"
+  );
+}
+
+#[test]
+fn request_sync_with_no_selection_reports_and_does_not_claim_a_slot() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  // Drop the selection so there is no worktree to sync.
+  app.list_state.select(None);
+  app.request_sync();
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sync),
+    "with nothing selected, request_sync must not claim a sync slot"
+  );
+  assert!(
+    app.status.contains("no worktree selected"),
+    "request_sync reports the missing selection: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn request_refresh_coalesces_onto_an_inflight_run() {
+  // A second `f` press while a refresh is already in flight must not spawn a
+  // second worker — `request_refresh` coalesces and returns early (so this
+  // test spawns zero threads).
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app.request_refresh(); // coalesced — no panic, no second worker
+  assert!(app.is_task_loading());
+  assert!(
+    app.tasks.complete(TaskKind::RefreshWorktrees, generation),
+    "the original run is still the authoritative one after a coalesced press"
+  );
+}
+
+#[test]
+fn sync_refresh_invalidates_an_inflight_async_refresh() {
+  // Issue #231 race guard: a synchronous `refresh()` (the create / delete /
+  // report-close path) must bump the task generation so a still-in-flight
+  // async refresh — spawned with a *pre-mutation* snapshot — is dropped
+  // rather than clobbering the authoritative post-mutation list.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  // An async refresh is in flight (claimed exactly as `request_refresh` would).
+  let stale = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  // A delete/create lands and re-lists synchronously while the worker runs.
+  app.refresh().unwrap();
+  let authoritative = app.worktrees.len();
+  // The pre-mutation worker now reports its stale snapshot.
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(stale, Ok(vec![worktree_fixture("ghost")])))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.worktrees.len(),
+    authoritative,
+    "the stale pre-mutation snapshot must not replace the sync-refreshed list"
+  );
+  assert!(
+    !app.worktrees.iter().any(|w| w.name == "ghost"),
+    "the dropped result's payload must never reach the list"
+  );
 }

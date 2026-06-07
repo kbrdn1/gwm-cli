@@ -18,8 +18,9 @@
 //!
 //! Differences from lazygit, all intentional:
 //!
-//! - **Single green palette** — `Color::Green` for connectors and
-//!   `Color::Green` + bold for `○` / `◎` nodes. Lazygit uses per-author
+//! - **Single `branch`-role palette** — the theme's `branch` role for
+//!   connectors and `branch` + bold for `○` / `◎` nodes (a flat
+//!   `Color::Green` before the #170 theme audit). Lazygit uses per-author
 //!   MD5→HSL→RGB colours; we skip that for now — every commit on `gwm`
 //!   is authored by the same person, so the rainbow is wasted ink. The
 //!   green matches the `Worktree` block's "synced" status badge for
@@ -36,10 +37,11 @@
 //!   `from_pos == to_pos == commit_pos`) is skipped in
 //!   [`render_pipe_set`] so it doesn't overwrite the node glyph.
 
+use super::theme::Theme;
 use crate::worktree::CommitRow;
 use git2::Oid;
 use ratatui::{
-  style::{Color, Modifier, Style},
+  style::{Modifier, Style},
   text::Span,
 };
 use std::collections::HashSet;
@@ -152,7 +154,7 @@ pub fn box_drawing_chars(up: bool, down: bool, left: bool, right: bool) -> (char
 /// commit. Zero OID is outside normal `git log` output and keeps pipe
 /// comparisons allocation-free.
 fn start_hash() -> Oid {
-  Oid::zero()
+  Oid::ZERO_SHA1
 }
 
 /// Walk `commits` once, producing the per-row pipe sets. This is the
@@ -324,7 +326,7 @@ fn get_next_pipes(prev_pipes: &[Pipe], commit: &CommitRow) -> Vec<Pipe> {
 
 /// Render a single pipe set into ratatui spans, two spans per cell. Port
 /// of lazygit's `renderPipeSet` (`graph.go:275-385`).
-pub fn render_pipe_set(pipes: &[Pipe]) -> Vec<Span<'static>> {
+pub fn render_pipe_set(pipes: &[Pipe], theme: &Theme) -> Vec<Span<'static>> {
   let mut max_pos: i16 = 0;
   let mut commit_pos: i16 = 0;
   let mut start_count: usize = 0;
@@ -365,8 +367,10 @@ pub fn render_pipe_set(pipes: &[Pipe]) -> Vec<Span<'static>> {
     c.set_type(if is_merge { CellType::Merge } else { CellType::Commit });
   }
 
-  let connector_style = Style::default().fg(Color::Green);
-  let node_style = Style::default().fg(Color::Green).add_modifier(Modifier::BOLD);
+  // The commit graph draws branch topology, so it follows the `branch`
+  // role (pre-theme this was a flat `Color::Green`).
+  let connector_style = Style::default().fg(theme.branch);
+  let node_style = Style::default().fg(theme.branch).add_modifier(Modifier::BOLD);
 
   let mut out: Vec<Span<'static>> = Vec::with_capacity(cells.len() * 2);
   for cell in &cells {
@@ -428,10 +432,10 @@ fn apply_pipe(cells: &mut [Cell], pipe: &Pipe) {
 
 /// One-shot helper: compute pipe sets for the commit list and render
 /// each row's spans. Output length matches `commits.len()`.
-pub fn render_commits(commits: &[CommitRow]) -> Vec<Vec<Span<'static>>> {
+pub fn render_commits(commits: &[CommitRow], theme: &Theme) -> Vec<Vec<Span<'static>>> {
   build_pipe_sets(commits)
     .into_iter()
-    .map(|pipes| render_pipe_set(&pipes))
+    .map(|pipes| render_pipe_set(&pipes, theme))
     .collect()
 }
 

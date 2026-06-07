@@ -120,7 +120,7 @@ fn compute_status(repo: &Repository) -> BranchStatus {
 
   // Ahead / behind vs upstream
   if let Ok(head_ref) = repo.head() {
-    if let Some(shorthand) = head_ref.shorthand() {
+    if let Ok(shorthand) = head_ref.shorthand() {
       if let Ok(local_branch) = repo.find_branch(shorthand, BranchType::Local) {
         if let Ok(upstream) = local_branch.upstream() {
           if let (Some(local_oid), Some(up_oid)) = (head_ref.target(), upstream.into_reference().target()) {
@@ -176,7 +176,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   // The main worktree is not listed by git2::Repository::worktrees(); add it manually.
   if let Some(workdir) = repo.workdir() {
     let head_ref = repo.head().ok();
-    let branch = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
+    let branch = head_ref
+      .as_ref()
+      .and_then(|r| r.shorthand().ok().map(|s| s.to_string()));
     let head = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
     let link = branch
       .as_deref()
@@ -201,7 +203,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   }
 
   let names = repo.worktrees()?;
-  for name in names.iter().flatten() {
+  // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
+  // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
+  for name in names.iter().filter_map(|r| r.ok().flatten()) {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
@@ -217,7 +221,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let (branch, head, status, age) = match Repository::open(&path) {
       Ok(sub) => {
         let head_ref = sub.head().ok();
-        let b = head_ref.as_ref().and_then(|r| r.shorthand().map(|s| s.to_string()));
+        let b = head_ref
+          .as_ref()
+          .and_then(|r| r.shorthand().ok().map(|s| s.to_string()));
         let h = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
         let s = compute_status(&sub);
         // The trunk-baseline lookup must run against the main repo's
@@ -294,7 +300,7 @@ pub fn add(
   // record points at the actual parent (`main` / `dev` / a release
   // train), not the freshly-created `branch_name` itself.
   let head_ref = repo.head()?;
-  let head_short = head_ref.shorthand().map(|s| s.to_string());
+  let head_short = head_ref.shorthand().ok().map(|s| s.to_string());
   let head_commit = head_ref.peel_to_commit()?;
   let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
     Ok(b) => {
@@ -340,7 +346,7 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
 
   // Capture the branch (if any) so we can drop it after pruning.
   let branch_name = match Repository::open(&path) {
-    Ok(sub) => sub.head().ok().and_then(|r| r.shorthand().map(|s| s.to_string())),
+    Ok(sub) => sub.head().ok().and_then(|r| r.shorthand().ok().map(|s| s.to_string())),
     Err(_) => None,
   };
 
@@ -392,7 +398,9 @@ pub struct PrunableEntry {
 pub fn prunable_worktrees(repo: &Repository) -> Result<Vec<PrunableEntry>> {
   let names = repo.worktrees()?;
   let mut out = Vec::new();
-  for name in names.iter().flatten() {
+  // `StringArray::iter` yields `Result<Option<&str>, _>`; skip both the
+  // `Err` (non-UTF-8 entry) and `None` arms so `name` is a plain `&str`.
+  for name in names.iter().filter_map(|r| r.ok().flatten()) {
     let wt = match repo.find_worktree(name) {
       Ok(w) => w,
       Err(_) => continue,
@@ -533,7 +541,7 @@ fn recent_commits_revwalk(repo: &Repository, tip: git2::Oid, limit: usize) -> Re
       hash: oid,
       author: commit.author().name().unwrap_or("").to_string(),
       parents: commit.parent_ids().collect(),
-      subject: commit.summary().unwrap_or("").to_string(),
+      subject: commit.summary().ok().flatten().unwrap_or("").to_string(),
     });
   }
   Ok(rows)
@@ -570,24 +578,38 @@ fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
   Ok(rows)
 }
 
+/// Run `git -C <dir> <args>`, returning stdout verbatim on success or a
+/// [`GwmError::CommandFailed`] carrying the verb and git's stderr on a
+/// non-zero exit (or the spawn error if `git` could not be launched).
+///
+/// This is the single shell-out helper for the read-side git invocations
+/// (sidebar previews, PR-body fillers) and for `gwm sync`'s mutating steps
+/// (issue #237 deduped five hand-rolled copies of this exact pattern).
+/// Callers that need trimming, truncation, or field parsing post-process the
+/// returned `String` themselves.
+pub fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
+  let out = Command::new("git")
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .output()
+    .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
+  if !out.status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git {} exited {}: {}",
+      args.join(" "),
+      out.status,
+      String::from_utf8_lossy(&out.stderr).trim()
+    )));
+  }
+  Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Shell out to `git log --oneline -n <n>` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview recent commits of the selected worktree.
 pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["log", "--oneline", "-n"])
-    .arg(n.to_string())
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git log exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+  let n = n.to_string();
+  run_git(path, &["log", "--oneline", "-n", &n])
 }
 
 /// Shell out to `git log --pretty=- %s <base>..<head>` inside `path`
@@ -597,21 +619,8 @@ pub fn git_log_oneline(path: &Path, n: usize) -> Result<String> {
 /// PR body without extra formatting.
 pub fn git_log_subject_between(path: &Path, base: &str, head: &str) -> Result<String> {
   let range = format!("{}..{}", base, head);
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["log", "--pretty=format:- %s"])
-    .arg(&range)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git log failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git log exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+  let out = run_git(path, &["log", "--pretty=format:- %s", &range])?;
+  Ok(out.trim_end().to_string())
 }
 
 /// Shell out to `git diff --stat <base>..<head>` inside `path`. The
@@ -619,21 +628,7 @@ pub fn git_log_subject_between(path: &Path, base: &str, head: &str) -> Result<St
 /// doesn't blow up the PR body (issue #84: 30-line cap by convention).
 pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usize) -> Result<String> {
   let range = format!("{}..{}", base, head);
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["diff", "--stat"])
-    .arg(&range)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git diff failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git diff exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  let raw = String::from_utf8_lossy(&output.stdout);
+  let raw = run_git(path, &["diff", "--stat", &range])?;
   let mut lines: Vec<&str> = raw.lines().collect();
   let truncated = lines.len() > max_lines;
   if truncated {
@@ -687,20 +682,7 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   // past the cap. Pre-review the limit was applied client-side after
   // the full stdout was read.
   let limit_arg = format!("-n{}", limit);
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git stash list failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git stash list exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  let raw = String::from_utf8_lossy(&output.stdout);
+  let raw = run_git(path, &["stash", "list", "--pretty=format:%gd\x1f%s", &limit_arg])?;
   let entries = raw
     .lines()
     .filter(|line| !line.is_empty())
@@ -718,20 +700,7 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
 /// Shell out to `git status --short` inside `path` and return raw stdout.
 /// Used by the TUI sidebar to preview the working-tree state.
 pub fn git_status_short(path: &Path) -> Result<String> {
-  let output = Command::new("git")
-    .arg("-C")
-    .arg(path)
-    .args(["status", "--short"])
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "git status exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+  run_git(path, &["status", "--short"])
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a
@@ -841,4 +810,30 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
       matches.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
     ))),
   }
+}
+
+/// Pick a base ref for `gwm pr` by walking the `configured` trunks list
+/// first, then the common defaults (`main`, `master`, `dev`, `develop`,
+/// `trunk`) so a repo whose local trunk is `master` and which hasn't
+/// customised `[doctor]` doesn't fall back to a non-existent `"main"`.
+/// Returns `None` only if none of the candidates resolve to a local
+/// branch — the caller then uses `"main"` as a last resort so the
+/// downstream `gh pr create --base main` produces a clean error message
+/// instead of a panic.
+pub fn resolve_trunk(repo: &Repository, configured: &[String]) -> Option<String> {
+  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
+  for trunk in configured {
+    if repo.find_branch(trunk, BranchType::Local).is_ok() {
+      return Some(trunk.clone());
+    }
+  }
+  for trunk in COMMON_TRUNKS {
+    if configured.iter().any(|t| t == trunk) {
+      continue; // already tried as a configured trunk above
+    }
+    if repo.find_branch(trunk, BranchType::Local).is_ok() {
+      return Some((*trunk).to_string());
+    }
+  }
+  None
 }

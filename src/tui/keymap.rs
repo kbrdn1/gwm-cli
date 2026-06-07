@@ -108,10 +108,13 @@ define_actions! {
   CycleSidebarLayout => "cycle_sidebar_layout",
   ToggleSidebarPosition => "toggle_sidebar_position",
   FocusSwap         => "focus_swap",
+  FocusWorktrees    => "focus_worktrees",
+  FocusStatus       => "focus_status",
   // Filter
   Filter            => "filter",
   // Lifecycle / mutating
   Refresh           => "refresh",
+  Sync              => "sync",
   Create            => "create",
   DeleteConfirm     => "delete",
   Bootstrap         => "bootstrap",
@@ -122,9 +125,12 @@ define_actions! {
   Yank              => "yank",
   Open              => "open",
   OpenMenu          => "open_menu",
+  OpenDocs          => "open_docs",
   LinkPrompt        => "link",
   FetchGithub       => "fetch_github",
   // Overlays
+  CommandLogs       => "command_logs",
+  ConfigPanel       => "config_panel",
   Help              => "help",
   Quit              => "quit",
   // Future surface — bound to ':' by default, picked up by #32.
@@ -386,8 +392,15 @@ impl Keymap {
       def(Action::CycleSidebarLayout, &["V"]),
       def(Action::ToggleSidebarPosition, &["H"]),
       def(Action::FocusSwap, &["Tab"]),
+      def(Action::FocusWorktrees, &["1"]),
+      def(Action::FocusStatus, &["2"]),
+      def(Action::CommandLogs, &["3"]),
+      def(Action::ConfigPanel, &["4"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),
+      // `s` is taken by ToggleSidebarMode, so Sync defaults to `S` — an
+      // uppercase lifecycle verb alongside `F` (FetchGithub) / `R` (Review).
+      def(Action::Sync, &["S"]),
       def(Action::Create, &["n"]),
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),
@@ -397,6 +410,7 @@ impl Keymap {
       def(Action::Yank, &["y"]),
       def(Action::Open, &["o"]),
       def(Action::OpenMenu, &["O"]),
+      def(Action::OpenDocs, &["."]),
       def(Action::LinkPrompt, &["L"]),
       def(Action::FetchGithub, &["F"]),
       def(Action::Help, &["?"]),
@@ -523,6 +537,22 @@ impl Keymap {
   /// rendered table stays stable across runs.
   pub fn list(&self) -> Vec<Binding> {
     self.entries.clone()
+  }
+
+  /// The canonical rendering of the **first** chord bound to `action`,
+  /// or `None` when the action is unbound. Used by UI copy that names a
+  /// key inline (e.g. pane titles such as `Issue / PR [F]`,
+  /// issue #224) so the hint tracks user overrides under `[tui.keys]`
+  /// instead of hard-coding a default that may have been rebound. A
+  /// multi-chord action returns its first chord in declaration order,
+  /// matching what `gwm tui keys` lists first.
+  pub fn primary_chord(&self, action: Action) -> Option<String> {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .and_then(|b| b.chords.first())
+      .map(|chord| format_chord(chord))
   }
 }
 

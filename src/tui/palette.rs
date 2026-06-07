@@ -62,6 +62,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "refresh the worktree list",
     },
     PaletteEntry {
+      action: Action::Sync,
+      name: "sync",
+      description: "sync the selected worktree onto its upstream (rebase)",
+    },
+    PaletteEntry {
       action: Action::Open,
       name: "open",
       description: "open the selected worktree (shell / editor / finder)",
@@ -70,6 +75,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       action: Action::OpenMenu,
       name: "open-menu",
       description: "open issue or PR URL in the browser",
+    },
+    PaletteEntry {
+      action: Action::OpenDocs,
+      name: "open-docs",
+      description: "open the gwm documentation in the browser",
     },
     PaletteEntry {
       action: Action::LinkPrompt,
@@ -132,6 +142,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "swap focus between worktree list and sidebar",
     },
     PaletteEntry {
+      action: Action::FocusWorktrees,
+      name: "focus-worktrees",
+      description: "focus the worktrees pane",
+    },
+    PaletteEntry {
+      action: Action::FocusStatus,
+      name: "focus-status",
+      description: "focus the status pane (opens it if hidden)",
+    },
+    PaletteEntry {
       action: Action::Top,
       name: "top",
       description: "jump to the first worktree",
@@ -150,6 +170,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       action: Action::Up,
       name: "up",
       description: "select the previous worktree",
+    },
+    PaletteEntry {
+      action: Action::CommandLogs,
+      name: "command-logs",
+      description: "show the command logs overlay",
+    },
+    PaletteEntry {
+      action: Action::ConfigPanel,
+      name: "config-panel",
+      description: "show the resolved configuration panel",
     },
     PaletteEntry {
       action: Action::Help,

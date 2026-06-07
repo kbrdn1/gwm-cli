@@ -10,14 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Docs
-
-- 📝 Sync the root `README.md` landing page to the v0.8.0 surface and fix the MSRV badge (`1.80+` → `1.82+`) ([#203](https://github.com/kbrdn1/gwm-cli/issues/203)). The "what gwm does" list now covers the config CLI + user-level global config, lifecycle hooks, CLI aliases + Gitmoji, the GitHub `gwm new` / `gwm pr` workflow with PR auto-detection, safety-daily (`--dry-run`, `gwm undo` / `gwm history`), `gwm sync`, and TUI personalisation (themes / remappable keymap / command palette / stashes). Follow-up to the #199 docs refresh — landing page only, every feature keeps its dedicated section under `docs/`.
+_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`0.9.0`](changelogs/0.9.0.md) — 2026-06-07
 - [`0.8.0`](changelogs/0.8.0.md) — 2026-06-01
 - [`0.7.0`](changelogs/0.7.0.md) — 2026-05-23
 - [`0.6.0`](changelogs/0.6.0.md) — 2026-05-21
@@ -31,6 +30,9 @@ In reverse chronological order:
 
 Per-RC notes covering only the delta against the previous RC (or against the previous stable, for `rc.1`):
 
+- [`0.9.0-rc.3`](changelogs/pre-releases/0.9.0-rc.3.md) — 2026-06-07
+- [`0.9.0-rc.2`](changelogs/pre-releases/0.9.0-rc.2.md) — 2026-06-06
+- [`0.9.0-rc.1`](changelogs/pre-releases/0.9.0-rc.1.md) — 2026-06-02
 - [`0.8.0-rc.5`](changelogs/pre-releases/0.8.0-rc.5.md) — 2026-06-01
 - [`0.8.0-rc.4`](changelogs/pre-releases/0.8.0-rc.4.md) — 2026-05-29
 - [`0.8.0-rc.3`](changelogs/pre-releases/0.8.0-rc.3.md) — 2026-05-29

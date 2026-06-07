@@ -24,11 +24,14 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-pub use app::{App, LauncherPlan, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use state::async_task::{TaskKind, TaskMsg, TaskRunner};
+pub use state::command_logs::CommandLogs;
+pub use state::config_panel::ConfigPanel;
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
-pub use state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
+pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
 pub use state::sidebar::SidebarState;
 
@@ -52,12 +55,27 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, badge_group_width, branch_name_color, build_sidebar_sections, ellipsize_middle,
-  filled_cells_for_progress, footer_line, freshness_color, header_line, header_title, help_lines, help_rows,
-  issue_badge_color, issue_summary_line, panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines,
-  table_marker, tilde_compress_with_home, working_tree_status_line, HelpRow, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
+  author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
+  build_sidebar_sections, centered_abs, chip_style, confirm_buttons_line, confirm_delete_branch_line,
+  confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle, field_input_line,
+  filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines, header_line,
+  help_body_section_color, help_label_style, help_lines, help_rows, help_section_style, issue_badge_color,
+  issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_line,
+  modal_hint_line, palette_name_style, pane_counter, panel_border_color, pr_badge_color, pr_summary_line,
+  recent_commits_lines, recent_items_pane_title, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_pane_title, working_tree_status_line, worktree_name_style,
+  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
   RECENT_COMMITS_LIMIT,
 };
+
+/// The single TUI render entry point. **Not part of the public SemVer
+/// surface** — exposed only so the modal render net in `tests/` (issue
+/// #235) can drive each overlay through the same `draw` path the event
+/// loop uses, pinning modal layout against future `ui.rs` refactors. The
+/// per-modal `draw_*` helpers stay private; this mirrors the
+/// `#[doc(hidden)] pub mod commit_graph` convention above.
+#[doc(hidden)]
+pub use ui::draw;
 
 pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   // Construct the App BEFORE touching the terminal: if discovery / config
@@ -132,6 +150,25 @@ fn confirm_fire(app: &mut App) {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
+    // Generic off-thread tasks (issue #231; GitHub fetch folded in by #255):
+    // apply any worker results that landed since the last tick — the
+    // off-thread worktree refresh and the `gh issue/pr view` fetches all
+    // report over this one channel now. Drained before the draw so the frame
+    // reflects the freshly-applied results, and the loader animates below
+    // while any of them is still in flight (200ms poll cadence).
+    app.drain_task_results();
+    if app.is_github_loading() || app.is_task_loading() {
+      app.spinner.tick();
+    }
+
+    // Keep the Command Logs overlay live (issue #226): re-snapshot the
+    // global log each tick while it is open so a command that finishes
+    // off-thread (e.g. the GitHub fetch) appears without reopening. The
+    // scroll cursor is preserved; the renderer re-clamps it.
+    if app.view == View::CommandLogs {
+      app.command_logs.sync();
+    }
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before
@@ -236,26 +273,53 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       }
       View::Help => match key.code {
         KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.view = View::List,
+        // Scroll the Keybindings overlay when it outgrows the modal (#217).
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.help_scroll_right(),
+        KeyCode::Left | KeyCode::Char('h') => app.help_scroll_left(),
+        KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
+        KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
         _ => {}
       },
-      View::Create => match key.code {
-        KeyCode::Esc => app.view = View::List,
-        KeyCode::Tab => app.create_next_field(),
-        KeyCode::BackTab => app.create_prev_field(),
-        KeyCode::Enter => {
-          if app.create_form.field == Field::Desc {
-            if let Err(e) = app.submit_create() {
-              app.status = format!("error: {}", e);
-            }
-          } else {
-            app.create_next_field();
+      // Command Logs overlay (issue #226). Scrolls like the help overlay;
+      // closes on Esc / `q` or the bound `command_logs` key (default `3`)
+      // so the open key toggles it shut even when rebound.
+      View::CommandLogs => match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+        KeyCode::Down | KeyCode::Char('j') => app.command_logs.scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.command_logs.scroll_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.command_logs.scroll_right(),
+        KeyCode::Left | KeyCode::Char('h') => app.command_logs.scroll_left(),
+        KeyCode::Home | KeyCode::Char('g') => app.command_logs.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.command_logs.scroll_to_bottom(),
+        _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
+        _ => {}
+      },
+      // Configuration panel (issue #232). Scrolls like the help / Command
+      // Logs overlays; closes on Esc / `q` or the bound `config_panel` key
+      // (default `4`) so the open key toggles it shut even when rebound.
+      View::Config => match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+        KeyCode::Down | KeyCode::Char('j') => app.config_panel.scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.config_panel.scroll_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.config_panel.scroll_right(),
+        KeyCode::Left | KeyCode::Char('h') => app.config_panel.scroll_left(),
+        KeyCode::Home | KeyCode::Char('g') => app.config_panel.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.config_panel.scroll_to_bottom(),
+        _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
+        _ => {}
+      },
+      // Create-overlay keys live in a testable `App` method (issue #217);
+      // the loop only owns the two side effects (submit / close).
+      View::Create => match app.handle_create_key(key) {
+        CreateKey::Submit => {
+          if let Err(e) = app.submit_create() {
+            app.status = format!("error: {}", e);
           }
         }
-        KeyCode::Up if app.create_form.field == Field::Type => app.create_prev_type(),
-        KeyCode::Down if app.create_form.field == Field::Type => app.create_next_type(),
-        KeyCode::Char(c) if app.create_form.field != Field::Type => app.create_push_char(c),
-        KeyCode::Backspace if app.create_form.field != Field::Type => app.create_pop_char(),
-        _ => {}
+        CreateKey::Cancel => app.view = View::List,
+        CreateKey::Handled => {}
       },
       View::Confirm => match key.code {
         // `y` confirms directly regardless of which button is focused
@@ -268,6 +332,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           ConfirmButton::Cancel => app.confirm_dismiss(),
         },
         KeyCode::Char('n') | KeyCode::Esc => app.confirm_dismiss(),
+        _ if app.key_matches_action(key, Action::ToggleDeleteBranch) => app.toggle_delete_branch(),
         // Button focus navigation (#187). `←` / `h` → Confirm,
         // `→` / `l` → Cancel, `Tab` toggles.
         KeyCode::Left | KeyCode::Char('h') => app.confirm.focus_confirm(),
@@ -284,6 +349,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       },
       View::OpenMenu => match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.exit_open_menu(),
+        KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up => app.open_menu_toggle_selection(),
+        KeyCode::Enter => {
+          if let Some(url) = app.open_menu_pick(app.open_menu_selected) {
+            open_url(&url, &mut app);
+          }
+        }
         KeyCode::Char('i') => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
             open_url(&url, &mut app);
@@ -294,20 +365,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
             open_url(&url, &mut app);
           }
         }
+        _ if app.key_matches_action(key, Action::FetchGithub) => app.refresh_github_status(),
         _ => {}
       },
-      View::LinkPrompt => match (app.link_prompt_stage(), key.code) {
-        (_, KeyCode::Esc) => app.link_prompt_cancel(),
-        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => app.link_prompt_choose(LinkTarget::Issue),
-        (app::LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => app.link_prompt_choose(LinkTarget::Pr),
-        (app::LinkPromptStage::InputNumber, KeyCode::Enter) => {
+      // Link-prompt keys live in a testable `App` method (issue #217); the
+      // loop only owns the two side effects (submit shell-out / close).
+      View::LinkPrompt => match app.handle_link_prompt_key(key) {
+        LinkPromptKey::Submit => {
           if let Err(e) = app.link_prompt_submit() {
             app.status = format!("link failed: {}", e);
           }
         }
-        (app::LinkPromptStage::InputNumber, KeyCode::Char(c)) => app.link_prompt_push_char(c),
-        (app::LinkPromptStage::InputNumber, KeyCode::Backspace) => app.link_prompt_pop_char(),
-        _ => {}
+        LinkPromptKey::Refresh => app.refresh_github_status(),
+        LinkPromptKey::Cancel => app.link_prompt_cancel(),
+        LinkPromptKey::Handled => {}
       },
       // Issue #32: command palette overlay. Palette entry names
       // are restricted to `[a-z0-9_-]` (see
@@ -418,9 +489,14 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::CycleSidebarLayout => app.cycle_sidebar_layout(),
     Action::ToggleSidebarPosition => app.toggle_sidebar_position(),
     Action::FocusSwap => app.toggle_focus(),
+    Action::FocusWorktrees => app.focus_worktrees(),
+    Action::FocusStatus => app.focus_status(),
     Action::Filter => app.enter_filter(),
-    Action::Refresh => app.refresh()?,
-    Action::Help => app.view = View::Help,
+    // Issue #231: the user-initiated refresh runs off-thread so a large
+    // repo / slow filesystem no longer freezes the TUI. A failed re-list
+    // now surfaces on the status bar instead of tearing down the loop.
+    Action::Refresh => app.request_refresh(),
+    Action::Help => app.enter_help(),
     Action::Yank => yank_selected_path_to_clipboard(app),
     Action::Open => match app.resolve_open_target() {
       None => app.status = "nothing selected".into(),
@@ -439,8 +515,16 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::Create if !app.picker_mode => app.enter_create(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
+    // Issue #258: `gwm sync` of the selected worktree, off-thread on the
+    // spine. Mutating, so disabled in picker mode like create / delete.
+    Action::Sync if !app.picker_mode => app.request_sync(),
     Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
     Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
+    // Read-only and selection-independent, like `open` / `yank` / `git_tui`
+    // — not picker-gated, so `gwm switch` can open the docs too (issue #233,
+    // Codex review on #268). Gating it would silently no-op a key the help
+    // overlay advertises in picker mode.
+    Action::OpenDocs => open_url(DOCS_URL, app),
     Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
     Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
     Action::Review if !app.picker_mode => {
@@ -455,6 +539,14 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // CommandPalette → run_action loop terminates cleanly (the
     // overlay just stays open).
     Action::CommandPalette => app.open_command_palette(),
+    // Issue #226: `3` opens the Command Logs overlay. Not picker-gated —
+    // it is a read-only transcript, harmless inside `gwm switch`, and
+    // mirrors Help / the palette which also open from any List state.
+    Action::CommandLogs => app.enter_command_logs(),
+    // Issue #232: `4` opens the Configuration panel. Like the Command Logs
+    // overlay it is read-only and not picker-gated — harmless inside
+    // `gwm switch`, opening from any List state.
+    Action::ConfigPanel => app.enter_config_panel(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into
@@ -646,7 +738,16 @@ fn yank_selected_path_to_clipboard(app: &mut App) {
   app.status = "y: no clipboard tool found (install pbcopy / wl-copy / xclip / xsel / clip)".into();
 }
 
-/// Spawn the OS opener for `url` (used by the OpenMenu key handler).
+/// Canonical documentation URL opened by the `.` key (issue #233).
+///
+/// Derived from the crate's `repository` (Cargo.toml) so a fork points at
+/// its own docs without a patch — there is no standalone docs site
+/// deployed yet, so the MVP target is the docs tree on the repo's default
+/// branch. A `[docs]` config override is a possible follow-up.
+pub const DOCS_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/tree/main/docs");
+
+/// Spawn the OS opener for `url` (used by the OpenMenu key handler and the
+/// `.` open-docs key, issue #233).
 /// Failures land in the status bar — we never propagate up.
 fn open_url(url: &str, app: &mut App) {
   let opener = if cfg!(target_os = "macos") {

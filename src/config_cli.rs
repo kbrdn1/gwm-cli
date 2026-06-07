@@ -35,7 +35,7 @@ pub fn set(key: &str, raw_value: Option<&str>) -> Result<()> {
   let resolved_key = set_value(doc.as_table_mut(), &segments, value)?;
   write_and_validate(&path, &doc)?;
   let rendered = resolved_value(&Config::load_for_repo(&root)?, &resolved_key)?;
-  println!("{} = {}", resolved_key, format_list_value(&rendered));
+  println!("{} = {}", resolved_key, crate::config::format_list_value(&rendered));
   Ok(())
 }
 
@@ -68,7 +68,7 @@ pub fn list(prefix: Option<&str>) -> Result<()> {
   let cfg = Config::load_for_repo(&root)?;
   let value = toml::Value::try_from(cfg).map_err(|e| GwmError::Config(e.to_string()))?;
   let mut rows = Vec::new();
-  flatten_value("", &value, &mut rows);
+  crate::config::flatten_value("", &value, &mut rows);
   for (key, value) in rows {
     if prefix
       .map(|p| key == p || key.starts_with(&format!("{}.", p)) || key.starts_with(&format!("{}[", p)))
@@ -329,42 +329,10 @@ fn remove_value(table: &mut Table, segments: &[Segment]) -> Result<()> {
   }
 }
 
-fn flatten_value(prefix: &str, value: &toml::Value, rows: &mut Vec<(String, String)>) {
-  match value {
-    toml::Value::Table(table) => {
-      for (key, value) in table {
-        let next = if prefix.is_empty() {
-          key.to_string()
-        } else {
-          format!("{}.{}", prefix, key)
-        };
-        flatten_value(&next, value, rows);
-      }
-    }
-    toml::Value::Array(values) if values.iter().all(toml::Value::is_table) => {
-      for (i, value) in values.iter().enumerate() {
-        flatten_value(&format!("{}[{}]", prefix, i), value, rows);
-      }
-    }
-    _ => rows.push((prefix.to_string(), format_list_value(value))),
-  }
-}
-
 fn format_get_value(value: &toml::Value) -> String {
   match value {
     toml::Value::String(s) => s.clone(),
-    _ => format_list_value(value),
-  }
-}
-
-fn format_list_value(value: &toml::Value) -> String {
-  match value {
-    toml::Value::String(s) => format!("{:?}", s),
-    toml::Value::Integer(i) => i.to_string(),
-    toml::Value::Float(f) => f.to_string(),
-    toml::Value::Boolean(b) => b.to_string(),
-    toml::Value::Datetime(d) => d.to_string(),
-    toml::Value::Array(_) | toml::Value::Table(_) => value.to_string(),
+    _ => crate::config::format_list_value(value),
   }
 }
 

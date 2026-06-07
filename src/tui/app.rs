@@ -1,9 +1,12 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
+use super::state::async_task::{TaskKind, TaskMsg, TaskRunner};
+use super::state::command_logs::CommandLogs;
+use super::state::config_panel::ConfigPanel;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
-use super::state::create_form::CreateForm;
+use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
-use super::state::github_fetch::GitHubFetch;
+use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
@@ -20,6 +23,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 // Re-export the GitHub fetch state enum at its historical path
@@ -66,6 +70,48 @@ pub enum View {
   /// / `palette_cycle_*` / `accept_command_palette` /
   /// `close_command_palette`.
   CommandPalette,
+  /// Command Logs overlay (issue #226). A ~90% fullscreen modal over a
+  /// dimmed list showing the lazygit-style transcript of the external
+  /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
+  /// state lives on [`App::command_logs`].
+  CommandLogs,
+  /// Configuration panel (issue #232). A ~90% fullscreen modal over a
+  /// dimmed list showing the resolved `.gwm.toml` (user-level global
+  /// deep-merged under the repo file) with a per-row source column
+  /// (repo / user / default). Opened on `4`, scrolled like the help
+  /// overlay; state lives on [`App::config_panel`].
+  Config,
+}
+
+/// What the run loop must do after [`App::handle_create_key`] processes a
+/// key in the create overlay (issue #217). Keeps the side effects
+/// (worktree creation, view transition) in the loop while the form
+/// mutations stay in the testable handler.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum CreateKey {
+  /// The key mutated form state (or was ignored); stay in the overlay.
+  Handled,
+  /// `Enter` on the description field — the loop should run `submit_create`.
+  Submit,
+  /// `Esc` — the loop should close the overlay back to the list.
+  Cancel,
+}
+
+/// What the run loop must do after [`App::handle_link_prompt_key`] processes
+/// a key in the link prompt (issue #217). Mirrors [`CreateKey`]: the testable
+/// handler owns the picker / digit-buffer mutations, the loop owns the two
+/// side effects (the `github::link_*` shell-out, the view transition).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum LinkPromptKey {
+  /// The key moved the highlight, committed a target, or edited the number
+  /// buffer (or was ignored); stay in the prompt.
+  Handled,
+  /// `Enter` on the number field — the loop should run `link_prompt_submit`.
+  Submit,
+  /// The resolved `fetch_github` key — the loop should refresh status.
+  Refresh,
+  /// `Esc` — the loop should close the prompt back to the list.
+  Cancel,
 }
 
 /// Target of an open / link action. Canonical definition lives in
@@ -109,6 +155,7 @@ pub struct App {
   pub view: View,
   pub status: String,
   pub delete_branch_on_remove: bool,
+  pub open_menu_selected: LinkTarget,
 
   // Create form state
   /// Create-worktree overlay state (extracted per #123). Holds field
@@ -122,6 +169,18 @@ pub struct App {
 
   // Bootstrap report
   pub report: Option<BootstrapReport>,
+
+  /// Keybindings (help) overlay scroll offset, in rows. Reset to 0 every
+  /// time the overlay opens; clamped to `help_max_scroll` (#217).
+  pub help_scroll: u16,
+  /// Keybindings (help) overlay horizontal scroll offset, in columns (#222).
+  pub help_x_scroll: u16,
+  /// Maximum help scroll offset, republished by [`super::ui::draw_help`]
+  /// each frame as `content_rows.saturating_sub(viewport_rows)` so the
+  /// offset can never scroll past the last line into the void.
+  pub help_max_scroll: u16,
+  /// Maximum horizontal help scroll offset, republished by the renderer.
+  pub help_max_x_scroll: u16,
 
   /// Sidebar (git preview) panel state (extracted per #127). Owns the
   /// visibility / focus flags, the scroll offset + max bound, and the
@@ -240,6 +299,35 @@ pub struct App {
   /// default when callers construct `App` directly, e.g. tests that
   /// don't care about the gate).
   pub trust_mode: crate::trust::TrustMode,
+
+  /// Generic off-thread task spine (issue #231; GitHub fetch folded in by
+  /// #255): coalescing + per-key generation late-drop for slow one-shot
+  /// ops — the worktree list refresh and the `gh issue/pr view` fetches.
+  /// Public for the same reason `github` is — the state-machine tests
+  /// claim a generation directly without spawning an OS thread.
+  pub tasks: TaskRunner,
+  /// Sender cloned into each background task worker (issue #231; carries the
+  /// GitHub fetch results too since #255).
+  task_tx: mpsc::Sender<TaskMsg>,
+  /// Receiver drained by [`Self::drain_task_results`] each event-loop tick.
+  /// A worker whose `App` has dropped simply fails its `send` and is ignored.
+  task_rx: mpsc::Receiver<TaskMsg>,
+
+  /// Command Logs overlay state (issue #226): the scroll cursor plus an
+  /// owned snapshot of the [`crate::command_log`] global, so the modal
+  /// renders off `App` state rather than locking the global mid-frame.
+  pub command_logs: CommandLogs,
+
+  /// Configuration panel overlay state (issue #232): the scroll cursor
+  /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
+  pub config_panel: ConfigPanel,
+
+  /// The user-level global config path this `App` was constructed with
+  /// (issue #232). Stored so [`Self::enter_config_panel`] resolves the
+  /// panel's source attribution against the *same* layers the running
+  /// config was loaded from — `None` in tests / sandboxed runs with no
+  /// global file, matching [`Config::load_layered`]'s injection point.
+  global_path: Option<PathBuf>,
 }
 
 impl App {
@@ -279,6 +367,7 @@ impl App {
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
+    let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
       repo,
       repo_name,
@@ -289,9 +378,14 @@ impl App {
       view: View::List,
       status: String::from("press ? for help"),
       delete_branch_on_remove: false,
+      open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
       branch_types,
       report: None,
+      help_scroll: 0,
+      help_x_scroll: 0,
+      help_max_scroll: 0,
+      help_max_x_scroll: 0,
       sidebar: SidebarState::new(),
       pending_g: false,
       pending_chord: Vec::new(),
@@ -308,6 +402,12 @@ impl App {
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
+      tasks: TaskRunner::new(),
+      task_tx,
+      task_rx,
+      command_logs: CommandLogs::new(),
+      config_panel: ConfigPanel::new(),
+      global_path: global_path.map(Path::to_path_buf),
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -343,7 +443,7 @@ impl App {
       .repo
       .find_remote("origin")
       .ok()
-      .and_then(|r| r.url().map(String::from));
+      .and_then(|r| r.url().ok().map(String::from));
     let origin = trust::resolve_origin_key(origin_url.as_deref(), &self.workdir);
 
     match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
@@ -383,19 +483,253 @@ impl App {
     Ok(app)
   }
 
+  /// Synchronous worktree list refresh. Kept for internal post-mutation
+  /// callers (create / delete / report-close) that need the list fresh
+  /// *before* the next render; the user-initiated `f` / `r` key path goes
+  /// through the off-thread [`Self::request_refresh`] instead (issue
+  /// #231). Both converge on [`Self::apply_refreshed_worktrees`] so the
+  /// two paths can never drift on the post-list bookkeeping.
   pub fn refresh(&mut self) -> Result<()> {
-    self.worktrees = worktree::list(&self.repo)?;
-    // The cached fuzzy-match indices reference the previous worktrees
-    // vec; drop them so the next render recomputes against the fresh
-    // list. (A length-change auto-invalidates too, but a refresh that
-    // produces a same-length vec with different contents would not —
-    // so the explicit flush is the safe play.)
+    // A synchronous re-list (create / delete / report-close) produces
+    // authoritative fresh state, so any older async refresh still in flight
+    // is by definition stale — bump its generation so `drain_task_results`
+    // drops the late result instead of clobbering this post-mutation list
+    // with a pre-mutation snapshot (issue #231, the #138 race class). A
+    // harmless counter bump when no task is running. Lives here and not in
+    // `apply_refreshed_worktrees` so the async drain, which shares that
+    // tail, does not re-invalidate the run it just applied.
+    self.tasks.invalidate(TaskKind::RefreshWorktrees);
+    let worktrees = worktree::list(&self.repo)?;
+    self.apply_refreshed_worktrees(worktrees);
+    Ok(())
+  }
+
+  /// Swap in a freshly-listed worktree vec and run the bookkeeping every
+  /// refresh path shares: drop the cached fuzzy-match indices (they point
+  /// at the previous vec — a length change auto-invalidates, but a
+  /// same-length list with different contents would not, so the explicit
+  /// flush is the safe play), re-clamp the selection (which re-resolves
+  /// the link cache), invalidate the sidebar preview, and report the
+  /// count. Called by the synchronous [`Self::refresh`] and by the
+  /// off-thread drain in [`Self::drain_task_results`].
+  fn apply_refreshed_worktrees(&mut self, worktrees: Vec<WorktreeInfo>) {
+    self.worktrees = worktrees;
     self.filter.invalidate();
-    // `clamp_selection_to_filter` re-resolves the link cache for us.
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
-    Ok(())
+  }
+
+  /// Off-thread worktree list refresh for the `f` / `r` key (issue #231):
+  /// spawn a worker that re-lists the worktrees and posts the result back
+  /// to the event loop, so a large repo / slow filesystem no longer
+  /// freezes the TUI. Coalesces onto an in-flight run (a second press
+  /// while loading is a no-op) and seeds the loader label + spinner. The
+  /// result is applied by [`Self::drain_task_results`].
+  pub fn request_refresh(&mut self) {
+    let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
+      // A refresh is already in flight — coalesce onto it.
+      return;
+    };
+    // Start the loader from a deterministic frame and surface the label.
+    self.spinner.reset();
+    self.status = TaskKind::RefreshWorktrees.loading_label().into();
+    self.spawn_refresh(generation);
+  }
+
+  /// Spawn one background worktree-list worker tagged with `generation`
+  /// (issue #231). A thin shell, mirroring [`Self::spawn_github_fetch`]:
+  /// it owns only the off-thread dispatch + send, no state logic (the
+  /// coalescing / late-drop contract lives in [`TaskRunner`], tested in
+  /// `tui_state_async_task_tests.rs`). `git2::Repository` is not `Send`,
+  /// so the worker opens its *own* repo from the owned `workdir` path
+  /// rather than borrowing `self.repo` — the same "only owned `Send` data
+  /// crosses the boundary" discipline as the GitHub worker. A `send`
+  /// failure (the `App`/receiver dropped) is ignored.
+  fn spawn_refresh(&self, generation: u64) {
+    let tx = self.task_tx.clone();
+    let workdir = self.workdir.clone();
+    std::thread::spawn(move || {
+      let result = worktree::discover_repo(Some(&workdir))
+        .and_then(|repo| worktree::list(&repo))
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::RefreshWorktrees(generation, result));
+    });
+  }
+
+  /// Off-thread `gwm sync` of the selected worktree for the `S` key (issue
+  /// #258): fetch + rebase its branch onto upstream on a worker thread, so a
+  /// slow network fetch / rebase does not freeze the event loop. Coalesces
+  /// onto an in-flight sync (a second `S` while one runs is a no-op, so two
+  /// rebases never race). The outcome is applied by
+  /// [`Self::drain_task_results`], which reports it and refreshes the list so
+  /// the new ahead/behind state shows. Default strategy is rebase (the repo
+  /// convention); a `--merge` variant is deferred (see #258).
+  pub fn request_sync(&mut self) {
+    let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
+      self.status = "no worktree selected to sync".into();
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::Sync) else {
+      // A sync is already in flight — coalesce onto it.
+      return;
+    };
+    self.spinner.reset();
+    self.status = TaskKind::Sync.loading_label().into();
+    self.spawn_sync(generation, path, name);
+  }
+
+  /// Spawn one background `gwm sync` worker tagged with `generation` (issue
+  /// #258). Mirrors [`Self::spawn_refresh`]: it moves only owned `Send` data
+  /// (the worktree `path` + `name`) across the boundary and runs the existing
+  /// [`crate::sync::sync`] logic, which discovers its own repo from `path` and
+  /// shells out to `git` for fetch/rebase. A `send` failure (the `App`/receiver
+  /// dropped) is ignored.
+  fn spawn_sync(&self, generation: u64, path: PathBuf, name: String) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = crate::sync::sync(&path, crate::sync::SyncStrategy::Rebase).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::Sync(generation, name, result));
+    });
+  }
+
+  /// Apply every background task result that has arrived since the last
+  /// call (issue #231; GitHub fetch results folded in by #255), draining
+  /// the channel without blocking. Each result goes through
+  /// [`TaskRunner::complete`], so a result whose per-key generation was
+  /// bumped mid-flight is dropped (#138 guard, generalised) — this is what
+  /// makes a stale GitHub worker lose to a fresh one in the retry race.
+  ///
+  /// A failed refresh surfaces on the status bar and leaves the list
+  /// intact — what used to be a fatal `refresh()?` that tore down the
+  /// event loop is now a graceful message. A GitHub result is stamped into
+  /// the per-key cache via `complete_{issue,pr}` (pure writes now that the
+  /// drop decision lives on the spine); once nothing GitHub-side is left
+  /// loading, the aggregate outcome is re-reported on the status bar — the
+  /// same end state `drain_github_results` produced pre-#255. Returns `true`
+  /// if at least one result was applied, so the loop can force a redraw.
+  pub fn drain_task_results(&mut self) -> bool {
+    let mut applied = false;
+    let mut github_applied = false;
+    let mut refresh_applied = false;
+    while let Ok(msg) = self.task_rx.try_recv() {
+      match msg {
+        TaskMsg::RefreshWorktrees(generation, result) => {
+          if !self.tasks.complete(TaskKind::RefreshWorktrees, generation) {
+            // Late result — a newer run (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(worktrees) => self.apply_refreshed_worktrees(worktrees),
+            Err(e) => self.status = format!("refresh failed: {}", e),
+          }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::GithubIssue(generation, number, result) => {
+          // Generation guard: a stale worker whose slot was bumped by an
+          // intervening invalidate/re-request is dropped here, before it can
+          // stamp the cache (the Codex-flagged race, fixed by the spine).
+          if !self.tasks.complete(TaskKind::GithubIssue(number), generation) {
+            continue;
+          }
+          self.github.complete_issue(number, result);
+          applied = true;
+          github_applied = true;
+        }
+        TaskMsg::GithubPr(generation, number, result) => {
+          if !self.tasks.complete(TaskKind::GithubPr(number), generation) {
+            continue;
+          }
+          self.github.complete_pr(number, result);
+          applied = true;
+          github_applied = true;
+        }
+        TaskMsg::Sync(generation, name, result) => {
+          if !self.tasks.complete(TaskKind::Sync, generation) {
+            // Late result — a newer sync (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(report) => {
+              // Re-list so the new ahead/behind state shows (this also bumps
+              // the refresh generation — the #138 race guard). The worker
+              // mutated refs in a subprocess, but a libgit2 read re-reads them
+              // from disk, so the synchronous `self.refresh()` (`self.repo`)
+              // sees the rebased state — verified end-to-end by the
+              // ahead/behind assertion in `sync_tests::
+              // tui_sync_action_relists_to_the_rebased_state_from_disk`.
+              // `refresh` sets its own "refreshed — N" status, so overwrite it
+              // with the sync outcome afterwards — the user pressed `S`, the
+              // sync result is what they want to read.
+              let _ = self.refresh();
+              self.status = crate::cli::format_sync_report(&name, &report).trim_end().to_string();
+            }
+            Err(e) => self.status = format!("sync failed: {}", e),
+          }
+          applied = true;
+          // The sync owns the status line this tick — keep the post-loop
+          // GitHub report from overwriting it (same guard the refresh uses).
+          refresh_applied = true;
+        }
+        TaskMsg::Bootstrap(generation, result) => {
+          if !self.tasks.complete(TaskKind::Bootstrap, generation) {
+            // Late result — a newer run (or an invalidate) superseded it, so
+            // it must not flip the view to a stale report.
+            continue;
+          }
+          match result {
+            Ok(report) => {
+              // Same outcome as the old synchronous path (issue #256): show
+              // the report and surface whether any step failed.
+              let any_failed = report.steps.iter().any(|s| s.status == StepStatus::Failed);
+              self.report = Some(report);
+              self.view = View::Report;
+              self.status = if any_failed {
+                "bootstrap had failures".into()
+              } else {
+                "bootstrap ok".into()
+              };
+            }
+            Err(e) => self.status = format!("bootstrap error: {}", e),
+          }
+          applied = true;
+          // The bootstrap owns the status line (and the view) this tick — keep
+          // the post-loop GitHub report from overwriting it (same guard the
+          // refresh / sync arms use).
+          refresh_applied = true;
+        }
+      }
+    }
+    // Once nothing GitHub-side is left loading, swap the "fetching…"
+    // placeholder for the real outcome (refreshed / partial failure /
+    // failure) — only when a GitHub result actually applied, so a dropped
+    // stale result never overwrites the current status (issue #217 review P2).
+    //
+    // Skip it when a worktree refresh also landed this tick: pre-#255 the
+    // event loop drained the GitHub channel *before* the task channel, so a
+    // simultaneous completion left `apply_refreshed_worktrees`' "refreshed —
+    // N" message standing last. The `!refresh_applied` guard preserves that
+    // ordering now that both drain in one pass.
+    if github_applied && !refresh_applied && !self.is_github_loading() {
+      self.report_github_refresh_status();
+    }
+    applied
+  }
+
+  /// `true` while any background task is in flight (issue #231) — drives
+  /// the statusbar spinner alongside [`Self::is_github_loading`].
+  pub fn is_task_loading(&self) -> bool {
+    self.tasks.is_any_loading()
+  }
+
+  /// A clone of the task channel sender background workers report over
+  /// (issue #231; GitHub fetch workers too since #255). Exposed so the
+  /// async-apply path ([`Self::drain_task_results`]) can be driven
+  /// deterministically in tests — inject a [`TaskMsg`] exactly as a worker
+  /// would, then drain — without spawning an OS thread or a real `gh`.
+  pub fn task_result_sender(&self) -> mpsc::Sender<TaskMsg> {
+    self.task_tx.clone()
   }
 
   /// Drop the cached sidebar content. Call on any change that may have altered
@@ -562,6 +896,13 @@ impl App {
     outcome
   }
 
+  pub fn key_matches_action(&self, key: KeyEvent, action: Action) -> bool {
+    matches!(
+      self.keymap.lookup(&[KeyStroke::from_event(&key)]),
+      ChordResolution::Matched(found) if found == action
+    )
+  }
+
   /// Mirror the new `pending_chord` buffer into the legacy
   /// `pending_g` boolean so pre-#87 tests that read it as a field
   /// stay green. Removed when those tests migrate to
@@ -666,12 +1007,132 @@ impl App {
     self.sidebar.toggle_focus();
   }
 
+  /// Direct-focus the worktree table (issue #217, `1`). Orchestrator-shaped
+  /// for the status-bar copy, like the sidebar toggles.
+  pub fn focus_worktrees(&mut self) {
+    self.sidebar.focus_table();
+    self.status = "focus: worktrees".into();
+  }
+
+  /// Direct-focus the status (sidebar) pane (issue #217, `2`). Opens the
+  /// sidebar if needed and moves focus onto it.
+  pub fn focus_status(&mut self) {
+    self.sidebar.focus_panel();
+    self.status = "focus: status".into();
+  }
+
+  /// The live UI context driving the statusbar chip + help subtitle (issue
+  /// #217). An open modal / overlay wins over the pane focus (issue #217
+  /// review P2): when the create form is up, the statusbar must advertise
+  /// the form's keys, not the worktrees pane's `n new` — pressing `n` there
+  /// types text. Only `View::List` falls through to the pane context
+  /// (`Picker` in `gwm switch`, `Status` when the sidebar holds focus, else
+  /// `Worktrees`).
+  pub fn hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.view {
+      View::Create => HintContext::Create,
+      View::Confirm => HintContext::Confirm,
+      View::OpenMenu => HintContext::OpenMenu,
+      View::LinkPrompt => HintContext::LinkPrompt,
+      View::CommandPalette => HintContext::CommandPalette,
+      View::Report => HintContext::Report,
+      View::Help => HintContext::Help,
+      // The Command Logs overlay (issue #226) is a ~90% fullscreen modal;
+      // the statusbar behind it shows the underlying pane's context, as the
+      // List view does.
+      View::CommandLogs => self.pane_hint_context(),
+      // The Configuration panel (issue #232) is likewise a ~90% fullscreen
+      // modal; the statusbar behind it keeps the underlying pane context.
+      View::Config => self.pane_hint_context(),
+      View::List => self.pane_hint_context(),
+    }
+  }
+
+  /// The underlying list-view pane context (issue #217), ignoring any open
+  /// overlay. Drives the help overlay's subtitle + picker-section gating:
+  /// `?` documents the keys for the pane you were on, so it must NOT collapse
+  /// to the `Help` context that [`Self::hint_context`] returns while the
+  /// overlay is up.
+  pub fn pane_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    if self.picker_mode {
+      HintContext::Picker
+    } else if self.sidebar.open && self.sidebar.focused {
+      HintContext::Status
+    } else {
+      HintContext::Worktrees
+    }
+  }
+
+  /// `true` while a GitHub issue / PR fetch for the current link is inflight
+  /// (issue #217) — drives the statusbar loading spinner.
+  pub fn is_github_loading(&self) -> bool {
+    matches!(self.issue_fetch_state(), GitHubFetchState::Loading)
+      || matches!(self.pr_fetch_state(), GitHubFetchState::Loading)
+  }
+
   pub fn sidebar_scroll_down(&mut self) {
     self.sidebar.scroll_down();
   }
 
   pub fn sidebar_scroll_up(&mut self) {
     self.sidebar.scroll_up();
+  }
+
+  /// Open the Keybindings (help) overlay from the top (#217). Resetting
+  /// the scroll offset here keeps re-opens predictable.
+  pub fn enter_help(&mut self) {
+    self.view = View::Help;
+    self.help_scroll = 0;
+    self.help_x_scroll = 0;
+  }
+
+  /// Open the Command Logs overlay (issue #226). Snapshots the global
+  /// command log into owned state and resets the scroll cursor so a
+  /// previously-scrolled session starts fresh at the top. The renderer
+  /// republishes `max_scroll` against the live viewport.
+  pub fn enter_command_logs(&mut self) {
+    self.command_logs.sync();
+    self.command_logs.reset();
+    self.view = View::CommandLogs;
+  }
+
+  /// Open the Configuration panel (issue #232). Resolves the effective
+  /// config — the user-level global deep-merged under the repo `.gwm.toml`,
+  /// with per-row source attribution — into owned state, then resets the
+  /// scroll cursor so a re-open starts fresh at the top. The reads are
+  /// cheap local TOML parses; on failure the panel still opens (empty)
+  /// with the error on the statusbar rather than refusing to open.
+  pub fn enter_config_panel(&mut self) {
+    match crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      Ok(rows) => self.config_panel.rows = rows,
+      Err(e) => {
+        self.config_panel.rows = Vec::new();
+        self.status = format!("error: {}", e);
+      }
+    }
+    self.config_panel.reset();
+    self.view = View::Config;
+  }
+
+  /// Scroll the help overlay down one row, clamped to the renderer-published
+  /// `help_max_scroll` so it never scrolls past the last line.
+  pub fn help_scroll_down(&mut self) {
+    self.help_scroll = (self.help_scroll + 1).min(self.help_max_scroll);
+  }
+
+  /// Scroll the help overlay up one row, clamped at the top.
+  pub fn help_scroll_up(&mut self) {
+    self.help_scroll = self.help_scroll.saturating_sub(1);
+  }
+
+  pub fn help_scroll_right(&mut self) {
+    self.help_x_scroll = (self.help_x_scroll + 1).min(self.help_max_x_scroll);
+  }
+
+  pub fn help_scroll_left(&mut self) {
+    self.help_x_scroll = self.help_x_scroll.saturating_sub(1);
   }
 
   /// Path to launch lazygit on, or `None` if nothing selected or lazygit is missing.
@@ -875,6 +1336,11 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
+    // Open focused on Issue rather than the cycle-only Type field (#217 UX):
+    // the first keypress then edits text instead of being a silent no-op on
+    // Type. The type keeps its `reset()` default and stays reachable via
+    // Shift-Tab / the field rotation.
+    self.create_form.field = Field::Issue;
     self.status = "tab/shift-tab: switch field — enter on desc: submit — esc: cancel".into();
   }
 
@@ -900,6 +1366,40 @@ impl App {
 
   pub fn create_pop_char(&mut self) {
     self.create_form.pop_char();
+  }
+
+  /// Handle one key in the create overlay and report what the run loop must
+  /// do next. Extracted from the inline `View::Create` match (issue #217)
+  /// so the input path — typing, type cycling, submit/cancel — is
+  /// unit-testable rather than only reachable through a live terminal.
+  ///
+  /// `h` / `l` mirror the `←` / `→` horizontal type selector, but **only**
+  /// when the Type field is focused; on a text field they are literal input
+  /// so the letters are never swallowed.
+  pub fn handle_create_key(&mut self, key: KeyEvent) -> CreateKey {
+    let on_type = self.create_form.field == Field::Type;
+    match key.code {
+      KeyCode::Esc => return CreateKey::Cancel,
+      KeyCode::Tab => self.create_next_field(),
+      KeyCode::BackTab => self.create_prev_field(),
+      KeyCode::Enter => {
+        if self.create_form.field == Field::Desc {
+          return CreateKey::Submit;
+        }
+        self.create_next_field();
+      }
+      KeyCode::Up | KeyCode::Left if on_type => self.create_prev_type(),
+      KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
+      KeyCode::Char('h') if on_type => self.create_prev_type(),
+      KeyCode::Char('l') if on_type => self.create_next_type(),
+      KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
+        self.status = "issue accepts digits only".into();
+      }
+      KeyCode::Char(c) if !on_type => self.create_push_char(c),
+      KeyCode::Backspace if !on_type => self.create_pop_char(),
+      _ => {}
+    }
+    CreateKey::Handled
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
@@ -1209,24 +1709,36 @@ impl App {
       }
     }
 
-    let ctx = BootstrapCtx {
-      main_repo: &self.workdir,
-      worktree: &path,
-      config: &self.config,
+    // Run off-thread on the async-task spine (issue #256): `bootstrap::run`
+    // (file copies, guards, command hooks) used to block the event loop. The
+    // TOFU gate above stays synchronous on the main thread; only the run
+    // itself moves to a worker, with the `View::Report` transition deferred
+    // to `drain_task_results`. A second `b` press while one is in flight
+    // coalesces (no `Some(generation)`), so two bootstraps never race.
+    let Some(generation) = self.tasks.request(TaskKind::Bootstrap) else {
+      return;
     };
-    match bootstrap::run(&ctx) {
-      Ok(r) => {
-        let any_failed = r.steps.iter().any(|s| s.status == StepStatus::Failed);
-        self.report = Some(r);
-        self.view = View::Report;
-        self.status = if any_failed {
-          "bootstrap had failures".into()
-        } else {
-          "bootstrap ok".into()
-        };
-      }
-      Err(e) => self.status = format!("bootstrap error: {}", e),
-    }
+    self.spinner.reset();
+    self.status = TaskKind::Bootstrap.loading_label().into();
+    self.spawn_bootstrap(generation, self.workdir.clone(), path, self.config.clone());
+  }
+
+  /// Spawn the off-thread bootstrap worker (issue #256). Only owned, `Send`
+  /// data crosses the thread boundary — the `main_repo` / `worktree` paths
+  /// and a clone of the resolved `Config` — so the worker rebuilds its own
+  /// `BootstrapCtx` rather than borrowing `self`. The result is posted back
+  /// over the task channel for `drain_task_results` to apply.
+  fn spawn_bootstrap(&self, generation: u64, main_repo: PathBuf, worktree: PathBuf, config: Config) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let ctx = BootstrapCtx {
+        main_repo: &main_repo,
+        worktree: &worktree,
+        config: &config,
+      };
+      let result = bootstrap::run(&ctx).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::Bootstrap(generation, result));
+    });
   }
 
   // ---- Issue/PR linking (issue #67) -------------------------------------
@@ -1241,13 +1753,22 @@ impl App {
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
     self.github.refresh_link(&self.repo, branch.as_deref());
+    // Navigation invariant (issue #255): the cache clear above must be paired
+    // with a spine generation-bump so any in-flight `gh` worker for the
+    // previous worktree's link is dropped instead of stamping the now-active
+    // worktree's cache. `refresh_link` no longer holds the old issue/PR
+    // numbers, so invalidate by predicate.
+    self.tasks.invalidate_matching(TaskKind::is_github);
   }
 
   fn selected_branch_name(&self) -> Option<String> {
-    self
-      .selected()
-      .and_then(|w| w.branch.clone())
-      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
+    self.selected().and_then(|w| w.branch.clone()).or_else(|| {
+      self
+        .repo
+        .head()
+        .ok()
+        .and_then(|h| h.shorthand().ok().map(|s| s.to_string()))
+    })
   }
 
   pub fn current_link(&self) -> &BranchLink {
@@ -1278,22 +1799,26 @@ impl App {
     }
   }
 
-  /// Drive the issue/PR fetch synchronously. Called from the event loop
-  /// when the user presses `F` (refresh GitHub status). Routes through
-  /// the [`GitHubFetch`] dedupe layer: `request(key)` claims the
-  /// per-target inflight slot and flips `*_state = Loading`, the
-  /// shell-out runs, `complete_{issue,pr}` clears the slot and
-  /// stamps the result.
+  /// Kick off the issue/PR fetch. Called from the event loop when the
+  /// user presses `F` (refresh GitHub status). Each `gh issue view` /
+  /// `gh pr view` shell-out runs **off-thread** on the shared async-task
+  /// spine (issue #255, migrated from #217's dedicated channel): the `App`
+  /// checks the per-key cache, claims a generation from
+  /// [`TaskRunner::request`], marks the cache `Loading`, and spawns a
+  /// worker tagged with that generation. The worker reports a
+  /// `TaskMsg::Github{Issue,Pr}` back; [`Self::drain_task_results`] applies
+  /// it only if the generation is still authoritative — so a stale worker
+  /// from a previous fetch loses the retry race to a fresh one.
   ///
-  /// This call path is the explicit user-initiated refresh, so it
-  /// flushes the cache via [`GitHubFetch::invalidate`] first — the
-  /// user just asked for fresh data, a `HitCache` short-circuit here
-  /// would be a bug. The inflight slot is still claimed via
-  /// `request`, so any concurrent visit-driven `request` for the
-  /// same key dedupes correctly (load-bearing payoff of #128).
+  /// The PR auto-detection (`gh pr list`, issue #181) stays synchronous:
+  /// it mutates `link` which the very next render needs, and it is a single
+  /// cheap call rather than the two `view` shell-outs the spinner is for.
+  ///
+  /// This call path is the explicit user-initiated refresh, so it flushes
+  /// the cache + drops any in-flight worker via [`Self::invalidate_github`]
+  /// first — the user just asked for fresh data, a cache short-circuit here
+  /// would be a bug.
   pub fn refresh_github_status(&mut self) {
-    use super::state::github_fetch::{FetchAction, FetchKey};
-
     let slug = self.github.link_slug.clone();
 
     // Drop a prior auto-detection so this refresh re-resolves it live
@@ -1302,9 +1827,9 @@ impl App {
     self.github.clear_detected_pr();
 
     // Auto-detect the selected branch's PR when none is linked (issue
-    // #181). Runs on the same synchronous F-refresh path as the issue/PR
-    // fetch; needs a remote, so it's a no-op without a slug. An explicit
-    // `gwm link --pr` wins — `apply_detected_pr` only fills an empty slot.
+    // #181). Synchronous (see method doc); needs a remote, so it's a no-op
+    // without a slug. An explicit `gwm link --pr` wins — `apply_detected_pr`
+    // only fills an empty slot.
     if self.github.link.pr.is_none() {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
         let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
@@ -1320,23 +1845,106 @@ impl App {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };
-    // Explicit user-initiated refresh: flush the cache before the
-    // request loop so `request` returns `Spawn` instead of `HitCache`
-    // for previously-loaded keys.
-    self.github.invalidate();
+    // Explicit user-initiated refresh: flush the cache (so the cold-cache
+    // branch fires instead of a hit) and drop any in-flight worker on the
+    // spine, so previously-loaded keys re-fetch.
+    self.invalidate_github();
+    let mut spawned = 0u32;
     if let Some(n) = self.github.link.issue {
-      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
-        let r = github::fetch_issue(&slug, n).map_err(|e| e.to_string());
-        self.github.complete_issue(n, r);
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
       }
     }
     if let Some(n) = self.github.link.pr {
-      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
-        let r = github::fetch_pr(&slug, n).map_err(|e| e.to_string());
-        self.github.complete_pr(n, r);
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
       }
     }
-    self.report_github_refresh_status();
+    if spawned > 0 {
+      // Loading state is live; the spinner animates until `drain` applies
+      // the results and re-reports the outcome.
+      self.spinner.reset();
+      self.status = "fetching GitHub status…".into();
+    } else {
+      // Nothing actually spawned (all keys already terminal in cache) —
+      // report the current outcome immediately.
+      self.report_github_refresh_status();
+    }
+  }
+
+  /// Flush the GitHub result cache **and** drop any in-flight GitHub worker
+  /// on the spine (issue #255). The navigation invariant: the cache clear
+  /// and the spine generation-bump must always move together, or a stale
+  /// worker's late result could outlive the cache flush. Routed through one
+  /// helper so the pairing can't desync — `refresh_github_status` and
+  /// (via the predicate) `refresh_link` are the only callers.
+  fn invalidate_github(&mut self) {
+    self.github.invalidate();
+    self.tasks.invalidate_matching(TaskKind::is_github);
+  }
+
+  /// Claim a spine generation for `Issue(n)` and spawn its `gh issue view`
+  /// worker (issue #255), returning `true` when a worker was actually
+  /// started. A terminal cache hit (the explicit refresh flushed the cache
+  /// first, so this only fires on a redundant call) or a coalesced spine
+  /// slot (a worker for this key is already in flight) returns `false`
+  /// without spawning a second subprocess.
+  fn spawn_github_issue(&mut self, n: u64, slug: &str) -> bool {
+    let key = FetchKey::Issue(n);
+    if self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubIssue(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, slug.to_string(), generation);
+    true
+  }
+
+  /// PR-side counterpart to [`Self::spawn_github_issue`] (issue #255).
+  fn spawn_github_pr(&mut self, n: u64, slug: &str) -> bool {
+    let key = FetchKey::Pr(n);
+    if self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubPr(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, slug.to_string(), generation);
+    true
+  }
+
+  /// Spawn one background `gh` shell-out for `key` tagged with `generation`
+  /// and wire its result back over the shared task channel (issue #255,
+  /// migrated from #217's dedicated channel). Deliberately a thin shell: it
+  /// owns only the off-thread dispatch + send, no state logic — the
+  /// coalescing / late-drop contract lives on the [`TaskRunner`] spine. A
+  /// `send` failure (the `App`/receiver was dropped) is ignored: there is
+  /// no longer anyone to apply the result.
+  fn spawn_github_fetch(&self, key: FetchKey, slug: String, generation: u64) {
+    let tx = self.task_tx.clone();
+    // Resolve the `gh` program on THIS (main) thread and hand it to the
+    // worker, so the worker never reads `GWM_GH` / the process environment
+    // concurrently with env-mutating code elsewhere (the `env_lock`
+    // unsoundness the worker would otherwise reintroduce — issue #217).
+    let program = github::gh_program();
+    std::thread::spawn(move || {
+      let msg = match key {
+        FetchKey::Issue(n) => TaskMsg::GithubIssue(
+          generation,
+          n,
+          github::fetch_issue_with(&program, &slug, n).map_err(|e| e.to_string()),
+        ),
+        FetchKey::Pr(n) => TaskMsg::GithubPr(
+          generation,
+          n,
+          github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string()),
+        ),
+      };
+      let _ = tx.send(msg);
+    });
   }
 
   /// Compute the post-refresh status line message based on the actual
@@ -1389,11 +1997,19 @@ impl App {
     // Re-resolve link + slug in case the user just linked something
     // (`gwm link …` from a parallel terminal) or moved the origin remote.
     self.refresh_link();
+    self.open_menu_selected = LinkTarget::Issue;
     self.view = View::OpenMenu;
   }
 
   pub fn exit_open_menu(&mut self) {
     self.view = View::List;
+  }
+
+  pub fn open_menu_toggle_selection(&mut self) {
+    self.open_menu_selected = match self.open_menu_selected {
+      LinkTarget::Issue => LinkTarget::Pr,
+      LinkTarget::Pr => LinkTarget::Issue,
+    };
   }
 
   /// Pick a target from the open menu. Returns the URL to open, or `None`
@@ -1434,7 +2050,46 @@ impl App {
   pub fn enter_link_prompt(&mut self) {
     self.view = View::LinkPrompt;
     self.link_prompt.reset();
-    self.status = "link: [i]ssue / [p]r · esc cancels".into();
+    self.status = "pick".into();
+  }
+
+  /// Highlighted row in the `ChooseTarget` picker (for the renderer).
+  pub fn link_prompt_selected(&self) -> LinkTarget {
+    self.link_prompt.selected
+  }
+
+  /// Testable key handler for the link prompt (issue #217), mirroring
+  /// [`App::handle_create_key`]. The picker / digit-buffer mutations and
+  /// the per-stage status copy stay here; the loop only acts on the
+  /// returned [`LinkPromptKey`] for the two genuine side effects
+  /// (submit shell-out, view transition).
+  pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
+    use crate::tui::state::link_prompt::LinkPromptStage;
+    if self.key_matches_action(key, Action::FetchGithub) {
+      return LinkPromptKey::Refresh;
+    }
+    match (self.link_prompt.stage, key.code) {
+      (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
+      // ChooseTarget: a vertical selectable list. j/k (and arrows) move the
+      // highlight, Enter links the highlighted row, i/p stay direct picks.
+      // With exactly two targets, up and down land on the same other row, so
+      // a single flip serves j/k/Up/Down alike.
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up) => {
+        self.link_prompt.toggle_selection()
+      }
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => self.link_prompt_choose(LinkTarget::Issue),
+      (LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => self.link_prompt_choose(LinkTarget::Pr),
+      (LinkPromptStage::ChooseTarget, KeyCode::Enter) => {
+        let target = self.link_prompt.selected;
+        self.link_prompt_choose(target);
+      }
+      // InputNumber: type the digits, Enter submits, Backspace deletes.
+      (LinkPromptStage::InputNumber, KeyCode::Enter) => return LinkPromptKey::Submit,
+      (LinkPromptStage::InputNumber, KeyCode::Char(c)) => self.link_prompt_push_char(c),
+      (LinkPromptStage::InputNumber, KeyCode::Backspace) => self.link_prompt_pop_char(),
+      _ => {}
+    }
+    LinkPromptKey::Handled
   }
 
   pub fn link_prompt_cancel(&mut self) {
@@ -1457,8 +2112,7 @@ impl App {
   pub fn link_prompt_choose(&mut self, target: LinkTarget) {
     self.link_prompt.commit_target(target);
     self.status = match target {
-      LinkTarget::Issue => "issue # — digits, enter to link, esc to cancel".into(),
-      LinkTarget::Pr => "pr # — digits, enter to link, esc to cancel".into(),
+      LinkTarget::Issue | LinkTarget::Pr => "num".into(),
     };
   }
 
@@ -1483,7 +2137,13 @@ impl App {
     let branch = self
       .selected()
       .and_then(|w| w.branch.clone())
-      .or_else(|| self.repo.head().ok().and_then(|h| h.shorthand().map(|s| s.to_string())))
+      .or_else(|| {
+        self
+          .repo
+          .head()
+          .ok()
+          .and_then(|h| h.shorthand().ok().map(|s| s.to_string()))
+      })
       .ok_or_else(|| GwmError::Other("no branch resolved for selected worktree".into()))?;
     match target {
       LinkTarget::Issue => github::link_issue(&self.repo, &branch, n)?,

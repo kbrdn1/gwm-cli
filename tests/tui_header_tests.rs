@@ -10,6 +10,7 @@
 //! layout contract is pinned here without spinning up a ratatui backend.
 
 use gwm::tui::header_line;
+use gwm::tui::theme::Theme;
 use ratatui::style::{Color, Modifier};
 use ratatui::text::{Line, Span};
 
@@ -29,12 +30,12 @@ fn span_with<'a, 'b>(line: &'a Line<'b>, needle: &str) -> Option<&'a Span<'b>> {
 }
 
 fn version_token() -> String {
-  format!("v{}", env!("CARGO_PKG_VERSION"))
+  env!("CARGO_PKG_VERSION").to_string()
 }
 
 #[test]
 fn header_surfaces_version_repo_and_path_when_wide() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, Color::Cyan);
+  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
   let text = plain(&line);
   assert!(text.contains(&version_token()), "missing version: {}", text);
   assert!(text.contains("gwm-cli"), "missing repo name: {}", text);
@@ -43,7 +44,7 @@ fn header_surfaces_version_repo_and_path_when_wide() {
 
 #[test]
 fn header_fits_on_a_single_line_within_the_given_width() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, Color::Cyan);
+  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
   assert!(
     display_width(&line) <= 120,
     "header width {} exceeded 120: {:?}",
@@ -55,8 +56,17 @@ fn header_fits_on_a_single_line_within_the_given_width() {
 
 #[test]
 fn version_renders_as_a_reverse_video_chip_on_the_accent_colour() {
-  let line = header_line("gwm-cli", "/tmp/x", false, 120, Color::Magenta);
-  let chip = span_with(&line, "gwm v").expect("version chip span present");
+  let line = header_line(
+    "gwm-cli",
+    "/tmp/x",
+    false,
+    120,
+    &Theme {
+      accent: Color::Magenta,
+      ..Theme::default()
+    },
+  );
+  let chip = span_with(&line, "gwm ").expect("version chip span present");
   assert_eq!(chip.style.fg, Some(Color::Magenta), "chip not painted on accent");
   assert!(
     chip.style.add_modifier.contains(Modifier::REVERSED),
@@ -69,12 +79,16 @@ fn version_renders_as_a_reverse_video_chip_on_the_accent_colour() {
 }
 
 #[test]
-fn repo_name_is_bold_and_path_is_dimmed() {
-  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, Color::Cyan);
+fn current_dir_name_is_a_leading_badge_and_path_is_dimmed() {
+  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
   let repo = span_with(&line, "gwm-cli").expect("repo span present");
   assert!(
+    repo.style.add_modifier.contains(Modifier::REVERSED),
+    "current dir name must render as a leading badge"
+  );
+  assert!(
     repo.style.add_modifier.contains(Modifier::BOLD),
-    "repo name must be bold"
+    "current dir name badge must be bold"
   );
   let path = span_with(&line, "/Users/me/Projects/gwm-cli").expect("path span present");
   assert_eq!(
@@ -85,14 +99,24 @@ fn repo_name_is_bold_and_path_is_dimmed() {
 }
 
 #[test]
+fn version_chip_is_pinned_to_the_end_when_wide() {
+  let line = header_line("gwm-cli", "/Users/me/Projects/gwm-cli", false, 120, &Theme::default());
+  let text = plain(&line);
+  assert!(
+    text.trim_end().ends_with(&format!("gwm {}", version_token())),
+    "version chip must end the header row: {text:?}"
+  );
+}
+
+#[test]
 fn picker_chip_present_only_in_picker_mode() {
-  let off = header_line("gwm-cli", "/tmp/x", false, 120, Color::Cyan);
+  let off = header_line("gwm-cli", "/tmp/x", false, 120, &Theme::default());
   assert!(
     !plain(&off).to_lowercase().contains("picker"),
     "picker chip leaked outside picker mode: {}",
     plain(&off)
   );
-  let on = header_line("gwm-cli", "/tmp/x", true, 120, Color::Cyan);
+  let on = header_line("gwm-cli", "/tmp/x", true, 120, &Theme::default());
   let chip = span_with(&on, "picker").expect("picker chip present in picker mode");
   assert!(
     chip.style.add_modifier.contains(Modifier::REVERSED),
@@ -103,13 +127,13 @@ fn picker_chip_present_only_in_picker_mode() {
 #[test]
 fn narrow_width_drops_path_but_keeps_version_chip_and_repo() {
   // Wide enough for the version chip + repo name, but not the long path.
-  let width = format!(" gwm {} ", version_token()).chars().count() + 2 + "gwm-cli".len() + 4;
+  let width = format!(" gwm {} ", version_token()).chars().count() + 2 + " gwm-cli ".len() + 4;
   let line = header_line(
     "gwm-cli",
     "/Users/me/some/really/long/path/that/will/not/fit/gwm-cli",
     false,
     width,
-    Color::Cyan,
+    &Theme::default(),
   );
   let text = plain(&line);
   assert!(
@@ -133,7 +157,7 @@ fn narrow_width_drops_path_but_keeps_version_chip_and_repo() {
 
 #[test]
 fn zero_width_emits_an_empty_line_without_overflowing() {
-  let line = header_line("gwm-cli", "/tmp/x", false, 0, Color::Cyan);
+  let line = header_line("gwm-cli", "/tmp/x", false, 0, &Theme::default());
   assert_eq!(display_width(&line), 0, "zero width must produce nothing");
   assert!(!plain(&line).contains('\n'));
 }
@@ -141,7 +165,7 @@ fn zero_width_emits_an_empty_line_without_overflowing() {
 #[test]
 fn control_chars_never_break_the_single_line_contract() {
   // A pathological workdir with embedded newline/tab must not split the row.
-  let line = header_line("gwm-cli", "/tmp/a\nb\tc", false, 120, Color::Cyan);
+  let line = header_line("gwm-cli", "/tmp/a\nb\tc", false, 120, &Theme::default());
   assert!(!plain(&line).contains('\n'), "newline leaked into header row");
   assert!(!plain(&line).contains('\t'), "tab leaked into header row");
 }

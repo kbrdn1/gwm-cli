@@ -146,6 +146,60 @@ fn uppercase_binding_matches_shift_modifier_variants() {
 }
 
 #[test]
+fn digit_keys_dispatch_pane_focus_actions() {
+  // Issue #217: `1` focuses the worktrees pane, `2` the status (sidebar)
+  // pane. Both are rebindable verbs so they route through the keymap.
+  let (_dir, mut app) = make_app();
+  assert_eq!(app.dispatch_key(press('1')), Some(Action::FocusWorktrees));
+  assert_eq!(app.dispatch_key(press('2')), Some(Action::FocusStatus));
+}
+
+#[test]
+fn focus_actions_respect_user_keymap_override() {
+  // `[tui.keys]` must be able to rebind the new focus verbs like any other
+  // action — the override replaces the default `2`.
+  let (dir, _) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[tui.keys]
+focus_status = ["F2"]
+"#,
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  assert_eq!(
+    app.dispatch_key(press('2')),
+    None,
+    "default 2 must be replaced by the override"
+  );
+  assert_eq!(
+    app.dispatch_key(press_named(KeyCode::F(2))),
+    Some(Action::FocusStatus),
+    "the F2 override must fire focus_status"
+  );
+}
+
+#[test]
+fn help_overlay_lists_pane_focus_bindings() {
+  use gwm::tui::help_lines;
+  use gwm::tui::keymap::Keymap;
+
+  let km = Keymap::defaults();
+  let lines = help_lines(&km, false);
+  assert!(
+    lines.iter().any(|l| l.starts_with("  1 ")),
+    "expected the default `1` focus binding in the help overlay:\n{}",
+    lines.join("\n")
+  );
+  assert!(
+    lines.iter().any(|l| l.starts_with("  2 ")),
+    "expected the default `2` focus binding in the help overlay:\n{}",
+    lines.join("\n")
+  );
+}
+
+#[test]
 fn s_dispatches_toggle_sidebar_mode() {
   // Issue #34: pressing `s` in the list view must cycle the sidebar
   // preview mode (Commits ↔ Stashes). The binding is wired through
@@ -254,26 +308,43 @@ fn help_rows_structures_title_sections_and_entries() {
   // surface as their own variants (not flattened strings).
   use gwm::tui::help_rows;
   use gwm::tui::keymap::{Action, Keymap};
-  use gwm::tui::HelpRow;
+  use gwm::tui::{HelpRow, HintContext};
 
   let km = Keymap::defaults();
-  let rows = help_rows(&km, false);
+  let rows = help_rows(&km, HintContext::Worktrees);
 
+  // Issue #217: the overlay title is now "Keybindings", followed by a
+  // context subtitle reflecting the focused pane.
   assert!(
-    matches!(rows.first(), Some(HelpRow::Title(t)) if t == "gwm — keys"),
-    "first row must be the title, got: {:?}",
+    matches!(rows.first(), Some(HelpRow::Title(t)) if t == "Keybindings"),
+    "first row must be the Keybindings title, got: {:?}",
     rows.first()
-  );
-  assert!(
-    rows.iter().any(|r| matches!(r, HelpRow::Section(s) if s == "global")),
-    "expected a `global` section header"
   );
   assert!(
     rows
       .iter()
-      .any(|r| matches!(r, HelpRow::Section(s) if s == "confirm delete")),
-    "expected a `confirm delete` section header"
+      .any(|r| matches!(r, HelpRow::Subtitle(s) if s == "worktrees")),
+    "expected a `worktrees` context subtitle"
   );
+  assert!(
+    rows.iter().any(|r| matches!(r, HelpRow::Section(s) if s == "Global")),
+    "expected a `Global` section header"
+  );
+  assert!(
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Section(s) if s == "Delete Worktree")),
+    "expected a `Delete Worktree` section header"
+  );
+  for pair in rows.windows(2) {
+    if matches!(pair[0], HelpRow::Section(_)) {
+      assert!(
+        matches!(pair[1], HelpRow::Blank),
+        "section headings should be followed by a visual gap, got {:?}",
+        pair
+      );
+    }
+  }
   // The `Down` action's default `j` binding must surface as an Entry
   // with the resolved chord in its `keys`, not baked into a string.
   let keys = km
@@ -303,14 +374,19 @@ fn help_lines_is_help_rows_flattened() {
   // this file) is preserved byte-for-byte after the refactor. This pins
   // the two builders together so they can never drift.
   use gwm::tui::keymap::Keymap;
-  use gwm::tui::{help_lines, help_rows, HelpRow};
+  use gwm::tui::{help_lines, help_rows, HelpRow, HintContext};
 
   let km = Keymap::defaults();
   for picker_mode in [false, true] {
-    let expected: Vec<String> = help_rows(&km, picker_mode)
+    let ctx = if picker_mode {
+      HintContext::Picker
+    } else {
+      HintContext::Worktrees
+    };
+    let expected: Vec<String> = help_rows(&km, ctx)
       .into_iter()
       .map(|row| match row {
-        HelpRow::Title(s) | HelpRow::Section(s) => s,
+        HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
         HelpRow::Blank => String::new(),
         HelpRow::Entry { keys, label } => {
           let keys = if keys.is_empty() { "(unbound)".to_string() } else { keys };
@@ -319,5 +395,27 @@ fn help_lines_is_help_rows_flattened() {
       })
       .collect();
     assert_eq!(help_lines(&km, picker_mode), expected, "picker_mode={picker_mode}");
+  }
+}
+
+#[test]
+fn help_subtitle_tracks_the_pane_context() {
+  // Issue #217: opening `?` while the status pane is focused shows a
+  // `status` subtitle; the picker shows `switch`.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  for (ctx, want) in [
+    (HintContext::Worktrees, "worktrees"),
+    (HintContext::Status, "status"),
+    (HintContext::Picker, "switch"),
+  ] {
+    let rows = help_rows(&km, ctx);
+    assert!(
+      rows.iter().any(|r| matches!(r, HelpRow::Subtitle(s) if s == want)),
+      "expected `{want}` subtitle for {want} context"
+    );
   }
 }

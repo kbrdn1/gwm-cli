@@ -306,6 +306,42 @@ fn git_log_oneline_errors_outside_repo() {
   assert!(err.is_err(), "expected error outside a git repo, got: {:?}", err);
 }
 
+// ---- run_git (issue #237) ---------------------------------------------------
+// The shared `git -C <dir> <args>` helper that the sidebar/PR shell-outs and
+// `gwm sync` both route through. These pin the two-branch contract the dedup
+// must preserve: stdout verbatim on success, and a non-zero git exit mapped to
+// `GwmError::CommandFailed` carrying git's own stderr.
+
+#[test]
+fn run_git_returns_stdout_on_success() {
+  let (dir, _) = init_repo();
+  let out = worktree::run_git(dir.path(), &["rev-parse", "--is-inside-work-tree"]).unwrap();
+  assert_eq!(
+    out.trim(),
+    "true",
+    "rev-parse stdout should be returned verbatim, got: {:?}",
+    out
+  );
+}
+
+#[test]
+fn run_git_maps_nonzero_exit_to_command_failed_with_stderr() {
+  let (dir, _) = init_repo();
+  // `git` runs and exits non-zero (the ref does not exist) — this exercises
+  // the status-failure branch, not the spawn-failure branch.
+  let err = worktree::run_git(dir.path(), &["rev-parse", "--verify", "definitely-missing-ref"]);
+  match err {
+    Err(gwm::error::GwmError::CommandFailed(msg)) => {
+      assert!(
+        msg.contains("fatal"),
+        "CommandFailed must carry git's stderr (expected 'fatal'), got: {}",
+        msg
+      );
+    }
+    other => panic!("expected GwmError::CommandFailed, got: {:?}", other),
+  }
+}
+
 // Issue #73: relative-duration formatter + branch age. The formatter is a
 // pure function (table-driven tests below); `branch_age` walks the commit
 // graph and needs a real repo with controlled commit timestamps.
@@ -808,4 +844,56 @@ fn git_stash_list_respects_limit() {
 
   let limited = worktree::git_stash_list(dir.path(), 2).unwrap();
   assert_eq!(limited.len(), 2, "limit must cap the result vec");
+}
+
+#[test]
+fn resolve_trunk_falls_back_to_master_when_no_main() {
+  // A repo whose only trunk-ish branch is `master` (no `main`) must
+  // resolve to "master" via the COMMON_TRUNKS fallback even when the
+  // caller passes no configured trunks.
+  let (_dir, repo) = init_repo();
+
+  // init_repo seeds `main`; create `master` at the same commit, point
+  // HEAD at it, then drop `main` so `master` is the sole local branch.
+  let head_oid = repo.head().unwrap().target().unwrap();
+  let head_commit = repo.find_commit(head_oid).unwrap();
+  repo.branch("master", &head_commit, false).unwrap();
+  repo.set_head("refs/heads/master").unwrap();
+  repo
+    .find_branch("main", git2::BranchType::Local)
+    .unwrap()
+    .delete()
+    .unwrap();
+
+  assert!(
+    repo.find_branch("main", git2::BranchType::Local).is_err(),
+    "main should be gone for this test"
+  );
+
+  let resolved = worktree::resolve_trunk(&repo, &[]);
+  assert_eq!(resolved.as_deref(), Some("master"));
+}
+
+#[test]
+fn resolve_trunk_prefers_configured_over_fallback() {
+  // With both `dev` and `main` present, a configured trunk of `dev`
+  // must win over the COMMON_TRUNKS fallback (which would otherwise
+  // pick `main` first).
+  let (_dir, repo) = init_repo();
+
+  let head_oid = repo.head().unwrap().target().unwrap();
+  let head_commit = repo.find_commit(head_oid).unwrap();
+  repo.branch("dev", &head_commit, false).unwrap();
+
+  assert!(
+    repo.find_branch("main", git2::BranchType::Local).is_ok(),
+    "main should exist for this test"
+  );
+  assert!(
+    repo.find_branch("dev", git2::BranchType::Local).is_ok(),
+    "dev should exist for this test"
+  );
+
+  let resolved = worktree::resolve_trunk(&repo, &["dev".to_string()]);
+  assert_eq!(resolved.as_deref(), Some("dev"));
 }

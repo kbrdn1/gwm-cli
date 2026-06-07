@@ -40,22 +40,42 @@ pub enum LinkPromptStage {
 }
 
 /// Pure state for the two-stage issue/PR link prompt. `Default` opens
-/// the prompt in the initial state (stage = ChooseTarget, no target,
-/// empty number buffer).
-#[derive(Debug, Default)]
+/// the prompt in the initial state (stage = ChooseTarget, no committed
+/// target, `Issue` highlighted, empty number buffer).
+#[derive(Debug)]
 pub struct LinkPrompt {
   /// Which stage of the prompt we're in. Drives the keypress dispatch
-  /// (i/p during ChooseTarget, digits/Enter/Backspace during
+  /// (j/k/Enter/i/p during ChooseTarget, digits/Enter/Backspace during
   /// InputNumber) at the event-loop layer.
   pub stage: LinkPromptStage,
-  /// Chosen target. `None` while in `ChooseTarget`, `Some(Issue|Pr)`
-  /// after [`Self::commit_target`].
+  /// Committed target. `None` while in `ChooseTarget`, `Some(Issue|Pr)`
+  /// after [`Self::commit_target`]. Distinct from [`Self::selected`]:
+  /// the highlight can move freely while nothing is committed yet.
   pub target: Option<LinkTarget>,
+  /// The highlighted row in the `ChooseTarget` vertical picker (#217).
+  /// `j`/`k` move it via [`Self::toggle_selection`]; `Enter` commits it.
+  /// Opens on `Issue` — most branches link an issue first; a PR comes
+  /// later when the branch is pushed. Frozen once a target is committed
+  /// so a stray keystroke during `InputNumber` can't flip it.
+  pub selected: LinkTarget,
   /// Digits typed by the user during `InputNumber`. Always digits-only:
   /// [`Self::push_char`] drops non-digits, [`Self::pop_char`] is the
   /// backspace handler. The orchestrator's submit handler calls
   /// `.parse::<u64>()` on this directly.
   pub number: String,
+}
+
+impl Default for LinkPrompt {
+  fn default() -> Self {
+    Self {
+      stage: LinkPromptStage::default(),
+      target: None,
+      // `LinkTarget` is a shared `cli::ValueEnum` with no `Default`, so the
+      // open-highlight default lives here rather than on that CLI type.
+      selected: LinkTarget::Issue,
+      number: String::new(),
+    }
+  }
 }
 
 impl LinkPrompt {
@@ -64,28 +84,28 @@ impl LinkPrompt {
   }
 
   /// Return to the freshly-opened state (stage = ChooseTarget, no
-  /// target, empty buffer). Called by the orchestrator when the prompt
-  /// opens, cancels, or completes a successful submit.
+  /// committed target, `Issue` highlighted, empty buffer). Called by the
+  /// orchestrator when the prompt opens, cancels, or completes a
+  /// successful submit.
   pub fn reset(&mut self) {
     self.stage = LinkPromptStage::ChooseTarget;
     self.target = None;
+    self.selected = LinkTarget::Issue;
     self.number.clear();
   }
 
-  /// Rotate the highlighted target during `ChooseTarget`. `None` →
-  /// `Issue` → `Pr` → `Issue` → … The first call from a freshly-opened
-  /// prompt lands on `Issue` because that's the more common case in
-  /// practice (most branches link an issue first; a PR comes later when
-  /// the branch is pushed). No-op during `InputNumber` so a stray
+  /// Move the highlight in the `ChooseTarget` picker. With exactly two
+  /// targets, `j` (down) and `k` (up) land on the same other row, so a
+  /// single flip covers both. No-op during `InputNumber` so a stray
   /// keystroke after commit can't flip the user's choice mid-typing.
-  pub fn toggle_target(&mut self) {
+  pub fn toggle_selection(&mut self) {
     if self.stage != LinkPromptStage::ChooseTarget {
       return;
     }
-    self.target = Some(match self.target {
-      None | Some(LinkTarget::Pr) => LinkTarget::Issue,
-      Some(LinkTarget::Issue) => LinkTarget::Pr,
-    });
+    self.selected = match self.selected {
+      LinkTarget::Issue => LinkTarget::Pr,
+      LinkTarget::Pr => LinkTarget::Issue,
+    };
   }
 
   /// Commit a target and advance to `InputNumber`. Clears the buffer so
