@@ -10,7 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
+### Changed
+
+- Off-thread bootstrap: pressing `b` to re-run bootstrap on the selected
+  worktree now runs `bootstrap::run` (file copies, guards, command hooks)
+  on the shared async-task spine instead of blocking the event loop, so a
+  slow bootstrap no longer freezes the TUI. The statusbar spinner animates
+  with a `bootstrapping…` label and `q` / `Esc` stay responsive while it
+  runs; the Report view opens when it finishes. The TOFU trust gate still
+  runs synchronously on the main thread before the worker spawns, and a
+  second `b` press while one is in flight coalesces (no double run).
+  ([#256](https://github.com/kbrdn1/gwm-cli/issues/256))
 
 ## Past releases
 

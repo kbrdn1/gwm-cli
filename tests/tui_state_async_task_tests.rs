@@ -213,3 +213,40 @@ fn a_late_sync_result_after_invalidate_is_dropped() {
     "a result from the invalidated generation must be dropped"
   );
 }
+
+// ---- Bootstrap task on the spine (issue #256) -----------------------------
+
+#[test]
+fn bootstrap_task_reports_the_bootstrapping_label() {
+  assert_eq!(TaskKind::Bootstrap.loading_label(), "bootstrapping…");
+  assert!(!TaskKind::Bootstrap.is_github(), "Bootstrap is not a GitHub kind");
+}
+
+#[test]
+fn second_bootstrap_request_while_inflight_is_coalesced() {
+  // Only one bootstrap runs at a time — a second `b` press while one is in
+  // flight must not spawn a second concurrent run (file copies / hooks).
+  let mut runner = TaskRunner::new();
+  assert_eq!(runner.request(TaskKind::Bootstrap), Some(1));
+  assert_eq!(
+    runner.request(TaskKind::Bootstrap),
+    None,
+    "a second bootstrap request while one is inflight must coalesce"
+  );
+  assert!(runner.is_loading(TaskKind::Bootstrap));
+}
+
+#[test]
+fn a_late_bootstrap_result_after_invalidate_is_dropped() {
+  // The generalised #138 guard for bootstrap: a worker whose generation was
+  // bumped by an intervening invalidate is dropped rather than flipping the
+  // view to a stale report.
+  let mut runner = TaskRunner::new();
+  let stale = runner.request(TaskKind::Bootstrap).unwrap();
+  runner.invalidate(TaskKind::Bootstrap);
+  assert!(!runner.is_loading(TaskKind::Bootstrap), "invalidate frees the slot");
+  assert!(
+    !runner.complete(TaskKind::Bootstrap, stale),
+    "a result from the invalidated generation must be dropped"
+  );
+}
