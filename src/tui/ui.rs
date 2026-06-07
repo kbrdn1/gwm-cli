@@ -1233,7 +1233,14 @@ fn branch_status_label(s: &BranchStatus) -> String {
   }
 }
 
-fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
+/// Worst-status accent colour for a [`BranchStatus`]: `unknown` → `muted`,
+/// `dirty`/`behind` → `dirty`, `ahead`-only → `accent`, else `clean`. The
+/// single source of truth shared by the sidebar status badge (`badges_line`)
+/// and the table status cell ([`format_status`], issue #241) — each builds its
+/// own label/sigils, but the colour is derived here once. Exported so the
+/// dedup is pinned by `tests/tui_theme_audit_tests.rs` (both call sites are
+/// private render code).
+pub fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
   if s.unknown {
     theme.muted
   } else if s.is_dirty || s.behind > 0 {
@@ -1364,8 +1371,12 @@ fn build_status_cell(w: &WorktreeInfo, width: usize, theme: &Theme) -> Cell<'sta
   Cell::from(label).style(Style::default().fg(color))
 }
 
-/// Pick a compact label + accent colour for a `BranchStatus`.
-fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Color) {
+/// Pick a compact label + accent colour for a `BranchStatus`. The colour is
+/// derived through the shared [`branch_status_color`] so the table cell and
+/// the sidebar status agree (issue #241); the label/sigil logic stays
+/// table-specific (the sidebar builds its own badge in `badges_line`).
+/// Exported so the colour route is pinned by `tests/tui_theme_audit_tests.rs`.
+pub fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Color) {
   if s.unknown {
     return ("unknown".into(), theme.muted);
   }
@@ -1391,15 +1402,11 @@ fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Colo
   let joined = parts.join(" ");
   let label = trunc(&joined, width.max(4));
 
-  // Worst-status colour: dirty/behind = dirty, ahead-only = accent, synced/clean = clean.
-  let color = if s.is_dirty || s.behind > 0 {
-    theme.dirty
-  } else if s.ahead > 0 {
-    theme.accent
-  } else {
-    theme.clean
-  };
-  (label, color)
+  // Worst-status colour, shared with the sidebar (issue #241). `unknown` was
+  // already handled by the early return above, so reaching `branch_status_color`
+  // here is byte-identical to the former inline `dirty/behind → ahead → clean`
+  // chain while keeping a single source of truth.
+  (label, branch_status_color(s, theme))
 }
 
 /// One statusbar hint specification (issue #217). Either a rebindable

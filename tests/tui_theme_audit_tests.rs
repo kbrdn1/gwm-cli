@@ -35,9 +35,9 @@ use gwm::tui::commit_graph::{render_pipe_set, test_row, Pipe, PipeKind};
 use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
-  branch_name_color, build_sidebar_sections, footer_line, freshness_color, header_line, help_label_style,
-  issue_badge_color, palette_name_style, pr_badge_color, table_marker, working_tree_status_line, worktree_name_style,
-  worktree_path_style,
+  branch_name_color, branch_status_color, build_sidebar_sections, footer_line, format_status, freshness_color,
+  header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color, table_marker,
+  working_tree_status_line, worktree_name_style, worktree_path_style,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::{Color, Modifier};
@@ -117,6 +117,75 @@ fn branch_name_color_resolves_every_state_through_theme_roles() {
     ..BranchStatus::default()
   };
   assert_eq!(branch_name_color(&unknown, &t), t.muted, "unknown → muted");
+}
+
+/// Representative `BranchStatus` values spanning every colour branch of the
+/// worst-status chain: unknown, dirty, behind-only, ahead-only, synced,
+/// unpublished/clean.
+fn status_color_cases() -> Vec<(&'static str, BranchStatus)> {
+  vec![
+    (
+      "unknown",
+      BranchStatus {
+        unknown: true,
+        ..BranchStatus::default()
+      },
+    ),
+    ("dirty", dirty_status()),
+    (
+      "behind-only",
+      BranchStatus {
+        has_upstream: true,
+        behind: 3,
+        ..BranchStatus::default()
+      },
+    ),
+    (
+      "ahead-only",
+      BranchStatus {
+        has_upstream: true,
+        ahead: 2,
+        ..BranchStatus::default()
+      },
+    ),
+    (
+      "synced",
+      BranchStatus {
+        has_upstream: true,
+        ..BranchStatus::default()
+      },
+    ),
+    ("unpublished-clean", BranchStatus::default()),
+  ]
+}
+
+#[test]
+fn branch_status_color_resolves_worst_status_through_theme_roles() {
+  let t = audit_theme();
+  let role = |label: &str| match label {
+    "unknown" => t.muted,
+    "dirty" | "behind-only" => t.dirty,
+    "ahead-only" => t.accent,
+    _ => t.clean,
+  };
+  for (label, s) in status_color_cases() {
+    assert_eq!(branch_status_color(&s, &t), role(label), "{label} → expected role");
+  }
+}
+
+#[test]
+fn format_status_colour_routes_through_branch_status_color() {
+  // Issue #241: the table status cell (`format_status`) and the sidebar status
+  // share one colour derivation. Pin the dedup so a future re-inline that
+  // diverges from `branch_status_color` is caught.
+  let t = audit_theme();
+  for (label, s) in status_color_cases() {
+    assert_eq!(
+      format_status(&s, 16, &t).1,
+      branch_status_color(&s, &t),
+      "{label}: format_status colour must equal branch_status_color"
+    );
+  }
 }
 
 #[test]
