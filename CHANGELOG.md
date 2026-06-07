@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Command Logs overlay: press `3` to open a lazygit-style, scrollable
+  transcript of the external commands gwm ran — the resolved command line,
+  duration, exit status, and captured output — newest-first over a ~90%
+  fullscreen modal. Scrolls like the help overlay (`j`/`k`, `g`/`G`,
+  `h`/`l`); `Esc` / `q` / `3` closes it. Completes the `1`/`2`/`3`
+  pane-key family and gives the single-line statusbar action log a full
+  scrollback. The transcript records `gh` GitHub calls, bootstrap shell
+  steps, and lifecycle hooks; read-only sidebar previews are excluded to
+  keep it signal-rich. Reachable by name via `:command-logs`; the `3`
+  binding is rebindable through `[tui.keys] command_logs`.
+  ([#226](https://github.com/kbrdn1/gwm-cli/issues/226))
 - Off-thread worktree list refresh: pressing `f` / `r` now re-lists the
   worktrees on a background worker instead of blocking the event loop, so a
   large repo or slow filesystem no longer freezes the TUI mid-refresh. The
