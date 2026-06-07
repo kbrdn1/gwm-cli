@@ -9,7 +9,7 @@ use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::ConfirmButton;
 use gwm::tui::{
-  badge_group_width, bootstrap_report_lines, confirm_buttons_line, create_buttons_line, ellipsize_middle,
+  badge_group_width, bootstrap_report_lines, centered_abs, confirm_buttons_line, create_buttons_line, ellipsize_middle,
   field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, recent_items_pane_title,
   status_pane_title, type_selector_line, working_tree_pane_title, worktrees_pane_title,
 };
@@ -17,6 +17,7 @@ use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_section_style,
   issue_pr_pane_title,
 };
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 #[test]
@@ -457,4 +458,103 @@ fn help_body_section_colour_is_distinct_from_subtitle_colour() {
     ..Theme::default()
   };
   assert_eq!(help_body_section_color(&theme), Color::Blue);
+}
+
+// `centered_abs` (issue #243, plan P7): the absolute-width centering shared by
+// the open-menu and link-prompt modals, extracted from two byte-for-byte
+// identical `Rect{}` blocks. Characterisation pins the contract so the
+// extraction (and the `centered_h` delegation) stays behaviour-preserving.
+
+#[test]
+fn centered_abs_centers_a_box_that_fits() {
+  // Nominal: 40×10 box in a 100×40 area → centred both axes.
+  assert_eq!(
+    centered_abs(
+      40,
+      10,
+      Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40
+      }
+    ),
+    Rect {
+      x: 30,
+      y: 15,
+      width: 40,
+      height: 10
+    }
+  );
+}
+
+#[test]
+fn centered_abs_honours_a_non_zero_area_origin() {
+  // The area's own x/y offset is added to the centred position.
+  assert_eq!(
+    centered_abs(
+      20,
+      6,
+      Rect {
+        x: 5,
+        y: 3,
+        width: 50,
+        height: 20
+      }
+    ),
+    Rect {
+      x: 20,
+      y: 10,
+      width: 20,
+      height: 6
+    }
+  );
+}
+
+#[test]
+fn centered_abs_caps_width_wider_than_the_area() {
+  // Width larger than the area is clamped to the area width; x collapses to 0.
+  assert_eq!(
+    centered_abs(
+      150,
+      10,
+      Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40
+      }
+    ),
+    Rect {
+      x: 0,
+      y: 15,
+      width: 100,
+      height: 10
+    }
+  );
+}
+
+#[test]
+fn centered_abs_caps_height_taller_than_the_area() {
+  // Edge case the inline modal blocks relied on: a box taller than the
+  // terminal is clamped to the area height and pinned to the top (y = area.y),
+  // because `saturating_sub` floors the vertical gap at 0.
+  assert_eq!(
+    centered_abs(
+      40,
+      50,
+      Rect {
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 40
+      }
+    ),
+    Rect {
+      x: 30,
+      y: 0,
+      width: 40,
+      height: 40
+    }
+  );
 }
