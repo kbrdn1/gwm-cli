@@ -12,6 +12,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Configuration panel: press `4` to open a ~90% fullscreen, scrollable
+  view of the **resolved** `.gwm.toml` — the user-level global config
+  (`~/.config/gwm/config.toml`) deep-merged under the repo file, exactly
+  as `gwm config list` resolves it. Rows are grouped by `[section]` and
+  each carries a colour-coded source column (**repo** / **user** /
+  **default**) marking which layer won — provenance the CLI never
+  exposed. Scrolls like the help overlay (`j`/`k`, `g`/`G`, `h`/`l`);
+  `Esc` / `q` / `4` closes it. Read-first: inline editing stays a
+  follow-up. Completes the `1`/`2`/`3`/`4` pane-key family; reachable by
+  name via `:config-panel` and rebindable through `[tui.keys] config_panel`.
+  ([#232](https://github.com/kbrdn1/gwm-cli/issues/232))
 - Command Logs overlay: press `3` to open a lazygit-style, scrollable
   transcript of the external commands gwm ran — the resolved command line,
   duration, exit status, and captured output — newest-first over a ~90%
