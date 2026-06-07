@@ -15,6 +15,7 @@ use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
+use std::path::Path;
 use std::process::Command;
 use std::sync::LazyLock;
 
@@ -577,6 +578,25 @@ where
   run_gh_with(&gh_program(), args)
 }
 
+/// Build the human-readable command line stored on the Command Logs
+/// transcript (issue #226) for a `gh` invocation: the program's *file name*
+/// (so a `GWM_GH=/usr/bin/gh` override still reads as `gh issue view …`
+/// rather than leaking the full path) followed by the resolved args. Kept
+/// pure and `pub` so its argv format is unit-testable without spawning `gh`
+/// (which CI runners do not have).
+pub fn gh_command_line(program: &OsStr, args: &[OsString]) -> String {
+  let name = Path::new(program)
+    .file_name()
+    .map(|n| n.to_string_lossy().into_owned())
+    .unwrap_or_else(|| program.to_string_lossy().into_owned());
+  let mut line = name;
+  for arg in args {
+    line.push(' ');
+    line.push_str(&arg.to_string_lossy());
+  }
+  line
+}
+
 /// [`run_gh`] against an explicitly resolved `gh` program. Lets callers on
 /// a worker thread (issue #217) avoid re-reading `GWM_GH` / the process
 /// environment concurrently with env-mutating code on other threads.
@@ -585,9 +605,14 @@ where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  let output = Command::new(program)
-    .args(args)
-    .output()
+  // Collect the args once so they can both drive the spawn and build the
+  // human-readable command line stored on the Command Logs transcript
+  // (issue #226): the resolved `gh <args…>`, not an opaque handle.
+  let collected: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
+  let cmdline = gh_command_line(program, &collected);
+  let mut cmd = Command::new(program);
+  cmd.args(&collected);
+  let output = crate::command_log::run_logged(&mut cmd, cmdline)
     .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;
   if !output.status.success() {
     return Err(GwmError::CommandFailed(format!(

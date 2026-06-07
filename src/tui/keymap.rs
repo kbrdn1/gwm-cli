@@ -127,6 +127,7 @@ define_actions! {
   LinkPrompt        => "link",
   FetchGithub       => "fetch_github",
   // Overlays
+  CommandLogs       => "command_logs",
   Help              => "help",
   Quit              => "quit",
   // Future surface — bound to ':' by default, picked up by #32.
@@ -390,6 +391,7 @@ impl Keymap {
       def(Action::FocusSwap, &["Tab"]),
       def(Action::FocusWorktrees, &["1"]),
       def(Action::FocusStatus, &["2"]),
+      def(Action::CommandLogs, &["3"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),
       def(Action::Create, &["n"]),

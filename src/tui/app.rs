@@ -1,6 +1,7 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
 use super::state::async_task::{TaskKind, TaskMsg, TaskRunner};
+use super::state::command_logs::CommandLogs;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -79,6 +80,11 @@ pub enum View {
   /// / `palette_cycle_*` / `accept_command_palette` /
   /// `close_command_palette`.
   CommandPalette,
+  /// Command Logs overlay (issue #226). A ~90% fullscreen modal over a
+  /// dimmed list showing the lazygit-style transcript of the external
+  /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
+  /// state lives on [`App::command_logs`].
+  CommandLogs,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -316,6 +322,11 @@ pub struct App {
   /// tick. Mirrors the GitHub channel; a worker whose `App` has dropped
   /// simply fails its `send` and is ignored.
   task_rx: mpsc::Receiver<TaskMsg>,
+
+  /// Command Logs overlay state (issue #226): the scroll cursor plus an
+  /// owned snapshot of the [`crate::command_log`] global, so the modal
+  /// renders off `App` state rather than locking the global mid-frame.
+  pub command_logs: CommandLogs,
 }
 
 impl App {
@@ -396,6 +407,7 @@ impl App {
       tasks: TaskRunner::new(),
       task_tx,
       task_rx,
+      command_logs: CommandLogs::new(),
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -894,6 +906,10 @@ impl App {
       View::CommandPalette => HintContext::CommandPalette,
       View::Report => HintContext::Report,
       View::Help => HintContext::Help,
+      // The Command Logs overlay (issue #226) is a ~90% fullscreen modal;
+      // the statusbar behind it shows the underlying pane's context, as the
+      // List view does.
+      View::CommandLogs => self.pane_hint_context(),
       View::List => self.pane_hint_context(),
     }
   }
@@ -935,6 +951,16 @@ impl App {
     self.view = View::Help;
     self.help_scroll = 0;
     self.help_x_scroll = 0;
+  }
+
+  /// Open the Command Logs overlay (issue #226). Snapshots the global
+  /// command log into owned state and resets the scroll cursor so a
+  /// previously-scrolled session starts fresh at the top. The renderer
+  /// republishes `max_scroll` against the live viewport.
+  pub fn enter_command_logs(&mut self) {
+    self.command_logs.sync();
+    self.command_logs.reset();
+    self.view = View::CommandLogs;
   }
 
   /// Scroll the help overlay down one row, clamped to the renderer-published

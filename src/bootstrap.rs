@@ -616,8 +616,11 @@ fn exec_shell(step: &CommandStep, cwd: &Path) -> Result<String> {
   // generalised in #65 so other subcommands (gwm tmux / gwm zellij)
   // don't inherit a misleading "bootstrap" prefix on their own
   // spawn failures.
-  let out = cmd
-    .output()
+  // Record on the Command Logs transcript (issue #226): a bootstrap step
+  // is an external command gwm ran. The logged line is the user-authored
+  // shell script, not the `sh -c` wrapper, so the transcript reads like the
+  // command the user wrote.
+  let out = crate::command_log::run_logged(&mut cmd, step.run.clone())
     .map_err(|e| GwmError::CommandFailed(format!("bootstrap step '{}': {}", step.name, e)))?;
   let stdout = String::from_utf8_lossy(&out.stdout).to_string();
   let stderr = String::from_utf8_lossy(&out.stderr).to_string();

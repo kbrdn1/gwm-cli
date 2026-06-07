@@ -739,3 +739,24 @@ fn parse_pr_list_number_returns_none_for_empty_array() {
 fn parse_pr_list_number_errors_on_malformed_json() {
   assert!(github::parse_pr_list_number("not json").is_err());
 }
+
+#[test]
+fn gh_command_line_uses_the_program_basename_and_joins_args() {
+  use std::ffi::{OsStr, OsString};
+  // Issue #226: the Command Logs transcript shows the resolved `gh <args…>`
+  // (the user's chosen lazygit-style argv). A `GWM_GH` override pointing at
+  // a full path must still read as `gh …`, not leak the path.
+  let args: Vec<OsString> = ["issue", "view", "226", "--json", "title,body"]
+    .iter()
+    .map(OsString::from)
+    .collect();
+  assert_eq!(
+    github::gh_command_line(OsStr::new("/opt/homebrew/bin/gh"), &args),
+    "gh issue view 226 --json title,body"
+  );
+  // A bare program name is preserved as-is.
+  assert_eq!(
+    github::gh_command_line(OsStr::new("gh"), &args),
+    "gh issue view 226 --json title,body"
+  );
+}

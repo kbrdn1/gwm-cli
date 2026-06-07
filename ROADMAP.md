@@ -90,10 +90,15 @@ If an issue still shows `open` on GitHub even though its work shipped, it's a tr
 
 Near-term TUI work, listed in **rough implementation order** — each item builds on the one above it. This is a dependency ordering, not a date commitment.
 
-1. [#231](https://github.com/kbrdn1/gwm-cli/issues/231) — **Async-task layer + better loader render** — the foundation. Generalise #217's off-thread GitHub fetch into a shared worker-thread + loader so list refresh (`f`), `sync`, bootstrap (`b`), and launcher spawns stop blocking the event loop, all rendering through one consistent loader widget. Everything below shows its loading state through this layer.
-2. [#226](https://github.com/kbrdn1/gwm-cli/issues/226) — **Command Logs modal (`3`)** — first consumer of the modal-on-a-number-key pattern; a scrollable transcript of every command gwm runs (argv, timing, exit, output), streamed through the new loader. Completes the `1`/`2`/`3` panel family and gives the single-line statusbar action log (#217) a full scrollback.
-3. [#232](https://github.com/kbrdn1/gwm-cli/issues/232) — **Configuration panel (`4`)** — the next pane in the family; a ~90% fullscreen modal (same pattern as #226 / #35, outside the `Tab` cycle) showing the **resolved** `.gwm.toml` (repo deep-merged with the user-level config, with a source column), reusing the merge logic already behind `gwm config list`.
-4. [#233](https://github.com/kbrdn1/gwm-cli/issues/233) — **Open docs in the browser (`.`)** — dependency-free quick win; a `.` key that opens the docs, reusing the `O` / `gwm open` browser-spawn path. Can land at any point.
+**Landed on `dev`** (unreleased — moves into the shipped table when the next version is cut):
+
+- [#231](https://github.com/kbrdn1/gwm-cli/issues/231) — **Async-task layer** — the foundation. A generic off-thread spine (`TaskRunner`: coalescing + late-result drop) that moved the worktree list refresh (`f` / `r`) off the event loop, rendering its loading state through the statusbar spinner. ([PR #254](https://github.com/kbrdn1/gwm-cli/pull/254)) Follow-ups: [#255](https://github.com/kbrdn1/gwm-cli/issues/255) (migrate the GitHub fetch onto the spine), [#256](https://github.com/kbrdn1/gwm-cli/issues/256) (bootstrap `b` off-thread), [#257](https://github.com/kbrdn1/gwm-cli/issues/257) (standalone loader widget — deferred to land with its first real consumer, #232 / #4), [#258](https://github.com/kbrdn1/gwm-cli/issues/258) (expose `gwm sync` as a TUI action).
+- [#226](https://github.com/kbrdn1/gwm-cli/issues/226) — **Command Logs modal (`3`)** — a lazygit-style, scrollable transcript of the external commands gwm ran (`gh` calls, bootstrap shell steps, lifecycle hooks) with resolved argv, timing, exit status, and captured output, newest-first over a ~90% fullscreen modal. Completes the `1`/`2`/`3` pane-key family and gives the single-line statusbar action log (#217) a full scrollback. ([PR #259](https://github.com/kbrdn1/gwm-cli/pull/259))
+
+**Queued**, in rough implementation order:
+
+1. [#232](https://github.com/kbrdn1/gwm-cli/issues/232) — **Configuration panel (`4`)** — the next pane in the family; a ~90% fullscreen modal (same pattern as #226 / #35, outside the `Tab` cycle) showing the **resolved** `.gwm.toml` (repo deep-merged with the user-level config, with a source column), reusing the merge logic already behind `gwm config list`. The natural first home for the standalone loader widget ([#257](https://github.com/kbrdn1/gwm-cli/issues/257)), which has a genuine async loading area here.
+2. [#233](https://github.com/kbrdn1/gwm-cli/issues/233) — **Open docs in the browser (`.`)** — dependency-free quick win; a `.` key that opens the docs, reusing the `O` / `gwm open` browser-spawn path. Can land at any point.
 
 ## Ambitious
 

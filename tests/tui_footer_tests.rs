@@ -250,6 +250,22 @@ fn hint_context_exposes_label_and_hints() {
 }
 
 #[test]
+fn worktrees_and_status_hints_advertise_the_command_logs_key() {
+  // Issue #226: the statusbar which-key must advertise `3 logs` so the
+  // Command Logs overlay is discoverable, alongside the `1`/`2` pane keys.
+  use gwm::tui::keymap::Keymap;
+  let km = Keymap::defaults();
+  for ctx in [HintContext::Worktrees, HintContext::Status] {
+    let resolved = ctx.resolve(&km);
+    assert!(
+      resolved.iter().any(|(k, l)| k == "3" && l == "logs"),
+      "context {:?} must advertise the `3 logs` hint: {resolved:?}",
+      ctx.label()
+    );
+  }
+}
+
+#[test]
 fn status_hints_resolve_user_rebindings() {
   // Issue #217 review (P2): the statusbar must show the *live* binding, not
   // the hard-coded default — the keymap actions are rebindable. `fetch` is

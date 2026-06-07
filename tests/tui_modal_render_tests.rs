@@ -196,6 +196,37 @@ fn report_modal_renders_title_and_step_labels() {
 }
 
 #[test]
+fn command_logs_modal_renders_title_and_entry_argv() {
+  use gwm::command_log::{CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  let (_dir, mut app) = make_app();
+  // Inject entries directly into owned state so the render is deterministic
+  // and never touches the process-global log (the event loop is what syncs
+  // the global in; here we pin the *render*).
+  app.command_logs.entries = vec![CommandLogEntry {
+    command: "gh issue view 226 --json title,body".into(),
+    duration: Duration::from_millis(412),
+    status: CommandStatus::Exited(Some(0)),
+    output: "ok".into(),
+  }];
+  app.view = View::CommandLogs;
+  let buf = render(&mut app);
+  assert_present(&buf, "Command Logs", "command logs title");
+  assert_present(&buf, "gh issue view 226", "logged command argv");
+}
+
+#[test]
+fn command_logs_modal_renders_empty_placeholder() {
+  let (_dir, mut app) = make_app();
+  app.command_logs.entries.clear();
+  app.view = View::CommandLogs;
+  let buf = render(&mut app);
+  assert_present(&buf, "Command Logs", "command logs title");
+  assert_present(&buf, "No commands", "empty-state placeholder");
+}
+
+#[test]
 fn open_menu_modal_renders_title_and_targets() {
   let (_dir, mut app) = make_app();
   app.enter_open_menu();

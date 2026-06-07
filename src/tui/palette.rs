@@ -162,6 +162,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "select the previous worktree",
     },
     PaletteEntry {
+      action: Action::CommandLogs,
+      name: "command-logs",
+      description: "show the command logs overlay",
+    },
+    PaletteEntry {
       action: Action::Help,
       name: "help",
       description: "show the help overlay",

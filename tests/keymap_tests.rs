@@ -215,6 +215,18 @@ fn default_keymap_binds_sidebar_layout_and_position() {
 }
 
 #[test]
+fn default_keymap_binds_command_logs_to_3() {
+  // Issue #226: `3` opens the Command Logs modal, completing the `1` / `2`
+  // / `3` pane-key family (focus_worktrees / focus_status / command_logs).
+  let km = Keymap::defaults();
+  let three = KeyStroke::parse_chord("3").unwrap();
+  assert!(matches!(
+    km.lookup(&three),
+    ChordResolution::Matched(Action::CommandLogs)
+  ));
+}
+
+#[test]
 fn user_override_replaces_default_for_one_action() {
   let mut km = Keymap::defaults();
   km.apply_override(Action::Down, vec![KeyStroke::parse_chord("Ctrl+n").unwrap()])
