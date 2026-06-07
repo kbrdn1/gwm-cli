@@ -177,3 +177,39 @@ fn a_stale_github_worker_loses_to_a_newer_generation_after_invalidate() {
   assert!(runner.complete(TaskKind::GithubIssue(42), gen_b));
   assert!(!runner.is_loading(TaskKind::GithubIssue(42)));
 }
+
+// ---- Sync task on the spine (issue #258) ----------------------------------
+
+#[test]
+fn sync_task_reports_the_syncing_label() {
+  assert_eq!(TaskKind::Sync.loading_label(), "syncing…");
+  assert!(!TaskKind::Sync.is_github(), "Sync is not a GitHub kind");
+}
+
+#[test]
+fn second_sync_request_while_inflight_is_coalesced() {
+  // Only one sync runs at a time — a second `S` press while a rebase is in
+  // flight must not spawn a second concurrent rebase.
+  let mut runner = TaskRunner::new();
+  assert_eq!(runner.request(TaskKind::Sync), Some(1));
+  assert_eq!(
+    runner.request(TaskKind::Sync),
+    None,
+    "a second sync request while one is inflight must coalesce"
+  );
+  assert!(runner.is_loading(TaskKind::Sync));
+}
+
+#[test]
+fn a_late_sync_result_after_invalidate_is_dropped() {
+  // The generalised #138 guard for sync: a worker whose generation was bumped
+  // by an intervening invalidate (e.g. a post-sync refresh) is dropped.
+  let mut runner = TaskRunner::new();
+  let stale = runner.request(TaskKind::Sync).unwrap();
+  runner.invalidate(TaskKind::Sync);
+  assert!(!runner.is_loading(TaskKind::Sync), "invalidate frees the slot");
+  assert!(
+    !runner.complete(TaskKind::Sync, stale),
+    "a result from the invalidated generation must be dropped"
+  );
+}

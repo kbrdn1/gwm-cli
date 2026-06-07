@@ -114,6 +114,7 @@ define_actions! {
   Filter            => "filter",
   // Lifecycle / mutating
   Refresh           => "refresh",
+  Sync              => "sync",
   Create            => "create",
   DeleteConfirm     => "delete",
   Bootstrap         => "bootstrap",
@@ -396,6 +397,9 @@ impl Keymap {
       def(Action::ConfigPanel, &["4"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f", "r"]),
+      // `s` is taken by ToggleSidebarMode, so Sync defaults to `S` — an
+      // uppercase lifecycle verb alongside `F` (FetchGithub) / `R` (Review).
+      def(Action::Sync, &["S"]),
       def(Action::Create, &["n"]),
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),

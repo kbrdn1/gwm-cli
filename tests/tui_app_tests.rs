@@ -4011,6 +4011,124 @@ fn drain_async_refresh_failure_surfaces_status_without_touching_the_list() {
   );
 }
 
+fn sync_report_integrated(behind: usize) -> gwm::sync::SyncReport {
+  gwm::sync::SyncReport {
+    branch: "feat/#258-x".into(),
+    upstream: "origin/main".into(),
+    strategy: gwm::sync::SyncStrategy::Rebase,
+    ahead_before: 0,
+    behind_before: behind,
+    action: gwm::sync::SyncAction::Integrated,
+  }
+}
+
+#[test]
+fn drain_applies_sync_report_and_reports_the_outcome() {
+  // Issue #258: a `gwm sync` result delivered off-thread is applied by
+  // `drain_task_results`, which re-lists the worktrees (so the new
+  // ahead/behind shows) and reports the sync outcome on the status bar.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  // Claim the Sync slot exactly as `request_sync` would, without spawning.
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  assert!(app.is_task_loading(), "request must mark the app as loading");
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(generation, "alpha".into(), Ok(sync_report_integrated(3))))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert!(!app.is_task_loading(), "the sync slot clears after draining");
+  assert!(
+    app.status.contains("rebased 3 commits"),
+    "status reports the sync outcome, not the refresh line: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_sync_failure_surfaces_on_the_status_bar() {
+  // A refused/failed sync (dirty tree, no upstream, conflicts) surfaces as a
+  // status message rather than tearing anything down.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(
+      generation,
+      "alpha".into(),
+      Err("branch 'feat/#258-x' has no upstream configured".into()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a failure still counts as a drained result");
+  assert!(!app.is_task_loading(), "the slot clears even on failure");
+  assert!(
+    app.status.contains("sync failed") && app.status.contains("no upstream"),
+    "the sync error reaches the status bar: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_a_superseded_sync_result() {
+  // The #138 guard on the sync path: a worker whose generation was bumped by
+  // an intervening invalidate is dropped, leaving the status untouched.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::Sync).unwrap();
+  app.tasks.invalidate(TaskKind::Sync);
+  app.status = "untouched".into();
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sync(stale, "alpha".into(), Ok(sync_report_integrated(2))))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.status, "untouched",
+    "a sync result invalidated mid-flight must be dropped, not reported"
+  );
+}
+
+#[test]
+fn request_sync_coalesces_onto_an_inflight_run() {
+  // A second `S` press while a sync is already in flight must not spawn a
+  // second rebase — `request_sync` coalesces and returns early (zero threads).
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  // The main worktree is selected by default, so request_sync gets past the
+  // selection check and reaches the coalesce branch.
+  let generation = app.tasks.request(TaskKind::Sync).unwrap();
+  app.request_sync(); // coalesced — no panic, no second worker
+  assert!(app.is_task_loading());
+  assert!(
+    app.tasks.complete(TaskKind::Sync, generation),
+    "the original sync is still authoritative after a coalesced press"
+  );
+}
+
+#[test]
+fn request_sync_with_no_selection_reports_and_does_not_claim_a_slot() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  // Drop the selection so there is no worktree to sync.
+  app.list_state.select(None);
+  app.request_sync();
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sync),
+    "with nothing selected, request_sync must not claim a sync slot"
+  );
+  assert!(
+    app.status.contains("no worktree selected"),
+    "request_sync reports the missing selection: {:?}",
+    app.status
+  );
+}
+
 #[test]
 fn request_refresh_coalesces_onto_an_inflight_run() {
   // A second `f` press while a refresh is already in flight must not spawn a
