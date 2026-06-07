@@ -55,6 +55,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off-thread mechanism, not two. Behaviour-preserving for the happy path; the
   spine's per-key generation counter is what fixes the race below.
   ([#255](https://github.com/kbrdn1/gwm-cli/issues/255))
+- The fuzzy filter (`/`) now renders inside the worktrees pane title instead
+  of a separate row below the table: the `/query`, cursor, and
+  `(visible/total)` ratio read in the pane border, attached to the list they
+  narrow. The standalone filter bar is gone, giving the table one more row.
+  ([#262](https://github.com/kbrdn1/gwm-cli/issues/262))
+- The command palette (`:`) input moved to the top of the modal (above the
+  matches) and adopts the New Worktree modal's background-filled input style,
+  so the palette reads input-then-results like the create form.
+  ([#262](https://github.com/kbrdn1/gwm-cli/issues/262))
 
 ### Fixed
 

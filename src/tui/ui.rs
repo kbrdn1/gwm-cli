@@ -39,37 +39,18 @@ pub struct SidebarSections {
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
-  // Filter bar is shown while the user is typing, AND while a sticky filter
-  // remains in effect (so they can see what's filtering the list).
-  let filter_visible = app.filter.active || !app.filter.query().is_empty();
-
-  // Header is a single borderless row (#185) — same one-line treatment as the
-  // footer, so the worktree table gets two extra rows of vertical space.
-  let chunks = if filter_visible {
-    Layout::default()
-      .direction(Direction::Vertical)
-      .constraints([
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
-        Constraint::Length(1),
-      ])
-      .split(f.area())
-  } else {
-    Layout::default()
-      .direction(Direction::Vertical)
-      .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
-      .split(f.area())
-  };
+  // Header and footer are single borderless rows (#185); the body fills the
+  // rest. The fuzzy filter no longer claims its own row — it renders inside
+  // the worktrees pane title (#262), so the layout is a stable header / body /
+  // footer split whether or not a filter is active.
+  let chunks = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([Constraint::Length(1), Constraint::Min(0), Constraint::Length(1)])
+    .split(f.area());
 
   draw_header(f, chunks[0], app);
   draw_body(f, chunks[1], app);
-  if filter_visible {
-    draw_filter_bar(f, chunks[2], app);
-    draw_footer(f, chunks[3], app);
-  } else {
-    draw_footer(f, chunks[2], app);
-  }
+  draw_footer(f, chunks[2], app);
 
   match app.view {
     View::Help => draw_help(f, app),
@@ -192,31 +173,6 @@ pub fn header_line(
   Line::from(spans)
 }
 
-/// Single-line filter bar rendered between the table and the footer.
-/// Mirrors Vim's `/` prompt: leading slash, the live query, and a block cursor
-/// while the user is actively typing.
-fn draw_filter_bar(f: &mut Frame, area: Rect, app: &App) {
-  // The `/` prompt and the block cursor use the `dirty` role (their
-  // historical `Color::Yellow`); the sticky-filter hint uses `muted`.
-  let mut spans = vec![
-    Span::styled("/", Style::default().fg(app.theme.dirty).add_modifier(Modifier::BOLD)),
-    Span::raw(app.filter.query()),
-  ];
-  if app.filter.active {
-    spans.push(Span::styled(
-      "█",
-      Style::default().fg(app.theme.dirty).add_modifier(Modifier::SLOW_BLINK),
-    ));
-  } else {
-    // Sticky filter: hint how to clear / refine without re-entering the bar.
-    spans.push(Span::styled(
-      "   (sticky — / to refine, esc on list to clear)",
-      Style::default().fg(app.theme.muted),
-    ));
-  }
-  f.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
 /// Lay out the worktree table and the optional preview sidebar for the
 /// body region. The layout (hidden / side-by-side / stacked) and the
 /// left-or-right side are decided by the pure
@@ -304,19 +260,51 @@ pub fn panel_border_color(focused: bool, theme: &super::theme::Theme) -> Color {
   }
 }
 
-/// Title for the worktree pane block (issue #217). Carries the `[1]` focus
-/// mnemonic (the pane is focusable with the `1` key) and a `(N)` /
-/// `(visible/total)` counter. `query_empty` switches between the two counter
-/// forms: when no filter is active the full worktree count is shown, otherwise
-/// the visible-over-total ratio so the user sees how much the filter narrowed
-/// the list. Pure + width-free so the copy is pinned by
-/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
-pub fn worktrees_pane_title(query_empty: bool, visible: usize, total: usize) -> String {
-  if query_empty {
-    format!(" [1] Worktrees ({}) ", total)
-  } else {
-    format!(" [1] Worktrees ({}/{}) ", visible, total)
+/// Title for the worktree pane block (issue #217; carries the inline fuzzy
+/// filter since #262). Always leads with the `[1]` focus mnemonic (the pane
+/// is focusable with the `1` key). When a filter is live — the user is typing
+/// (`active`) or a sticky query remains — the title embeds the `/query`
+/// prompt (in `filter_color`), a block cursor while `active`, and the
+/// `(visible/total)` ratio so the user sees how much the filter narrowed the
+/// list. With no filter it shows just the `(total)` count. This replaces the
+/// standalone filter bar row (#262): the filter now reads in the pane border,
+/// attached to the list it narrows. Pure + width-free so the copy + the
+/// prompt colour are pinned by `tests/tui_ui_helpers_tests.rs` without a
+/// ratatui backend.
+pub fn worktrees_pane_title(
+  query: &str,
+  active: bool,
+  visible: usize,
+  total: usize,
+  filter_color: Color,
+) -> Line<'static> {
+  let mut spans = vec![Span::raw(" [1] Worktrees ")];
+  // Live filter (typing or sticky): show the `/query` prompt + optional
+  // cursor, mirroring the Vim-style bar the title replaced.
+  if active || !query.is_empty() {
+    spans.push(Span::styled(
+      "/",
+      Style::default().fg(filter_color).add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(query.to_string()));
+    if active {
+      spans.push(Span::styled(
+        "\u{2588}",
+        Style::default().fg(filter_color).add_modifier(Modifier::SLOW_BLINK),
+      ));
+    }
+    spans.push(Span::raw(" "));
   }
+  // Counter: the visible/total ratio only once a query actually narrows the
+  // list; an empty query (even while the bar is open) matches all, so the
+  // plain `(total)` form reads cleaner.
+  let counter = if query.is_empty() {
+    format!("({}) ", total)
+  } else {
+    format!("({}/{}) ", visible, total)
+  };
+  spans.push(Span::raw(counter));
+  Line::from(spans)
 }
 
 /// Title for the head section of the status (sidebar) pane (issue #217).
@@ -408,7 +396,13 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
 
-  let title = worktrees_pane_title(app.filter.query().is_empty(), visible.len(), app.worktrees.len());
+  let title = worktrees_pane_title(
+    app.filter.query(),
+    app.filter.active,
+    visible.len(),
+    app.worktrees.len(),
+    app.theme.dirty,
+  );
 
   // Bottom-right `selected of visible` counter (issue #217), mirroring the
   // Recent Commits footer. `list_state.selected()` is 0-based; render it
@@ -3046,18 +3040,21 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
   let inner = outer.inner(area);
   f.render_widget(outer, area);
 
-  // Six rows: a detached centred title, a blank spacer, the matches list
-  // (flex), a hint gap, statusbar-style hints, and the input bar pinned to the bottom (issue #217 — the title
-  // moved off the border into the frame).
+  // Input-first layout (issue #262): a detached centred title, a blank
+  // spacer, the `:` input field (background-filled, mirroring the New
+  // Worktree modal's `field_input_line`), a spacer, the matches list (flex),
+  // a hint gap, and the statusbar-style hint. The input moved to the top so
+  // the modal reads input-then-results like the create form.
   let layout = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
       Constraint::Length(1), // title
       Constraint::Length(1), // spacer
+      Constraint::Length(1), // input field
+      Constraint::Length(1), // spacer
       Constraint::Min(3),    // matches
       Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
-      Constraint::Length(1), // input bar
     ])
     .split(inner);
 
@@ -3070,6 +3067,25 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       .centered(),
     ),
     layout[0],
+  );
+
+  // The `:` input field, styled like the create modal's fields: a `:` label
+  // then a background-filled value box. The palette input is always focused
+  // (the user is typing into it), so it carries the accent fill + cursor.
+  let label = ":";
+  let gutter = 2 + label.chars().count() + 2; // field_input_line's `  label  ` gutter
+  let value_w = (inner.width as usize).saturating_sub(gutter);
+  f.render_widget(
+    Paragraph::new(field_input_line(
+      label,
+      app.palette.buffer(),
+      true,
+      value_w,
+      accent,
+      app.theme.muted,
+      app.theme.selection_bg,
+    )),
+    layout[2],
   );
 
   let entries = app.palette.matches();
@@ -3098,22 +3114,15 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       Style::default().fg(app.theme.prunable),
     )));
   }
-  f.render_widget(Paragraph::new(lines), layout[2]);
+  f.render_widget(Paragraph::new(lines), layout[4]);
   f.render_widget(
     Paragraph::new(modal_hint_for_context(
       HintContext::CommandPalette,
       &app.keymap,
       &app.theme,
     )),
-    layout[4],
+    layout[6],
   );
-
-  let input_line = Line::from(vec![
-    Span::styled(":", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-    Span::raw(app.palette.buffer().to_string()),
-    Span::styled("_", Style::default().fg(app.theme.muted)),
-  ]);
-  f.render_widget(Paragraph::new(input_line), layout[5]);
 }
 
 /// Body of the Issue / PR sidebar block. The block title (`" Issue / PR "`)
