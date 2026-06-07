@@ -2260,17 +2260,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     // changes, mirroring `gwm config list`'s grouping.
     let mut current_section: Option<String> = None;
     for row in &app.config_panel.rows {
-      let section = row
-        .key
-        .split(|c| c == '.' || c == '[')
-        .next()
-        .unwrap_or("")
-        .to_string();
+      let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
       if current_section.as_deref() != Some(section.as_str()) {
         if current_section.is_some() {
           lines.push(Line::from(String::new()));
         }
-        lines.push(Line::from(Span::styled(format!("[{section}]"), help_section_style(accent))));
+        lines.push(Line::from(Span::styled(
+          format!("[{section}]"),
+          help_section_style(accent),
+        )));
         current_section = Some(section);
       }
       // Leading source column, colour-coded and padded so keys align: repo
