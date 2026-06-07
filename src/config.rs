@@ -708,6 +708,47 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
   }
 }
 
+/// Flatten a (possibly nested) TOML value into `key = display` rows,
+/// dotted for tables and `name[i]` for arrays-of-tables, leaving scalar
+/// leaves as-is. Shared by `gwm config list` (the CLI surface) and the
+/// in-TUI Configuration panel (issue #232) so neither can drift from the
+/// other's key shape. Pure — pushes onto `rows` in table-iteration order
+/// (`toml::Value::Table` is a `BTreeMap`, so keys come out sorted).
+pub(crate) fn flatten_value(prefix: &str, value: &toml::Value, rows: &mut Vec<(String, String)>) {
+  match value {
+    toml::Value::Table(table) => {
+      for (key, value) in table {
+        let next = if prefix.is_empty() {
+          key.to_string()
+        } else {
+          format!("{}.{}", prefix, key)
+        };
+        flatten_value(&next, value, rows);
+      }
+    }
+    toml::Value::Array(values) if values.iter().all(toml::Value::is_table) => {
+      for (i, value) in values.iter().enumerate() {
+        flatten_value(&format!("{}[{}]", prefix, i), value, rows);
+      }
+    }
+    _ => rows.push((prefix.to_string(), format_list_value(value))),
+  }
+}
+
+/// Render a single TOML scalar (or non-table aggregate) the way
+/// `gwm config list` does: strings quoted, scalars bare, arrays/tables
+/// via their `Display`. Shared with the Configuration panel (issue #232).
+pub(crate) fn format_list_value(value: &toml::Value) -> String {
+  match value {
+    toml::Value::String(s) => format!("{:?}", s),
+    toml::Value::Integer(i) => i.to_string(),
+    toml::Value::Float(f) => f.to_string(),
+    toml::Value::Boolean(b) => b.to_string(),
+    toml::Value::Datetime(d) => d.to_string(),
+    toml::Value::Array(_) | toml::Value::Table(_) => value.to_string(),
+  }
+}
+
 /// On-disk location of the user-level global config under a given
 /// XDG config-home directory: `<config_home>/gwm/config.toml`. Pure
 /// (no env / FS access) so the path contract is unit-testable. Issue
