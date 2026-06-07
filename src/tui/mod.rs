@@ -28,6 +28,7 @@ pub use app::{
   App, CreateKey, GithubFetchMsg, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
 };
 pub use state::async_task::{TaskKind, TaskMsg, TaskRunner};
+pub use state::command_logs::CommandLogs;
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
