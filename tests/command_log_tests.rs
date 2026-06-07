@@ -103,6 +103,29 @@ fn run_logged_records_a_successful_command_with_its_output() {
 }
 
 #[test]
+fn run_logged_keeps_stderr_for_a_mixed_output_failure() {
+  // Codex review (#259): a command that writes to stdout *and* puts its
+  // diagnostics on stderr before failing must not lose the error text — the
+  // transcript is for troubleshooting. Both streams are kept.
+  let out_sentinel = "gwm-cmdlog-mixed-out-a1";
+  let err_sentinel = "gwm-cmdlog-mixed-err-b2";
+  let mut cmd = Command::new("sh");
+  cmd
+    .arg("-c")
+    .arg(format!("echo {out_sentinel}; echo {err_sentinel} >&2; exit 1"));
+  let _ = command_log::run_logged(&mut cmd, format!("sh -c mixed # {err_sentinel}"));
+
+  let recorded = command_log::snapshot();
+  let mine = recorded
+    .iter()
+    .find(|e| e.command.contains(err_sentinel))
+    .expect("the failing command was recorded");
+  assert_eq!(mine.status, CommandStatus::Exited(Some(1)));
+  assert!(mine.output.contains(out_sentinel), "stdout is kept");
+  assert!(mine.output.contains(err_sentinel), "stderr diagnostics are not dropped");
+}
+
+#[test]
 fn run_logged_records_a_nonzero_exit() {
   let sentinel = "gwm-cmdlog-fail-b219";
   let mut cmd = Command::new("sh");

@@ -168,10 +168,17 @@ pub fn reset() {
 fn bound_output(stdout: &[u8], stderr: &[u8]) -> String {
   let stdout = String::from_utf8_lossy(stdout);
   let stdout = stdout.trim();
-  let combined = if stdout.is_empty() {
-    String::from_utf8_lossy(stderr).trim().to_string()
-  } else {
-    stdout.to_string()
+  let stderr = String::from_utf8_lossy(stderr);
+  let stderr = stderr.trim();
+  // Keep BOTH streams: a command that writes progress to stdout and its
+  // diagnostics to stderr before failing must not lose the error text in
+  // the transcript — the modal is for troubleshooting (Codex review #259).
+  // Stdout first, stderr after, joined when both are present.
+  let combined = match (stdout.is_empty(), stderr.is_empty()) {
+    (true, true) => String::new(),
+    (false, true) => stdout.to_string(),
+    (true, false) => stderr.to_string(),
+    (false, false) => format!("{stdout}\n{stderr}"),
   };
   if combined.len() <= MAX_OUTPUT_BYTES {
     return combined;
