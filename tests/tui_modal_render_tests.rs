@@ -309,3 +309,32 @@ fn command_palette_modal_renders_title_and_entries() {
     row_strings(&buf).join("\n")
   );
 }
+
+#[test]
+fn command_palette_renders_the_input_above_the_matches() {
+  // Issue #262: the palette input moved to the top (input-first), above the
+  // matches list. Type a query that still matches a command, then assert the
+  // typed text's row sits above the matched command's row.
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  // A distinctive query that is a subsequence of `create` so a match remains.
+  for c in "cre".chars() {
+    app.palette.push_char(c);
+  }
+  let buf = render(&mut app);
+  let rows = row_strings(&buf);
+  let input_row = rows
+    .iter()
+    .position(|r| r.contains("cre"))
+    .expect("the typed query must render in the input field");
+  let match_row = rows
+    .iter()
+    .position(|r| r.contains("create"))
+    .expect("a matching command row must render");
+  assert!(
+    input_row < match_row,
+    "the palette input must render above the matches list (input-first), \
+     input_row={input_row} match_row={match_row} — buffer rows:\n{}",
+    rows.join("\n")
+  );
+}

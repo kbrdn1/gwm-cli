@@ -86,19 +86,57 @@ fn badge_group_width_unbound_renders_one_muted_badge() {
 // Worktrees pane title + counter (issue #217)
 // ---------------------------------------------------------------------------
 
-#[test]
-fn worktrees_pane_title_unfiltered_shows_total_with_focus_index() {
-  // No active filter → the `(N)` counter is the full worktree count, and the
-  // pane carries the `[1]` focus mnemonic (focusable with the `1` key). The
-  // casing is fixed to `Worktrees` (was lowercase `worktrees`).
-  assert_eq!(worktrees_pane_title(true, 5, 5), " [1] Worktrees (5) ");
+/// Flatten a `Line` into its visible text (span contents concatenated).
+fn title_text(line: &ratatui::text::Line<'_>) -> String {
+  line.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
 #[test]
-fn worktrees_pane_title_filtered_shows_visible_over_total() {
-  // Active filter → `(visible/total)` so the user sees how much the filter
-  // narrowed the list.
-  assert_eq!(worktrees_pane_title(false, 3, 5), " [1] Worktrees (3/5) ");
+fn worktrees_pane_title_unfiltered_shows_total_with_focus_index() {
+  // No filter (empty query, not active) → the `(N)` counter is the full
+  // worktree count, and the pane carries the `[1]` focus mnemonic (focusable
+  // with the `1` key). Casing is fixed to `Worktrees`.
+  let line = worktrees_pane_title("", false, 5, 5, Color::Yellow);
+  assert_eq!(title_text(&line), " [1] Worktrees (5) ");
+}
+
+#[test]
+fn worktrees_pane_title_active_filter_shows_query_cursor_and_ratio() {
+  // Issue #262: the live `/` filter renders in the pane title. While typing
+  // (active), the title carries the `/query`, a block cursor, and the
+  // `(visible/total)` ratio so the user sees how much the filter narrowed.
+  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow);
+  assert_eq!(title_text(&line), " [1] Worktrees /au\u{2588} (3/5) ");
+}
+
+#[test]
+fn worktrees_pane_title_sticky_filter_shows_query_without_cursor() {
+  // Sticky (committed) filter: the query stays visible in the title for
+  // context, but with no cursor (the bar is closed) and a compact form — no
+  // oversized hint.
+  let line = worktrees_pane_title("au", false, 3, 5, Color::Yellow);
+  assert_eq!(title_text(&line), " [1] Worktrees /au (3/5) ");
+}
+
+#[test]
+fn worktrees_pane_title_active_empty_query_shows_prompt_and_total() {
+  // Just opened the bar with an empty buffer: the `/` prompt + cursor show,
+  // but the counter stays the `(total)` form (an empty query matches all).
+  let line = worktrees_pane_title("", true, 5, 5, Color::Yellow);
+  assert_eq!(title_text(&line), " [1] Worktrees /\u{2588} (5) ");
+}
+
+#[test]
+fn worktrees_pane_title_paints_the_slash_in_the_filter_colour() {
+  // The `/` prompt keeps its dedicated filter colour (historically the
+  // `dirty` role) so it reads as an editable affordance, not chrome.
+  let line = worktrees_pane_title("au", true, 3, 5, Color::Yellow);
+  let slash = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "/")
+    .expect("title must carry a styled '/' prompt span");
+  assert_eq!(slash.style.fg, Some(Color::Yellow));
 }
 
 #[test]
