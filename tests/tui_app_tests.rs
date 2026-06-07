@@ -3764,3 +3764,131 @@ fn create_key_esc_requests_cancel() {
     CreateKey::Cancel
   ));
 }
+
+// ---------------------------------------------------------------------------
+// Async-task layer — off-thread worktree refresh (issue #231)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn drain_applies_async_refresh_result() {
+  // Issue #231: a worktree list refresh delivered off-thread (over the task
+  // channel) is applied by `drain_task_results`, swapping in the fresh list
+  // and clearing the loading slot — the deterministic analogue of the
+  // background worker, with no real OS thread (the flaky-thread-test trap).
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  // Claim the slot exactly as `request_refresh` would, without spawning.
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  assert!(app.is_task_loading(), "request must mark the app as loading");
+
+  let fresh = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(generation, Ok(fresh)))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "drain must report it applied a result");
+  assert_eq!(app.worktrees.len(), 2, "the fresh list replaces the old one");
+  assert!(!app.is_task_loading(), "no task should be inflight after draining");
+  assert!(
+    app.status.contains("refreshed"),
+    "status reports the refresh outcome: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_async_refresh_invalidated_mid_flight() {
+  // Issue #231 carries the #138 guarantee onto the generic spine: a refresh
+  // result whose generation was bumped by an intervening invalidate is
+  // dropped, leaving the current list untouched.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let before = app.worktrees.len();
+  let stale = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  // The run is superseded (e.g. a fresh `f` or a future invalidation hook).
+  app.tasks.invalidate(TaskKind::RefreshWorktrees);
+  // The late worker reports back after the bump.
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(stale, Ok(vec![worktree_fixture("ghost")])))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.worktrees.len(),
+    before,
+    "a refresh invalidated mid-flight must be dropped, not applied"
+  );
+}
+
+#[test]
+fn drain_async_refresh_failure_surfaces_status_without_touching_the_list() {
+  // Off-thread refresh converts what used to be a fatal `refresh()?` (which
+  // tore down the event loop) into a graceful status message; the list is
+  // left as-is so the UI keeps showing the last good state.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let before = app.worktrees.len();
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(generation, Err("boom".into())))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a failure still counts as a drained result");
+  assert_eq!(app.worktrees.len(), before, "a failed refresh leaves the list intact");
+  assert!(!app.is_task_loading(), "the slot clears even on failure");
+  assert!(
+    app.status.contains("boom"),
+    "the error reaches the status bar: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn request_refresh_coalesces_onto_an_inflight_run() {
+  // A second `f` press while a refresh is already in flight must not spawn a
+  // second worker — `request_refresh` coalesces and returns early (so this
+  // test spawns zero threads).
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app.request_refresh(); // coalesced — no panic, no second worker
+  assert!(app.is_task_loading());
+  assert!(
+    app.tasks.complete(TaskKind::RefreshWorktrees, generation),
+    "the original run is still the authoritative one after a coalesced press"
+  );
+}
+
+#[test]
+fn sync_refresh_invalidates_an_inflight_async_refresh() {
+  // Issue #231 race guard: a synchronous `refresh()` (the create / delete /
+  // report-close path) must bump the task generation so a still-in-flight
+  // async refresh — spawned with a *pre-mutation* snapshot — is dropped
+  // rather than clobbering the authoritative post-mutation list.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  // An async refresh is in flight (claimed exactly as `request_refresh` would).
+  let stale = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  // A delete/create lands and re-lists synchronously while the worker runs.
+  app.refresh().unwrap();
+  let authoritative = app.worktrees.len();
+  // The pre-mutation worker now reports its stale snapshot.
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(stale, Ok(vec![worktree_fixture("ghost")])))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.worktrees.len(),
+    authoritative,
+    "the stale pre-mutation snapshot must not replace the sync-refreshed list"
+  );
+  assert!(
+    !app.worktrees.iter().any(|w| w.name == "ghost"),
+    "the dropped result's payload must never reach the list"
+  );
+}

@@ -11,7 +11,9 @@
 //! - `link_prompt` — two-stage issue/PR linking prompt (#126)
 //! - `sidebar` — scroll offsets + commit-line cache (#127)
 //! - `github_fetch` — TTL cache + inflight dedupe for `gh` shell-outs (#128, this PR)
+//! - `async_task` — generic off-thread spine (coalescing + late-drop) for slow ops (#231)
 
+pub mod async_task;
 pub mod confirm;
 pub mod create_form;
 pub mod filter;

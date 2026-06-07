@@ -1796,11 +1796,12 @@ pub fn status_line(
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   let ctx = app.hint_context();
-  // Spinner shows only while a GitHub fetch is inflight (issue #217). The
-  // frame advances at the poll cadence once the fetch runs off-thread
-  // (#217 async path); with a blocking fetch the Loading state is too brief
-  // to paint, which is exactly why the async path matters.
-  let spinner = if app.is_github_loading() {
+  // Spinner shows while any async op is inflight: a GitHub fetch (issue
+  // #217) or a generic background task such as the off-thread worktree
+  // refresh (issue #231). Both render through the same statusbar spinner +
+  // per-op label (carried on `app.status`) so "loading" reads consistently
+  // across every async site. The frame advances at the poll cadence.
+  let spinner = if app.is_github_loading() || app.is_task_loading() {
     Some(app.spinner.glyph(DOT_FRAMES))
   } else {
     None
