@@ -585,9 +585,18 @@ where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  let output = Command::new(program)
-    .args(args)
-    .output()
+  // Collect the args once so they can both drive the spawn and build the
+  // human-readable command line stored on the Command Logs transcript
+  // (issue #226): the resolved `gh <args…>`, not an opaque handle.
+  let collected: Vec<std::ffi::OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
+  let mut cmdline = program.to_string_lossy().into_owned();
+  for arg in &collected {
+    cmdline.push(' ');
+    cmdline.push_str(&arg.to_string_lossy());
+  }
+  let mut cmd = Command::new(program);
+  cmd.args(&collected);
+  let output = crate::command_log::run_logged(&mut cmd, cmdline)
     .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;
   if !output.status.success() {
     return Err(GwmError::CommandFailed(format!(

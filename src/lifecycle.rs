@@ -234,11 +234,14 @@ fn run_step(step: &HookStep, ctx: &HookContext) -> std::result::Result<String, S
     .map(|(key, value)| (key.clone(), expand_placeholders(value, ctx)))
     .collect::<HashMap<_, _>>();
   let mut cmd = Command::new("sh");
-  cmd.arg("-c").arg(run).current_dir(&ctx.cwd);
+  cmd.arg("-c").arg(&run).current_dir(&ctx.cwd);
   for (key, value) in env {
     cmd.env(key, value);
   }
-  let out = cmd.output().map_err(|e| format!("failed to spawn: {}", e))?;
+  // Record on the Command Logs transcript (issue #226): a lifecycle hook is
+  // an external command gwm ran. Log the placeholder-expanded script the
+  // user authored, not the `sh -c` wrapper.
+  let out = crate::command_log::run_logged(&mut cmd, run.clone()).map_err(|e| format!("failed to spawn: {}", e))?;
   let stdout = String::from_utf8_lossy(&out.stdout).to_string();
   let stderr = String::from_utf8_lossy(&out.stderr).to_string();
   let detail = if stdout.is_empty() { stderr } else { stdout };

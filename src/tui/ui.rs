@@ -2157,10 +2157,7 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let mut lines: Vec<Line<'static>> = overlay_title_lines("Command Logs", accent);
 
   if app.command_logs.entries.is_empty() {
-    lines.push(Line::from(Span::styled(
-      "No commands run yet.",
-      muted_style,
-    )));
+    lines.push(Line::from(Span::styled("No commands run yet.", muted_style)));
   } else {
     // Newest-first: the most recent command is what the user opened the
     // overlay to see, so it sits at the top without scrolling.
@@ -2173,13 +2170,17 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
       // Outcome line, coloured by exit status.
       let (color, detail) = match &entry.status {
         CommandStatus::Exited(Some(0)) => (ok_color, format!("→ exit 0 ({} ms)", entry.duration.as_millis())),
-        CommandStatus::Exited(Some(code)) => {
-          (err_color, format!("→ exit {} ({} ms)", code, entry.duration.as_millis()))
-        }
+        CommandStatus::Exited(Some(code)) => (
+          err_color,
+          format!("→ exit {} ({} ms)", code, entry.duration.as_millis()),
+        ),
         CommandStatus::Exited(None) => (err_color, format!("→ terminated ({} ms)", entry.duration.as_millis())),
         CommandStatus::Spawn => (err_color, "✗ failed to spawn".to_string()),
       };
-      lines.push(Line::from(vec![Span::raw("  "), Span::styled(detail, Style::default().fg(color))]));
+      lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(detail, Style::default().fg(color)),
+      ]));
       // Captured output, tail-capped so one chatty command cannot dominate
       // the transcript (the tail is where errors surface).
       if !entry.output.is_empty() {
