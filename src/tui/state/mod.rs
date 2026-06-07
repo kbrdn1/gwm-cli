@@ -13,9 +13,11 @@
 //! - `sidebar` — scroll offsets + commit-line cache (#127)
 //! - `github_fetch` — TTL cache + inflight dedupe for `gh` shell-outs (#128, this PR)
 //! - `async_task` — generic off-thread spine (coalescing + late-drop) for slow ops (#231)
+//! - `config_panel` — scroll + resolved-row snapshot for the Configuration overlay (#232)
 
 pub mod async_task;
 pub mod command_logs;
+pub mod config_panel;
 pub mod confirm;
 pub mod create_form;
 pub mod filter;
