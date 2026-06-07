@@ -2,6 +2,7 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
 use super::state::async_task::{TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
+use super::state::config_panel::ConfigPanel;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -85,6 +86,12 @@ pub enum View {
   /// commands gwm ran. Opened on `3`, scrolled like the help overlay;
   /// state lives on [`App::command_logs`].
   CommandLogs,
+  /// Configuration panel (issue #232). A ~90% fullscreen modal over a
+  /// dimmed list showing the resolved `.gwm.toml` (user-level global
+  /// deep-merged under the repo file) with a per-row source column
+  /// (repo / user / default). Opened on `4`, scrolled like the help
+  /// overlay; state lives on [`App::config_panel`].
+  Config,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -327,6 +334,17 @@ pub struct App {
   /// owned snapshot of the [`crate::command_log`] global, so the modal
   /// renders off `App` state rather than locking the global mid-frame.
   pub command_logs: CommandLogs,
+
+  /// Configuration panel overlay state (issue #232): the scroll cursor
+  /// plus the resolved-row snapshot, filled by [`Self::enter_config_panel`].
+  pub config_panel: ConfigPanel,
+
+  /// The user-level global config path this `App` was constructed with
+  /// (issue #232). Stored so [`Self::enter_config_panel`] resolves the
+  /// panel's source attribution against the *same* layers the running
+  /// config was loaded from — `None` in tests / sandboxed runs with no
+  /// global file, matching [`Config::load_layered`]'s injection point.
+  global_path: Option<PathBuf>,
 }
 
 impl App {
@@ -408,6 +426,8 @@ impl App {
       task_tx,
       task_rx,
       command_logs: CommandLogs::new(),
+      config_panel: ConfigPanel::new(),
+      global_path: global_path.map(Path::to_path_buf),
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -910,6 +930,9 @@ impl App {
       // the statusbar behind it shows the underlying pane's context, as the
       // List view does.
       View::CommandLogs => self.pane_hint_context(),
+      // The Configuration panel (issue #232) is likewise a ~90% fullscreen
+      // modal; the statusbar behind it keeps the underlying pane context.
+      View::Config => self.pane_hint_context(),
       View::List => self.pane_hint_context(),
     }
   }
@@ -961,6 +984,24 @@ impl App {
     self.command_logs.sync();
     self.command_logs.reset();
     self.view = View::CommandLogs;
+  }
+
+  /// Open the Configuration panel (issue #232). Resolves the effective
+  /// config — the user-level global deep-merged under the repo `.gwm.toml`,
+  /// with per-row source attribution — into owned state, then resets the
+  /// scroll cursor so a re-open starts fresh at the top. The reads are
+  /// cheap local TOML parses; on failure the panel still opens (empty)
+  /// with the error on the statusbar rather than refusing to open.
+  pub fn enter_config_panel(&mut self) {
+    match crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      Ok(rows) => self.config_panel.rows = rows,
+      Err(e) => {
+        self.config_panel.rows = Vec::new();
+        self.status = format!("error: {}", e);
+      }
+    }
+    self.config_panel.reset();
+    self.view = View::Config;
   }
 
   /// Scroll the help overlay down one row, clamped to the renderer-published

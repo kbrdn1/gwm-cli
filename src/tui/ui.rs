@@ -7,6 +7,7 @@ use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
+use crate::config::ConfigSource;
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
@@ -79,6 +80,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::LinkPrompt => draw_link_prompt(f, app),
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
+    View::Config => draw_config_panel(f, app),
     View::List => {}
   }
 }
@@ -1478,6 +1480,7 @@ impl HintContext {
         Hint::Key(Review, "review"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
+        Hint::Key(ConfigPanel, "config"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1489,6 +1492,7 @@ impl HintContext {
         Hint::Key(FetchGithub, "fetch"),
         Hint::Key(FocusWorktrees, "worktrees"),
         Hint::Key(CommandLogs, "logs"),
+        Hint::Key(ConfigPanel, "config"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1956,6 +1960,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
+  rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
@@ -2225,6 +2230,85 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let scroll = app.command_logs.scroll;
   let x_scroll = app.command_logs.x_scroll;
+
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+}
+
+/// Render the Configuration panel overlay (issue #232): a ~90% fullscreen
+/// modal listing the resolved config (user-level global merged under the
+/// repo `.gwm.toml`) grouped by top-level section, each row carrying a
+/// leading colour-coded source column (repo / user / default). Scrolls
+/// like the help / Command Logs overlays — the renderer republishes
+/// `config_panel.max_scroll` / `max_x_scroll` against the live viewport.
+fn draw_config_panel(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let repo_color = app.theme.clean;
+  let user_color = app.theme.branch;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+
+  let mut lines: Vec<Line<'static>> = overlay_title_lines("Configuration", accent);
+
+  if app.config_panel.rows.is_empty() {
+    lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
+  } else {
+    // Rows arrive sorted (the flatten walks a `BTreeMap`), so each
+    // top-level section is contiguous — emit a `[section]` heading when it
+    // changes, mirroring `gwm config list`'s grouping.
+    let mut current_section: Option<String> = None;
+    for row in &app.config_panel.rows {
+      let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
+      if current_section.as_deref() != Some(section.as_str()) {
+        if current_section.is_some() {
+          lines.push(Line::from(String::new()));
+        }
+        lines.push(Line::from(Span::styled(
+          format!("[{section}]"),
+          help_section_style(accent),
+        )));
+        current_section = Some(section);
+      }
+      // Leading source column, colour-coded and padded so keys align: repo
+      // overrides read strongest, user next, defaults muted.
+      let src_color = match row.source {
+        ConfigSource::Repo => repo_color,
+        ConfigSource::User => user_color,
+        ConfigSource::Default => muted,
+      };
+      lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+        Span::raw("  "),
+        Span::styled(row.key.clone(), label_style),
+        Span::styled(" = ", muted_style),
+        Span::styled(row.value.clone(), Style::default().fg(Color::White)),
+      ]));
+    }
+  }
+
+  // Footer hint: scroll + close, matching the Command Logs overlay.
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(Span::styled(
+    "j/k scroll · g/G top/bottom · esc close",
+    muted_style.add_modifier(Modifier::ITALIC),
+  )));
+
+  // Publish the scroll bounds against the live viewport (mirrors
+  // `draw_command_logs` / `draw_help`).
+  let block = overlay_block(accent);
+  let inner = block.inner(area);
+  let viewport = inner.height as usize;
+  app.config_panel.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
+  let viewport_w = inner.width as usize;
+  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
+  app.config_panel.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
+  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
+  let scroll = app.config_panel.scroll;
+  let x_scroll = app.config_panel.x_scroll;
 
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);

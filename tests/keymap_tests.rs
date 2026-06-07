@@ -227,6 +227,19 @@ fn default_keymap_binds_command_logs_to_3() {
 }
 
 #[test]
+fn default_keymap_binds_config_panel_to_4() {
+  // Issue #232: `4` opens the Configuration panel, extending the `1` / `2`
+  // / `3` / `4` pane-key family (focus_worktrees / focus_status /
+  // command_logs / config_panel).
+  let km = Keymap::defaults();
+  let four = KeyStroke::parse_chord("4").unwrap();
+  assert!(matches!(
+    km.lookup(&four),
+    ChordResolution::Matched(Action::ConfigPanel)
+  ));
+}
+
+#[test]
 fn user_override_replaces_default_for_one_action() {
   let mut km = Keymap::defaults();
   km.apply_override(Action::Down, vec![KeyStroke::parse_chord("Ctrl+n").unwrap()])

@@ -266,6 +266,22 @@ fn worktrees_and_status_hints_advertise_the_command_logs_key() {
 }
 
 #[test]
+fn worktrees_and_status_hints_advertise_the_config_panel_key() {
+  // Issue #232: the statusbar which-key must advertise `4 config` so the
+  // Configuration panel is discoverable, alongside the `1`/`2`/`3` pane keys.
+  use gwm::tui::keymap::Keymap;
+  let km = Keymap::defaults();
+  for ctx in [HintContext::Worktrees, HintContext::Status] {
+    let resolved = ctx.resolve(&km);
+    assert!(
+      resolved.iter().any(|(k, l)| k == "4" && l == "config"),
+      "context {:?} must advertise the `4 config` hint: {resolved:?}",
+      ctx.label()
+    );
+  }
+}
+
+#[test]
 fn status_hints_resolve_user_rebindings() {
   // Issue #217 review (P2): the statusbar must show the *live* binding, not
   // the hard-coded default — the keymap actions are rebindable. `fetch` is

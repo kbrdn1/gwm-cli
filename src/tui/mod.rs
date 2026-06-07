@@ -29,6 +29,7 @@ pub use app::{
 };
 pub use state::async_task::{TaskKind, TaskMsg, TaskRunner};
 pub use state::command_logs::CommandLogs;
+pub use state::config_panel::ConfigPanel;
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -299,6 +300,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
         _ => {}
       },
+      // Configuration panel (issue #232). Scrolls like the help / Command
+      // Logs overlays; closes on Esc / `q` or the bound `config_panel` key
+      // (default `4`) so the open key toggles it shut even when rebound.
+      View::Config => match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+        KeyCode::Down | KeyCode::Char('j') => app.config_panel.scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.config_panel.scroll_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.config_panel.scroll_right(),
+        KeyCode::Left | KeyCode::Char('h') => app.config_panel.scroll_left(),
+        KeyCode::Home | KeyCode::Char('g') => app.config_panel.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.config_panel.scroll_to_bottom(),
+        _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
+        _ => {}
+      },
       // Create-overlay keys live in a testable `App` method (issue #217);
       // the loop only owns the two side effects (submit / close).
       View::Create => match app.handle_create_key(key) {
@@ -524,6 +539,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // it is a read-only transcript, harmless inside `gwm switch`, and
     // mirrors Help / the palette which also open from any List state.
     Action::CommandLogs => app.enter_command_logs(),
+    // Issue #232: `4` opens the Configuration panel. Like the Command Logs
+    // overlay it is read-only and not picker-gated — harmless inside
+    // `gwm switch`, opening from any List state.
+    Action::ConfigPanel => app.enter_config_panel(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into
