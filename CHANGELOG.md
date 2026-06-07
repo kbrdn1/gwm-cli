@@ -50,6 +50,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The warm-cache draw path now renders the cached lines by reference; on a
   300-commit sidebar this is ~19% faster per frame (no perceptible change
   otherwise). ([#238](https://github.com/kbrdn1/gwm-cli/issues/238))
+- The off-thread GitHub issue / PR fetch (`F`) now runs on the same shared
+  async-task spine as the worktree refresh instead of its own channel — one
+  off-thread mechanism, not two. Behaviour-preserving for the happy path; the
+  spine's per-key generation counter is what fixes the race below.
+  ([#255](https://github.com/kbrdn1/gwm-cli/issues/255))
+
+### Fixed
+
+- GitHub status refresh no longer shows stale issue / PR data after a quick
+  re-fetch. Pressing `F` (or navigating away and back) while a fetch was still
+  in flight could let the *older* worker's result win the race and overwrite
+  the fresh one, because the previous dedupe had no per-fetch generation. The
+  fetch now rides the async-task spine, so a superseded worker's late result
+  is dropped regardless of arrival order.
+  ([#255](https://github.com/kbrdn1/gwm-cli/issues/255))
 
 ## Past releases
 
