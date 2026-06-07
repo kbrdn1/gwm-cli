@@ -128,18 +128,12 @@ pub fn header_line(
   let repo = sanitize(repo_name);
   let path = sanitize(workdir_display);
 
-  let version_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let dir_badge_style = Style::default()
-    .fg(theme.name)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let version_style = chip_style(theme.accent);
+  let dir_badge_style = chip_style(theme.name);
   // Picker chip uses the `dirty` role (not the accent) so the mode warning
   // reads as distinct from the always-present version chip — pre-theme this
   // was a hard-coded `Color::Yellow`.
-  let picker_style = Style::default()
-    .fg(theme.dirty)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let picker_style = chip_style(theme.dirty);
   let path_style = Style::default().fg(theme.muted);
 
   let version_text = format!(" gwm {} ", env!("CARGO_PKG_VERSION"));
@@ -1239,7 +1233,14 @@ fn branch_status_label(s: &BranchStatus) -> String {
   }
 }
 
-fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
+/// Worst-status accent colour for a [`BranchStatus`]: `unknown` → `muted`,
+/// `dirty`/`behind` → `dirty`, `ahead`-only → `accent`, else `clean`. The
+/// single source of truth shared by the sidebar status badge (`badges_line`)
+/// and the table status cell ([`format_status`], issue #241) — each builds its
+/// own label/sigils, but the colour is derived here once. Exported so the
+/// dedup is pinned by `tests/tui_theme_audit_tests.rs` (both call sites are
+/// private render code).
+pub fn branch_status_color(s: &BranchStatus, theme: &Theme) -> Color {
   if s.unknown {
     theme.muted
   } else if s.is_dirty || s.behind > 0 {
@@ -1272,6 +1273,39 @@ pub fn worktree_name_style(theme: &Theme) -> Style {
 /// for the same testability reason.
 pub fn worktree_path_style(theme: &Theme) -> Style {
   Style::default().fg(theme.path)
+}
+
+/// The shared "chip" style: a reverse-video, bold badge painted on `color`
+/// (issue #240). This is the single source of truth for the `` key `` /
+/// button / badge treatment that recurs across the header, footer,
+/// statusbar, help overlay and modal buttons — `REVERSED` paints `color`
+/// as the chip's background, `BOLD` keeps the glyph legible against it.
+/// Extracted so the ~14 inline `fg(c).add_modifier(REVERSED | BOLD)`
+/// repetitions resolve through one definition; sites that add a `bg` or
+/// extra modifiers keep their bespoke style.
+pub fn chip_style(color: Color) -> Style {
+  Style::default()
+    .fg(color)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
+/// Style for a *non-highlighted* command name in the command palette
+/// (issue #210 follow-up). Routes through the `name` role (default
+/// `White`) so a `[theme]` override / light preset recolours it, instead
+/// of the pre-#240 hard-coded `Color::White` that bypassed the theme.
+/// Extracted so the route is pinned by `tests/tui_theme_audit_tests.rs`
+/// (`draw_command_palette` is private Frame render code).
+pub fn palette_name_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.name)
+}
+
+/// Style for a Keybindings-overlay entry *label* (the action description
+/// trailing each key chip). Routes through the `name` role (default
+/// `White`) for the same reason as [`palette_name_style`]: the pre-#240
+/// literal `Color::White` ignored a `[theme]` override. Pinned by
+/// `tests/tui_theme_audit_tests.rs`.
+pub fn help_label_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.name)
 }
 
 fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
@@ -1337,8 +1371,12 @@ fn build_status_cell(w: &WorktreeInfo, width: usize, theme: &Theme) -> Cell<'sta
   Cell::from(label).style(Style::default().fg(color))
 }
 
-/// Pick a compact label + accent colour for a `BranchStatus`.
-fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Color) {
+/// Pick a compact label + accent colour for a `BranchStatus`. The colour is
+/// derived through the shared [`branch_status_color`] so the table cell and
+/// the sidebar status agree (issue #241); the label/sigil logic stays
+/// table-specific (the sidebar builds its own badge in `badges_line`).
+/// Exported so the colour route is pinned by `tests/tui_theme_audit_tests.rs`.
+pub fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Color) {
   if s.unknown {
     return ("unknown".into(), theme.muted);
   }
@@ -1364,15 +1402,11 @@ fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, Colo
   let joined = parts.join(" ");
   let label = trunc(&joined, width.max(4));
 
-  // Worst-status colour: dirty/behind = dirty, ahead-only = accent, synced/clean = clean.
-  let color = if s.is_dirty || s.behind > 0 {
-    theme.dirty
-  } else if s.ahead > 0 {
-    theme.accent
-  } else {
-    theme.clean
-  };
-  (label, color)
+  // Worst-status colour, shared with the sidebar (issue #241). `unknown` was
+  // already handled by the early return above, so reaching `branch_status_color`
+  // here is byte-identical to the former inline `dirty/behind → ahead → clean`
+  // chain while keeping a single source of truth.
+  (label, branch_status_color(s, theme))
 }
 
 /// One statusbar hint specification (issue #217). Either a rebindable
@@ -1553,9 +1587,7 @@ pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
 }
 
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
-  let chip_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let chip_style = chip_style(theme.accent);
   let label_style = Style::default().fg(theme.muted);
   let mut spans: Vec<Span<'static>> = Vec::new();
   for (i, (key, label)) in hints.iter().enumerate() {
@@ -1600,9 +1632,7 @@ fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Ke
 /// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
 /// labels and the bracketed status are ASCII / single-width in practice).
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
-  let chip_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let chip_style = chip_style(theme.accent);
   let label_style = Style::default().fg(theme.muted);
   let status_style = Style::default().fg(theme.dirty);
 
@@ -1693,12 +1723,8 @@ pub fn status_line(
   width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  let context_style = Style::default()
-    .fg(theme.focus)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let chip_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let context_style = chip_style(theme.focus);
+  let chip_style = chip_style(theme.accent);
   let label_style = Style::default().fg(theme.muted);
   let status_style = Style::default().fg(theme.dirty);
   let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
@@ -2038,11 +2064,9 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // the title share the bold-accent heading style. Labels stay white
   // for contrast; an `(unbound)` action renders muted instead of a chip
   // so it reads as "no binding" rather than a live key.
-  let chip_style = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let chip_style = chip_style(accent);
   let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  let label_style = Style::default().fg(Color::White);
+  let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
 
   // Align every label to the same column: pad each badge *group* out to
@@ -2217,9 +2241,7 @@ fn draw_create(f: &mut Frame, app: &App) {
 /// chip rather than defaulting focus to Cancel. Pure so the chip contract
 /// is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
-  let primary = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let primary = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   Line::from(vec![
     Span::styled(" Create ", primary),
@@ -2250,9 +2272,7 @@ pub fn type_selector_line(
   // badge style as the buttons) so it stands out as an editable control;
   // idle it is plain white text between muted arrows.
   let name_style = if focused {
-    Style::default()
-      .fg(accent)
-      .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    chip_style(accent)
   } else {
     Style::default().fg(Color::White)
   };
@@ -2312,9 +2332,7 @@ pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, m
   let button = format!(" {key}  {label} ");
   let button = format!("{button:<BUTTON_WIDTH$}");
   if selected {
-    let chip = Style::default()
-      .fg(accent)
-      .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let chip = chip_style(accent);
     return Line::from(vec![Span::raw("  "), Span::styled(button, chip)]);
   }
 
@@ -2367,12 +2385,8 @@ pub fn confirm_delete_branch_line(
   accent: Color,
   muted: Color,
 ) -> Line<'static> {
-  let key_style = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let value_style = Style::default()
-    .fg(if enabled { accent } else { muted })
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let key_style = chip_style(accent);
+  let value_style = chip_style(if enabled { accent } else { muted });
   Line::from(vec![
     Span::styled(
       format!("{:<label_width$}  ", "Delete Branch", label_width = label_width),
@@ -2541,9 +2555,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 /// `Enter` lands on. Pure so the chip contract is pinned by
 /// `tests/tui_ui_helpers_tests.rs`.
 pub fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
-  let focused = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let focused = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   let (confirm_style, cancel_style) = match focus {
     ConfirmButton::Confirm => (focused, idle),
@@ -2915,7 +2927,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       let name_style = if i == highlight {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
       } else {
-        Style::default().fg(Color::White)
+        palette_name_style(&app.theme)
       };
       Line::from(vec![
         Span::raw(prefix),
@@ -3016,44 +3028,63 @@ pub fn issue_summary_line(
   issue_summary_line_with_spinner(n, src, state, max_width, theme, None)
 }
 
-fn issue_summary_line_with_spinner(
-  n: u64,
-  src: LinkSource,
-  state: &GitHubFetchState<crate::github::IssueStatus>,
+/// Resolved render inputs for a GitHub summary line, after the caller has
+/// collapsed the issue/PR-specific `match` into the shared shape. The
+/// `Loaded` arm carries the already-picked badge label + colour and an
+/// optional `trailing` segment (issue: empty; PR: ` · checks N/M`) placed
+/// between the closing `]` and the final space+title.
+enum SummaryState<'a> {
+  Idle,
+  Loading,
+  Loaded {
+    badge: &'a str,
+    badge_color: Color,
+    trailing: String,
+    title: &'a str,
+  },
+  Error(&'a str),
+}
+
+/// Shared renderer behind [`issue_summary_line`] and [`pr_summary_line`].
+/// Both twins resolve their `head` ("Issue #…" vs "PR    #…"), badge, and
+/// `trailing` segment, then delegate here so the truncation budget, the
+/// narrow-fallback flatten, and the Idle/Loading/Error arms live in one
+/// place. The `trailing` param is what keeps the two byte-identical: issue
+/// passes "" → renders `] title`; PR passes ` · checks 1/2` → renders
+/// `]· checks 1/2 title`, exactly as the inlined versions did.
+fn summary_line(
+  head: String,
+  state: SummaryState,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  let head = format!("Issue #{}{}", n, source_marker(src));
   // The `head` carries no status signal, only identity — it paints with
   // the `name` role (issue #210; default `White`) while the badge colour
-  // tracks the issue state.
+  // tracks the GitHub state.
   match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
-    GitHubFetchState::Loading => {
+    SummaryState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
+    SummaryState::Loading => {
       let glyph = spinner.unwrap_or("…");
       Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
     }
-    GitHubFetchState::Loaded(s) => {
-      // Mirror `issue_badge_color` exactly so the summary line and the
-      // sidebar header dot never disagree for the same issue: closed maps
-      // to `locked` ("moved on"), not `prunable` ("alarming"). Pre-#170
-      // this site hard-coded `Color::Red` while the dot used `Magenta` —
-      // a latent inconsistency the audit closes (Copilot review #209).
-      let badge_color = issue_badge_color(s.state, theme);
-      let badge = match s.state {
-        IssueState::Open => "open",
-        IssueState::Closed => "closed",
-      };
-      // Fixed prefix = "<head> [<badge>] " — try to preserve in full and
-      // trim the title to whatever budget remains. If the prefix alone
-      // already exceeds the width budget (very narrow sidebar), fall
+    SummaryState::Loaded {
+      badge,
+      badge_color,
+      trailing,
+      title,
+    } => {
+      // Fixed prefix = "<head> [<badge>]<trailing> " — try to preserve in
+      // full and trim the title to whatever budget remains. If the prefix
+      // alone already exceeds the width budget (very narrow sidebar), fall
       // back to flattening the line into a single styled string and
       // truncating it — preserves no badge color but stays inside the
-      // block.
-      let fixed = head.chars().count() + 4 + badge.chars().count(); // " [" + badge + "] "
+      // block. `trailing` is empty for issues and ` · checks N/M` for PRs;
+      // count chars (the `·` is U+00B7: 2 bytes, 1 column) so the budget
+      // arithmetic matches the pre-dedup twins exactly.
+      let fixed = head.chars().count() + 3 + badge.chars().count() + trailing.chars().count() + 1; // " [" + badge + "]" + trailing + " "
       if fixed >= max_width {
-        let raw = format!("{} [{}] {}", head, badge, s.title);
+        let raw = format!("{} [{}]{} {}", head, badge, trailing, title);
         return Line::from(trunc(&raw, max_width));
       }
       let budget = max_width - fixed;
@@ -3064,11 +3095,13 @@ fn issue_summary_line_with_spinner(
           badge.to_string(),
           Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("] "),
-        Span::raw(trunc(&s.title, budget)),
+        Span::raw("]"),
+        Span::raw(trailing),
+        Span::raw(" "),
+        Span::raw(trunc(title, budget)),
       ])
     }
-    GitHubFetchState::Error(e) => {
+    SummaryState::Error(e) => {
       let fixed = head.chars().count() + 2; // " " + "!"
       let budget = max_width.saturating_sub(fixed);
       Line::from(vec![
@@ -3078,6 +3111,40 @@ fn issue_summary_line_with_spinner(
       ])
     }
   }
+}
+
+fn issue_summary_line_with_spinner(
+  n: u64,
+  src: LinkSource,
+  state: &GitHubFetchState<crate::github::IssueStatus>,
+  max_width: usize,
+  theme: &Theme,
+  spinner: Option<&str>,
+) -> Line<'static> {
+  let head = format!("Issue #{}{}", n, source_marker(src));
+  let resolved = match state {
+    GitHubFetchState::Idle => SummaryState::Idle,
+    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Loaded(s) => {
+      // Mirror `issue_badge_color` exactly so the summary line and the
+      // sidebar header dot never disagree for the same issue: closed maps
+      // to `locked` ("moved on"), not `prunable` ("alarming"). Pre-#170
+      // this site hard-coded `Color::Red` while the dot used `Magenta` —
+      // a latent inconsistency the audit closes (Copilot review #209).
+      let badge = match s.state {
+        IssueState::Open => "open",
+        IssueState::Closed => "closed",
+      };
+      SummaryState::Loaded {
+        badge,
+        badge_color: issue_badge_color(s.state, theme),
+        trailing: String::new(),
+        title: &s.title,
+      }
+    }
+    GitHubFetchState::Error(e) => SummaryState::Error(e),
+  };
+  summary_line(head, resolved, max_width, theme, spinner)
 }
 
 /// Render the Loaded / Idle / Loading / Error variants for a PR link
@@ -3103,58 +3170,36 @@ fn pr_summary_line_with_spinner(
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}{}", n, source_marker(src));
-  // The `head` carries no status signal, only identity — it paints with
-  // the `name` role (issue #210; default `White`) while the badge colour
-  // tracks the PR state.
-  match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
-    GitHubFetchState::Loading => {
-      let glyph = spinner.unwrap_or("…");
-      Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
-    }
+  let resolved = match state {
+    GitHubFetchState::Idle => SummaryState::Idle,
+    GitHubFetchState::Loading => SummaryState::Loading,
     GitHubFetchState::Loaded(s) => {
-      let (badge, badge_color) = match s.state {
-        PrState::Open => ("open", theme.clean),
-        PrState::Draft => ("draft", theme.muted),
-        PrState::Closed => ("closed", theme.prunable),
-        PrState::Merged => ("merged", theme.locked),
+      // Route the badge colour through `pr_badge_color` (mirroring how the
+      // issue side calls `issue_badge_color`) so the summary line and the
+      // sidebar header dot never disagree for the same PR. Only the label
+      // stays inline. Pre-#239 this site duplicated the colour map (Copilot
+      // review #209).
+      let badge = match s.state {
+        PrState::Open => "open",
+        PrState::Draft => "draft",
+        PrState::Closed => "closed",
+        PrState::Merged => "merged",
       };
-      let checks = if s.checks_total > 0 {
+      let trailing = if s.checks_total > 0 {
         format!(" · checks {}/{}", s.checks_passed, s.checks_total)
       } else {
         String::new()
       };
-      let fixed = head.chars().count() + 3 + badge.chars().count() + checks.chars().count() + 1; // " [" + badge + "]" + checks + " "
-      if fixed >= max_width {
-        // Very narrow sidebar — fall back to a single truncated string.
-        // Drops the badge color but keeps the line inside the block.
-        let raw = format!("{} [{}]{} {}", head, badge, checks, s.title);
-        return Line::from(trunc(&raw, max_width));
+      SummaryState::Loaded {
+        badge,
+        badge_color: pr_badge_color(s.state, theme),
+        trailing,
+        title: &s.title,
       }
-      let budget = max_width - fixed;
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name).add_modifier(Modifier::BOLD)),
-        Span::raw(" ["),
-        Span::styled(
-          badge.to_string(),
-          Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("]"),
-        Span::raw(checks),
-        Span::raw(" "),
-        Span::raw(trunc(&s.title, budget)),
-      ])
     }
-    GitHubFetchState::Error(e) => {
-      let fixed = head.chars().count() + 2; // " " + "!"
-      let budget = max_width.saturating_sub(fixed);
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name)),
-        Span::raw(" "),
-        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
-      ])
-    }
-  }
+    GitHubFetchState::Error(e) => SummaryState::Error(e),
+  };
+  summary_line(head, resolved, max_width, theme, spinner)
 }
 
 // ---- Issue #73: lazygit-style colour helpers -------------------------------

@@ -35,8 +35,9 @@ use gwm::tui::commit_graph::{render_pipe_set, test_row, Pipe, PipeKind};
 use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
-  branch_name_color, build_sidebar_sections, footer_line, freshness_color, header_line, issue_badge_color,
-  pr_badge_color, table_marker, working_tree_status_line, worktree_name_style, worktree_path_style,
+  branch_name_color, branch_status_color, build_sidebar_sections, footer_line, format_status, freshness_color,
+  header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color, table_marker,
+  working_tree_status_line, worktree_name_style, worktree_path_style,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::{Color, Modifier};
@@ -116,6 +117,75 @@ fn branch_name_color_resolves_every_state_through_theme_roles() {
     ..BranchStatus::default()
   };
   assert_eq!(branch_name_color(&unknown, &t), t.muted, "unknown → muted");
+}
+
+/// Representative `BranchStatus` values spanning every colour branch of the
+/// worst-status chain: unknown, dirty, behind-only, ahead-only, synced,
+/// unpublished/clean.
+fn status_color_cases() -> Vec<(&'static str, BranchStatus)> {
+  vec![
+    (
+      "unknown",
+      BranchStatus {
+        unknown: true,
+        ..BranchStatus::default()
+      },
+    ),
+    ("dirty", dirty_status()),
+    (
+      "behind-only",
+      BranchStatus {
+        has_upstream: true,
+        behind: 3,
+        ..BranchStatus::default()
+      },
+    ),
+    (
+      "ahead-only",
+      BranchStatus {
+        has_upstream: true,
+        ahead: 2,
+        ..BranchStatus::default()
+      },
+    ),
+    (
+      "synced",
+      BranchStatus {
+        has_upstream: true,
+        ..BranchStatus::default()
+      },
+    ),
+    ("unpublished-clean", BranchStatus::default()),
+  ]
+}
+
+#[test]
+fn branch_status_color_resolves_worst_status_through_theme_roles() {
+  let t = audit_theme();
+  let role = |label: &str| match label {
+    "unknown" => t.muted,
+    "dirty" | "behind-only" => t.dirty,
+    "ahead-only" => t.accent,
+    _ => t.clean,
+  };
+  for (label, s) in status_color_cases() {
+    assert_eq!(branch_status_color(&s, &t), role(label), "{label} → expected role");
+  }
+}
+
+#[test]
+fn format_status_colour_routes_through_branch_status_color() {
+  // Issue #241: the table status cell (`format_status`) and the sidebar status
+  // share one colour derivation. Pin the dedup so a future re-inline that
+  // diverges from `branch_status_color` is caught.
+  let t = audit_theme();
+  for (label, s) in status_color_cases() {
+    assert_eq!(
+      format_status(&s, 16, &t).1,
+      branch_status_color(&s, &t),
+      "{label}: format_status colour must equal branch_status_color"
+    );
+  }
 }
 
 #[test]
@@ -270,6 +340,42 @@ fn issue_summary_line_closed_badge_agrees_with_the_header_dot() {
   );
 }
 
+#[test]
+fn pr_summary_line_merged_badge_routes_through_pr_badge_color() {
+  // #239 / Copilot review #209 follow-up: the PR Loaded arm used to inline
+  // its own badge-colour map. After the dedup it must resolve through
+  // `pr_badge_color`, exactly as the issue side calls `issue_badge_color`.
+  // `audit_theme()` gives `locked` a value distinct from clean/muted/prunable
+  // so a Merged PR's badge can only match if the route is honoured.
+  let t = audit_theme();
+  let status = gwm::github::PrStatus {
+    number: 42,
+    title: "shipped".into(),
+    state: PrState::Merged,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let line = gwm::tui::pr_summary_line(
+    42,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    fg_containing(&line, "merged"),
+    Some(t.locked),
+    "merged PR badge → locked, matching pr_badge_color"
+  );
+  assert_eq!(
+    fg_containing(&line, "merged"),
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "summary line and the header dot must use the same role for merged PRs"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // #210: `name` / `path` chrome roles
 // ---------------------------------------------------------------------------
@@ -296,6 +402,41 @@ fn name_and_path_styles_default_to_legacy_white_and_gray() {
   let d = Theme::default();
   assert_eq!(worktree_name_style(&d).fg, Some(Color::White), "default name → White");
   assert_eq!(worktree_path_style(&d).fg, Some(Color::Gray), "default path → Gray");
+}
+
+#[test]
+fn palette_and_help_labels_resolve_through_name_role() {
+  // #240(b): the command-palette non-highlighted command name and the
+  // Keybindings-overlay entry label used to paint with a hard-coded
+  // `Color::White` that bypassed `theme.name`, so a light / non-default
+  // preset could not recolour them (#210). They now route through the
+  // `name` role. `audit_theme()` gives `name` a value distinct from
+  // White, so a regression back to the literal is caught here.
+  let t = audit_theme();
+  assert_eq!(
+    palette_name_style(&t).fg,
+    Some(t.name),
+    "palette command name → name role"
+  );
+  assert_eq!(help_label_style(&t).fg, Some(t.name), "help entry label → name role");
+}
+
+#[test]
+fn palette_and_help_labels_default_to_legacy_white() {
+  // Guard the "no visible change without [theme]" contract for #240(b):
+  // the default `name` role is White, so the default palette / help output
+  // is byte-identical to the pre-#240 hard-coded literal.
+  let d = Theme::default();
+  assert_eq!(
+    palette_name_style(&d).fg,
+    Some(Color::White),
+    "default palette command name → White"
+  );
+  assert_eq!(
+    help_label_style(&d).fg,
+    Some(Color::White),
+    "default help entry label → White"
+  );
 }
 
 #[test]
