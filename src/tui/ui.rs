@@ -6,6 +6,7 @@ use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
 use crate::bootstrap::{BootstrapReport, StepStatus};
+use crate::command_log::CommandStatus;
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
@@ -77,6 +78,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::OpenMenu => draw_open_menu(f, app),
     View::LinkPrompt => draw_link_prompt(f, app),
     View::CommandPalette => draw_command_palette(f, app),
+    View::CommandLogs => draw_command_logs(f, app),
     View::List => {}
   }
 }
@@ -2131,6 +2133,94 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
   let scroll = app.help_scroll;
   let x_scroll = app.help_x_scroll;
+
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+}
+
+/// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
+/// over the dimmed list showing the lazygit-style transcript of the
+/// external commands gwm ran, newest-first. Scrolls like the help overlay —
+/// the renderer republishes `command_logs.max_scroll` / `max_x_scroll`
+/// against the live viewport so `App`'s scroll cursor can never run past
+/// the content. Colours track `[theme]` roles (`clean` ok / `prunable`
+/// fail / `muted` output) so a theme override applies here too.
+fn draw_command_logs(f: &mut Frame, app: &mut App) {
+  let area = centered(90, 85, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let ok_color = app.theme.clean;
+  let err_color = app.theme.prunable;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+
+  let mut lines: Vec<Line<'static>> = overlay_title_lines("Command Logs", accent);
+
+  if app.command_logs.entries.is_empty() {
+    lines.push(Line::from(Span::styled(
+      "No commands run yet.",
+      muted_style,
+    )));
+  } else {
+    // Newest-first: the most recent command is what the user opened the
+    // overlay to see, so it sits at the top without scrolling.
+    for entry in app.command_logs.entries.iter().rev() {
+      // The resolved argv, prefixed lazygit-style with `$`.
+      lines.push(Line::from(vec![
+        Span::styled("$ ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+        Span::styled(entry.command.clone(), label_style),
+      ]));
+      // Outcome line, coloured by exit status.
+      let (color, detail) = match &entry.status {
+        CommandStatus::Exited(Some(0)) => (ok_color, format!("→ exit 0 ({} ms)", entry.duration.as_millis())),
+        CommandStatus::Exited(Some(code)) => {
+          (err_color, format!("→ exit {} ({} ms)", code, entry.duration.as_millis()))
+        }
+        CommandStatus::Exited(None) => (err_color, format!("→ terminated ({} ms)", entry.duration.as_millis())),
+        CommandStatus::Spawn => (err_color, "✗ failed to spawn".to_string()),
+      };
+      lines.push(Line::from(vec![Span::raw("  "), Span::styled(detail, Style::default().fg(color))]));
+      // Captured output, tail-capped so one chatty command cannot dominate
+      // the transcript (the tail is where errors surface).
+      if !entry.output.is_empty() {
+        const MAX_OUTPUT_LINES: usize = 6;
+        let out: Vec<&str> = entry.output.lines().collect();
+        let start = out.len().saturating_sub(MAX_OUTPUT_LINES);
+        if start > 0 {
+          lines.push(Line::from(Span::styled(
+            format!("    … {} earlier line(s)", start),
+            muted_style,
+          )));
+        }
+        for l in &out[start..] {
+          lines.push(Line::from(Span::styled(format!("    {}", l), muted_style)));
+        }
+      }
+      lines.push(Line::from(String::new()));
+    }
+  }
+
+  // Footer hint: scroll + close. A plain muted line (not `push_modal_hint`,
+  // whose contexts are pane-specific) keeps the overlay self-documenting.
+  lines.push(Line::from(Span::styled(
+    "j/k scroll · g/G top/bottom · esc close",
+    muted_style.add_modifier(Modifier::ITALIC),
+  )));
+
+  // Publish the scroll bounds against the live viewport (mirrors
+  // `draw_help`): the renderer is the only place that knows both the
+  // content length and the inner modal height, so it clamps here.
+  let block = overlay_block(accent);
+  let inner = block.inner(area);
+  let viewport = inner.height as usize;
+  app.command_logs.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  app.command_logs.scroll = app.command_logs.scroll.min(app.command_logs.max_scroll);
+  let viewport_w = inner.width as usize;
+  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
+  app.command_logs.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
+  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
+  let scroll = app.command_logs.scroll;
+  let x_scroll = app.command_logs.x_scroll;
 
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);

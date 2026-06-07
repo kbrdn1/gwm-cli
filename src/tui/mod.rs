@@ -164,6 +164,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       app.spinner.tick();
     }
 
+    // Keep the Command Logs overlay live (issue #226): re-snapshot the
+    // global log each tick while it is open so a command that finishes
+    // off-thread (e.g. the GitHub fetch) appears without reopening. The
+    // scroll cursor is preserved; the renderer re-clamps it.
+    if app.view == View::CommandLogs {
+      app.command_logs.sync();
+    }
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before
@@ -275,6 +283,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         KeyCode::Left | KeyCode::Char('h') => app.help_scroll_left(),
         KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
         KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
+        _ => {}
+      },
+      // Command Logs overlay (issue #226). Scrolls like the help overlay;
+      // closes on Esc / `q` or the bound `command_logs` key (default `3`)
+      // so the open key toggles it shut even when rebound.
+      View::CommandLogs => match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+        KeyCode::Down | KeyCode::Char('j') => app.command_logs.scroll_down(),
+        KeyCode::Up | KeyCode::Char('k') => app.command_logs.scroll_up(),
+        KeyCode::Right | KeyCode::Char('l') => app.command_logs.scroll_right(),
+        KeyCode::Left | KeyCode::Char('h') => app.command_logs.scroll_left(),
+        KeyCode::Home | KeyCode::Char('g') => app.command_logs.scroll_to_top(),
+        KeyCode::End | KeyCode::Char('G') => app.command_logs.scroll_to_bottom(),
+        _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
         _ => {}
       },
       // Create-overlay keys live in a testable `App` method (issue #217);
@@ -498,6 +520,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // CommandPalette → run_action loop terminates cleanly (the
     // overlay just stays open).
     Action::CommandPalette => app.open_command_palette(),
+    // Issue #226: `3` opens the Command Logs overlay. Not picker-gated —
+    // it is a read-only transcript, harmless inside `gwm switch`, and
+    // mirrors Help / the palette which also open from any List state.
+    Action::CommandLogs => app.enter_command_logs(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into

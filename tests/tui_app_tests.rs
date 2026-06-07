@@ -74,6 +74,37 @@ fn focus_worktrees_releases_sidebar_focus() {
 }
 
 #[test]
+fn enter_command_logs_opens_the_overlay_syncs_and_resets_scroll() {
+  // Issue #226: `3` opens the Command Logs modal. Opening must (1) switch
+  // to the overlay view, (2) sync the global command log into owned state,
+  // and (3) reset the scroll cursor so a previously-scrolled session starts
+  // fresh at the top.
+  use gwm::command_log::{self, CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  let sentinel = "gwm-enter-cmdlog-9a1c";
+  command_log::record(CommandLogEntry {
+    command: format!("gh pr list # {sentinel}"),
+    duration: Duration::from_millis(1),
+    status: CommandStatus::Exited(Some(0)),
+    output: String::new(),
+  });
+
+  let (_dir, mut app) = make_app();
+  app.command_logs.scroll = 9;
+  app.command_logs.x_scroll = 3;
+  app.enter_command_logs();
+
+  assert_eq!(app.view, View::CommandLogs);
+  assert_eq!(app.command_logs.scroll, 0, "scroll resets on open");
+  assert_eq!(app.command_logs.x_scroll, 0, "horizontal scroll resets on open");
+  assert!(
+    app.command_logs.entries.iter().any(|e| e.command.contains(sentinel)),
+    "opening the overlay snapshots the global command log"
+  );
+}
+
+#[test]
 fn hint_context_follows_focus() {
   // Issue #217: the statusbar chip + help subtitle read the live focus. The
   // worktrees pane is the default; focusing the sidebar switches to Status.
