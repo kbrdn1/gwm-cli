@@ -845,3 +845,55 @@ fn git_stash_list_respects_limit() {
   let limited = worktree::git_stash_list(dir.path(), 2).unwrap();
   assert_eq!(limited.len(), 2, "limit must cap the result vec");
 }
+
+#[test]
+fn resolve_trunk_falls_back_to_master_when_no_main() {
+  // A repo whose only trunk-ish branch is `master` (no `main`) must
+  // resolve to "master" via the COMMON_TRUNKS fallback even when the
+  // caller passes no configured trunks.
+  let (_dir, repo) = init_repo();
+
+  // init_repo seeds `main`; create `master` at the same commit, point
+  // HEAD at it, then drop `main` so `master` is the sole local branch.
+  let head_oid = repo.head().unwrap().target().unwrap();
+  let head_commit = repo.find_commit(head_oid).unwrap();
+  repo.branch("master", &head_commit, false).unwrap();
+  repo.set_head("refs/heads/master").unwrap();
+  repo
+    .find_branch("main", git2::BranchType::Local)
+    .unwrap()
+    .delete()
+    .unwrap();
+
+  assert!(
+    repo.find_branch("main", git2::BranchType::Local).is_err(),
+    "main should be gone for this test"
+  );
+
+  let resolved = worktree::resolve_trunk(&repo, &[]);
+  assert_eq!(resolved.as_deref(), Some("master"));
+}
+
+#[test]
+fn resolve_trunk_prefers_configured_over_fallback() {
+  // With both `dev` and `main` present, a configured trunk of `dev`
+  // must win over the COMMON_TRUNKS fallback (which would otherwise
+  // pick `main` first).
+  let (_dir, repo) = init_repo();
+
+  let head_oid = repo.head().unwrap().target().unwrap();
+  let head_commit = repo.find_commit(head_oid).unwrap();
+  repo.branch("dev", &head_commit, false).unwrap();
+
+  assert!(
+    repo.find_branch("main", git2::BranchType::Local).is_ok(),
+    "main should exist for this test"
+  );
+  assert!(
+    repo.find_branch("dev", git2::BranchType::Local).is_ok(),
+    "dev should exist for this test"
+  );
+
+  let resolved = worktree::resolve_trunk(&repo, &["dev".to_string()]);
+  assert_eq!(resolved.as_deref(), Some("dev"));
+}
