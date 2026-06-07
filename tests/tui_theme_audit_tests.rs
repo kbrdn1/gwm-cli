@@ -270,6 +270,42 @@ fn issue_summary_line_closed_badge_agrees_with_the_header_dot() {
   );
 }
 
+#[test]
+fn pr_summary_line_merged_badge_routes_through_pr_badge_color() {
+  // #239 / Copilot review #209 follow-up: the PR Loaded arm used to inline
+  // its own badge-colour map. After the dedup it must resolve through
+  // `pr_badge_color`, exactly as the issue side calls `issue_badge_color`.
+  // `audit_theme()` gives `locked` a value distinct from clean/muted/prunable
+  // so a Merged PR's badge can only match if the route is honoured.
+  let t = audit_theme();
+  let status = gwm::github::PrStatus {
+    number: 42,
+    title: "shipped".into(),
+    state: PrState::Merged,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let line = gwm::tui::pr_summary_line(
+    42,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    fg_containing(&line, "merged"),
+    Some(t.locked),
+    "merged PR badge → locked, matching pr_badge_color"
+  );
+  assert_eq!(
+    fg_containing(&line, "merged"),
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "summary line and the header dot must use the same role for merged PRs"
+  );
+}
+
 // ---------------------------------------------------------------------------
 // #210: `name` / `path` chrome roles
 // ---------------------------------------------------------------------------

@@ -3016,44 +3016,63 @@ pub fn issue_summary_line(
   issue_summary_line_with_spinner(n, src, state, max_width, theme, None)
 }
 
-fn issue_summary_line_with_spinner(
-  n: u64,
-  src: LinkSource,
-  state: &GitHubFetchState<crate::github::IssueStatus>,
+/// Resolved render inputs for a GitHub summary line, after the caller has
+/// collapsed the issue/PR-specific `match` into the shared shape. The
+/// `Loaded` arm carries the already-picked badge label + colour and an
+/// optional `trailing` segment (issue: empty; PR: ` · checks N/M`) placed
+/// between the closing `]` and the final space+title.
+enum SummaryState<'a> {
+  Idle,
+  Loading,
+  Loaded {
+    badge: &'a str,
+    badge_color: Color,
+    trailing: String,
+    title: &'a str,
+  },
+  Error(&'a str),
+}
+
+/// Shared renderer behind [`issue_summary_line`] and [`pr_summary_line`].
+/// Both twins resolve their `head` ("Issue #…" vs "PR    #…"), badge, and
+/// `trailing` segment, then delegate here so the truncation budget, the
+/// narrow-fallback flatten, and the Idle/Loading/Error arms live in one
+/// place. The `trailing` param is what keeps the two byte-identical: issue
+/// passes "" → renders `] title`; PR passes ` · checks 1/2` → renders
+/// `]· checks 1/2 title`, exactly as the inlined versions did.
+fn summary_line(
+  head: String,
+  state: SummaryState,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  let head = format!("Issue #{}{}", n, source_marker(src));
   // The `head` carries no status signal, only identity — it paints with
   // the `name` role (issue #210; default `White`) while the badge colour
-  // tracks the issue state.
+  // tracks the GitHub state.
   match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
-    GitHubFetchState::Loading => {
+    SummaryState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
+    SummaryState::Loading => {
       let glyph = spinner.unwrap_or("…");
       Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
     }
-    GitHubFetchState::Loaded(s) => {
-      // Mirror `issue_badge_color` exactly so the summary line and the
-      // sidebar header dot never disagree for the same issue: closed maps
-      // to `locked` ("moved on"), not `prunable` ("alarming"). Pre-#170
-      // this site hard-coded `Color::Red` while the dot used `Magenta` —
-      // a latent inconsistency the audit closes (Copilot review #209).
-      let badge_color = issue_badge_color(s.state, theme);
-      let badge = match s.state {
-        IssueState::Open => "open",
-        IssueState::Closed => "closed",
-      };
-      // Fixed prefix = "<head> [<badge>] " — try to preserve in full and
-      // trim the title to whatever budget remains. If the prefix alone
-      // already exceeds the width budget (very narrow sidebar), fall
+    SummaryState::Loaded {
+      badge,
+      badge_color,
+      trailing,
+      title,
+    } => {
+      // Fixed prefix = "<head> [<badge>]<trailing> " — try to preserve in
+      // full and trim the title to whatever budget remains. If the prefix
+      // alone already exceeds the width budget (very narrow sidebar), fall
       // back to flattening the line into a single styled string and
       // truncating it — preserves no badge color but stays inside the
-      // block.
-      let fixed = head.chars().count() + 4 + badge.chars().count(); // " [" + badge + "] "
+      // block. `trailing` is empty for issues and ` · checks N/M` for PRs;
+      // count chars (the `·` is U+00B7: 2 bytes, 1 column) so the budget
+      // arithmetic matches the pre-dedup twins exactly.
+      let fixed = head.chars().count() + 3 + badge.chars().count() + trailing.chars().count() + 1; // " [" + badge + "]" + trailing + " "
       if fixed >= max_width {
-        let raw = format!("{} [{}] {}", head, badge, s.title);
+        let raw = format!("{} [{}]{} {}", head, badge, trailing, title);
         return Line::from(trunc(&raw, max_width));
       }
       let budget = max_width - fixed;
@@ -3064,11 +3083,13 @@ fn issue_summary_line_with_spinner(
           badge.to_string(),
           Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
         ),
-        Span::raw("] "),
-        Span::raw(trunc(&s.title, budget)),
+        Span::raw("]"),
+        Span::raw(trailing),
+        Span::raw(" "),
+        Span::raw(trunc(title, budget)),
       ])
     }
-    GitHubFetchState::Error(e) => {
+    SummaryState::Error(e) => {
       let fixed = head.chars().count() + 2; // " " + "!"
       let budget = max_width.saturating_sub(fixed);
       Line::from(vec![
@@ -3078,6 +3099,40 @@ fn issue_summary_line_with_spinner(
       ])
     }
   }
+}
+
+fn issue_summary_line_with_spinner(
+  n: u64,
+  src: LinkSource,
+  state: &GitHubFetchState<crate::github::IssueStatus>,
+  max_width: usize,
+  theme: &Theme,
+  spinner: Option<&str>,
+) -> Line<'static> {
+  let head = format!("Issue #{}{}", n, source_marker(src));
+  let resolved = match state {
+    GitHubFetchState::Idle => SummaryState::Idle,
+    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Loaded(s) => {
+      // Mirror `issue_badge_color` exactly so the summary line and the
+      // sidebar header dot never disagree for the same issue: closed maps
+      // to `locked` ("moved on"), not `prunable` ("alarming"). Pre-#170
+      // this site hard-coded `Color::Red` while the dot used `Magenta` —
+      // a latent inconsistency the audit closes (Copilot review #209).
+      let badge = match s.state {
+        IssueState::Open => "open",
+        IssueState::Closed => "closed",
+      };
+      SummaryState::Loaded {
+        badge,
+        badge_color: issue_badge_color(s.state, theme),
+        trailing: String::new(),
+        title: &s.title,
+      }
+    }
+    GitHubFetchState::Error(e) => SummaryState::Error(e),
+  };
+  summary_line(head, resolved, max_width, theme, spinner)
 }
 
 /// Render the Loaded / Idle / Loading / Error variants for a PR link
@@ -3103,58 +3158,36 @@ fn pr_summary_line_with_spinner(
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}{}", n, source_marker(src));
-  // The `head` carries no status signal, only identity — it paints with
-  // the `name` role (issue #210; default `White`) while the badge colour
-  // tracks the PR state.
-  match state {
-    GitHubFetchState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
-    GitHubFetchState::Loading => {
-      let glyph = spinner.unwrap_or("…");
-      Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
-    }
+  let resolved = match state {
+    GitHubFetchState::Idle => SummaryState::Idle,
+    GitHubFetchState::Loading => SummaryState::Loading,
     GitHubFetchState::Loaded(s) => {
-      let (badge, badge_color) = match s.state {
-        PrState::Open => ("open", theme.clean),
-        PrState::Draft => ("draft", theme.muted),
-        PrState::Closed => ("closed", theme.prunable),
-        PrState::Merged => ("merged", theme.locked),
+      // Route the badge colour through `pr_badge_color` (mirroring how the
+      // issue side calls `issue_badge_color`) so the summary line and the
+      // sidebar header dot never disagree for the same PR. Only the label
+      // stays inline. Pre-#239 this site duplicated the colour map (Copilot
+      // review #209).
+      let badge = match s.state {
+        PrState::Open => "open",
+        PrState::Draft => "draft",
+        PrState::Closed => "closed",
+        PrState::Merged => "merged",
       };
-      let checks = if s.checks_total > 0 {
+      let trailing = if s.checks_total > 0 {
         format!(" · checks {}/{}", s.checks_passed, s.checks_total)
       } else {
         String::new()
       };
-      let fixed = head.chars().count() + 3 + badge.chars().count() + checks.chars().count() + 1; // " [" + badge + "]" + checks + " "
-      if fixed >= max_width {
-        // Very narrow sidebar — fall back to a single truncated string.
-        // Drops the badge color but keeps the line inside the block.
-        let raw = format!("{} [{}]{} {}", head, badge, checks, s.title);
-        return Line::from(trunc(&raw, max_width));
+      SummaryState::Loaded {
+        badge,
+        badge_color: pr_badge_color(s.state, theme),
+        trailing,
+        title: &s.title,
       }
-      let budget = max_width - fixed;
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name).add_modifier(Modifier::BOLD)),
-        Span::raw(" ["),
-        Span::styled(
-          badge.to_string(),
-          Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("]"),
-        Span::raw(checks),
-        Span::raw(" "),
-        Span::raw(trunc(&s.title, budget)),
-      ])
     }
-    GitHubFetchState::Error(e) => {
-      let fixed = head.chars().count() + 2; // " " + "!"
-      let budget = max_width.saturating_sub(fixed);
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name)),
-        Span::raw(" "),
-        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
-      ])
-    }
-  }
+    GitHubFetchState::Error(e) => SummaryState::Error(e),
+  };
+  summary_line(head, resolved, max_width, theme, spinner)
 }
 
 // ---- Issue #73: lazygit-style colour helpers -------------------------------
