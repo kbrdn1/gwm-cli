@@ -34,6 +34,7 @@
 //! module is pure state — no I/O, no `App` dependency — so the contract
 //! is pinned by `tests/tui_state_async_task_tests.rs`.
 
+use crate::github::{IssueStatus, PrStatus};
 use crate::worktree::WorktreeInfo;
 use std::collections::{HashMap, HashSet};
 
@@ -47,6 +48,16 @@ pub enum TaskKind {
   /// (create / delete / report-close) that need the list fresh before the
   /// next render.
   RefreshWorktrees,
+  /// Off-thread `gh issue view` fetch for the linked issue, keyed by issue
+  /// number (issue #255 — migrated from the separate `github_tx`/`inflight`
+  /// channel). The number is the coalescing key, so `Issue(42)` and
+  /// `Issue(43)` are independent slots with independent generations — the
+  /// per-key identity the late-drop guard needs to discard a stale worker
+  /// without clobbering a newer one's slot (the #138 guarantee, now keyed).
+  GithubIssue(u64),
+  /// PR-side counterpart to [`Self::GithubIssue`] (`gh pr view`). Keyed by
+  /// PR number; never collides with an issue of the same number.
+  GithubPr(u64),
 }
 
 impl TaskKind {
@@ -56,7 +67,17 @@ impl TaskKind {
   pub fn loading_label(self) -> &'static str {
     match self {
       TaskKind::RefreshWorktrees => "refreshing worktrees…",
+      TaskKind::GithubIssue(_) | TaskKind::GithubPr(_) => "fetching GitHub status…",
     }
+  }
+
+  /// `true` for the GitHub fetch kinds (`GithubIssue` / `GithubPr`). Used
+  /// as the predicate for [`TaskRunner::invalidate_matching`] so the `App`
+  /// can drop every in-flight GitHub fetch on navigation / explicit refresh
+  /// without naming the (now-stale) issue/PR numbers it no longer holds
+  /// (issue #255).
+  pub fn is_github(self) -> bool {
+    matches!(self, TaskKind::GithubIssue(_) | TaskKind::GithubPr(_))
   }
 }
 
@@ -69,6 +90,13 @@ pub enum TaskMsg {
   /// A worktree list refresh result: the freshly-listed worktrees, or a
   /// stringified error from the off-thread `discover_repo` + `list`.
   RefreshWorktrees(u64, std::result::Result<Vec<WorktreeInfo>, String>),
+  /// A `gh issue view` result (issue #255): the worker's `generation`, the
+  /// issue `number` it fetched, and the parsed [`IssueStatus`] (or a
+  /// stringified error). The generation lets [`TaskRunner::complete`] drop a
+  /// stale worker's result; the number keys it back into the GitHub cache.
+  GithubIssue(u64, u64, std::result::Result<IssueStatus, String>),
+  /// PR-side counterpart to [`Self::GithubIssue`] (`gh pr view`).
+  GithubPr(u64, u64, std::result::Result<PrStatus, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
@@ -118,6 +146,21 @@ impl TaskRunner {
   pub fn invalidate(&mut self, kind: TaskKind) {
     *self.generation.entry(kind).or_insert(0) += 1;
     self.running.remove(&kind);
+  }
+
+  /// [`Self::invalidate`] every in-flight kind matching `pred` (issue #255).
+  /// The GitHub fetch needs this because, on navigation, the `App` clears
+  /// the per-key cache for *all* GitHub fetches but no longer holds the
+  /// (stale) issue/PR numbers to invalidate them by key — a
+  /// `|k| k.is_github()` predicate drops every running GitHub worker's slot
+  /// so a fresh fetch starts at a new generation and the stale worker's late
+  /// result is discarded by [`Self::complete`]. Only running kinds are
+  /// touched: an idle kind has no in-flight worker to drop.
+  pub fn invalidate_matching<F: Fn(TaskKind) -> bool>(&mut self, pred: F) {
+    let hits: Vec<TaskKind> = self.running.iter().copied().filter(|&k| pred(k)).collect();
+    for kind in hits {
+      self.invalidate(kind);
+    }
   }
 
   /// Decide whether a result tagged `generation` for `kind` is still
