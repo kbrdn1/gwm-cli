@@ -1842,6 +1842,35 @@ fn resolved_rows_with_no_files_marks_everything_default() {
 }
 
 #[test]
+fn resolved_rows_attributes_array_of_tables_entries() {
+  // The common real-world shape is an array-of-tables (`[[labels]]`,
+  // `[[branch_types]]`), where the merged value goes through serde's struct
+  // serialisation and the raw layer through a bare file parse. This pins
+  // that those key shapes (`labels[0].name`, …) match so a repo-declared
+  // entry attributes to Repo rather than silently reading as a default.
+  let repo = TempDir::new().unwrap();
+  std::fs::write(
+    repo.path().join(CONFIG_FILE),
+    "[[labels]]\nname = \"bug\"\ncolor = \"d73a4a\"\n\n[[branch_types]]\nname = \"feat\"\ndescription = \"a feature\"\n",
+  )
+  .unwrap();
+
+  let rows = resolved_rows(repo.path(), None).unwrap();
+
+  assert_eq!(row_for(&rows, "labels[0].name").source, ConfigSource::Repo);
+  assert_eq!(row_for(&rows, "labels[0].name").value, "\"bug\"");
+  assert_eq!(row_for(&rows, "labels[0].color").source, ConfigSource::Repo);
+  assert_eq!(row_for(&rows, "branch_types[0].name").source, ConfigSource::Repo);
+
+  // An unset optional sub-field (`labels[0].description`) is omitted by the
+  // TOML serialiser (Option::None), so it produces no phantom default row.
+  assert!(
+    !rows.iter().any(|r| r.key == "labels[0].description"),
+    "unset optional sub-fields must not surface as default rows"
+  );
+}
+
+#[test]
 fn config_source_labels_are_stable() {
   assert_eq!(ConfigSource::Repo.label(), "repo");
   assert_eq!(ConfigSource::User.label(), "user");
