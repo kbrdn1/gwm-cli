@@ -520,6 +520,11 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::Sync if !app.picker_mode => app.request_sync(),
     Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
     Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
+    // Read-only and selection-independent, like `open` / `yank` / `git_tui`
+    // — not picker-gated, so `gwm switch` can open the docs too (issue #233,
+    // Codex review on #268). Gating it would silently no-op a key the help
+    // overlay advertises in picker mode.
+    Action::OpenDocs => open_url(DOCS_URL, app),
     Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
     Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
     Action::Review if !app.picker_mode => {
@@ -733,7 +738,16 @@ fn yank_selected_path_to_clipboard(app: &mut App) {
   app.status = "y: no clipboard tool found (install pbcopy / wl-copy / xclip / xsel / clip)".into();
 }
 
-/// Spawn the OS opener for `url` (used by the OpenMenu key handler).
+/// Canonical documentation URL opened by the `.` key (issue #233).
+///
+/// Derived from the crate's `repository` (Cargo.toml) so a fork points at
+/// its own docs without a patch — there is no standalone docs site
+/// deployed yet, so the MVP target is the docs tree on the repo's default
+/// branch. A `[docs]` config override is a possible follow-up.
+pub const DOCS_URL: &str = concat!(env!("CARGO_PKG_REPOSITORY"), "/tree/main/docs");
+
+/// Spawn the OS opener for `url` (used by the OpenMenu key handler and the
+/// `.` open-docs key, issue #233).
 /// Failures land in the status bar — we never propagate up.
 fn open_url(url: &str, app: &mut App) {
   let opener = if cfg!(target_os = "macos") {

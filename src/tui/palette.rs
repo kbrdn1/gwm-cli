@@ -77,6 +77,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "open issue or PR URL in the browser",
     },
     PaletteEntry {
+      action: Action::OpenDocs,
+      name: "open-docs",
+      description: "open the gwm documentation in the browser",
+    },
+    PaletteEntry {
       action: Action::LinkPrompt,
       name: "link",
       description: "link the selected worktree to an issue or PR",

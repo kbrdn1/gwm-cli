@@ -125,6 +125,7 @@ define_actions! {
   Yank              => "yank",
   Open              => "open",
   OpenMenu          => "open_menu",
+  OpenDocs          => "open_docs",
   LinkPrompt        => "link",
   FetchGithub       => "fetch_github",
   // Overlays
@@ -409,6 +410,7 @@ impl Keymap {
       def(Action::Yank, &["y"]),
       def(Action::Open, &["o"]),
       def(Action::OpenMenu, &["O"]),
+      def(Action::OpenDocs, &["."]),
       def(Action::LinkPrompt, &["L"]),
       def(Action::FetchGithub, &["F"]),
       def(Action::Help, &["?"]),
