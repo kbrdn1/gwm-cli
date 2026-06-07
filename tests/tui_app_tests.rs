@@ -1895,11 +1895,16 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   // Re-resolve the slug now that the remote exists.
   app.refresh_link();
 
-  let gh = dir.path().join("fake-gh");
-  // Write a fake `gh` that detects PR `n` (both `pr list` and `pr view`).
-  let write_gh = |n: u64| {
+  // Write a fake `gh` (detecting PR `n` via both `pr list` and `pr view`)
+  // to its own path. Two distinct scripts — never one rewritten in place —
+  // because the first refresh spawns an off-thread `pr view` worker (issue
+  // #255) that may still be executing its script when the second refresh
+  // fires. Truncating a script mid-exec raced that worker (`ETXTBSY` on
+  // Linux → the re-detect's spawn fails → `None`): the #248 flake. Keeping
+  // every script write-once / exec-many removes the race on any OS.
+  let write_gh = |path: &std::path::Path, n: u64| {
     std::fs::write(
-      &gh,
+      path,
       format!(
         "#!/bin/sh\n\
          if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
@@ -1910,11 +1915,14 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
       ),
     )
     .unwrap();
-    let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
     perms.set_mode(0o755);
-    std::fs::set_permissions(&gh, perms).unwrap();
+    std::fs::set_permissions(path, perms).unwrap();
   };
-  write_gh(128);
+  let gh_first = dir.path().join("fake-gh-128");
+  let gh_second = dir.path().join("fake-gh-200");
+  write_gh(&gh_first, 128);
+  write_gh(&gh_second, 200);
 
   // Serialise against the other env-mutating tests in this binary.
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
@@ -1922,7 +1930,7 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   // SAFETY: env mutation is guarded by `env_lock()` above; GWM_GH is
   // restored at the end of the test, before returning.
   unsafe {
-    std::env::set_var("GWM_GH", &gh);
+    std::env::set_var("GWM_GH", &gh_first);
   }
 
   // First refresh: nothing linked → detect PR #128.
@@ -1932,8 +1940,12 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
 
   // The branch's PR changed (e.g. closed + reopened as #200). A detected
   // link is "resolved live", so a second refresh must re-detect rather
-  // than stick to #128 (issue #181 — Copilot review on PR #184).
-  write_gh(200);
+  // than stick to #128 (issue #181 — Copilot review on PR #184). Point at
+  // the second script — written once, never the file the first refresh's
+  // worker is still execing — so the re-detect can't race that exec.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_second);
+  }
   app.refresh_github_status();
 
   unsafe {
