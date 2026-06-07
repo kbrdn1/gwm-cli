@@ -128,18 +128,12 @@ pub fn header_line(
   let repo = sanitize(repo_name);
   let path = sanitize(workdir_display);
 
-  let version_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let dir_badge_style = Style::default()
-    .fg(theme.name)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let version_style = chip_style(theme.accent);
+  let dir_badge_style = chip_style(theme.name);
   // Picker chip uses the `dirty` role (not the accent) so the mode warning
   // reads as distinct from the always-present version chip — pre-theme this
   // was a hard-coded `Color::Yellow`.
-  let picker_style = Style::default()
-    .fg(theme.dirty)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let picker_style = chip_style(theme.dirty);
   let path_style = Style::default().fg(theme.muted);
 
   let version_text = format!(" gwm {} ", env!("CARGO_PKG_VERSION"));
@@ -1274,6 +1268,39 @@ pub fn worktree_path_style(theme: &Theme) -> Style {
   Style::default().fg(theme.path)
 }
 
+/// The shared "chip" style: a reverse-video, bold badge painted on `color`
+/// (issue #240). This is the single source of truth for the `` key `` /
+/// button / badge treatment that recurs across the header, footer,
+/// statusbar, help overlay and modal buttons — `REVERSED` paints `color`
+/// as the chip's background, `BOLD` keeps the glyph legible against it.
+/// Extracted so the ~14 inline `fg(c).add_modifier(REVERSED | BOLD)`
+/// repetitions resolve through one definition; sites that add a `bg` or
+/// extra modifiers keep their bespoke style.
+pub fn chip_style(color: Color) -> Style {
+  Style::default()
+    .fg(color)
+    .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+}
+
+/// Style for a *non-highlighted* command name in the command palette
+/// (issue #210 follow-up). Routes through the `name` role (default
+/// `White`) so a `[theme]` override / light preset recolours it, instead
+/// of the pre-#240 hard-coded `Color::White` that bypassed the theme.
+/// Extracted so the route is pinned by `tests/tui_theme_audit_tests.rs`
+/// (`draw_command_palette` is private Frame render code).
+pub fn palette_name_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.name)
+}
+
+/// Style for a Keybindings-overlay entry *label* (the action description
+/// trailing each key chip). Routes through the `name` role (default
+/// `White`) for the same reason as [`palette_name_style`]: the pre-#240
+/// literal `Color::White` ignored a `[theme]` override. Pinned by
+/// `tests/tui_theme_audit_tests.rs`.
+pub fn help_label_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.name)
+}
+
 fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
   let (marker_label, marker_color) = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
@@ -1553,9 +1580,7 @@ pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
 }
 
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
-  let chip_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let chip_style = chip_style(theme.accent);
   let label_style = Style::default().fg(theme.muted);
   let mut spans: Vec<Span<'static>> = Vec::new();
   for (i, (key, label)) in hints.iter().enumerate() {
@@ -1600,9 +1625,7 @@ fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Ke
 /// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
 /// labels and the bracketed status are ASCII / single-width in practice).
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
-  let chip_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let chip_style = chip_style(theme.accent);
   let label_style = Style::default().fg(theme.muted);
   let status_style = Style::default().fg(theme.dirty);
 
@@ -1693,12 +1716,8 @@ pub fn status_line(
   width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  let context_style = Style::default()
-    .fg(theme.focus)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let chip_style = Style::default()
-    .fg(theme.accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let context_style = chip_style(theme.focus);
+  let chip_style = chip_style(theme.accent);
   let label_style = Style::default().fg(theme.muted);
   let status_style = Style::default().fg(theme.dirty);
   let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
@@ -2038,11 +2057,9 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // the title share the bold-accent heading style. Labels stay white
   // for contrast; an `(unbound)` action renders muted instead of a chip
   // so it reads as "no binding" rather than a live key.
-  let chip_style = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let chip_style = chip_style(accent);
   let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  let label_style = Style::default().fg(Color::White);
+  let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
 
   // Align every label to the same column: pad each badge *group* out to
@@ -2217,9 +2234,7 @@ fn draw_create(f: &mut Frame, app: &App) {
 /// chip rather than defaulting focus to Cancel. Pure so the chip contract
 /// is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
-  let primary = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let primary = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   Line::from(vec![
     Span::styled(" Create ", primary),
@@ -2250,9 +2265,7 @@ pub fn type_selector_line(
   // badge style as the buttons) so it stands out as an editable control;
   // idle it is plain white text between muted arrows.
   let name_style = if focused {
-    Style::default()
-      .fg(accent)
-      .add_modifier(Modifier::REVERSED | Modifier::BOLD)
+    chip_style(accent)
   } else {
     Style::default().fg(Color::White)
   };
@@ -2312,9 +2325,7 @@ pub fn link_target_line(key: &str, label: &str, selected: bool, accent: Color, m
   let button = format!(" {key}  {label} ");
   let button = format!("{button:<BUTTON_WIDTH$}");
   if selected {
-    let chip = Style::default()
-      .fg(accent)
-      .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+    let chip = chip_style(accent);
     return Line::from(vec![Span::raw("  "), Span::styled(button, chip)]);
   }
 
@@ -2367,12 +2378,8 @@ pub fn confirm_delete_branch_line(
   accent: Color,
   muted: Color,
 ) -> Line<'static> {
-  let key_style = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
-  let value_style = Style::default()
-    .fg(if enabled { accent } else { muted })
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let key_style = chip_style(accent);
+  let value_style = chip_style(if enabled { accent } else { muted });
   Line::from(vec![
     Span::styled(
       format!("{:<label_width$}  ", "Delete Branch", label_width = label_width),
@@ -2541,9 +2548,7 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 /// `Enter` lands on. Pure so the chip contract is pinned by
 /// `tests/tui_ui_helpers_tests.rs`.
 pub fn confirm_buttons_line(focus: ConfirmButton, accent: Color, muted: Color) -> Line<'static> {
-  let focused = Style::default()
-    .fg(accent)
-    .add_modifier(Modifier::REVERSED | Modifier::BOLD);
+  let focused = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   let (confirm_style, cancel_style) = match focus {
     ConfirmButton::Confirm => (focused, idle),
@@ -2915,7 +2920,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
       let name_style = if i == highlight {
         Style::default().fg(accent).add_modifier(Modifier::BOLD)
       } else {
-        Style::default().fg(Color::White)
+        palette_name_style(&app.theme)
       };
       Line::from(vec![
         Span::raw(prefix),

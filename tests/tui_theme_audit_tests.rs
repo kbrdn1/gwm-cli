@@ -35,8 +35,9 @@ use gwm::tui::commit_graph::{render_pipe_set, test_row, Pipe, PipeKind};
 use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
-  branch_name_color, build_sidebar_sections, footer_line, freshness_color, header_line, issue_badge_color,
-  pr_badge_color, table_marker, working_tree_status_line, worktree_name_style, worktree_path_style,
+  branch_name_color, build_sidebar_sections, footer_line, freshness_color, header_line, help_label_style,
+  issue_badge_color, palette_name_style, pr_badge_color, table_marker, working_tree_status_line, worktree_name_style,
+  worktree_path_style,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::{Color, Modifier};
@@ -332,6 +333,41 @@ fn name_and_path_styles_default_to_legacy_white_and_gray() {
   let d = Theme::default();
   assert_eq!(worktree_name_style(&d).fg, Some(Color::White), "default name → White");
   assert_eq!(worktree_path_style(&d).fg, Some(Color::Gray), "default path → Gray");
+}
+
+#[test]
+fn palette_and_help_labels_resolve_through_name_role() {
+  // #240(b): the command-palette non-highlighted command name and the
+  // Keybindings-overlay entry label used to paint with a hard-coded
+  // `Color::White` that bypassed `theme.name`, so a light / non-default
+  // preset could not recolour them (#210). They now route through the
+  // `name` role. `audit_theme()` gives `name` a value distinct from
+  // White, so a regression back to the literal is caught here.
+  let t = audit_theme();
+  assert_eq!(
+    palette_name_style(&t).fg,
+    Some(t.name),
+    "palette command name → name role"
+  );
+  assert_eq!(help_label_style(&t).fg, Some(t.name), "help entry label → name role");
+}
+
+#[test]
+fn palette_and_help_labels_default_to_legacy_white() {
+  // Guard the "no visible change without [theme]" contract for #240(b):
+  // the default `name` role is White, so the default palette / help output
+  // is byte-identical to the pre-#240 hard-coded literal.
+  let d = Theme::default();
+  assert_eq!(
+    palette_name_style(&d).fg,
+    Some(Color::White),
+    "default palette command name → White"
+  );
+  assert_eq!(
+    help_label_style(&d).fg,
+    Some(Color::White),
+    "default help entry label → White"
+  );
 }
 
 #[test]
