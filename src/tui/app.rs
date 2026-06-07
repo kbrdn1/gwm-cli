@@ -6,7 +6,7 @@ use super::state::config_panel::ConfigPanel;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
-use super::state::github_fetch::GitHubFetch;
+use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
@@ -32,17 +32,6 @@ use std::time::{Duration, Instant};
 // `state::github_fetch` re-export landed) keep compiling. The owning
 // module is now `tui::state::github_fetch` — see #128.
 pub use super::state::github_fetch::GitHubFetchState;
-
-/// Result of an off-thread `gh issue view` / `gh pr view` shell-out
-/// (issue #217). The background fetch thread sends one of these back to
-/// the event loop over [`App::github_rx`]; [`App::drain_github_results`]
-/// applies it through the existing `GitHubFetch::complete_*` guards (so the
-/// #138 stale-result drop still holds). Carries owned, `Send` data only —
-/// no `git2::Repository` crosses the thread boundary.
-pub enum GithubFetchMsg {
-  Issue(u64, std::result::Result<IssueStatus, String>),
-  Pr(u64, std::result::Result<PrStatus, String>),
-}
 
 /// Spawnable launcher plan handed to the event loop by
 /// [`App::prepare_git_tui`] / [`App::prepare_review`]. Carries the
@@ -311,23 +300,17 @@ pub struct App {
   /// don't care about the gate).
   pub trust_mode: crate::trust::TrustMode,
 
-  /// Sender cloned into each background GitHub fetch thread (issue #217).
-  github_tx: mpsc::Sender<GithubFetchMsg>,
-  /// Receiver drained by [`Self::drain_github_results`] each event-loop
-  /// tick. Held for the lifetime of the `App`; when the `App` drops, any
-  /// still-running fetch thread's `send` simply fails and is ignored.
-  github_rx: mpsc::Receiver<GithubFetchMsg>,
-
-  /// Generic off-thread task spine (issue #231): coalescing + late-drop
-  /// for slow one-shot ops, starting with the worktree list refresh.
+  /// Generic off-thread task spine (issue #231; GitHub fetch folded in by
+  /// #255): coalescing + per-key generation late-drop for slow one-shot
+  /// ops — the worktree list refresh and the `gh issue/pr view` fetches.
   /// Public for the same reason `github` is — the state-machine tests
   /// claim a generation directly without spawning an OS thread.
   pub tasks: TaskRunner,
-  /// Sender cloned into each background task worker (issue #231).
+  /// Sender cloned into each background task worker (issue #231; carries the
+  /// GitHub fetch results too since #255).
   task_tx: mpsc::Sender<TaskMsg>,
-  /// Receiver drained by [`Self::drain_task_results`] each event-loop
-  /// tick. Mirrors the GitHub channel; a worker whose `App` has dropped
-  /// simply fails its `send` and is ignored.
+  /// Receiver drained by [`Self::drain_task_results`] each event-loop tick.
+  /// A worker whose `App` has dropped simply fails its `send` and is ignored.
   task_rx: mpsc::Receiver<TaskMsg>,
 
   /// Command Logs overlay state (issue #226): the scroll cursor plus an
@@ -384,7 +367,6 @@ impl App {
     if !worktrees.is_empty() {
       state.select(Some(0));
     }
-    let (github_tx, github_rx) = mpsc::channel();
     let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
       repo,
@@ -420,8 +402,6 @@ impl App {
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
-      github_tx,
-      github_rx,
       tasks: TaskRunner::new(),
       task_tx,
       task_rx,
@@ -578,15 +558,24 @@ impl App {
   }
 
   /// Apply every background task result that has arrived since the last
-  /// call (issue #231), draining the channel without blocking. Each
-  /// result goes through [`TaskRunner::complete`], so a result whose
-  /// generation was bumped mid-flight is dropped (#138 guard, generalised).
+  /// call (issue #231; GitHub fetch results folded in by #255), draining
+  /// the channel without blocking. Each result goes through
+  /// [`TaskRunner::complete`], so a result whose per-key generation was
+  /// bumped mid-flight is dropped (#138 guard, generalised) — this is what
+  /// makes a stale GitHub worker lose to a fresh one in the retry race.
+  ///
   /// A failed refresh surfaces on the status bar and leaves the list
   /// intact — what used to be a fatal `refresh()?` that tore down the
-  /// event loop is now a graceful message. Returns `true` if at least one
-  /// result was applied, so the loop can force a redraw.
+  /// event loop is now a graceful message. A GitHub result is stamped into
+  /// the per-key cache via `complete_{issue,pr}` (pure writes now that the
+  /// drop decision lives on the spine); once nothing GitHub-side is left
+  /// loading, the aggregate outcome is re-reported on the status bar — the
+  /// same end state `drain_github_results` produced pre-#255. Returns `true`
+  /// if at least one result was applied, so the loop can force a redraw.
   pub fn drain_task_results(&mut self) -> bool {
     let mut applied = false;
+    let mut github_applied = false;
+    let mut refresh_applied = false;
     while let Ok(msg) = self.task_rx.try_recv() {
       match msg {
         TaskMsg::RefreshWorktrees(generation, result) => {
@@ -599,8 +588,41 @@ impl App {
             Err(e) => self.status = format!("refresh failed: {}", e),
           }
           applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::GithubIssue(generation, number, result) => {
+          // Generation guard: a stale worker whose slot was bumped by an
+          // intervening invalidate/re-request is dropped here, before it can
+          // stamp the cache (the Codex-flagged race, fixed by the spine).
+          if !self.tasks.complete(TaskKind::GithubIssue(number), generation) {
+            continue;
+          }
+          self.github.complete_issue(number, result);
+          applied = true;
+          github_applied = true;
+        }
+        TaskMsg::GithubPr(generation, number, result) => {
+          if !self.tasks.complete(TaskKind::GithubPr(number), generation) {
+            continue;
+          }
+          self.github.complete_pr(number, result);
+          applied = true;
+          github_applied = true;
         }
       }
+    }
+    // Once nothing GitHub-side is left loading, swap the "fetching…"
+    // placeholder for the real outcome (refreshed / partial failure /
+    // failure) — only when a GitHub result actually applied, so a dropped
+    // stale result never overwrites the current status (issue #217 review P2).
+    //
+    // Skip it when a worktree refresh also landed this tick: pre-#255 the
+    // event loop drained the GitHub channel *before* the task channel, so a
+    // simultaneous completion left `apply_refreshed_worktrees`' "refreshed —
+    // N" message standing last. The `!refresh_applied` guard preserves that
+    // ordering now that both drain in one pass.
+    if github_applied && !refresh_applied && !self.is_github_loading() {
+      self.report_github_refresh_status();
     }
     applied
   }
@@ -612,10 +634,10 @@ impl App {
   }
 
   /// A clone of the task channel sender background workers report over
-  /// (issue #231). Exposed so the async-apply path
-  /// ([`Self::drain_task_results`]) can be driven deterministically in
-  /// tests — inject a [`TaskMsg`] exactly as a worker would, then drain —
-  /// without spawning an OS thread. Mirrors [`Self::github_result_sender`].
+  /// (issue #231; GitHub fetch workers too since #255). Exposed so the
+  /// async-apply path ([`Self::drain_task_results`]) can be driven
+  /// deterministically in tests — inject a [`TaskMsg`] exactly as a worker
+  /// would, then drain — without spawning an OS thread or a real `gh`.
   pub fn task_result_sender(&self) -> mpsc::Sender<TaskMsg> {
     self.task_tx.clone()
   }
@@ -1629,6 +1651,12 @@ impl App {
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
     self.github.refresh_link(&self.repo, branch.as_deref());
+    // Navigation invariant (issue #255): the cache clear above must be paired
+    // with a spine generation-bump so any in-flight `gh` worker for the
+    // previous worktree's link is dropped instead of stamping the now-active
+    // worktree's cache. `refresh_link` no longer holds the old issue/PR
+    // numbers, so invalidate by predicate.
+    self.tasks.invalidate_matching(TaskKind::is_github);
   }
 
   fn selected_branch_name(&self) -> Option<String> {
@@ -1670,26 +1698,25 @@ impl App {
   }
 
   /// Kick off the issue/PR fetch. Called from the event loop when the
-  /// user presses `F` (refresh GitHub status). Routes through the
-  /// [`GitHubFetch`] dedupe layer: `request(key)` claims the per-target
-  /// inflight slot and flips `*_state = Loading`, then the `gh issue view`
-  /// / `gh pr view` shell-out runs **off-thread** (issue #217) so the TUI
-  /// stays responsive and the statusbar spinner can animate. Each thread
-  /// reports back over [`Self::github_tx`]; the event loop applies the
-  /// result via [`Self::drain_github_results`], which calls
-  /// `complete_{issue,pr}` — keeping the #128 dedupe and #138 stale-drop
-  /// guarantees intact.
+  /// user presses `F` (refresh GitHub status). Each `gh issue view` /
+  /// `gh pr view` shell-out runs **off-thread** on the shared async-task
+  /// spine (issue #255, migrated from #217's dedicated channel): the `App`
+  /// checks the per-key cache, claims a generation from
+  /// [`TaskRunner::request`], marks the cache `Loading`, and spawns a
+  /// worker tagged with that generation. The worker reports a
+  /// `TaskMsg::Github{Issue,Pr}` back; [`Self::drain_task_results`] applies
+  /// it only if the generation is still authoritative — so a stale worker
+  /// from a previous fetch loses the retry race to a fresh one.
   ///
   /// The PR auto-detection (`gh pr list`, issue #181) stays synchronous:
   /// it mutates `link` which the very next render needs, and it is a single
   /// cheap call rather than the two `view` shell-outs the spinner is for.
   ///
   /// This call path is the explicit user-initiated refresh, so it flushes
-  /// the cache via [`GitHubFetch::invalidate`] first — the user just asked
-  /// for fresh data, a `HitCache` short-circuit here would be a bug.
+  /// the cache + drops any in-flight worker via [`Self::invalidate_github`]
+  /// first — the user just asked for fresh data, a cache short-circuit here
+  /// would be a bug.
   pub fn refresh_github_status(&mut self) {
-    use super::state::github_fetch::{FetchAction, FetchKey};
-
     let slug = self.github.link_slug.clone();
 
     // Drop a prior auto-detection so this refresh re-resolves it live
@@ -1716,20 +1743,18 @@ impl App {
       self.status = "no GitHub remote — cannot fetch status".into();
       return;
     };
-    // Explicit user-initiated refresh: flush the cache before the
-    // request loop so `request` returns `Spawn` instead of `HitCache`
-    // for previously-loaded keys.
-    self.github.invalidate();
+    // Explicit user-initiated refresh: flush the cache (so the cold-cache
+    // branch fires instead of a hit) and drop any in-flight worker on the
+    // spine, so previously-loaded keys re-fetch.
+    self.invalidate_github();
     let mut spawned = 0u32;
     if let Some(n) = self.github.link.issue {
-      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Issue(n)) {
-        self.spawn_github_fetch(FetchKey::Issue(n), slug.clone());
+      if self.spawn_github_issue(n, &slug) {
         spawned += 1;
       }
     }
     if let Some(n) = self.github.link.pr {
-      if let FetchAction::Spawn(_) = self.github.request(FetchKey::Pr(n)) {
-        self.spawn_github_fetch(FetchKey::Pr(n), slug.clone());
+      if self.spawn_github_pr(n, &slug) {
         spawned += 1;
       }
     }
@@ -1745,16 +1770,59 @@ impl App {
     }
   }
 
-  /// Spawn one background `gh` shell-out for `key` and wire its result back
-  /// over the channel (issue #217). Deliberately a thin shell: it owns only
-  /// the off-thread dispatch + send, no state logic — the contract lives in
-  /// `request` / `complete_*` (tested in `tui_state_github_fetch_tests.rs`)
-  /// and in [`Self::drain_github_results`] (tested in `tui_app_tests.rs`).
-  /// A `send` failure (the `App`/receiver was dropped) is ignored: there is
+  /// Flush the GitHub result cache **and** drop any in-flight GitHub worker
+  /// on the spine (issue #255). The navigation invariant: the cache clear
+  /// and the spine generation-bump must always move together, or a stale
+  /// worker's late result could outlive the cache flush. Routed through one
+  /// helper so the pairing can't desync — `refresh_github_status` and
+  /// (via the predicate) `refresh_link` are the only callers.
+  fn invalidate_github(&mut self) {
+    self.github.invalidate();
+    self.tasks.invalidate_matching(TaskKind::is_github);
+  }
+
+  /// Claim a spine generation for `Issue(n)` and spawn its `gh issue view`
+  /// worker (issue #255), returning `true` when a worker was actually
+  /// started. A terminal cache hit (the explicit refresh flushed the cache
+  /// first, so this only fires on a redundant call) or a coalesced spine
+  /// slot (a worker for this key is already in flight) returns `false`
+  /// without spawning a second subprocess.
+  fn spawn_github_issue(&mut self, n: u64, slug: &str) -> bool {
+    let key = FetchKey::Issue(n);
+    if self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubIssue(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, slug.to_string(), generation);
+    true
+  }
+
+  /// PR-side counterpart to [`Self::spawn_github_issue`] (issue #255).
+  fn spawn_github_pr(&mut self, n: u64, slug: &str) -> bool {
+    let key = FetchKey::Pr(n);
+    if self.github.is_cached(key) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::GithubPr(n)) else {
+      return false;
+    };
+    self.github.mark_loading(key);
+    self.spawn_github_fetch(key, slug.to_string(), generation);
+    true
+  }
+
+  /// Spawn one background `gh` shell-out for `key` tagged with `generation`
+  /// and wire its result back over the shared task channel (issue #255,
+  /// migrated from #217's dedicated channel). Deliberately a thin shell: it
+  /// owns only the off-thread dispatch + send, no state logic — the
+  /// coalescing / late-drop contract lives on the [`TaskRunner`] spine. A
+  /// `send` failure (the `App`/receiver was dropped) is ignored: there is
   /// no longer anyone to apply the result.
-  fn spawn_github_fetch(&self, key: super::state::github_fetch::FetchKey, slug: String) {
-    use super::state::github_fetch::FetchKey;
-    let tx = self.github_tx.clone();
+  fn spawn_github_fetch(&self, key: FetchKey, slug: String, generation: u64) {
+    let tx = self.task_tx.clone();
     // Resolve the `gh` program on THIS (main) thread and hand it to the
     // worker, so the worker never reads `GWM_GH` / the process environment
     // concurrently with env-mutating code elsewhere (the `env_lock`
@@ -1762,52 +1830,19 @@ impl App {
     let program = github::gh_program();
     std::thread::spawn(move || {
       let msg = match key {
-        FetchKey::Issue(n) => GithubFetchMsg::Issue(
+        FetchKey::Issue(n) => TaskMsg::GithubIssue(
+          generation,
           n,
           github::fetch_issue_with(&program, &slug, n).map_err(|e| e.to_string()),
         ),
-        FetchKey::Pr(n) => GithubFetchMsg::Pr(n, github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string())),
+        FetchKey::Pr(n) => TaskMsg::GithubPr(
+          generation,
+          n,
+          github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string()),
+        ),
       };
       let _ = tx.send(msg);
     });
-  }
-
-  /// Apply every GitHub fetch result that has arrived since the last call
-  /// (issue #217), draining the channel without blocking. Each result goes
-  /// through `complete_{issue,pr}`, so a result whose inflight slot was
-  /// cleared by an intervening navigation/`invalidate` is dropped (#138).
-  /// Returns `true` if at least one result was applied, so the event loop
-  /// can force a redraw. When the last inflight fetch lands, re-reports the
-  /// aggregate outcome on the status bar.
-  pub fn drain_github_results(&mut self) -> bool {
-    let mut applied = false;
-    while let Ok(msg) = self.github_rx.try_recv() {
-      // Only count results `complete_*` actually applied — a result whose
-      // inflight slot was invalidated mid-flight (#138) is dropped and must
-      // NOT trigger a status report over the current message (issue #217
-      // review P2).
-      let did_apply = match msg {
-        GithubFetchMsg::Issue(n, r) => self.github.complete_issue(n, r),
-        GithubFetchMsg::Pr(n, r) => self.github.complete_pr(n, r),
-      };
-      applied |= did_apply;
-    }
-    // Once nothing is left loading, swap the "fetching…" placeholder for the
-    // real outcome (refreshed / partial failure / failure).
-    if applied && !self.is_github_loading() {
-      self.report_github_refresh_status();
-    }
-    applied
-  }
-
-  /// A clone of the channel sender background fetch threads report over
-  /// (issue #217). Exposed so the async-apply path
-  /// ([`Self::drain_github_results`]) can be driven deterministically —
-  /// inject a [`GithubFetchMsg`] exactly as a thread would, then drain —
-  /// without spawning an OS thread or a real `gh` (the advisor-flagged
-  /// flaky-thread-test trap). `spawn_github_fetch` uses the same channel.
-  pub fn github_result_sender(&self) -> mpsc::Sender<GithubFetchMsg> {
-    self.github_tx.clone()
   }
 
   /// Compute the post-refresh status line message based on the actual

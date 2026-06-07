@@ -102,3 +102,78 @@ fn loading_label_surfaces_the_inflight_task_label() {
   runner.request(TaskKind::RefreshWorktrees);
   assert_eq!(runner.loading_label(), Some("refreshing worktrees…"));
 }
+
+// ---- GitHub fetch kinds on the spine (issue #255) -------------------------
+
+#[test]
+fn github_kinds_report_the_shared_fetch_label() {
+  // Every GitHub fetch reads as the same statusbar copy regardless of which
+  // issue / PR number it carries, mirroring the pre-migration "fetching
+  // GitHub status…" line.
+  assert_eq!(TaskKind::GithubIssue(42).loading_label(), "fetching GitHub status…");
+  assert_eq!(TaskKind::GithubPr(7).loading_label(), "fetching GitHub status…");
+}
+
+#[test]
+fn is_github_is_true_only_for_github_kinds() {
+  assert!(TaskKind::GithubIssue(1).is_github());
+  assert!(TaskKind::GithubPr(1).is_github());
+  assert!(!TaskKind::RefreshWorktrees.is_github());
+}
+
+#[test]
+fn github_issue_and_pr_with_same_number_are_independent_slots() {
+  // The (target, number) identity carries onto the spine: Issue(42) and
+  // Pr(42) never coalesce or share a generation.
+  let mut runner = TaskRunner::new();
+  assert_eq!(runner.request(TaskKind::GithubIssue(42)), Some(1));
+  assert_eq!(
+    runner.request(TaskKind::GithubPr(42)),
+    Some(1),
+    "Pr(42) must claim its own slot, not coalesce onto Issue(42)"
+  );
+  assert!(runner.is_loading(TaskKind::GithubIssue(42)));
+  assert!(runner.is_loading(TaskKind::GithubPr(42)));
+}
+
+#[test]
+fn invalidate_matching_drops_only_running_github_slots() {
+  // The navigation path: a refresh worker and two GitHub fetches are in
+  // flight; `invalidate_matching(is_github)` must drop both GitHub slots and
+  // bump their generations, while leaving the refresh slot untouched.
+  let mut runner = TaskRunner::new();
+  runner.request(TaskKind::RefreshWorktrees);
+  let stale_issue = runner.request(TaskKind::GithubIssue(42)).unwrap();
+  let stale_pr = runner.request(TaskKind::GithubPr(7)).unwrap();
+
+  runner.invalidate_matching(|k| k.is_github());
+
+  assert!(
+    runner.is_loading(TaskKind::RefreshWorktrees),
+    "a non-GitHub task must survive invalidate_matching(is_github)"
+  );
+  assert!(!runner.is_loading(TaskKind::GithubIssue(42)), "GitHub issue slot freed");
+  assert!(!runner.is_loading(TaskKind::GithubPr(7)), "GitHub pr slot freed");
+  // The stale generations are now superseded — their late results drop.
+  assert!(!runner.complete(TaskKind::GithubIssue(42), stale_issue));
+  assert!(!runner.complete(TaskKind::GithubPr(7), stale_pr));
+}
+
+#[test]
+fn a_stale_github_worker_loses_to_a_newer_generation_after_invalidate() {
+  // The Codex-flagged race at the spine level: Worker A claims gen 1 for
+  // Issue(42); an invalidate (navigate away/back) bumps the generation;
+  // Worker B claims a fresh generation. Whatever the arrival order, A's
+  // result is dropped and B's is authoritative.
+  let mut runner = TaskRunner::new();
+  let gen_a = runner.request(TaskKind::GithubIssue(42)).unwrap();
+  runner.invalidate_matching(|k| k.is_github());
+  let gen_b = runner.request(TaskKind::GithubIssue(42)).unwrap();
+  assert_ne!(gen_a, gen_b, "the fresh run must own a distinct generation");
+
+  // Stale worker A reports first — dropped.
+  assert!(!runner.complete(TaskKind::GithubIssue(42), gen_a));
+  // Fresh worker B reports second — applied, and clears the slot.
+  assert!(runner.complete(TaskKind::GithubIssue(42), gen_b));
+  assert!(!runner.is_loading(TaskKind::GithubIssue(42)));
+}

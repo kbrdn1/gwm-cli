@@ -1,29 +1,25 @@
 //! Unit tests for the pure `GitHubFetch` sub-struct (issue #128, part
-//! 6/6 of the `tui::app::App` decomposition #102).
+//! 6/6 of the `tui::app::App` decomposition #102; threading migrated onto
+//! the async-task spine in #255).
 //!
-//! Exercises the GitHub fetch state slice in isolation — `GitHubFetch`
-//! owns `link`, `link_slug`, `issue_state`, `pr_state`, and the
-//! inflight-dedupe layer that closes the load-bearing payoff of #128:
-//! "multiple concurrent visit events to the same target trigger
-//! redundant `gh` shell-outs because there's no dedupe layer". The
-//! `App` orchestrator keeps the side-effecting shell-out
-//! (`gh issue view`, `gh pr view`); this module's tests pin the pure
-//! state machine + dedupe contract.
+//! Post-#255 `GitHubFetch` is a *result cache* + link state: it owns
+//! `link`, `link_slug`, and the per-(target, number) `issue_cache` /
+//! `pr_cache`. The off-thread coalescing, the inflight dedupe, and the
+//! late-result drop it used to hold are now the generic
+//! `state::async_task::TaskRunner` spine (covered by
+//! `tui_state_async_task_tests.rs`). These tests pin what the cache still
+//! owns:
 //!
-//! Dedupe contract:
-//!
-//! - `request(key)` on a cold cache returns `Spawn` and marks the key
-//!   inflight so a concurrent caller can dedupe.
-//! - A second `request(key)` while inflight returns `AlreadyInflight`
-//!   (no redundant shell-out).
-//! - `complete(key, result)` clears the inflight flag and stores the
-//!   loaded / errored state on `issue_state` or `pr_state` so the
-//!   next `request(key)` returns `HitCache` instead of re-spawning.
-//! - Different keys (e.g. `Issue(42)` vs `Pr(42)`) never collide — the
-//!   target discriminant is part of the dedupe identity.
+//! - `mark_loading(key)` flips the per-key entry to `Loading`.
+//! - `complete_{issue,pr}(n, result)` stamps the terminal `Loaded` /
+//!   `Error` variant (a pure write — the drop decision lives on the spine).
+//! - `is_cached(key)` is `true` only for a terminal variant, and the
+//!   `(target, number)` tuple is the cache identity: `Issue(42)`,
+//!   `Pr(42)`, and `Issue(43)` are all independent (the #138 keying).
+//! - `invalidate()` clears the cache.
 
 use gwm::github::{IssueState, IssueStatus, PrState, PrStatus};
-use gwm::tui::state::github_fetch::{FetchAction, FetchKey, GitHubFetch, GitHubFetchState};
+use gwm::tui::state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 
 fn sample_issue(n: u64) -> IssueStatus {
   IssueStatus {
@@ -48,254 +44,131 @@ fn sample_pr(n: u64) -> PrStatus {
   }
 }
 
-// ---- Cold cache returns Spawn ---------------------------------------------
+// ---- mark_loading flips the per-key entry to Loading ----------------------
 
 #[test]
-fn request_on_cold_cache_returns_spawn_for_issue() {
+fn mark_loading_flips_issue_to_loading() {
   let mut gh = GitHubFetch::new();
-  let action = gh.request(FetchKey::Issue(42));
-  assert!(matches!(action, FetchAction::Spawn(FetchKey::Issue(42))));
-  // And the per-key entry flips to `Loading` so the UI can paint an
-  // in-flight badge — same contract the pre-extraction
-  // `refresh_github_status` used; post-#138 it's read via the keyed
-  // accessor instead of a per-target field.
+  assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Idle));
+  gh.mark_loading(FetchKey::Issue(42));
   assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Loading));
 }
 
 #[test]
-fn request_on_cold_cache_returns_spawn_for_pr() {
+fn mark_loading_flips_pr_to_loading() {
   let mut gh = GitHubFetch::new();
-  let action = gh.request(FetchKey::Pr(7));
-  assert!(matches!(action, FetchAction::Spawn(FetchKey::Pr(7))));
+  gh.mark_loading(FetchKey::Pr(7));
   assert!(matches!(gh.pr_fetch_state(7), GitHubFetchState::Loading));
 }
 
-// ---- Dedupe: second request while inflight returns AlreadyInflight --------
+// ---- is_cached is true only for a terminal variant ------------------------
 
 #[test]
-fn second_request_while_inflight_returns_already_inflight() {
-  let mut gh = GitHubFetch::new();
-  let first = gh.request(FetchKey::Issue(42));
-  assert!(matches!(first, FetchAction::Spawn(_)));
+fn is_cached_is_false_on_a_cold_cache() {
+  let gh = GitHubFetch::new();
+  assert!(!gh.is_cached(FetchKey::Issue(42)));
+  assert!(!gh.is_cached(FetchKey::Pr(7)));
+}
 
-  // Concurrent visit event hits the same key before completion. Without
-  // dedupe, this would trigger a redundant `gh issue view 42 …` — the
-  // load-bearing payoff of #128 is that it doesn't.
-  let second = gh.request(FetchKey::Issue(42));
+#[test]
+fn is_cached_is_false_while_loading() {
+  // A Loading entry is not terminal — the `App` must still let the worker
+  // finish, not short-circuit on a half-populated slot.
+  let mut gh = GitHubFetch::new();
+  gh.mark_loading(FetchKey::Issue(42));
   assert!(
-    matches!(second, FetchAction::AlreadyInflight),
-    "expected AlreadyInflight on second request to the same key, got {:?}",
-    second
+    !gh.is_cached(FetchKey::Issue(42)),
+    "a Loading entry must not count as cached"
   );
 }
 
 #[test]
-fn third_request_while_inflight_still_returns_already_inflight() {
+fn complete_issue_stamps_loaded_and_marks_cached() {
   let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Pr(11)), FetchAction::Spawn(_)));
-  assert!(matches!(gh.request(FetchKey::Pr(11)), FetchAction::AlreadyInflight));
-  assert!(matches!(gh.request(FetchKey::Pr(11)), FetchAction::AlreadyInflight));
-}
-
-// ---- After complete: cache is warm, request hits cache --------------------
-
-#[test]
-fn after_complete_request_returns_hit_cache_for_issue() {
-  let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
+  gh.mark_loading(FetchKey::Issue(42));
   gh.complete_issue(42, Ok(sample_issue(42)));
-  let action = gh.request(FetchKey::Issue(42));
-  assert!(
-    matches!(action, FetchAction::HitCache),
-    "expected HitCache after successful complete, got {:?}",
-    action
-  );
-  // And the loaded state is observable via the keyed accessor.
   assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Loaded(_)));
+  assert!(gh.is_cached(FetchKey::Issue(42)));
 }
 
 #[test]
-fn after_complete_request_returns_hit_cache_for_pr() {
+fn complete_pr_stamps_loaded_and_marks_cached() {
   let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
+  gh.mark_loading(FetchKey::Pr(7));
   gh.complete_pr(7, Ok(sample_pr(7)));
-  let action = gh.request(FetchKey::Pr(7));
-  assert!(matches!(action, FetchAction::HitCache));
   assert!(matches!(gh.pr_fetch_state(7), GitHubFetchState::Loaded(_)));
+  assert!(gh.is_cached(FetchKey::Pr(7)));
 }
 
 #[test]
-fn after_errored_complete_request_returns_hit_cache() {
-  // An errored fetch is still "completed" — re-shelling out on every
-  // visit event after a hard `gh` failure would be a noise amplifier,
-  // not a fix. Cache the error, let the explicit `F` (refresh) key
-  // bypass via `invalidate()`.
+fn an_errored_complete_is_still_terminal_and_cached() {
+  // An errored fetch is still "completed" — re-shelling out on every visit
+  // event after a hard `gh` failure would be a noise amplifier. Cache the
+  // error; the explicit `F` (refresh) key bypasses via `invalidate()`.
   let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
+  gh.mark_loading(FetchKey::Issue(42));
   gh.complete_issue(42, Err("gh: connection refused".into()));
-  let action = gh.request(FetchKey::Issue(42));
-  assert!(matches!(action, FetchAction::HitCache));
   assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Error(_)));
+  assert!(gh.is_cached(FetchKey::Issue(42)));
 }
 
-// ---- Different keys (Issue 42 vs PR 42) don't collide ---------------------
+// ---- (target, number) is the cache identity (#138 keying) -----------------
 
 #[test]
-fn issue_and_pr_with_same_number_do_not_collide_in_dedupe() {
+fn issue_and_pr_with_same_number_are_independent_in_the_cache() {
+  // Same number, different target — completing one must not warm the other.
   let mut gh = GitHubFetch::new();
-  // Issue 42 goes inflight.
-  let issue_action = gh.request(FetchKey::Issue(42));
-  assert!(matches!(issue_action, FetchAction::Spawn(_)));
-  // PR 42 — same number, different target — must still Spawn. If the
-  // dedupe key only hashed the number, this would wrongly return
-  // AlreadyInflight and the PR fetch would never fire.
-  let pr_action = gh.request(FetchKey::Pr(42));
-  assert!(
-    matches!(pr_action, FetchAction::Spawn(_)),
-    "Issue(42) and Pr(42) must not collide in dedupe, got {:?}",
-    pr_action
-  );
-}
-
-#[test]
-fn completing_issue_does_not_clear_inflight_pr() {
-  let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
-  assert!(matches!(gh.request(FetchKey::Pr(42)), FetchAction::Spawn(_)));
-  // Completing the issue must NOT clear the PR's inflight flag.
   gh.complete_issue(42, Ok(sample_issue(42)));
-  let pr_action = gh.request(FetchKey::Pr(42));
+  assert!(gh.is_cached(FetchKey::Issue(42)));
   assert!(
-    matches!(pr_action, FetchAction::AlreadyInflight),
-    "complete_issue must not free Pr(42)'s inflight slot, got {:?}",
-    pr_action
+    !gh.is_cached(FetchKey::Pr(42)),
+    "Issue(42) and Pr(42) must not share a cache slot"
   );
 }
 
 #[test]
-fn different_issue_numbers_do_not_collide() {
+fn caching_one_issue_number_does_not_warm_another() {
+  // Pre-#138 the cache was a single per-target slot, so any terminal
+  // Issue(_) made every Issue(*) falsely hit. The cache is keyed by
+  // (target, number), so Issue(43) stays cold after completing Issue(42).
   let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
-  // A different issue # must Spawn — dedupe is per-(target, number),
-  // not just per-target.
-  assert!(matches!(gh.request(FetchKey::Issue(43)), FetchAction::Spawn(_)));
-}
-
-// ---- complete() clears the inflight slot so a follow-up request is Spawn
-//      after explicit invalidation ----------------------------------------
-
-#[test]
-fn complete_clears_inflight_slot() {
-  let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
   gh.complete_issue(42, Ok(sample_issue(42)));
-  // Cache is warm — a `request` returns HitCache, not AlreadyInflight.
-  // The inflight slot itself was cleared by `complete`.
-  let action = gh.request(FetchKey::Issue(42));
-  assert!(matches!(action, FetchAction::HitCache));
-  // Invalidate (simulates `refresh_link` after the user navigates to
-  // a different worktree) and request again — should Spawn, not
-  // AlreadyInflight (the slot was correctly freed by `complete`).
-  gh.invalidate();
-  let action = gh.request(FetchKey::Issue(42));
+  assert!(gh.is_cached(FetchKey::Issue(42)));
   assert!(
-    matches!(action, FetchAction::Spawn(_)),
-    "after complete + invalidate, request should Spawn (inflight slot was freed by complete), got {:?}",
-    action
-  );
-}
-
-// ---- Bug #138 / pin 1: cache identity must include the FetchKey number ----
-//
-// Pre-fix: `is_cached` looked only at the per-target `*_state` enum, so
-// any terminal variant for `Issue(_)` made every `Issue(*)` key falsely
-// hit the cache. After completing Issue(42), a request for Issue(43)
-// must STILL return Spawn — Issue 43 was never fetched, so the cache
-// for 43 is cold.
-
-#[test]
-fn request_after_complete_for_different_number_returns_spawn_not_hit_cache() {
-  let mut gh = GitHubFetch::new();
-  // Warm Issue(42).
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
-  gh.complete_issue(42, Ok(sample_issue(42)));
-  // Issue(42) is now cached — sanity check.
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::HitCache));
-  // Different number, same target — MUST Spawn. The cache is keyed by
-  // `(target, number)`, and Issue(43) was never fetched.
-  let action = gh.request(FetchKey::Issue(43));
-  assert!(
-    matches!(action, FetchAction::Spawn(FetchKey::Issue(43))),
-    "Issue(43) was never fetched, but is_cached(Issue(43)) wrongly returned true — \
-     cache identity ignores the FetchKey number field (bug #138). got {:?}",
-    action
+    !gh.is_cached(FetchKey::Issue(43)),
+    "Issue(43) was never fetched — the cache identity must include the number (bug #138)"
   );
 }
 
 #[test]
-fn request_after_complete_for_different_pr_number_returns_spawn_not_hit_cache() {
-  // PR-side mirror of the issue bug — same shape, different target.
+fn caching_one_pr_number_does_not_warm_another() {
   let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
   gh.complete_pr(7, Ok(sample_pr(7)));
-  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::HitCache));
-  let action = gh.request(FetchKey::Pr(8));
+  assert!(gh.is_cached(FetchKey::Pr(7)));
   assert!(
-    matches!(action, FetchAction::Spawn(FetchKey::Pr(8))),
-    "Pr(8) was never fetched, but is_cached(Pr(8)) wrongly returned true — \
-     cache identity ignores the FetchKey number field (bug #138). got {:?}",
-    action
+    !gh.is_cached(FetchKey::Pr(8)),
+    "Pr(8) was never fetched — the cache identity must include the number (bug #138)"
   );
 }
 
-// ---- Bug #138 / pin 2: complete_* must drop result if invalidated mid-flight
-//
-// Pre-fix: `complete_issue`/`complete_pr` unconditionally stamped the
-// result onto `*_state`, even when an intervening `invalidate()` had
-// already cleared the inflight slot. The race:
-//
-//   1. request(Issue(42))      → Spawn, inflight = {Issue(42)}
-//   2. invalidate()            → inflight = {} (user navigated away)
-//   3. complete_issue(42, Ok(...)) → stamps Loaded() into the
-//      now-active state, corrupting the new worktree's cache.
-//
-// The fix: complete_* must check whether the inflight slot survived
-// the invalidation and silently drop the result if not.
+// ---- invalidate clears the cache ------------------------------------------
 
 #[test]
-fn complete_after_invalidate_drops_the_stale_result() {
+fn invalidate_clears_the_cache() {
+  // Simulates `refresh_link` after the user navigates to a different
+  // worktree: the cached (issue, pr) tuple is no longer authoritative.
   let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
-  // User navigates away → invalidate() clears the inflight slot.
-  gh.invalidate();
-  // The shell-out finally returns. complete_issue must drop it because
-  // the slot is no longer claimed — anything else corrupts the cache
-  // for the now-active worktree (bug #138).
   gh.complete_issue(42, Ok(sample_issue(42)));
-  // The cache must remain cold for Issue(42) — the late result was
-  // dropped, so a fresh request must Spawn, not HitCache.
-  let action = gh.request(FetchKey::Issue(42));
-  assert!(
-    matches!(action, FetchAction::Spawn(_)),
-    "complete_issue stamped a stale result into a cache that was invalidated mid-flight — \
-     the late result must be dropped (bug #138). got {:?}",
-    action
-  );
-}
-
-#[test]
-fn complete_pr_after_invalidate_drops_the_stale_result() {
-  let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
-  gh.invalidate();
   gh.complete_pr(7, Ok(sample_pr(7)));
-  let action = gh.request(FetchKey::Pr(7));
-  assert!(
-    matches!(action, FetchAction::Spawn(_)),
-    "complete_pr stamped a stale result into a cache that was invalidated mid-flight — \
-     the late result must be dropped (bug #138). got {:?}",
-    action
-  );
+  assert!(gh.is_cached(FetchKey::Issue(42)));
+  assert!(gh.is_cached(FetchKey::Pr(7)));
+
+  gh.invalidate();
+
+  assert!(!gh.is_cached(FetchKey::Issue(42)));
+  assert!(!gh.is_cached(FetchKey::Pr(7)));
+  assert!(matches!(gh.issue_fetch_state(42), GitHubFetchState::Idle));
+  assert!(matches!(gh.pr_fetch_state(7), GitHubFetchState::Idle));
 }
 
 // ---- PR auto-detection on the slice (issue #181) --------------------------
@@ -354,31 +227,4 @@ fn clear_detected_pr_leaves_an_explicit_link_pinned() {
 
   assert_eq!(gh.link.pr, Some(61));
   assert_eq!(gh.link.pr_source, gwm::github::LinkSource::Explicit);
-}
-
-#[test]
-fn complete_reports_whether_the_result_was_applied() {
-  // Issue #217 review (P2): `complete_*` must signal whether it actually
-  // stamped the result, so the async drain can avoid reporting "refreshed"
-  // for a result it silently dropped (#138 stale-drop).
-  let mut gh = GitHubFetch::new();
-  assert!(matches!(gh.request(FetchKey::Issue(42)), FetchAction::Spawn(_)));
-  assert!(
-    gh.complete_issue(42, Ok(sample_issue(42))),
-    "a result for an inflight key must report applied=true"
-  );
-
-  // A second completion for the same (now-terminal) key has no inflight slot.
-  assert!(
-    !gh.complete_issue(42, Ok(sample_issue(42))),
-    "a result with no inflight slot must report applied=false"
-  );
-
-  // PR side, dropped after invalidate.
-  assert!(matches!(gh.request(FetchKey::Pr(7)), FetchAction::Spawn(_)));
-  gh.invalidate();
-  assert!(
-    !gh.complete_pr(7, Ok(sample_pr(7))),
-    "a result invalidated mid-flight must report applied=false"
-  );
 }
