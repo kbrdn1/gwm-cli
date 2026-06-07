@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Off-thread worktree list refresh: pressing `f` / `r` now re-lists the
+  worktrees on a background worker instead of blocking the event loop, so a
+  large repo or slow filesystem no longer freezes the TUI mid-refresh. The
+  statusbar spinner animates with a `refreshing worktrees…` label and `q` /
+  `Esc` stay responsive while it runs; a failed re-list surfaces on the
+  status bar instead of tearing down the session. Built on a new generic
+  async-task spine (coalescing + late-result drop) that the GitHub fetch,
+  bootstrap, and future panels can adopt.
+  ([#231](https://github.com/kbrdn1/gwm-cli/issues/231))
+
 ### Changed
 
 - Sidebar rendering no longer deep-clones the cached sections on every frame.

@@ -1,5 +1,6 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
+use super::state::async_task::{TaskKind, TaskMsg, TaskRunner};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -303,6 +304,18 @@ pub struct App {
   /// tick. Held for the lifetime of the `App`; when the `App` drops, any
   /// still-running fetch thread's `send` simply fails and is ignored.
   github_rx: mpsc::Receiver<GithubFetchMsg>,
+
+  /// Generic off-thread task spine (issue #231): coalescing + late-drop
+  /// for slow one-shot ops, starting with the worktree list refresh.
+  /// Public for the same reason `github` is — the state-machine tests
+  /// claim a generation directly without spawning an OS thread.
+  pub tasks: TaskRunner,
+  /// Sender cloned into each background task worker (issue #231).
+  task_tx: mpsc::Sender<TaskMsg>,
+  /// Receiver drained by [`Self::drain_task_results`] each event-loop
+  /// tick. Mirrors the GitHub channel; a worker whose `App` has dropped
+  /// simply fails its `send` and is ignored.
+  task_rx: mpsc::Receiver<TaskMsg>,
 }
 
 impl App {
@@ -343,6 +356,7 @@ impl App {
       state.select(Some(0));
     }
     let (github_tx, github_rx) = mpsc::channel();
+    let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
       repo,
       repo_name,
@@ -379,6 +393,9 @@ impl App {
       trust_mode: crate::trust::TrustMode::Prompt,
       github_tx,
       github_rx,
+      tasks: TaskRunner::new(),
+      task_tx,
+      task_rx,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -454,19 +471,121 @@ impl App {
     Ok(app)
   }
 
+  /// Synchronous worktree list refresh. Kept for internal post-mutation
+  /// callers (create / delete / report-close) that need the list fresh
+  /// *before* the next render; the user-initiated `f` / `r` key path goes
+  /// through the off-thread [`Self::request_refresh`] instead (issue
+  /// #231). Both converge on [`Self::apply_refreshed_worktrees`] so the
+  /// two paths can never drift on the post-list bookkeeping.
   pub fn refresh(&mut self) -> Result<()> {
-    self.worktrees = worktree::list(&self.repo)?;
-    // The cached fuzzy-match indices reference the previous worktrees
-    // vec; drop them so the next render recomputes against the fresh
-    // list. (A length-change auto-invalidates too, but a refresh that
-    // produces a same-length vec with different contents would not —
-    // so the explicit flush is the safe play.)
+    // A synchronous re-list (create / delete / report-close) produces
+    // authoritative fresh state, so any older async refresh still in flight
+    // is by definition stale — bump its generation so `drain_task_results`
+    // drops the late result instead of clobbering this post-mutation list
+    // with a pre-mutation snapshot (issue #231, the #138 race class). A
+    // harmless counter bump when no task is running. Lives here and not in
+    // `apply_refreshed_worktrees` so the async drain, which shares that
+    // tail, does not re-invalidate the run it just applied.
+    self.tasks.invalidate(TaskKind::RefreshWorktrees);
+    let worktrees = worktree::list(&self.repo)?;
+    self.apply_refreshed_worktrees(worktrees);
+    Ok(())
+  }
+
+  /// Swap in a freshly-listed worktree vec and run the bookkeeping every
+  /// refresh path shares: drop the cached fuzzy-match indices (they point
+  /// at the previous vec — a length change auto-invalidates, but a
+  /// same-length list with different contents would not, so the explicit
+  /// flush is the safe play), re-clamp the selection (which re-resolves
+  /// the link cache), invalidate the sidebar preview, and report the
+  /// count. Called by the synchronous [`Self::refresh`] and by the
+  /// off-thread drain in [`Self::drain_task_results`].
+  fn apply_refreshed_worktrees(&mut self, worktrees: Vec<WorktreeInfo>) {
+    self.worktrees = worktrees;
     self.filter.invalidate();
-    // `clamp_selection_to_filter` re-resolves the link cache for us.
     self.clamp_selection_to_filter();
     self.invalidate_sidebar_cache();
     self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
-    Ok(())
+  }
+
+  /// Off-thread worktree list refresh for the `f` / `r` key (issue #231):
+  /// spawn a worker that re-lists the worktrees and posts the result back
+  /// to the event loop, so a large repo / slow filesystem no longer
+  /// freezes the TUI. Coalesces onto an in-flight run (a second press
+  /// while loading is a no-op) and seeds the loader label + spinner. The
+  /// result is applied by [`Self::drain_task_results`].
+  pub fn request_refresh(&mut self) {
+    let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
+      // A refresh is already in flight — coalesce onto it.
+      return;
+    };
+    // Start the loader from a deterministic frame and surface the label.
+    self.spinner.reset();
+    self.status = TaskKind::RefreshWorktrees.loading_label().into();
+    self.spawn_refresh(generation);
+  }
+
+  /// Spawn one background worktree-list worker tagged with `generation`
+  /// (issue #231). A thin shell, mirroring [`Self::spawn_github_fetch`]:
+  /// it owns only the off-thread dispatch + send, no state logic (the
+  /// coalescing / late-drop contract lives in [`TaskRunner`], tested in
+  /// `tui_state_async_task_tests.rs`). `git2::Repository` is not `Send`,
+  /// so the worker opens its *own* repo from the owned `workdir` path
+  /// rather than borrowing `self.repo` — the same "only owned `Send` data
+  /// crosses the boundary" discipline as the GitHub worker. A `send`
+  /// failure (the `App`/receiver dropped) is ignored.
+  fn spawn_refresh(&self, generation: u64) {
+    let tx = self.task_tx.clone();
+    let workdir = self.workdir.clone();
+    std::thread::spawn(move || {
+      let result = worktree::discover_repo(Some(&workdir))
+        .and_then(|repo| worktree::list(&repo))
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::RefreshWorktrees(generation, result));
+    });
+  }
+
+  /// Apply every background task result that has arrived since the last
+  /// call (issue #231), draining the channel without blocking. Each
+  /// result goes through [`TaskRunner::complete`], so a result whose
+  /// generation was bumped mid-flight is dropped (#138 guard, generalised).
+  /// A failed refresh surfaces on the status bar and leaves the list
+  /// intact — what used to be a fatal `refresh()?` that tore down the
+  /// event loop is now a graceful message. Returns `true` if at least one
+  /// result was applied, so the loop can force a redraw.
+  pub fn drain_task_results(&mut self) -> bool {
+    let mut applied = false;
+    while let Ok(msg) = self.task_rx.try_recv() {
+      match msg {
+        TaskMsg::RefreshWorktrees(generation, result) => {
+          if !self.tasks.complete(TaskKind::RefreshWorktrees, generation) {
+            // Late result — a newer run (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(worktrees) => self.apply_refreshed_worktrees(worktrees),
+            Err(e) => self.status = format!("refresh failed: {}", e),
+          }
+          applied = true;
+        }
+      }
+    }
+    applied
+  }
+
+  /// `true` while any background task is in flight (issue #231) — drives
+  /// the statusbar spinner alongside [`Self::is_github_loading`].
+  pub fn is_task_loading(&self) -> bool {
+    self.tasks.is_any_loading()
+  }
+
+  /// A clone of the task channel sender background workers report over
+  /// (issue #231). Exposed so the async-apply path
+  /// ([`Self::drain_task_results`]) can be driven deterministically in
+  /// tests — inject a [`TaskMsg`] exactly as a worker would, then drain —
+  /// without spawning an OS thread. Mirrors [`Self::github_result_sender`].
+  pub fn task_result_sender(&self) -> mpsc::Sender<TaskMsg> {
+    self.task_tx.clone()
   }
 
   /// Drop the cached sidebar content. Call on any change that may have altered

@@ -27,6 +27,7 @@ use std::time::{Duration, Instant};
 pub use app::{
   App, CreateKey, GithubFetchMsg, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
 };
+pub use state::async_task::{TaskKind, TaskMsg, TaskRunner};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -155,7 +156,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // 200ms poll cadence. Drained before the draw so the frame reflects the
     // freshly-applied results.
     app.drain_github_results();
-    if app.is_github_loading() {
+    // Generic off-thread tasks (issue #231): apply any worker results that
+    // landed since the last tick — e.g. an off-thread worktree refresh.
+    app.drain_task_results();
+    if app.is_github_loading() || app.is_task_loading() {
       app.spinner.tick();
     }
 
@@ -454,7 +458,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::FocusWorktrees => app.focus_worktrees(),
     Action::FocusStatus => app.focus_status(),
     Action::Filter => app.enter_filter(),
-    Action::Refresh => app.refresh()?,
+    // Issue #231: the user-initiated refresh runs off-thread so a large
+    // repo / slow filesystem no longer freezes the TUI. A failed re-list
+    // now surfaces on the status bar instead of tearing down the loop.
+    Action::Refresh => app.request_refresh(),
     Action::Help => app.enter_help(),
     Action::Yank => yank_selected_path_to_clipboard(app),
     Action::Open => match app.resolve_open_target() {
