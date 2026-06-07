@@ -4,7 +4,7 @@ use common::init_repo;
 use gwm::naming::BRANCH_TYPES;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
-  branch_name_color, filled_cells_for_progress, freshness_color, header_title, panel_border_color, pr_badge_color, App,
+  branch_name_color, filled_cells_for_progress, freshness_color, panel_border_color, pr_badge_color, App,
   ConfirmKeyAction, CountdownTickOutcome, Field, View,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
@@ -102,37 +102,6 @@ fn focused_panel_border_wears_the_theme_focus_colour() {
     panel_border_color(false, &theme),
     theme.muted,
     "unfocused panel wears the theme muted role (#170)"
-  );
-}
-
-#[test]
-fn header_title_includes_running_version_repo_and_workdir() {
-  // The TUI header surfaces `<repo> <workdir> gwm <version>`.
-  // Cross-check both halves: the version comes from CARGO_PKG_VERSION
-  // (the same string `gwm --version` prints) and the format keeps the
-  // current-dir name first and the version last.
-  let title = header_title("gwm-cli", "/Users/kbrdn1/Projects/Perso/gwm-cli");
-  assert!(title.contains("gwm-cli"), "missing repo name: {}", title);
-  assert!(
-    title.contains("/Users/kbrdn1/Projects/Perso/gwm-cli"),
-    "missing workdir: {}",
-    title
-  );
-  let version_token = env!("CARGO_PKG_VERSION");
-  assert!(
-    title.contains(version_token),
-    "missing running version `{}`: {}",
-    version_token,
-    title
-  );
-  // Pin the exact layout so a refactor moving the version pre/post
-  // would have to update this assertion deliberately.
-  assert_eq!(
-    title,
-    format!(
-      " gwm-cli /Users/kbrdn1/Projects/Perso/gwm-cli gwm {} ",
-      env!("CARGO_PKG_VERSION")
-    )
   );
 }
 

@@ -5,7 +5,7 @@
 //! visible at the right edge — hints are what gets truncated when the
 //! terminal is narrow, never the log.
 //!
-//! `footer_line` is a pure builder (like `header_title` / `help_lines`) so the
+//! `footer_line` is a pure builder (like `header_line` / `help_lines`) so the
 //! layout contract is pinned here without spinning up a ratatui backend.
 
 use gwm::tui::theme::Theme;
