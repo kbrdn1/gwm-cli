@@ -1285,7 +1285,7 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
   let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();
 
   let base = base_override
-    .or_else(|| resolve_pr_base(&repo, &config.doctor.trunks))
+    .or_else(|| worktree::resolve_trunk(&repo, &config.doctor.trunks))
     .unwrap_or_else(|| "main".into());
 
   let commits = worktree::git_log_subject_between(&workdir, &base, &head_name)
@@ -1353,32 +1353,6 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
     eprintln!("note: could not record gwm-pr config for {}: {}", head_name, e);
   }
   Ok(())
-}
-
-/// Pick a base ref for `gwm pr` by walking the configured `[doctor].trunks`
-/// list first, then the common defaults (`main`, `master`, `dev`,
-/// `develop`, `trunk`) so a repo whose local trunk is `master` and which
-/// hasn't customised `[doctor]` doesn't fall back to a non-existent
-/// `"main"`. Returns `None` only if none of the candidates resolve to a
-/// local branch — the caller then uses `"main"` as a last resort so the
-/// downstream `gh pr create --base main` produces a clean error message
-/// instead of a panic.
-fn resolve_pr_base(repo: &Repository, trunks: &[String]) -> Option<String> {
-  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
-  for trunk in trunks {
-    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
-      return Some(trunk.clone());
-    }
-  }
-  for trunk in COMMON_TRUNKS {
-    if trunks.iter().any(|t| t == trunk) {
-      continue; // already tried as a configured trunk above
-    }
-    if repo.find_branch(trunk, git2::BranchType::Local).is_ok() {
-      return Some((*trunk).to_string());
-    }
-  }
-  None
 }
 
 fn pr_title(ctx: &PrTemplateContext) -> String {
