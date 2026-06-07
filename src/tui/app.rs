@@ -557,6 +557,42 @@ impl App {
     });
   }
 
+  /// Off-thread `gwm sync` of the selected worktree for the `S` key (issue
+  /// #258): fetch + rebase its branch onto upstream on a worker thread, so a
+  /// slow network fetch / rebase does not freeze the event loop. Coalesces
+  /// onto an in-flight sync (a second `S` while one runs is a no-op, so two
+  /// rebases never race). The outcome is applied by
+  /// [`Self::drain_task_results`], which reports it and refreshes the list so
+  /// the new ahead/behind state shows. Default strategy is rebase (the repo
+  /// convention); a `--merge` variant is deferred (see #258).
+  pub fn request_sync(&mut self) {
+    let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
+      self.status = "no worktree selected to sync".into();
+      return;
+    };
+    let Some(generation) = self.tasks.request(TaskKind::Sync) else {
+      // A sync is already in flight — coalesce onto it.
+      return;
+    };
+    self.spinner.reset();
+    self.status = TaskKind::Sync.loading_label().into();
+    self.spawn_sync(generation, path, name);
+  }
+
+  /// Spawn one background `gwm sync` worker tagged with `generation` (issue
+  /// #258). Mirrors [`Self::spawn_refresh`]: it moves only owned `Send` data
+  /// (the worktree `path` + `name`) across the boundary and runs the existing
+  /// [`crate::sync::sync`] logic, which discovers its own repo from `path` and
+  /// shells out to `git` for fetch/rebase. A `send` failure (the `App`/receiver
+  /// dropped) is ignored.
+  fn spawn_sync(&self, generation: u64, path: PathBuf, name: String) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = crate::sync::sync(&path, crate::sync::SyncStrategy::Rebase).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::Sync(generation, name, result));
+    });
+  }
+
   /// Apply every background task result that has arrived since the last
   /// call (issue #231; GitHub fetch results folded in by #255), draining
   /// the channel without blocking. Each result goes through
@@ -608,6 +644,33 @@ impl App {
           self.github.complete_pr(number, result);
           applied = true;
           github_applied = true;
+        }
+        TaskMsg::Sync(generation, name, result) => {
+          if !self.tasks.complete(TaskKind::Sync, generation) {
+            // Late result — a newer sync (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(report) => {
+              // Re-list so the new ahead/behind state shows (this also bumps
+              // the refresh generation — the #138 race guard). The worker
+              // mutated refs in a subprocess, but a libgit2 read re-reads them
+              // from disk, so the synchronous `self.refresh()` (`self.repo`)
+              // sees the rebased state — verified end-to-end by the
+              // ahead/behind assertion in `sync_tests::
+              // tui_sync_action_relists_to_the_rebased_state_from_disk`.
+              // `refresh` sets its own "refreshed — N" status, so overwrite it
+              // with the sync outcome afterwards — the user pressed `S`, the
+              // sync result is what they want to read.
+              let _ = self.refresh();
+              self.status = crate::cli::format_sync_report(&name, &report).trim_end().to_string();
+            }
+            Err(e) => self.status = format!("sync failed: {}", e),
+          }
+          applied = true;
+          // The sync owns the status line this tick — keep the post-loop
+          // GitHub report from overwriting it (same guard the refresh uses).
+          refresh_applied = true;
         }
       }
     }

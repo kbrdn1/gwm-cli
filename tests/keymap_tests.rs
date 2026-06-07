@@ -215,6 +215,25 @@ fn default_keymap_binds_sidebar_layout_and_position() {
 }
 
 #[test]
+fn default_keymap_binds_sync_to_uppercase_s() {
+  // Issue #258: `S` runs `gwm sync` on the selected worktree. It must be
+  // uppercase `S` because lowercase `s` is already ToggleSidebarMode — the
+  // mnemonic sits with the other uppercase lifecycle verbs (`F`, `R`).
+  let km = Keymap::defaults();
+
+  let sync = KeyStroke::parse_chord("S").unwrap();
+  assert!(matches!(km.lookup(&sync), ChordResolution::Matched(Action::Sync)));
+
+  // Guard the conflict that motivated the choice: lowercase `s` stays the
+  // sidebar-mode toggle, untouched.
+  let sidebar_mode = KeyStroke::parse_chord("s").unwrap();
+  assert!(matches!(
+    km.lookup(&sidebar_mode),
+    ChordResolution::Matched(Action::ToggleSidebarMode)
+  ));
+}
+
+#[test]
 fn default_keymap_binds_command_logs_to_3() {
   // Issue #226: `3` opens the Command Logs modal, completing the `1` / `2`
   // / `3` pane-key family (focus_worktrees / focus_status / command_logs).

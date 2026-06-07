@@ -515,6 +515,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::Create if !app.picker_mode => app.enter_create(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
+    // Issue #258: `gwm sync` of the selected worktree, off-thread on the
+    // spine. Mutating, so disabled in picker mode like create / delete.
+    Action::Sync if !app.picker_mode => app.request_sync(),
     Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
     Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
     Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),

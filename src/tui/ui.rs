@@ -1961,6 +1961,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   ));
   rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
+    rows.push(entry(Action::Sync, "sync selected worktree onto its upstream (rebase)"));
     rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
     rows.push(entry(Action::Review, "run [review] launcher against the resolved base"));
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));

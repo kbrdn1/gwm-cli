@@ -62,6 +62,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "refresh the worktree list",
     },
     PaletteEntry {
+      action: Action::Sync,
+      name: "sync",
+      description: "sync the selected worktree onto its upstream (rebase)",
+    },
+    PaletteEntry {
       action: Action::Open,
       name: "open",
       description: "open the selected worktree (shell / editor / finder)",
