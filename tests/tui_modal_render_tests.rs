@@ -227,6 +227,34 @@ fn command_logs_modal_renders_empty_placeholder() {
 }
 
 #[test]
+fn config_panel_modal_renders_title_section_and_source_column() {
+  use gwm::config::{ConfigRow, ConfigSource};
+
+  let (_dir, mut app) = make_app();
+  // Inject rows directly so the render is deterministic (the event loop is
+  // what resolves the real config on open; here we pin the *render*).
+  app.config_panel.rows = vec![
+    ConfigRow {
+      key: "worktree.base".into(),
+      value: "\"/tmp/repo-wt\"".into(),
+      source: ConfigSource::Repo,
+    },
+    ConfigRow {
+      key: "worktree.path_pattern".into(),
+      value: "\"{type}-{issue}-{desc}\"".into(),
+      source: ConfigSource::Default,
+    },
+  ];
+  app.view = View::Config;
+  let buf = render(&mut app);
+  assert_present(&buf, "Configuration", "config panel title");
+  assert_present(&buf, "[worktree]", "grouped section heading");
+  assert_present(&buf, "worktree.base", "resolved config key");
+  assert_present(&buf, "repo", "source column marker");
+  assert_present(&buf, "default", "default source marker");
+}
+
+#[test]
 fn open_menu_modal_renders_title_and_targets() {
   let (_dir, mut app) = make_app();
   app.enter_open_menu();

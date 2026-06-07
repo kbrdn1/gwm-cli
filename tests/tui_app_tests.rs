@@ -105,6 +105,37 @@ fn enter_command_logs_opens_the_overlay_syncs_and_resets_scroll() {
 }
 
 #[test]
+fn enter_config_panel_opens_resolves_rows_and_resets_scroll() {
+  // Issue #232: `4` opens the Configuration panel. Opening must (1) switch
+  // to the overlay view, (2) resolve the effective config into owned rows,
+  // and (3) reset the scroll cursor so a previously-scrolled session starts
+  // fresh at the top.
+  use gwm::config::ConfigSource;
+
+  let (_dir, mut app) = make_app();
+  app.config_panel.scroll = 9;
+  app.config_panel.x_scroll = 3;
+  app.enter_config_panel();
+
+  assert_eq!(app.view, View::Config);
+  assert_eq!(app.config_panel.scroll, 0, "scroll resets on open");
+  assert_eq!(app.config_panel.x_scroll, 0, "horizontal scroll resets on open");
+  assert!(
+    !app.config_panel.rows.is_empty(),
+    "opening resolves the effective config into rows"
+  );
+  // The fixture has no repo `.gwm.toml` and no global config, so every
+  // resolved value is a built-in default.
+  let base = app
+    .config_panel
+    .rows
+    .iter()
+    .find(|r| r.key == "worktree.base")
+    .expect("worktree.base resolved");
+  assert_eq!(base.source, ConfigSource::Default);
+}
+
+#[test]
 fn hint_context_follows_focus() {
   // Issue #217: the statusbar chip + help subtitle read the live focus. The
   // worktrees pane is the default; focusing the sidebar switches to Status.

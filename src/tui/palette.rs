@@ -167,6 +167,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "show the command logs overlay",
     },
     PaletteEntry {
+      action: Action::ConfigPanel,
+      name: "config-panel",
+      description: "show the resolved configuration panel",
+    },
+    PaletteEntry {
       action: Action::Help,
       name: "help",
       description: "show the help overlay",
