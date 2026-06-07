@@ -1477,6 +1477,7 @@ impl HintContext {
         Hint::Key(GitTui, "git"),
         Hint::Key(Review, "review"),
         Hint::Key(FocusStatus, "status"),
+        Hint::Key(CommandLogs, "logs"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1487,6 +1488,7 @@ impl HintContext {
         Hint::Key(CycleSidebarLayout, "layout"),
         Hint::Key(FetchGithub, "fetch"),
         Hint::Key(FocusWorktrees, "worktrees"),
+        Hint::Key(CommandLogs, "logs"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1953,6 +1955,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   rows.push(entry(Action::FocusSwap, "swap focus between worktree list and sidebar"));
   rows.push(entry(Action::FocusWorktrees, "focus the worktrees pane"));
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
+  rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
