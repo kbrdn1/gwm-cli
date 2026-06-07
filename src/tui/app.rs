@@ -672,6 +672,33 @@ impl App {
           // GitHub report from overwriting it (same guard the refresh uses).
           refresh_applied = true;
         }
+        TaskMsg::Bootstrap(generation, result) => {
+          if !self.tasks.complete(TaskKind::Bootstrap, generation) {
+            // Late result — a newer run (or an invalidate) superseded it, so
+            // it must not flip the view to a stale report.
+            continue;
+          }
+          match result {
+            Ok(report) => {
+              // Same outcome as the old synchronous path (issue #256): show
+              // the report and surface whether any step failed.
+              let any_failed = report.steps.iter().any(|s| s.status == StepStatus::Failed);
+              self.report = Some(report);
+              self.view = View::Report;
+              self.status = if any_failed {
+                "bootstrap had failures".into()
+              } else {
+                "bootstrap ok".into()
+              };
+            }
+            Err(e) => self.status = format!("bootstrap error: {}", e),
+          }
+          applied = true;
+          // The bootstrap owns the status line (and the view) this tick — keep
+          // the post-loop GitHub report from overwriting it (same guard the
+          // refresh / sync arms use).
+          refresh_applied = true;
+        }
       }
     }
     // Once nothing GitHub-side is left loading, swap the "fetching…"
@@ -1682,24 +1709,36 @@ impl App {
       }
     }
 
-    let ctx = BootstrapCtx {
-      main_repo: &self.workdir,
-      worktree: &path,
-      config: &self.config,
+    // Run off-thread on the async-task spine (issue #256): `bootstrap::run`
+    // (file copies, guards, command hooks) used to block the event loop. The
+    // TOFU gate above stays synchronous on the main thread; only the run
+    // itself moves to a worker, with the `View::Report` transition deferred
+    // to `drain_task_results`. A second `b` press while one is in flight
+    // coalesces (no `Some(generation)`), so two bootstraps never race.
+    let Some(generation) = self.tasks.request(TaskKind::Bootstrap) else {
+      return;
     };
-    match bootstrap::run(&ctx) {
-      Ok(r) => {
-        let any_failed = r.steps.iter().any(|s| s.status == StepStatus::Failed);
-        self.report = Some(r);
-        self.view = View::Report;
-        self.status = if any_failed {
-          "bootstrap had failures".into()
-        } else {
-          "bootstrap ok".into()
-        };
-      }
-      Err(e) => self.status = format!("bootstrap error: {}", e),
-    }
+    self.spinner.reset();
+    self.status = TaskKind::Bootstrap.loading_label().into();
+    self.spawn_bootstrap(generation, self.workdir.clone(), path, self.config.clone());
+  }
+
+  /// Spawn the off-thread bootstrap worker (issue #256). Only owned, `Send`
+  /// data crosses the thread boundary — the `main_repo` / `worktree` paths
+  /// and a clone of the resolved `Config` — so the worker rebuilds its own
+  /// `BootstrapCtx` rather than borrowing `self`. The result is posted back
+  /// over the task channel for `drain_task_results` to apply.
+  fn spawn_bootstrap(&self, generation: u64, main_repo: PathBuf, worktree: PathBuf, config: Config) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let ctx = BootstrapCtx {
+        main_repo: &main_repo,
+        worktree: &worktree,
+        config: &config,
+      };
+      let result = bootstrap::run(&ctx).map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::Bootstrap(generation, result));
+    });
   }
 
   // ---- Issue/PR linking (issue #67) -------------------------------------

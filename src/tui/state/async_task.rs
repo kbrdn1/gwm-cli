@@ -34,6 +34,7 @@
 //! module is pure state — no I/O, no `App` dependency — so the contract
 //! is pinned by `tests/tui_state_async_task_tests.rs`.
 
+use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
 use crate::worktree::WorktreeInfo;
@@ -64,6 +65,14 @@ pub enum TaskKind {
   /// [`Self::RefreshWorktrees`] — one sync in flight at a time, so a second
   /// `S` press while one runs coalesces instead of racing a second rebase.
   Sync,
+  /// Off-thread bootstrap of the selected worktree (issue #256 — the `b`
+  /// key): `bootstrap::run` (file copies, guards, command hooks) used to
+  /// block the event loop. A single global op like [`Self::Sync`] — one
+  /// bootstrap in flight at a time, so a second `b` press coalesces instead
+  /// of racing a second run. The TOFU trust gate stays on the main thread
+  /// before the spawn; completion sets `App::report` and flips to
+  /// `View::Report`.
+  Bootstrap,
 }
 
 impl TaskKind {
@@ -75,6 +84,7 @@ impl TaskKind {
       TaskKind::RefreshWorktrees => "refreshing worktrees…",
       TaskKind::GithubIssue(_) | TaskKind::GithubPr(_) => "fetching GitHub status…",
       TaskKind::Sync => "syncing…",
+      TaskKind::Bootstrap => "bootstrapping…",
     }
   }
 
@@ -108,6 +118,11 @@ pub enum TaskMsg {
   /// worktree's display `name` (for the status line), and the [`SyncReport`]
   /// (or a stringified error — dirty tree, no upstream, conflicts).
   Sync(u64, String, std::result::Result<SyncReport, String>),
+  /// A bootstrap result (issue #256): the worker's `generation` and the
+  /// [`BootstrapReport`] (or a stringified error). On a live generation the
+  /// drain sets `App::report` and flips to `View::Report`; a superseded
+  /// late result is dropped by [`TaskRunner::complete`].
+  Bootstrap(u64, std::result::Result<BootstrapReport, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
