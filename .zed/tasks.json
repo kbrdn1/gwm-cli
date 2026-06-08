@@ -1,0 +1,315 @@
+[
+  {
+    "label": "gwm-cli: Bootstrap new worktree (post-creation)",
+    "command": "bash",
+    "args": [
+      "-c",
+      "cd \"$ZED_MAIN_GIT_WORKTREE\" && gwm bootstrap \"$ZED_WORKTREE_ROOT\""
+    ],
+    "hooks": ["create_worktree"],
+    "reveal": "no_focus",
+    "hide": "on_success",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "gwm-cli: Run TUI [RECOMMENDED]",
+    "command": "cd $ZED_WORKTREE_ROOT && make tui",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "dock"
+  },
+  {
+    "label": "gwm-cli: CLI Help",
+    "command": "cd $ZED_WORKTREE_ROOT && make run",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "on_success",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Project Targets",
+    "command": "cd $ZED_WORKTREE_ROOT && make help",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "on_success",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Cargo Fetch",
+    "command": "cd $ZED_WORKTREE_ROOT && make fetch",
+    "use_new_terminal": true,
+    "reveal": "no_focus",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "on_success",
+    "reveal_target": "dock"
+  },
+  {
+    "label": "gwm-cli: Build",
+    "command": "cd $ZED_WORKTREE_ROOT && make build",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "dock"
+  },
+  {
+    "label": "gwm-cli: Build Release",
+    "command": "cd $ZED_WORKTREE_ROOT && make build-release",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "dock"
+  },
+  {
+    "label": "gwm-cli: Install Local",
+    "command": "cd $ZED_WORKTREE_ROOT && make install",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "dock"
+  },
+  {
+    "label": "gwm-cli: Test",
+    "command": "cd $ZED_WORKTREE_ROOT && make test",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Test Watch",
+    "command": "cd $ZED_WORKTREE_ROOT && make test-watch",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Test Release",
+    "command": "cd $ZED_WORKTREE_ROOT && make test-release",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Test Minimal PATH",
+    "command": "cd $ZED_WORKTREE_ROOT && make test-minimal-path",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Format",
+    "command": "cd $ZED_WORKTREE_ROOT && make fmt",
+    "use_new_terminal": true,
+    "reveal": "no_focus",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "on_success",
+    "reveal_target": "dock"
+  },
+  {
+    "label": "gwm-cli: Format Check",
+    "command": "cd $ZED_WORKTREE_ROOT && make fmt-check",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "on_success",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Clippy",
+    "command": "cd $ZED_WORKTREE_ROOT && make clippy",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: CI",
+    "command": "cd $ZED_WORKTREE_ROOT && make ci",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Doctor",
+    "command": "cd $ZED_WORKTREE_ROOT && make doctor",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Doctor Release",
+    "command": "cd $ZED_WORKTREE_ROOT && make doctor-release",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Audit",
+    "command": "cd $ZED_WORKTREE_ROOT && make audit",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: MSRV Check",
+    "command": "cd $ZED_WORKTREE_ROOT && make msrv",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "never",
+    "reveal_target": "center"
+  },
+  {
+    "label": "gwm-cli: Clean Cargo Artifacts",
+    "command": "cd $ZED_WORKTREE_ROOT && make clean",
+    "use_new_terminal": true,
+    "reveal": "always",
+    "shell": {
+      "with_arguments": {
+        "program": "/bin/bash",
+        "args": ["-c"]
+      }
+    },
+    "allow_concurrent_runs": false,
+    "hide": "on_success",
+    "reveal_target": "dock"
+  }
+]
