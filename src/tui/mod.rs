@@ -136,6 +136,10 @@ fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Resu
 /// countdown mode the first call arms (the loop ticks the bar), a second
 /// disarms; in classic mode it fires immediately.
 fn confirm_fire(app: &mut App) {
+  if app.is_delete_worktree_loading() {
+    app.status = TaskKind::DeleteWorktree.loading_label().into();
+    return;
+  }
   match app.confirm_press_y(Instant::now()) {
     ConfirmKeyAction::FireNow => {
       if let Err(e) = app.confirm_delete() {
@@ -196,7 +200,6 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         CountdownTickOutcome::ReadyToFire => {
           if let Err(e) = app.confirm_delete() {
             app.status = format!("delete failed: {}", e);
-            app.view = View::List;
           }
         }
         CountdownTickOutcome::Pending | CountdownTickOutcome::NotArmed => {}
@@ -337,6 +340,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         CreateKey::Cancel => app.view = View::List,
         CreateKey::Handled => {}
       },
+      View::Confirm if app.is_delete_worktree_loading() => {}
       View::Confirm => match key.code {
         // `y` confirms directly regardless of which button is focused
         // (unchanged muscle memory). `Enter` activates the *focused*

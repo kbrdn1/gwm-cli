@@ -94,9 +94,9 @@ If an issue still shows `open` on GitHub even though its work shipped, it's a tr
 
 Near-term TUI work, listed in **rough implementation order** — each item builds on the one above it. This is a dependency ordering, not a date commitment.
 
-The 0.9.0 async-task train (the spine #231, GitHub-fetch-on-spine #255, sync `S` #258, bootstrap `b` #256, Command Logs `3` #226, Configuration panel `4` #232, open-docs `.` #233) has shipped — see the Shipped highlights table above. The graceful-shutdown follow-up #267 has also landed on `dev` after v0.9.0 and is tracked in `CHANGELOG.md` under `[Unreleased]`. The near-term queue is now:
+The 0.9.0 async-task train (the spine #231, GitHub-fetch-on-spine #255, sync `S` #258, bootstrap `b` #256, Command Logs `3` #226, Configuration panel `4` #232, open-docs `.` #233) has shipped — see the Shipped highlights table above. The graceful-shutdown follow-up #267 has also landed on `dev` after v0.9.0 and is tracked in `CHANGELOG.md` under `[Unreleased]`. The standalone loader-widget follow-up #257 now has its first real consumer in the delete-worktree modal and is tracked in `CHANGELOG.md` under `[Unreleased]`.
 
-1. [#257](https://github.com/kbrdn1/gwm-cli/issues/257) — **Standalone loader widget** — *blocked*: its intended consumers (#226 Command Logs, #232 Configuration panel) shipped without a dedicated async loading area (both open instantly), so building it now would be dead code. Deferred until a panel with a genuinely slow, dedicated-area data source lands (e.g. #35 embedded lazygit PTY, #36 multi-repo listing).
+No small near-term TUI follow-up is queued right now; the next candidates are the larger Ambitious items below when demand warrants them.
 
 ## Ambitious
 

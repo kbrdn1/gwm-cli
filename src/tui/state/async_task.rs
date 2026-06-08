@@ -10,7 +10,7 @@
 //!
 //! Unlike [`super::github_fetch`] this is **not** a result cache. The
 //! GitHub layer caches `(target, number)` lookups and dedupes them; a
-//! refresh / sync / bootstrap is a one-shot "run it, give me a fresh
+//! refresh / sync / bootstrap / delete-worktree is a one-shot "run it, give me a fresh
 //! result" with nothing worth caching by key. So the spine keeps only
 //! two things from that design — *coalescing* and the *late-result
 //! drop* — and drops the per-key cache:
@@ -73,6 +73,11 @@ pub enum TaskKind {
   /// before the spawn; completion sets `App::report` and flips to
   /// `View::Report`.
   Bootstrap,
+  /// Off-thread delete of the selected worktree (issue #257):
+  /// `worktree::remove` can touch git admin files, remove the worktree
+  /// directory, and optionally delete the branch, so it must not block the
+  /// render loop while the confirm modal is open.
+  DeleteWorktree,
 }
 
 impl TaskKind {
@@ -85,6 +90,7 @@ impl TaskKind {
       TaskKind::GithubIssue(_) | TaskKind::GithubPr(_) => "fetching GitHub status…",
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
+      TaskKind::DeleteWorktree => "deleting worktree…",
     }
   }
 
@@ -100,7 +106,7 @@ impl TaskKind {
   /// `true` for workers that can leave repository / worktree state
   /// partially changed if the process exits before their result is drained.
   pub fn is_mutating(self) -> bool {
-    matches!(self, TaskKind::Sync | TaskKind::Bootstrap)
+    matches!(self, TaskKind::Sync | TaskKind::Bootstrap | TaskKind::DeleteWorktree)
   }
 }
 
@@ -129,6 +135,10 @@ pub enum TaskMsg {
   /// drain sets `App::report` and flips to `View::Report`; a superseded
   /// late result is dropped by [`TaskRunner::complete`].
   Bootstrap(u64, std::result::Result<BootstrapReport, String>),
+  /// A delete-worktree result (issue #257): the worker's generation, the
+  /// deleted worktree's display name + path label for the status line, and
+  /// the deletion outcome.
+  DeleteWorktree(u64, String, String, std::result::Result<(), String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
@@ -222,7 +232,7 @@ impl TaskRunner {
   }
 
   /// `true` while a mutating worker is still in flight. Quit handling uses
-  /// this to keep `sync` / `bootstrap` from being abandoned mid-operation.
+  /// this to keep `sync` / `bootstrap` / delete-worktree from being abandoned mid-operation.
   pub fn has_mutating_task_in_flight(&self) -> bool {
     self.running.iter().any(|kind| kind.is_mutating())
   }
@@ -233,6 +243,8 @@ impl TaskRunner {
       Some(TaskKind::Sync.loading_label())
     } else if self.running.contains(&TaskKind::Bootstrap) {
       Some(TaskKind::Bootstrap.loading_label())
+    } else if self.running.contains(&TaskKind::DeleteWorktree) {
+      Some(TaskKind::DeleteWorktree.loading_label())
     } else {
       None
     }

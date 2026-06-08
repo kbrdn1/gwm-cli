@@ -1,5 +1,6 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, Keymap};
+use super::state::async_task::TaskKind;
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
 use super::state::sidebar::SidebarMode;
@@ -11,10 +12,11 @@ use crate::config::ConfigSource;
 use crate::github::{IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
+  buffer::Buffer,
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
+  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Widget, Wrap},
   Frame,
 };
 use std::time::{Duration, Instant};
@@ -34,8 +36,100 @@ pub struct SidebarSections {
   pub worktree: Vec<Line<'static>>,
   /// `git status --short` lines, or `✓ clean`, or a load error.
   pub working_tree: Vec<Line<'static>>,
+  /// Number of changed files reported by `git status --short`.
+  pub working_tree_file_count: usize,
   /// Up to 10 oneline commits, or an empty / error notice.
   pub recent_commits: Vec<Line<'static>>,
+}
+
+/// Reusable one-line loader for dedicated panel/modal areas (issue #257).
+#[derive(Debug, Clone, Copy)]
+pub enum LoaderWidgetState<'a> {
+  Running {
+    glyph: &'a str,
+    label: &'a str,
+    detail: Option<&'a str>,
+  },
+  Failed {
+    message: &'a str,
+    detail: Option<&'a str>,
+  },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoaderWidget<'a> {
+  state: LoaderWidgetState<'a>,
+  accent: Color,
+  text: Color,
+  muted: Color,
+  failed: Color,
+  alignment: Alignment,
+}
+
+impl<'a> LoaderWidget<'a> {
+  pub fn running(glyph: &'a str, label: &'a str, detail: Option<&'a str>, theme: &Theme) -> Self {
+    Self {
+      state: LoaderWidgetState::Running { glyph, label, detail },
+      accent: theme.accent,
+      text: theme.name,
+      muted: theme.muted,
+      failed: theme.prunable,
+      alignment: Alignment::Left,
+    }
+  }
+
+  pub fn failed(message: &'a str, detail: Option<&'a str>, theme: &Theme) -> Self {
+    Self {
+      state: LoaderWidgetState::Failed { message, detail },
+      accent: theme.accent,
+      text: theme.name,
+      muted: theme.muted,
+      failed: theme.prunable,
+      alignment: Alignment::Left,
+    }
+  }
+
+  pub fn alignment(mut self, alignment: Alignment) -> Self {
+    self.alignment = alignment;
+    self
+  }
+
+  fn line(self) -> Line<'static> {
+    let mut spans = match self.state {
+      LoaderWidgetState::Running { glyph, label, .. } => vec![
+        Span::styled(
+          format!("{glyph} "),
+          Style::default().fg(self.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+          label.to_string(),
+          Style::default().fg(self.text).add_modifier(Modifier::BOLD),
+        ),
+      ],
+      LoaderWidgetState::Failed { message, .. } => vec![
+        Span::styled("! ", Style::default().fg(self.failed).add_modifier(Modifier::BOLD)),
+        Span::styled(
+          message.to_string(),
+          Style::default().fg(self.failed).add_modifier(Modifier::BOLD),
+        ),
+      ],
+    };
+
+    let detail = match self.state {
+      LoaderWidgetState::Running { detail, .. } | LoaderWidgetState::Failed { detail, .. } => detail,
+    };
+    if let Some(detail) = detail {
+      spans.push(Span::styled(" — ", Style::default().fg(self.muted)));
+      spans.push(Span::styled(detail.to_string(), Style::default().fg(self.muted)));
+    }
+    Line::from(spans)
+  }
+}
+
+impl Widget for LoaderWidget<'_> {
+  fn render(self, area: Rect, buf: &mut Buffer) {
+    Paragraph::new(self.line()).alignment(self.alignment).render(area, buf);
+  }
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -531,12 +625,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // Read the cached section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
   // worktree section gains +1 row for the live header prefix.
-  let (worktree_len, working_tree_len, commits_len) = {
+  let (worktree_len, working_tree_len, working_tree_file_count, commits_len) = {
     let cache = app.sidebar.cache.as_ref();
     let s = cache.map(|(_, s)| s);
     (
       s.map(|s| s.worktree.len()).unwrap_or(0) + 1,
       s.map(|s| s.working_tree.len()).unwrap_or(0),
+      s.map(|s| s.working_tree_file_count).unwrap_or(0),
       s.map(|s| s.recent_commits.len()).unwrap_or(0) as u16,
     )
   };
@@ -602,6 +697,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   };
   let issue_pr_title = issue_pr_pane_title(&app.keymap);
   let working_tree_title = working_tree_pane_title(&app.keymap);
+  let working_tree_footer = if working_tree_len == 0 {
+    None
+  } else {
+    Some(format!(" {} ", working_tree_file_count))
+  };
 
   // The render borrow: cached sections are read by reference and never
   // cloned (issue #238). On a cache hit this copies zero commit text — the
@@ -639,7 +739,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         SectionBody::new(&cache.working_tree),
         border_color,
         0,
-        None,
+        working_tree_footer,
       );
     }
     render_section(
@@ -791,13 +891,14 @@ pub fn build_sidebar_sections(
     // follow-up list; v1 ships `<ref>  <subject>` only.
     SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
-  let working_tree = match mode {
+  let (working_tree, working_tree_file_count) = match mode {
     SidebarMode::Commits => working_tree_lines(w, theme),
-    SidebarMode::Stashes => Vec::new(),
+    SidebarMode::Stashes => (Vec::new(), 0),
   };
   SidebarSections {
     worktree: worktree_identity_lines(w, theme),
     working_tree,
+    working_tree_file_count,
     recent_commits: body,
   }
 }
@@ -954,19 +1055,27 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
+fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, usize) {
   match worktree::git_status_short(&w.path) {
-    Ok(s) if s.trim().is_empty() => {
+    Ok(s) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
-      ))]
+      ))],
+      0,
+    ),
+    Ok(s) => {
+      let lines: Vec<Line<'static>> = s.lines().map(|line| working_tree_status_line(line, theme)).collect();
+      let count = lines.len();
+      (lines, count)
     }
-    Ok(s) => s.lines().map(|line| working_tree_status_line(line, theme)).collect(),
-    Err(e) => vec![Line::from(Span::styled(
-      format!("! {}", e),
-      Style::default().fg(theme.prunable),
-    ))],
+    Err(e) => (
+      vec![Line::from(Span::styled(
+        format!("! {}", e),
+        Style::default().fg(theme.prunable),
+      ))],
+      0,
+    ),
   }
 }
 
@@ -2677,8 +2786,24 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
-  // --- loader + countdown (only while the safety countdown is armed) ---
-  if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
+  // --- loader + countdown ---
+  if app.is_delete_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::DeleteWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.delete_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("delete failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
     let now = Instant::now();
     let mut spans = vec![Span::styled(
       format!("{} ", app.spinner.glyph(DOT_FRAMES)),
@@ -2695,20 +2820,22 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   }
 
   // --- buttons (focused one highlighted) ---
-  f.render_widget(
-    Paragraph::new(confirm_buttons_line(
-      app.confirm.focused_button(),
-      app.theme.accent,
-      muted,
-    ))
-    .alignment(Alignment::Center),
-    inner[2],
-  );
+  if !app.is_delete_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(confirm_buttons_line(
+        app.confirm.focused_button(),
+        app.theme.accent,
+        muted,
+      ))
+      .alignment(Alignment::Center),
+      inner[2],
+    );
 
-  f.render_widget(
-    Paragraph::new(modal_hint_for_context(HintContext::Confirm, &app.keymap, &app.theme)),
-    inner[4],
-  );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(HintContext::Confirm, &app.keymap, &app.theme)),
+      inner[4],
+    );
+  }
 }
 
 /// The ` Confirm ` ` Cancel ` button row (#187, restyled in #217). The
