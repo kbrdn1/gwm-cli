@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Docs roadmap pages now mirror the v0.9.0 stable surface, the v0.8.0 historical cycle, and the current `[Unreleased]` dev delta in both English and French.
 - TUI now has a reusable dedicated-area `LoaderWidget`; the delete-worktree modal uses it as the first real consumer, showing both in-flight and failed delete states.
 - The sidebar `Working Tree` pane now renders the changed-file count in its bottom-right footer.
 - Project tooling now ships a Flippad-style colored `Makefile` plus Zed tasks for the local Rust workflow (`build`, `test`, `clippy`, `doctor`, `audit`, worktree bootstrap, and related shortcuts).
