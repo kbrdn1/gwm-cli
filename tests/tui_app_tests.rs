@@ -3692,6 +3692,145 @@ run  = "echo would-have-run"
   let _ = BRANCH_TYPES; // keep the import live; the indirect lookup above relies on the default list.
 }
 
+// ---- Issue #276: create worktree on the async-task spine ------------------
+
+fn fill_create_form(app: &mut App, issue: &str, desc: &str) {
+  let feat_idx = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "feat")
+    .expect("`feat` is in branch types");
+  app.create_form.type_index = feat_idx;
+  app.create_form.issue = issue.into();
+  app.create_form.desc = desc.into();
+}
+
+#[test]
+fn submit_create_starts_async_create_and_keeps_create_modal_open() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let base_dir = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base_dir.path()),
+  );
+  let (_dir, mut app) = app_with_config(&body);
+  app.view = View::Create;
+  fill_create_form(&mut app, "276", "async-create");
+
+  app
+    .submit_create()
+    .expect("submit_create must only enqueue async create");
+
+  assert_eq!(app.view, View::Create, "the modal stays open while create runs");
+  assert!(
+    app.tasks.is_loading(TaskKind::CreateWorktree),
+    "create must claim an async loading slot"
+  );
+  assert_eq!(app.status, TaskKind::CreateWorktree.loading_label());
+
+  for _ in 0..50 {
+    if app.drain_task_results() {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(
+    !app.tasks.is_loading(TaskKind::CreateWorktree),
+    "background create should drain before temp dirs are dropped"
+  );
+}
+
+#[test]
+fn drain_applies_async_create_result_and_flips_to_report_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      generation,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#276-async-create".into(),
+        created: PathBuf::from("/tmp/gwm-created"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("post_create hook")],
+        },
+      }),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a live create result must be applied");
+  assert_eq!(app.view, View::Report);
+  assert!(app.report.is_some(), "create report is shown in the Report view");
+  assert!(
+    app.status.contains("created feat/#276-async-create @ /tmp/gwm-created"),
+    "status reports the created branch and path: {:?}",
+    app.status
+  );
+  assert!(!app.tasks.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
+fn drain_create_failure_stays_in_create_and_reports_status() {
+  use gwm::tui::{TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(generation, Err("branch already exists".into())))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a create failure still clears the live slot");
+  assert_eq!(app.view, View::Create);
+  assert_eq!(app.status, "create failed: branch already exists");
+  assert!(!app.tasks.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
+fn drain_drops_a_superseded_create_result() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.tasks.invalidate(TaskKind::CreateWorktree);
+  app.view = View::Create;
+  app.status = "untouched".into();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      stale,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#276-stale".into(),
+        created: PathBuf::from("/tmp/stale"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("stale")],
+        },
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Create);
+  assert_eq!(app.status, "untouched");
+  assert!(app.report.is_none());
+}
+
 #[test]
 fn tui_bootstrap_selected_aborts_on_untrusted_config() {
   // Counterpart of the submit_create test — the `b` keybinding
@@ -4399,6 +4538,19 @@ fn quit_waits_while_a_sync_task_is_in_flight() {
   app.tasks.request(TaskKind::Sync).unwrap();
 
   assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_create_worktree_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::CreateWorktree).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+  assert_eq!(app.status, "finishing creating worktree before quit…");
 }
 
 #[test]

@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Delete-worktree confirmation no longer blocks the TUI render loop while the removal runs; the async spine drives the deletion and quit waits for it like other mutating tasks.
+- Create-worktree submission no longer blocks the TUI render loop while `worktree::add` and bootstrap run; the Create modal now shows a dedicated loader/failure row and the global statusline spinner stays active until completion.
 - TUI quit now waits for in-flight mutating spine tasks (`sync` / `bootstrap` / delete-worktree) to finish instead of abandoning them mid-operation.
 
 ## Past releases

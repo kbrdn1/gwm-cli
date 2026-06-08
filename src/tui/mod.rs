@@ -25,7 +25,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
-pub use state::async_task::{TaskKind, TaskMsg, TaskRunner};
+pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::ConfigPanel;
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
@@ -330,7 +330,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ => {}
       },
       // Create-overlay keys live in a testable `App` method (issue #217);
-      // the loop only owns the two side effects (submit / close).
+      // the loop only owns the two side effects (submit / close). While the
+      // async create worker is in flight (#276), keep the modal locked so a
+      // second submit/cancel does not race the mutating operation.
+      View::Create if app.is_create_worktree_loading() => {}
       View::Create => match app.handle_create_key(key) {
         CreateKey::Submit => {
           if let Err(e) = app.submit_create() {
