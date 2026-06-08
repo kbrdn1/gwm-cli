@@ -122,6 +122,48 @@ fn is_github_is_true_only_for_github_kinds() {
 }
 
 #[test]
+fn is_mutating_is_true_only_for_tasks_that_change_worktrees() {
+  assert!(TaskKind::Sync.is_mutating());
+  assert!(TaskKind::Bootstrap.is_mutating());
+  assert!(!TaskKind::RefreshWorktrees.is_mutating());
+  assert!(!TaskKind::GithubIssue(1).is_mutating());
+  assert!(!TaskKind::GithubPr(1).is_mutating());
+}
+
+#[test]
+fn runner_reports_when_a_mutating_task_is_in_flight() {
+  let mut runner = TaskRunner::new();
+  runner.request(TaskKind::RefreshWorktrees);
+  runner.request(TaskKind::GithubIssue(42));
+
+  assert!(runner.is_any_loading());
+  assert!(!runner.has_mutating_task_in_flight());
+
+  runner.request(TaskKind::Sync);
+  assert!(runner.has_mutating_task_in_flight());
+}
+
+#[test]
+fn mutating_loading_label_prefers_mutating_work_over_read_only_work() {
+  let mut runner = TaskRunner::new();
+  runner.request(TaskKind::RefreshWorktrees);
+  runner.request(TaskKind::GithubIssue(42));
+  runner.request(TaskKind::Sync);
+
+  assert_eq!(runner.mutating_loading_label(), Some("syncing…"));
+}
+
+#[test]
+fn runner_stops_reporting_mutating_work_once_it_completes() {
+  let mut runner = TaskRunner::new();
+  let generation = runner.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(runner.has_mutating_task_in_flight());
+  assert!(runner.complete(TaskKind::Bootstrap, generation));
+  assert!(!runner.has_mutating_task_in_flight());
+}
+
+#[test]
 fn github_issue_and_pr_with_same_number_are_independent_slots() {
   // The (target, number) identity carries onto the spine: Issue(42) and
   // Pr(42) never coalesce or share a generation.

@@ -96,6 +96,12 @@ impl TaskKind {
   pub fn is_github(self) -> bool {
     matches!(self, TaskKind::GithubIssue(_) | TaskKind::GithubPr(_))
   }
+
+  /// `true` for workers that can leave repository / worktree state
+  /// partially changed if the process exits before their result is drained.
+  pub fn is_mutating(self) -> bool {
+    matches!(self, TaskKind::Sync | TaskKind::Bootstrap)
+  }
 }
 
 /// Result of an off-thread task, posted from a worker thread back to the
@@ -213,6 +219,21 @@ impl TaskRunner {
   /// alongside the GitHub fetch's own loading signal.
   pub fn is_any_loading(&self) -> bool {
     !self.running.is_empty()
+  }
+
+  /// `true` while a mutating worker is still in flight. Quit handling uses
+  /// this to keep `sync` / `bootstrap` from being abandoned mid-operation.
+  pub fn has_mutating_task_in_flight(&self) -> bool {
+    self.running.iter().any(|kind| kind.is_mutating())
+  }
+
+  /// Loader label for a mutating in-flight task, if any.
+  pub fn mutating_loading_label(&self) -> Option<&'static str> {
+    self
+      .running
+      .iter()
+      .find(|kind| kind.is_mutating())
+      .map(|kind| kind.loading_label())
   }
 
   /// The loader label for an in-flight task, if any. `None` when nothing

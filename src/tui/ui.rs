@@ -1918,7 +1918,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     HelpRow::Section("Global".to_string()),
     HelpRow::Blank,
     entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
-    fixed("Ctrl-C", "force quit (hard-coded escape hatch)"),
+    fixed("Ctrl-C", "quit (hard-coded escape hatch)"),
     HelpRow::Blank,
     HelpRow::Section("List View".to_string()),
     HelpRow::Blank,

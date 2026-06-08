@@ -4308,6 +4308,55 @@ fn request_refresh_coalesces_onto_an_inflight_run() {
 }
 
 #[test]
+fn quit_waits_while_a_sync_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Sync).unwrap();
+
+  assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_bootstrap_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_does_not_wait_for_read_only_tasks() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app.tasks.request(TaskKind::GithubIssue(42)).unwrap();
+  app.tasks.request(TaskKind::GithubPr(7)).unwrap();
+
+  assert!(app.can_quit_now());
+}
+
+#[test]
+fn quit_waiting_status_explains_the_deferred_exit() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+
+  assert_eq!(app.status, "finishing bootstrapping before quit…");
+}
+
+#[test]
 fn sync_refresh_invalidates_an_inflight_async_refresh() {
   // Issue #231 race guard: a synchronous `refresh()` (the create / delete /
   // report-close path) must bump the task generation so a still-in-flight
