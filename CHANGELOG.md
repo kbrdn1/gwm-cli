@@ -12,11 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TUI now has a reusable dedicated-area `LoaderWidget`; the delete-worktree modal uses it as the first real consumer, showing both in-flight and failed delete states.
+- The sidebar `Working Tree` pane now renders the changed-file count in its bottom-right footer.
 - Project tooling now ships a Flippad-style colored `Makefile` plus Zed tasks for the local Rust workflow (`build`, `test`, `clippy`, `doctor`, `audit`, worktree bootstrap, and related shortcuts).
 
 ### Fixed
 
-- TUI quit now waits for in-flight mutating spine tasks (`sync` / `bootstrap`) to finish instead of abandoning them mid-operation.
+- Delete-worktree confirmation no longer blocks the TUI render loop while the removal runs; the async spine drives the deletion and quit waits for it like other mutating tasks.
+- TUI quit now waits for in-flight mutating spine tasks (`sync` / `bootstrap` / delete-worktree) to finish instead of abandoning them mid-operation.
 
 ## Past releases
 

@@ -258,6 +258,11 @@ pub struct App {
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
 
+  /// Last delete-worktree failure shown inside the confirm modal (issue
+  /// #257). Kept on `App`, not `ConfirmModal`, because it is the outcome of
+  /// the async worktree deletion side effect rather than countdown state.
+  pub delete_failure: Option<String>,
+
   /// Animated loader for overlays (issue #187). Advanced by the event
   /// loop's 200ms poll tick while the confirm countdown is armed and
   /// read by the renderer; pure state lives in
@@ -397,6 +402,7 @@ impl App {
       picker_should_exit: false,
       should_quit: false,
       confirm: ConfirmModal::new(),
+      delete_failure: None,
       spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
@@ -699,6 +705,32 @@ impl App {
           // refresh / sync arms use).
           refresh_applied = true;
         }
+        TaskMsg::DeleteWorktree(generation, name, label, result) => {
+          if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
+            // Late result — a newer run (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(()) => {
+              self.delete_failure = None;
+              self.view = View::List;
+              self.confirm.reset();
+              let refresh_result = self.refresh();
+              self.status = match refresh_result {
+                Ok(()) => format!("removed {} ({})", name, label),
+                Err(e) => format!("removed {} ({}); refresh failed: {}", name, label, e),
+              };
+            }
+            Err(e) => {
+              self.delete_failure = Some(e.clone());
+              self.view = View::Confirm;
+              self.status = format!("delete failed: {}", e);
+            }
+          }
+          applied = true;
+          // Delete owns the status line this tick.
+          refresh_applied = true;
+        }
       }
     }
     // Once nothing GitHub-side is left loading, swap the "fetching…"
@@ -723,9 +755,14 @@ impl App {
     self.tasks.is_any_loading()
   }
 
+  /// `true` while the delete-worktree worker is in flight (issue #257).
+  pub fn is_delete_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::DeleteWorktree)
+  }
+
   /// `true` when a requested quit can safely leave the event loop now.
   /// Mutating spine workers keep running until their result is drained so
-  /// `sync` / `bootstrap` are not abandoned mid-operation.
+  /// `sync` / `bootstrap` / delete-worktree are not abandoned mid-operation.
   pub fn can_quit_now(&self) -> bool {
     !self.should_quit || !self.tasks.has_mutating_task_in_flight()
   }
@@ -1476,6 +1513,7 @@ impl App {
     }
     self.view = View::Confirm;
     self.confirm.reset();
+    self.delete_failure = None;
     // Start the loader animation from a deterministic frame each time
     // the modal opens (#187).
     self.spinner.reset();
@@ -1486,11 +1524,38 @@ impl App {
       Some(s) => (s.name.clone(), s.path.display().to_string()),
       None => return Ok(()),
     };
-    worktree::remove(&self.repo, &name, self.delete_branch_on_remove)?;
-    self.status = format!("removed {} ({})", name, label);
-    self.view = View::List;
-    self.confirm.reset();
-    self.refresh()
+    if self.is_delete_worktree_loading() {
+      return Ok(());
+    }
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before deleting worktree", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before deleting worktree".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::DeleteWorktree) else {
+      return Ok(());
+    };
+    let delete_branch = self.delete_branch_on_remove;
+    self.delete_failure = None;
+    self.confirm.dismiss();
+    self.spinner.reset();
+    self.status = TaskKind::DeleteWorktree.loading_label().into();
+    self.spawn_delete_worktree(generation, name, label, delete_branch);
+    Ok(())
+  }
+
+  fn spawn_delete_worktree(&self, generation: u64, name: String, label: String, delete_branch: bool) {
+    let tx = self.task_tx.clone();
+    let workdir = self.workdir.clone();
+    std::thread::spawn(move || {
+      let result = worktree::discover_repo(Some(&workdir))
+        .and_then(|repo| worktree::remove(&repo, &name, delete_branch))
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::DeleteWorktree(generation, name, label, result));
+    });
   }
 
   // ---- Confirm-overlay safety countdown (issue #30, extracted per #125) ---
@@ -1540,7 +1605,12 @@ impl App {
   /// Handle the dismissal keys (`n` / `Esc`) inside the confirm overlay.
   /// Always disarms the countdown and returns to the list.
   pub fn confirm_dismiss(&mut self) {
+    if self.is_delete_worktree_loading() {
+      self.status = TaskKind::DeleteWorktree.loading_label().into();
+      return;
+    }
     self.confirm.dismiss();
+    self.delete_failure = None;
     self.view = View::List;
   }
 

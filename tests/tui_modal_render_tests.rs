@@ -35,7 +35,7 @@ mod common;
 
 use common::init_repo;
 use gwm::bootstrap::{BootstrapReport, StepResult};
-use gwm::tui::{draw, App, LinkTarget, View};
+use gwm::tui::{draw, App, LinkTarget, TaskKind, View};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::{backend::TestBackend, buffer::Buffer, Terminal};
 use std::path::PathBuf;
@@ -175,6 +175,35 @@ fn confirm_modal_renders_title_target_and_buttons() {
   // Confirm / Cancel buttons.
   assert_present(&buf, "Confirm", "confirm button");
   assert_present(&buf, "Cancel", "cancel button");
+}
+
+#[test]
+fn confirm_modal_renders_delete_loader_while_delete_is_in_flight() {
+  let (_dir, mut app) = make_app();
+  app.worktrees.push(deletable_worktree("feat-257-loader"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.view = View::Confirm;
+  app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+
+  let buf = render(&mut app);
+
+  assert_present(&buf, "Delete Worktree", "confirm title");
+  assert_present(&buf, "deleting worktree", "delete loader label");
+}
+
+#[test]
+fn confirm_modal_renders_delete_failure_after_async_delete_fails() {
+  let (_dir, mut app) = make_app();
+  app.worktrees.push(deletable_worktree("feat-257-loader"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.view = View::Confirm;
+  app.delete_failure = Some("permission denied".into());
+
+  let buf = render(&mut app);
+
+  assert_present(&buf, "delete failed", "delete failure label");
+  assert_present(&buf, "permission denied", "delete failure detail");
+  assert_present(&buf, "Cancel", "cancel button after failure");
 }
 
 #[test]

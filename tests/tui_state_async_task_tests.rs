@@ -266,6 +266,19 @@ fn bootstrap_task_reports_the_bootstrapping_label() {
 }
 
 #[test]
+fn delete_worktree_task_reports_the_deleting_label_and_is_mutating() {
+  assert_eq!(TaskKind::DeleteWorktree.loading_label(), "deleting worktree…");
+  assert!(
+    !TaskKind::DeleteWorktree.is_github(),
+    "DeleteWorktree is not a GitHub kind"
+  );
+  assert!(
+    TaskKind::DeleteWorktree.is_mutating(),
+    "DeleteWorktree mutates disk/git state"
+  );
+}
+
+#[test]
 fn second_bootstrap_request_while_inflight_is_coalesced() {
   // Only one bootstrap runs at a time — a second `b` press while one is in
   // flight must not spawn a second concurrent run (file copies / hooks).

@@ -4257,6 +4257,89 @@ fn drain_drops_a_superseded_sync_result() {
 }
 
 #[test]
+fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+  app.delete_failure = Some("old failure".into());
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "delete result should be applied");
+  assert!(!app.is_delete_worktree_loading(), "delete slot clears after success");
+  assert_eq!(app.view, View::List);
+  assert!(app.delete_failure.is_none(), "old failure is cleared after success");
+  assert!(
+    app.status.contains("removed alpha") && app.status.contains("/tmp/alpha"),
+    "status reports the removed target: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Err("permission denied".into()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "delete failure should still be applied");
+  assert!(!app.is_delete_worktree_loading(), "delete slot clears after failure");
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.delete_failure.as_deref(), Some("permission denied"));
+  assert!(
+    app.status.contains("delete failed") && app.status.contains("permission denied"),
+    "status reports the delete failure: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_a_superseded_delete_worktree_result() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.tasks.invalidate(TaskKind::DeleteWorktree);
+  app.view = View::Confirm;
+  app.status = "untouched".into();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      stale,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.status, "untouched");
+}
+
+#[test]
 fn request_sync_coalesces_onto_an_inflight_run() {
   // A second `S` press while a sync is already in flight must not spawn a
   // second rebase — `request_sync` coalesces and returns early (zero threads).
@@ -4327,6 +4410,19 @@ fn quit_waits_while_a_bootstrap_task_is_in_flight() {
   app.tasks.request(TaskKind::Bootstrap).unwrap();
 
   assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_delete_worktree_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+  assert_eq!(app.status, "finishing deleting worktree before quit…");
 }
 
 #[test]

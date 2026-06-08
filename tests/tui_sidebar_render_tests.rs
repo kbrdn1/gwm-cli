@@ -102,3 +102,27 @@ fn sidebar_warm_cache_render_is_stable_across_frames() {
     "two consecutive warm-cache draws must produce byte-identical sidebar buffers"
   );
 }
+
+#[test]
+fn working_tree_section_renders_file_count_footer() {
+  let dir = repo_with_commits(1);
+  for i in 0..11 {
+    std::fs::write(dir.path().join(format!("dirty-{i}.txt")), "dirty").unwrap();
+  }
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("Working Tree"),
+    "sidebar must render the Working Tree pane: {text}"
+  );
+  assert!(
+    text.contains(" 11 "),
+    "Working Tree footer must render the number of changed files: {text}"
+  );
+}
