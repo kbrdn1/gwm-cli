@@ -220,6 +220,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       app.defer_quit_for_mutating_task();
       continue;
     }
+    if app.should_quit {
+      continue;
+    }
 
     match app.view {
       // When the inline filter bar is open, capture every key as filter input

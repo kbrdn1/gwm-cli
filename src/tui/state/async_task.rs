@@ -229,11 +229,13 @@ impl TaskRunner {
 
   /// Loader label for a mutating in-flight task, if any.
   pub fn mutating_loading_label(&self) -> Option<&'static str> {
-    self
-      .running
-      .iter()
-      .find(|kind| kind.is_mutating())
-      .map(|kind| kind.loading_label())
+    if self.running.contains(&TaskKind::Sync) {
+      Some(TaskKind::Sync.loading_label())
+    } else if self.running.contains(&TaskKind::Bootstrap) {
+      Some(TaskKind::Bootstrap.loading_label())
+    } else {
+      None
+    }
   }
 
   /// The loader label for an in-flight task, if any. `None` when nothing

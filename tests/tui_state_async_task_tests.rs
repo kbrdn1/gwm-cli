@@ -148,6 +148,7 @@ fn mutating_loading_label_prefers_mutating_work_over_read_only_work() {
   let mut runner = TaskRunner::new();
   runner.request(TaskKind::RefreshWorktrees);
   runner.request(TaskKind::GithubIssue(42));
+  runner.request(TaskKind::Bootstrap);
   runner.request(TaskKind::Sync);
 
   assert_eq!(runner.mutating_loading_label(), Some("syncing…"));
