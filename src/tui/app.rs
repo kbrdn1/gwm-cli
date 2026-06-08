@@ -723,6 +723,23 @@ impl App {
     self.tasks.is_any_loading()
   }
 
+  /// `true` when a requested quit can safely leave the event loop now.
+  /// Mutating spine workers keep running until their result is drained so
+  /// `sync` / `bootstrap` are not abandoned mid-operation.
+  pub fn can_quit_now(&self) -> bool {
+    !self.should_quit || !self.tasks.has_mutating_task_in_flight()
+  }
+
+  /// Surface why a requested quit is being held. The event loop keeps
+  /// ticking/draining while this status is visible.
+  pub fn defer_quit_for_mutating_task(&mut self) {
+    if let Some(label) = self.tasks.mutating_loading_label() {
+      self.status = format!("finishing {} before quit…", label.trim_end_matches('…'));
+    } else {
+      self.status = "finishing task before quit…".into();
+    }
+  }
+
   /// A clone of the task channel sender background workers report over
   /// (issue #231; GitHub fetch workers too since #255). Exposed so the
   /// async-apply path ([`Self::drain_task_results`]) can be driven

@@ -161,6 +161,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       app.spinner.tick();
     }
 
+    if app.should_quit {
+      if app.can_quit_now() {
+        break;
+      }
+      app.defer_quit_for_mutating_task();
+    }
+
     // Keep the Command Logs overlay live (issue #226): re-snapshot the
     // global log each tick while it is open so a command that finishes
     // off-thread (e.g. the GitHub fetch) appears without reopening. The
@@ -206,7 +213,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 
     // Global keys
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-      break;
+      app.should_quit = true;
+      if app.can_quit_now() {
+        break;
+      }
+      app.defer_quit_for_mutating_task();
+      continue;
+    }
+    if app.should_quit {
+      continue;
     }
 
     match app.view {
@@ -251,7 +266,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           if !app.filter.query().is_empty() {
             app.exit_filter_cancel();
           } else {
-            break;
+            app.should_quit = true;
           }
         } else if key.code == KeyCode::Enter {
           app.cancel_pending_motion();
@@ -266,9 +281,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           // palette overlay (issue #32) and the key path stay
           // observationally identical: both call the same dispatch.
           if matches!(action, Action::Quit) {
-            break;
+            app.should_quit = true;
+          } else {
+            run_action(terminal, &mut app, action)?;
           }
-          run_action(terminal, &mut app, action)?;
         }
       }
       View::Help => match key.code {
@@ -422,13 +438,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     if app.picker_should_exit {
       break;
     }
-    // Issue #32: `Action::Quit` fired from a non-keystroke path
-    // (the command palette accepting `:quit`) sets this flag via
-    // `run_action`. The keystroke path also breaks directly, so
-    // this branch only matters for palette / future-non-keystroke
-    // dispatchers.
+    // Issue #32/#267: every quit path raises this flag, then the loop
+    // exits only once in-flight mutating workers have reported back. Read-
+    // only workers may be abandoned immediately.
     if app.should_quit {
-      break;
+      if app.can_quit_now() {
+        break;
+      }
+      app.defer_quit_for_mutating_task();
     }
   }
   Ok(app.picker_result)
@@ -459,21 +476,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// future feature wired into one would silently miss the other.
 ///
 /// `Action::Quit` raises `app.should_quit` so the event loop can
-/// honour it from any caller — the keystroke path can also just
-/// `break` directly, but the palette path delegates here and has
-/// no way to signal `break` through a `Result<()>`. The loop
-/// checks the flag at the top of every iteration (alongside
-/// `picker_should_exit`).
+/// honour it from any caller and defer the actual exit while a mutating
+/// worker is still in flight. The loop checks the flag at the top and
+/// bottom of every iteration.
 fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, action: Action) -> Result<()> {
   match action {
-    // Issue #32: signal quit via `app.should_quit` so the palette
-    // path (which can't `break` from inside `run_action` →
-    // `accept_command_palette` → event-loop match) still exits the
-    // TUI when the user types `:quit`. The keystroke path also
-    // matches on `Action::Quit` and `break`s directly before
-    // calling `run_action`, so this branch is observationally a
-    // no-op for the `q` key — both paths converge on the loop
-    // exit.
+    // Issue #32/#267: signal quit via `app.should_quit` so palette
+    // and keymap paths share the same graceful-shutdown gate.
     Action::Quit => app.should_quit = true,
     Action::Down => app.next(),
     Action::Up => app.prev(),
