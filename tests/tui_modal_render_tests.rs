@@ -152,6 +152,31 @@ fn create_modal_renders_title_fields_and_buttons() {
 }
 
 #[test]
+fn create_modal_renders_loader_while_create_is_in_flight() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.tasks.request(TaskKind::CreateWorktree).unwrap();
+
+  let buf = render(&mut app);
+
+  assert_present(&buf, "New Worktree", "create title");
+  assert_present(&buf, "creating worktree", "create loader label");
+}
+
+#[test]
+fn create_modal_renders_create_failure_after_async_create_fails() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_failure = Some("branch already exists".into());
+
+  let buf = render(&mut app);
+
+  assert_present(&buf, "create failed", "create failure label");
+  assert_present(&buf, "branch already exists", "create failure detail");
+  assert_present(&buf, "Cancel", "cancel button after failure");
+}
+
+#[test]
 fn confirm_modal_renders_title_target_and_buttons() {
   let (_dir, mut app) = make_app();
   // Inject a deletable worktree and select it so the modal renders its

@@ -336,6 +336,18 @@ fn help_rows_structures_title_sections_and_entries() {
       .any(|r| matches!(r, HelpRow::Section(s) if s == "Delete Worktree")),
     "expected a `Delete Worktree` section header"
   );
+  assert!(
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Section(s) if s == "Issue / PR")),
+    "expected a clean `Issue / PR` section header"
+  );
+  assert!(
+    !rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Section(s) if s.contains("(#67)"))),
+    "Which Key section headers must not expose internal issue references"
+  );
   for pair in rows.windows(2) {
     if matches!(pair[0], HelpRow::Section(_)) {
       assert!(

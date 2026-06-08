@@ -1,6 +1,6 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
-use super::state::async_task::{TaskKind, TaskMsg, TaskRunner};
+use super::state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::ConfigPanel;
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
@@ -161,6 +161,8 @@ pub struct App {
   /// Create-worktree overlay state (extracted per #123). Holds field
   /// focus, type index, and the issue/slug input buffers.
   pub create_form: CreateForm,
+  /// Last asynchronous create failure shown inside the Create modal.
+  pub create_failure: Option<String>,
   /// Branch types displayed in the create-form picker. Resolved once at
   /// startup from [`Config::resolved_branch_types`] so the picker
   /// honours any `[[branch_types]]` override in `.gwm.toml` without
@@ -385,6 +387,7 @@ impl App {
       delete_branch_on_remove: false,
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
+      create_failure: None,
       branch_types,
       report: None,
       help_scroll: 0,
@@ -620,6 +623,37 @@ impl App {
     let mut refresh_applied = false;
     while let Ok(msg) = self.task_rx.try_recv() {
       match msg {
+        TaskMsg::CreateWorktree(generation, result) => {
+          if !self.tasks.complete(TaskKind::CreateWorktree, generation) {
+            // Late result — a newer run (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(result) => {
+              self.create_failure = None;
+              self.report = Some(result.report);
+              self.view = View::Report;
+              let refresh_result = self.refresh();
+              self.status = match refresh_result {
+                Ok(()) => format!("created {} @ {}", result.branch, result.created.display()),
+                Err(e) => format!(
+                  "created {} @ {}; refresh failed: {}",
+                  result.branch,
+                  result.created.display(),
+                  e
+                ),
+              };
+            }
+            Err(e) => {
+              self.create_failure = Some(e.clone());
+              self.view = View::Create;
+              self.status = format!("create failed: {}", e);
+            }
+          }
+          applied = true;
+          // Create owns the status line this tick.
+          refresh_applied = true;
+        }
         TaskMsg::RefreshWorktrees(generation, result) => {
           if !self.tasks.complete(TaskKind::RefreshWorktrees, generation) {
             // Late result — a newer run (or an invalidate) superseded it.
@@ -753,6 +787,11 @@ impl App {
   /// the statusbar spinner alongside [`Self::is_github_loading`].
   pub fn is_task_loading(&self) -> bool {
     self.tasks.is_any_loading()
+  }
+
+  /// `true` while the create-worktree worker is in flight (issue #276).
+  pub fn is_create_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::CreateWorktree)
   }
 
   /// `true` while the delete-worktree worker is in flight (issue #257).
@@ -1390,6 +1429,7 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
+    self.create_failure = None;
     // Open focused on Issue rather than the cycle-only Type field (#217 UX):
     // the first keypress then edits text instead of being a silent no-op on
     // Type. The type keeps its `reset()` default and stays reachable via
@@ -1431,6 +1471,9 @@ impl App {
   /// when the Type field is focused; on a text field they are literal input
   /// so the letters are never swallowed.
   pub fn handle_create_key(&mut self, key: KeyEvent) -> CreateKey {
+    if self.is_create_worktree_loading() {
+      return CreateKey::Handled;
+    }
     let on_type = self.create_form.field == Field::Type;
     match key.code {
       KeyCode::Esc => return CreateKey::Cancel,
@@ -1485,19 +1528,60 @@ impl App {
       return Ok(());
     }
 
-    let created = worktree::add(&self.repo, &dirname, &target, &branch, false)?;
-
-    let ctx = BootstrapCtx {
-      main_repo: &self.workdir,
-      worktree: &created,
-      config: &self.config,
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before creating worktree", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before creating worktree".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::CreateWorktree) else {
+      return Ok(());
     };
-    let report = bootstrap::run(&ctx)?;
-    self.report = Some(report);
-    self.view = View::Report;
-    self.refresh()?;
-    self.status = format!("created {} @ {}", branch, created.display());
+    self.create_failure = None;
+    self.spinner.reset();
+    self.status = TaskKind::CreateWorktree.loading_label().into();
+    self.spawn_create_worktree(
+      generation,
+      dirname,
+      target,
+      branch,
+      self.workdir.clone(),
+      self.config.clone(),
+    );
     Ok(())
+  }
+
+  fn spawn_create_worktree(
+    &self,
+    generation: u64,
+    dirname: String,
+    target: PathBuf,
+    branch: String,
+    workdir: PathBuf,
+    config: Config,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = (|| -> Result<CreateWorktreeResult> {
+        let repo = worktree::discover_repo(Some(&workdir))?;
+        let created = worktree::add(&repo, &dirname, &target, &branch, false)?;
+        let ctx = BootstrapCtx {
+          main_repo: &workdir,
+          worktree: &created,
+          config: &config,
+        };
+        let report = bootstrap::run(&ctx)?;
+        Ok(CreateWorktreeResult {
+          branch,
+          created,
+          report,
+        })
+      })()
+      .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::CreateWorktree(generation, result));
+    });
   }
 
   // ---- Delete flow ---------------------------------------------------------

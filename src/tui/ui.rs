@@ -2077,7 +2077,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
-    rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
+    rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
     rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
     rows.push(entry(
@@ -2431,17 +2431,10 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  // The modal is a single Paragraph of per-line-aligned rows (the title /
-  // buttons / hint centre themselves, the fields stay left) — no manual
-  // Layout split, the rounded frame's `Padding` owns the breathing room
-  // (issue #217). Height is the fixed row count plus the border + padding
-  // rows, so the box hugs its content; the width is capped so the input
-  // surfaces don't span a wide terminal.
-  const ROWS: u16 = 14; // title(2) + type + gap + 2 preview + gap + issue + gap + desc + gap + buttons + gap + hint
-  let height = ROWS + 2 /* border */ + 2 /* vertical padding */;
-  let area = centered_box(70, 72, height, f.area());
   let block = overlay_block(clean);
-  let inner_w = block.inner(area).width as usize;
+  let term = f.area();
+  let outer = centered_box(70, 72, 1, term);
+  let inner_w = block.inner(outer).width as usize;
 
   // Width of the background-filled value field: the inner width minus the
   // `  label  ` gutter (2 indent + label column + 2 gap).
@@ -2500,12 +2493,52 @@ fn draw_create(f: &mut Frame, app: &App) {
     muted,
     surface,
   ));
-  lines.push(Line::from(String::new()));
-  lines.push(create_buttons_line(accent, muted).centered());
-  push_modal_hint(&mut lines, HintContext::Create, &app.keymap, &app.theme);
+
+  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let area = centered_box(70, 72, height, term);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // title + form fields
+      Constraint::Length(1), // loader / failure
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
 
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block), area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(lines), inner[0]);
+
+  if app.is_create_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::CreateWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.create_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("create failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  }
+
+  if !app.is_create_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(create_buttons_line(accent, muted)).alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(HintContext::Create, &app.keymap, &app.theme)),
+      inner[4],
+    );
+  }
 }
 
 /// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).

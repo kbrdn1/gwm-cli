@@ -123,6 +123,7 @@ fn is_github_is_true_only_for_github_kinds() {
 
 #[test]
 fn is_mutating_is_true_only_for_tasks_that_change_worktrees() {
+  assert!(TaskKind::CreateWorktree.is_mutating());
   assert!(TaskKind::Sync.is_mutating());
   assert!(TaskKind::Bootstrap.is_mutating());
   assert!(!TaskKind::RefreshWorktrees.is_mutating());
@@ -227,6 +228,31 @@ fn a_stale_github_worker_loses_to_a_newer_generation_after_invalidate() {
 fn sync_task_reports_the_syncing_label() {
   assert_eq!(TaskKind::Sync.loading_label(), "syncing…");
   assert!(!TaskKind::Sync.is_github(), "Sync is not a GitHub kind");
+}
+
+#[test]
+fn create_worktree_task_reports_the_creating_label_and_is_mutating() {
+  assert_eq!(TaskKind::CreateWorktree.loading_label(), "creating worktree…");
+  assert!(
+    !TaskKind::CreateWorktree.is_github(),
+    "CreateWorktree is not a GitHub kind"
+  );
+  assert!(
+    TaskKind::CreateWorktree.is_mutating(),
+    "CreateWorktree mutates disk/git state"
+  );
+}
+
+#[test]
+fn second_create_worktree_request_while_inflight_is_coalesced() {
+  let mut runner = TaskRunner::new();
+  assert_eq!(runner.request(TaskKind::CreateWorktree), Some(1));
+  assert_eq!(
+    runner.request(TaskKind::CreateWorktree),
+    None,
+    "a second create request while one is inflight must coalesce"
+  );
+  assert!(runner.is_loading(TaskKind::CreateWorktree));
 }
 
 #[test]
