@@ -3692,6 +3692,145 @@ run  = "echo would-have-run"
   let _ = BRANCH_TYPES; // keep the import live; the indirect lookup above relies on the default list.
 }
 
+// ---- Issue #276: create worktree on the async-task spine ------------------
+
+fn fill_create_form(app: &mut App, issue: &str, desc: &str) {
+  let feat_idx = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "feat")
+    .expect("`feat` is in branch types");
+  app.create_form.type_index = feat_idx;
+  app.create_form.issue = issue.into();
+  app.create_form.desc = desc.into();
+}
+
+#[test]
+fn submit_create_starts_async_create_and_keeps_create_modal_open() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let base_dir = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base_dir.path()),
+  );
+  let (_dir, mut app) = app_with_config(&body);
+  app.view = View::Create;
+  fill_create_form(&mut app, "276", "async-create");
+
+  app
+    .submit_create()
+    .expect("submit_create must only enqueue async create");
+
+  assert_eq!(app.view, View::Create, "the modal stays open while create runs");
+  assert!(
+    app.tasks.is_loading(TaskKind::CreateWorktree),
+    "create must claim an async loading slot"
+  );
+  assert_eq!(app.status, TaskKind::CreateWorktree.loading_label());
+
+  for _ in 0..50 {
+    if app.drain_task_results() {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(
+    !app.tasks.is_loading(TaskKind::CreateWorktree),
+    "background create should drain before temp dirs are dropped"
+  );
+}
+
+#[test]
+fn drain_applies_async_create_result_and_flips_to_report_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      generation,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#276-async-create".into(),
+        created: PathBuf::from("/tmp/gwm-created"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("post_create hook")],
+        },
+      }),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a live create result must be applied");
+  assert_eq!(app.view, View::Report);
+  assert!(app.report.is_some(), "create report is shown in the Report view");
+  assert!(
+    app.status.contains("created feat/#276-async-create @ /tmp/gwm-created"),
+    "status reports the created branch and path: {:?}",
+    app.status
+  );
+  assert!(!app.tasks.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
+fn drain_create_failure_stays_in_create_and_reports_status() {
+  use gwm::tui::{TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(generation, Err("branch already exists".into())))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a create failure still clears the live slot");
+  assert_eq!(app.view, View::Create);
+  assert_eq!(app.status, "create failed: branch already exists");
+  assert!(!app.tasks.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
+fn drain_drops_a_superseded_create_result() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.tasks.invalidate(TaskKind::CreateWorktree);
+  app.view = View::Create;
+  app.status = "untouched".into();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      stale,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#276-stale".into(),
+        created: PathBuf::from("/tmp/stale"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("stale")],
+        },
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Create);
+  assert_eq!(app.status, "untouched");
+  assert!(app.report.is_none());
+}
+
 #[test]
 fn tui_bootstrap_selected_aborts_on_untrusted_config() {
   // Counterpart of the submit_create test — the `b` keybinding
@@ -4257,6 +4396,89 @@ fn drain_drops_a_superseded_sync_result() {
 }
 
 #[test]
+fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+  app.delete_failure = Some("old failure".into());
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "delete result should be applied");
+  assert!(!app.is_delete_worktree_loading(), "delete slot clears after success");
+  assert_eq!(app.view, View::List);
+  assert!(app.delete_failure.is_none(), "old failure is cleared after success");
+  assert!(
+    app.status.contains("removed alpha") && app.status.contains("/tmp/alpha"),
+    "status reports the removed target: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Err("permission denied".into()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "delete failure should still be applied");
+  assert!(!app.is_delete_worktree_loading(), "delete slot clears after failure");
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.delete_failure.as_deref(), Some("permission denied"));
+  assert!(
+    app.status.contains("delete failed") && app.status.contains("permission denied"),
+    "status reports the delete failure: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_a_superseded_delete_worktree_result() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.tasks.invalidate(TaskKind::DeleteWorktree);
+  app.view = View::Confirm;
+  app.status = "untouched".into();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      stale,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.status, "untouched");
+}
+
+#[test]
 fn request_sync_coalesces_onto_an_inflight_run() {
   // A second `S` press while a sync is already in flight must not spawn a
   // second rebase — `request_sync` coalesces and returns early (zero threads).
@@ -4308,6 +4530,81 @@ fn request_refresh_coalesces_onto_an_inflight_run() {
 }
 
 #[test]
+fn quit_waits_while_a_sync_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Sync).unwrap();
+
+  assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_create_worktree_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::CreateWorktree).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+  assert_eq!(app.status, "finishing creating worktree before quit…");
+}
+
+#[test]
+fn quit_waits_while_a_bootstrap_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_delete_worktree_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+  assert_eq!(app.status, "finishing deleting worktree before quit…");
+}
+
+#[test]
+fn quit_does_not_wait_for_read_only_tasks() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app.tasks.request(TaskKind::GithubIssue(42)).unwrap();
+  app.tasks.request(TaskKind::GithubPr(7)).unwrap();
+
+  assert!(app.can_quit_now());
+}
+
+#[test]
+fn quit_waiting_status_explains_the_deferred_exit() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+
+  assert_eq!(app.status, "finishing bootstrapping before quit…");
+}
+
+#[test]
 fn sync_refresh_invalidates_an_inflight_async_refresh() {
   // Issue #231 race guard: a synchronous `refresh()` (the create / delete /
   // report-close path) must bump the task generation so a still-in-flight
@@ -4334,5 +4631,227 @@ fn sync_refresh_invalidates_an_inflight_async_refresh() {
   assert!(
     !app.worktrees.iter().any(|w| w.name == "ghost"),
     "the dropped result's payload must never reach the list"
+  );
+}
+
+// ---- Issue #276 / #257: create & delete helpers on App ------------------
+
+#[test]
+fn enter_create_clears_a_prior_create_failure() {
+  // Re-opening the Create modal after a failed async create must reset the
+  // error banner so the user is not shown a stale error message.
+  let (_dir, mut app) = make_app();
+  app.create_failure = Some("previous error".into());
+  app.enter_create();
+  assert!(
+    app.create_failure.is_none(),
+    "enter_create must clear any prior create_failure"
+  );
+}
+
+#[test]
+fn enter_confirm_delete_clears_a_prior_delete_failure() {
+  // Re-opening the Confirm modal after a failed async delete must reset the
+  // error banner so the user is not shown a stale error message.
+  let (_dir, mut app) = make_app();
+  app.delete_failure = Some("previous error".into());
+  // Inject a non-main deletable worktree so enter_confirm_delete can proceed.
+  app.worktrees.push(worktree_fixture("feat-to-delete"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.enter_confirm_delete();
+  assert!(
+    app.delete_failure.is_none(),
+    "enter_confirm_delete must clear any prior delete_failure"
+  );
+}
+
+#[test]
+fn handle_create_key_returns_handled_without_side_effects_while_create_is_loading() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::async_task::TaskKind;
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  // Simulate an in-flight create task.
+  app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  assert!(app.is_create_worktree_loading());
+
+  // Typing should be a no-op while the create is running.
+  let before_issue = app.create_form.issue.clone();
+  let result = app.handle_create_key(KeyEvent::new(KeyCode::Char('9'), KeyModifiers::NONE));
+  assert!(
+    matches!(result, CreateKey::Handled),
+    "handle_create_key must return Handled while create is loading"
+  );
+  assert_eq!(
+    app.create_form.issue, before_issue,
+    "no input must reach the form fields while a create is in flight"
+  );
+}
+
+#[test]
+fn confirm_dismiss_is_blocked_while_delete_is_loading() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.view = View::Confirm;
+  app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  assert!(app.is_delete_worktree_loading());
+
+  app.confirm_dismiss();
+
+  // The view must NOT have changed back to List while the delete is running.
+  assert_eq!(
+    app.view,
+    View::Confirm,
+    "confirm_dismiss must not return to List while delete is in flight"
+  );
+  assert_eq!(
+    app.status,
+    TaskKind::DeleteWorktree.loading_label(),
+    "status must reflect the in-flight delete"
+  );
+}
+
+#[test]
+fn confirm_dismiss_clears_delete_failure_and_returns_to_list() {
+  // After a failed delete (delete_failure is Some), dismissing the modal
+  // clears the failure and goes back to the list.
+  let (_dir, mut app) = make_app();
+  app.view = View::Confirm;
+  app.delete_failure = Some("disk full".into());
+
+  app.confirm_dismiss();
+
+  assert_eq!(app.view, View::List, "dismiss must return to List");
+  assert!(
+    app.delete_failure.is_none(),
+    "confirm_dismiss must clear delete_failure"
+  );
+}
+
+#[test]
+fn is_create_worktree_loading_reflects_task_runner_state() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  assert!(
+    !app.is_create_worktree_loading(),
+    "no create in flight initially"
+  );
+  let gen = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  assert!(app.is_create_worktree_loading(), "loading after request");
+  app.tasks.complete(TaskKind::CreateWorktree, gen);
+  assert!(
+    !app.is_create_worktree_loading(),
+    "not loading after complete"
+  );
+}
+
+#[test]
+fn is_delete_worktree_loading_reflects_task_runner_state() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  assert!(
+    !app.is_delete_worktree_loading(),
+    "no delete in flight initially"
+  );
+  let gen = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  assert!(app.is_delete_worktree_loading(), "loading after request");
+  app.tasks.complete(TaskKind::DeleteWorktree, gen);
+  assert!(
+    !app.is_delete_worktree_loading(),
+    "not loading after complete"
+  );
+}
+
+#[test]
+fn can_quit_now_is_true_when_should_quit_is_false_regardless_of_tasks() {
+  // `can_quit_now` documents: true while the create-worktree worker is in
+  // flight — but only if should_quit is already set. When the user has NOT
+  // requested a quit it must return true (no forced blocking).
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = false;
+  app.tasks.request(TaskKind::Sync).unwrap();
+
+  assert!(
+    app.can_quit_now(),
+    "can_quit_now must be true when should_quit is false"
+  );
+}
+
+#[test]
+fn drain_delete_success_resets_the_confirm_modal() {
+  // After a successful delete the confirm modal is reset (not just dismissed)
+  // so the next open starts with a fresh countdown state.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "wt-alpha".into(),
+      "/tmp/wt-alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  // The view went to List and the confirm modal is in its fresh (not armed)
+  // state — verified by the `is_armed` predicate.
+  assert_eq!(app.view, View::List);
+  assert!(
+    !app.confirm.is_armed(),
+    "confirm modal must be reset (disarmed) after a successful delete"
+  );
+}
+
+#[test]
+fn create_failure_is_set_on_async_create_error_and_cleared_on_success() {
+  // Regression: the failure banner from a first attempt must not survive
+  // into the next successful create result if the slot is reused.
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+
+  // First attempt fails.
+  let gen1 = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(gen1, Err("conflict".into())))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(app.create_failure.as_deref(), Some("conflict"));
+
+  // Second attempt succeeds (new generation).
+  let gen2 = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      gen2,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#1-ok".into(),
+        created: PathBuf::from("/tmp/gwm-ok"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("post_create")],
+        },
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.create_failure.is_none(),
+    "a successful create result must clear any prior create_failure"
   );
 }

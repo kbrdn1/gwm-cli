@@ -102,3 +102,78 @@ fn sidebar_warm_cache_render_is_stable_across_frames() {
     "two consecutive warm-cache draws must produce byte-identical sidebar buffers"
   );
 }
+
+#[test]
+fn working_tree_section_renders_file_count_footer() {
+  let dir = repo_with_commits(1);
+  for i in 0..11 {
+    std::fs::write(dir.path().join(format!("dirty-{i}.txt")), "dirty").unwrap();
+  }
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("Working Tree"),
+    "sidebar must render the Working Tree pane: {text}"
+  );
+  assert!(
+    text.contains(" 11 "),
+    "Working Tree footer must render the number of changed files: {text}"
+  );
+}
+
+#[test]
+fn working_tree_section_shows_zero_in_footer_for_clean_checkout() {
+  // A clean checkout has no changed files (count = 0). The footer still shows
+  // " 0 " rather than disappearing — the count is always rendered when the
+  // working-tree section has content (even the "✓ clean" line counts).
+  let dir = repo_with_commits(1);
+  // Do not write any untracked files — the checkout is clean.
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("Working Tree"),
+    "sidebar must render the Working Tree pane for a clean checkout: {text}"
+  );
+  // The clean checkout renders "✓ clean" and the footer shows " 0 ".
+  assert!(
+    text.contains("clean"),
+    "sidebar working-tree pane must show clean indicator: {text}"
+  );
+  assert!(
+    text.contains(" 0 "),
+    "Working Tree footer must render ' 0 ' for a clean checkout: {text}"
+  );
+}
+
+#[test]
+fn working_tree_file_count_matches_actual_untracked_files() {
+  // Boundary check: exactly 3 untracked files → footer shows " 3 ".
+  let dir = repo_with_commits(1);
+  for i in 0..3 {
+    std::fs::write(dir.path().join(format!("untracked-{i}.txt")), "x").unwrap();
+  }
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains(" 3 "),
+    "Working Tree footer must render ' 3 ' for 3 untracked files: {text}"
+  );
+}
