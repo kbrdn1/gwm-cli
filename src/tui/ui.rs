@@ -2077,7 +2077,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
-    rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
+    rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
     rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
     rows.push(entry(
