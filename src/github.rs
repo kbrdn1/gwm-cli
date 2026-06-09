@@ -26,6 +26,12 @@ static PR_URL_RE: LazyLock<regex::Regex> =
 
 const ISSUE_CONFIG_KEY: &str = "gwm-issue";
 const PR_CONFIG_KEY: &str = "gwm-pr";
+/// Persisted home of an auto-detected PR (issue #283). Kept distinct from
+/// the explicit [`PR_CONFIG_KEY`] so [`read_link`] can resolve it as
+/// [`LinkSource::Detected`] (not `Explicit`) — the pane needs that
+/// distinction for its `detected` badge, and the explicit override must
+/// still win.
+const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
 
 /// Where the issue or PR number came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,9 +43,10 @@ pub enum LinkSource {
   /// Explicit override set via `gwm link …` (lives in git branch config).
   Explicit,
   /// Auto-detected from GitHub: a PR whose head ref is this branch was
-  /// found via `gh pr list --head <branch>` (issue #181). Ephemeral —
-  /// never written to the git config, so an explicit `gwm link --pr`
-  /// always wins on the next read.
+  /// found via `gh pr list --head <branch>` (issue #181). May be persisted
+  /// to the `gwm-pr-detected` branch-config key (issue #283) so the
+  /// no-fetch table read path surfaces it on every row; an explicit
+  /// `gwm link --pr` still always wins on the next read.
   Detected,
 }
 
@@ -87,9 +94,16 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
     },
   };
 
+  // PR resolution order (issue #283): an explicit `gwm link --pr` wins,
+  // then a persisted auto-detection (`gwm-pr-detected`), then nothing. The
+  // persisted-detected branch is what lets the no-fetch table read path
+  // colour the PR pastille on every row without a per-row `gh` shell-out.
   let (pr, pr_source) = match explicit_pr {
     Some(n) => (Some(n), LinkSource::Explicit),
-    None => (None, LinkSource::None),
+    None => match read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)? {
+      Some(n) => (Some(n), LinkSource::Detected),
+      None => (None, LinkSource::None),
+    },
   };
 
   Ok(BranchLink {
@@ -107,9 +121,10 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
 ///
 /// An explicit (or previously-detected) PR always wins: when `link.pr`
 /// is already `Some`, this is a no-op so a `gwm link --pr` override is
-/// never clobbered. The applied number is marked [`LinkSource::Detected`]
-/// and is *never* persisted to the git config by this function — it lives
-/// only on the in-memory [`BranchLink`].
+/// never clobbered. The applied number is marked [`LinkSource::Detected`].
+/// This function only mutates the in-memory [`BranchLink`]; call
+/// [`persist_detected_pr`] separately to write it to the git config so the
+/// table read path (issue #283) picks it up.
 pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
   if link.pr.is_none() {
     if let Some(n) = detected {
@@ -151,6 +166,24 @@ pub fn unlink_issue(repo: &Repository, branch: &str) -> Result<()> {
 
 pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
   remove_branch_key(repo, branch, PR_CONFIG_KEY)
+}
+
+/// Persist an auto-detected PR number to its own branch-config key
+/// (`gwm-pr-detected`, issue #283), distinct from the explicit `gwm-pr`.
+/// This lets the no-fetch table read path surface the detected PR on every
+/// row without a per-row `gh` shell-out, while keeping the
+/// detected/explicit distinction the pane badge needs. An explicit
+/// `gwm link --pr` still wins in [`read_link`]. Re-detection overwrites the
+/// stored value.
+pub fn persist_detected_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
+  write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)
+}
+
+/// Drop a persisted auto-detection (issue #283). A no-op when no detected
+/// PR was stored. Used when a detection no longer holds (the branch's PR
+/// went away) so a stale number doesn't linger in the config.
+pub fn clear_persisted_detected_pr(repo: &Repository, branch: &str) -> Result<()> {
+  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)
 }
 
 fn config_key(branch: &str, leaf: &str) -> String {

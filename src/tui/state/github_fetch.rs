@@ -178,7 +178,10 @@ impl GitHubFetch {
   /// here so the sidebar's `pr_fetch_state()` can resolve it. Delegates
   /// to [`github::apply_detected_pr`], so an explicit `gwm link --pr`
   /// (already on `link.pr`) always wins and the result is marked
-  /// `LinkSource::Detected` — never persisted.
+  /// `LinkSource::Detected`. This only mutates in-memory state; the `App`
+  /// separately persists the detection via
+  /// [`github::persist_detected_pr`] (issue #283) so the table read path
+  /// picks it up.
   pub fn apply_detected_pr(&mut self, detected: Option<u64>) {
     github::apply_detected_pr(&mut self.link, detected);
   }

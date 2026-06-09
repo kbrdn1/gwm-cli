@@ -2136,6 +2136,15 @@ impl App {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
         let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
         self.github.apply_detected_pr(detected);
+        // Persist the detection (issue #283) so the no-fetch table read
+        // path colours the PR pastille on every row, not just the selected
+        // one. A vanished detection clears the stored key so it can't go
+        // stale. Best-effort: a git-config write failure must not break the
+        // refresh, so the result is intentionally discarded.
+        let _ = match detected {
+          Some(n) => github::persist_detected_pr(&self.repo, &branch, n),
+          None => github::clear_persisted_detected_pr(&self.repo, &branch),
+        };
       }
     }
 

@@ -100,6 +100,65 @@ fn unlink_pr_clears_the_pr_link_only() {
   assert_eq!(link.pr, None);
 }
 
+// --- Persisted PR detection (issue #283) ---------------------------------
+
+#[test]
+fn persist_detected_pr_is_read_back_as_detected_source() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // The detected PR lives in its own key so the no-fetch table read path
+  // can surface it on every row while staying distinguishable from an
+  // explicit link.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.pr, Some(77));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn explicit_pr_overrides_persisted_detected_pr() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // Both keys set: the explicit `gwm link --pr` must win, and its source
+  // must read back as Explicit (not Detected) so the pane badge is right.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(61));
+  assert_eq!(link.pr_source, LinkSource::Explicit);
+}
+
+#[test]
+fn persist_detected_pr_overwrites_a_previous_detection() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // Re-detection (the branch's PR changed) refreshes the stored value.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 88).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(88));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn clear_persisted_detected_pr_removes_the_detected_link() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::clear_persisted_detected_pr(&repo, "feat/#42-tui-search").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_source, LinkSource::None);
+}
+
 // --- Repo-slug extraction ------------------------------------------------
 
 fn set_origin(repo: &git2::Repository, url: &str) {
