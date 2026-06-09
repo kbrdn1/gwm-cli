@@ -3875,27 +3875,27 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
 /// keeps its single `★` (painted with the `main` role, preserving the
 /// pre-#73 convention). Every other row renders two pastilles `●/●`:
 ///
-/// - left = **Issue** — `clean` green when an issue is linked, else white.
+/// - left = **Issue** — loaded issue-state colour when known, `clean` green
+///   when only a link is known, else white.
 /// - right = **PR** — `locked` violet when a PR is linked, else white.
 /// - a `muted` `/` separates them.
 ///
-/// The table is the no-fetch read path (only the selected worktree triggers
-/// a `gh` fetch), so the pastille colour signals link **presence / type**,
-/// not live open/closed state — that coloured-by-status dot lives in the
-/// sidebar header where the fetch result is known. A detected PR shows here
-/// on every row only because it is persisted to `gwm-pr-detected` (#283) and
-/// read back by [`crate::github::read_link`].
+/// The table is normally the no-fetch read path. Once the selected worktree's
+/// issue status has been fetched, the row snapshot carries that loaded state
+/// so the Issue pastille can mirror open/closed without a per-row `gh` call.
+/// A detected PR shows here on every row only because it is persisted to
+/// `gwm-pr-detected` (#283) and read back by [`crate::github::read_link`].
 pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
     return Line::from(Span::styled("★", Style::default().fg(theme.main)));
   }
   // An empty slot stays `name`-white so "no link" reads as a neutral
   // placeholder rather than borrowing a status colour that would claim the
-  // row. A linked slot takes its accent: issue → `clean`, PR → `locked`.
-  let issue_color = if w.link.issue.is_some() {
-    theme.clean
-  } else {
-    theme.name
+  // row. A linked slot takes its accent unless a live loaded state exists.
+  let issue_color = match (w.link.issue, w.issue_state) {
+    (Some(_), Some(state)) => issue_badge_color(state, theme),
+    (Some(_), None) => theme.clean,
+    (None, _) => theme.name,
   };
   let pr_color = if w.link.pr.is_some() { theme.locked } else { theme.name };
   Line::from(vec![

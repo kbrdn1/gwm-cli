@@ -1,5 +1,5 @@
 use crate::error::{GwmError, Result};
-use crate::github::{self, BranchLink};
+use crate::github::{self, BranchLink, IssueState};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +35,9 @@ pub struct WorktreeInfo {
   /// re-shelling `git config`. Empty link = no marker dot. See
   /// `tui/ui.rs::table_marker`.
   pub link: BranchLink,
+  /// Loaded GitHub issue state for the row, if the TUI has fetched it this
+  /// session. `None` keeps the table on its no-fetch linked/unlinked colour.
+  pub issue_state: Option<IssueState>,
   /// Branch age relative to the trunk baseline, pre-computed at list
   /// time so the TUI render path never opens a fresh `git2::Repository`
   /// per row per frame (issue #103). `None` for trunk branches and for
@@ -199,6 +202,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_prunable: false,
       status: compute_status(repo),
       link,
+      issue_state: None,
       age,
     });
   }
@@ -258,6 +262,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_prunable,
       status,
       link,
+      issue_state: None,
       age,
     });
   }

@@ -73,6 +73,7 @@ fn deletable_worktree(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
     age: None,
   }
 }

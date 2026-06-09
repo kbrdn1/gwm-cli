@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The Worktrees pane Issue pastille now switches to the loaded issue-state colour once the selected worktree's GitHub status is fetched, so a closed issue no longer stays green.
 - Settings free-text fields (worktree base/patterns, open shell/editor commands) persist as TOML strings, so a value like `123` or `true` is no longer coerced to a number/bool; config writes also validate before touching disk, so a rejected edit can never overwrite a good config file — while an edit to an already-invalid file is still written (then surfaces the error) so `gwm config set` can recover a broken config rather than refusing every edit.
 - Scrollable modal bodies (Keybindings, Command Logs, Settings) compute the horizontal-pan bound after reserving the scrollbar column, so the final cell of a long line stays reachable.
 - Delete-worktree confirmation no longer blocks the TUI render loop while the removal runs; the async spine drives the deletion and quit waits for it like other mutating tasks.

@@ -40,6 +40,7 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
     age: None,
   }
 }
@@ -2796,6 +2797,34 @@ fn table_marker_issue_only_leaves_the_pr_pastille_white() {
 }
 
 #[test]
+fn table_marker_issue_pastille_uses_loaded_closed_issue_state() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let mut w = worktree_fixture("feat-1");
+  w.branch = Some("feat/#42-tui-search".into());
+  w.link = app.current_link().clone();
+  app.worktrees = vec![w];
+  app.list_state.select(Some(0));
+
+  app.apply_issue_fetch_result(Ok(IssueStatus {
+    number: 42,
+    title: "Done".into(),
+    state: IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  let theme = Theme::default();
+  let line = gwm::tui::table_marker(&app.worktrees[0], &theme);
+  let cells = marker_cells(&line);
+  assert_eq!(
+    cells[0].1,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "closed issue dot should use the closed issue state colour"
+  );
+}
+
+#[test]
 fn table_marker_pr_only_leaves_the_issue_pastille_white() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
@@ -2873,6 +2902,7 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
       unknown: false,
     },
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
     age: None,
   }
 }
@@ -3615,6 +3645,7 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
     age: None,
   }
 }

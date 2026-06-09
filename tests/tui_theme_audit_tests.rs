@@ -245,6 +245,17 @@ fn table_marker_resolves_through_theme_roles() {
   assert_eq!(line.spans[1].style.fg, Some(t.muted), "separator → muted role");
   assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
 
+  // Once an issue status is loaded, the Issue dot follows the same state role
+  // as the Issue/PR pane badge.
+  let mut closed_issue = issue_only.clone();
+  closed_issue.issue_state = Some(IssueState::Closed);
+  let line = table_marker(&closed_issue, &t);
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "closed issue dot → issue_badge_color closed role"
+  );
+
   // PR linked, issue empty: mirror — empty issue dot → `name`, PR → `locked`.
   let mut pr_only = base_worktree("pr");
   pr_only.link = BranchLink {
@@ -728,6 +739,7 @@ fn base_worktree(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: BranchLink::empty(),
+    issue_state: None,
     age: Some(Duration::from_secs(3600)),
   }
 }

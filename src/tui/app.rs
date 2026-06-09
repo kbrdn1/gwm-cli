@@ -15,7 +15,7 @@ use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
-use crate::github::{self, BranchLink, IssueStatus, PrStatus};
+use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
@@ -2125,7 +2125,23 @@ impl App {
     };
     let link = self.github.link.clone();
     if let Some(w) = self.worktrees.get_mut(original) {
+      if w.link.issue != link.issue {
+        w.issue_state = None;
+      }
       w.link = link;
+    }
+  }
+
+  fn sync_selected_issue_state_into_table(&mut self, state: IssueState) {
+    let Some(i) = self.list_state.selected() else {
+      return;
+    };
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let Some(&original) = filtered.get(i) else {
+      return;
+    };
+    if let Some(w) = self.worktrees.get_mut(original) {
+      w.issue_state = Some(state);
     }
   }
 
@@ -2380,6 +2396,7 @@ impl App {
     let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
     self.github.link.issue_title = Some(status.title.clone());
     self.sync_selected_link_into_table();
+    self.sync_selected_issue_state_into_table(status.state);
   }
 
   fn persist_loaded_pr_title(&mut self, status: &PrStatus) {
