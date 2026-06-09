@@ -234,16 +234,17 @@ fn table_marker_resolves_through_theme_roles() {
   );
 
   // Issue linked, PR empty: issue dot → `clean`, separator → `muted`, the
-  // empty PR dot → `name` (the neutral white slot).
+  // empty PR dash → `name` (the neutral white slot).
   let mut issue_only = base_worktree("issue");
   issue_only.link = BranchLink {
     issue: Some(7),
     ..BranchLink::empty()
   };
   let line = table_marker(&issue_only, &t);
+  assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
   assert_eq!(line.spans[0].style.fg, Some(t.clean), "issue dot → clean role");
   assert_eq!(line.spans[1].style.fg, Some(t.muted), "separator → muted role");
-  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 
   // Once an issue status is loaded, the Issue dot follows the same state role
   // as the Issue/PR pane badge.
@@ -256,21 +257,33 @@ fn table_marker_resolves_through_theme_roles() {
     "closed issue dot → issue_badge_color closed role"
   );
 
-  // PR linked, issue empty: mirror — empty issue dot → `name`, PR → `locked`.
+  // PR linked, issue empty: mirror — empty issue dash → `name`, PR → `locked`.
   let mut pr_only = base_worktree("pr");
   pr_only.link = BranchLink {
     pr: Some(8),
     ..BranchLink::empty()
   };
   let line = table_marker(&pr_only, &t);
-  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dot → name role");
+  assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
   assert_eq!(line.spans[2].style.fg, Some(t.locked), "pr dot → locked role");
+
+  let mut closed_pr = pr_only.clone();
+  closed_pr.pr_state = Some(PrState::Closed);
+  let line = table_marker(&closed_pr, &t);
+  assert_eq!(
+    line.spans[2].style.fg,
+    Some(pr_badge_color(PrState::Closed, &t)),
+    "closed pr dot → pr_badge_color closed role"
+  );
 
   // Nothing linked: two `name`-white slots.
   let unlinked = base_worktree("plain");
   let line = table_marker(&unlinked, &t);
-  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dot → name role");
-  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
+  assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
+  assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +753,7 @@ fn base_worktree(name: &str) -> WorktreeInfo {
     status: BranchStatus::default(),
     link: BranchLink::empty(),
     issue_state: None,
+    pr_state: None,
     age: Some(Duration::from_secs(3600)),
   }
 }

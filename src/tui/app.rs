@@ -22,6 +22,7 @@ use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -522,15 +523,44 @@ impl App {
   /// at the previous vec — a length change auto-invalidates, but a
   /// same-length list with different contents would not, so the explicit
   /// flush is the safe play), re-clamp the selection (which re-resolves
-  /// the link cache), invalidate the sidebar preview, and report the
-  /// count. Called by the synchronous [`Self::refresh`] and by the
-  /// off-thread drain in [`Self::drain_task_results`].
-  fn apply_refreshed_worktrees(&mut self, worktrees: Vec<WorktreeInfo>) {
+  /// the link cache), refresh every Issue/PR status linked by the listed
+  /// rows, invalidate the sidebar preview, and report the count. Called by
+  /// the synchronous [`Self::refresh`] and by the off-thread drain in
+  /// [`Self::drain_task_results`].
+  fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
+    let issue_states: HashMap<u64, IssueState> = self
+      .worktrees
+      .iter()
+      .filter_map(|w| Some((w.link.issue?, w.issue_state?)))
+      .collect();
+    let pr_states = self
+      .worktrees
+      .iter()
+      .filter_map(|w| Some((w.link.pr?, w.pr_state?)))
+      .collect::<HashMap<_, _>>();
+
+    for w in &mut worktrees {
+      if let Some(issue) = w.link.issue {
+        w.issue_state = issue_states.get(&issue).copied();
+      }
+      if let Some(pr) = w.link.pr {
+        w.pr_state = pr_states.get(&pr).copied();
+      }
+    }
+
     self.worktrees = worktrees;
     self.filter.invalidate();
     self.clamp_selection_to_filter();
+    let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
-    self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
+    self.status = if spawned > 0 {
+      format!(
+        "refreshed — {} worktree(s); fetching GitHub status…",
+        self.worktrees.len()
+      )
+    } else {
+      format!("refreshed — {} worktree(s)", self.worktrees.len())
+    };
   }
 
   /// Off-thread worktree list refresh for the `f` / `r` key (issue #231):
@@ -2128,20 +2158,56 @@ impl App {
       if w.link.issue != link.issue {
         w.issue_state = None;
       }
+      if w.link.pr != link.pr {
+        w.pr_state = None;
+      }
       w.link = link;
     }
   }
 
-  fn sync_selected_issue_state_into_table(&mut self, state: IssueState) {
-    let Some(i) = self.list_state.selected() else {
-      return;
-    };
-    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
-    let Some(&original) = filtered.get(i) else {
-      return;
-    };
-    if let Some(w) = self.worktrees.get_mut(original) {
-      w.issue_state = Some(state);
+  fn sync_issue_status_into_table(&mut self, status: &IssueStatus) {
+    if self.github.link.issue == Some(status.number) {
+      self.github.link.issue_title = Some(status.title.clone());
+      if let Some(branch) = self.selected_branch_name() {
+        let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
+      }
+    }
+    for w in &mut self.worktrees {
+      if w.link.issue != Some(status.number) {
+        continue;
+      }
+      w.issue_state = Some(status.state);
+      w.link.issue_title = Some(status.title.clone());
+      if let Some(branch) = w.branch.as_deref() {
+        let _ = github::persist_issue_title(&self.repo, branch, &status.title);
+      }
+    }
+  }
+
+  fn sync_pr_status_into_table(&mut self, status: &PrStatus) {
+    if self.github.link.pr == Some(status.number) {
+      self.github.link.pr_title = Some(status.title.clone());
+      if let Some(branch) = self.selected_branch_name() {
+        let _ = match self.github.link.pr_source {
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title),
+          github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+        };
+      }
+    }
+    for w in &mut self.worktrees {
+      if w.link.pr != Some(status.number) {
+        continue;
+      }
+      w.pr_state = Some(status.state);
+      w.link.pr_title = Some(status.title.clone());
+      if let Some(branch) = w.branch.as_deref() {
+        let _ = match w.link.pr_source {
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, branch, &status.title),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, branch, &status.title),
+          github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+        };
+      }
     }
   }
 
@@ -2259,6 +2325,46 @@ impl App {
       // report the current outcome immediately.
       self.report_github_refresh_status();
     }
+  }
+
+  fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    let Some(slug) = self.github.link_slug.clone() else {
+      return 0;
+    };
+    let issues = self
+      .worktrees
+      .iter()
+      .filter_map(|w| w.link.issue)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    let prs = self
+      .worktrees
+      .iter()
+      .filter_map(|w| w.link.pr)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    if issues.is_empty() && prs.is_empty() {
+      return 0;
+    }
+
+    self.invalidate_github();
+    let mut spawned = 0u32;
+    for n in issues {
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
+      }
+    }
+    for n in prs {
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if spawned > 0 {
+      self.spinner.reset();
+    }
+    spawned
   }
 
   /// Flush the GitHub result cache **and** drop any in-flight GitHub worker
@@ -2387,32 +2493,11 @@ impl App {
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
-    if self.github.link.issue != Some(status.number) {
-      return;
-    }
-    let Some(branch) = self.selected_branch_name() else {
-      return;
-    };
-    let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
-    self.github.link.issue_title = Some(status.title.clone());
-    self.sync_selected_link_into_table();
-    self.sync_selected_issue_state_into_table(status.state);
+    self.sync_issue_status_into_table(status);
   }
 
   fn persist_loaded_pr_title(&mut self, status: &PrStatus) {
-    if self.github.link.pr != Some(status.number) {
-      return;
-    }
-    let Some(branch) = self.selected_branch_name() else {
-      return;
-    };
-    let _ = match self.github.link.pr_source {
-      github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title),
-      github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title),
-      github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
-    };
-    self.github.link.pr_title = Some(status.title.clone());
-    self.sync_selected_link_into_table();
+    self.sync_pr_status_into_table(status);
   }
 
   // ---- Open menu ----------------------------------------------------------

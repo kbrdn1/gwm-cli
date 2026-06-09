@@ -474,8 +474,8 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // column rock-stable at 4 cells (the cost of losing the unit
   // letter to truncation — "22h" → "22" — is worse than name/branch
   // shrinking by a char or two). Strategy:
-  //   - `Length(4)` for age, `Length(3)` for marker (`●/●`), `Length(16)`
-  //     for status: hard-fixed lengths the solver must honour.
+  //   - `Length(4)` for age, `Length(3)` for marker (`●/●`, `●/-`, etc.),
+  //     `Length(16)` for status: hard-fixed lengths the solver must honour.
   //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
   //     when the terminal is narrow (they shrink down to 8) and grow
   //     to the original clamped width (or more) when there's room.
@@ -3873,18 +3873,20 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
 
 /// Build the table's first-column marker (issue #283). The main worktree
 /// keeps its single `★` (painted with the `main` role, preserving the
-/// pre-#73 convention). Every other row renders two pastilles `●/●`:
+/// pre-#73 convention). Every other row renders two Issue/PR slots:
 ///
-/// - left = **Issue** — loaded issue-state colour when known, `clean` green
-///   when only a link is known, else white.
-/// - right = **PR** — `locked` violet when a PR is linked, else white.
+/// - left = **Issue** — `●` with the loaded issue-state colour when known,
+///   `●` in `clean` green when only a link is known, else `-` in white.
+/// - right = **PR** — `●` with the loaded PR-state colour when known, `●`
+///   in `locked` violet when only a link is known, else `-` in white.
 /// - a `muted` `/` separates them.
 ///
-/// The table is normally the no-fetch read path. Once the selected worktree's
-/// issue status has been fetched, the row snapshot carries that loaded state
-/// so the Issue pastille can mirror open/closed without a per-row `gh` call.
-/// A detected PR shows here on every row only because it is persisted to
-/// `gwm-pr-detected` (#283) and read back by [`crate::github::read_link`].
+/// The table is normally the no-fetch read path. Once GitHub status has been
+/// fetched for linked rows, their snapshots carry loaded states so
+/// the Issue/PR pastilles can mirror open/closed/draft/merged without a
+/// per-frame `gh` call. A detected PR shows here on every row only because it
+/// is persisted to `gwm-pr-detected` (#283) and read back by
+/// [`crate::github::read_link`].
 pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
     return Line::from(Span::styled("★", Style::default().fg(theme.main)));
@@ -3897,10 +3899,20 @@ pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
     (Some(_), None) => theme.clean,
     (None, _) => theme.name,
   };
-  let pr_color = if w.link.pr.is_some() { theme.locked } else { theme.name };
+  let pr_color = match (w.link.pr, w.pr_state) {
+    (Some(_), Some(state)) => pr_badge_color(state, theme),
+    (Some(_), None) => theme.locked,
+    (None, _) => theme.name,
+  };
   Line::from(vec![
-    Span::styled("●", Style::default().fg(issue_color)),
+    Span::styled(
+      if w.link.issue.is_some() { "●" } else { "-" },
+      Style::default().fg(issue_color),
+    ),
     Span::styled("/", Style::default().fg(theme.muted)),
-    Span::styled("●", Style::default().fg(pr_color)),
+    Span::styled(
+      if w.link.pr.is_some() { "●" } else { "-" },
+      Style::default().fg(pr_color),
+    ),
   ])
 }

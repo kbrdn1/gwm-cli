@@ -55,6 +55,7 @@ fn fixture_repo(commit_count: usize) -> (TempDir, Repository, WorktreeInfo) {
     status: BranchStatus::default(),
     link: BranchLink::empty(),
     issue_state: None,
+    pr_state: None,
     age: None,
   };
 
