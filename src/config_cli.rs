@@ -176,13 +176,28 @@ fn load_document(path: &Path) -> Result<DocumentMut> {
 }
 
 fn write_and_validate(path: &Path, doc: &DocumentMut) -> Result<()> {
-  // Validate the rendered document BEFORE touching disk (issue #279 review
-  // P2): a write that would fail `Config` validation must not overwrite the
-  // existing good file and strand the next launch on an invalid config.
   let rendered = doc.to_string();
-  validate_rendered(path, &rendered)?;
-  std::fs::write(path, rendered)?;
-  Ok(())
+  match validate_rendered(path, &rendered) {
+    // The edit is valid — write it.
+    Ok(()) => {
+      std::fs::write(path, rendered)?;
+      Ok(())
+    }
+    // The edit would produce an invalid Config. Only refuse the write when
+    // the existing on-disk file is VALID (or absent) — i.e. this edit would
+    // clobber a good file with a broken one (issue #279 review P2). If the
+    // file is ALREADY invalid, keep the historical write-then-error
+    // behaviour so `gwm config set` can still edit a broken file toward a
+    // fixed state rather than refusing every edit until it is hand-repaired
+    // (issue #281 — the validate-before-write chicken-and-egg).
+    Err(e) => {
+      if validate_file(path).is_ok() {
+        return Err(e);
+      }
+      std::fs::write(path, rendered)?;
+      Err(e)
+    }
+  }
 }
 
 fn validate_file(path: &Path) -> Result<()> {
