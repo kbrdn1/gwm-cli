@@ -1,6 +1,7 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, Keymap};
 use super::state::async_task::TaskKind;
+use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
 use super::state::sidebar::SidebarMode;
@@ -16,7 +17,10 @@ use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Widget, Wrap},
+  widgets::{
+    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, Widget, Wrap,
+  },
   Frame,
 };
 use std::time::{Duration, Instant};
@@ -1385,6 +1389,23 @@ pub fn chip_style(color: Color) -> Style {
     .add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
+/// The hint *bind* style (issue #279): the accent-coloured, **bold** key
+/// glyph that leads every statusbar / modal hint. This replaces the
+/// pre-#279 reverse-video [`chip_style`] badge with a flat herdr-style
+/// "accent bind + space + muted action" treatment — no box around the key.
+/// Action *buttons* (Create / confirm / type selector) and the statusbar
+/// context anchor keep [`chip_style`]; only the which-key hints are flat.
+pub fn hint_key_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+}
+
+/// The hint *action* style (issue #279): the muted description trailing a
+/// [`hint_key_style`] bind. Routed through the `muted` role so a theme
+/// override recolours it with the rest of the dim chrome.
+pub fn hint_label_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.muted)
+}
+
 /// Style for a *non-highlighted* command name in the command palette
 /// (issue #210 follow-up). Routes through the `name` role (default
 /// `White`) so a `[theme]` override / light preset recolours it, instead
@@ -1583,7 +1604,7 @@ impl HintContext {
         Hint::Key(Review, "review"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
-        Hint::Key(ConfigPanel, "config"),
+        Hint::Key(ConfigPanel, "settings"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1595,7 +1616,7 @@ impl HintContext {
         Hint::Key(FetchGithub, "fetch"),
         Hint::Key(FocusWorktrees, "worktrees"),
         Hint::Key(CommandLogs, "logs"),
-        Hint::Key(ConfigPanel, "config"),
+        Hint::Key(ConfigPanel, "settings"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1687,14 +1708,16 @@ pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
 }
 
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let mut spans: Vec<Span<'static>> = Vec::new();
   for (i, (key, label)) in hints.iter().enumerate() {
     if i > 0 {
-      spans.push(Span::raw(" "));
+      // Two spaces between hint pairs keep `key action` groups visually
+      // distinct now that the badge box is gone (issue #279).
+      spans.push(Span::raw("  "));
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
   }
   Line::from(spans).centered()
@@ -1732,8 +1755,8 @@ fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Ke
 /// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
 /// labels and the bracketed status are ASCII / single-width in practice).
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let status_style = Style::default().fg(theme.dirty);
 
   // A zero-width row can hold nothing — return an empty line rather than let
@@ -1764,21 +1787,21 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   let hint_budget = (width - status_w - 1).saturating_sub(1);
 
   let mut spans: Vec<Span<'static>> = Vec::new();
-  let mut used = 0usize; // display columns consumed by hint badges so far
+  let mut used = 0usize; // display columns consumed by hint groups so far
   let mut truncated = false;
   for (i, (key, label)) in hints.iter().enumerate() {
-    let sep = usize::from(i > 0); // single space between badges
-                                  // chip ` key ` (key + 2 pad) + ` label` (label + 1 leading space)
-    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    let sep = if i > 0 { 2 } else { 0 }; // two spaces between hint groups (#279)
+                                         // flat bind `key` + ` label` (label + 1 leading space)
+    let badge_w = key.chars().count() + 1 + label.chars().count();
     if used + sep + badge_w > hint_budget {
       truncated = true;
       break;
     }
-    if sep == 1 {
-      spans.push(Span::raw(" "));
-      used += 1;
+    if sep > 0 {
+      spans.push(Span::raw(" ".repeat(sep)));
+      used += sep;
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
     used += badge_w;
   }
@@ -1824,8 +1847,8 @@ pub fn status_line(
   theme: &Theme,
 ) -> Line<'static> {
   let context_style = chip_style(theme.focus);
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let status_style = Style::default().fg(theme.dirty);
   let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
@@ -1871,19 +1894,19 @@ pub fn status_line(
   let mut truncated = false;
   let mut hint_used = 0usize;
   for (i, (key, label)) in hints.iter().enumerate() {
-    // A separating space before every badge except the very first one when
-    // there is no left cluster.
-    let sep = usize::from(i > 0 || used > 0);
-    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    // Two spaces between hint groups (#279); a single space after the left
+    // cluster (context chip / spinner) before the first hint.
+    let sep = if i > 0 { 2 } else { usize::from(used > 0) };
+    let badge_w = key.chars().count() + 1 + label.chars().count();
     if hint_used + sep + badge_w > hint_budget {
       truncated = true;
       break;
     }
-    if sep == 1 {
-      spans.push(Span::raw(" "));
-      hint_used += 1;
+    if sep > 0 {
+      spans.push(Span::raw(" ".repeat(sep)));
+      hint_used += sep;
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
     hint_used += badge_w;
   }
@@ -2144,12 +2167,40 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
 /// so the labels line up regardless of how many chords a row binds.
 pub fn badge_group_width(keys: &str) -> usize {
   if keys.is_empty() || keys == "(unbound)" {
-    return "(unbound)".chars().count() + 2;
+    return "(unbound)".chars().count();
   }
   let chords: Vec<&str> = keys.split(", ").collect();
-  let badges: usize = chords.iter().map(|c| c.chars().count() + 2).sum();
-  // One space between adjacent badges.
-  badges + chords.len().saturating_sub(1)
+  // Flat accent-bold glyphs now (issue #279), no `` key `` padding box: a
+  // group is the sum of bare chord widths plus one space between adjacent
+  // chords.
+  let glyphs: usize = chords.iter().map(|c| c.chars().count()).sum();
+  glyphs + chords.len().saturating_sub(1)
+}
+
+/// One documented-binding row for the Keybindings overlay (issue #279):
+/// the chord(s) as flat accent-bold glyphs (no reverse-video badge),
+/// padded to `max_group_w` so every label lines up in one column, then the
+/// human label. An unbound action reads as a muted `(unbound)` placeholder.
+/// Extracted as a pure builder so the de-badged treatment is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Theme) -> Line<'static> {
+  let key_style = hint_key_style(theme);
+  let muted_style = Style::default().fg(theme.muted);
+  let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+  if keys.is_empty() || keys == "(unbound)" {
+    spans.push(Span::styled("(unbound)", muted_style));
+  } else {
+    for (i, chord) in keys.split(", ").enumerate() {
+      if i > 0 {
+        spans.push(Span::raw(" "));
+      }
+      spans.push(Span::styled(chord.to_string(), key_style));
+    }
+  }
+  let pad = max_group_w.saturating_sub(badge_group_width(keys)) + 1;
+  spans.push(Span::raw(" ".repeat(pad)));
+  spans.push(Span::styled(label.to_string(), help_label_style(theme)));
+  Line::from(spans)
 }
 
 fn draw_help(f: &mut Frame, app: &mut App) {
@@ -2162,20 +2213,15 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
   let accent = app.theme.accent;
-  let muted = app.theme.muted;
 
-  // Key *badges* mirror the bottom statusline's chip style
-  // (`footer_line`): a reversed-bold accent block. Section headers and
-  // the title share the bold-accent heading style. Labels stay white
-  // for contrast; an `(unbound)` action renders muted instead of a chip
-  // so it reads as "no binding" rather than a live key.
-  let chip_style = chip_style(accent);
   let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  let label_style = help_label_style(&app.theme);
-  let muted_style = Style::default().fg(muted);
+  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
+  // italic, so the context name is clearly a different colour from both the
+  // bold title and the muted key labels (issue #217 follow-up).
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
-  // Align every label to the same column: pad each badge *group* out to
-  // the widest one so the descriptions line up under one another.
+  // Align every label to the same column: pad each chord *group* out to the
+  // widest one so the descriptions line up under one another.
   let max_group_w = rows
     .iter()
     .filter_map(|r| match r {
@@ -2185,70 +2231,64 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     .max()
     .unwrap_or(0);
 
-  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
-  // italic, so the context name is clearly a different colour from both the
-  // bold title and the muted key labels (issue #217 follow-up).
-  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
-
-  let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+  // Issue #279: split the overlay into a FIXED header (title + subtitle), a
+  // SCROLLABLE body (sections + entries), and a FIXED footer hint. Pre-#279
+  // the whole content scrolled in one `Paragraph`, so the title and the
+  // close hint rolled off the top/bottom as soon as the body outgrew the
+  // modal. Title/subtitle are the leading rows; everything else is body.
+  let mut header_lines: Vec<Line<'static>> = Vec::new();
+  let mut body_lines: Vec<Line<'static>> = Vec::new();
   for row in rows {
     match row {
-      // Title + subtitle are centred (issue #217); section headers stay
-      // left-aligned so they anchor their groups lazygit-style.
-      HelpRow::Title(t) => {
-        lines.push(Line::from(Span::styled(t, heading_style)).centered());
-      }
-      HelpRow::Subtitle(t) => {
-        lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
-      }
-      HelpRow::Section(t) => {
-        lines.push(Line::from(Span::styled(
-          t,
-          help_section_style(help_body_section_color(&app.theme)),
-        )));
-      }
-      HelpRow::Blank => lines.push(Line::from(String::new())),
+      // Title + subtitle are centred (issue #217) and pinned in the header.
+      HelpRow::Title(t) => header_lines.push(Line::from(Span::styled(t, heading_style)).centered()),
+      HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
+      // Section headers stay left-aligned so they anchor their groups
+      // lazygit-style.
+      HelpRow::Section(t) => body_lines.push(Line::from(Span::styled(
+        t,
+        help_section_style(help_body_section_color(&app.theme)),
+      ))),
+      HelpRow::Blank => body_lines.push(Line::from(String::new())),
       HelpRow::Entry { keys, label } => {
-        // One badge per chord, separated by a space (#187 review: the
-        // comma-joined `j, Down` now reads as `[ j ] [ Down ]`).
-        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        if keys.is_empty() || keys == "(unbound)" {
-          spans.push(Span::styled(" (unbound) ", muted_style));
-        } else {
-          for (i, chord) in keys.split(", ").enumerate() {
-            if i > 0 {
-              spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(format!(" {} ", chord), chip_style));
-          }
-        }
-        let pad = max_group_w.saturating_sub(badge_group_width(&keys)) + 1;
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(label, label_style));
-        lines.push(Line::from(spans));
+        body_lines.push(help_entry_line(&keys, &label, max_group_w, &app.theme));
       }
     }
   }
-  push_modal_hint(&mut lines, HintContext::Help, &app.keymap, &app.theme);
 
-  // Publish the scroll bound against the actual viewport so the Keybindings
-  // overlay can scroll when it outgrows the modal (#217). The renderer is
-  // the only place that knows both the content length and the inner height,
-  // so it clamps the offset here too.
   let block = overlay_block(accent);
   let inner_area = block.inner(area);
-  let viewport = inner_area.height as usize;
-  app.help_max_scroll = (lines.len().saturating_sub(viewport)) as u16;
-  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let viewport_width = inner_area.width as usize;
-  let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(viewport_width) as u16;
-  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
-  let scroll = app.help_scroll;
-  let x_scroll = app.help_x_scroll;
-
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(block, area);
+
+  // header (fixed) | body (scrollable) | footer hint (fixed). The header is
+  // exactly as tall as its line count; the footer is one row; the body
+  // takes the rest.
+  let header_h = header_lines.len() as u16;
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner_area);
+
+  f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // Publish the scroll bounds against the BODY viewport only (issue #279) —
+  // not the whole inner height — so the clamp matches what actually scrolls
+  // and the last body rows stay reachable.
+  let body_viewport = body_area.height as usize;
+  app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+  let scroll = app.help_scroll;
+  // Reserve the scrollbar column FIRST, then bound the horizontal pan against
+  // the reduced text width so the final cell stays reachable (review P3).
+  let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.help_max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
+  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
+  let x_scroll = app.help_x_scroll;
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(
+    modal_hint_for_context(HintContext::Help, &app.keymap, &app.theme),
+    footer_area,
+  );
 }
 
 /// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
@@ -2266,15 +2306,39 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let err_color = app.theme.prunable;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
 
-  let mut lines: Vec<Line<'static>> = overlay_title_lines("Command Logs", accent);
+  // Fixed header (title) / scrollable body / fixed footer hint (issue #279) —
+  // the title and the close hint stay pinned while the transcript scrolls.
+  let block = overlay_block(accent);
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  f.render_widget(
+    Paragraph::new(Line::from(Span::styled("Command Logs", heading_style)).centered()),
+    header_area,
+  );
+
+  // A full-width `-` rule, padded by a blank line above and below, separates
+  // adjacent log entries (issue #279 follow-up).
+  let rule = "-".repeat(body_area.width as usize);
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
   if app.command_logs.entries.is_empty() {
     lines.push(Line::from(Span::styled("No commands run yet.", muted_style)));
   } else {
     // Newest-first: the most recent command is what the user opened the
     // overlay to see, so it sits at the top without scrolling.
-    for entry in app.command_logs.entries.iter().rev() {
+    for (i, entry) in app.command_logs.entries.iter().rev().enumerate() {
+      if i > 0 {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(Span::styled(rule.clone(), muted_style)));
+        lines.push(Line::from(String::new()));
+      }
       // The resolved argv, prefixed lazygit-style with `$`.
       lines.push(Line::from(vec![
         Span::styled("$ ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
@@ -2310,113 +2374,233 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
           lines.push(Line::from(Span::styled(format!("    {}", l), muted_style)));
         }
       }
-      lines.push(Line::from(String::new()));
     }
   }
 
-  // Footer hint: scroll + close. A plain muted line (not `push_modal_hint`,
-  // whose contexts are pane-specific) keeps the overlay self-documenting.
-  lines.push(Line::from(Span::styled(
-    "j/k scroll · g/G top/bottom · esc close",
-    muted_style.add_modifier(Modifier::ITALIC),
-  )));
-
-  // Publish the scroll bounds against the live viewport (mirrors
-  // `draw_help`): the renderer is the only place that knows both the
-  // content length and the inner modal height, so it clamps here.
-  let block = overlay_block(accent);
-  let inner = block.inner(area);
-  let viewport = inner.height as usize;
-  app.command_logs.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  // Publish the scroll bounds against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.command_logs.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
   app.command_logs.scroll = app.command_logs.scroll.min(app.command_logs.max_scroll);
-  let viewport_w = inner.width as usize;
-  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.command_logs.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
-  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let scroll = app.command_logs.scroll;
+  // Reserve the scrollbar column first, then bound the pan (review P3).
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
+  app.command_logs.max_x_scroll = content_w.saturating_sub(text_area.width as usize) as u16;
+  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let x_scroll = app.command_logs.x_scroll;
-
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(
+    modal_hint_line(
+      &[
+        ("j/k", "scroll"),
+        ("g/G", "top/bottom"),
+        ("y", "copy"),
+        ("Esc", "close"),
+      ],
+      &app.theme,
+    ),
+    footer_area,
+  );
 }
 
-/// Render the Configuration panel overlay (issue #232): a ~90% fullscreen
-/// modal listing the resolved config (user-level global merged under the
-/// repo `.gwm.toml`) grouped by top-level section, each row carrying a
-/// leading colour-coded source column (repo / user / default). Scrolls
-/// like the help / Command Logs overlays — the renderer republishes
-/// `config_panel.max_scroll` / `max_x_scroll` against the live viewport.
-fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered(90, 85, f.area());
+/// Render a vertical scrollbar on the right edge of `area` when the content
+/// overflows the viewport (issue #279, herdr-style), and return the text
+/// area shrunk by one column to make room. When everything fits, the area
+/// is returned unchanged and no scrollbar is drawn. The thumb tracks the
+/// theme `accent`; the track reads `muted`.
+fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
+  let viewport = area.height as usize;
+  if content_len <= viewport || area.width < 2 {
+    return area;
+  }
+  // ratatui maps the thumb over `content_length - 1`, but our scroll offset
+  // is clamped to `content_len - viewport` (the last page stays full). Pass
+  // `content_length = max_scroll + 1` with the real viewport length so the
+  // thumb size stays proportional AND reaches the bottom at full scroll
+  // (issue #279 follow-up: the thumb used to top out early).
+  let max_scroll = content_len - viewport;
+  let mut state = ScrollbarState::new(max_scroll + 1)
+    .position(offset as usize)
+    .viewport_content_length(viewport);
+  let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(None)
+    .end_symbol(None)
+    .thumb_style(Style::default().fg(theme.accent))
+    .track_style(Style::default().fg(theme.muted));
+  f.render_stateful_widget(bar, area, &mut state);
+  Rect {
+    width: area.width.saturating_sub(1),
+    ..area
+  }
+}
+
+/// Build the read-only `All`-tab body: the resolved config grouped by
+/// top-level section with a colour-coded source column (repo / user /
+/// default). The pre-#279 Configuration view, now one tab of the Settings
+/// overlay.
+fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
-  let repo_color = app.theme.clean;
-  let user_color = app.theme.branch;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
-
-  let mut lines: Vec<Line<'static>> = overlay_title_lines("Configuration", accent);
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
   if app.config_panel.rows.is_empty() {
     lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
-  } else {
-    // Rows arrive sorted (the flatten walks a `BTreeMap`), so each
-    // top-level section is contiguous — emit a `[section]` heading when it
-    // changes, mirroring `gwm config list`'s grouping.
-    let mut current_section: Option<String> = None;
-    for row in &app.config_panel.rows {
-      let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
-      if current_section.as_deref() != Some(section.as_str()) {
-        if current_section.is_some() {
-          lines.push(Line::from(String::new()));
-        }
-        lines.push(Line::from(Span::styled(
-          format!("[{section}]"),
-          help_section_style(accent),
-        )));
-        current_section = Some(section);
-      }
-      // Leading source column, colour-coded and padded so keys align: repo
-      // overrides read strongest, user next, defaults muted.
-      let src_color = match row.source {
-        ConfigSource::Repo => repo_color,
-        ConfigSource::User => user_color,
-        ConfigSource::Default => muted,
-      };
-      lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
-        Span::raw("  "),
-        Span::styled(row.key.clone(), label_style),
-        Span::styled(" = ", muted_style),
-        Span::styled(row.value.clone(), Style::default().fg(Color::White)),
-      ]));
-    }
+    return lines;
   }
+  let mut current_section: Option<String> = None;
+  for row in &app.config_panel.rows {
+    let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
+    if current_section.as_deref() != Some(section.as_str()) {
+      if current_section.is_some() {
+        lines.push(Line::from(String::new()));
+      }
+      lines.push(Line::from(Span::styled(
+        format!("[{section}]"),
+        help_section_style(accent),
+      )));
+      current_section = Some(section);
+    }
+    let src_color = match row.source {
+      ConfigSource::Repo => app.theme.clean,
+      ConfigSource::User => app.theme.branch,
+      ConfigSource::Default => muted,
+    };
+    lines.push(Line::from(vec![
+      Span::raw("  "),
+      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::raw("  "),
+      Span::styled(row.key.clone(), label_style),
+      Span::styled(" = ", muted_style),
+      Span::styled(row.value.clone(), Style::default().fg(Color::White)),
+    ]));
+  }
+  lines
+}
 
-  // Footer hint: scroll + close, matching the Command Logs overlay.
-  lines.push(Line::from(String::new()));
-  lines.push(Line::from(Span::styled(
-    "j/k scroll · g/G top/bottom · esc close",
-    muted_style.add_modifier(Modifier::ITALIC),
-  )));
+/// Build an editable-tab body: one row per [`SettingField`], the selected
+/// row marked and its value in the accent. The `Uint` field under edit
+/// shows its live buffer with a cursor; a field whose effective value is
+/// shadowed by a higher-precedence layer carries an inline guidance note
+/// (issue #279 — honours "edit both layers" without a silent dead edit).
+fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+  let panel = &app.config_panel;
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
-  // Publish the scroll bounds against the live viewport (mirrors
-  // `draw_command_logs` / `draw_help`).
+  for (i, field) in fields.iter().enumerate() {
+    let selected = i == panel.selected;
+    let editing = selected && panel.editing.is_some();
+    let value = if editing {
+      format!("{}_", panel.editing.as_deref().unwrap_or(""))
+    } else {
+      field.current(&app.config)
+    };
+    let marker = if selected { "›" } else { " " };
+    let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let value_style = if selected {
+      Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(Color::White)
+    };
+    let mut spans = vec![
+      Span::styled(format!(" {marker} "), marker_style),
+      Span::styled(format!("{:<24}", field.label()), label_style),
+      Span::styled(value, value_style),
+    ];
+    // Shadow guidance: editing the Global layer for a field the repo
+    // overrides won't change the effective value (repo wins). Surface it
+    // rather than silently no-op or hard-disable the field.
+    if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
+    {
+      spans.push(Span::styled("  — set in .gwm.toml; switch to Project", muted_style));
+    }
+    lines.push(Line::from(spans));
+  }
+  lines
+}
+
+/// Render the Settings overlay (issue #232; editable in #279): same modal
+/// size as the Keybindings overlay, with a fixed header (title + the edit
+/// layer as a subtitle + category tabs), a scrollable body (the active
+/// tab's fields, or the read-only resolved config on the `All` tab) with a
+/// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
+/// `config_panel.max_scroll` against the live body viewport.
+fn draw_config_panel(f: &mut Frame, app: &mut App) {
+  let area = centered(60, 60, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let muted_style = Style::default().fg(muted);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+  // Subtitle reads in the branch hue + italic, mirroring the Keybindings
+  // overlay's context subtitle.
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
+
+  let tab = app.config_panel.tab;
+  let editing = app.config_panel.editing.is_some();
+  let selected_kind = app.config_panel.selected_field().map(SettingField::kind);
+
+  // Header: title + the active edit layer as a subtitle + a blank spacer +
+  // the tab strip (all fixed). The layer-switch key lives in the footer
+  // hints, so the subtitle stays a plain context label.
+  let title = Line::from(Span::styled("Settings", heading_style)).centered();
+  let subtitle = Line::from(Span::styled(app.config_panel.layer.label(), subtitle_style)).centered();
+  let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+  for (i, t) in SettingsTab::ALL.iter().enumerate() {
+    if i > 0 {
+      tab_spans.push(Span::raw("  "));
+    }
+    let style = if *t == tab { chip_style(accent) } else { muted_style };
+    tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
+  }
+  let header_lines = vec![title, subtitle, Line::from(String::new()), Line::from(tab_spans)];
+
+  // Body depends on the active tab.
+  let body_lines = match tab {
+    SettingsTab::All => settings_all_lines(app),
+    other => settings_fields_lines(app, other.fields()),
+  };
+
+  // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
+  // the current tab / edit mode.
+  let footer_hints: Vec<(&str, &str)> = if editing {
+    vec![("Enter", "save"), ("Esc", "cancel")]
+  } else if tab == SettingsTab::All {
+    vec![("j/k", "scroll"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  } else if selected_kind == Some(FieldKind::Choice) {
+    vec![("Space", "cycle"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  } else {
+    vec![("Enter", "edit"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  };
+
   let block = overlay_block(accent);
   let inner = block.inner(area);
-  let viewport = inner.height as usize;
-  app.config_panel.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
-  app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
-  let viewport_w = inner.width as usize;
-  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.config_panel.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
-  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
-  let scroll = app.config_panel.scroll;
-  let x_scroll = app.config_panel.x_scroll;
-
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(block, area);
+
+  let header_h = header_lines.len() as u16;
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // Publish scroll bounds against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.config_panel.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
+  let scroll = app.config_panel.scroll;
+  // Reserve the scrollbar column first, then bound the pan (review P3).
+  let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  let content_w = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.config_panel.max_x_scroll = content_w.saturating_sub(text_area.width as usize) as u16;
+  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
+  let x_scroll = app.config_panel.x_scroll;
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {

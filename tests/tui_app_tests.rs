@@ -4633,3 +4633,172 @@ fn sync_refresh_invalidates_an_inflight_async_refresh() {
     "the dropped result's payload must never reach the list"
   );
 }
+
+// ---------------------------------------------------------------------------
+// Editable Settings panel — apply-live + persistence (issue #279)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn activate_choice_setting_persists_project_layer_and_applies_live() {
+  use gwm::config::{Config, SidebarPosition};
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0; // sidebar position
+  assert_eq!(app.config.tui.sidebar_position, SidebarPosition::Right);
+
+  // Cycle the choice: right → left, written to the project `.gwm.toml` and
+  // applied live.
+  app.activate_selected_setting();
+
+  assert_eq!(
+    app.config.tui.sidebar_position,
+    SidebarPosition::Left,
+    "live config updated"
+  );
+  assert_eq!(
+    app.sidebar.position,
+    SidebarPosition::Left,
+    "live sidebar position re-seeded"
+  );
+
+  let written = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(
+    written.contains("sidebar_position"),
+    "edit persisted to .gwm.toml: {written}"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.tui.sidebar_position,
+    SidebarPosition::Left,
+    "edit round-trips through a fresh layered load"
+  );
+}
+
+#[test]
+fn committing_numeric_input_persists_the_typed_value() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 2; // confirm countdown (Uint input)
+
+  // Arm the input, retype "5", commit.
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on a Uint field opens the input"
+  );
+  app.config_panel.editing = Some("5".into());
+  app.commit_settings_edit();
+
+  assert!(app.config_panel.editing.is_none(), "commit closes the input");
+  assert_eq!(app.config.tui.confirm_countdown_secs, 5, "live config updated");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.confirm_countdown_secs, 5, "typed value persisted");
+}
+
+#[test]
+fn committing_text_input_persists_a_worktree_pattern() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Worktree;
+  app.config_panel.selected = 0; // base directory (Text input)
+
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on a Text field opens the input"
+  );
+  app.config_panel.editing = Some("{home}/custom-wt/{repo}".into());
+  app.commit_settings_edit();
+
+  assert_eq!(
+    app.config.worktree.base, "{home}/custom-wt/{repo}",
+    "live config updated"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.worktree.base, "{home}/custom-wt/{repo}", "text value persisted");
+}
+
+#[test]
+fn committing_numeric_looking_text_persists_as_a_string() {
+  // Review P2: a Text field whose value looks like a number must round-trip
+  // as a string through the typed load, not be coerced to an int.
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Worktree;
+  app.config_panel.selected = 0; // base directory (Text input)
+
+  app.activate_selected_setting();
+  app.config_panel.editing = Some("404".into());
+  app.commit_settings_edit();
+
+  assert_eq!(app.config.worktree.base, "404", "live config keeps the text value");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.worktree.base, "404", "numeric-looking text persisted as a string");
+}
+
+#[test]
+fn command_logs_transcript_is_newest_first_and_empty_when_blank() {
+  use gwm::command_log::{CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  let (_dir, mut app) = make_app();
+  // Empty transcript when nothing has run.
+  assert!(app.command_logs_transcript().is_empty());
+
+  app.command_logs.entries = vec![
+    CommandLogEntry {
+      command: "first cmd".into(),
+      duration: Duration::from_millis(10),
+      status: CommandStatus::Exited(Some(0)),
+      output: "ok".into(),
+    },
+    CommandLogEntry {
+      command: "second cmd".into(),
+      duration: Duration::from_millis(20),
+      status: CommandStatus::Exited(Some(2)),
+      output: "boom".into(),
+    },
+  ];
+  let t = app.command_logs_transcript();
+  assert!(
+    t.contains("$ first cmd") && t.contains("$ second cmd"),
+    "both argv present: {t}"
+  );
+  // Newest-first: the last-pushed entry leads the transcript.
+  assert!(
+    t.find("second cmd").unwrap() < t.find("first cmd").unwrap(),
+    "newest entry must come first: {t}"
+  );
+  assert!(t.contains("→ exit 2"), "non-zero exit is recorded: {t}");
+  assert!(
+    t.contains("boom") && t.contains("ok"),
+    "captured output is included: {t}"
+  );
+}
+
+#[test]
+fn activate_is_a_noop_on_the_read_only_all_tab() {
+  use gwm::tui::SettingsTab;
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::All;
+  app.activate_selected_setting();
+  // Nothing written: the All tab has no editable field.
+  assert!(
+    !dir.path().join(".gwm.toml").exists(),
+    "the read-only All tab must not write anything"
+  );
+}

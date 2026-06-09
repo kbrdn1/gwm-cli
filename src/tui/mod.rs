@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 pub use state::command_logs::CommandLogs;
-pub use state::config_panel::ConfigPanel;
+pub use state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer, SettingsTab};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
@@ -59,13 +59,13 @@ pub use ui::{
   build_sidebar_sections, centered_abs, chip_style, confirm_buttons_line, confirm_delete_branch_line,
   confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle, field_input_line,
   filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines, header_line,
-  help_body_section_color, help_label_style, help_lines, help_rows, help_section_style, issue_badge_color,
-  issue_pr_pane_title, issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_line,
-  modal_hint_line, palette_name_style, pane_counter, panel_border_color, pr_badge_color, pr_summary_line,
-  recent_commits_lines, recent_items_pane_title, status_line, status_pane_title, table_marker,
-  tilde_compress_with_home, type_selector_line, working_tree_pane_title, working_tree_status_line, worktree_name_style,
-  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, COMMIT_HASH_DISPLAY_LEN,
-  RECENT_COMMITS_LIMIT,
+  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
+  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
+  link_prompt_modal_width, link_target_line, modal_hint_line, palette_name_style, pane_counter, panel_border_color,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, status_line, status_pane_title,
+  table_marker, tilde_compress_with_home, type_selector_line, working_tree_pane_title, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -306,6 +306,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       // so the open key toggles it shut even when rebound.
       View::CommandLogs => match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+        // `y` copies the whole transcript to the clipboard (issue #279).
+        KeyCode::Char('y') => copy_command_logs_to_clipboard(&mut app),
         KeyCode::Down | KeyCode::Char('j') => app.command_logs.scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.command_logs.scroll_up(),
         KeyCode::Right | KeyCode::Char('l') => app.command_logs.scroll_right(),
@@ -315,17 +317,53 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
         _ => {}
       },
-      // Configuration panel (issue #232). Scrolls like the help / Command
-      // Logs overlays; closes on Esc / `q` or the bound `config_panel` key
-      // (default `4`) so the open key toggles it shut even when rebound.
+      // Settings panel (issue #232; editable in #279). While a numeric input
+      // is armed, keystrokes route to the edit buffer and only Enter / Esc
+      // escape — so `q` / `j` / Tab while typing a countdown never quit or
+      // navigate. Otherwise: Tab/BackTab switch category tabs, `L` flips the
+      // edit layer, Up/Down select fields (or scroll on the read-only `All`
+      // tab), Space/Enter cycle a choice or open the numeric input, and
+      // Esc / `q` / the bound `config_panel` key (default `4`) close.
+      View::Config if app.config_panel.editing.is_some() => match key.code {
+        KeyCode::Enter => app.commit_settings_edit(),
+        KeyCode::Esc => app.config_panel.cancel_edit(),
+        KeyCode::Backspace => app.config_panel.pop_edit_char(),
+        KeyCode::Char(c) => app.config_panel.push_edit_char(c),
+        _ => {}
+      },
       View::Config => match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
-        KeyCode::Down | KeyCode::Char('j') => app.config_panel.scroll_down(),
-        KeyCode::Up | KeyCode::Char('k') => app.config_panel.scroll_up(),
-        KeyCode::Right | KeyCode::Char('l') => app.config_panel.scroll_right(),
-        KeyCode::Left | KeyCode::Char('h') => app.config_panel.scroll_left(),
-        KeyCode::Home | KeyCode::Char('g') => app.config_panel.scroll_to_top(),
-        KeyCode::End | KeyCode::Char('G') => app.config_panel.scroll_to_bottom(),
+        KeyCode::Tab => app.config_panel.next_tab(),
+        KeyCode::BackTab => app.config_panel.prev_tab(),
+        KeyCode::Char('L') => app.config_panel.toggle_layer(),
+        KeyCode::Char(' ') | KeyCode::Enter => app.activate_selected_setting(),
+        KeyCode::Down | KeyCode::Char('j') => {
+          if app.config_panel.tab == SettingsTab::All {
+            app.config_panel.scroll_down();
+          } else {
+            app.config_panel.select_next();
+          }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+          if app.config_panel.tab == SettingsTab::All {
+            app.config_panel.scroll_up();
+          } else {
+            app.config_panel.select_prev();
+          }
+        }
+        // Horizontal pan + jump only matter on the long read-only `All` tab.
+        KeyCode::Right | KeyCode::Char('l') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_right()
+        }
+        KeyCode::Left | KeyCode::Char('h') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_left()
+        }
+        KeyCode::Home | KeyCode::Char('g') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_to_top()
+        }
+        KeyCode::End | KeyCode::Char('G') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_to_bottom()
+        }
         _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
         _ => {}
       },
@@ -707,12 +745,34 @@ fn run_subshell(
 /// its stdin. Failures and "no tool found" both surface in the status
 /// bar — no propagation, the TUI must never die on a clipboard miss.
 fn yank_selected_path_to_clipboard(app: &mut App) {
-  use std::io::Write;
   let Some(path) = app.yank_selected_path() else {
     app.status = "nothing selected".into();
     return;
   };
   let text = path.display().to_string();
+  copy_text_to_clipboard(app, &text, "yanked path");
+}
+
+/// Copy the Command Logs transcript to the clipboard (issue #279, `y`).
+/// Builds the plain-text transcript from owned state, then hands it to the
+/// shared clipboard helper. Empty transcript → a status note, no spawn.
+fn copy_command_logs_to_clipboard(app: &mut App) {
+  let text = app.command_logs_transcript();
+  if text.is_empty() {
+    app.status = "no commands to copy".into();
+    return;
+  }
+  copy_text_to_clipboard(app, &text, "copied command logs");
+}
+
+/// Feed `text` to the first available clipboard tool from
+/// [`clipboard_candidates`]. Walks the candidates in order, uses the first
+/// one whose binary is on `$PATH`, and feeds the text through its stdin.
+/// `success` is the status-bar label on a clean copy. Failures and "no tool
+/// found" both surface in the status bar — the TUI must never die on a
+/// clipboard miss.
+fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
+  use std::io::Write;
   for (cmd, args) in clipboard_candidates() {
     if which::which(cmd).is_err() {
       continue;
@@ -730,7 +790,7 @@ fn yank_selected_path_to_clipboard(app: &mut App) {
         }
         match c.wait() {
           Ok(s) if s.success() => {
-            app.status = format!("yanked path ({})", cmd);
+            app.status = format!("{} ({})", success, cmd);
             return;
           }
           Ok(s) => {

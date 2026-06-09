@@ -14,8 +14,8 @@ use gwm::tui::{
   status_pane_title, type_selector_line, working_tree_pane_title, worktrees_pane_title,
 };
 use gwm::tui::{
-  confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_section_style,
-  issue_pr_pane_title,
+  confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
+  help_section_style, issue_pr_pane_title,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -58,28 +58,57 @@ fn ellipsize_middle_counts_chars_not_bytes() {
 }
 
 #[test]
-fn badge_group_width_single_chord_is_chord_plus_two_pad() {
-  // ` q ` → 1 + 2.
-  assert_eq!(badge_group_width("q"), 3);
-  // ` Ctrl-C ` → 6 + 2.
-  assert_eq!(badge_group_width("Ctrl-C"), 8);
+fn badge_group_width_single_chord_is_the_bare_chord_width() {
+  // Issue #279: chords are flat accent-bold glyphs now, no `` key `` box —
+  // so a group's width is the bare chord width, not chord + 2 pad.
+  assert_eq!(badge_group_width("q"), 1);
+  assert_eq!(badge_group_width("Ctrl-C"), 6);
 }
 
 #[test]
-fn badge_group_width_splits_comma_chords_into_separate_badges() {
-  // `j, Down` renders as `[ j ] [ Down ]`:
-  //   ` j ` = 3, one separator space, ` Down ` = 6  → 10.
-  assert_eq!(badge_group_width("j, Down"), 3 + 1 + 6);
-  // `g g` is a *single* sequential chord (space inside, no comma) → one
-  // badge ` g g ` = 5.
-  assert_eq!(badge_group_width("g g"), 5);
+fn badge_group_width_splits_comma_chords_with_a_single_space() {
+  // `j, Down` renders as `j Down` (flat): 1 + one separator space + 4 → 6.
+  assert_eq!(badge_group_width("j, Down"), 1 + 1 + 4);
+  // `g g` is a *single* sequential chord (space inside, no comma) → `g g` = 3.
+  assert_eq!(badge_group_width("g g"), 3);
 }
 
 #[test]
-fn badge_group_width_unbound_renders_one_muted_badge() {
-  let expected = "(unbound)".chars().count() + 2;
+fn badge_group_width_unbound_is_the_bare_placeholder_width() {
+  let expected = "(unbound)".chars().count();
   assert_eq!(badge_group_width("(unbound)"), expected);
   assert_eq!(badge_group_width(""), expected);
+}
+
+#[test]
+fn help_entry_line_renders_flat_accent_chords_not_badges() {
+  // Issue #279: the keybindings body drops the reverse-video chord badge
+  // for flat accent-bold glyphs (herdr-style). The label stays readable.
+  let theme = Theme {
+    accent: Color::Magenta,
+    ..Theme::default()
+  };
+  let line = help_entry_line("j, Down", "next", 10, &theme);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("next"), "label missing: {text:?}");
+  // The first chord renders as a bare `j` accent-bold span — no padding box.
+  let chord = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "j")
+    .expect("a bare 'j' chord span");
+  assert_eq!(chord.style.fg, Some(Color::Magenta), "chord wears the accent");
+  assert!(
+    chord.style.add_modifier.contains(Modifier::BOLD),
+    "chord is bold: {chord:?}"
+  );
+  assert!(
+    !line
+      .spans
+      .iter()
+      .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+    "no chord span should be a reverse-video badge anymore"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -224,19 +253,40 @@ fn confirm_buttons_render_as_chips_without_brackets() {
 }
 
 #[test]
-fn modal_hint_line_uses_statusbar_badge_treatment() {
-  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &Theme::default());
+fn modal_hint_line_renders_accent_bind_then_muted_action() {
+  // Issue #279: hints drop the reverse-video badge for a herdr-style
+  // "accent bind + space + muted action" treatment. The key span carries
+  // the accent colour + BOLD (no REVERSED box); the label reads muted.
+  let theme = Theme {
+    accent: Color::Magenta,
+    muted: Color::Gray,
+    ..Theme::default()
+  };
+  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &theme);
   let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(text.contains("fetch"), "hint label missing: {text:?}");
-  let fetch = line
+  // The bind is the bare key glyph — no surrounding padding box.
+  let key = line
     .spans
     .iter()
-    .find(|s| s.content.contains("F"))
-    .expect("fetch key badge");
+    .find(|s| s.content.as_ref() == "F")
+    .expect("a bare 'F' bind span (no badge padding)");
+  assert_eq!(key.style.fg, Some(Color::Magenta), "bind wears the accent");
   assert!(
-    fetch.style.add_modifier.contains(Modifier::REVERSED),
-    "modal key hints should use statusbar-like badges"
+    key.style.add_modifier.contains(Modifier::BOLD),
+    "bind is bold for emphasis"
   );
+  assert!(
+    !key.style.add_modifier.contains(Modifier::REVERSED),
+    "hints no longer use a reverse-video badge: {key:?}"
+  );
+  // The action reads in the muted role.
+  let label = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("fetch"))
+    .expect("a fetch label span");
+  assert_eq!(label.style.fg, Some(Color::Gray), "action reads muted");
 }
 
 #[test]
