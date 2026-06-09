@@ -313,6 +313,9 @@ pub struct App {
   /// Public for the same reason `github` is — the state-machine tests
   /// claim a generation directly without spawning an OS thread.
   pub tasks: TaskRunner,
+  /// Last point at which the periodic TUI worktree refresh was armed.
+  /// Tests set this directly to simulate elapsed time without sleeping.
+  pub last_auto_refresh_at: Instant,
   /// Sender cloned into each background task worker (issue #231; carries the
   /// GitHub fetch results too since #255).
   task_tx: mpsc::Sender<TaskMsg>,
@@ -412,6 +415,7 @@ impl App {
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
       tasks: TaskRunner::new(),
+      last_auto_refresh_at: Instant::now(),
       task_tx,
       task_rx,
       command_logs: CommandLogs::new(),
@@ -544,6 +548,28 @@ impl App {
     self.spinner.reset();
     self.status = TaskKind::RefreshWorktrees.loading_label().into();
     self.spawn_refresh(generation);
+  }
+
+  /// Periodic worktree-list refresh for the TUI event loop. Returns `true`
+  /// only when a new async refresh task was actually started. `0` disables
+  /// the feature, and an in-flight refresh coalesces so the renderer is never
+  /// blocked by repeated relist attempts.
+  pub fn maybe_auto_refresh(&mut self, now: Instant) -> bool {
+    let secs = self.config.tui.auto_refresh_secs;
+    if secs == 0 {
+      return false;
+    }
+    if now.saturating_duration_since(self.last_auto_refresh_at) < Duration::from_secs(secs) {
+      return false;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
+      return false;
+    };
+    self.last_auto_refresh_at = now;
+    self.spinner.reset();
+    self.status = "auto-refreshing worktrees…".into();
+    self.spawn_refresh(generation);
+    true
   }
 
   /// Spawn one background worktree-list worker tagged with `generation`

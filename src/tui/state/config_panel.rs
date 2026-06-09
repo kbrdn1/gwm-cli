@@ -70,6 +70,7 @@ impl SettingsTab {
         SettingField::SidebarPosition,
         SettingField::OpenMode,
         SettingField::ConfirmCountdown,
+        SettingField::AutoRefreshSecs,
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
       ],
@@ -149,6 +150,8 @@ pub enum SettingField {
   OpenMode,
   /// `tui.confirm_countdown_secs` — numeric input.
   ConfirmCountdown,
+  /// `tui.auto_refresh_secs` — numeric input, 0 disables.
+  AutoRefreshSecs,
   /// `tui.open.shell_cmd` — `$SHELL` override (text).
   OpenShellCmd,
   /// `tui.open.editor_cmd` — `$EDITOR` override (text).
@@ -166,6 +169,7 @@ impl SettingField {
       SettingField::SidebarPosition => "sidebar position",
       SettingField::OpenMode => "open mode",
       SettingField::ConfirmCountdown => "confirm countdown (s)",
+      SettingField::AutoRefreshSecs => "auto refresh (s)",
       SettingField::OpenShellCmd => "open shell cmd",
       SettingField::OpenEditorCmd => "open editor cmd",
     }
@@ -181,6 +185,7 @@ impl SettingField {
       SettingField::SidebarPosition => "tui.sidebar_position",
       SettingField::OpenMode => "tui.open.mode",
       SettingField::ConfirmCountdown => "tui.confirm_countdown_secs",
+      SettingField::AutoRefreshSecs => "tui.auto_refresh_secs",
       SettingField::OpenShellCmd => "tui.open.shell_cmd",
       SettingField::OpenEditorCmd => "tui.open.editor_cmd",
     }
@@ -190,7 +195,7 @@ impl SettingField {
   pub fn kind(self) -> FieldKind {
     match self {
       SettingField::ThemePreset | SettingField::SidebarPosition | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::ConfirmCountdown => FieldKind::Uint,
+      SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
       | SettingField::WorktreeBranchPattern
@@ -224,6 +229,7 @@ impl SettingField {
         crate::config::TuiOpenMode::Finder => "finder".into(),
       },
       SettingField::ConfirmCountdown => cfg.tui.confirm_countdown_secs.to_string(),
+      SettingField::AutoRefreshSecs => cfg.tui.auto_refresh_secs.to_string(),
       SettingField::OpenShellCmd => cfg.tui.open.shell_cmd.clone().unwrap_or_default(),
       SettingField::OpenEditorCmd => cfg.tui.open.editor_cmd.clone().unwrap_or_default(),
     }

@@ -5177,6 +5177,54 @@ fn request_refresh_coalesces_onto_an_inflight_run() {
 }
 
 #[test]
+fn auto_refresh_triggers_after_default_interval_without_resetting_selection() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
+  app.list_state.select(Some(1));
+  let start = Instant::now();
+  app.last_auto_refresh_at = start;
+
+  assert!(
+    !app.maybe_auto_refresh(start + Duration::from_secs(59)),
+    "default interval is 60s, so 59s must not refresh"
+  );
+  assert_eq!(app.list_state.selected(), Some(1), "selection stays put before refresh");
+
+  assert!(
+    app.maybe_auto_refresh(start + Duration::from_secs(60)),
+    "60s default interval should trigger a worktree refresh"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::RefreshWorktrees),
+    "auto-refresh uses the async refresh task"
+  );
+  assert_eq!(
+    app.list_state.selected(),
+    Some(1),
+    "requesting auto-refresh must not reset the user's selection"
+  );
+}
+
+#[test]
+fn auto_refresh_zero_is_disabled() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  app.config.tui.auto_refresh_secs = 0;
+  let start = Instant::now();
+  app.last_auto_refresh_at = start;
+
+  assert!(
+    !app.maybe_auto_refresh(start + Duration::from_secs(3600)),
+    "auto_refresh_secs = 0 disables periodic refresh"
+  );
+  assert!(
+    !app.tasks.is_loading(TaskKind::RefreshWorktrees),
+    "disabled auto-refresh must not claim a refresh task"
+  );
+}
+
+#[test]
 fn quit_waits_while_a_sync_task_is_in_flight() {
   use gwm::tui::state::async_task::TaskKind;
 
@@ -5347,6 +5395,29 @@ fn committing_numeric_input_persists_the_typed_value() {
   assert_eq!(app.config.tui.confirm_countdown_secs, 5, "live config updated");
   let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.confirm_countdown_secs, 5, "typed value persisted");
+}
+
+#[test]
+fn committing_auto_refresh_secs_persists_the_typed_value() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 3; // auto refresh (Uint input)
+
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on auto refresh opens the numeric input"
+  );
+  app.config_panel.editing = Some("0".into());
+  app.commit_settings_edit();
+
+  assert_eq!(app.config.tui.auto_refresh_secs, 0, "live config updated");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.auto_refresh_secs, 0, "typed value persisted");
 }
 
 #[test]
