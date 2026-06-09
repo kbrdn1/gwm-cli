@@ -2306,15 +2306,39 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let err_color = app.theme.prunable;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
 
-  let mut lines: Vec<Line<'static>> = overlay_title_lines("Command Logs", accent);
+  // Fixed header (title) / scrollable body / fixed footer hint (issue #279) —
+  // the title and the close hint stay pinned while the transcript scrolls.
+  let block = overlay_block(accent);
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  f.render_widget(
+    Paragraph::new(Line::from(Span::styled("Command Logs", heading_style)).centered()),
+    header_area,
+  );
+
+  // A full-width `-` rule, padded by a blank line above and below, separates
+  // adjacent log entries (issue #279 follow-up).
+  let rule = "-".repeat(body_area.width as usize);
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
   if app.command_logs.entries.is_empty() {
     lines.push(Line::from(Span::styled("No commands run yet.", muted_style)));
   } else {
     // Newest-first: the most recent command is what the user opened the
     // overlay to see, so it sits at the top without scrolling.
-    for entry in app.command_logs.entries.iter().rev() {
+    for (i, entry) in app.command_logs.entries.iter().rev().enumerate() {
+      if i > 0 {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(Span::styled(rule.clone(), muted_style)));
+        lines.push(Line::from(String::new()));
+      }
       // The resolved argv, prefixed lazygit-style with `$`.
       lines.push(Line::from(vec![
         Span::styled("$ ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
@@ -2350,34 +2374,28 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
           lines.push(Line::from(Span::styled(format!("    {}", l), muted_style)));
         }
       }
-      lines.push(Line::from(String::new()));
     }
   }
 
-  // Footer hint: scroll + close. A plain muted line (not `push_modal_hint`,
-  // whose contexts are pane-specific) keeps the overlay self-documenting.
-  lines.push(Line::from(Span::styled(
-    "j/k scroll · g/G top/bottom · esc close",
-    muted_style.add_modifier(Modifier::ITALIC),
-  )));
-
-  // Publish the scroll bounds against the live viewport (mirrors
-  // `draw_help`): the renderer is the only place that knows both the
-  // content length and the inner modal height, so it clamps here.
-  let block = overlay_block(accent);
-  let inner = block.inner(area);
-  let viewport = inner.height as usize;
-  app.command_logs.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  // Publish the scroll bounds against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.command_logs.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
   app.command_logs.scroll = app.command_logs.scroll.min(app.command_logs.max_scroll);
-  let viewport_w = inner.width as usize;
   let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.command_logs.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
+  app.command_logs.max_x_scroll = content_w.saturating_sub(body_area.width as usize) as u16;
   app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let scroll = app.command_logs.scroll;
   let x_scroll = app.command_logs.x_scroll;
 
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+  f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(
+    modal_hint_line(
+      &[("j/k", "scroll"), ("g/G", "top/bottom"), ("Esc", "close")],
+      &app.theme,
+    ),
+    footer_area,
+  );
 }
 
 /// Render a vertical scrollbar on the right edge of `area` when the content

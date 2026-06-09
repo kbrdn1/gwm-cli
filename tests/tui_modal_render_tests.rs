@@ -306,6 +306,62 @@ fn command_logs_modal_renders_empty_placeholder() {
 }
 
 #[test]
+fn command_logs_modal_keeps_title_and_footer_fixed_while_body_scrolls() {
+  use gwm::command_log::{CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  // Issue #279: the Command Logs overlay scrolls its body only — title and
+  // footer hint stay pinned. Many entries + a short terminal force overflow;
+  // scrolling to the bottom must keep both on screen.
+  let (_dir, mut app) = make_app();
+  app.command_logs.entries = (0..12)
+    .map(|i| CommandLogEntry {
+      command: format!("command number {i}"),
+      duration: Duration::from_millis(10),
+      status: CommandStatus::Exited(Some(0)),
+      output: "some output".into(),
+    })
+    .collect();
+  app.view = View::CommandLogs;
+  app.command_logs.scroll = u16::MAX; // clamps to the bottom on render
+
+  let backend = TestBackend::new(100, 16);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let buf = terminal.backend().buffer().clone();
+
+  assert_present(&buf, "Command Logs", "title stays fixed at the top");
+  assert_present(&buf, "scroll", "footer hint stays fixed at the bottom");
+}
+
+#[test]
+fn command_logs_modal_separates_entries_with_a_dashed_rule() {
+  use gwm::command_log::{CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  // Issue #279: adjacent log entries are separated by a full-width `-` rule
+  // (padded by a blank line above and below).
+  let (_dir, mut app) = make_app();
+  app.command_logs.entries = vec![
+    CommandLogEntry {
+      command: "first".into(),
+      duration: Duration::from_millis(1),
+      status: CommandStatus::Exited(Some(0)),
+      output: String::new(),
+    },
+    CommandLogEntry {
+      command: "second".into(),
+      duration: Duration::from_millis(1),
+      status: CommandStatus::Exited(Some(0)),
+      output: String::new(),
+    },
+  ];
+  app.view = View::CommandLogs;
+  let buf = render(&mut app);
+  assert_present(&buf, "----------", "a dashed rule separates the two entries");
+}
+
+#[test]
 fn settings_panel_all_tab_renders_title_section_and_source_column() {
   use gwm::config::{ConfigRow, ConfigSource};
   use gwm::tui::SettingsTab;
