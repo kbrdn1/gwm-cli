@@ -3495,7 +3495,10 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.issue_source,
       app.issue_fetch_state(),
-      link.issue_title.as_deref(),
+      PersistedSummary {
+        title: link.issue_title.as_deref(),
+        state: link.issue_state,
+      },
       max_width,
       &app.theme,
       Some(spinner),
@@ -3507,7 +3510,10 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.pr_source,
       app.pr_fetch_state(),
-      link.pr_title.as_deref(),
+      PersistedSummary {
+        title: link.pr_title.as_deref(),
+        state: link.pr_state,
+      },
       max_width,
       &app.theme,
       Some(spinner),
@@ -3561,7 +3567,22 @@ pub fn issue_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  issue_summary_line_with_spinner(n, src, state, None, max_width, theme, None)
+  issue_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
+}
+
+#[derive(Clone, Copy)]
+struct PersistedSummary<'a, S> {
+  title: Option<&'a str>,
+  state: Option<S>,
+}
+
+impl<S> PersistedSummary<'_, S> {
+  fn none() -> Self {
+    Self {
+      title: None,
+      state: None,
+    }
+  }
 }
 
 /// Resolved render inputs for a GitHub summary line, after the caller has
@@ -3572,6 +3593,12 @@ pub fn issue_summary_line(
 enum SummaryState<'a> {
   Idle,
   CachedTitle {
+    title: &'a str,
+  },
+  CachedStatus {
+    badge: &'a str,
+    badge_color: Color,
+    trailing: String,
     title: &'a str,
   },
   Loading,
@@ -3617,7 +3644,7 @@ fn summary_line(
   // `name` role (issue #210); the icon mirrors loaded state colour and falls
   // back to muted while no fresh status exists.
   let icon_color = match &state {
-    SummaryState::Loaded { badge_color, .. } => *badge_color,
+    SummaryState::CachedStatus { badge_color, .. } | SummaryState::Loaded { badge_color, .. } => *badge_color,
     SummaryState::Idle | SummaryState::CachedTitle { .. } | SummaryState::Loading | SummaryState::Error(_) => {
       theme.muted
     }
@@ -3652,6 +3679,31 @@ fn summary_line(
       spans.push(Span::raw(" "));
       spans.push(Span::raw(trunc(title, budget)));
       flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
+    SummaryState::CachedStatus {
+      badge,
+      badge_color,
+      trailing,
+      title,
+    } => {
+      let badge_seg_w = 1 + badge.chars().count() + 2;
+      let fixed = prefix_w + badge_seg_w + trailing.chars().count() + 1;
+      if fixed >= max_width {
+        let mut spans = build_prefix(true);
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(format!(" {} ", badge)));
+        spans.push(Span::raw(trailing));
+        flatten_if_overflow(&mut spans, max_width);
+        return Line::from(spans);
+      }
+      let budget = max_width - fixed;
+      let mut spans = build_prefix(true);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
+      spans.push(Span::raw(trailing));
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
       Line::from(spans)
     }
     SummaryState::Loading => {
@@ -3708,17 +3760,46 @@ fn issue_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::IssueStatus>,
-  persisted_title: Option<&str>,
+  persisted: PersistedSummary<'_, IssueState>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("Issue #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => persisted_title
-      .map(|title| SummaryState::CachedTitle { title })
-      .unwrap_or(SummaryState::Idle),
-    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Idle => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          IssueState::Open => "open",
+          IssueState::Closed => "closed",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: issue_badge_color(state, theme),
+          trailing: String::new(),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => persisted
+        .title
+        .map(|title| SummaryState::CachedTitle { title })
+        .unwrap_or(SummaryState::Idle),
+    },
+    GitHubFetchState::Loading => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          IssueState::Open => "open",
+          IssueState::Closed => "closed",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: issue_badge_color(state, theme),
+          trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => SummaryState::Loading,
+    },
     GitHubFetchState::Loaded(s) => {
       // Mirror `issue_badge_color` exactly so the summary line and the
       // sidebar header dot never disagree for the same issue: closed maps
@@ -3752,24 +3833,57 @@ pub fn pr_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, None, max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
 }
 
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::PrStatus>,
-  persisted_title: Option<&str>,
+  persisted: PersistedSummary<'_, PrState>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => persisted_title
-      .map(|title| SummaryState::CachedTitle { title })
-      .unwrap_or(SummaryState::Idle),
-    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Idle => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          PrState::Open => "open",
+          PrState::Draft => "draft",
+          PrState::Closed => "closed",
+          PrState::Merged => "merged",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: pr_badge_color(state, theme),
+          trailing: String::new(),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => persisted
+        .title
+        .map(|title| SummaryState::CachedTitle { title })
+        .unwrap_or(SummaryState::Idle),
+    },
+    GitHubFetchState::Loading => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          PrState::Open => "open",
+          PrState::Draft => "draft",
+          PrState::Closed => "closed",
+          PrState::Merged => "merged",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: pr_badge_color(state, theme),
+          trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => SummaryState::Loading,
+    },
     GitHubFetchState::Loaded(s) => {
       // Route the badge colour through `pr_badge_color` (mirroring how the
       // issue side calls `issue_badge_color`) so the summary line and the

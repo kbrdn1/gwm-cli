@@ -1637,6 +1637,117 @@ fn github_status_lines_show_persisted_titles_before_fetch() {
   assert!(text.contains("Startup PR title"), "PR title missing: {text}");
 }
 
+#[test]
+fn github_status_lines_show_persisted_state_before_fetch() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Closed PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "closed")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let lines = gwm::tui::github_status_lines(&app, 120);
+  let text = lines
+    .iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+  assert!(text.contains(" closed "), "persisted issue state missing: {text}");
+  assert!(text.contains("Closed issue"), "persisted issue title missing: {text}");
+  assert!(text.contains("Closed PR"), "persisted PR title missing: {text}");
+
+  let theme = Theme::default();
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "persisted issue icon should use the persisted state colour"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(gwm::tui::pr_badge_color(PrState::Closed, &theme)),
+    "persisted PR icon should use the persisted state colour"
+  );
+}
+
+#[test]
+fn github_status_lines_keep_persisted_state_visible_while_loading() {
+  use gwm::tui::FetchKey;
+
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Merged PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.github.mark_loading(FetchKey::Issue(42));
+  app.github.mark_loading(FetchKey::Pr(61));
+
+  let lines = gwm::tui::github_status_lines(&app, 120);
+  let text = lines
+    .iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+  assert!(
+    text.contains(" closed "),
+    "loading issue line should keep cached state: {text}"
+  );
+  assert!(
+    text.contains(" merged "),
+    "loading PR line should keep cached state: {text}"
+  );
+  assert!(
+    text.contains("loading"),
+    "loading line should still disclose the refresh: {text}"
+  );
+
+  let theme = Theme::default();
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "loading issue icon should keep the persisted state colour"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(gwm::tui::pr_badge_color(PrState::Merged, &theme)),
+    "loading PR icon should keep the persisted state colour"
+  );
+}
+
 fn sample_issue(n: u64) -> gwm::github::IssueStatus {
   sample_issue_titled(n, "x")
 }
@@ -2763,6 +2874,8 @@ fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
     pr: Some(43),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::Detected,
   };
@@ -2787,6 +2900,8 @@ fn table_marker_issue_only_leaves_the_pr_slot_as_dash() {
     pr: None,
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
@@ -2835,6 +2950,8 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     pr: Some(61),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::None,
     pr_source: LinkSource::Explicit,
   };
@@ -2863,6 +2980,42 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
 }
 
 #[test]
+fn table_marker_uses_persisted_issue_and_pr_state_on_startup() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "closed")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let theme = Theme::default();
+  let mut listed = app.worktrees[0].clone();
+  listed.is_main = false;
+  let cells = marker_cells(&gwm::tui::table_marker(&listed, &theme));
+  assert_eq!(
+    cells[0].1,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "issue marker should reuse persisted issue state after restart"
+  );
+  assert_eq!(
+    cells[2].1,
+    Some(gwm::tui::pr_badge_color(PrState::Closed, &theme)),
+    "PR marker should reuse persisted PR state after restart"
+  );
+}
+
+#[test]
 fn table_marker_pr_only_leaves_the_issue_slot_as_dash() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
@@ -2872,6 +3025,8 @@ fn table_marker_pr_only_leaves_the_issue_slot_as_dash() {
     pr: Some(43),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::None,
     pr_source: LinkSource::Detected,
   };
@@ -5036,6 +5191,8 @@ fn worktree_refresh_fetches_issue_and_pr_status_for_every_linked_worktree() {
       pr: Some(pr),
       issue_title: None,
       pr_title: None,
+      issue_state: None,
+      pr_state: None,
       issue_source: LinkSource::Explicit,
       pr_source: LinkSource::Explicit,
     };
@@ -5127,11 +5284,82 @@ fn worktree_refresh_fetches_issue_and_pr_status_for_every_linked_worktree() {
       "issue title should persist on branch {branch}"
     );
     assert_eq!(
+      link.issue_state,
+      Some(IssueState::Closed),
+      "issue state should persist on branch {branch}"
+    );
+    assert_eq!(
       link.pr_title.as_deref(),
       Some(pr_title),
       "PR title should persist on branch {branch}"
     );
+    assert_eq!(
+      link.pr_state,
+      Some(PrState::Merged),
+      "PR state should persist on branch {branch}"
+    );
   }
+}
+
+#[cfg(unix)]
+#[test]
+fn app_startup_fetches_issue_and_pr_status_for_linked_worktrees() {
+  use gwm::tui::TaskKind;
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-startup", &head, false).unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-startup").unwrap();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-startup", 61).unwrap();
+
+  let fake_gh = dir.path().join("fake-gh-startup-refresh");
+  std::fs::write(
+    &fake_gh,
+    "#!/bin/sh\n\
+     kind=\"$1\"\n\
+     number=\"$3\"\n\
+     if [ \"$kind\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"issue %s\",\"state\":\"OPEN\",\"url\":\"https://example.test/issues/%s\",\"labels\":[],\"updatedAt\":\"2026-06-09T00:00:00Z\"}' \"$number\" \"$number\" \"$number\"\n\
+     elif [ \"$kind\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"pr %s\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/%s\",\"updatedAt\":\"2026-06-09T00:00:00Z\",\"statusCheckRollup\":[]}' \"$number\" \"$number\" \"$number\"\n\
+     else\n\
+       exit 2\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&fake_gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&fake_gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` and the TUI captures the
+  // program path before spawning its initial GitHub workers.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubIssue(42)),
+    "startup should fetch the linked issue immediately"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubPr(61)),
+    "startup should fetch the linked PR immediately"
+  );
 }
 
 #[cfg(unix)]
@@ -5168,6 +5396,8 @@ fn github_refresh_fetches_only_the_current_link_without_relisting_worktrees() {
     pr: Some(61),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::Explicit,
     pr_source: LinkSource::Explicit,
   };
@@ -5178,6 +5408,8 @@ fn github_refresh_fetches_only_the_current_link_without_relisting_worktrees() {
     pr: Some(286),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::Explicit,
     pr_source: LinkSource::Explicit,
   };

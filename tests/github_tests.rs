@@ -169,6 +169,42 @@ fn read_link_round_trips_explicit_and_detected_pr_titles() {
 }
 
 #[test]
+fn read_link_round_trips_persisted_issue_state() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  github::persist_issue_state(&repo, "feat/#42-tui-search", IssueState::Closed).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_source, LinkSource::BranchName);
+  assert_eq!(link.issue_state, Some(IssueState::Closed));
+}
+
+#[test]
+fn read_link_round_trips_explicit_and_detected_pr_states() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  github::persist_pr_state(&repo, "feat/#42-tui-search", PrState::Merged).unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Draft).unwrap();
+
+  let explicit = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(explicit.pr, Some(61));
+  assert_eq!(explicit.pr_source, LinkSource::Explicit);
+  assert_eq!(explicit.pr_state, Some(PrState::Merged));
+
+  github::unlink_pr(&repo, "feat/#42-tui-search").unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Draft).unwrap();
+  let detected = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(detected.pr, Some(77));
+  assert_eq!(detected.pr_source, LinkSource::Detected);
+  assert_eq!(detected.pr_state, Some(PrState::Draft));
+}
+
+#[test]
 fn unlink_issue_clears_persisted_issue_title() {
   let (_dir, repo) = init_repo();
   make_branch(&repo, "random-branch");
@@ -178,6 +214,7 @@ fn unlink_issue_clears_persisted_issue_title() {
     cfg
       .set_str("branch.random-branch.gwm-issue-title", "Stale issue title")
       .unwrap();
+    cfg.set_str("branch.random-branch.gwm-issue-state", "closed").unwrap();
   }
 
   github::unlink_issue(&repo, "random-branch").unwrap();
@@ -185,6 +222,7 @@ fn unlink_issue_clears_persisted_issue_title() {
 
   assert_eq!(link.issue, None);
   assert_eq!(link.issue_title, None);
+  assert_eq!(link.issue_state, None);
 }
 
 #[test]
@@ -197,9 +235,15 @@ fn unlink_pr_clears_explicit_and_detected_pr_titles() {
     cfg
       .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Explicit PR title")
       .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
     cfg.set_str("branch.feat/#42-tui-search.gwm-pr-detected", "77").unwrap();
     cfg
       .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Detected PR title")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-state", "draft")
       .unwrap();
   }
 
@@ -208,6 +252,7 @@ fn unlink_pr_clears_explicit_and_detected_pr_titles() {
 
   assert_eq!(link.pr, None);
   assert_eq!(link.pr_title, None);
+  assert_eq!(link.pr_state, None);
 }
 
 #[test]
@@ -220,6 +265,9 @@ fn clear_persisted_detected_pr_clears_detected_title() {
     cfg
       .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Detected PR title")
       .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-state", "draft")
+      .unwrap();
   }
 
   github::clear_persisted_detected_pr(&repo, "feat/#42-tui-search").unwrap();
@@ -227,6 +275,7 @@ fn clear_persisted_detected_pr_clears_detected_title() {
 
   assert_eq!(link.pr, None);
   assert_eq!(link.pr_title, None);
+  assert_eq!(link.pr_state, None);
 }
 
 #[test]
@@ -252,11 +301,13 @@ fn persist_detected_pr_overwrites_a_previous_detection() {
   // Re-detection (the branch's PR changed) refreshes the stored value.
   github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
   github::persist_detected_pr_title(&repo, "feat/#42-tui-search", "Old detected title").unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Merged).unwrap();
   github::persist_detected_pr(&repo, "feat/#42-tui-search", 88).unwrap();
 
   let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
   assert_eq!(link.pr, Some(88));
   assert_eq!(link.pr_title, None);
+  assert_eq!(link.pr_state, None);
   assert_eq!(link.pr_source, LinkSource::Detected);
 }
 
@@ -267,6 +318,7 @@ fn persist_detected_pr_keeps_title_when_number_is_unchanged() {
 
   github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
   github::persist_detected_pr_title(&repo, "feat/#42-tui-search", "Detected PR title").unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Draft).unwrap();
 
   // A successful refresh that redetects the same PR should not throw away a
   // known title before the follow-up status fetch has a chance to update it.
@@ -275,6 +327,7 @@ fn persist_detected_pr_keeps_title_when_number_is_unchanged() {
   let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
   assert_eq!(link.pr, Some(77));
   assert_eq!(link.pr_title.as_deref(), Some("Detected PR title"));
+  assert_eq!(link.pr_state, Some(PrState::Draft));
   assert_eq!(link.pr_source, LinkSource::Detected);
 }
 
@@ -822,6 +875,8 @@ fn branch_link_summary_renders_human_readable() {
     pr: Some(61),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::Explicit,
   };
@@ -868,6 +923,8 @@ fn apply_detected_pr_sets_pr_with_detected_source_when_none_linked() {
     pr: None,
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
@@ -889,6 +946,8 @@ fn apply_detected_pr_leaves_explicit_pr_untouched() {
     pr: Some(61),
     issue_title: None,
     pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::None,
     pr_source: LinkSource::Explicit,
   };

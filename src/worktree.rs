@@ -204,9 +204,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked: false,
       is_prunable: false,
       status: compute_status(repo),
+      issue_state: link.issue_state,
+      pr_state: link.pr_state,
       link,
-      issue_state: None,
-      pr_state: None,
       age,
     });
   }
@@ -265,9 +265,9 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked,
       is_prunable,
       status,
+      issue_state: link.issue_state,
+      pr_state: link.pr_state,
       link,
-      issue_state: None,
-      pr_state: None,
       age,
     });
   }

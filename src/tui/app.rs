@@ -427,6 +427,10 @@ impl App {
     // #188). Orientation stays at its `Auto` default — runtime-only.
     out.sidebar.position = out.config.tui.sidebar_position;
     out.refresh_link();
+    let spawned = out.refresh_linked_github_statuses_for_worktrees();
+    if spawned > 0 {
+      out.status = String::from("fetching GitHub status…");
+    }
     Ok(out)
   }
 
@@ -541,10 +545,14 @@ impl App {
 
     for w in &mut worktrees {
       if let Some(issue) = w.link.issue {
-        w.issue_state = issue_states.get(&issue).copied();
+        if let Some(state) = issue_states.get(&issue).copied() {
+          w.issue_state = Some(state);
+        }
       }
       if let Some(pr) = w.link.pr {
-        w.pr_state = pr_states.get(&pr).copied();
+        if let Some(state) = pr_states.get(&pr).copied() {
+          w.pr_state = Some(state);
+        }
       }
     }
 
@@ -2168,8 +2176,10 @@ impl App {
   fn sync_issue_status_into_table(&mut self, status: &IssueStatus) {
     if self.github.link.issue == Some(status.number) {
       self.github.link.issue_title = Some(status.title.clone());
+      self.github.link.issue_state = Some(status.state);
       if let Some(branch) = self.selected_branch_name() {
         let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
+        let _ = github::persist_issue_state(&self.repo, &branch, status.state);
       }
     }
     for w in &mut self.worktrees {
@@ -2178,8 +2188,10 @@ impl App {
       }
       w.issue_state = Some(status.state);
       w.link.issue_title = Some(status.title.clone());
+      w.link.issue_state = Some(status.state);
       if let Some(branch) = w.branch.as_deref() {
         let _ = github::persist_issue_title(&self.repo, branch, &status.title);
+        let _ = github::persist_issue_state(&self.repo, branch, status.state);
       }
     }
   }
@@ -2187,10 +2199,13 @@ impl App {
   fn sync_pr_status_into_table(&mut self, status: &PrStatus) {
     if self.github.link.pr == Some(status.number) {
       self.github.link.pr_title = Some(status.title.clone());
+      self.github.link.pr_state = Some(status.state);
       if let Some(branch) = self.selected_branch_name() {
         let _ = match self.github.link.pr_source {
-          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title),
-          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title),
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title)
+            .and_then(|()| github::persist_detected_pr_state(&self.repo, &branch, status.state)),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title)
+            .and_then(|()| github::persist_pr_state(&self.repo, &branch, status.state)),
           github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
         };
       }
@@ -2201,10 +2216,13 @@ impl App {
       }
       w.pr_state = Some(status.state);
       w.link.pr_title = Some(status.title.clone());
+      w.link.pr_state = Some(status.state);
       if let Some(branch) = w.branch.as_deref() {
         let _ = match w.link.pr_source {
-          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, branch, &status.title),
-          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, branch, &status.title),
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, branch, &status.title)
+            .and_then(|()| github::persist_detected_pr_state(&self.repo, branch, status.state)),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, branch, &status.title)
+            .and_then(|()| github::persist_pr_state(&self.repo, branch, status.state)),
           github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
         };
       }

@@ -36,8 +36,8 @@ use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, branch_status_color, build_sidebar_sections, footer_line, format_status, freshness_color,
-  header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color, table_marker,
-  working_tree_status_line, worktree_name_style, worktree_path_style,
+  github_status_lines, header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color,
+  table_marker, working_tree_status_line, worktree_name_style, worktree_path_style, App,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::{Color, Modifier};
@@ -557,6 +557,58 @@ fn summary_line_loaded_icons_resolve_through_state_roles() {
     pr.spans[0].style.fg,
     Some(pr_badge_color(PrState::Merged, &t)),
     "loaded PR icon → PR state role"
+  );
+}
+
+#[test]
+fn github_status_cached_state_icons_resolve_through_state_roles() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Merged PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let t = audit_theme();
+  app.theme = t;
+
+  let lines = github_status_lines(&app, 120);
+
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "cached issue icon -> issue state role"
+  );
+  assert_eq!(
+    fg_containing(&lines[0], "closed"),
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "cached issue badge -> issue state role"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "cached PR icon -> PR state role"
+  );
+  assert_eq!(
+    fg_containing(&lines[1], "merged"),
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "cached PR badge -> PR state role"
   );
 }
 

@@ -2109,11 +2109,14 @@ fn fetch_link_status(
   let pr = link.pr.and_then(|n| github::fetch_pr(slug, n).ok());
   if let Some(issue) = &issue {
     let _ = github::persist_issue_title(repo, branch, &issue.title);
+    let _ = github::persist_issue_state(repo, branch, issue.state);
   }
   if let Some(pr) = &pr {
     let _ = match link.pr_source {
-      LinkSource::Detected => github::persist_detected_pr_title(repo, branch, &pr.title),
-      LinkSource::Explicit => github::persist_pr_title(repo, branch, &pr.title),
+      LinkSource::Detected => github::persist_detected_pr_title(repo, branch, &pr.title)
+        .and_then(|()| github::persist_detected_pr_state(repo, branch, pr.state)),
+      LinkSource::Explicit => github::persist_pr_title(repo, branch, &pr.title)
+        .and_then(|()| github::persist_pr_state(repo, branch, pr.state)),
       LinkSource::BranchName | LinkSource::None => Ok(()),
     };
   }
