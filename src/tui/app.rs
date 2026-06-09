@@ -2077,6 +2077,26 @@ impl App {
     &self.github.link
   }
 
+  /// Mirror the live resolved `github.link` onto the selected worktree's
+  /// snapshot (issue #283 / Codex review #284). The table renders the PR/
+  /// issue pastilles from `self.worktrees[*].link`, captured at list time,
+  /// so a freshly persisted auto-detection would otherwise stay invisible on
+  /// the selected row until a full relist. Resolves the selection through
+  /// the same filter map as [`Self::selected`].
+  fn sync_selected_link_into_table(&mut self) {
+    let Some(i) = self.list_state.selected() else {
+      return;
+    };
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let Some(&original) = filtered.get(i) else {
+      return;
+    };
+    let link = self.github.link.clone();
+    if let Some(w) = self.worktrees.get_mut(original) {
+      w.link = link;
+    }
+  }
+
   pub fn current_slug(&self) -> Option<&str> {
     self.github.link_slug.as_deref()
   }
@@ -2134,17 +2154,37 @@ impl App {
     // only fills an empty slot.
     if self.github.link.pr.is_none() {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
-        let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
-        self.github.apply_detected_pr(detected);
-        // Persist the detection (issue #283) so the no-fetch table read
-        // path colours the PR pastille on every row, not just the selected
-        // one. A vanished detection clears the stored key so it can't go
-        // stale. Best-effort: a git-config write failure must not break the
-        // refresh, so the result is intentionally discarded.
-        let _ = match detected {
-          Some(n) => github::persist_detected_pr(&self.repo, &branch, n),
-          None => github::clear_persisted_detected_pr(&self.repo, &branch),
-        };
+        match github::find_pr_for_branch(slug, &branch) {
+          Ok(detected) => {
+            self.github.apply_detected_pr(detected);
+            // Persist the detection (issue #283) so the no-fetch table read
+            // path colours the PR pastille on every row, not just the
+            // selected one. Only a *successful* probe is authoritative:
+            // store a hit, and clear the key only on a proven `Ok(None)`.
+            // Best-effort write — a git-config failure must not break the
+            // refresh, so the result is intentionally discarded.
+            let _ = match detected {
+              Some(n) => github::persist_detected_pr(&self.repo, &branch, n),
+              None => github::clear_persisted_detected_pr(&self.repo, &branch),
+            };
+          }
+          Err(_) => {
+            // The probe failed (gh missing / offline / rate limit). It did
+            // NOT prove the PR vanished, so keep any persisted detection
+            // rather than wiping it (Codex review #284), and restore it into
+            // memory so a failed `F` doesn't blank a still-valid PR.
+            if let Ok(stored) = github::read_link(&self.repo, &branch) {
+              if stored.pr_source == github::LinkSource::Detected {
+                self.github.apply_detected_pr(stored.pr);
+              }
+            }
+          }
+        }
+        // Mirror the resolved link onto the selected row's snapshot so the
+        // table pastille reflects the detection immediately, without waiting
+        // for a separate relist (Codex review #284). The table renders from
+        // `self.worktrees[*].link`, not the live `github.link`.
+        self.sync_selected_link_into_table();
       }
     }
 

@@ -1937,6 +1937,15 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   app.refresh_github_status();
   assert_eq!(app.current_link().pr, Some(128));
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+  // Table-snapshot sync (Codex review #284): the table renders from
+  // `self.worktrees[*].link`, not the live `github.link`, so a detection
+  // must be mirrored onto the selected row or its PR pastille stays white
+  // until a separate relist.
+  assert_eq!(
+    app.selected().map(|w| w.link.pr),
+    Some(Some(128)),
+    "the selected row snapshot must reflect the detected PR immediately"
+  );
 
   // The branch's PR changed (e.g. closed + reopened as #200). A detected
   // link is "resolved live", so a second refresh must re-detect rather
@@ -1974,6 +1983,76 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
     "the detected PR must be persisted so the table read path sees it"
   );
   assert_eq!(persisted.pr_source, LinkSource::Detected);
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: a transient `gh` failure (missing binary, offline,
+  // rate limit) must NOT wipe a previously persisted detection — pressing
+  // `F` offline should keep showing the PR, not blank it.
+  let (dir, repo, mut app) = make_app_on_branch("detect-me");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.refresh_link();
+
+  // A `gh` that detects PR #128, then a `gh` that always fails (exit 1).
+  let gh_ok = dir.path().join("fake-gh-ok");
+  std::fs::write(
+    &gh_ok,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":128}]'\n\
+     elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '%s' '{\"number\":128,\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/128\"}'\n\
+     fi\n",
+  )
+  .unwrap();
+  let gh_fail = dir.path().join("fake-gh-fail");
+  std::fs::write(&gh_fail, "#!/bin/sh\nexit 1\n").unwrap();
+  for p in [&gh_ok, &gh_fail] {
+    let mut perms = std::fs::metadata(p).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(p, perms).unwrap();
+  }
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_ok);
+  }
+  app.refresh_github_status();
+  assert_eq!(app.current_link().pr, Some(128), "first refresh detects #128");
+
+  // Now `gh` fails. The probe did not prove the PR vanished.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_fail);
+  }
+  app.refresh_github_status();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  // The persisted key survives a failed probe...
+  let persisted = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(
+    persisted.pr,
+    Some(128),
+    "a failed gh probe must not wipe the persisted detection"
+  );
+  assert_eq!(persisted.pr_source, LinkSource::Detected);
+  // ...and stays visible in memory rather than blanking the pane.
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "the pane must keep the still-valid PR after a failed probe"
+  );
 }
 
 // ---- Configurable launchers (issue #75) --------------------------------
