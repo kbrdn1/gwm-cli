@@ -285,16 +285,17 @@ fn worktrees_and_status_hints_advertise_the_command_logs_key() {
 }
 
 #[test]
-fn worktrees_and_status_hints_advertise_the_config_panel_key() {
-  // Issue #232: the statusbar which-key must advertise `4 config` so the
-  // Configuration panel is discoverable, alongside the `1`/`2`/`3` pane keys.
+fn worktrees_and_status_hints_advertise_the_settings_panel_key() {
+  // Issue #232 / #279: the statusbar which-key must advertise `4 settings`
+  // so the Settings panel is discoverable, alongside the `1`/`2`/`3` pane
+  // keys (renamed from `config` when the panel became editable).
   use gwm::tui::keymap::Keymap;
   let km = Keymap::defaults();
   for ctx in [HintContext::Worktrees, HintContext::Status] {
     let resolved = ctx.resolve(&km);
     assert!(
-      resolved.iter().any(|(k, l)| k == "4" && l == "config"),
-      "context {:?} must advertise the `4 config` hint: {resolved:?}",
+      resolved.iter().any(|(k, l)| k == "4" && l == "settings"),
+      "context {:?} must advertise the `4 settings` hint: {resolved:?}",
       ctx.label()
     );
   }

@@ -315,17 +315,53 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
         _ => {}
       },
-      // Configuration panel (issue #232). Scrolls like the help / Command
-      // Logs overlays; closes on Esc / `q` or the bound `config_panel` key
-      // (default `4`) so the open key toggles it shut even when rebound.
+      // Settings panel (issue #232; editable in #279). While a numeric input
+      // is armed, keystrokes route to the edit buffer and only Enter / Esc
+      // escape — so `q` / `j` / Tab while typing a countdown never quit or
+      // navigate. Otherwise: Tab/BackTab switch category tabs, `L` flips the
+      // edit layer, Up/Down select fields (or scroll on the read-only `All`
+      // tab), Space/Enter cycle a choice or open the numeric input, and
+      // Esc / `q` / the bound `config_panel` key (default `4`) close.
+      View::Config if app.config_panel.editing.is_some() => match key.code {
+        KeyCode::Enter => app.commit_settings_edit(),
+        KeyCode::Esc => app.config_panel.cancel_edit(),
+        KeyCode::Backspace => app.config_panel.pop_edit_char(),
+        KeyCode::Char(c) => app.config_panel.push_edit_char(c),
+        _ => {}
+      },
       View::Config => match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
-        KeyCode::Down | KeyCode::Char('j') => app.config_panel.scroll_down(),
-        KeyCode::Up | KeyCode::Char('k') => app.config_panel.scroll_up(),
-        KeyCode::Right | KeyCode::Char('l') => app.config_panel.scroll_right(),
-        KeyCode::Left | KeyCode::Char('h') => app.config_panel.scroll_left(),
-        KeyCode::Home | KeyCode::Char('g') => app.config_panel.scroll_to_top(),
-        KeyCode::End | KeyCode::Char('G') => app.config_panel.scroll_to_bottom(),
+        KeyCode::Tab => app.config_panel.next_tab(),
+        KeyCode::BackTab => app.config_panel.prev_tab(),
+        KeyCode::Char('L') => app.config_panel.toggle_layer(),
+        KeyCode::Char(' ') | KeyCode::Enter => app.activate_selected_setting(),
+        KeyCode::Down | KeyCode::Char('j') => {
+          if app.config_panel.tab == SettingsTab::All {
+            app.config_panel.scroll_down();
+          } else {
+            app.config_panel.select_next();
+          }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+          if app.config_panel.tab == SettingsTab::All {
+            app.config_panel.scroll_up();
+          } else {
+            app.config_panel.select_prev();
+          }
+        }
+        // Horizontal pan + jump only matter on the long read-only `All` tab.
+        KeyCode::Right | KeyCode::Char('l') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_right()
+        }
+        KeyCode::Left | KeyCode::Char('h') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_left()
+        }
+        KeyCode::Home | KeyCode::Char('g') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_to_top()
+        }
+        KeyCode::End | KeyCode::Char('G') if app.config_panel.tab == SettingsTab::All => {
+          app.config_panel.scroll_to_bottom()
+        }
         _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
         _ => {}
       },

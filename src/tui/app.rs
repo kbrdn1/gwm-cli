@@ -2,7 +2,7 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
-use super::state::config_panel::ConfigPanel;
+use super::state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -1207,6 +1207,97 @@ impl App {
     }
     self.config_panel.reset();
     self.view = View::Config;
+  }
+
+  /// Activate the selected Settings field (issue #279): cycle a choice field
+  /// to its next value (writing + applying live), or arm the numeric input
+  /// buffer for a `Uint` field. No-op on the read-only `All` tab.
+  pub fn activate_selected_setting(&mut self) {
+    let Some(field) = self.config_panel.selected_field() else {
+      return;
+    };
+    match field.kind() {
+      FieldKind::Choice => {
+        if let Some(next) = field.next_choice(&self.config) {
+          self.apply_setting(field, &next);
+        }
+      }
+      FieldKind::Uint => {
+        let current = field.current(&self.config);
+        self.config_panel.begin_edit(&current);
+      }
+    }
+  }
+
+  /// Commit the in-progress numeric edit (issue #279): write the buffered
+  /// value to the selected field and apply it live. Clearing the buffer
+  /// reads as `0` (see [`ConfigPanel::take_edit`]).
+  pub fn commit_settings_edit(&mut self) {
+    let Some(field) = self.config_panel.selected_field() else {
+      self.config_panel.cancel_edit();
+      return;
+    };
+    if let Some(value) = self.config_panel.take_edit() {
+      self.apply_setting(field, &value);
+    }
+  }
+
+  /// Persist `field = value` into the active layer's TOML file and apply the
+  /// change live (issue #279). The write targets the per-project `.gwm.toml`
+  /// or the user-global `config.toml` per the panel's layer selector; on
+  /// success the config is reloaded, the theme re-resolved, the sidebar
+  /// position re-seeded and the resolved-rows snapshot refreshed so the
+  /// `All` tab and the source attribution track the edit. Every fallible
+  /// step routes its error to the status line — no `unwrap` on this path.
+  pub fn apply_setting(&mut self, field: SettingField, value: &str) {
+    let path = match self.config_panel.layer {
+      SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
+      SettingsLayer::Global => match self.global_path.clone() {
+        Some(p) => p,
+        None => {
+          self.status = "settings: no global config path (set $XDG_CONFIG_HOME or $HOME)".into();
+          return;
+        }
+      },
+    };
+
+    if let Err(e) = crate::config_cli::set_value_at(&path, field.key_path(), value) {
+      self.status = format!("settings: {}", e);
+      return;
+    }
+
+    // Reload the merged config so every live read (open mode, confirm
+    // countdown) and the re-seeded state below reflect the edit.
+    match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
+      Ok(cfg) => self.config = cfg,
+      Err(e) => {
+        self.status = format!("settings saved, but reload failed: {}", e);
+        return;
+      }
+    }
+    match self.config.theme.resolve() {
+      Ok(theme) => self.theme = theme,
+      Err(e) => self.status = format!("theme: {}", e),
+    }
+    self.sidebar.position = self.config.tui.sidebar_position;
+    if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      self.config_panel.rows = rows;
+    }
+
+    let mut status = format!(
+      "set {} = {} ({})",
+      field.key_path(),
+      value,
+      self.config_panel.layer.label()
+    );
+    // Surface a shadowed edit: writing global for a key the repo overrides
+    // leaves the effective value unchanged (repo wins).
+    if self.config_panel.layer == SettingsLayer::Global
+      && self.config_panel.field_source(field) == Some(crate::config::ConfigSource::Repo)
+    {
+      status.push_str(" — shadowed by .gwm.toml");
+    }
+    self.status = status;
   }
 
   /// Scroll the help overlay down one row, clamped to the renderer-published

@@ -306,8 +306,9 @@ fn command_logs_modal_renders_empty_placeholder() {
 }
 
 #[test]
-fn config_panel_modal_renders_title_section_and_source_column() {
+fn settings_panel_all_tab_renders_title_section_and_source_column() {
   use gwm::config::{ConfigRow, ConfigSource};
+  use gwm::tui::SettingsTab;
 
   let (_dir, mut app) = make_app();
   // Inject rows directly so the render is deterministic (the event loop is
@@ -324,13 +325,32 @@ fn config_panel_modal_renders_title_section_and_source_column() {
       source: ConfigSource::Default,
     },
   ];
+  // The read-only resolved config now lives under the `All` tab.
+  app.config_panel.tab = SettingsTab::All;
   app.view = View::Config;
   let buf = render(&mut app);
-  assert_present(&buf, "Configuration", "config panel title");
+  assert_present(&buf, "Settings", "settings panel title (renamed from Configuration)");
   assert_present(&buf, "[worktree]", "grouped section heading");
   assert_present(&buf, "worktree.base", "resolved config key");
   assert_present(&buf, "repo", "source column marker");
   assert_present(&buf, "default", "default source marker");
+}
+
+#[test]
+fn settings_panel_theme_tab_renders_tabs_layer_and_editable_field() {
+  // Issue #279: the default Theme tab shows the category tab strip, the
+  // edit-layer indicator, and the editable theme-preset field with its
+  // current value.
+  let (_dir, mut app) = make_app();
+  app.view = View::Config;
+  let buf = render(&mut app);
+  assert_present(&buf, "Settings", "settings panel title");
+  // Tab strip.
+  assert_present(&buf, "Theme", "Theme tab label");
+  assert_present(&buf, "TUI", "TUI tab label");
+  // Layer indicator + the editable field row.
+  assert_present(&buf, "layer", "edit-layer indicator");
+  assert_present(&buf, "theme preset", "editable theme-preset field label");
 }
 
 #[test]

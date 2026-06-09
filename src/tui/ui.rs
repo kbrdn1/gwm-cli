@@ -1,6 +1,7 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, Keymap};
 use super::state::async_task::TaskKind;
+use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
 use super::state::sidebar::SidebarMode;
@@ -16,7 +17,10 @@ use ratatui::{
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Widget, Wrap},
+  widgets::{
+    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, Widget, Wrap,
+  },
   Frame,
 };
 use std::time::{Duration, Instant};
@@ -1600,7 +1604,7 @@ impl HintContext {
         Hint::Key(Review, "review"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
-        Hint::Key(ConfigPanel, "config"),
+        Hint::Key(ConfigPanel, "settings"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1612,7 +1616,7 @@ impl HintContext {
         Hint::Key(FetchGithub, "fetch"),
         Hint::Key(FocusWorktrees, "worktrees"),
         Hint::Key(CommandLogs, "logs"),
-        Hint::Key(ConfigPanel, "config"),
+        Hint::Key(ConfigPanel, "settings"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -2279,7 +2283,8 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   let scroll = app.help_scroll;
   let x_scroll = app.help_x_scroll;
 
-  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), body_area);
+  let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_for_context(HintContext::Help, &app.keymap, &app.theme),
     footer_area,
@@ -2375,83 +2380,201 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
 }
 
-/// Render the Configuration panel overlay (issue #232): a ~90% fullscreen
-/// modal listing the resolved config (user-level global merged under the
-/// repo `.gwm.toml`) grouped by top-level section, each row carrying a
-/// leading colour-coded source column (repo / user / default). Scrolls
-/// like the help / Command Logs overlays — the renderer republishes
-/// `config_panel.max_scroll` / `max_x_scroll` against the live viewport.
+/// Render a vertical scrollbar on the right edge of `area` when the content
+/// overflows the viewport (issue #279, herdr-style), and return the text
+/// area shrunk by one column to make room. When everything fits, the area
+/// is returned unchanged and no scrollbar is drawn. The thumb tracks the
+/// theme `accent`; the track reads `muted`.
+fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
+  let viewport = area.height as usize;
+  if content_len <= viewport || area.width < 2 {
+    return area;
+  }
+  let mut state = ScrollbarState::new(content_len)
+    .position(offset as usize)
+    .viewport_content_length(viewport);
+  let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(None)
+    .end_symbol(None)
+    .thumb_style(Style::default().fg(theme.accent))
+    .track_style(Style::default().fg(theme.muted));
+  f.render_stateful_widget(bar, area, &mut state);
+  Rect {
+    width: area.width.saturating_sub(1),
+    ..area
+  }
+}
+
+/// Build the read-only `All`-tab body: the resolved config grouped by
+/// top-level section with a colour-coded source column (repo / user /
+/// default). The pre-#279 Configuration view, now one tab of the Settings
+/// overlay.
+fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+  let mut lines: Vec<Line<'static>> = Vec::new();
+
+  if app.config_panel.rows.is_empty() {
+    lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
+    return lines;
+  }
+  let mut current_section: Option<String> = None;
+  for row in &app.config_panel.rows {
+    let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
+    if current_section.as_deref() != Some(section.as_str()) {
+      if current_section.is_some() {
+        lines.push(Line::from(String::new()));
+      }
+      lines.push(Line::from(Span::styled(
+        format!("[{section}]"),
+        help_section_style(accent),
+      )));
+      current_section = Some(section);
+    }
+    let src_color = match row.source {
+      ConfigSource::Repo => app.theme.clean,
+      ConfigSource::User => app.theme.branch,
+      ConfigSource::Default => muted,
+    };
+    lines.push(Line::from(vec![
+      Span::raw("  "),
+      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::raw("  "),
+      Span::styled(row.key.clone(), label_style),
+      Span::styled(" = ", muted_style),
+      Span::styled(row.value.clone(), Style::default().fg(Color::White)),
+    ]));
+  }
+  lines
+}
+
+/// Build an editable-tab body: one row per [`SettingField`], the selected
+/// row marked and its value in the accent. The `Uint` field under edit
+/// shows its live buffer with a cursor; a field whose effective value is
+/// shadowed by a higher-precedence layer carries an inline guidance note
+/// (issue #279 — honours "edit both layers" without a silent dead edit).
+fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+  let panel = &app.config_panel;
+  let mut lines: Vec<Line<'static>> = Vec::new();
+
+  for (i, field) in fields.iter().enumerate() {
+    let selected = i == panel.selected;
+    let editing = selected && panel.editing.is_some();
+    let value = if editing {
+      format!("{}_", panel.editing.as_deref().unwrap_or(""))
+    } else {
+      field.current(&app.config)
+    };
+    let marker = if selected { "›" } else { " " };
+    let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let value_style = if selected {
+      Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(Color::White)
+    };
+    let mut spans = vec![
+      Span::styled(format!(" {marker} "), marker_style),
+      Span::styled(format!("{:<24}", field.label()), label_style),
+      Span::styled(value, value_style),
+    ];
+    // Shadow guidance: editing the Global layer for a field the repo
+    // overrides won't change the effective value (repo wins). Surface it
+    // rather than silently no-op or hard-disable the field.
+    if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
+    {
+      spans.push(Span::styled("  — set in .gwm.toml; switch to Project", muted_style));
+    }
+    lines.push(Line::from(spans));
+  }
+  lines
+}
+
+/// Render the Settings overlay (issue #232; editable in #279): a ~90%
+/// fullscreen modal with a fixed header (title + category tabs + the edit
+/// layer indicator), a scrollable body (the active tab's fields, or the
+/// read-only resolved config on the `All` tab) with a herdr-style
+/// scrollbar, and a fixed footer hint. The renderer republishes
+/// `config_panel.max_scroll` against the live body viewport.
 fn draw_config_panel(f: &mut Frame, app: &mut App) {
   let area = centered(90, 85, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
-  let repo_color = app.theme.clean;
-  let user_color = app.theme.branch;
-  let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
 
-  let mut lines: Vec<Line<'static>> = overlay_title_lines("Configuration", accent);
+  let tab = app.config_panel.tab;
+  let editing = app.config_panel.editing.is_some();
+  let selected_kind = app.config_panel.selected_field().map(SettingField::kind);
 
-  if app.config_panel.rows.is_empty() {
-    lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
-  } else {
-    // Rows arrive sorted (the flatten walks a `BTreeMap`), so each
-    // top-level section is contiguous — emit a `[section]` heading when it
-    // changes, mirroring `gwm config list`'s grouping.
-    let mut current_section: Option<String> = None;
-    for row in &app.config_panel.rows {
-      let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
-      if current_section.as_deref() != Some(section.as_str()) {
-        if current_section.is_some() {
-          lines.push(Line::from(String::new()));
-        }
-        lines.push(Line::from(Span::styled(
-          format!("[{section}]"),
-          help_section_style(accent),
-        )));
-        current_section = Some(section);
-      }
-      // Leading source column, colour-coded and padded so keys align: repo
-      // overrides read strongest, user next, defaults muted.
-      let src_color = match row.source {
-        ConfigSource::Repo => repo_color,
-        ConfigSource::User => user_color,
-        ConfigSource::Default => muted,
-      };
-      lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
-        Span::raw("  "),
-        Span::styled(row.key.clone(), label_style),
-        Span::styled(" = ", muted_style),
-        Span::styled(row.value.clone(), Style::default().fg(Color::White)),
-      ]));
+  // Header: title + tab strip + layer indicator (all fixed).
+  let title = Line::from(Span::styled("Settings", heading_style)).centered();
+  let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+  for (i, t) in SettingsTab::ALL.iter().enumerate() {
+    if i > 0 {
+      tab_spans.push(Span::raw("  "));
     }
+    let style = if *t == tab { chip_style(accent) } else { muted_style };
+    tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
   }
+  let tabs_line = Line::from(tab_spans);
+  let layer_line = Line::from(vec![
+    Span::styled("  layer: ", muted_style),
+    Span::styled(
+      app.config_panel.layer.label(),
+      Style::default().fg(accent).add_modifier(Modifier::BOLD),
+    ),
+    Span::styled("   (L to switch)", muted_style),
+  ]);
+  let header_lines = vec![title, tabs_line, layer_line];
 
-  // Footer hint: scroll + close, matching the Command Logs overlay.
-  lines.push(Line::from(String::new()));
-  lines.push(Line::from(Span::styled(
-    "j/k scroll · g/G top/bottom · esc close",
-    muted_style.add_modifier(Modifier::ITALIC),
-  )));
+  // Body depends on the active tab.
+  let body_lines = match tab {
+    SettingsTab::All => settings_all_lines(app),
+    other => settings_fields_lines(app, other.fields()),
+  };
 
-  // Publish the scroll bounds against the live viewport (mirrors
-  // `draw_command_logs` / `draw_help`).
+  // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
+  // the current tab / edit mode.
+  let footer_hints: Vec<(&str, &str)> = if editing {
+    vec![("Enter", "save"), ("Esc", "cancel")]
+  } else if tab == SettingsTab::All {
+    vec![("j/k", "scroll"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  } else if selected_kind == Some(FieldKind::Uint) {
+    vec![("Enter", "edit"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  } else {
+    vec![("Space", "cycle"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  };
+
   let block = overlay_block(accent);
   let inner = block.inner(area);
-  let viewport = inner.height as usize;
-  app.config_panel.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let header_h = header_lines.len() as u16;
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // Publish scroll bounds against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.config_panel.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
   app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
-  let viewport_w = inner.width as usize;
-  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.config_panel.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
+  let content_w = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.config_panel.max_x_scroll = content_w.saturating_sub(body_area.width as usize) as u16;
   app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
   let scroll = app.config_panel.scroll;
   let x_scroll = app.config_panel.x_scroll;
 
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {

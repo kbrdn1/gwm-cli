@@ -4633,3 +4633,85 @@ fn sync_refresh_invalidates_an_inflight_async_refresh() {
     "the dropped result's payload must never reach the list"
   );
 }
+
+// ---------------------------------------------------------------------------
+// Editable Settings panel — apply-live + persistence (issue #279)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn activate_choice_setting_persists_project_layer_and_applies_live() {
+  use gwm::config::{Config, SidebarPosition};
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0; // sidebar position
+  assert_eq!(app.config.tui.sidebar_position, SidebarPosition::Right);
+
+  // Cycle the choice: right → left, written to the project `.gwm.toml` and
+  // applied live.
+  app.activate_selected_setting();
+
+  assert_eq!(
+    app.config.tui.sidebar_position,
+    SidebarPosition::Left,
+    "live config updated"
+  );
+  assert_eq!(
+    app.sidebar.position,
+    SidebarPosition::Left,
+    "live sidebar position re-seeded"
+  );
+
+  let written = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(
+    written.contains("sidebar_position"),
+    "edit persisted to .gwm.toml: {written}"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.tui.sidebar_position,
+    SidebarPosition::Left,
+    "edit round-trips through a fresh layered load"
+  );
+}
+
+#[test]
+fn committing_numeric_input_persists_the_typed_value() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 2; // confirm countdown (Uint input)
+
+  // Arm the input, retype "5", commit.
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on a Uint field opens the input"
+  );
+  app.config_panel.editing = Some("5".into());
+  app.commit_settings_edit();
+
+  assert!(app.config_panel.editing.is_none(), "commit closes the input");
+  assert_eq!(app.config.tui.confirm_countdown_secs, 5, "live config updated");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.confirm_countdown_secs, 5, "typed value persisted");
+}
+
+#[test]
+fn activate_is_a_noop_on_the_read_only_all_tab() {
+  use gwm::tui::SettingsTab;
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::All;
+  app.activate_selected_setting();
+  // Nothing written: the All tab has no editable field.
+  assert!(
+    !dir.path().join(".gwm.toml").exists(),
+    "the read-only All tab must not write anything"
+  );
+}
