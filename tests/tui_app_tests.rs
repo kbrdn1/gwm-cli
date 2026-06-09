@@ -2973,6 +2973,141 @@ fn issue_summary_line_truncates_error_state_to_budget() {
   assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
 }
 
+// ---- Issue #283: pane icons + source / state chips ----------------------
+
+fn span_with<'a>(line: &'a ratatui::text::Line<'a>, needle: &str) -> Option<&'a ratatui::text::Span<'a>> {
+  line.spans.iter().find(|s| s.content.contains(needle))
+}
+
+#[test]
+fn issue_summary_line_leads_with_the_issue_icon() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert!(
+    line.spans[0].content.contains(gwm::tui::ISSUE_ICON),
+    "issue pane line must lead with the issue nerdfont glyph: {:?}",
+    line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_leads_with_the_pr_icon() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  assert!(
+    line.spans[0].content.contains(gwm::tui::PR_ICON),
+    "pr pane line must lead with the pr nerdfont glyph: {:?}",
+    line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Detected,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "detected").expect("a 'detected' source chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the source chip must use the version-badge reverse-video treatment"
+  );
+}
+
+#[test]
+fn issue_summary_line_renders_auto_source_as_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "auto").expect("an 'auto' source chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the source chip must use the version-badge reverse-video treatment"
+  );
+}
+
+#[test]
+fn explicit_link_renders_no_source_chip() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    !text.contains("auto"),
+    "explicit link must not show an auto chip: {text}"
+  );
+  assert!(
+    !text.contains("detected"),
+    "explicit link must not show a detected chip: {text}"
+  );
+}
+
+#[test]
+fn issue_summary_line_state_badge_is_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let status = gwm::github::IssueStatus {
+    number: 7,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "open").expect("an 'open' state chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the state badge must use the version-badge reverse-video treatment"
+  );
+}
+
 // ---- Recent Commits panel: lazygit-style fill + clip (issue #71) ---------
 
 use gwm::tui::{recent_commits_lines, RECENT_COMMITS_LIMIT};

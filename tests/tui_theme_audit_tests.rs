@@ -227,7 +227,11 @@ fn table_marker_resolves_through_theme_roles() {
   // Main keeps its single `★` painted with the `main` role.
   let mut main = base_worktree("main");
   main.is_main = true;
-  assert_eq!(table_marker(&main, &t).spans[0].style.fg, Some(t.main), "main marker → main role");
+  assert_eq!(
+    table_marker(&main, &t).spans[0].style.fg,
+    Some(t.main),
+    "main marker → main role"
+  );
 
   // Issue linked, PR empty: issue dot → `clean`, separator → `muted`, the
   // empty PR dot → `name` (the neutral white slot).

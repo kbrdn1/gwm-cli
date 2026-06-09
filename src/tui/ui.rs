@@ -3514,12 +3514,36 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   lines
 }
 
-fn source_marker(s: LinkSource) -> &'static str {
+/// Nerdfont glyph leading the pane's Issue line (issue #283):
+/// `nf-oct-issue_opened`.
+pub const ISSUE_ICON: &str = "\u{f41b}";
+/// Nerdfont glyph leading the pane's PR line (issue #283):
+/// `nf-oct-git_pull_request`.
+pub const PR_ICON: &str = "\u{f407}";
+
+/// The pane's source chip (issue #283): `auto` for a branch-name inference,
+/// `detected` for a live GitHub match. Explicit / none carry no chip — the
+/// number already speaks for an explicit link. Rendered version-badge style
+/// (reverse-video [`chip_style`]); `auto` stays muted, `detected` takes the
+/// accent so a freshly-found PR draws the eye.
+fn source_chip(s: LinkSource, theme: &Theme) -> Option<(&'static str, Color)> {
   match s {
-    LinkSource::None => "",
-    LinkSource::BranchName => " (auto)",
-    LinkSource::Explicit => "",
-    LinkSource::Detected => " (detected)",
+    LinkSource::BranchName => Some(("auto", theme.muted)),
+    LinkSource::Detected => Some(("detected", theme.accent)),
+    LinkSource::Explicit | LinkSource::None => None,
+  }
+}
+
+/// Collapse a multi-span line into a single truncated plain span when the
+/// styled spans together overflow `max_width`. Used by the pane's narrow
+/// fallback so the icon + chips never push the line past the block border
+/// (issue #283). Width is counted in display columns (`chars().count()`),
+/// matching the budget arithmetic in [`summary_line`].
+fn flatten_if_overflow(spans: &mut Vec<Span<'static>>, max_width: usize) {
+  let w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+  if w > max_width {
+    let raw: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    *spans = vec![Span::raw(trunc(&raw, max_width))];
   }
 }
 
@@ -3555,28 +3579,67 @@ enum SummaryState<'a> {
   Error(&'a str),
 }
 
-/// Shared renderer behind [`issue_summary_line`] and [`pr_summary_line`].
-/// Both twins resolve their `head` ("Issue #…" vs "PR    #…"), badge, and
-/// `trailing` segment, then delegate here so the truncation budget, the
-/// narrow-fallback flatten, and the Idle/Loading/Error arms live in one
-/// place. The `trailing` param is what keeps the two byte-identical: issue
-/// passes "" → renders `] title`; PR passes ` · checks 1/2` → renders
-/// `]· checks 1/2 title`, exactly as the inlined versions did.
+/// Shared renderer behind [`issue_summary_line`] and [`pr_summary_line`]
+/// (issue #283). Both twins pass their leading nerdfont `icon`, their `head`
+/// identity ("Issue #…" / "PR    #…"), the link `source`, and — for `Loaded`
+/// — a state `badge` + optional `trailing` segment. Every line leads with
+/// `<icon> <head>`, then an optional version-badge-style source chip
+/// (`auto` / `detected`), then the state-specific tail.
+///
+/// `trailing` keeps the two twins identical past the badge: issue passes ""
+/// → renders ` badge  title`; PR passes ` · checks 1/2` → renders
+/// ` badge · checks 1/2 title`. Widths are counted in display columns (the
+/// `·` is U+00B7: 1 column) so the budget arithmetic holds.
 fn summary_line(
+  icon: &str,
   head: String,
+  source: LinkSource,
   state: SummaryState,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  // The `head` carries no status signal, only identity — it paints with
-  // the `name` role (issue #210; default `White`) while the badge colour
-  // tracks the GitHub state.
+  // `<icon> <head>` plus an optional source chip are common to every state.
+  // `prefix_w` tracks the visible width so the variable tail (title / error
+  // blob) can be trimmed to fit `max_width`.
+  let icon_seg = format!("{} ", icon); // glyph + space
+  let chip = source_chip(source, theme);
+  // Source chip segment = " " + " <label> " (a leading gap + the padded chip).
+  let source_seg_w = chip.map(|(l, _)| 1 + l.chars().count() + 2).unwrap_or(0);
+  let prefix_w = icon_seg.chars().count() + head.chars().count() + source_seg_w;
+
+  // The `head` carries no status signal, only identity — it paints with the
+  // `name` role (issue #210); the icon stays muted and the chips carry the
+  // state/source colour.
+  let build_prefix = |head_bold: bool| -> Vec<Span<'static>> {
+    let head_style = if head_bold {
+      Style::default().fg(theme.name).add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(theme.name)
+    };
+    let mut spans = vec![
+      Span::styled(icon_seg.clone(), Style::default().fg(theme.muted)),
+      Span::styled(head.clone(), head_style),
+    ];
+    if let Some((label, color)) = chip {
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", label), chip_style(color)));
+    }
+    spans
+  };
+
   match state {
-    SummaryState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
+    SummaryState::Idle => {
+      let mut spans = build_prefix(false);
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
     SummaryState::Loading => {
       let glyph = spinner.unwrap_or("…");
-      Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(format!(" {} loading", glyph)));
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
     }
     SummaryState::Loaded {
       badge,
@@ -3584,41 +3647,39 @@ fn summary_line(
       trailing,
       title,
     } => {
-      // Fixed prefix = "<head> [<badge>]<trailing> " — try to preserve in
-      // full and trim the title to whatever budget remains. If the prefix
-      // alone already exceeds the width budget (very narrow sidebar), fall
-      // back to flattening the line into a single styled string and
-      // truncating it — preserves no badge color but stays inside the
-      // block. `trailing` is empty for issues and ` · checks N/M` for PRs;
-      // count chars (the `·` is U+00B7: 2 bytes, 1 column) so the budget
-      // arithmetic matches the pre-dedup twins exactly.
-      let fixed = head.chars().count() + 3 + badge.chars().count() + trailing.chars().count() + 1; // " [" + badge + "]" + trailing + " "
+      // Tail fixed cost past the prefix = " " + " <badge> " + trailing + " ".
+      let badge_seg_w = 1 + badge.chars().count() + 2;
+      let fixed = prefix_w + badge_seg_w + trailing.chars().count() + 1;
       if fixed >= max_width {
-        let raw = format!("{} [{}]{} {}", head, badge, trailing, title);
-        return Line::from(trunc(&raw, max_width));
+        // Very narrow pane: keep the prefix + badge, drop the title, and
+        // flatten to fit rather than overflow the block border.
+        let mut spans = build_prefix(true);
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(format!(" {} ", badge)));
+        spans.push(Span::raw(trailing));
+        flatten_if_overflow(&mut spans, max_width);
+        return Line::from(spans);
       }
       let budget = max_width - fixed;
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name).add_modifier(Modifier::BOLD)),
-        Span::raw(" ["),
-        Span::styled(
-          badge.to_string(),
-          Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("]"),
-        Span::raw(trailing),
-        Span::raw(" "),
-        Span::raw(trunc(title, budget)),
-      ])
+      let mut spans = build_prefix(true);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
+      spans.push(Span::raw(trailing));
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
+      Line::from(spans)
     }
     SummaryState::Error(e) => {
-      let fixed = head.chars().count() + 2; // " " + "!"
+      let fixed = prefix_w + 2; // " " + "!"
       let budget = max_width.saturating_sub(fixed);
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name)),
-        Span::raw(" "),
-        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
-      ])
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(
+        format!("!{}", trunc(e, budget)),
+        Style::default().fg(theme.prunable),
+      ));
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
     }
   }
 }
@@ -3631,7 +3692,7 @@ fn issue_summary_line_with_spinner(
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  let head = format!("Issue #{}{}", n, source_marker(src));
+  let head = format!("Issue #{}", n);
   let resolved = match state {
     GitHubFetchState::Idle => SummaryState::Idle,
     GitHubFetchState::Loading => SummaryState::Loading,
@@ -3654,7 +3715,7 @@ fn issue_summary_line_with_spinner(
     }
     GitHubFetchState::Error(e) => SummaryState::Error(e),
   };
-  summary_line(head, resolved, max_width, theme, spinner)
+  summary_line(ISSUE_ICON, head, src, resolved, max_width, theme, spinner)
 }
 
 /// Render the Loaded / Idle / Loading / Error variants for a PR link
@@ -3679,7 +3740,7 @@ fn pr_summary_line_with_spinner(
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  let head = format!("PR    #{}{}", n, source_marker(src));
+  let head = format!("PR    #{}", n);
   let resolved = match state {
     GitHubFetchState::Idle => SummaryState::Idle,
     GitHubFetchState::Loading => SummaryState::Loading,
@@ -3709,7 +3770,7 @@ fn pr_summary_line_with_spinner(
     }
     GitHubFetchState::Error(e) => SummaryState::Error(e),
   };
-  summary_line(head, resolved, max_width, theme, spinner)
+  summary_line(PR_ICON, head, src, resolved, max_width, theme, spinner)
 }
 
 // ---- Issue #73: lazygit-style colour helpers -------------------------------
@@ -3805,7 +3866,11 @@ pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   // An empty slot stays `name`-white so "no link" reads as a neutral
   // placeholder rather than borrowing a status colour that would claim the
   // row. A linked slot takes its accent: issue → `clean`, PR → `locked`.
-  let issue_color = if w.link.issue.is_some() { theme.clean } else { theme.name };
+  let issue_color = if w.link.issue.is_some() {
+    theme.clean
+  } else {
+    theme.name
+  };
   let pr_color = if w.link.pr.is_some() { theme.locked } else { theme.name };
   Line::from(vec![
     Span::styled("●", Style::default().fg(issue_color)),
