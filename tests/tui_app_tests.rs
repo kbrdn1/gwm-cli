@@ -2055,6 +2055,67 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: a persisted detection (#283) must NOT make the live
+  // CLI detection path (`gwm status` / `gwm list --detect-pr`) authoritative.
+  // It must still re-run `gh pr list` so a PR that was replaced since the
+  // last TUI `F` is reflected — only an explicit `gwm link --pr` pins it.
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+
+  // Stale persisted detection: #128.
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+
+  // Live `gh` now reports #200 for the branch.
+  let gh = dir.path().join("fake-gh-200");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":200}]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+
+  // Explicit override still wins even over a live re-detection.
+  gwm::github::link_pr(&repo, "detect-me", 61).unwrap();
+  let explicit = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(
+    link.pr,
+    Some(200),
+    "live detection must override the stale persisted #128"
+  );
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(explicit.pr, Some(61), "an explicit link still wins over live detection");
+  assert_eq!(explicit.pr_source, LinkSource::Explicit);
+}
+
 // ---- Configurable launchers (issue #75) --------------------------------
 //
 // The `R` key in the worktree-list view now triggers the [review]

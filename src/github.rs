@@ -134,20 +134,35 @@ pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
   }
 }
 
-/// Resolve the link for `branch` and, when no PR is explicitly linked,
+/// Resolve the link for `branch` and, unless a PR is *explicitly* linked,
 /// auto-detect the branch's PR from GitHub via `gh` (issue #181). The
-/// detected PR is marked [`LinkSource::Detected`] and is never persisted.
+/// detected PR is marked [`LinkSource::Detected`].
 ///
-/// Detection is best-effort: a `gh` failure (not installed, no network,
-/// no PR for the branch) degrades silently to "no PR" rather than
-/// erroring — the local link is still returned. This shells out, so
-/// callers on hot paths (per-worktree listing) must opt in deliberately
-/// rather than route every read through here.
+/// A persisted auto-detection (`gwm-pr-detected`, issue #283) does NOT pin
+/// the result here: this is the live-detection path (`gwm status` /
+/// `gwm list --detect-pr`), so it re-runs `gh pr list` to reflect a PR that
+/// was opened / closed / replaced since the last detection, rather than
+/// echoing a stale stored number (Codex review #284). Only an explicit
+/// `gwm link --pr` short-circuits the probe.
+///
+/// Detection is best-effort: a `gh` failure (not installed, no network)
+/// leaves the link untouched — a persisted detection survives the failed
+/// probe rather than being wiped — and the local link is still returned.
+/// This shells out, so callers on hot paths (per-worktree listing) must opt
+/// in deliberately rather than route every read through here.
 pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) -> Result<BranchLink> {
   let mut link = read_link(repo, branch)?;
-  if link.pr.is_none() {
-    let detected = find_pr_for_branch(slug, branch).ok().flatten();
-    apply_detected_pr(&mut link, detected);
+  if link.pr_source != LinkSource::Explicit {
+    // Re-resolve live. On success, the fresh result replaces any persisted
+    // detection (a vanished PR clears it); on a `gh` failure, keep whatever
+    // `read_link` already resolved (possibly a persisted detection).
+    if let Ok(detected) = find_pr_for_branch(slug, branch) {
+      link.pr = detected;
+      link.pr_source = match detected {
+        Some(_) => LinkSource::Detected,
+        None => LinkSource::None,
+      };
+    }
   }
   Ok(link)
 }
