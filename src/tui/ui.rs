@@ -2163,12 +2163,40 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
 /// so the labels line up regardless of how many chords a row binds.
 pub fn badge_group_width(keys: &str) -> usize {
   if keys.is_empty() || keys == "(unbound)" {
-    return "(unbound)".chars().count() + 2;
+    return "(unbound)".chars().count();
   }
   let chords: Vec<&str> = keys.split(", ").collect();
-  let badges: usize = chords.iter().map(|c| c.chars().count() + 2).sum();
-  // One space between adjacent badges.
-  badges + chords.len().saturating_sub(1)
+  // Flat accent-bold glyphs now (issue #279), no `` key `` padding box: a
+  // group is the sum of bare chord widths plus one space between adjacent
+  // chords.
+  let glyphs: usize = chords.iter().map(|c| c.chars().count()).sum();
+  glyphs + chords.len().saturating_sub(1)
+}
+
+/// One documented-binding row for the Keybindings overlay (issue #279):
+/// the chord(s) as flat accent-bold glyphs (no reverse-video badge),
+/// padded to `max_group_w` so every label lines up in one column, then the
+/// human label. An unbound action reads as a muted `(unbound)` placeholder.
+/// Extracted as a pure builder so the de-badged treatment is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Theme) -> Line<'static> {
+  let key_style = hint_key_style(theme);
+  let muted_style = Style::default().fg(theme.muted);
+  let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+  if keys.is_empty() || keys == "(unbound)" {
+    spans.push(Span::styled("(unbound)", muted_style));
+  } else {
+    for (i, chord) in keys.split(", ").enumerate() {
+      if i > 0 {
+        spans.push(Span::raw(" "));
+      }
+      spans.push(Span::styled(chord.to_string(), key_style));
+    }
+  }
+  let pad = max_group_w.saturating_sub(badge_group_width(keys)) + 1;
+  spans.push(Span::raw(" ".repeat(pad)));
+  spans.push(Span::styled(label.to_string(), help_label_style(theme)));
+  Line::from(spans)
 }
 
 fn draw_help(f: &mut Frame, app: &mut App) {
@@ -2181,20 +2209,15 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
   let accent = app.theme.accent;
-  let muted = app.theme.muted;
 
-  // Key *badges* mirror the bottom statusline's chip style
-  // (`footer_line`): a reversed-bold accent block. Section headers and
-  // the title share the bold-accent heading style. Labels stay white
-  // for contrast; an `(unbound)` action renders muted instead of a chip
-  // so it reads as "no binding" rather than a live key.
-  let chip_style = chip_style(accent);
   let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  let label_style = help_label_style(&app.theme);
-  let muted_style = Style::default().fg(muted);
+  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
+  // italic, so the context name is clearly a different colour from both the
+  // bold title and the muted key labels (issue #217 follow-up).
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
-  // Align every label to the same column: pad each badge *group* out to
-  // the widest one so the descriptions line up under one another.
+  // Align every label to the same column: pad each chord *group* out to the
+  // widest one so the descriptions line up under one another.
   let max_group_w = rows
     .iter()
     .filter_map(|r| match r {
@@ -2204,70 +2227,63 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     .max()
     .unwrap_or(0);
 
-  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
-  // italic, so the context name is clearly a different colour from both the
-  // bold title and the muted key labels (issue #217 follow-up).
-  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
-
-  let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+  // Issue #279: split the overlay into a FIXED header (title + subtitle), a
+  // SCROLLABLE body (sections + entries), and a FIXED footer hint. Pre-#279
+  // the whole content scrolled in one `Paragraph`, so the title and the
+  // close hint rolled off the top/bottom as soon as the body outgrew the
+  // modal. Title/subtitle are the leading rows; everything else is body.
+  let mut header_lines: Vec<Line<'static>> = Vec::new();
+  let mut body_lines: Vec<Line<'static>> = Vec::new();
   for row in rows {
     match row {
-      // Title + subtitle are centred (issue #217); section headers stay
-      // left-aligned so they anchor their groups lazygit-style.
-      HelpRow::Title(t) => {
-        lines.push(Line::from(Span::styled(t, heading_style)).centered());
-      }
-      HelpRow::Subtitle(t) => {
-        lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
-      }
-      HelpRow::Section(t) => {
-        lines.push(Line::from(Span::styled(
-          t,
-          help_section_style(help_body_section_color(&app.theme)),
-        )));
-      }
-      HelpRow::Blank => lines.push(Line::from(String::new())),
+      // Title + subtitle are centred (issue #217) and pinned in the header.
+      HelpRow::Title(t) => header_lines.push(Line::from(Span::styled(t, heading_style)).centered()),
+      HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
+      // Section headers stay left-aligned so they anchor their groups
+      // lazygit-style.
+      HelpRow::Section(t) => body_lines.push(Line::from(Span::styled(
+        t,
+        help_section_style(help_body_section_color(&app.theme)),
+      ))),
+      HelpRow::Blank => body_lines.push(Line::from(String::new())),
       HelpRow::Entry { keys, label } => {
-        // One badge per chord, separated by a space (#187 review: the
-        // comma-joined `j, Down` now reads as `[ j ] [ Down ]`).
-        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        if keys.is_empty() || keys == "(unbound)" {
-          spans.push(Span::styled(" (unbound) ", muted_style));
-        } else {
-          for (i, chord) in keys.split(", ").enumerate() {
-            if i > 0 {
-              spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(format!(" {} ", chord), chip_style));
-          }
-        }
-        let pad = max_group_w.saturating_sub(badge_group_width(&keys)) + 1;
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(label, label_style));
-        lines.push(Line::from(spans));
+        body_lines.push(help_entry_line(&keys, &label, max_group_w, &app.theme));
       }
     }
   }
-  push_modal_hint(&mut lines, HintContext::Help, &app.keymap, &app.theme);
 
-  // Publish the scroll bound against the actual viewport so the Keybindings
-  // overlay can scroll when it outgrows the modal (#217). The renderer is
-  // the only place that knows both the content length and the inner height,
-  // so it clamps the offset here too.
   let block = overlay_block(accent);
   let inner_area = block.inner(area);
-  let viewport = inner_area.height as usize;
-  app.help_max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  // header (fixed) | body (scrollable) | footer hint (fixed). The header is
+  // exactly as tall as its line count; the footer is one row; the body
+  // takes the rest.
+  let header_h = header_lines.len() as u16;
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner_area);
+
+  f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // Publish the scroll bounds against the BODY viewport only (issue #279) —
+  // not the whole inner height — so the clamp matches what actually scrolls
+  // and the last body rows stay reachable.
+  let body_viewport = body_area.height as usize;
+  app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
   app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let viewport_width = inner_area.width as usize;
-  let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(viewport_width) as u16;
+  let body_viewport_w = body_area.width as usize;
+  let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.help_max_x_scroll = content_width.saturating_sub(body_viewport_w) as u16;
   app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
   let scroll = app.help_scroll;
   let x_scroll = app.help_x_scroll;
 
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), body_area);
+  f.render_widget(
+    modal_hint_for_context(HintContext::Help, &app.keymap, &app.theme),
+    footer_area,
+  );
 }
 
 /// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal

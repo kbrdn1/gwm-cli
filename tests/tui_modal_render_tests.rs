@@ -135,6 +135,31 @@ fn help_modal_renders_title_and_close_hint() {
 }
 
 #[test]
+fn help_modal_keeps_title_and_footer_fixed_while_body_scrolls() {
+  // Issue #279: the Keybindings overlay scrolls its BODY only — the title
+  // and the footer hint stay pinned. Render into a short terminal (so the
+  // body definitely overflows), scroll to the bottom, and assert that both
+  // the title and the footer hint are still on screen. Pre-#279 the whole
+  // content scrolled in one Paragraph, so at max scroll the title rolled
+  // off the top — this test would have gone red.
+  let (_dir, mut app) = make_app();
+  app.enter_help();
+  // Drive the scroll cursor past the end; the renderer clamps it to the
+  // body's max-scroll, i.e. "scrolled to the bottom".
+  app.help_scroll = u16::MAX;
+
+  let backend = TestBackend::new(100, 18);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  let buf = terminal.backend().buffer().clone();
+
+  assert_present(&buf, "Keybindings", "help title stays fixed at the top");
+  // The footer advertises the close hint — pinned at the bottom, visible
+  // even at max scroll.
+  assert_present(&buf, "close", "help footer hint stays fixed at the bottom");
+}
+
+#[test]
 fn create_modal_renders_title_fields_and_buttons() {
   let (_dir, mut app) = make_app();
   app.enter_create();
