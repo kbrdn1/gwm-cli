@@ -405,8 +405,9 @@ fn settings_panel_theme_tab_renders_tabs_layer_and_editable_field() {
   assert_present(&buf, "Theme", "Theme tab label");
   assert_present(&buf, "Worktree", "Worktree tab label");
   assert_present(&buf, "TUI", "TUI tab label");
-  // Layer is now a subtitle ("… · L to switch layer").
-  assert_present(&buf, "L to switch layer", "edit-layer subtitle");
+  // The active layer reads as a plain subtitle (the switch key lives in the
+  // footer hints, not the subtitle).
+  assert_present(&buf, "project (.gwm.toml)", "edit-layer subtitle");
   assert_present(&buf, "theme preset", "editable theme-preset field label");
 }
 

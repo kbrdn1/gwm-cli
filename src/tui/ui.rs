@@ -2539,13 +2539,11 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   let editing = app.config_panel.editing.is_some();
   let selected_kind = app.config_panel.selected_field().map(SettingField::kind);
 
-  // Header: title + the active edit layer as a subtitle + tab strip (fixed).
+  // Header: title + the active edit layer as a subtitle + a blank spacer +
+  // the tab strip (all fixed). The layer-switch key lives in the footer
+  // hints, so the subtitle stays a plain context label.
   let title = Line::from(Span::styled("Settings", heading_style)).centered();
-  let subtitle = Line::from(Span::styled(
-    format!("{}  ·  L to switch layer", app.config_panel.layer.label()),
-    subtitle_style,
-  ))
-  .centered();
+  let subtitle = Line::from(Span::styled(app.config_panel.layer.label(), subtitle_style)).centered();
   let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
   for (i, t) in SettingsTab::ALL.iter().enumerate() {
     if i > 0 {
@@ -2554,7 +2552,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     let style = if *t == tab { chip_style(accent) } else { muted_style };
     tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
   }
-  let header_lines = vec![title, subtitle, Line::from(tab_spans)];
+  let header_lines = vec![title, subtitle, Line::from(String::new()), Line::from(tab_spans)];
 
   // Body depends on the active tab.
   let body_lines = match tab {
