@@ -203,6 +203,20 @@ fn edit_buffer_takes_digits_only_and_commits() {
 }
 
 #[test]
+fn auto_refresh_secs_accepts_four_plus_digit_intervals() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 3;
+  assert_eq!(panel.selected_field(), Some(SettingField::AutoRefreshSecs));
+  assert_eq!(panel.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
+  panel.begin_edit("");
+  for c in "3600".chars() {
+    panel.push_edit_char(c);
+  }
+  assert_eq!(panel.editing.as_deref(), Some("3600"));
+}
+
+#[test]
 fn take_edit_returns_the_raw_buffer() {
   // The state layer returns the raw buffer; the App commit path coerces an
   // empty numeric buffer to "0" (an empty text buffer stays empty).

@@ -562,10 +562,10 @@ impl App {
     if now.saturating_duration_since(self.last_auto_refresh_at) < Duration::from_secs(secs) {
       return false;
     }
+    self.last_auto_refresh_at = now;
     let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
       return false;
     };
-    self.last_auto_refresh_at = now;
     self.spinner.reset();
     self.status = "auto-refreshing worktrees…".into();
     self.spawn_refresh(generation);

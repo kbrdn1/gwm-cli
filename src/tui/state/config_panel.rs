@@ -204,6 +204,14 @@ impl SettingField {
     }
   }
 
+  fn edit_char_limit(self) -> usize {
+    match self {
+      SettingField::AutoRefreshSecs => 20,
+      SettingField::ConfirmCountdown => 3,
+      _ => 256,
+    }
+  }
+
   /// The fixed choice set for a `Choice` field. Theme presets come from the
   /// theme registry; the rest are static. Empty for non-choice fields.
   pub fn choices(self) -> &'static [&'static str] {
@@ -358,16 +366,18 @@ impl ConfigPanel {
   }
 
   /// Append a character to the edit buffer. `Uint` fields take ASCII digits
-  /// only (capped at 3 chars — the countdown clamps to single seconds
-  /// anyway); `Text` fields take any printable character (capped at 256).
+  /// only (with per-field caps); `Text` fields take any printable character
+  /// (capped at 256).
   pub fn push_edit_char(&mut self, c: char) {
-    let uint = matches!(self.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
+    let field = self.selected_field();
+    let uint = matches!(field.map(SettingField::kind), Some(FieldKind::Uint));
+    let limit = field.map(SettingField::edit_char_limit).unwrap_or(256);
     if let Some(buf) = self.editing.as_mut() {
       if uint {
-        if c.is_ascii_digit() && buf.len() < 3 {
+        if c.is_ascii_digit() && buf.len() < limit {
           buf.push(c);
         }
-      } else if !c.is_control() && buf.len() < 256 {
+      } else if !c.is_control() && buf.len() < limit {
         buf.push(c);
       }
     }

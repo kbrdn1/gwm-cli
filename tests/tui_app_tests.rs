@@ -5223,6 +5223,33 @@ fn auto_refresh_triggers_after_default_interval_without_resetting_selection() {
 }
 
 #[test]
+fn auto_refresh_advances_timer_when_refresh_is_already_inflight() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let start = Instant::now();
+  app.last_auto_refresh_at = start;
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  let elapsed = start + Duration::from_secs(60);
+
+  assert!(
+    !app.maybe_auto_refresh(elapsed),
+    "an in-flight refresh coalesces instead of spawning a second worker"
+  );
+  assert_eq!(
+    app.last_auto_refresh_at, elapsed,
+    "coalescing still advances the timer to avoid an immediate follow-up refresh"
+  );
+  assert!(
+    app.tasks.complete(TaskKind::RefreshWorktrees, generation),
+    "the original refresh remains authoritative"
+  );
+  assert!(
+    !app.maybe_auto_refresh(elapsed + Duration::from_secs(1)),
+    "the next event-loop tick should not immediately start another auto-refresh"
+  );
+}
+
+#[test]
 fn auto_refresh_zero_is_disabled() {
   use gwm::tui::state::async_task::TaskKind;
   let (_dir, mut app) = make_app();
