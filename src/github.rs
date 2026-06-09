@@ -145,6 +145,13 @@ pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
 /// echoing a stale stored number (Codex review #284). Only an explicit
 /// `gwm link --pr` short-circuits the probe.
 ///
+/// On a successful probe this also **reconciles the persisted cache**
+/// (`gwm-pr-detected`): it rewrites the stored number to the fresh result,
+/// or clears it when the PR vanished, so the no-fetch consumers (`read_link`,
+/// the TUI table at startup, `gwm open pr`) don't resurrect a stale number
+/// after this path saw it change (Codex review #284). The cache write is
+/// best-effort — a read-only repo must not turn `gwm status` into an error.
+///
 /// Detection is best-effort: a `gh` failure (not installed, no network)
 /// leaves the link untouched — a persisted detection survives the failed
 /// probe rather than being wiped — and the local link is still returned.
@@ -161,6 +168,15 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) 
       link.pr_source = match detected {
         Some(_) => LinkSource::Detected,
         None => LinkSource::None,
+      };
+      // Reconcile the persisted cache (issue #283 / Codex review #284) so the
+      // no-fetch consumers (`read_link`, the TUI table at startup,
+      // `gwm open pr`) don't resurrect a stale number after this live path
+      // saw it change or vanish. Best-effort: a read-only repo must not turn
+      // `gwm status` into an error, so a write failure is discarded.
+      let _ = match detected {
+        Some(n) => persist_detected_pr(repo, branch, n),
+        None => clear_persisted_detected_pr(repo, branch),
       };
     }
   }

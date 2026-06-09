@@ -2120,6 +2120,10 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
     std::env::set_var("GWM_GH", &gh);
   }
   let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  // The live path must reconcile the persisted cache (#284), not just memory,
+  // so no-fetch consumers (table at startup, `gwm open pr`) don't resurrect
+  // the stale #128. Capture the stored value before the explicit link below.
+  let reconciled = gwm::github::read_link(&repo, "detect-me").unwrap();
 
   // Explicit override still wins even over a live re-detection.
   gwm::github::link_pr(&repo, "detect-me", 61).unwrap();
@@ -2138,8 +2142,64 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
     "live detection must override the stale persisted #128"
   );
   assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(
+    reconciled.pr,
+    Some(200),
+    "the live detection must rewrite the persisted cache to the fresh number"
+  );
   assert_eq!(explicit.pr, Some(61), "an explicit link still wins over live detection");
   assert_eq!(explicit.pr_source, LinkSource::Explicit);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: when the live probe proves the PR is gone (`Ok(None)`),
+  // the live CLI path must clear the persisted cache too, otherwise a no-fetch
+  // read (`read_link`) would resurrect the stale stored number.
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+
+  // Live `gh pr list` returns an empty array — the PR no longer exists.
+  let gh = dir.path().join("fake-gh-empty");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let stored = gwm::github::read_link(&repo, "detect-me").unwrap();
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(link.pr, None, "a vanished PR resolves to no PR live");
+  assert_eq!(
+    stored.pr, None,
+    "the persisted cache must be cleared so no-fetch reads don't resurrect it"
+  );
 }
 
 // ---- Configurable launchers (issue #75) --------------------------------
