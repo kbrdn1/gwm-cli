@@ -1268,7 +1268,14 @@ impl App {
       },
     };
 
-    if let Err(e) = crate::config_cli::set_value_at(&path, field.key_path(), value) {
+    // Numeric fields write a TOML integer; choices and free text write a
+    // TOML string, so a value like `123` / `true` in a shell command or
+    // worktree pattern is preserved as text rather than coerced (review P2).
+    let write = match field.kind() {
+      FieldKind::Uint => crate::config_cli::set_value_at(&path, field.key_path(), value),
+      FieldKind::Choice | FieldKind::Text => crate::config_cli::set_string_at(&path, field.key_path(), value),
+    };
+    if let Err(e) = write {
       self.status = format!("settings: {}", e);
       return;
     }

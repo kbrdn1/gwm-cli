@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Settings free-text fields (worktree base/patterns, open shell/editor commands) persist as TOML strings, so a value like `123` or `true` is no longer coerced to a number/bool; config writes also validate before touching disk, so a rejected edit can never overwrite a good config file.
+- Scrollable modal bodies (Keybindings, Command Logs, Settings) compute the horizontal-pan bound after reserving the scrollbar column, so the final cell of a long line stays reachable.
 - Delete-worktree confirmation no longer blocks the TUI render loop while the removal runs; the async spine drives the deletion and quit waits for it like other mutating tasks.
 - Create-worktree submission no longer blocks the TUI render loop while `worktree::add` and bootstrap run; the Create modal now shows a dedicated loader/failure row and the global statusline spinner stays active until completion.
 - TUI quit now waits for in-flight mutating spine tasks (`sync` / `bootstrap` / delete-worktree) to finish instead of abandoning them mid-operation.

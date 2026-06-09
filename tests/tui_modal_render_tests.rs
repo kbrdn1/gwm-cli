@@ -395,6 +395,42 @@ fn settings_panel_all_tab_renders_title_section_and_source_column() {
 }
 
 #[test]
+fn settings_all_tab_horizontal_pan_reveals_the_last_column_past_the_scrollbar() {
+  use gwm::config::{ConfigRow, ConfigSource};
+  use gwm::tui::SettingsTab;
+
+  // Review P3: when a vertical scrollbar reserves the rightmost column, the
+  // horizontal pan bound must account for the narrower text area so the
+  // final cell of a long line is still reachable. A long first row (ending
+  // in a unique marker) plus many filler rows forces both a vertical
+  // scrollbar and a horizontal overflow.
+  let (_dir, mut app) = make_app();
+  let mut rows = vec![ConfigRow {
+    key: "tui.long".into(),
+    value: format!("{}ZEND", "v".repeat(120)),
+    source: ConfigSource::Repo,
+  }];
+  for i in 0..40 {
+    rows.push(ConfigRow {
+      key: format!("tui.k{i}"),
+      value: "x".into(),
+      source: ConfigSource::Default,
+    });
+  }
+  app.config_panel.rows = rows;
+  app.config_panel.tab = SettingsTab::All;
+  app.view = View::Config;
+  app.config_panel.x_scroll = u16::MAX; // clamps to max_x_scroll on render
+
+  let buf = render(&mut app);
+  assert_present(
+    &buf,
+    "ZEND",
+    "horizontal pan must reveal the final cell even with the scrollbar column reserved",
+  );
+}
+
+#[test]
 fn settings_panel_theme_tab_renders_tabs_layer_and_editable_field() {
   // Issue #279: the default Theme tab shows the category tab strip, the
   // edit-layer indicator, and the editable theme-preset field with its

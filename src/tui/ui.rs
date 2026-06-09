@@ -2276,14 +2276,14 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   let body_viewport = body_area.height as usize;
   app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
   app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let body_viewport_w = body_area.width as usize;
-  let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(body_viewport_w) as u16;
-  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
   let scroll = app.help_scroll;
-  let x_scroll = app.help_x_scroll;
-
+  // Reserve the scrollbar column FIRST, then bound the horizontal pan against
+  // the reduced text width so the final cell stays reachable (review P3).
   let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.help_max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
+  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
+  let x_scroll = app.help_x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_for_context(HintContext::Help, &app.keymap, &app.theme),
@@ -2381,13 +2381,13 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let body_viewport = body_area.height as usize;
   app.command_logs.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
   app.command_logs.scroll = app.command_logs.scroll.min(app.command_logs.max_scroll);
-  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.command_logs.max_x_scroll = content_w.saturating_sub(body_area.width as usize) as u16;
-  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let scroll = app.command_logs.scroll;
-  let x_scroll = app.command_logs.x_scroll;
-
+  // Reserve the scrollbar column first, then bound the pan (review P3).
   let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
+  app.command_logs.max_x_scroll = content_w.saturating_sub(text_area.width as usize) as u16;
+  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
+  let x_scroll = app.command_logs.x_scroll;
   f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_line(
@@ -2592,13 +2592,13 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   let body_viewport = body_area.height as usize;
   app.config_panel.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
   app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
-  let content_w = body_lines.iter().map(Line::width).max().unwrap_or(0);
-  app.config_panel.max_x_scroll = content_w.saturating_sub(body_area.width as usize) as u16;
-  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
   let scroll = app.config_panel.scroll;
-  let x_scroll = app.config_panel.x_scroll;
-
+  // Reserve the scrollbar column first, then bound the pan (review P3).
   let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  let content_w = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.config_panel.max_x_scroll = content_w.saturating_sub(text_area.width as usize) as u16;
+  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
+  let x_scroll = app.config_panel.x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }

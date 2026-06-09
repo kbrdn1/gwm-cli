@@ -4729,6 +4729,27 @@ fn committing_text_input_persists_a_worktree_pattern() {
 }
 
 #[test]
+fn committing_numeric_looking_text_persists_as_a_string() {
+  // Review P2: a Text field whose value looks like a number must round-trip
+  // as a string through the typed load, not be coerced to an int.
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Worktree;
+  app.config_panel.selected = 0; // base directory (Text input)
+
+  app.activate_selected_setting();
+  app.config_panel.editing = Some("404".into());
+  app.commit_settings_edit();
+
+  assert_eq!(app.config.worktree.base, "404", "live config keeps the text value");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.worktree.base, "404", "numeric-looking text persisted as a string");
+}
+
+#[test]
 fn command_logs_transcript_is_newest_first_and_empty_when_blank() {
   use gwm::command_log::{CommandLogEntry, CommandStatus};
   use std::time::Duration;

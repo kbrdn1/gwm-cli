@@ -8,7 +8,7 @@
 //! injected (tempdirs), never `$HOME`.
 
 use gwm::config::{Config, SidebarPosition, TuiOpenMode};
-use gwm::config_cli::set_value_at;
+use gwm::config_cli::{set_string_at, set_value_at};
 use std::path::Path;
 
 fn load(repo: &Path, global: Option<&Path>) -> Config {
@@ -58,6 +58,45 @@ fn set_value_at_writes_global_layer_and_creates_parent_dir() {
   assert!(global.exists(), "writer must create the global file + its parent dir");
   let cfg = load(repo.path(), Some(&global));
   assert_eq!(cfg.tui.confirm_countdown_secs, 3);
+}
+
+#[test]
+fn set_string_at_preserves_numeric_looking_text_as_a_string() {
+  // Review P2: a free-text value that looks like a scalar (`123`, `true`)
+  // must persist as a TOML string, not be coerced — otherwise a worktree
+  // base / shell command of that form writes an int/bool and breaks the
+  // typed load.
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+
+  set_string_at(&gwm_toml, "worktree.base", "123").unwrap();
+
+  let raw = std::fs::read_to_string(&gwm_toml).unwrap();
+  assert!(
+    raw.contains("base = \"123\""),
+    "value must be quoted as a string: {raw}"
+  );
+  let cfg = load(repo.path(), None);
+  assert_eq!(cfg.worktree.base, "123");
+}
+
+#[test]
+fn an_invalid_write_does_not_clobber_the_existing_file() {
+  // Review P2: validation happens BEFORE the file is written, so an edit
+  // that would produce an invalid Config (here a non-numeric string into a
+  // u32 field) errors and leaves the previous good file untouched.
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+  std::fs::write(&gwm_toml, "[tui]\nconfirm_countdown_secs = 4\n").unwrap();
+
+  let result = set_string_at(&gwm_toml, "tui.confirm_countdown_secs", "abc");
+  assert!(result.is_err(), "writing a non-numeric value to a u32 field must fail");
+
+  let cfg = load(repo.path(), None);
+  assert_eq!(
+    cfg.tui.confirm_countdown_secs, 4,
+    "the prior valid file must survive a rejected write"
+  );
 }
 
 #[test]
