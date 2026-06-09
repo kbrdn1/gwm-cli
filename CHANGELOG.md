@@ -12,10 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The Settings panel (`4`, renamed from Configuration) is now editable: category tabs (Theme / TUI / All), a per-project ↔ global edit-layer selector (`L`), real toggles/choices (theme preset, sidebar position, open mode) and a numeric input (confirm countdown). Edits persist into the chosen layer's TOML and apply live; a global edit shadowed by a `.gwm.toml` override is surfaced rather than silently dropped.
+- Scrollable modal bodies (Keybindings, Settings) now render a herdr-style scrollbar.
 - Docs roadmap pages now mirror the v0.9.0 stable surface, the v0.8.0 historical cycle, and the current `[Unreleased]` dev delta in both English and French.
 - TUI now has a reusable dedicated-area `LoaderWidget`; the delete-worktree modal uses it as the first real consumer, showing both in-flight and failed delete states.
 - The sidebar `Working Tree` pane now renders the changed-file count in its bottom-right footer.
 - Project tooling now ships a Flippad-style colored `Makefile` plus Zed tasks for the local Rust workflow (`build`, `test`, `clippy`, `doctor`, `audit`, worktree bootstrap, and related shortcuts).
+
+### Changed
+
+- Statusbar and modal which-key hints drop the reverse-video badge for a flat "accent bind + muted action" treatment; action buttons keep their chip style. The Keybindings overlay now scrolls its body only, keeping the title and footer hints pinned.
 
 ### Fixed
 
