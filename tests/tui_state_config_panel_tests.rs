@@ -6,8 +6,8 @@
 //! the modal paints. Mirrors the Command Logs slice's clamp tests —
 //! ratatui-free, no terminal backend.
 
-use gwm::config::{ConfigRow, ConfigSource};
-use gwm::tui::ConfigPanel;
+use gwm::config::{Config, ConfigRow, ConfigSource};
+use gwm::tui::{ConfigPanel, FieldKind, SettingField, SettingsLayer, SettingsTab};
 
 fn sample_row() -> ConfigRow {
   ConfigRow {
@@ -82,4 +82,199 @@ fn reset_zeroes_the_cursor_but_keeps_rows() {
   assert_eq!(panel.scroll, 0);
   assert_eq!(panel.x_scroll, 0);
   assert_eq!(panel.rows.len(), 1, "reset clears the cursor, not the data");
+}
+
+// ---------------------------------------------------------------------------
+// Editable Settings panel (issue #279): tabs, layer selector, field
+// selection, and the numeric-input edit buffer — all pure state.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn new_panel_defaults_to_theme_tab_project_layer() {
+  let panel = ConfigPanel::new();
+  assert_eq!(panel.tab, SettingsTab::Theme);
+  assert_eq!(panel.layer, SettingsLayer::Project);
+  assert_eq!(panel.selected, 0);
+  assert!(panel.editing.is_none());
+}
+
+#[test]
+fn next_tab_cycles_theme_tui_all_and_wraps() {
+  let mut panel = ConfigPanel::new();
+  assert_eq!(panel.tab, SettingsTab::Theme);
+  panel.next_tab();
+  assert_eq!(panel.tab, SettingsTab::Tui);
+  panel.next_tab();
+  assert_eq!(panel.tab, SettingsTab::All);
+  panel.next_tab();
+  assert_eq!(panel.tab, SettingsTab::Theme, "wraps back to the first tab");
+}
+
+#[test]
+fn prev_tab_wraps_backwards() {
+  let mut panel = ConfigPanel::new();
+  panel.prev_tab();
+  assert_eq!(panel.tab, SettingsTab::All, "prev from the first tab wraps to the last");
+}
+
+#[test]
+fn switching_tab_resets_selection_and_edit_buffer() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 2;
+  panel.editing = Some("4".into());
+  panel.next_tab();
+  assert_eq!(panel.selected, 0, "selection resets on tab change");
+  assert!(panel.editing.is_none(), "edit buffer clears on tab change");
+}
+
+#[test]
+fn selected_field_follows_the_tab() {
+  let mut panel = ConfigPanel::new();
+  // Theme tab → theme preset.
+  assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
+  // Tui tab → sidebar / open / countdown in order.
+  panel.tab = SettingsTab::Tui;
+  assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::OpenMode));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::ConfirmCountdown));
+  // All tab is read-only → no editable field.
+  panel.tab = SettingsTab::All;
+  panel.selected = 0;
+  assert_eq!(panel.selected_field(), None);
+}
+
+#[test]
+fn select_next_clamps_to_the_last_field() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui; // 3 fields
+  for _ in 0..10 {
+    panel.select_next();
+  }
+  assert_eq!(panel.selected, 2, "never selects past the last field");
+}
+
+#[test]
+fn toggle_layer_flips_project_and_global_with_matching_source() {
+  let mut panel = ConfigPanel::new();
+  assert_eq!(panel.layer, SettingsLayer::Project);
+  assert_eq!(panel.layer.source(), ConfigSource::Repo);
+  panel.toggle_layer();
+  assert_eq!(panel.layer, SettingsLayer::Global);
+  assert_eq!(panel.layer.source(), ConfigSource::User);
+  panel.toggle_layer();
+  assert_eq!(panel.layer, SettingsLayer::Project);
+}
+
+#[test]
+fn begin_edit_only_arms_for_a_uint_field() {
+  let mut panel = ConfigPanel::new();
+  // Theme preset is a Choice → begin_edit is a no-op.
+  panel.begin_edit("catppuccin");
+  assert!(panel.editing.is_none(), "choice fields are not text-edited");
+  // Confirm countdown is a Uint → arms the buffer.
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 2;
+  assert_eq!(panel.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
+  panel.begin_edit("4");
+  assert_eq!(panel.editing.as_deref(), Some("4"));
+}
+
+#[test]
+fn edit_buffer_takes_digits_only_and_commits() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 2;
+  panel.begin_edit("");
+  panel.push_edit_char('3');
+  panel.push_edit_char('x'); // ignored — not a digit
+  panel.push_edit_char('0');
+  assert_eq!(panel.editing.as_deref(), Some("30"));
+  panel.pop_edit_char();
+  assert_eq!(panel.editing.as_deref(), Some("3"));
+  assert_eq!(panel.take_edit().as_deref(), Some("3"));
+  assert!(panel.editing.is_none(), "commit clears the buffer");
+}
+
+#[test]
+fn taking_an_empty_edit_reads_as_zero() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 2;
+  panel.begin_edit("");
+  assert_eq!(
+    panel.take_edit().as_deref(),
+    Some("0"),
+    "a cleared input is a valid zero"
+  );
+}
+
+#[test]
+fn cancel_edit_discards_the_buffer() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 2;
+  panel.begin_edit("4");
+  panel.push_edit_char('2');
+  panel.cancel_edit();
+  assert!(panel.editing.is_none());
+}
+
+#[test]
+fn select_is_inert_while_editing() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 2;
+  panel.begin_edit("4");
+  panel.select_prev();
+  assert_eq!(panel.selected, 2, "navigation is suppressed while typing");
+}
+
+#[test]
+fn setting_field_current_reads_the_resolved_config() {
+  let cfg = Config::default();
+  // Defaults: theme preset unset → "default"; sidebar right; open shell.
+  assert_eq!(SettingField::ThemePreset.current(&cfg), "default");
+  assert_eq!(SettingField::SidebarPosition.current(&cfg), "right");
+  assert_eq!(SettingField::OpenMode.current(&cfg), "shell");
+}
+
+#[test]
+fn choice_fields_cycle_and_wrap_uint_fields_do_not() {
+  let cfg = Config::default();
+  // sidebar: right → left.
+  assert_eq!(SettingField::SidebarPosition.next_choice(&cfg).as_deref(), Some("left"));
+  // open mode: shell → editor.
+  assert_eq!(SettingField::OpenMode.next_choice(&cfg).as_deref(), Some("editor"));
+  // theme preset currently "default" (not a choice) → falls back to the first preset.
+  let first = gwm::tui::theme::preset_names()[0];
+  assert_eq!(SettingField::ThemePreset.next_choice(&cfg).as_deref(), Some(first));
+  // confirm countdown is a Uint → no choice cycle.
+  assert_eq!(SettingField::ConfirmCountdown.next_choice(&cfg), None);
+}
+
+#[test]
+fn field_source_is_looked_up_from_the_resolved_rows() {
+  let mut panel = ConfigPanel::new();
+  panel.rows = vec![
+    ConfigRow {
+      key: "tui.sidebar_position".into(),
+      value: "left".into(),
+      source: ConfigSource::Repo,
+    },
+    ConfigRow {
+      key: "theme.preset".into(),
+      value: "\"gruvbox\"".into(),
+      source: ConfigSource::User,
+    },
+  ];
+  assert_eq!(
+    panel.field_source(SettingField::SidebarPosition),
+    Some(ConfigSource::Repo)
+  );
+  assert_eq!(panel.field_source(SettingField::ThemePreset), Some(ConfigSource::User));
+  // A field absent from the rows resolves to no source.
+  assert_eq!(panel.field_source(SettingField::OpenMode), None);
 }

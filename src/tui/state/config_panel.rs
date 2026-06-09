@@ -1,28 +1,224 @@
-//! Configuration panel modal state (issue #232).
+//! Settings panel modal state (issue #232; editable in #279).
 //!
-//! The scroll cursor for the ~90% fullscreen Configuration overlay plus
-//! the owned, already-resolved [`crate::config::ConfigRow`] snapshot the
-//! renderer paints. Unlike the Command Logs slice there is no `sync`:
-//! the `App` resolves the rows once on open (cheap local TOML reads via
-//! [`crate::config::resolved_rows`]) and assigns them here, so the panel
-//! renders from owned state with no I/O on the render path.
+//! Started life as a read-only Configuration overlay (issue #232): the
+//! scroll cursor plus the owned, already-resolved [`crate::config::ConfigRow`]
+//! snapshot the renderer paints. Issue #279 turns it into an editable
+//! **Settings** panel — herdr-style — without dropping that read-only view:
 //!
-//! Scroll mirrors the help / Command Logs overlays: the cursor lives
-//! here, but `max_scroll` / `max_x_scroll` are republished by the
-//! renderer each frame against the live viewport, since only the renderer
-//! knows both the content length and the inner modal height. The scroll
-//! methods clamp against whatever bound the last frame published.
+//! - **Tabs** ([`SettingsTab`]) split the surface into the editable `Theme`
+//!   and `Tui` categories plus the read-only `All` resolved-config view.
+//! - **A layer selector** ([`SettingsLayer`]) chooses whether an edit lands
+//!   in the per-project `.gwm.toml` or the user-global `config.toml`.
+//! - **Fields** ([`SettingField`]) are real toggles / choices / numeric
+//!   inputs, resolved live against the loaded [`crate::config::Config`].
+//!
+//! The state here stays pure (no I/O): navigation, selection and the input
+//! edit buffer live here and are unit-tested ratatui-free; the actual write
+//! (`config_cli::set_value_at`) and the apply-live reload are orchestrated
+//! by [`crate::tui::App`]. Scroll mirrors the help / Command Logs overlays:
+//! the cursor lives here, `max_scroll` / `max_x_scroll` are republished by
+//! the renderer each frame against the live viewport.
 
-use crate::config::ConfigRow;
+use crate::config::{Config, ConfigRow, ConfigSource};
 
-/// Owned state for the Configuration overlay: the resolved rows and the
-/// (vertical + horizontal) scroll cursor with its renderer-published
+/// The Settings categories, in tab order. `Theme` and `Tui` are editable;
+/// `All` is the read-only resolved-config view (the pre-#279 panel).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+  /// Theme preset selection (editable).
+  #[default]
+  Theme,
+  /// TUI behaviour knobs: sidebar side, open mode, confirm countdown.
+  Tui,
+  /// The full resolved config, read-only with source attribution.
+  All,
+}
+
+impl SettingsTab {
+  /// Tabs in display order — the navigation cycle.
+  pub const ALL: [SettingsTab; 3] = [SettingsTab::Theme, SettingsTab::Tui, SettingsTab::All];
+
+  /// Short tab label shown in the header strip.
+  pub fn label(self) -> &'static str {
+    match self {
+      SettingsTab::Theme => "Theme",
+      SettingsTab::Tui => "TUI",
+      SettingsTab::All => "All",
+    }
+  }
+
+  /// The editable fields under this tab, in display order. `All` has none
+  /// (it is the read-only resolved view).
+  pub fn fields(self) -> &'static [SettingField] {
+    match self {
+      SettingsTab::Theme => &[SettingField::ThemePreset],
+      SettingsTab::Tui => &[
+        SettingField::SidebarPosition,
+        SettingField::OpenMode,
+        SettingField::ConfirmCountdown,
+      ],
+      SettingsTab::All => &[],
+    }
+  }
+}
+
+/// Which config layer an edit targets. Both are editable (issue #279):
+/// `Project` writes the repo `.gwm.toml`, `Global` writes the user-level
+/// `~/.config/gwm/config.toml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsLayer {
+  /// The repo-local `.gwm.toml` — the default (matches `gwm config set`).
+  #[default]
+  Project,
+  /// The user-global `~/.config/gwm/config.toml`.
+  Global,
+}
+
+impl SettingsLayer {
+  /// Label for the header indicator.
+  pub fn label(self) -> &'static str {
+    match self {
+      SettingsLayer::Project => "project (.gwm.toml)",
+      SettingsLayer::Global => "global (~/.config/gwm)",
+    }
+  }
+
+  /// The [`ConfigSource`] an edit on this layer writes — used to decide
+  /// whether the edit will actually take effect or be shadowed by a
+  /// higher-precedence layer.
+  pub fn source(self) -> ConfigSource {
+    match self {
+      SettingsLayer::Project => ConfigSource::Repo,
+      SettingsLayer::Global => ConfigSource::User,
+    }
+  }
+
+  /// Flip to the other layer.
+  pub fn toggled(self) -> Self {
+    match self {
+      SettingsLayer::Project => SettingsLayer::Global,
+      SettingsLayer::Global => SettingsLayer::Project,
+    }
+  }
+}
+
+/// How a [`SettingField`] is edited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldKind {
+  /// Cycle through a fixed set of values (Space / Enter advances).
+  Choice,
+  /// A numeric (`u32`) value edited character-by-character in a buffer.
+  Uint,
+}
+
+const SIDEBAR_CHOICES: &[&str] = &["right", "left"];
+const OPEN_MODE_CHOICES: &[&str] = &["shell", "editor", "finder"];
+
+/// One editable setting, resolved live against the loaded [`Config`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingField {
+  /// `theme.preset` — cycle the built-in palettes.
+  ThemePreset,
+  /// `tui.sidebar_position` — left / right.
+  SidebarPosition,
+  /// `tui.open.mode` — shell / editor / finder.
+  OpenMode,
+  /// `tui.confirm_countdown_secs` — numeric input.
+  ConfirmCountdown,
+}
+
+impl SettingField {
+  /// Human label shown in the panel.
+  pub fn label(self) -> &'static str {
+    match self {
+      SettingField::ThemePreset => "theme preset",
+      SettingField::SidebarPosition => "sidebar position",
+      SettingField::OpenMode => "open mode",
+      SettingField::ConfirmCountdown => "confirm countdown (s)",
+    }
+  }
+
+  /// Dotted config key path the edit writes (`config_cli::set_value_at`).
+  pub fn key_path(self) -> &'static str {
+    match self {
+      SettingField::ThemePreset => "theme.preset",
+      SettingField::SidebarPosition => "tui.sidebar_position",
+      SettingField::OpenMode => "tui.open.mode",
+      SettingField::ConfirmCountdown => "tui.confirm_countdown_secs",
+    }
+  }
+
+  /// Whether the field is a cyclable choice or a numeric input.
+  pub fn kind(self) -> FieldKind {
+    match self {
+      SettingField::ConfirmCountdown => FieldKind::Uint,
+      _ => FieldKind::Choice,
+    }
+  }
+
+  /// The fixed choice set for a `Choice` field. Theme presets come from the
+  /// theme registry; the rest are static. Empty for `Uint` fields.
+  pub fn choices(self) -> &'static [&'static str] {
+    match self {
+      SettingField::ThemePreset => crate::tui::theme::preset_names(),
+      SettingField::SidebarPosition => SIDEBAR_CHOICES,
+      SettingField::OpenMode => OPEN_MODE_CHOICES,
+      SettingField::ConfirmCountdown => &[],
+    }
+  }
+
+  /// The current value as a display string, read from the resolved config.
+  pub fn current(self, cfg: &Config) -> String {
+    match self {
+      SettingField::ThemePreset => cfg.theme.preset.clone().unwrap_or_else(|| "default".into()),
+      SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
+      SettingField::OpenMode => match cfg.tui.open.mode {
+        crate::config::TuiOpenMode::Shell => "shell".into(),
+        crate::config::TuiOpenMode::Editor => "editor".into(),
+        crate::config::TuiOpenMode::Finder => "finder".into(),
+      },
+      SettingField::ConfirmCountdown => cfg.tui.confirm_countdown_secs.to_string(),
+    }
+  }
+
+  /// The next value for a `Choice` field, wrapping. If the current value is
+  /// not one of the choices (e.g. theme preset is `None`/"default"), the
+  /// first choice is returned. `None` for `Uint` fields.
+  pub fn next_choice(self, cfg: &Config) -> Option<String> {
+    let choices = self.choices();
+    if choices.is_empty() {
+      return None;
+    }
+    let current = self.current(cfg);
+    let idx = choices.iter().position(|c| *c == current);
+    let next = match idx {
+      Some(i) => choices[(i + 1) % choices.len()],
+      None => choices[0],
+    };
+    Some(next.to_string())
+  }
+}
+
+/// Owned state for the Settings overlay: the read-only resolved rows, the
+/// active tab / layer / selection, the optional numeric-input edit buffer,
+/// and the (vertical + horizontal) scroll cursor with renderer-published
 /// bounds.
 #[derive(Debug, Default)]
 pub struct ConfigPanel {
-  /// Resolved config rows (key, value, source), grouped section-first by
-  /// the renderer. Assigned by [`crate::tui::App::enter_config_panel`].
+  /// Resolved config rows (key, value, source) for the read-only `All` tab,
+  /// grouped section-first by the renderer. Also the source-attribution
+  /// lookup behind the editable tabs. Assigned by
+  /// [`crate::tui::App::enter_config_panel`].
   pub rows: Vec<ConfigRow>,
+  /// Active settings tab (issue #279).
+  pub tab: SettingsTab,
+  /// Which config layer edits target (issue #279).
+  pub layer: SettingsLayer,
+  /// Selected field index within the current editable tab.
+  pub selected: usize,
+  /// When `Some`, the numeric-input edit buffer for the selected `Uint`
+  /// field; keystrokes route here until commit (Enter) or cancel (Esc).
+  pub editing: Option<String>,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
   /// Maximum vertical scroll offset, republished by the renderer each
@@ -38,6 +234,106 @@ impl ConfigPanel {
   /// An empty overlay at the origin.
   pub fn new() -> Self {
     Self::default()
+  }
+
+  /// The editable fields under the active tab (empty on the `All` tab).
+  pub fn fields(&self) -> &'static [SettingField] {
+    self.tab.fields()
+  }
+
+  /// The selected field, if the active tab has any.
+  pub fn selected_field(&self) -> Option<SettingField> {
+    self.fields().get(self.selected).copied()
+  }
+
+  /// Move to the next tab, wrapping. Resets the field selection and any
+  /// in-progress edit so the new tab starts clean.
+  pub fn next_tab(&mut self) {
+    let idx = SettingsTab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+    self.tab = SettingsTab::ALL[(idx + 1) % SettingsTab::ALL.len()];
+    self.selected = 0;
+    self.editing = None;
+    self.scroll = 0;
+  }
+
+  /// Move to the previous tab, wrapping. Same reset as [`Self::next_tab`].
+  pub fn prev_tab(&mut self) {
+    let idx = SettingsTab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
+    let len = SettingsTab::ALL.len();
+    self.tab = SettingsTab::ALL[(idx + len - 1) % len];
+    self.selected = 0;
+    self.editing = None;
+    self.scroll = 0;
+  }
+
+  /// Flip the edit target layer (project ↔ global).
+  pub fn toggle_layer(&mut self) {
+    self.layer = self.layer.toggled();
+  }
+
+  /// Select the previous field in the current tab (no-op while editing or on
+  /// a tab with no fields).
+  pub fn select_prev(&mut self) {
+    if self.editing.is_some() {
+      return;
+    }
+    self.selected = self.selected.saturating_sub(1);
+  }
+
+  /// Select the next field in the current tab, clamped to the last field.
+  pub fn select_next(&mut self) {
+    if self.editing.is_some() {
+      return;
+    }
+    let count = self.fields().len();
+    if count > 0 {
+      self.selected = (self.selected + 1).min(count - 1);
+    }
+  }
+
+  /// Begin editing the selected `Uint` field, seeding the buffer with its
+  /// current value. No-op if the selected field is not a `Uint` input.
+  pub fn begin_edit(&mut self, current: &str) {
+    if matches!(self.selected_field().map(SettingField::kind), Some(FieldKind::Uint)) {
+      self.editing = Some(current.to_string());
+    }
+  }
+
+  /// Append a digit to the edit buffer (ignores non-digits and overlong
+  /// input — the confirm countdown clamps to a single digit's worth of
+  /// seconds anyway, but we allow up to 3 chars for round-tripping).
+  pub fn push_edit_char(&mut self, c: char) {
+    if let Some(buf) = self.editing.as_mut() {
+      if c.is_ascii_digit() && buf.len() < 3 {
+        buf.push(c);
+      }
+    }
+  }
+
+  /// Delete the last character of the edit buffer.
+  pub fn pop_edit_char(&mut self) {
+    if let Some(buf) = self.editing.as_mut() {
+      buf.pop();
+    }
+  }
+
+  /// Cancel the in-progress edit, discarding the buffer.
+  pub fn cancel_edit(&mut self) {
+    self.editing = None;
+  }
+
+  /// Commit the in-progress edit, returning the buffer (empty buffer reads
+  /// as `"0"` so a cleared input is a valid zero, not a parse error).
+  pub fn take_edit(&mut self) -> Option<String> {
+    self.editing.take().map(|b| if b.is_empty() { "0".into() } else { b })
+  }
+
+  /// The source layer that currently provides `field`'s value, looked up in
+  /// the resolved rows. Drives the "shadowed edit" guidance: editing the
+  /// global layer for a field the repo overrides won't change the effective
+  /// value (repo wins).
+  pub fn field_source(&self, field: SettingField) -> Option<ConfigSource> {
+    self.rows.iter().find(|r| r.key == field.key_path()).map(|r| r.source)
   }
 
   /// Scroll down one row, never past the last line.
@@ -70,10 +366,12 @@ impl ConfigPanel {
     self.scroll = self.max_scroll;
   }
 
-  /// Reset the scroll cursor to the origin, keeping the resolved rows.
-  /// Called when the overlay opens.
+  /// Reset the cursor + selection + edit buffer to the origin, keeping the
+  /// resolved rows and the active tab/layer. Called when the overlay opens.
   pub fn reset(&mut self) {
     self.scroll = 0;
     self.x_scroll = 0;
+    self.selected = 0;
+    self.editing = None;
   }
 }
