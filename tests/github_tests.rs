@@ -147,6 +147,22 @@ fn persist_detected_pr_overwrites_a_previous_detection() {
 }
 
 #[test]
+fn unlink_pr_also_clears_a_persisted_detection() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // A persisted detection plus an explicit link, then unlink: unlinking a PR
+  // must not resurface a stale auto-detection from the detected key.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  github::unlink_pr(&repo, "feat/#42-tui-search").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_source, LinkSource::None);
+}
+
+#[test]
 fn clear_persisted_detected_pr_removes_the_detected_link() {
   let (_dir, repo) = init_repo();
   make_branch(&repo, "feat/#42-tui-search");

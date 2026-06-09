@@ -165,7 +165,11 @@ pub fn unlink_issue(repo: &Repository, branch: &str) -> Result<()> {
 }
 
 pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
-  remove_branch_key(repo, branch, PR_CONFIG_KEY)
+  // Drop both the explicit link and any persisted auto-detection (#283),
+  // otherwise unlinking would leave a stale `gwm-pr-detected` number that
+  // `read_link` would resurface as a `Detected` PR on the next read.
+  remove_branch_key(repo, branch, PR_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)
 }
 
 /// Persist an auto-detected PR number to its own branch-config key
