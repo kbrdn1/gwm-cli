@@ -1548,6 +1548,93 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
   }
 }
 
+#[test]
+fn loaded_issue_status_persists_title_for_no_fetch_startup() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Ok(IssueStatus {
+    number: 42,
+    title: "Persisted issue title".into(),
+    state: IssueState::Open,
+    url: "https://example.test/issues/42".into(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_title.as_deref(), Some("Persisted issue title"));
+}
+
+#[test]
+fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "Persisted explicit PR title".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+  }));
+
+  let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(61));
+  assert_eq!(link.pr_source, LinkSource::Explicit);
+  assert_eq!(link.pr_title.as_deref(), Some("Persisted explicit PR title"));
+}
+
+#[test]
+fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 77,
+    title: "Persisted detected PR title".into(),
+    state: PrState::Merged,
+    url: "https://example.test/pull/77".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+  }));
+
+  let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(77));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(link.pr_title.as_deref(), Some("Persisted detected PR title"));
+}
+
+#[test]
+fn github_status_lines_show_persisted_titles_before_fetch() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Startup issue title")
+      .unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr-detected", "77").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Startup PR title")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let text = gwm::tui::github_status_lines(&app, 120)
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(text.contains("Startup issue title"), "issue title missing: {text}");
+  assert!(text.contains("Startup PR title"), "PR title missing: {text}");
+}
+
 fn sample_issue(n: u64) -> gwm::github::IssueStatus {
   sample_issue_titled(n, "x")
 }
@@ -2153,6 +2240,53 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
 
 #[cfg(unix)]
 #[test]
+fn read_link_with_pr_detection_keeps_title_when_detected_pr_is_unchanged() {
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+  gwm::github::persist_detected_pr_title(&repo, "detect-me", "Cached detected title").unwrap();
+
+  let gh = dir.path().join("fake-gh-128");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":128}]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(link.pr, Some(128));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(link.pr_title.as_deref(), Some("Cached detected title"));
+}
+
+#[cfg(unix)]
+#[test]
 fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
   use std::os::unix::fs::PermissionsExt;
 
@@ -2626,6 +2760,8 @@ fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
   w.link = BranchLink {
     issue: Some(42),
     pr: Some(43),
+    issue_title: None,
+    pr_title: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::Detected,
   };
@@ -2648,6 +2784,8 @@ fn table_marker_issue_only_leaves_the_pr_pastille_white() {
   w.link = BranchLink {
     issue: Some(42),
     pr: None,
+    issue_title: None,
+    pr_title: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
@@ -2665,6 +2803,8 @@ fn table_marker_pr_only_leaves_the_issue_pastille_white() {
   w.link = BranchLink {
     issue: None,
     pr: Some(43),
+    issue_title: None,
+    pr_title: None,
     issue_source: LinkSource::None,
     pr_source: LinkSource::Detected,
   };
@@ -3235,6 +3375,64 @@ fn issue_summary_line_leads_with_the_issue_icon() {
 }
 
 #[test]
+fn issue_summary_line_icon_has_leading_and_trailing_space() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert_eq!(
+    line.spans[0].content.as_ref(),
+    format!(" {} ", gwm::tui::ISSUE_ICON),
+    "issue icon segment should not touch the pane border"
+  );
+}
+
+#[test]
+fn issue_summary_line_loaded_icon_uses_issue_state_color() {
+  let status = gwm::github::IssueStatus {
+    number: 7,
+    title: "x".into(),
+    state: gwm::github::IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &theme,
+  );
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(gwm::tui::issue_badge_color(gwm::github::IssueState::Closed, &theme)),
+    "loaded issue icon should reuse the issue state badge role"
+  );
+}
+
+#[test]
+fn issue_summary_line_idle_icon_stays_muted() {
+  let theme = Theme::default();
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &theme,
+  );
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(theme.muted),
+    "idle issue icon stays neutral"
+  );
+}
+
+#[test]
 fn pr_summary_line_leads_with_the_pr_icon() {
   let status = gwm::github::PrStatus {
     number: 9,
@@ -3256,6 +3454,32 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     line.spans[0].content.contains(gwm::tui::PR_ICON),
     "pr pane line must lead with the pr nerdfont glyph: {:?}",
     line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_loaded_icon_uses_pr_state_color() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Merged,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &theme,
+  );
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(gwm::tui::pr_badge_color(gwm::github::PrState::Merged, &theme)),
+    "loaded PR icon should reuse the PR state badge role"
   );
 }
 

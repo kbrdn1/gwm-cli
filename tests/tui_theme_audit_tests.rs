@@ -489,6 +489,74 @@ fn summary_line_heads_resolve_through_name_role() {
   );
 }
 
+#[test]
+fn summary_line_loaded_icons_resolve_through_state_roles() {
+  let t = audit_theme();
+  let issue_status = gwm::github::IssueStatus {
+    number: 7,
+    title: "closed".into(),
+    state: IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(issue_status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    issue.spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "loaded issue icon → issue state role"
+  );
+
+  let pr_status = gwm::github::PrStatus {
+    number: 9,
+    title: "merged".into(),
+    state: PrState::Merged,
+    url: String::new(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+  };
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(pr_status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    pr.spans[0].style.fg,
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "loaded PR icon → PR state role"
+  );
+}
+
+#[test]
+fn summary_line_non_loaded_icons_stay_muted() {
+  let t = audit_theme();
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Idle,
+    80,
+    &t,
+  );
+  assert_eq!(issue.spans[0].style.fg, Some(t.muted), "idle issue icon → muted");
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Error("offline".into()),
+    80,
+    &t,
+  );
+  assert_eq!(pr.spans[0].style.fg, Some(t.muted), "error PR icon → muted");
+}
+
 // ---------------------------------------------------------------------------
 // Header / footer chrome
 // ---------------------------------------------------------------------------

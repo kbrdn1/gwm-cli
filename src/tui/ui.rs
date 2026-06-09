@@ -3495,6 +3495,7 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.issue_source,
       app.issue_fetch_state(),
+      link.issue_title.as_deref(),
       max_width,
       &app.theme,
       Some(spinner),
@@ -3506,6 +3507,7 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.pr_source,
       app.pr_fetch_state(),
+      link.pr_title.as_deref(),
       max_width,
       &app.theme,
       Some(spinner),
@@ -3559,7 +3561,7 @@ pub fn issue_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  issue_summary_line_with_spinner(n, src, state, max_width, theme, None)
+  issue_summary_line_with_spinner(n, src, state, None, max_width, theme, None)
 }
 
 /// Resolved render inputs for a GitHub summary line, after the caller has
@@ -3569,6 +3571,9 @@ pub fn issue_summary_line(
 /// between the closing `]` and the final space+title.
 enum SummaryState<'a> {
   Idle,
+  CachedTitle {
+    title: &'a str,
+  },
   Loading,
   Loaded {
     badge: &'a str,
@@ -3602,15 +3607,21 @@ fn summary_line(
   // `<icon> <head>` plus an optional source chip are common to every state.
   // `prefix_w` tracks the visible width so the variable tail (title / error
   // blob) can be trimmed to fit `max_width`.
-  let icon_seg = format!("{} ", icon); // glyph + space
+  let icon_seg = format!(" {} ", icon); // leading gap + glyph + trailing gap
   let chip = source_chip(source, theme);
   // Source chip segment = " " + " <label> " (a leading gap + the padded chip).
   let source_seg_w = chip.map(|(l, _)| 1 + l.chars().count() + 2).unwrap_or(0);
   let prefix_w = icon_seg.chars().count() + head.chars().count() + source_seg_w;
 
   // The `head` carries no status signal, only identity — it paints with the
-  // `name` role (issue #210); the icon stays muted and the chips carry the
-  // state/source colour.
+  // `name` role (issue #210); the icon mirrors loaded state colour and falls
+  // back to muted while no fresh status exists.
+  let icon_color = match &state {
+    SummaryState::Loaded { badge_color, .. } => *badge_color,
+    SummaryState::Idle | SummaryState::CachedTitle { .. } | SummaryState::Loading | SummaryState::Error(_) => {
+      theme.muted
+    }
+  };
   let build_prefix = |head_bold: bool| -> Vec<Span<'static>> {
     let head_style = if head_bold {
       Style::default().fg(theme.name).add_modifier(Modifier::BOLD)
@@ -3618,7 +3629,7 @@ fn summary_line(
       Style::default().fg(theme.name)
     };
     let mut spans = vec![
-      Span::styled(icon_seg.clone(), Style::default().fg(theme.muted)),
+      Span::styled(icon_seg.clone(), Style::default().fg(icon_color)),
       Span::styled(head.clone(), head_style),
     ];
     if let Some((label, color)) = chip {
@@ -3631,6 +3642,15 @@ fn summary_line(
   match state {
     SummaryState::Idle => {
       let mut spans = build_prefix(false);
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
+    SummaryState::CachedTitle { title } => {
+      let fixed = prefix_w + 1;
+      let budget = max_width.saturating_sub(fixed);
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
       flatten_if_overflow(&mut spans, max_width);
       Line::from(spans)
     }
@@ -3688,13 +3708,16 @@ fn issue_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::IssueStatus>,
+  persisted_title: Option<&str>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("Issue #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => SummaryState::Idle,
+    GitHubFetchState::Idle => persisted_title
+      .map(|title| SummaryState::CachedTitle { title })
+      .unwrap_or(SummaryState::Idle),
     GitHubFetchState::Loading => SummaryState::Loading,
     GitHubFetchState::Loaded(s) => {
       // Mirror `issue_badge_color` exactly so the summary line and the
@@ -3729,20 +3752,23 @@ pub fn pr_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, None, max_width, theme, None)
 }
 
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::PrStatus>,
+  persisted_title: Option<&str>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => SummaryState::Idle,
+    GitHubFetchState::Idle => persisted_title
+      .map(|title| SummaryState::CachedTitle { title })
+      .unwrap_or(SummaryState::Idle),
     GitHubFetchState::Loading => SummaryState::Loading,
     GitHubFetchState::Loaded(s) => {
       // Route the badge colour through `pr_badge_color` (mirroring how the

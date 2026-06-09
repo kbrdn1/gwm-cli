@@ -673,6 +673,9 @@ impl App {
           if !self.tasks.complete(TaskKind::GithubIssue(number), generation) {
             continue;
           }
+          if let Ok(status) = &result {
+            self.persist_loaded_issue_title(status);
+          }
           self.github.complete_issue(number, result);
           applied = true;
           github_applied = true;
@@ -680,6 +683,9 @@ impl App {
         TaskMsg::GithubPr(generation, number, result) => {
           if !self.tasks.complete(TaskKind::GithubPr(number), generation) {
             continue;
+          }
+          if let Ok(status) = &result {
+            self.persist_loaded_pr_title(status);
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -2325,11 +2331,45 @@ impl App {
   }
 
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
+    if let Ok(status) = &r {
+      self.persist_loaded_issue_title(status);
+    }
     self.github.apply_issue_result(r);
   }
 
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
+    if let Ok(status) = &r {
+      self.persist_loaded_pr_title(status);
+    }
     self.github.apply_pr_result(r);
+  }
+
+  fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
+    if self.github.link.issue != Some(status.number) {
+      return;
+    }
+    let Some(branch) = self.selected_branch_name() else {
+      return;
+    };
+    let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
+    self.github.link.issue_title = Some(status.title.clone());
+    self.sync_selected_link_into_table();
+  }
+
+  fn persist_loaded_pr_title(&mut self, status: &PrStatus) {
+    if self.github.link.pr != Some(status.number) {
+      return;
+    }
+    let Some(branch) = self.selected_branch_name() else {
+      return;
+    };
+    let _ = match self.github.link.pr_source {
+      github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title),
+      github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title),
+      github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+    };
+    self.github.link.pr_title = Some(status.title.clone());
+    self.sync_selected_link_into_table();
   }
 
   // ---- Open menu ----------------------------------------------------------

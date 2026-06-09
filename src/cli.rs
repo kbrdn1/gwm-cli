@@ -2085,7 +2085,7 @@ fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
     Some(s) => github::read_link_with_pr_detection(&repo, &branch, s)?,
     None => github::read_link(&repo, &branch)?,
   };
-  let (issue_status, pr_status) = fetch_link_status(&link, slug.as_deref());
+  let (issue_status, pr_status) = fetch_link_status(&repo, &branch, &link, slug.as_deref());
 
   if json {
     print_status_json(&branch, slug.as_deref(), &link, &issue_status, &pr_status);
@@ -2095,13 +2095,28 @@ fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
   Ok(())
 }
 
-fn fetch_link_status(link: &BranchLink, slug: Option<&str>) -> (Option<IssueStatus>, Option<PrStatus>) {
+fn fetch_link_status(
+  repo: &Repository,
+  branch: &str,
+  link: &BranchLink,
+  slug: Option<&str>,
+) -> (Option<IssueStatus>, Option<PrStatus>) {
   let Some(slug) = slug else {
     return (None, None);
   };
   // `gh` is optional — if either call fails we degrade gracefully.
   let issue = link.issue.and_then(|n| github::fetch_issue(slug, n).ok());
   let pr = link.pr.and_then(|n| github::fetch_pr(slug, n).ok());
+  if let Some(issue) = &issue {
+    let _ = github::persist_issue_title(repo, branch, &issue.title);
+  }
+  if let Some(pr) = &pr {
+    let _ = match link.pr_source {
+      LinkSource::Detected => github::persist_detected_pr_title(repo, branch, &pr.title),
+      LinkSource::Explicit => github::persist_pr_title(repo, branch, &pr.title),
+      LinkSource::BranchName | LinkSource::None => Ok(()),
+    };
+  }
   (issue, pr)
 }
 
