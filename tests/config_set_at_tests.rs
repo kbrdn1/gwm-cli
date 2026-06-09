@@ -100,6 +100,27 @@ fn an_invalid_write_does_not_clobber_the_existing_file() {
 }
 
 #[test]
+fn editing_an_already_invalid_file_still_writes_the_change() {
+  // Issue #281: validate-before-write (review P2) must not block recovery
+  // edits. A pre-existing invalid file (here a non-numeric countdown) plus
+  // an unrelated set still writes the change — the validation error is
+  // surfaced, but the edit is not refused, so `gwm config set` can be used
+  // to nudge a broken config back toward valid.
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+  std::fs::write(&gwm_toml, "[tui]\nconfirm_countdown_secs = \"abc\"\n").unwrap();
+
+  let result = set_string_at(&gwm_toml, "theme.preset", "gruvbox");
+  assert!(result.is_err(), "the pre-existing invalid value is still surfaced");
+
+  let raw = std::fs::read_to_string(&gwm_toml).unwrap();
+  assert!(
+    raw.contains("preset = \"gruvbox\""),
+    "the unrelated edit must still be written to an already-invalid file: {raw}"
+  );
+}
+
+#[test]
 fn set_value_at_preserves_other_keys_in_the_file() {
   // Surgical edit: setting one key must not drop unrelated existing keys.
   let repo = tempfile::tempdir().unwrap();
