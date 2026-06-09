@@ -1985,6 +1985,32 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   assert_eq!(persisted.pr_source, LinkSource::Detected);
 }
 
+#[test]
+fn refresh_keeps_persisted_pr_when_no_remote_slug() {
+  // Codex review #284: pressing `F` when the probe cannot run at all (no
+  // origin remote → `link_slug` is None) must NOT blank a persisted
+  // detection. The unconditional `clear_detected_pr()` used to wipe the
+  // in-memory link before the skipped probe could restore it.
+  let (_dir, repo, mut app) = make_app_on_branch("detect-me");
+  // No origin remote is configured, so there is no slug to probe with.
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+  app.refresh_link();
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "precondition: the persisted detection loads into memory"
+  );
+
+  app.refresh_github_status();
+
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "a refresh that cannot probe must keep the persisted detection"
+  );
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+}
+
 #[cfg(unix)]
 #[test]
 fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
