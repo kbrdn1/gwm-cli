@@ -39,6 +39,29 @@ pub fn set(key: &str, raw_value: Option<&str>) -> Result<()> {
   Ok(())
 }
 
+/// Layer-aware, silent variant of [`set`] for the in-TUI Settings panel
+/// (issue #279): set `key = value` in the TOML file at an EXPLICIT `path`
+/// (the repo `.gwm.toml` OR the user-global `config.toml`) rather than the
+/// discovered repo root, and return without printing so the TUI owns the
+/// feedback. Reuses the exact key-path parser, scalar coercion, surgical
+/// `toml_edit` write and post-write `Config` validation as `gwm config set`,
+/// so a write that round-trips through `gwm config` round-trips here too.
+///
+/// Creates the parent directory when missing so the user-global file can be
+/// written on its first use (the `~/.config/gwm/` dir may not exist yet).
+pub fn set_value_at(path: &Path, key: &str, raw_value: &str) -> Result<()> {
+  if let Some(parent) = path.parent() {
+    if !parent.as_os_str().is_empty() {
+      std::fs::create_dir_all(parent)?;
+    }
+  }
+  let mut doc = load_document(path)?;
+  let segments = parse_key(key)?;
+  let item = parse_scalar(raw_value);
+  set_value(doc.as_table_mut(), &segments, item)?;
+  write_and_validate(path, &doc)
+}
+
 fn split_set_args(key: &str, raw_value: Option<&str>) -> Result<(String, String)> {
   match (key.split_once('='), raw_value) {
     (Some((key, value)), None) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
