@@ -1937,6 +1937,15 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   app.refresh_github_status();
   assert_eq!(app.current_link().pr, Some(128));
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+  // Table-snapshot sync (Codex review #284): the table renders from
+  // `self.worktrees[*].link`, not the live `github.link`, so a detection
+  // must be mirrored onto the selected row or its PR pastille stays white
+  // until a separate relist.
+  assert_eq!(
+    app.selected().map(|w| w.link.pr),
+    Some(Some(128)),
+    "the selected row snapshot must reflect the detected PR immediately"
+  );
 
   // The branch's PR changed (e.g. closed + reopened as #200). A detected
   // link is "resolved live", so a second refresh must re-detect rather
@@ -1961,6 +1970,236 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
     "a detected PR must re-resolve on refresh"
   );
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+
+  // Wiring guard (issue #283): the detection must be PERSISTED to the git
+  // config, not just held in memory — that is what lets the no-fetch table
+  // read path colour the PR pastille on every row. Read the link straight
+  // from the repo (bypassing the in-memory `app.github.link`) so dropping
+  // `persist_detected_pr` from `refresh_github_status` turns this red.
+  let persisted = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(
+    persisted.pr,
+    Some(200),
+    "the detected PR must be persisted so the table read path sees it"
+  );
+  assert_eq!(persisted.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn refresh_keeps_persisted_pr_when_no_remote_slug() {
+  // Codex review #284: pressing `F` when the probe cannot run at all (no
+  // origin remote → `link_slug` is None) must NOT blank a persisted
+  // detection. The unconditional `clear_detected_pr()` used to wipe the
+  // in-memory link before the skipped probe could restore it.
+  let (_dir, repo, mut app) = make_app_on_branch("detect-me");
+  // No origin remote is configured, so there is no slug to probe with.
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+  app.refresh_link();
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "precondition: the persisted detection loads into memory"
+  );
+
+  app.refresh_github_status();
+
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "a refresh that cannot probe must keep the persisted detection"
+  );
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: a transient `gh` failure (missing binary, offline,
+  // rate limit) must NOT wipe a previously persisted detection — pressing
+  // `F` offline should keep showing the PR, not blank it.
+  let (dir, repo, mut app) = make_app_on_branch("detect-me");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.refresh_link();
+
+  // A `gh` that detects PR #128, then a `gh` that always fails (exit 1).
+  let gh_ok = dir.path().join("fake-gh-ok");
+  std::fs::write(
+    &gh_ok,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":128}]'\n\
+     elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '%s' '{\"number\":128,\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/128\"}'\n\
+     fi\n",
+  )
+  .unwrap();
+  let gh_fail = dir.path().join("fake-gh-fail");
+  std::fs::write(&gh_fail, "#!/bin/sh\nexit 1\n").unwrap();
+  for p in [&gh_ok, &gh_fail] {
+    let mut perms = std::fs::metadata(p).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(p, perms).unwrap();
+  }
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_ok);
+  }
+  app.refresh_github_status();
+  assert_eq!(app.current_link().pr, Some(128), "first refresh detects #128");
+
+  // Now `gh` fails. The probe did not prove the PR vanished.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_fail);
+  }
+  app.refresh_github_status();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  // The persisted key survives a failed probe...
+  let persisted = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(
+    persisted.pr,
+    Some(128),
+    "a failed gh probe must not wipe the persisted detection"
+  );
+  assert_eq!(persisted.pr_source, LinkSource::Detected);
+  // ...and stays visible in memory rather than blanking the pane.
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "the pane must keep the still-valid PR after a failed probe"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: a persisted detection (#283) must NOT make the live
+  // CLI detection path (`gwm status` / `gwm list --detect-pr`) authoritative.
+  // It must still re-run `gh pr list` so a PR that was replaced since the
+  // last TUI `F` is reflected — only an explicit `gwm link --pr` pins it.
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+
+  // Stale persisted detection: #128.
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+
+  // Live `gh` now reports #200 for the branch.
+  let gh = dir.path().join("fake-gh-200");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":200}]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  // The live path must reconcile the persisted cache (#284), not just memory,
+  // so no-fetch consumers (table at startup, `gwm open pr`) don't resurrect
+  // the stale #128. Capture the stored value before the explicit link below.
+  let reconciled = gwm::github::read_link(&repo, "detect-me").unwrap();
+
+  // Explicit override still wins even over a live re-detection.
+  gwm::github::link_pr(&repo, "detect-me", 61).unwrap();
+  let explicit = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(
+    link.pr,
+    Some(200),
+    "live detection must override the stale persisted #128"
+  );
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(
+    reconciled.pr,
+    Some(200),
+    "the live detection must rewrite the persisted cache to the fresh number"
+  );
+  assert_eq!(explicit.pr, Some(61), "an explicit link still wins over live detection");
+  assert_eq!(explicit.pr_source, LinkSource::Explicit);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: when the live probe proves the PR is gone (`Ok(None)`),
+  // the live CLI path must clear the persisted cache too, otherwise a no-fetch
+  // read (`read_link`) would resurrect the stale stored number.
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+
+  // Live `gh pr list` returns an empty array — the PR no longer exists.
+  let gh = dir.path().join("fake-gh-empty");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let stored = gwm::github::read_link(&repo, "detect-me").unwrap();
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(link.pr, None, "a vanished PR resolves to no PR live");
+  assert_eq!(
+    stored.pr, None,
+    "the persisted cache must be cleared so no-fetch reads don't resurrect it"
+  );
 }
 
 // ---- Configurable launchers (issue #75) --------------------------------
@@ -2352,29 +2591,57 @@ fn yank_selected_path_returns_none_when_nothing_selected() {
   assert!(app.yank_selected_path().is_none());
 }
 
-// ---- Issue #73 (PR #74 follow-up): table marker pastille ------------------
-// The marker column (first cell) doubles as the lazygit-style status dot.
-// `★` still wins for main; non-main worktrees that carry a link (issue or
-// PR) get `●` so the row visually signals "this has GitHub context", even
-// when the sidebar is hidden (`<120` cols or `v` collapsed).
+// ---- Issue #283: table marker pastilles -----------------------------------
+// The marker column (first cell) renders two pastilles `●/●`: left = Issue
+// (green when linked), right = PR (violet when linked), white when the slot
+// is empty, muted `/` between. The main worktree keeps its `★`. The table is
+// the no-fetch read path, so the colour signals link **presence**, not live
+// open/closed state (that stays in the sidebar header where a fetch runs).
+
+/// Pull each span's `(content, fg)` out of a `table_marker` line so the
+/// pastille assertions read as a flat list.
+fn marker_cells(line: &ratatui::text::Line<'_>) -> Vec<(String, Option<Color>)> {
+  line
+    .spans
+    .iter()
+    .map(|s| (s.content.as_ref().to_string(), s.style.fg))
+    .collect()
+}
 
 #[test]
-fn table_marker_for_main_worktree_is_yellow_star() {
+fn table_marker_for_main_worktree_is_a_yellow_star() {
   use gwm::github::BranchLink;
   let mut w = worktree_fixture("main");
   w.is_main = true;
   w.link = BranchLink::empty();
-  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, "★");
-  assert_eq!(color, Color::Yellow);
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  assert_eq!(marker_cells(&line), vec![("★".to_string(), Some(Color::Yellow))]);
 }
 
 #[test]
-fn table_marker_for_linked_non_main_is_neutral_dot() {
-  // No fetched state available at the table layer — colour stays neutral
-  // (Cyan) so the dot reads as "has link" without claiming a specific
-  // open/closed status. The coloured dot lives in the sidebar header where
-  // the live fetch state is known.
+fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: Some(42),
+    pr: Some(43),
+    issue_source: LinkSource::BranchName,
+    pr_source: LinkSource::Detected,
+  };
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  assert_eq!(
+    marker_cells(&line),
+    vec![
+      ("●".to_string(), Some(Color::Green)),    // issue linked → clean role
+      ("/".to_string(), Some(Color::DarkGray)), // muted separator
+      ("●".to_string(), Some(Color::Magenta)),  // pr linked → locked role
+    ]
+  );
+}
+
+#[test]
+fn table_marker_issue_only_leaves_the_pr_pastille_white() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
@@ -2384,19 +2651,40 @@ fn table_marker_for_linked_non_main_is_neutral_dot() {
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
-  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, "●");
-  assert_eq!(color, Color::Cyan);
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::Green), "issue dot green");
+  assert_eq!(cells[2].1, Some(Color::White), "empty pr dot white");
 }
 
 #[test]
-fn table_marker_for_unlinked_non_main_is_blank() {
+fn table_marker_pr_only_leaves_the_issue_pastille_white() {
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: None,
+    pr: Some(43),
+    issue_source: LinkSource::None,
+    pr_source: LinkSource::Detected,
+  };
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::White), "empty issue dot white");
+  assert_eq!(cells[2].1, Some(Color::Magenta), "pr dot violet");
+}
+
+#[test]
+fn table_marker_unlinked_non_main_is_two_white_pastilles() {
   use gwm::github::BranchLink;
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
   w.link = BranchLink::empty();
-  let (label, _color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::White), "empty issue dot white");
+  assert_eq!(cells[1].0, "/", "muted separator between the pastilles");
+  assert_eq!(cells[2].1, Some(Color::White), "empty pr dot white");
 }
 
 #[test]
@@ -2922,6 +3210,141 @@ fn issue_summary_line_truncates_error_state_to_budget() {
   );
   let width = line_visible_width(&line);
   assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
+}
+
+// ---- Issue #283: pane icons + source / state chips ----------------------
+
+fn span_with<'a>(line: &'a ratatui::text::Line<'a>, needle: &str) -> Option<&'a ratatui::text::Span<'a>> {
+  line.spans.iter().find(|s| s.content.contains(needle))
+}
+
+#[test]
+fn issue_summary_line_leads_with_the_issue_icon() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert!(
+    line.spans[0].content.contains(gwm::tui::ISSUE_ICON),
+    "issue pane line must lead with the issue nerdfont glyph: {:?}",
+    line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_leads_with_the_pr_icon() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  assert!(
+    line.spans[0].content.contains(gwm::tui::PR_ICON),
+    "pr pane line must lead with the pr nerdfont glyph: {:?}",
+    line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Detected,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "detected").expect("a 'detected' source chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the source chip must use the version-badge reverse-video treatment"
+  );
+}
+
+#[test]
+fn issue_summary_line_renders_auto_source_as_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "auto").expect("an 'auto' source chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the source chip must use the version-badge reverse-video treatment"
+  );
+}
+
+#[test]
+fn explicit_link_renders_no_source_chip() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    !text.contains("auto"),
+    "explicit link must not show an auto chip: {text}"
+  );
+  assert!(
+    !text.contains("detected"),
+    "explicit link must not show a detected chip: {text}"
+  );
+}
+
+#[test]
+fn issue_summary_line_state_badge_is_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let status = gwm::github::IssueStatus {
+    number: 7,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "open").expect("an 'open' state chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the state badge must use the version-badge reverse-video treatment"
+  );
 }
 
 // ---- Recent Commits panel: lazygit-style fill + clip (issue #71) ---------

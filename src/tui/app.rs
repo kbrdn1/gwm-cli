@@ -2077,6 +2077,26 @@ impl App {
     &self.github.link
   }
 
+  /// Mirror the live resolved `github.link` onto the selected worktree's
+  /// snapshot (issue #283 / Codex review #284). The table renders the PR/
+  /// issue pastilles from `self.worktrees[*].link`, captured at list time,
+  /// so a freshly persisted auto-detection would otherwise stay invisible on
+  /// the selected row until a full relist. Resolves the selection through
+  /// the same filter map as [`Self::selected`].
+  fn sync_selected_link_into_table(&mut self) {
+    let Some(i) = self.list_state.selected() else {
+      return;
+    };
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let Some(&original) = filtered.get(i) else {
+      return;
+    };
+    let link = self.github.link.clone();
+    if let Some(w) = self.worktrees.get_mut(original) {
+      w.link = link;
+    }
+  }
+
   pub fn current_slug(&self) -> Option<&str> {
     self.github.link_slug.as_deref()
   }
@@ -2123,19 +2143,38 @@ impl App {
   pub fn refresh_github_status(&mut self) {
     let slug = self.github.link_slug.clone();
 
-    // Drop a prior auto-detection so this refresh re-resolves it live
-    // (issue #181): a detected PR must not stick across `F` presses if
-    // the branch's PR changed. Explicit / branch-name links stay pinned.
-    self.github.clear_detected_pr();
-
-    // Auto-detect the selected branch's PR when none is linked (issue
-    // #181). Synchronous (see method doc); needs a remote, so it's a no-op
-    // without a slug. An explicit `gwm link --pr` wins — `apply_detected_pr`
-    // only fills an empty slot.
-    if self.github.link.pr.is_none() {
+    // Re-resolve a non-explicit PR live on `F` (issue #181/#283): only an
+    // explicit `gwm link --pr` pins the PR; a branch-name / none / persisted-
+    // detected (#283) PR is re-probed so a number that changed since the last
+    // detection is refreshed. The in-memory detection is dropped *only* once
+    // we have a fresh successful result (the `Ok` arm), so a refresh that
+    // cannot probe — no origin slug, no resolvable branch, or a failed `gh`
+    // call — keeps the persisted detection visible instead of blanking the
+    // pane/table (Codex review #284). `apply_detected_pr` only fills an empty
+    // slot, hence the clear-then-apply to replace a stale detection.
+    if self.github.link.pr_source != github::LinkSource::Explicit {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
-        let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
-        self.github.apply_detected_pr(detected);
+        if let Ok(detected) = github::find_pr_for_branch(slug, &branch) {
+          self.github.clear_detected_pr();
+          self.github.apply_detected_pr(detected);
+          // Persist the detection (issue #283) so the no-fetch table read
+          // path colours the PR pastille on every row, not just the selected
+          // one. Only a successful probe is authoritative: store a hit, clear
+          // the key on a proven `Ok(None)`. Best-effort write — a git-config
+          // failure must not break the refresh, so the result is discarded.
+          let _ = match detected {
+            Some(n) => github::persist_detected_pr(&self.repo, &branch, n),
+            None => github::clear_persisted_detected_pr(&self.repo, &branch),
+          };
+        }
+        // On a `gh` failure (Err) nothing was cleared, so the link keeps
+        // whatever `read_link` resolved (possibly a persisted detection).
+        //
+        // Mirror the resolved link onto the selected row's snapshot so the
+        // table pastille reflects the detection immediately, without waiting
+        // for a separate relist (Codex review #284). The table renders from
+        // `self.worktrees[*].link`, not the live `github.link`.
+        self.sync_selected_link_into_table();
       }
     }
 

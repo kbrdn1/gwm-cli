@@ -221,26 +221,45 @@ fn issue_badge_color_resolves_through_theme_roles() {
 }
 
 #[test]
-fn table_marker_resolves_through_theme_roles_but_keeps_neutral_default() {
+fn table_marker_resolves_through_theme_roles() {
   let t = audit_theme();
 
+  // Main keeps its single `★` painted with the `main` role.
   let mut main = base_worktree("main");
   main.is_main = true;
-  assert_eq!(table_marker(&main, &t).1, t.main, "main worktree marker → main role");
+  assert_eq!(
+    table_marker(&main, &t).spans[0].style.fg,
+    Some(t.main),
+    "main marker → main role"
+  );
 
-  let mut linked = base_worktree("linked");
-  linked.link = BranchLink {
+  // Issue linked, PR empty: issue dot → `clean`, separator → `muted`, the
+  // empty PR dot → `name` (the neutral white slot).
+  let mut issue_only = base_worktree("issue");
+  issue_only.link = BranchLink {
     issue: Some(7),
     ..BranchLink::empty()
   };
-  assert_eq!(table_marker(&linked, &t).1, t.accent, "linked marker → accent role");
+  let line = table_marker(&issue_only, &t);
+  assert_eq!(line.spans[0].style.fg, Some(t.clean), "issue dot → clean role");
+  assert_eq!(line.spans[1].style.fg, Some(t.muted), "separator → muted role");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
 
+  // PR linked, issue empty: mirror — empty issue dot → `name`, PR → `locked`.
+  let mut pr_only = base_worktree("pr");
+  pr_only.link = BranchLink {
+    pr: Some(8),
+    ..BranchLink::empty()
+  };
+  let line = table_marker(&pr_only, &t);
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dot → name role");
+  assert_eq!(line.spans[2].style.fg, Some(t.locked), "pr dot → locked role");
+
+  // Nothing linked: two `name`-white slots.
   let unlinked = base_worktree("plain");
-  assert_eq!(
-    table_marker(&unlinked, &t).1,
-    Color::Reset,
-    "unlinked, non-main marker carries no role and stays Reset"
-  );
+  let line = table_marker(&unlinked, &t);
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dot → name role");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
 }
 
 // ---------------------------------------------------------------------------

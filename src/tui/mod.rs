@@ -65,7 +65,7 @@ pub use ui::{
   pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, status_line, status_pane_title,
   table_marker, tilde_compress_with_home, type_selector_line, working_tree_pane_title, working_tree_status_line,
   worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
-  COMMIT_HASH_DISPLAY_LEN, RECENT_COMMITS_LIMIT,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
