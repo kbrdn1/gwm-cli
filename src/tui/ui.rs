@@ -474,8 +474,8 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // column rock-stable at 4 cells (the cost of losing the unit
   // letter to truncation — "22h" → "22" — is worse than name/branch
   // shrinking by a char or two). Strategy:
-  //   - `Length(4)` for age, `Length(2)` for marker, `Length(16)` for
-  //     status: hard-fixed lengths the solver must honour.
+  //   - `Length(4)` for age, `Length(3)` for marker (`●/●`), `Length(16)`
+  //     for status: hard-fixed lengths the solver must honour.
   //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
   //     when the terminal is narrow (they shrink down to 8) and grow
   //     to the original clamped width (or more) when there's room.
@@ -484,7 +484,7 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // stays at 4 cells across every size.
   let widths = [
     Constraint::Length(4),
-    Constraint::Length(2),
+    Constraint::Length(3),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
@@ -1426,7 +1426,7 @@ pub fn help_label_style(theme: &Theme) -> Style {
 }
 
 fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
-  let (marker_label, marker_color) = table_marker(w, theme);
+  let marker = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
   // The worktree name is the row's primary identity text. It paints with
@@ -1458,7 +1458,7 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme:
 
   Row::new(vec![
     age_cell,
-    Cell::from(marker_label).style(Style::default().fg(marker_color)),
+    Cell::from(marker),
     name_cell,
     branch_cell,
     status_cell,
@@ -3784,24 +3784,32 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
   }
 }
 
-/// Pick the marker glyph + colour for the table's first column. `★`
-/// for the main worktree (preserves the pre-#73 convention), `●` for
-/// any other worktree that carries an issue or PR link, blank space
-/// otherwise so unlinked rows don't read as "claimed". Colour stays
-/// neutral (Cyan) — the live PR / issue state isn't known at the
-/// table layer (only the selected worktree triggers a fetch), so the
-/// table dot signals "has link" rather than a specific status. The
-/// colour-coded `●` lives in the sidebar header where the fetch state
-/// is available.
-pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> (&'static str, Color) {
+/// Build the table's first-column marker (issue #283). The main worktree
+/// keeps its single `★` (painted with the `main` role, preserving the
+/// pre-#73 convention). Every other row renders two pastilles `●/●`:
+///
+/// - left = **Issue** — `clean` green when an issue is linked, else white.
+/// - right = **PR** — `locked` violet when a PR is linked, else white.
+/// - a `muted` `/` separates them.
+///
+/// The table is the no-fetch read path (only the selected worktree triggers
+/// a `gh` fetch), so the pastille colour signals link **presence / type**,
+/// not live open/closed state — that coloured-by-status dot lives in the
+/// sidebar header where the fetch result is known. A detected PR shows here
+/// on every row only because it is persisted to `gwm-pr-detected` (#283) and
+/// read back by [`crate::github::read_link`].
+pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
-    return ("★", theme.main);
+    return Line::from(Span::styled("★", Style::default().fg(theme.main)));
   }
-  if w.link.issue.is_some() || w.link.pr.is_some() {
-    return ("●", theme.accent);
-  }
-  // No semantic role: an unlinked, non-main row carries no signal, so
-  // it stays on the terminal default rather than borrowing a theme
-  // colour that would read as "claimed".
-  (" ", Color::Reset)
+  // An empty slot stays `name`-white so "no link" reads as a neutral
+  // placeholder rather than borrowing a status colour that would claim the
+  // row. A linked slot takes its accent: issue → `clean`, PR → `locked`.
+  let issue_color = if w.link.issue.is_some() { theme.clean } else { theme.name };
+  let pr_color = if w.link.pr.is_some() { theme.locked } else { theme.name };
+  Line::from(vec![
+    Span::styled("●", Style::default().fg(issue_color)),
+    Span::styled("/", Style::default().fg(theme.muted)),
+    Span::styled("●", Style::default().fg(pr_color)),
+  ])
 }

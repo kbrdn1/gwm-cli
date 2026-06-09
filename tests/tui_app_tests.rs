@@ -2352,29 +2352,57 @@ fn yank_selected_path_returns_none_when_nothing_selected() {
   assert!(app.yank_selected_path().is_none());
 }
 
-// ---- Issue #73 (PR #74 follow-up): table marker pastille ------------------
-// The marker column (first cell) doubles as the lazygit-style status dot.
-// `★` still wins for main; non-main worktrees that carry a link (issue or
-// PR) get `●` so the row visually signals "this has GitHub context", even
-// when the sidebar is hidden (`<120` cols or `v` collapsed).
+// ---- Issue #283: table marker pastilles -----------------------------------
+// The marker column (first cell) renders two pastilles `●/●`: left = Issue
+// (green when linked), right = PR (violet when linked), white when the slot
+// is empty, muted `/` between. The main worktree keeps its `★`. The table is
+// the no-fetch read path, so the colour signals link **presence**, not live
+// open/closed state (that stays in the sidebar header where a fetch runs).
+
+/// Pull each span's `(content, fg)` out of a `table_marker` line so the
+/// pastille assertions read as a flat list.
+fn marker_cells(line: &ratatui::text::Line<'_>) -> Vec<(String, Option<Color>)> {
+  line
+    .spans
+    .iter()
+    .map(|s| (s.content.as_ref().to_string(), s.style.fg))
+    .collect()
+}
 
 #[test]
-fn table_marker_for_main_worktree_is_yellow_star() {
+fn table_marker_for_main_worktree_is_a_yellow_star() {
   use gwm::github::BranchLink;
   let mut w = worktree_fixture("main");
   w.is_main = true;
   w.link = BranchLink::empty();
-  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, "★");
-  assert_eq!(color, Color::Yellow);
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  assert_eq!(marker_cells(&line), vec![("★".to_string(), Some(Color::Yellow))]);
 }
 
 #[test]
-fn table_marker_for_linked_non_main_is_neutral_dot() {
-  // No fetched state available at the table layer — colour stays neutral
-  // (Cyan) so the dot reads as "has link" without claiming a specific
-  // open/closed status. The coloured dot lives in the sidebar header where
-  // the live fetch state is known.
+fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: Some(42),
+    pr: Some(43),
+    issue_source: LinkSource::BranchName,
+    pr_source: LinkSource::Detected,
+  };
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  assert_eq!(
+    marker_cells(&line),
+    vec![
+      ("●".to_string(), Some(Color::Green)),    // issue linked → clean role
+      ("/".to_string(), Some(Color::DarkGray)), // muted separator
+      ("●".to_string(), Some(Color::Magenta)),  // pr linked → locked role
+    ]
+  );
+}
+
+#[test]
+fn table_marker_issue_only_leaves_the_pr_pastille_white() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
@@ -2384,19 +2412,40 @@ fn table_marker_for_linked_non_main_is_neutral_dot() {
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
-  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, "●");
-  assert_eq!(color, Color::Cyan);
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::Green), "issue dot green");
+  assert_eq!(cells[2].1, Some(Color::White), "empty pr dot white");
 }
 
 #[test]
-fn table_marker_for_unlinked_non_main_is_blank() {
+fn table_marker_pr_only_leaves_the_issue_pastille_white() {
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: None,
+    pr: Some(43),
+    issue_source: LinkSource::None,
+    pr_source: LinkSource::Detected,
+  };
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::White), "empty issue dot white");
+  assert_eq!(cells[2].1, Some(Color::Magenta), "pr dot violet");
+}
+
+#[test]
+fn table_marker_unlinked_non_main_is_two_white_pastilles() {
   use gwm::github::BranchLink;
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
   w.link = BranchLink::empty();
-  let (label, _color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::White), "empty issue dot white");
+  assert_eq!(cells[1].0, "/", "muted separator between the pastilles");
+  assert_eq!(cells[2].1, Some(Color::White), "empty pr dot white");
 }
 
 #[test]
