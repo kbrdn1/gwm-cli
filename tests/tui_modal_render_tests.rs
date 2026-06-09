@@ -347,9 +347,10 @@ fn settings_panel_theme_tab_renders_tabs_layer_and_editable_field() {
   assert_present(&buf, "Settings", "settings panel title");
   // Tab strip.
   assert_present(&buf, "Theme", "Theme tab label");
+  assert_present(&buf, "Worktree", "Worktree tab label");
   assert_present(&buf, "TUI", "TUI tab label");
-  // Layer indicator + the editable field row.
-  assert_present(&buf, "layer", "edit-layer indicator");
+  // Layer is now a subtitle ("… · L to switch layer").
+  assert_present(&buf, "L to switch layer", "edit-layer subtitle");
   assert_present(&buf, "theme preset", "editable theme-preset field label");
 }
 

@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- The Settings panel (`4`, renamed from Configuration) is now editable: category tabs (Theme / TUI / All), a per-project ↔ global edit-layer selector (`L`), real toggles/choices (theme preset, sidebar position, open mode) and a numeric input (confirm countdown). Edits persist into the chosen layer's TOML and apply live; a global edit shadowed by a `.gwm.toml` override is surfaced rather than silently dropped.
+- The Settings panel (`4`, renamed from Configuration) is now editable: category tabs (Theme / Worktree / TUI / All) with the edit layer shown as a subtitle, a per-project ↔ global edit-layer selector (`L`), real toggles/choices (theme preset, sidebar position, open mode), numeric input (confirm countdown) and text inputs (worktree base + patterns, open shell/editor commands). Edits persist into the chosen layer's TOML and apply live; a global edit shadowed by a `.gwm.toml` override is surfaced rather than silently dropped. The read-only resolved config lives under the `All` tab.
 - Scrollable modal bodies (Keybindings, Settings) now render a herdr-style scrollbar.
 - Docs roadmap pages now mirror the v0.9.0 stable surface, the v0.8.0 historical cycle, and the current `[Unreleased]` dev delta in both English and French.
 - TUI now has a reusable dedicated-area `LoaderWidget`; the delete-worktree modal uses it as the first real consumer, showing both in-flight and failed delete states.

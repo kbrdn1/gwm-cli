@@ -99,9 +99,11 @@ fn new_panel_defaults_to_theme_tab_project_layer() {
 }
 
 #[test]
-fn next_tab_cycles_theme_tui_all_and_wraps() {
+fn next_tab_cycles_theme_worktree_tui_all_and_wraps() {
   let mut panel = ConfigPanel::new();
   assert_eq!(panel.tab, SettingsTab::Theme);
+  panel.next_tab();
+  assert_eq!(panel.tab, SettingsTab::Worktree);
   panel.next_tab();
   assert_eq!(panel.tab, SettingsTab::Tui);
   panel.next_tab();
@@ -149,11 +151,11 @@ fn selected_field_follows_the_tab() {
 #[test]
 fn select_next_clamps_to_the_last_field() {
   let mut panel = ConfigPanel::new();
-  panel.tab = SettingsTab::Tui; // 3 fields
+  panel.tab = SettingsTab::Tui; // 5 fields
   for _ in 0..10 {
     panel.select_next();
   }
-  assert_eq!(panel.selected, 2, "never selects past the last field");
+  assert_eq!(panel.selected, 4, "never selects past the last field");
 }
 
 #[test]
@@ -199,16 +201,33 @@ fn edit_buffer_takes_digits_only_and_commits() {
 }
 
 #[test]
-fn taking_an_empty_edit_reads_as_zero() {
+fn take_edit_returns_the_raw_buffer() {
+  // The state layer returns the raw buffer; the App commit path coerces an
+  // empty numeric buffer to "0" (an empty text buffer stays empty).
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
   panel.selected = 2;
   panel.begin_edit("");
   assert_eq!(
     panel.take_edit().as_deref(),
-    Some("0"),
-    "a cleared input is a valid zero"
+    Some(""),
+    "empty buffer round-trips verbatim"
   );
+}
+
+#[test]
+fn text_fields_accept_non_digit_characters() {
+  // Issue #279 follow-up: Worktree patterns are free-text inputs, so the
+  // buffer must take letters / punctuation, not digits only.
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Worktree;
+  panel.selected = 0; // base directory (Text)
+  assert_eq!(panel.selected_field().map(SettingField::kind), Some(FieldKind::Text));
+  panel.begin_edit("");
+  for c in "{home}/wt".chars() {
+    panel.push_edit_char(c);
+  }
+  assert_eq!(panel.editing.as_deref(), Some("{home}/wt"));
 }
 
 #[test]

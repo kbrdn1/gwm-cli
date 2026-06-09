@@ -4703,6 +4703,32 @@ fn committing_numeric_input_persists_the_typed_value() {
 }
 
 #[test]
+fn committing_text_input_persists_a_worktree_pattern() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Worktree;
+  app.config_panel.selected = 0; // base directory (Text input)
+
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on a Text field opens the input"
+  );
+  app.config_panel.editing = Some("{home}/custom-wt/{repo}".into());
+  app.commit_settings_edit();
+
+  assert_eq!(
+    app.config.worktree.base, "{home}/custom-wt/{repo}",
+    "live config updated"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.worktree.base, "{home}/custom-wt/{repo}", "text value persisted");
+}
+
+#[test]
 fn activate_is_a_noop_on_the_read_only_all_tab() {
   use gwm::tui::SettingsTab;
   let (dir, mut app) = make_app();

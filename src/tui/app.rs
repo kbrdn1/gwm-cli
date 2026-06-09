@@ -1222,7 +1222,7 @@ impl App {
           self.apply_setting(field, &next);
         }
       }
-      FieldKind::Uint => {
+      FieldKind::Uint | FieldKind::Text => {
         let current = field.current(&self.config);
         self.config_panel.begin_edit(&current);
       }
@@ -1238,6 +1238,13 @@ impl App {
       return;
     };
     if let Some(value) = self.config_panel.take_edit() {
+      // A cleared numeric input is a valid zero; a cleared text input is a
+      // legitimate empty / unset value.
+      let value = if field.kind() == FieldKind::Uint && value.is_empty() {
+        "0".to_string()
+      } else {
+        value
+      };
       self.apply_setting(field, &value);
     }
   }

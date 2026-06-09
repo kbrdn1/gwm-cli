@@ -2390,7 +2390,13 @@ fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usi
   if content_len <= viewport || area.width < 2 {
     return area;
   }
-  let mut state = ScrollbarState::new(content_len)
+  // ratatui maps the thumb over `content_length - 1`, but our scroll offset
+  // is clamped to `content_len - viewport` (the last page stays full). Pass
+  // `content_length = max_scroll + 1` with the real viewport length so the
+  // thumb size stays proportional AND reaches the bottom at full scroll
+  // (issue #279 follow-up: the thumb used to top out early).
+  let max_scroll = content_len - viewport;
+  let mut state = ScrollbarState::new(max_scroll + 1)
     .position(offset as usize)
     .viewport_content_length(viewport);
   let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -2495,25 +2501,33 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
   lines
 }
 
-/// Render the Settings overlay (issue #232; editable in #279): a ~90%
-/// fullscreen modal with a fixed header (title + category tabs + the edit
-/// layer indicator), a scrollable body (the active tab's fields, or the
-/// read-only resolved config on the `All` tab) with a herdr-style
-/// scrollbar, and a fixed footer hint. The renderer republishes
+/// Render the Settings overlay (issue #232; editable in #279): same modal
+/// size as the Keybindings overlay, with a fixed header (title + the edit
+/// layer as a subtitle + category tabs), a scrollable body (the active
+/// tab's fields, or the read-only resolved config on the `All` tab) with a
+/// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
 /// `config_panel.max_scroll` against the live body viewport.
 fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered(90, 85, f.area());
+  let area = centered(60, 60, f.area());
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let muted_style = Style::default().fg(muted);
   let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+  // Subtitle reads in the branch hue + italic, mirroring the Keybindings
+  // overlay's context subtitle.
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
   let tab = app.config_panel.tab;
   let editing = app.config_panel.editing.is_some();
   let selected_kind = app.config_panel.selected_field().map(SettingField::kind);
 
-  // Header: title + tab strip + layer indicator (all fixed).
+  // Header: title + the active edit layer as a subtitle + tab strip (fixed).
   let title = Line::from(Span::styled("Settings", heading_style)).centered();
+  let subtitle = Line::from(Span::styled(
+    format!("{}  ·  L to switch layer", app.config_panel.layer.label()),
+    subtitle_style,
+  ))
+  .centered();
   let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
   for (i, t) in SettingsTab::ALL.iter().enumerate() {
     if i > 0 {
@@ -2522,16 +2536,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     let style = if *t == tab { chip_style(accent) } else { muted_style };
     tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
   }
-  let tabs_line = Line::from(tab_spans);
-  let layer_line = Line::from(vec![
-    Span::styled("  layer: ", muted_style),
-    Span::styled(
-      app.config_panel.layer.label(),
-      Style::default().fg(accent).add_modifier(Modifier::BOLD),
-    ),
-    Span::styled("   (L to switch)", muted_style),
-  ]);
-  let header_lines = vec![title, tabs_line, layer_line];
+  let header_lines = vec![title, subtitle, Line::from(tab_spans)];
 
   // Body depends on the active tab.
   let body_lines = match tab {
@@ -2545,10 +2550,10 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
     vec![("Enter", "save"), ("Esc", "cancel")]
   } else if tab == SettingsTab::All {
     vec![("j/k", "scroll"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
-  } else if selected_kind == Some(FieldKind::Uint) {
-    vec![("Enter", "edit"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
-  } else {
+  } else if selected_kind == Some(FieldKind::Choice) {
     vec![("Space", "cycle"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  } else {
+    vec![("Enter", "edit"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
   };
 
   let block = overlay_block(accent);
