@@ -1961,6 +1961,19 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
     "a detected PR must re-resolve on refresh"
   );
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+
+  // Wiring guard (issue #283): the detection must be PERSISTED to the git
+  // config, not just held in memory — that is what lets the no-fetch table
+  // read path colour the PR pastille on every row. Read the link straight
+  // from the repo (bypassing the in-memory `app.github.link`) so dropping
+  // `persist_detected_pr` from `refresh_github_status` turns this red.
+  let persisted = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(
+    persisted.pr,
+    Some(200),
+    "the detected PR must be persisted so the table read path sees it"
+  );
+  assert_eq!(persisted.pr_source, LinkSource::Detected);
 }
 
 // ---- Configurable launchers (issue #75) --------------------------------
