@@ -2391,7 +2391,12 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
     modal_hint_line(
-      &[("j/k", "scroll"), ("g/G", "top/bottom"), ("Esc", "close")],
+      &[
+        ("j/k", "scroll"),
+        ("g/G", "top/bottom"),
+        ("y", "copy"),
+        ("Esc", "close"),
+      ],
       &app.theme,
     ),
     footer_area,

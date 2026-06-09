@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Statusbar and modal which-key hints drop the reverse-video badge for a flat "accent bind + muted action" treatment; action buttons keep their chip style. The Keybindings and Command Logs overlays now scroll their body only, keeping the title and footer hints pinned, with a herdr-style scrollbar. Command Logs separates entries with a full-width dashed rule and uses the flat footer hint.
+- Statusbar and modal which-key hints drop the reverse-video badge for a flat "accent bind + muted action" treatment; action buttons keep their chip style. The Keybindings and Command Logs overlays now scroll their body only, keeping the title and footer hints pinned, with a herdr-style scrollbar. Command Logs separates entries with a full-width dashed rule, uses the flat footer hint, and copies the whole transcript to the clipboard with `y`.
 
 ### Fixed
 

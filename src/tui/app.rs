@@ -1307,6 +1307,32 @@ impl App {
     self.status = status;
   }
 
+  /// Render the Command Logs transcript as plain text for the clipboard
+  /// (issue #279, `y`): newest-first, mirroring the overlay's layout
+  /// (`$ argv`, the outcome line, then the full captured output — not the
+  /// tail-capped view), entries separated by a blank line. Pure + owned so
+  /// the format is unit-testable without a clipboard. Empty when no commands
+  /// have run.
+  pub fn command_logs_transcript(&self) -> String {
+    use crate::command_log::CommandStatus;
+    let mut out = String::new();
+    for entry in self.command_logs.entries.iter().rev() {
+      out.push_str(&format!("$ {}\n", entry.command));
+      let detail = match &entry.status {
+        CommandStatus::Exited(Some(0)) => format!("→ exit 0 ({} ms)", entry.duration.as_millis()),
+        CommandStatus::Exited(Some(code)) => format!("→ exit {} ({} ms)", code, entry.duration.as_millis()),
+        CommandStatus::Exited(None) => format!("→ terminated ({} ms)", entry.duration.as_millis()),
+        CommandStatus::Spawn => "✗ failed to spawn".to_string(),
+      };
+      out.push_str(&format!("  {}\n", detail));
+      for line in entry.output.lines() {
+        out.push_str(&format!("    {}\n", line));
+      }
+      out.push('\n');
+    }
+    out.trim_end().to_string()
+  }
+
   /// Scroll the help overlay down one row, clamped to the renderer-published
   /// `help_max_scroll` so it never scrolls past the last line.
   pub fn help_scroll_down(&mut self) {

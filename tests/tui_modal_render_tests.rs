@@ -293,6 +293,8 @@ fn command_logs_modal_renders_title_and_entry_argv() {
   let buf = render(&mut app);
   assert_present(&buf, "Command Logs", "command logs title");
   assert_present(&buf, "gh issue view 226", "logged command argv");
+  // The footer advertises the `y` copy bind (issue #279).
+  assert_present(&buf, "copy", "command logs copy hint");
 }
 
 #[test]

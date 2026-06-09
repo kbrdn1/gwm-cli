@@ -4729,6 +4729,46 @@ fn committing_text_input_persists_a_worktree_pattern() {
 }
 
 #[test]
+fn command_logs_transcript_is_newest_first_and_empty_when_blank() {
+  use gwm::command_log::{CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  let (_dir, mut app) = make_app();
+  // Empty transcript when nothing has run.
+  assert!(app.command_logs_transcript().is_empty());
+
+  app.command_logs.entries = vec![
+    CommandLogEntry {
+      command: "first cmd".into(),
+      duration: Duration::from_millis(10),
+      status: CommandStatus::Exited(Some(0)),
+      output: "ok".into(),
+    },
+    CommandLogEntry {
+      command: "second cmd".into(),
+      duration: Duration::from_millis(20),
+      status: CommandStatus::Exited(Some(2)),
+      output: "boom".into(),
+    },
+  ];
+  let t = app.command_logs_transcript();
+  assert!(
+    t.contains("$ first cmd") && t.contains("$ second cmd"),
+    "both argv present: {t}"
+  );
+  // Newest-first: the last-pushed entry leads the transcript.
+  assert!(
+    t.find("second cmd").unwrap() < t.find("first cmd").unwrap(),
+    "newest entry must come first: {t}"
+  );
+  assert!(t.contains("→ exit 2"), "non-zero exit is recorded: {t}");
+  assert!(
+    t.contains("boom") && t.contains("ok"),
+    "captured output is included: {t}"
+  );
+}
+
+#[test]
 fn activate_is_a_noop_on_the_read_only_all_tab() {
   use gwm::tui::SettingsTab;
   let (dir, mut app) = make_app();

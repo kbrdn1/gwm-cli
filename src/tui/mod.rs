@@ -306,6 +306,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       // so the open key toggles it shut even when rebound.
       View::CommandLogs => match key.code {
         KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+        // `y` copies the whole transcript to the clipboard (issue #279).
+        KeyCode::Char('y') => copy_command_logs_to_clipboard(&mut app),
         KeyCode::Down | KeyCode::Char('j') => app.command_logs.scroll_down(),
         KeyCode::Up | KeyCode::Char('k') => app.command_logs.scroll_up(),
         KeyCode::Right | KeyCode::Char('l') => app.command_logs.scroll_right(),
@@ -743,12 +745,34 @@ fn run_subshell(
 /// its stdin. Failures and "no tool found" both surface in the status
 /// bar — no propagation, the TUI must never die on a clipboard miss.
 fn yank_selected_path_to_clipboard(app: &mut App) {
-  use std::io::Write;
   let Some(path) = app.yank_selected_path() else {
     app.status = "nothing selected".into();
     return;
   };
   let text = path.display().to_string();
+  copy_text_to_clipboard(app, &text, "yanked path");
+}
+
+/// Copy the Command Logs transcript to the clipboard (issue #279, `y`).
+/// Builds the plain-text transcript from owned state, then hands it to the
+/// shared clipboard helper. Empty transcript → a status note, no spawn.
+fn copy_command_logs_to_clipboard(app: &mut App) {
+  let text = app.command_logs_transcript();
+  if text.is_empty() {
+    app.status = "no commands to copy".into();
+    return;
+  }
+  copy_text_to_clipboard(app, &text, "copied command logs");
+}
+
+/// Feed `text` to the first available clipboard tool from
+/// [`clipboard_candidates`]. Walks the candidates in order, uses the first
+/// one whose binary is on `$PATH`, and feeds the text through its stdin.
+/// `success` is the status-bar label on a clean copy. Failures and "no tool
+/// found" both surface in the status bar — the TUI must never die on a
+/// clipboard miss.
+fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
+  use std::io::Write;
   for (cmd, args) in clipboard_candidates() {
     if which::which(cmd).is_err() {
       continue;
@@ -766,7 +790,7 @@ fn yank_selected_path_to_clipboard(app: &mut App) {
         }
         match c.wait() {
           Ok(s) if s.success() => {
-            app.status = format!("yanked path ({})", cmd);
+            app.status = format!("{} ({})", success, cmd);
             return;
           }
           Ok(s) => {
