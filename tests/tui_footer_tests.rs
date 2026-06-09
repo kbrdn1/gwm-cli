@@ -87,21 +87,37 @@ fn status_has_absolute_priority_when_space_is_tiny() {
 }
 
 #[test]
-fn keys_render_as_reverse_video_chips_on_the_accent_colour() {
+fn keys_render_as_accent_bold_binds_not_badges() {
+  // Issue #279: the footer hints drop the reverse-video badge for a
+  // herdr-style "accent bind + muted action" treatment. The key reads in
+  // the accent colour + BOLD with no REVERSED box.
   let line = footer_line(
     HINTS,
     "ready",
     120,
     &Theme {
       accent: Color::Magenta,
+      muted: Color::Gray,
       ..Theme::default()
     },
   );
-  // At least one span is a chip: reverse-video, accent-coloured, carrying a key.
-  let has_chip = line.spans.iter().any(|s| {
-    s.style.add_modifier.contains(Modifier::REVERSED) && s.style.fg == Some(Color::Magenta) && s.content.contains('n')
-  });
-  assert!(has_chip, "no reverse-video accent chip found in footer spans");
+  // A bind span: accent-coloured, bold, NOT reversed, carrying the key.
+  let bind = line
+    .spans
+    .iter()
+    .find(|s| s.style.fg == Some(Color::Magenta) && s.content.as_ref() == "n")
+    .expect("a bare accent 'n' bind span");
+  assert!(
+    bind.style.add_modifier.contains(Modifier::BOLD),
+    "bind is bold: {bind:?}"
+  );
+  assert!(
+    !line
+      .spans
+      .iter()
+      .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+    "no hint span should be a reverse-video badge anymore"
+  );
   // Labels are still present so the row stays self-documenting.
   assert!(plain(&line).contains("new"));
 }
@@ -158,20 +174,23 @@ fn status_line_shows_context_chip_at_the_left() {
     text.trim_start().starts_with("worktrees") || text.contains("worktrees"),
     "context chip missing at the left: {text:?}"
   );
-  // …and it is a reversed accent chip, like the hint badges.
+  // …and the context label stays a reversed focus chip — it's a "where am
+  // I" anchor, not a hint, so it keeps the badge treatment (issue #279).
   let has_ctx_chip = line.spans.iter().any(|s| {
     s.style.add_modifier.contains(Modifier::REVERSED)
       && s.style.fg == Some(Color::Green)
       && s.content.contains("worktrees")
   });
   assert!(has_ctx_chip, "context label is not a reversed focus chip: {text:?}");
+  // Hint binds, by contrast, are now flat accent-bold glyphs (no badge).
   assert!(
-    line
-      .spans
-      .iter()
-      .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
-      .any(|s| s.style.fg == Some(Color::Magenta) && s.content.contains(" n ")),
-    "hint key badges should keep the accent colour while context uses focus: {text:?}"
+    line.spans.iter().any(|s| {
+      !s.style.add_modifier.contains(Modifier::REVERSED)
+        && s.style.fg == Some(Color::Magenta)
+        && s.style.add_modifier.contains(Modifier::BOLD)
+        && s.content.as_ref() == "n"
+    }),
+    "hint binds should be flat accent-bold glyphs while context uses a focus chip: {text:?}"
   );
 }
 

@@ -224,19 +224,40 @@ fn confirm_buttons_render_as_chips_without_brackets() {
 }
 
 #[test]
-fn modal_hint_line_uses_statusbar_badge_treatment() {
-  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &Theme::default());
+fn modal_hint_line_renders_accent_bind_then_muted_action() {
+  // Issue #279: hints drop the reverse-video badge for a herdr-style
+  // "accent bind + space + muted action" treatment. The key span carries
+  // the accent colour + BOLD (no REVERSED box); the label reads muted.
+  let theme = Theme {
+    accent: Color::Magenta,
+    muted: Color::Gray,
+    ..Theme::default()
+  };
+  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &theme);
   let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(text.contains("fetch"), "hint label missing: {text:?}");
-  let fetch = line
+  // The bind is the bare key glyph — no surrounding padding box.
+  let key = line
     .spans
     .iter()
-    .find(|s| s.content.contains("F"))
-    .expect("fetch key badge");
+    .find(|s| s.content.as_ref() == "F")
+    .expect("a bare 'F' bind span (no badge padding)");
+  assert_eq!(key.style.fg, Some(Color::Magenta), "bind wears the accent");
   assert!(
-    fetch.style.add_modifier.contains(Modifier::REVERSED),
-    "modal key hints should use statusbar-like badges"
+    key.style.add_modifier.contains(Modifier::BOLD),
+    "bind is bold for emphasis"
   );
+  assert!(
+    !key.style.add_modifier.contains(Modifier::REVERSED),
+    "hints no longer use a reverse-video badge: {key:?}"
+  );
+  // The action reads in the muted role.
+  let label = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("fetch"))
+    .expect("a fetch label span");
+  assert_eq!(label.style.fg, Some(Color::Gray), "action reads muted");
 }
 
 #[test]

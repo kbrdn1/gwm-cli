@@ -1385,6 +1385,23 @@ pub fn chip_style(color: Color) -> Style {
     .add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
+/// The hint *bind* style (issue #279): the accent-coloured, **bold** key
+/// glyph that leads every statusbar / modal hint. This replaces the
+/// pre-#279 reverse-video [`chip_style`] badge with a flat herdr-style
+/// "accent bind + space + muted action" treatment — no box around the key.
+/// Action *buttons* (Create / confirm / type selector) and the statusbar
+/// context anchor keep [`chip_style`]; only the which-key hints are flat.
+pub fn hint_key_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+}
+
+/// The hint *action* style (issue #279): the muted description trailing a
+/// [`hint_key_style`] bind. Routed through the `muted` role so a theme
+/// override recolours it with the rest of the dim chrome.
+pub fn hint_label_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.muted)
+}
+
 /// Style for a *non-highlighted* command name in the command palette
 /// (issue #210 follow-up). Routes through the `name` role (default
 /// `White`) so a `[theme]` override / light preset recolours it, instead
@@ -1687,14 +1704,16 @@ pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
 }
 
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let mut spans: Vec<Span<'static>> = Vec::new();
   for (i, (key, label)) in hints.iter().enumerate() {
     if i > 0 {
-      spans.push(Span::raw(" "));
+      // Two spaces between hint pairs keep `key action` groups visually
+      // distinct now that the badge box is gone (issue #279).
+      spans.push(Span::raw("  "));
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
   }
   Line::from(spans).centered()
@@ -1732,8 +1751,8 @@ fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Ke
 /// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
 /// labels and the bracketed status are ASCII / single-width in practice).
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let status_style = Style::default().fg(theme.dirty);
 
   // A zero-width row can hold nothing — return an empty line rather than let
@@ -1764,21 +1783,21 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   let hint_budget = (width - status_w - 1).saturating_sub(1);
 
   let mut spans: Vec<Span<'static>> = Vec::new();
-  let mut used = 0usize; // display columns consumed by hint badges so far
+  let mut used = 0usize; // display columns consumed by hint groups so far
   let mut truncated = false;
   for (i, (key, label)) in hints.iter().enumerate() {
-    let sep = usize::from(i > 0); // single space between badges
-                                  // chip ` key ` (key + 2 pad) + ` label` (label + 1 leading space)
-    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    let sep = if i > 0 { 2 } else { 0 }; // two spaces between hint groups (#279)
+                                         // flat bind `key` + ` label` (label + 1 leading space)
+    let badge_w = key.chars().count() + 1 + label.chars().count();
     if used + sep + badge_w > hint_budget {
       truncated = true;
       break;
     }
-    if sep == 1 {
-      spans.push(Span::raw(" "));
-      used += 1;
+    if sep > 0 {
+      spans.push(Span::raw(" ".repeat(sep)));
+      used += sep;
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
     used += badge_w;
   }
@@ -1824,8 +1843,8 @@ pub fn status_line(
   theme: &Theme,
 ) -> Line<'static> {
   let context_style = chip_style(theme.focus);
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let status_style = Style::default().fg(theme.dirty);
   let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
@@ -1871,19 +1890,19 @@ pub fn status_line(
   let mut truncated = false;
   let mut hint_used = 0usize;
   for (i, (key, label)) in hints.iter().enumerate() {
-    // A separating space before every badge except the very first one when
-    // there is no left cluster.
-    let sep = usize::from(i > 0 || used > 0);
-    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    // Two spaces between hint groups (#279); a single space after the left
+    // cluster (context chip / spinner) before the first hint.
+    let sep = if i > 0 { 2 } else { usize::from(used > 0) };
+    let badge_w = key.chars().count() + 1 + label.chars().count();
     if hint_used + sep + badge_w > hint_budget {
       truncated = true;
       break;
     }
-    if sep == 1 {
-      spans.push(Span::raw(" "));
-      hint_used += 1;
+    if sep > 0 {
+      spans.push(Span::raw(" ".repeat(sep)));
+      hint_used += sep;
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
     hint_used += badge_w;
   }
