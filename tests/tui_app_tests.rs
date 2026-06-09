@@ -3375,7 +3375,7 @@ fn issue_summary_line_leads_with_the_issue_icon() {
 }
 
 #[test]
-fn issue_summary_line_icon_has_leading_and_trailing_space() {
+fn issue_summary_line_icon_has_trailing_space_only() {
   let line = issue_summary_line(
     7,
     gwm::github::LinkSource::Explicit,
@@ -3385,8 +3385,8 @@ fn issue_summary_line_icon_has_leading_and_trailing_space() {
   );
   assert_eq!(
     line.spans[0].content.as_ref(),
-    format!(" {} ", gwm::tui::ISSUE_ICON),
-    "issue icon segment should not touch the pane border"
+    format!("{}  ", gwm::tui::ISSUE_ICON),
+    "issue icon segment should leave two spaces after the glyph only"
   );
 }
 
@@ -3454,6 +3454,22 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     line.spans[0].content.contains(gwm::tui::PR_ICON),
     "pr pane line must lead with the pr nerdfont glyph: {:?}",
     line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_icon_has_trailing_space_only() {
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert_eq!(
+    line.spans[0].content.as_ref(),
+    format!("{}  ", gwm::tui::PR_ICON),
+    "PR icon segment should leave two spaces after the glyph only"
   );
 }
 

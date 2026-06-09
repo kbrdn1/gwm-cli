@@ -3607,7 +3607,7 @@ fn summary_line(
   // `<icon> <head>` plus an optional source chip are common to every state.
   // `prefix_w` tracks the visible width so the variable tail (title / error
   // blob) can be trimmed to fit `max_width`.
-  let icon_seg = format!(" {} ", icon); // leading gap + glyph + trailing gap
+  let icon_seg = format!("{}  ", icon); // glyph + two trailing gaps
   let chip = source_chip(source, theme);
   // Source chip segment = " " + " <label> " (a leading gap + the padded chip).
   let source_seg_w = chip.map(|(l, _)| 1 + l.chars().count() + 2).unwrap_or(0);
