@@ -505,6 +505,30 @@ fn branch_age_returns_none_when_no_trunk_candidate_exists_locally() {
   );
 }
 
+#[test]
+fn branch_age_prefers_persisted_local_branch_creation_time() {
+  let (_dir, repo) = init_repo();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("feat/#285-local-created", &head, false).unwrap();
+
+  let created = chrono::Utc::now().timestamp() - 3 * 86_400;
+  repo
+    .config()
+    .unwrap()
+    .set_str("branch.feat/#285-local-created.gwm-created-at", &created.to_string())
+    .unwrap();
+
+  let age = worktree::branch_age(&repo, "feat/#285-local-created")
+    .expect("persisted local creation timestamp should define branch age");
+  let drift = age.as_secs().abs_diff(3 * 86_400);
+  assert!(
+    drift < 300,
+    "expected ~3 days from local branch creation, got {}s (drift {}s)",
+    age.as_secs(),
+    drift
+  );
+}
+
 /// Helper: append a commit (empty tree, configurable timestamp) on top of
 /// the given ref. The committer / author share the same timestamp so
 /// `branch_age` (which reads committer time) is deterministic.

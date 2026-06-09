@@ -15,13 +15,14 @@ use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
 use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
-use crate::github::{self, BranchLink, IssueStatus, PrStatus};
+use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -313,6 +314,9 @@ pub struct App {
   /// Public for the same reason `github` is — the state-machine tests
   /// claim a generation directly without spawning an OS thread.
   pub tasks: TaskRunner,
+  /// Last point at which the periodic TUI worktree refresh was armed.
+  /// Tests set this directly to simulate elapsed time without sleeping.
+  pub last_auto_refresh_at: Instant,
   /// Sender cloned into each background task worker (issue #231; carries the
   /// GitHub fetch results too since #255).
   task_tx: mpsc::Sender<TaskMsg>,
@@ -412,6 +416,7 @@ impl App {
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
       tasks: TaskRunner::new(),
+      last_auto_refresh_at: Instant::now(),
       task_tx,
       task_rx,
       command_logs: CommandLogs::new(),
@@ -422,6 +427,10 @@ impl App {
     // #188). Orientation stays at its `Auto` default — runtime-only.
     out.sidebar.position = out.config.tui.sidebar_position;
     out.refresh_link();
+    let spawned = out.refresh_linked_github_statuses_for_worktrees();
+    if spawned > 0 {
+      out.status = String::from("fetching GitHub status…");
+    }
     Ok(out)
   }
 
@@ -518,15 +527,48 @@ impl App {
   /// at the previous vec — a length change auto-invalidates, but a
   /// same-length list with different contents would not, so the explicit
   /// flush is the safe play), re-clamp the selection (which re-resolves
-  /// the link cache), invalidate the sidebar preview, and report the
-  /// count. Called by the synchronous [`Self::refresh`] and by the
-  /// off-thread drain in [`Self::drain_task_results`].
-  fn apply_refreshed_worktrees(&mut self, worktrees: Vec<WorktreeInfo>) {
+  /// the link cache), refresh every Issue/PR status linked by the listed
+  /// rows, invalidate the sidebar preview, and report the count. Called by
+  /// the synchronous [`Self::refresh`] and by the off-thread drain in
+  /// [`Self::drain_task_results`].
+  fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
+    let issue_states: HashMap<u64, IssueState> = self
+      .worktrees
+      .iter()
+      .filter_map(|w| Some((w.link.issue?, w.issue_state?)))
+      .collect();
+    let pr_states = self
+      .worktrees
+      .iter()
+      .filter_map(|w| Some((w.link.pr?, w.pr_state?)))
+      .collect::<HashMap<_, _>>();
+
+    for w in &mut worktrees {
+      if let Some(issue) = w.link.issue {
+        if let Some(state) = issue_states.get(&issue).copied() {
+          w.issue_state = Some(state);
+        }
+      }
+      if let Some(pr) = w.link.pr {
+        if let Some(state) = pr_states.get(&pr).copied() {
+          w.pr_state = Some(state);
+        }
+      }
+    }
+
     self.worktrees = worktrees;
     self.filter.invalidate();
     self.clamp_selection_to_filter();
+    let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
-    self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
+    self.status = if spawned > 0 {
+      format!(
+        "refreshed — {} worktree(s); fetching GitHub status…",
+        self.worktrees.len()
+      )
+    } else {
+      format!("refreshed — {} worktree(s)", self.worktrees.len())
+    };
   }
 
   /// Off-thread worktree list refresh for the `f` / `r` key (issue #231):
@@ -544,6 +586,28 @@ impl App {
     self.spinner.reset();
     self.status = TaskKind::RefreshWorktrees.loading_label().into();
     self.spawn_refresh(generation);
+  }
+
+  /// Periodic worktree-list refresh for the TUI event loop. Returns `true`
+  /// only when a new async refresh task was actually started. `0` disables
+  /// the feature, and an in-flight refresh coalesces so the renderer is never
+  /// blocked by repeated relist attempts.
+  pub fn maybe_auto_refresh(&mut self, now: Instant) -> bool {
+    let secs = self.config.tui.auto_refresh_secs;
+    if secs == 0 {
+      return false;
+    }
+    if now.saturating_duration_since(self.last_auto_refresh_at) < Duration::from_secs(secs) {
+      return false;
+    }
+    self.last_auto_refresh_at = now;
+    let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
+      return false;
+    };
+    self.spinner.reset();
+    self.status = "auto-refreshing worktrees…".into();
+    self.spawn_refresh(generation);
+    true
   }
 
   /// Spawn one background worktree-list worker tagged with `generation`
@@ -673,6 +737,9 @@ impl App {
           if !self.tasks.complete(TaskKind::GithubIssue(number), generation) {
             continue;
           }
+          if let Ok(status) = &result {
+            self.persist_loaded_issue_title(status);
+          }
           self.github.complete_issue(number, result);
           applied = true;
           github_applied = true;
@@ -680,6 +747,9 @@ impl App {
         TaskMsg::GithubPr(generation, number, result) => {
           if !self.tasks.complete(TaskKind::GithubPr(number), generation) {
             continue;
+          }
+          if let Ok(status) = &result {
+            self.persist_loaded_pr_title(status);
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -2093,7 +2163,69 @@ impl App {
     };
     let link = self.github.link.clone();
     if let Some(w) = self.worktrees.get_mut(original) {
+      if w.link.issue != link.issue {
+        w.issue_state = None;
+      }
+      if w.link.pr != link.pr {
+        w.pr_state = None;
+      }
       w.link = link;
+    }
+  }
+
+  fn sync_issue_status_into_table(&mut self, status: &IssueStatus) {
+    if self.github.link.issue == Some(status.number) {
+      self.github.link.issue_title = Some(status.title.clone());
+      self.github.link.issue_state = Some(status.state);
+      if let Some(branch) = self.selected_branch_name() {
+        let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
+        let _ = github::persist_issue_state(&self.repo, &branch, status.state);
+      }
+    }
+    for w in &mut self.worktrees {
+      if w.link.issue != Some(status.number) {
+        continue;
+      }
+      w.issue_state = Some(status.state);
+      w.link.issue_title = Some(status.title.clone());
+      w.link.issue_state = Some(status.state);
+      if let Some(branch) = w.branch.as_deref() {
+        let _ = github::persist_issue_title(&self.repo, branch, &status.title);
+        let _ = github::persist_issue_state(&self.repo, branch, status.state);
+      }
+    }
+  }
+
+  fn sync_pr_status_into_table(&mut self, status: &PrStatus) {
+    if self.github.link.pr == Some(status.number) {
+      self.github.link.pr_title = Some(status.title.clone());
+      self.github.link.pr_state = Some(status.state);
+      if let Some(branch) = self.selected_branch_name() {
+        let _ = match self.github.link.pr_source {
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title)
+            .and_then(|()| github::persist_detected_pr_state(&self.repo, &branch, status.state)),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title)
+            .and_then(|()| github::persist_pr_state(&self.repo, &branch, status.state)),
+          github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+        };
+      }
+    }
+    for w in &mut self.worktrees {
+      if w.link.pr != Some(status.number) {
+        continue;
+      }
+      w.pr_state = Some(status.state);
+      w.link.pr_title = Some(status.title.clone());
+      w.link.pr_state = Some(status.state);
+      if let Some(branch) = w.branch.as_deref() {
+        let _ = match w.link.pr_source {
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, branch, &status.title)
+            .and_then(|()| github::persist_detected_pr_state(&self.repo, branch, status.state)),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, branch, &status.title)
+            .and_then(|()| github::persist_pr_state(&self.repo, branch, status.state)),
+          github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+        };
+      }
     }
   }
 
@@ -2213,6 +2345,46 @@ impl App {
     }
   }
 
+  fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    let Some(slug) = self.github.link_slug.clone() else {
+      return 0;
+    };
+    let issues = self
+      .worktrees
+      .iter()
+      .filter_map(|w| w.link.issue)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    let prs = self
+      .worktrees
+      .iter()
+      .filter_map(|w| w.link.pr)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    if issues.is_empty() && prs.is_empty() {
+      return 0;
+    }
+
+    self.invalidate_github();
+    let mut spawned = 0u32;
+    for n in issues {
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
+      }
+    }
+    for n in prs {
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if spawned > 0 {
+      self.spinner.reset();
+    }
+    spawned
+  }
+
   /// Flush the GitHub result cache **and** drop any in-flight GitHub worker
   /// on the spine (issue #255). The navigation invariant: the cache clear
   /// and the spine generation-bump must always move together, or a stale
@@ -2325,11 +2497,25 @@ impl App {
   }
 
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
+    if let Ok(status) = &r {
+      self.persist_loaded_issue_title(status);
+    }
     self.github.apply_issue_result(r);
   }
 
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
+    if let Ok(status) = &r {
+      self.persist_loaded_pr_title(status);
+    }
     self.github.apply_pr_result(r);
+  }
+
+  fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
+    self.sync_issue_status_into_table(status);
+  }
+
+  fn persist_loaded_pr_title(&mut self, status: &PrStatus) {
+    self.sync_pr_status_into_table(status);
   }
 
   // ---- Open menu ----------------------------------------------------------

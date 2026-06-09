@@ -154,6 +154,7 @@ fn confirm_fire(app: &mut App) {
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
+    let now = Instant::now();
     // Generic off-thread tasks (issue #231; GitHub fetch folded in by #255):
     // apply any worker results that landed since the last tick — the
     // off-thread worktree refresh and the `gh issue/pr view` fetches all
@@ -179,6 +180,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     if app.view == View::CommandLogs {
       app.command_logs.sync();
     }
+    app.maybe_auto_refresh(now);
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -196,7 +198,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       if app.confirm.is_armed() {
         app.spinner.tick();
       }
-      match app.tick_confirm_countdown(Instant::now()) {
+      match app.tick_confirm_countdown(now) {
         CountdownTickOutcome::ReadyToFire => {
           if let Err(e) = app.confirm_delete() {
             app.status = format!("delete failed: {}", e);

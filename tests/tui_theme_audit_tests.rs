@@ -36,8 +36,8 @@ use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, branch_status_color, build_sidebar_sections, footer_line, format_status, freshness_color,
-  header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color, table_marker,
-  working_tree_status_line, worktree_name_style, worktree_path_style,
+  github_status_lines, header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color,
+  table_marker, working_tree_status_line, worktree_name_style, worktree_path_style, App,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::{Color, Modifier};
@@ -234,32 +234,56 @@ fn table_marker_resolves_through_theme_roles() {
   );
 
   // Issue linked, PR empty: issue dot → `clean`, separator → `muted`, the
-  // empty PR dot → `name` (the neutral white slot).
+  // empty PR dash → `name` (the neutral white slot).
   let mut issue_only = base_worktree("issue");
   issue_only.link = BranchLink {
     issue: Some(7),
     ..BranchLink::empty()
   };
   let line = table_marker(&issue_only, &t);
+  assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
   assert_eq!(line.spans[0].style.fg, Some(t.clean), "issue dot → clean role");
   assert_eq!(line.spans[1].style.fg, Some(t.muted), "separator → muted role");
-  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 
-  // PR linked, issue empty: mirror — empty issue dot → `name`, PR → `locked`.
+  // Once an issue status is loaded, the Issue dot follows the same state role
+  // as the Issue/PR pane badge.
+  let mut closed_issue = issue_only.clone();
+  closed_issue.issue_state = Some(IssueState::Closed);
+  let line = table_marker(&closed_issue, &t);
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "closed issue dot → issue_badge_color closed role"
+  );
+
+  // PR linked, issue empty: mirror — empty issue dash → `name`, PR → `locked`.
   let mut pr_only = base_worktree("pr");
   pr_only.link = BranchLink {
     pr: Some(8),
     ..BranchLink::empty()
   };
   let line = table_marker(&pr_only, &t);
-  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dot → name role");
+  assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
   assert_eq!(line.spans[2].style.fg, Some(t.locked), "pr dot → locked role");
+
+  let mut closed_pr = pr_only.clone();
+  closed_pr.pr_state = Some(PrState::Closed);
+  let line = table_marker(&closed_pr, &t);
+  assert_eq!(
+    line.spans[2].style.fg,
+    Some(pr_badge_color(PrState::Closed, &t)),
+    "closed pr dot → pr_badge_color closed role"
+  );
 
   // Nothing linked: two `name`-white slots.
   let unlinked = base_worktree("plain");
   let line = table_marker(&unlinked, &t);
-  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dot → name role");
-  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dot → name role");
+  assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
+  assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +513,126 @@ fn summary_line_heads_resolve_through_name_role() {
   );
 }
 
+#[test]
+fn summary_line_loaded_icons_resolve_through_state_roles() {
+  let t = audit_theme();
+  let issue_status = gwm::github::IssueStatus {
+    number: 7,
+    title: "closed".into(),
+    state: IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(issue_status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    issue.spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "loaded issue icon → issue state role"
+  );
+
+  let pr_status = gwm::github::PrStatus {
+    number: 9,
+    title: "merged".into(),
+    state: PrState::Merged,
+    url: String::new(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+  };
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(pr_status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    pr.spans[0].style.fg,
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "loaded PR icon → PR state role"
+  );
+}
+
+#[test]
+fn github_status_cached_state_icons_resolve_through_state_roles() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Merged PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let t = audit_theme();
+  app.theme = t;
+
+  let lines = github_status_lines(&app, 120);
+
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "cached issue icon -> issue state role"
+  );
+  assert_eq!(
+    fg_containing(&lines[0], "closed"),
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "cached issue badge -> issue state role"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "cached PR icon -> PR state role"
+  );
+  assert_eq!(
+    fg_containing(&lines[1], "merged"),
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "cached PR badge -> PR state role"
+  );
+}
+
+#[test]
+fn summary_line_non_loaded_icons_stay_muted() {
+  let t = audit_theme();
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Idle,
+    80,
+    &t,
+  );
+  assert_eq!(issue.spans[0].style.fg, Some(t.muted), "idle issue icon → muted");
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Error("offline".into()),
+    80,
+    &t,
+  );
+  assert_eq!(pr.spans[0].style.fg, Some(t.muted), "error PR icon → muted");
+}
+
 // ---------------------------------------------------------------------------
 // Header / footer chrome
 // ---------------------------------------------------------------------------
@@ -660,6 +804,8 @@ fn base_worktree(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
     age: Some(Duration::from_secs(3600)),
   }
 }

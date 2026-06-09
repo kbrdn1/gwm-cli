@@ -459,6 +459,10 @@ fn tui_section_defaults_to_three_second_countdown() {
   let cfg = Config::default();
   assert_eq!(cfg.tui.confirm_countdown_secs, 3);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
+  assert_eq!(
+    cfg.tui.auto_refresh_secs, 60,
+    "TUI auto-refresh defaults to once per minute"
+  );
 }
 
 #[test]
@@ -546,6 +550,36 @@ confirm_countdown_secs = 0
   .unwrap();
   let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 0);
+}
+
+#[test]
+fn tui_auto_refresh_zero_disables_periodic_refresh() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+auto_refresh_secs = 0
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.auto_refresh_secs, 0);
+}
+
+#[test]
+fn tui_auto_refresh_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+auto_refresh_secs = 15
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.auto_refresh_secs, 15);
 }
 
 #[test]

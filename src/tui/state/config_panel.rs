@@ -70,6 +70,7 @@ impl SettingsTab {
         SettingField::SidebarPosition,
         SettingField::OpenMode,
         SettingField::ConfirmCountdown,
+        SettingField::AutoRefreshSecs,
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
       ],
@@ -149,6 +150,8 @@ pub enum SettingField {
   OpenMode,
   /// `tui.confirm_countdown_secs` — numeric input.
   ConfirmCountdown,
+  /// `tui.auto_refresh_secs` — numeric input, 0 disables.
+  AutoRefreshSecs,
   /// `tui.open.shell_cmd` — `$SHELL` override (text).
   OpenShellCmd,
   /// `tui.open.editor_cmd` — `$EDITOR` override (text).
@@ -166,6 +169,7 @@ impl SettingField {
       SettingField::SidebarPosition => "sidebar position",
       SettingField::OpenMode => "open mode",
       SettingField::ConfirmCountdown => "confirm countdown (s)",
+      SettingField::AutoRefreshSecs => "auto refresh (s)",
       SettingField::OpenShellCmd => "open shell cmd",
       SettingField::OpenEditorCmd => "open editor cmd",
     }
@@ -181,6 +185,7 @@ impl SettingField {
       SettingField::SidebarPosition => "tui.sidebar_position",
       SettingField::OpenMode => "tui.open.mode",
       SettingField::ConfirmCountdown => "tui.confirm_countdown_secs",
+      SettingField::AutoRefreshSecs => "tui.auto_refresh_secs",
       SettingField::OpenShellCmd => "tui.open.shell_cmd",
       SettingField::OpenEditorCmd => "tui.open.editor_cmd",
     }
@@ -190,12 +195,20 @@ impl SettingField {
   pub fn kind(self) -> FieldKind {
     match self {
       SettingField::ThemePreset | SettingField::SidebarPosition | SettingField::OpenMode => FieldKind::Choice,
-      SettingField::ConfirmCountdown => FieldKind::Uint,
+      SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
       | SettingField::WorktreeBranchPattern
       | SettingField::OpenShellCmd
       | SettingField::OpenEditorCmd => FieldKind::Text,
+    }
+  }
+
+  fn edit_char_limit(self) -> usize {
+    match self {
+      SettingField::AutoRefreshSecs => 20,
+      SettingField::ConfirmCountdown => 3,
+      _ => 256,
     }
   }
 
@@ -224,6 +237,7 @@ impl SettingField {
         crate::config::TuiOpenMode::Finder => "finder".into(),
       },
       SettingField::ConfirmCountdown => cfg.tui.confirm_countdown_secs.to_string(),
+      SettingField::AutoRefreshSecs => cfg.tui.auto_refresh_secs.to_string(),
       SettingField::OpenShellCmd => cfg.tui.open.shell_cmd.clone().unwrap_or_default(),
       SettingField::OpenEditorCmd => cfg.tui.open.editor_cmd.clone().unwrap_or_default(),
     }
@@ -352,16 +366,18 @@ impl ConfigPanel {
   }
 
   /// Append a character to the edit buffer. `Uint` fields take ASCII digits
-  /// only (capped at 3 chars — the countdown clamps to single seconds
-  /// anyway); `Text` fields take any printable character (capped at 256).
+  /// only (with per-field caps); `Text` fields take any printable character
+  /// (capped at 256).
   pub fn push_edit_char(&mut self, c: char) {
-    let uint = matches!(self.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
+    let field = self.selected_field();
+    let uint = matches!(field.map(SettingField::kind), Some(FieldKind::Uint));
+    let limit = field.map(SettingField::edit_char_limit).unwrap_or(256);
     if let Some(buf) = self.editing.as_mut() {
       if uint {
-        if c.is_ascii_digit() && buf.len() < 3 {
+        if c.is_ascii_digit() && buf.len() < limit {
           buf.push(c);
         }
-      } else if !c.is_control() && buf.len() < 256 {
+      } else if !c.is_control() && buf.len() < limit {
         buf.push(c);
       }
     }

@@ -227,6 +227,12 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [tui]
 # confirm_countdown_secs = 3
+#
+# Auto-refresh the TUI worktree list/status every N seconds so Issue/PR
+# markers and branch metadata do not stay stale while the session is open.
+# `0` disables periodic refresh. Default: 60.
+#
+# auto_refresh_secs = 60
 
 # --- TUI sidebar position (issue #188) ---------------------------------------
 # Which side the worktree-details preview sidebar sits on in the side-by-side

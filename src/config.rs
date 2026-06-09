@@ -453,6 +453,12 @@ pub struct TuiConfig {
   #[serde(default = "default_confirm_countdown_secs")]
   pub confirm_countdown_secs: u32,
 
+  /// Periodic worktree-list refresh interval in seconds. Default `60`
+  /// keeps Issue/PR table state reasonably fresh; `0` disables the
+  /// automatic refresh loop.
+  #[serde(default = "default_auto_refresh_secs")]
+  pub auto_refresh_secs: u64,
+
   /// `[tui.open]` sub-table — drives the dispatch of the `o` key in the
   /// list view. Default mode is `shell` (lazygit-like worktree-manager
   /// workflow); pre-#73 behaviour (`open` / `xdg-open` / `explorer`) is
@@ -481,6 +487,7 @@ impl Default for TuiConfig {
   fn default() -> Self {
     Self {
       confirm_countdown_secs: default_confirm_countdown_secs(),
+      auto_refresh_secs: default_auto_refresh_secs(),
       open: TuiOpenConfig::default(),
       sidebar_position: SidebarPosition::default(),
       keys: TuiKeysConfig::default(),
@@ -673,6 +680,10 @@ impl TuiConfig {
 
 fn default_confirm_countdown_secs() -> u32 {
   3
+}
+
+fn default_auto_refresh_secs() -> u64 {
+  60
 }
 
 /// Read a config file as a raw `toml::Value` (always a table at the

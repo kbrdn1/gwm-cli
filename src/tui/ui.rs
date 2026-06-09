@@ -474,8 +474,8 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // column rock-stable at 4 cells (the cost of losing the unit
   // letter to truncation — "22h" → "22" — is worse than name/branch
   // shrinking by a char or two). Strategy:
-  //   - `Length(4)` for age, `Length(3)` for marker (`●/●`), `Length(16)`
-  //     for status: hard-fixed lengths the solver must honour.
+  //   - `Length(4)` for age, `Length(3)` for marker (`●/●`, `●/-`, etc.),
+  //     `Length(16)` for status: hard-fixed lengths the solver must honour.
   //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
   //     when the terminal is narrow (they shrink down to 8) and grow
   //     to the original clamped width (or more) when there's room.
@@ -3495,6 +3495,10 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.issue_source,
       app.issue_fetch_state(),
+      PersistedSummary {
+        title: link.issue_title.as_deref(),
+        state: link.issue_state,
+      },
       max_width,
       &app.theme,
       Some(spinner),
@@ -3506,6 +3510,10 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.pr_source,
       app.pr_fetch_state(),
+      PersistedSummary {
+        title: link.pr_title.as_deref(),
+        state: link.pr_state,
+      },
       max_width,
       &app.theme,
       Some(spinner),
@@ -3559,7 +3567,22 @@ pub fn issue_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  issue_summary_line_with_spinner(n, src, state, max_width, theme, None)
+  issue_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
+}
+
+#[derive(Clone, Copy)]
+struct PersistedSummary<'a, S> {
+  title: Option<&'a str>,
+  state: Option<S>,
+}
+
+impl<S> PersistedSummary<'_, S> {
+  fn none() -> Self {
+    Self {
+      title: None,
+      state: None,
+    }
+  }
 }
 
 /// Resolved render inputs for a GitHub summary line, after the caller has
@@ -3569,6 +3592,15 @@ pub fn issue_summary_line(
 /// between the closing `]` and the final space+title.
 enum SummaryState<'a> {
   Idle,
+  CachedTitle {
+    title: &'a str,
+  },
+  CachedStatus {
+    badge: &'a str,
+    badge_color: Color,
+    trailing: String,
+    title: &'a str,
+  },
   Loading,
   Loaded {
     badge: &'a str,
@@ -3602,15 +3634,21 @@ fn summary_line(
   // `<icon> <head>` plus an optional source chip are common to every state.
   // `prefix_w` tracks the visible width so the variable tail (title / error
   // blob) can be trimmed to fit `max_width`.
-  let icon_seg = format!("{} ", icon); // glyph + space
+  let icon_seg = format!("{}  ", icon); // glyph + two trailing gaps
   let chip = source_chip(source, theme);
   // Source chip segment = " " + " <label> " (a leading gap + the padded chip).
   let source_seg_w = chip.map(|(l, _)| 1 + l.chars().count() + 2).unwrap_or(0);
   let prefix_w = icon_seg.chars().count() + head.chars().count() + source_seg_w;
 
   // The `head` carries no status signal, only identity — it paints with the
-  // `name` role (issue #210); the icon stays muted and the chips carry the
-  // state/source colour.
+  // `name` role (issue #210); the icon mirrors loaded state colour and falls
+  // back to muted while no fresh status exists.
+  let icon_color = match &state {
+    SummaryState::CachedStatus { badge_color, .. } | SummaryState::Loaded { badge_color, .. } => *badge_color,
+    SummaryState::Idle | SummaryState::CachedTitle { .. } | SummaryState::Loading | SummaryState::Error(_) => {
+      theme.muted
+    }
+  };
   let build_prefix = |head_bold: bool| -> Vec<Span<'static>> {
     let head_style = if head_bold {
       Style::default().fg(theme.name).add_modifier(Modifier::BOLD)
@@ -3618,7 +3656,7 @@ fn summary_line(
       Style::default().fg(theme.name)
     };
     let mut spans = vec![
-      Span::styled(icon_seg.clone(), Style::default().fg(theme.muted)),
+      Span::styled(icon_seg.clone(), Style::default().fg(icon_color)),
       Span::styled(head.clone(), head_style),
     ];
     if let Some((label, color)) = chip {
@@ -3632,6 +3670,40 @@ fn summary_line(
     SummaryState::Idle => {
       let mut spans = build_prefix(false);
       flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
+    SummaryState::CachedTitle { title } => {
+      let fixed = prefix_w + 1;
+      let budget = max_width.saturating_sub(fixed);
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
+    SummaryState::CachedStatus {
+      badge,
+      badge_color,
+      trailing,
+      title,
+    } => {
+      let badge_seg_w = 1 + badge.chars().count() + 2;
+      let fixed = prefix_w + badge_seg_w + trailing.chars().count() + 1;
+      if fixed >= max_width {
+        let mut spans = build_prefix(true);
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(format!(" {} ", badge)));
+        spans.push(Span::raw(trailing));
+        flatten_if_overflow(&mut spans, max_width);
+        return Line::from(spans);
+      }
+      let budget = max_width - fixed;
+      let mut spans = build_prefix(true);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
+      spans.push(Span::raw(trailing));
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
       Line::from(spans)
     }
     SummaryState::Loading => {
@@ -3688,14 +3760,46 @@ fn issue_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::IssueStatus>,
+  persisted: PersistedSummary<'_, IssueState>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("Issue #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => SummaryState::Idle,
-    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Idle => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          IssueState::Open => "open",
+          IssueState::Closed => "closed",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: issue_badge_color(state, theme),
+          trailing: String::new(),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => persisted
+        .title
+        .map(|title| SummaryState::CachedTitle { title })
+        .unwrap_or(SummaryState::Idle),
+    },
+    GitHubFetchState::Loading => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          IssueState::Open => "open",
+          IssueState::Closed => "closed",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: issue_badge_color(state, theme),
+          trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => SummaryState::Loading,
+    },
     GitHubFetchState::Loaded(s) => {
       // Mirror `issue_badge_color` exactly so the summary line and the
       // sidebar header dot never disagree for the same issue: closed maps
@@ -3729,21 +3833,57 @@ pub fn pr_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
 }
 
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::PrStatus>,
+  persisted: PersistedSummary<'_, PrState>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => SummaryState::Idle,
-    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Idle => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          PrState::Open => "open",
+          PrState::Draft => "draft",
+          PrState::Closed => "closed",
+          PrState::Merged => "merged",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: pr_badge_color(state, theme),
+          trailing: String::new(),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => persisted
+        .title
+        .map(|title| SummaryState::CachedTitle { title })
+        .unwrap_or(SummaryState::Idle),
+    },
+    GitHubFetchState::Loading => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          PrState::Open => "open",
+          PrState::Draft => "draft",
+          PrState::Closed => "closed",
+          PrState::Merged => "merged",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: pr_badge_color(state, theme),
+          trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => SummaryState::Loading,
+    },
     GitHubFetchState::Loaded(s) => {
       // Route the badge colour through `pr_badge_color` (mirroring how the
       // issue side calls `issue_badge_color`) so the summary line and the
@@ -3847,34 +3987,46 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
 
 /// Build the table's first-column marker (issue #283). The main worktree
 /// keeps its single `★` (painted with the `main` role, preserving the
-/// pre-#73 convention). Every other row renders two pastilles `●/●`:
+/// pre-#73 convention). Every other row renders two Issue/PR slots:
 ///
-/// - left = **Issue** — `clean` green when an issue is linked, else white.
-/// - right = **PR** — `locked` violet when a PR is linked, else white.
+/// - left = **Issue** — `●` with the loaded issue-state colour when known,
+///   `●` in `clean` green when only a link is known, else `-` in white.
+/// - right = **PR** — `●` with the loaded PR-state colour when known, `●`
+///   in `locked` violet when only a link is known, else `-` in white.
 /// - a `muted` `/` separates them.
 ///
-/// The table is the no-fetch read path (only the selected worktree triggers
-/// a `gh` fetch), so the pastille colour signals link **presence / type**,
-/// not live open/closed state — that coloured-by-status dot lives in the
-/// sidebar header where the fetch result is known. A detected PR shows here
-/// on every row only because it is persisted to `gwm-pr-detected` (#283) and
-/// read back by [`crate::github::read_link`].
+/// The table is normally the no-fetch read path. Once GitHub status has been
+/// fetched for linked rows, their snapshots carry loaded states so
+/// the Issue/PR pastilles can mirror open/closed/draft/merged without a
+/// per-frame `gh` call. A detected PR shows here on every row only because it
+/// is persisted to `gwm-pr-detected` (#283) and read back by
+/// [`crate::github::read_link`].
 pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
     return Line::from(Span::styled("★", Style::default().fg(theme.main)));
   }
   // An empty slot stays `name`-white so "no link" reads as a neutral
   // placeholder rather than borrowing a status colour that would claim the
-  // row. A linked slot takes its accent: issue → `clean`, PR → `locked`.
-  let issue_color = if w.link.issue.is_some() {
-    theme.clean
-  } else {
-    theme.name
+  // row. A linked slot takes its accent unless a live loaded state exists.
+  let issue_color = match (w.link.issue, w.issue_state) {
+    (Some(_), Some(state)) => issue_badge_color(state, theme),
+    (Some(_), None) => theme.clean,
+    (None, _) => theme.name,
   };
-  let pr_color = if w.link.pr.is_some() { theme.locked } else { theme.name };
+  let pr_color = match (w.link.pr, w.pr_state) {
+    (Some(_), Some(state)) => pr_badge_color(state, theme),
+    (Some(_), None) => theme.locked,
+    (None, _) => theme.name,
+  };
   Line::from(vec![
-    Span::styled("●", Style::default().fg(issue_color)),
+    Span::styled(
+      if w.link.issue.is_some() { "●" } else { "-" },
+      Style::default().fg(issue_color),
+    ),
     Span::styled("/", Style::default().fg(theme.muted)),
-    Span::styled("●", Style::default().fg(pr_color)),
+    Span::styled(
+      if w.link.pr.is_some() { "●" } else { "-" },
+      Style::default().fg(pr_color),
+    ),
   ])
 }

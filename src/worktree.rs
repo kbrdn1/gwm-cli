@@ -1,5 +1,5 @@
 use crate::error::{GwmError, Result};
-use crate::github::{self, BranchLink};
+use crate::github::{self, BranchLink, IssueState, PrState};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ use std::time::Duration;
 /// convention). Hardcoded here because `branch_age` is also reachable
 /// from contexts that don't carry a `Config` (CLI smoke paths).
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
+const BRANCH_CREATED_AT_CONFIG_KEY: &str = "gwm-created-at";
 const RECENT_COMMITS_CACHE_MAX_ENTRIES: usize = 64;
 type RecentCommitCacheKey = (PathBuf, git2::Oid, usize);
 
@@ -34,6 +35,12 @@ pub struct WorktreeInfo {
   /// re-shelling `git config`. Empty link = no marker dot. See
   /// `tui/ui.rs::table_marker`.
   pub link: BranchLink,
+  /// Loaded GitHub issue state for the row, if the TUI has fetched it this
+  /// session. `None` keeps the table on its no-fetch linked/unlinked colour.
+  pub issue_state: Option<IssueState>,
+  /// Loaded GitHub PR state for the row, if the TUI has fetched it this
+  /// session. `None` keeps the table on its no-fetch linked/unlinked colour.
+  pub pr_state: Option<PrState>,
   /// Branch age relative to the trunk baseline, pre-computed at list
   /// time so the TUI render path never opens a fresh `git2::Repository`
   /// per row per frame (issue #103). `None` for trunk branches and for
@@ -197,6 +204,8 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked: false,
       is_prunable: false,
       status: compute_status(repo),
+      issue_state: link.issue_state,
+      pr_state: link.pr_state,
       link,
       age,
     });
@@ -256,6 +265,8 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked,
       is_prunable,
       status,
+      issue_state: link.issue_state,
+      pr_state: link.pr_state,
       link,
       age,
     });
@@ -302,7 +313,7 @@ pub fn add(
   let head_ref = repo.head()?;
   let head_short = head_ref.shorthand().ok().map(|s| s.to_string());
   let head_commit = head_ref.peel_to_commit()?;
-  let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
+  let (branch, created_branch) = match repo.find_branch(branch_name, git2::BranchType::Local) {
     Ok(b) => {
       if !reuse_branch {
         // Resolve the existing tip for the error message so the user
@@ -318,10 +329,13 @@ pub fn add(
           oid,
         });
       }
-      b
+      (b, false)
     }
-    Err(_) => repo.branch(branch_name, &head_commit, false)?,
+    Err(_) => (repo.branch(branch_name, &head_commit, false)?, true),
   };
+  if created_branch {
+    let _ = write_branch_created_at(repo, branch_name, chrono::Utc::now().timestamp());
+  }
   let reference = branch.into_reference();
 
   let mut opts = WorktreeAddOptions::new();
@@ -335,6 +349,28 @@ pub fn add(
   }
 
   Ok(target_path.to_path_buf())
+}
+
+fn branch_config_key(branch: &str, leaf: &str) -> String {
+  format!("branch.{}.{}", branch, leaf)
+}
+
+fn write_branch_created_at(repo: &Repository, branch: &str, unix_secs: i64) -> Result<()> {
+  let mut cfg = repo.config()?;
+  cfg.set_str(
+    &branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY),
+    &unix_secs.to_string(),
+  )?;
+  Ok(())
+}
+
+fn branch_created_age(repo: &Repository, branch: &str) -> Option<Duration> {
+  let cfg = repo.config().ok()?;
+  let key = branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY);
+  let raw = cfg.get_string(&key).ok()?;
+  let created = raw.trim().parse::<i64>().ok()?;
+  let now = chrono::Utc::now().timestamp();
+  Some(Duration::from_secs((now - created).max(0) as u64))
 }
 
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
@@ -718,6 +754,10 @@ pub fn branch_age(repo: &Repository, branch: &str) -> Option<Duration> {
   // UI can render a dash instead of a misleadingly precise duration.
   if TRUNK_CANDIDATES.contains(&branch) {
     return None;
+  }
+
+  if let Some(age) = branch_created_age(repo, branch) {
+    return Some(age);
   }
 
   let local = repo.find_branch(branch, BranchType::Local).ok()?;

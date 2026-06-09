@@ -32,6 +32,12 @@ const PR_CONFIG_KEY: &str = "gwm-pr";
 /// distinction for its `detected` badge, and the explicit override must
 /// still win.
 const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
+const ISSUE_TITLE_CONFIG_KEY: &str = "gwm-issue-title";
+const PR_TITLE_CONFIG_KEY: &str = "gwm-pr-title";
+const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
+const ISSUE_STATE_CONFIG_KEY: &str = "gwm-issue-state";
+const PR_STATE_CONFIG_KEY: &str = "gwm-pr-state";
+const DETECTED_PR_STATE_CONFIG_KEY: &str = "gwm-pr-detected-state";
 
 /// Where the issue or PR number came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +62,10 @@ pub enum LinkSource {
 pub struct BranchLink {
   pub issue: Option<u64>,
   pub pr: Option<u64>,
+  pub issue_title: Option<String>,
+  pub pr_title: Option<String>,
+  pub issue_state: Option<IssueState>,
+  pub pr_state: Option<PrState>,
   pub issue_source: LinkSource,
   pub pr_source: LinkSource,
 }
@@ -65,6 +75,10 @@ impl BranchLink {
     Self {
       issue: None,
       pr: None,
+      issue_title: None,
+      pr_title: None,
+      issue_state: None,
+      pr_state: None,
       issue_source: LinkSource::None,
       pr_source: LinkSource::None,
     }
@@ -105,10 +119,32 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
       None => (None, LinkSource::None),
     },
   };
+  let issue_title = match issue {
+    Some(_) => read_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY)?,
+    None => None,
+  };
+  let issue_state = match issue {
+    Some(_) => read_branch_issue_state(repo, branch)?,
+    None => None,
+  };
+  let pr_title = match pr_source {
+    LinkSource::Explicit => read_branch_string(repo, branch, PR_TITLE_CONFIG_KEY)?,
+    LinkSource::Detected => read_branch_string(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?,
+    LinkSource::BranchName | LinkSource::None => None,
+  };
+  let pr_state = match pr_source {
+    LinkSource::Explicit => read_branch_pr_state(repo, branch, PR_STATE_CONFIG_KEY)?,
+    LinkSource::Detected => read_branch_pr_state(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)?,
+    LinkSource::BranchName | LinkSource::None => None,
+  };
 
   Ok(BranchLink {
     issue,
     pr,
+    issue_title,
+    pr_title,
+    issue_state,
+    pr_state,
     issue_source,
     pr_source,
   })
@@ -130,6 +166,8 @@ pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
     if let Some(n) = detected {
       link.pr = Some(n);
       link.pr_source = LinkSource::Detected;
+      link.pr_title = None;
+      link.pr_state = None;
     }
   }
 }
@@ -164,10 +202,24 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) 
     // detection (a vanished PR clears it); on a `gh` failure, keep whatever
     // `read_link` already resolved (possibly a persisted detection).
     if let Ok(detected) = find_pr_for_branch(slug, branch) {
+      let previous_pr = link.pr;
+      let previous_pr_source = link.pr_source;
+      let previous_pr_title = link.pr_title.clone();
+      let previous_pr_state = link.pr_state;
       link.pr = detected;
       link.pr_source = match detected {
         Some(_) => LinkSource::Detected,
         None => LinkSource::None,
+      };
+      link.pr_title = if previous_pr_source == LinkSource::Detected && detected == previous_pr {
+        previous_pr_title
+      } else {
+        None
+      };
+      link.pr_state = if previous_pr_source == LinkSource::Detected && detected == previous_pr {
+        previous_pr_state
+      } else {
+        None
       };
       // Reconcile the persisted cache (issue #283 / Codex review #284) so the
       // no-fetch consumers (`read_link`, the TUI table at startup,
@@ -184,15 +236,21 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) 
 }
 
 pub fn link_issue(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)
+  write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)?;
+  remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn link_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, PR_CONFIG_KEY, number)
+  write_branch_u64(repo, branch, PR_CONFIG_KEY, number)?;
+  remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)
 }
 
 pub fn unlink_issue(repo: &Repository, branch: &str) -> Result<()> {
-  remove_branch_key(repo, branch, ISSUE_CONFIG_KEY)
+  remove_branch_key(repo, branch, ISSUE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
@@ -200,7 +258,11 @@ pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
   // otherwise unlinking would leave a stale `gwm-pr-detected` number that
   // `read_link` would resurface as a `Detected` PR on the next read.
   remove_branch_key(repo, branch, PR_CONFIG_KEY)?;
-  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)
+  remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
 }
 
 /// Persist an auto-detected PR number to its own branch-config key
@@ -209,16 +271,50 @@ pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
 /// row without a per-row `gh` shell-out, while keeping the
 /// detected/explicit distinction the pane badge needs. An explicit
 /// `gwm link --pr` still wins in [`read_link`]. Re-detection overwrites the
-/// stored value.
+/// stored value and clears a cached title only when the detected number
+/// actually changed.
 pub fn persist_detected_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)
+  let previous = read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?;
+  write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)?;
+  if previous == Some(number) {
+    Ok(())
+  } else {
+    remove_branch_key(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?;
+    remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
+  }
 }
 
 /// Drop a persisted auto-detection (issue #283). A no-op when no detected
 /// PR was stored. Used when a detection no longer holds (the branch's PR
 /// went away) so a stale number doesn't linger in the config.
 pub fn clear_persisted_detected_pr(repo: &Repository, branch: &str) -> Result<()> {
-  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)
+  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
+}
+
+pub fn persist_issue_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  write_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY, title)
+}
+
+pub fn persist_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  write_branch_string(repo, branch, PR_TITLE_CONFIG_KEY, title)
+}
+
+pub fn persist_detected_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  write_branch_string(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY, title)
+}
+
+pub fn persist_issue_state(repo: &Repository, branch: &str, state: IssueState) -> Result<()> {
+  write_branch_string(repo, branch, ISSUE_STATE_CONFIG_KEY, issue_state_config_value(state))
+}
+
+pub fn persist_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  write_branch_string(repo, branch, PR_STATE_CONFIG_KEY, pr_state_config_value(state))
+}
+
+pub fn persist_detected_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  write_branch_string(repo, branch, DETECTED_PR_STATE_CONFIG_KEY, pr_state_config_value(state))
 }
 
 fn config_key(branch: &str, leaf: &str) -> String {
@@ -239,9 +335,75 @@ fn read_branch_u64(repo: &Repository, branch: &str, leaf: &str) -> Result<Option
   }
 }
 
+fn read_branch_string(repo: &Repository, branch: &str, leaf: &str) -> Result<Option<String>> {
+  let cfg = repo.config()?;
+  let key = config_key(branch, leaf);
+  match cfg.get_string(&key) {
+    Ok(s) => Ok(Some(s)),
+    Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+    Err(e) => Err(GwmError::Git(e)),
+  }
+}
+
+fn read_branch_issue_state(repo: &Repository, branch: &str) -> Result<Option<IssueState>> {
+  Ok(
+    read_branch_string(repo, branch, ISSUE_STATE_CONFIG_KEY)?
+      .as_deref()
+      .and_then(parse_issue_state_config_value),
+  )
+}
+
+fn read_branch_pr_state(repo: &Repository, branch: &str, leaf: &str) -> Result<Option<PrState>> {
+  Ok(
+    read_branch_string(repo, branch, leaf)?
+      .as_deref()
+      .and_then(parse_pr_state_config_value),
+  )
+}
+
+fn parse_issue_state_config_value(value: &str) -> Option<IssueState> {
+  match value.trim().to_ascii_lowercase().as_str() {
+    "open" => Some(IssueState::Open),
+    "closed" => Some(IssueState::Closed),
+    _ => None,
+  }
+}
+
+fn parse_pr_state_config_value(value: &str) -> Option<PrState> {
+  match value.trim().to_ascii_lowercase().as_str() {
+    "open" => Some(PrState::Open),
+    "draft" => Some(PrState::Draft),
+    "closed" => Some(PrState::Closed),
+    "merged" => Some(PrState::Merged),
+    _ => None,
+  }
+}
+
+fn issue_state_config_value(state: IssueState) -> &'static str {
+  match state {
+    IssueState::Open => "open",
+    IssueState::Closed => "closed",
+  }
+}
+
+fn pr_state_config_value(state: PrState) -> &'static str {
+  match state {
+    PrState::Open => "open",
+    PrState::Draft => "draft",
+    PrState::Closed => "closed",
+    PrState::Merged => "merged",
+  }
+}
+
 fn write_branch_u64(repo: &Repository, branch: &str, leaf: &str, value: u64) -> Result<()> {
   let mut cfg = repo.config()?;
   cfg.set_str(&config_key(branch, leaf), &value.to_string())?;
+  Ok(())
+}
+
+fn write_branch_string(repo: &Repository, branch: &str, leaf: &str, value: &str) -> Result<()> {
+  let mut cfg = repo.config()?;
+  cfg.set_str(&config_key(branch, leaf), value)?;
   Ok(())
 }
 

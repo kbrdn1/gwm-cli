@@ -135,13 +135,15 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → sidebar / open / countdown in order.
+  // Tui tab → sidebar / open / countdown / auto refresh in order.
   panel.tab = SettingsTab::Tui;
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::OpenMode));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::ConfirmCountdown));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::AutoRefreshSecs));
   // All tab is read-only → no editable field.
   panel.tab = SettingsTab::All;
   panel.selected = 0;
@@ -151,11 +153,11 @@ fn selected_field_follows_the_tab() {
 #[test]
 fn select_next_clamps_to_the_last_field() {
   let mut panel = ConfigPanel::new();
-  panel.tab = SettingsTab::Tui; // 5 fields
+  panel.tab = SettingsTab::Tui; // 6 fields
   for _ in 0..10 {
     panel.select_next();
   }
-  assert_eq!(panel.selected, 4, "never selects past the last field");
+  assert_eq!(panel.selected, 5, "never selects past the last field");
 }
 
 #[test]
@@ -198,6 +200,20 @@ fn edit_buffer_takes_digits_only_and_commits() {
   assert_eq!(panel.editing.as_deref(), Some("3"));
   assert_eq!(panel.take_edit().as_deref(), Some("3"));
   assert!(panel.editing.is_none(), "commit clears the buffer");
+}
+
+#[test]
+fn auto_refresh_secs_accepts_four_plus_digit_intervals() {
+  let mut panel = ConfigPanel::new();
+  panel.tab = SettingsTab::Tui;
+  panel.selected = 3;
+  assert_eq!(panel.selected_field(), Some(SettingField::AutoRefreshSecs));
+  assert_eq!(panel.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
+  panel.begin_edit("");
+  for c in "3600".chars() {
+    panel.push_edit_char(c);
+  }
+  assert_eq!(panel.editing.as_deref(), Some("3600"));
 }
 
 #[test]
@@ -258,6 +274,7 @@ fn setting_field_current_reads_the_resolved_config() {
   assert_eq!(SettingField::ThemePreset.current(&cfg), "default");
   assert_eq!(SettingField::SidebarPosition.current(&cfg), "right");
   assert_eq!(SettingField::OpenMode.current(&cfg), "shell");
+  assert_eq!(SettingField::AutoRefreshSecs.current(&cfg), "60");
 }
 
 #[test]
@@ -272,6 +289,7 @@ fn choice_fields_cycle_and_wrap_uint_fields_do_not() {
   assert_eq!(SettingField::ThemePreset.next_choice(&cfg).as_deref(), Some(first));
   // confirm countdown is a Uint → no choice cycle.
   assert_eq!(SettingField::ConfirmCountdown.next_choice(&cfg), None);
+  assert_eq!(SettingField::AutoRefreshSecs.next_choice(&cfg), None);
 }
 
 #[test]

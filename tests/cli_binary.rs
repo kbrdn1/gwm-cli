@@ -1411,6 +1411,36 @@ fn status_auto_detects_pr_when_none_explicitly_linked() {
 }
 
 #[test]
+fn status_persists_detected_pr_title_after_fetch() {
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("detect-me", &head, false).unwrap();
+  repo.set_head("refs/heads/detect-me").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    r#"[{"number":128}]"#,
+    r#"{"number":128,"title":"Auto-detect PR","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/128"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["status", "--json"])
+    .assert()
+    .success();
+
+  let link = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(link.pr, Some(128));
+  assert_eq!(link.pr_source, gwm::github::LinkSource::Detected);
+  assert_eq!(link.pr_title.as_deref(), Some("Auto-detect PR"));
+}
+
+#[test]
 fn status_explicit_pr_link_wins_over_detection() {
   // An explicit `gwm link --pr` must not be clobbered by detection: the
   // reported source stays "explicit" even though `gh pr list` would
