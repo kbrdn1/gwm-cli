@@ -681,6 +681,84 @@ pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usi
   Ok(out)
 }
 
+/// Insertion / deletion line counts of a branch versus its base trunk
+/// (issue #287). Populated from `git diff --shortstat <base>...HEAD` — the
+/// three-dot merge-base form, so the figures reflect only what the branch
+/// itself contributed (the GitHub-PR view), not divergence that landed on
+/// the trunk after the fork.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffLineStat {
+  /// Lines added by the branch relative to the merge-base with its trunk.
+  pub insertions: usize,
+  /// Lines removed by the branch relative to the merge-base with its trunk.
+  pub deletions: usize,
+}
+
+impl DiffLineStat {
+  /// True when the branch carries no committed diff against its base — a
+  /// fresh branch with no commits past the fork point, or one whose net
+  /// change is empty. The sidebar hides the `Diff` line in that case.
+  pub fn is_empty(&self) -> bool {
+    self.insertions == 0 && self.deletions == 0
+  }
+}
+
+/// Parse a `git diff --shortstat` summary line into a [`DiffLineStat`]
+/// (issue #287). The line looks like
+/// ` 3 files changed, 12 insertions(+), 4 deletions(-)`, but either the
+/// insertions or the deletions clause can be absent — an all-additions or
+/// all-deletions diff omits the empty side, and an empty diff yields an
+/// empty string. Any clause that's missing counts as zero; the singular
+/// `1 insertion(+)` / `1 deletion(-)` forms are handled too.
+pub fn parse_diff_shortstat(raw: &str) -> DiffLineStat {
+  let mut out = DiffLineStat::default();
+  for part in raw.split(',') {
+    let part = part.trim();
+    if let Some(n) = part
+      .strip_suffix("insertions(+)")
+      .or_else(|| part.strip_suffix("insertion(+)"))
+    {
+      out.insertions = n.trim().parse().unwrap_or(0);
+    } else if let Some(n) = part
+      .strip_suffix("deletions(-)")
+      .or_else(|| part.strip_suffix("deletion(-)"))
+    {
+      out.deletions = n.trim().parse().unwrap_or(0);
+    }
+  }
+  out
+}
+
+/// Committed diff size of the worktree's current branch versus its base
+/// trunk (issue #287), via `git diff --shortstat <base>...HEAD`. Returns
+/// `Ok(None)` when no base trunk resolves locally, when the path is not a
+/// readable repo, or when HEAD *is* the resolved trunk (nothing to diff
+/// against). `trunks` is the configured trunk-priority list
+/// (`config.doctor.trunks`) so the figure matches the base `gwm pr` would
+/// target — `resolve_trunk` walks it before falling back to the common
+/// defaults.
+pub fn git_diff_stat_vs_base(path: &Path, trunks: &[String]) -> Result<Option<DiffLineStat>> {
+  let repo = match Repository::open(path) {
+    Ok(r) => r,
+    Err(_) => return Ok(None),
+  };
+  let base = match resolve_trunk(&repo, trunks) {
+    Some(b) => b,
+    None => return Ok(None),
+  };
+  // HEAD sitting on the trunk itself has no base distinct from itself —
+  // the three-dot diff would be empty, but short-circuit so we never paint
+  // a `+0 -0` line for the main worktree resting on its trunk.
+  if let Ok(head) = repo.head() {
+    if head.shorthand().ok() == Some(base.as_str()) {
+      return Ok(None);
+    }
+  }
+  let range = format!("{}...HEAD", base);
+  let raw = run_git(path, &["diff", "--shortstat", &range])?;
+  Ok(Some(parse_diff_shortstat(&raw)))
+}
+
 /// One row of `git stash list` (issue #34). Surfaced by the sidebar
 /// in stashes mode. Kept deliberately minimal — `ref_name` so the user
 /// can copy `stash@{N}` to the status bar, `subject` so they can tell
