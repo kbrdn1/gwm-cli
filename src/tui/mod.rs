@@ -238,8 +238,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       if app.view == View::Pty {
         if let Some(ref mut pty) = app.pty_overlay {
           // 90% × 90% overlay minus overlay_block overhead (6 cols, 4 rows).
-          let inner_cols = (cols * 90 / 100).saturating_sub(6).max(10);
-          let inner_rows = (rows * 90 / 100).saturating_sub(4).max(5);
+          let inner_cols = ((cols as u32 * 90 / 100) as u16).saturating_sub(6).max(10);
+          let inner_rows = ((rows as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
           pty.resize(inner_cols, inner_rows);
         }
       }
@@ -654,8 +654,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
       if let Some(plan) = app.prepare_git_tui() {
         let sz = terminal.size().unwrap_or_default();
         // 90% × 90% overlay minus overlay_block overhead (6 cols, 4 rows).
-        let inner_cols = (sz.width * 90 / 100).saturating_sub(6).max(20);
-        let inner_rows = (sz.height * 90 / 100).saturating_sub(4).max(5);
+        let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+        let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
         let argv: Vec<String> = plan.expanded.argv.clone();
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         match PtyOverlay::spawn(PtyKind::LazyGit, &argv_refs, &plan.cwd, inner_cols, inner_rows) {
@@ -671,8 +671,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::ReviewOverlay if !app.picker_mode => {
       if let Some(mut plan) = app.prepare_review() {
         let sz = terminal.size().unwrap_or_default();
-        let inner_cols = (sz.width * 90 / 100).saturating_sub(6).max(20);
-        let inner_rows = (sz.height * 90 / 100).saturating_sub(4).max(5);
+        let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+        let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
         let argv: Vec<String> = plan.expanded.argv.clone();
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         // Transfer diff_file ownership into the overlay so it stays alive

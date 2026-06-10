@@ -91,7 +91,9 @@ impl PtyOverlay {
     // Slave fd is no longer needed once the child holds its own copy.
     drop(pair.slave);
 
-    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    // Bounded channel: the reader thread blocks when the buffer is full,
+    // preventing unbounded memory growth when PTY output outpaces consumption.
+    let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(128);
     let mut reader = pair
       .master
       .try_clone_reader()
