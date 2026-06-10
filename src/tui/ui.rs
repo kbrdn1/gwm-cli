@@ -1147,18 +1147,49 @@ pub const WT_CREATED_ICON: &str = "\u{eadc}";
 pub const WT_MODIFIED_ICON: &str = "\u{eadd}";
 pub const WT_DELETED_ICON: &str = "\u{eade}";
 
-/// Tally `git status --short` porcelain output into per-category
-/// [`WorkingTreeCounts`] (issue #287). Categorisation is one bucket per
-/// file, by the `XY` status pair, with a deterministic precedence so each
-/// line increments exactly one counter:
+/// The single change-category a `git status --short` `XY` pair falls into
+/// (issue #287). Shared by the Working-Tree footer counts and the per-row
+/// colouring so a file's row colour always equals the footer segment it's
+/// counted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WtCategory {
+  Created,
+  Modified,
+  Deleted,
+}
+
+/// Classify a porcelain `XY` status pair into its dominant
+/// [`WtCategory`], with a deterministic precedence (created > deleted >
+/// modified) so each file maps to exactly one bucket:
 ///
 /// - `??` (untracked) or an `A` in either column → **created**,
 /// - else a `D` in either column → **deleted**,
 /// - else anything changed (`M`, `R`, `C`, `T`, `U`, …) → **modified**.
-///
-/// Lines too short to carry an `XY` pair, or an all-blank pair, are
-/// skipped — real porcelain output never produces them, but the helper is
-/// `pub` so a non-git caller could.
+fn working_tree_category(x: char, y: char) -> WtCategory {
+  if (x == '?' && y == '?') || x == 'A' || y == 'A' {
+    WtCategory::Created
+  } else if x == 'D' || y == 'D' {
+    WtCategory::Deleted
+  } else {
+    WtCategory::Modified
+  }
+}
+
+/// Theme colour for a change category (issue #287): created → `untracked`
+/// (green), modified → `modified` (yellow), deleted → `prunable` (red).
+fn working_tree_category_color(cat: WtCategory, theme: &Theme) -> Color {
+  match cat {
+    WtCategory::Created => theme.untracked,
+    WtCategory::Modified => theme.modified,
+    WtCategory::Deleted => theme.prunable,
+  }
+}
+
+/// Tally `git status --short` porcelain output into per-category
+/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Lines
+/// too short to carry an `XY` pair, or an all-blank pair, are skipped —
+/// real porcelain output never produces them, but the helper is `pub` so a
+/// non-git caller could.
 pub fn working_tree_status_counts(status_short: &str) -> WorkingTreeCounts {
   let mut c = WorkingTreeCounts::default();
   for line in status_short.lines() {
@@ -1174,12 +1205,10 @@ pub fn working_tree_status_counts(status_short: &str) -> WorkingTreeCounts {
     if x == ' ' && y == ' ' {
       continue;
     }
-    if (x == '?' && y == '?') || x == 'A' || y == 'A' {
-      c.created += 1;
-    } else if x == 'D' || y == 'D' {
-      c.deleted += 1;
-    } else {
-      c.modified += 1;
+    match working_tree_category(x, y) {
+      WtCategory::Created => c.created += 1,
+      WtCategory::Modified => c.modified += 1,
+      WtCategory::Deleted => c.deleted += 1,
     }
   }
   c
@@ -1217,22 +1246,23 @@ pub fn working_tree_counts_footer(counts: &WorkingTreeCounts, theme: &Theme) -> 
   Some(Line::from(spans))
 }
 
-/// Colourise one `git status --short` porcelain line (issue #179).
+/// Colourise one `git status --short` porcelain line (issue #179, recoloured
+/// in #287).
 ///
-/// The short format is `XY<space>PATH`, where `X` is the index (staged)
-/// status and `Y` the worktree status. Three distinct colours keep modified
-/// and created files visually apart:
+/// The short format is `XY<space>PATH`. The whole row — both status columns
+/// and the file name — is painted by the file's single change category, so
+/// a row's colour always equals the Working-Tree footer segment it's
+/// counted in:
 ///
-/// - staged change (`X` column) → cyan,
-/// - modified-in-worktree (`Y` column) → yellow,
-/// - `??` (untracked / created) → green,
-/// - the **file name** → the dominant status colour: green when untracked,
-///   else yellow when the worktree side carries a change, else cyan when only
-///   the index side does.
+/// - created (`??` / `A`) → green (`untracked` role),
+/// - modified (`M`, `R`, `C`, `T`, `U`, …) → yellow (`modified` role),
+/// - deleted (`D`) → red (`prunable` role).
 ///
-/// The separator space is left unstyled. The rendered text is byte-for-byte
-/// identical to the input — only `Span` styling is added — so the sidebar
-/// keeps showing the exact `git status --short` codes it always did.
+/// Precedence created > deleted > modified mirrors
+/// [`working_tree_status_counts`] via the shared [`working_tree_category`].
+/// The pre-#287 staged-vs-worktree (cyan `X` column) distinction is dropped
+/// in favour of this add/modify/delete scheme. The separator space is left
+/// unstyled; the rendered text is byte-for-byte identical to the input.
 pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   // Porcelain short output is always `XY<space>PATH` with ASCII status
   // codes, but the helper is `pub` — a non-git caller could pass arbitrary
@@ -1244,7 +1274,7 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
     Some(c) => c,
     None => return Line::from(raw.to_string()),
   };
-  let (y_at, y) = match indices.next() {
+  let (_y_at, y) = match indices.next() {
     Some(c) => c,
     None => return Line::from(raw.to_string()),
   };
@@ -1254,49 +1284,15 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   };
   // Byte offset where the path begins (just past the separator char).
   let path_at = sep_at + sep.len_utf8();
-  let untracked = x == '?' && y == '?';
 
-  // The three git-status families paint through their own roles (issue
-  // #211; defaults cyan/yellow/green match the pre-#211 borrowed
-  // accent/dirty/clean, so a `[theme]`-less config is unchanged):
-  // staged → `staged`, worktree-modified → `modified`, untracked/created
-  // → `untracked`.
-  let staged = Style::default().fg(theme.staged);
-  let modified = Style::default().fg(theme.modified);
-  let created = Style::default().fg(theme.untracked);
-  // X column: untracked `?` → created, other staged change → staged.
-  let x_style = if x == '?' {
-    created
-  } else if x != ' ' {
-    staged
-  } else {
-    Style::default()
-  };
-  // Y column: untracked `?` → created, worktree modification → modified.
-  let y_style = if y == '?' {
-    created
-  } else if y != ' ' {
-    modified
-  } else {
-    Style::default()
-  };
-  // File name takes the dominant status colour: created wins, then a
-  // worktree modification, then a staged-only change.
-  let name_style = if untracked {
-    created
-  } else if y != ' ' {
-    modified
-  } else if x != ' ' {
-    staged
-  } else {
-    Style::default()
-  };
+  // One colour for the whole row, from the file's change category — so the
+  // row and the footer count agree (issue #287).
+  let style = Style::default().fg(working_tree_category_color(working_tree_category(x, y), theme));
 
   Line::from(vec![
-    Span::styled(raw[x_at..y_at].to_string(), x_style),
-    Span::styled(raw[y_at..sep_at].to_string(), y_style),
+    Span::styled(raw[x_at..sep_at].to_string(), style),
     Span::raw(raw[sep_at..path_at].to_string()),
-    Span::styled(raw[path_at..].to_string(), name_style),
+    Span::styled(raw[path_at..].to_string(), style),
   ])
 }
 

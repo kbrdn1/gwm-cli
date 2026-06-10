@@ -3271,13 +3271,13 @@ fn sidebar_diff_line_absent_for_empty_or_missing_stat() {
   }
 }
 
-// ---- working_tree_status_line (issue #179) ---------------------------------
-// Colourisation of each `git status --short` entry in the Working Tree sidebar
-// block, with three distinct status colours so modified ≠ created at a glance:
-//   - staged (X column)        → cyan
-//   - modified (Y column)      → yellow
-//   - untracked (`??`)         → green
-// The file name takes the dominant status colour.
+// ---- working_tree_status_line (issue #179, recoloured in #287) -------------
+// The whole row is painted by the file's change category so it matches the
+// Working Tree footer count it belongs to:
+//   - created (`??` / `A`)     → green
+//   - modified (`M`, `R`, …)   → yellow
+//   - deleted (`D`)            → red
+// (The pre-#287 staged-vs-worktree cyan `X`-column split is gone.)
 use gwm::tui::working_tree_status_line;
 
 fn filename_span_fg(line: &ratatui::text::Line<'static>, needle: &str) -> Option<Color> {
@@ -3298,6 +3298,7 @@ fn working_tree_status_line_preserves_raw_text() {
     "A  staged.rs",
     "AM both.rs",
     " M tracked.rs",
+    " D gone.rs",
     "?? untracked.rs",
     "R  old.rs -> new.rs",
   ] {
@@ -3311,26 +3312,21 @@ fn working_tree_status_line_preserves_raw_text() {
 }
 
 #[test]
-fn working_tree_status_line_staged_only_is_cyan() {
+fn working_tree_status_line_added_is_green() {
+  // `A` (added / staged) is a *created* file → green, status code + name.
   let line = working_tree_status_line("A  staged.rs", &Theme::default());
-  assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "added code → green");
   assert_eq!(
     filename_span_fg(&line, "staged.rs"),
-    Some(Color::Cyan),
-    "staged-only filename → cyan"
+    Some(Color::Green),
+    "added filename → green"
   );
 }
 
 #[test]
-fn working_tree_status_line_unstaged_modified_is_yellow() {
+fn working_tree_status_line_modified_is_yellow() {
   let line = working_tree_status_line(" M tracked.rs", &Theme::default());
-  assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(
-    line.spans[1].style.fg,
-    Some(Color::Yellow),
-    "Y column (modified) → yellow"
-  );
+  assert_eq!(line.spans[0].style.fg, Some(Color::Yellow), "modified code → yellow");
   assert_eq!(
     filename_span_fg(&line, "tracked.rs"),
     Some(Color::Yellow),
@@ -3339,10 +3335,23 @@ fn working_tree_status_line_unstaged_modified_is_yellow() {
 }
 
 #[test]
+fn working_tree_status_line_deleted_is_red() {
+  // `D` (deleted) → red, matching the footer's deleted segment (issue #287).
+  for raw in ["D  gone.rs", " D gone.rs"] {
+    let line = working_tree_status_line(raw, &Theme::default());
+    assert_eq!(line.spans[0].style.fg, Some(Color::Red), "deleted code → red: {raw:?}");
+    assert_eq!(
+      filename_span_fg(&line, "gone.rs"),
+      Some(Color::Red),
+      "deleted filename → red: {raw:?}"
+    );
+  }
+}
+
+#[test]
 fn working_tree_status_line_untracked_is_green() {
   let line = working_tree_status_line("?? untracked.rs", &Theme::default());
-  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked code → green");
   assert_eq!(
     filename_span_fg(&line, "untracked.rs"),
     Some(Color::Green),
@@ -3366,18 +3375,16 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
 }
 
 #[test]
-fn working_tree_status_line_partially_staged_splits_status_columns() {
-  // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
-  // dominant worktree colour (yellow) since it carries unstaged changes.
+fn working_tree_status_line_added_then_modified_is_green() {
+  // `AM`: created wins over a later modification (precedence created >
+  // deleted > modified), so the whole row is green — matching the bucket
+  // the file is counted in.
   let line = working_tree_status_line("AM both.rs", &Theme::default());
-  assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
-  assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y=M modified → yellow");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "AM (created wins) → green");
   assert_eq!(
     filename_span_fg(&line, "both.rs"),
-    Some(Color::Yellow),
-    "filename with modified change → yellow"
+    Some(Color::Green),
+    "AM filename → green"
   );
 }
 
