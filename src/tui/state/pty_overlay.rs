@@ -161,9 +161,19 @@ impl PtyOverlay {
     matches!(self.child.try_wait(), Ok(None))
   }
 
-  /// Send SIGKILL (or the platform equivalent) to the child process.
+  /// Send SIGKILL (or the platform equivalent) to the child process and
+  /// attempt a non-blocking reap so the process does not linger as a zombie.
+  /// Returns the exit status if the child has already been reaped, or `None`
+  /// if it is still shutting down (the OS will clean it up on `gwm` exit).
   pub fn kill(&mut self) {
     let _ = self.child.kill();
+    let _ = self.child.try_wait();
+  }
+
+  /// After calling [`kill`], poll the exit status once. Exposed for tests that
+  /// need to assert the child was reaped without sleeping.
+  pub fn try_wait_after_kill(&mut self) -> Option<portable_pty::ExitStatus> {
+    self.child.try_wait().ok().flatten()
   }
 }
 

@@ -182,6 +182,24 @@ fn pty_overlay_poll_bytes_does_not_panic_on_output() {
   pty.poll_bytes();
 }
 
+// ── kill() reaps child (no zombie) ────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn kill_reaps_child_no_zombie() {
+  let (_dir, app) = make_app();
+  let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
+  pty.kill();
+  // After kill(), try_wait() must return Ok(Some(_)) immediately — meaning
+  // the process was reaped and will not linger as a zombie.
+  let status = pty.try_wait_after_kill();
+  assert!(
+    status.is_some(),
+    "try_wait_after_kill must return Some(exit_status) — process should be reaped"
+  );
+}
+
 // ── PtyKind::Review discriminator ─────────────────────────────────────────
 
 #[cfg(unix)]

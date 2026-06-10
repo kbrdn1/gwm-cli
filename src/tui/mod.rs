@@ -627,6 +627,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
       match cwd {
         None => app.status = "nothing selected".into(),
         Some(path) => {
+          #[cfg(windows)]
+          let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+          #[cfg(not(windows))]
           let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
           let sz = terminal.size().unwrap_or_default();
           let inner_cols = (sz.width * 90 / 100).saturating_sub(6).max(20);
