@@ -1003,3 +1003,30 @@ fn diff_stat_vs_base_is_none_when_head_is_the_trunk() {
   let stat = worktree::git_diff_stat_vs_base(dir.path(), &["main".to_string()]).unwrap();
   assert!(stat.is_none(), "HEAD on the trunk must yield None, got {stat:?}");
 }
+
+#[test]
+fn diff_stat_vs_base_is_none_for_a_later_trunk_worktree() {
+  // Issue #287 review (P2): with the default `["dev", "main"]`, a worktree
+  // whose HEAD is on `main` resolves its base to `dev` (the earlier
+  // candidate). A naive `head == resolved_base` check would leak a
+  // `dev...main` diff onto a trunk worktree; HEAD being *any* trunk must
+  // suppress the row.
+  let (dir, repo) = init_repo(); // seeds `main`
+  let head_oid = repo.head().unwrap().target().unwrap();
+  let head_commit = repo.find_commit(head_oid).unwrap();
+  repo.branch("dev", &head_commit, false).unwrap();
+
+  let stat = worktree::git_diff_stat_vs_base(dir.path(), &["dev".to_string(), "main".to_string()]).unwrap();
+  assert!(
+    stat.is_none(),
+    "a worktree on the `main` trunk must yield None even when `dev` resolves as base, got {stat:?}"
+  );
+}
+
+#[test]
+fn is_trunk_branch_matches_configured_and_common_defaults() {
+  assert!(worktree::is_trunk_branch("main", &[]));
+  assert!(worktree::is_trunk_branch("develop", &[]));
+  assert!(worktree::is_trunk_branch("release", &["release".to_string()]));
+  assert!(!worktree::is_trunk_branch("feat/#287-x", &[]));
+}

@@ -13,6 +13,10 @@ use std::time::Duration;
 /// convention). Hardcoded here because `branch_age` is also reachable
 /// from contexts that don't carry a `Config` (CLI smoke paths).
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
+/// Common trunk branch names tried (after any configured trunks) when
+/// resolving a PR / diff base, and treated as "this branch is itself a
+/// trunk" by [`is_trunk_branch`]. Superset of [`TRUNK_CANDIDATES`].
+const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
 const BRANCH_CREATED_AT_CONFIG_KEY: &str = "gwm-created-at";
 const RECENT_COMMITS_CACHE_MAX_ENTRIES: usize = 64;
 type RecentCommitCacheKey = (PathBuf, git2::Oid, usize);
@@ -729,31 +733,44 @@ pub fn parse_diff_shortstat(raw: &str) -> DiffLineStat {
   out
 }
 
+/// True when `branch` is itself a trunk — present in the configured trunk
+/// list or in the [`COMMON_TRUNKS`] defaults. Used to suppress the Status
+/// pane's diff row on trunk worktrees regardless of which trunk
+/// `resolve_trunk` would pick as the base (issue #287).
+pub fn is_trunk_branch(branch: &str, configured: &[String]) -> bool {
+  configured.iter().any(|t| t == branch) || COMMON_TRUNKS.contains(&branch)
+}
+
 /// Committed diff size of the worktree's current branch versus its base
 /// trunk (issue #287), via `git diff --shortstat <base>...HEAD`. Returns
-/// `Ok(None)` when no base trunk resolves locally, when the path is not a
-/// readable repo, or when HEAD *is* the resolved trunk (nothing to diff
-/// against). `trunks` is the configured trunk-priority list
-/// (`config.doctor.trunks`) so the figure matches the base `gwm pr` would
-/// target — `resolve_trunk` walks it before falling back to the common
-/// defaults.
+/// `Ok(None)` when the path is not a readable repo, when HEAD is itself a
+/// trunk (no meaningful base to diff against — see [`is_trunk_branch`]), or
+/// when no base trunk resolves locally. `trunks` is the configured
+/// trunk-priority list (`config.doctor.trunks`) so the figure matches the
+/// base `gwm pr` would target — `resolve_trunk` walks it before falling
+/// back to the common defaults.
 pub fn git_diff_stat_vs_base(path: &Path, trunks: &[String]) -> Result<Option<DiffLineStat>> {
   let repo = match Repository::open(path) {
     Ok(r) => r,
     Err(_) => return Ok(None),
   };
+  // HEAD sitting on *any* trunk has no meaningful base to diff against —
+  // suppress the row so a trunk worktree never shows a `Diff`. This must
+  // check the whole trunk universe, not just the resolved base: with the
+  // default `["dev", "main"]`, a worktree on `main` resolves its base to
+  // `dev` (the earlier candidate), and a `head == base` check alone would
+  // leak a `main...dev` diff onto a trunk worktree (issue #287 review).
+  if let Ok(head) = repo.head() {
+    if let Ok(branch) = head.shorthand() {
+      if is_trunk_branch(branch, trunks) {
+        return Ok(None);
+      }
+    }
+  }
   let base = match resolve_trunk(&repo, trunks) {
     Some(b) => b,
     None => return Ok(None),
   };
-  // HEAD sitting on the trunk itself has no base distinct from itself —
-  // the three-dot diff would be empty, but short-circuit so we never paint
-  // a `+0 -0` line for the main worktree resting on its trunk.
-  if let Ok(head) = repo.head() {
-    if head.shorthand().ok() == Some(base.as_str()) {
-      return Ok(None);
-    }
-  }
   let range = format!("{}...HEAD", base);
   let raw = run_git(path, &["diff", "--shortstat", &range])?;
   Ok(Some(parse_diff_shortstat(&raw)))
@@ -939,7 +956,6 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
 /// downstream `gh pr create --base main` produces a clean error message
 /// instead of a panic.
 pub fn resolve_trunk(repo: &Repository, configured: &[String]) -> Option<String> {
-  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
   for trunk in configured {
     if repo.find_branch(trunk, BranchType::Local).is_ok() {
       return Some(trunk.clone());
