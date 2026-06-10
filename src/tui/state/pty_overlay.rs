@@ -105,10 +105,7 @@ impl PtyOverlay {
       }
     });
 
-    let writer = pair
-      .master
-      .take_writer()
-      .map_err(|e| GwmError::Other(e.to_string()))?;
+    let writer = pair.master.take_writer().map_err(|e| GwmError::Other(e.to_string()))?;
 
     let parser = tui_term::vt100::Parser::new(rows, cols, 0);
 

@@ -7,7 +7,9 @@ mod common;
 
 use common::init_repo;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwm::tui::{key_to_bytes, App, PtyKind, PtyOverlay, View};
+use gwm::tui::{key_to_bytes, App, View};
+#[cfg(unix)]
+use gwm::tui::{PtyKind, PtyOverlay};
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -53,10 +55,10 @@ fn key_to_bytes_esc_is_escape_byte() {
 
 #[test]
 fn key_to_bytes_arrow_sequences() {
-  assert_eq!(key_to_bytes(ev(KeyCode::Up, KeyModifiers::NONE)),    &[27, b'[', b'A']);
-  assert_eq!(key_to_bytes(ev(KeyCode::Down, KeyModifiers::NONE)),  &[27, b'[', b'B']);
+  assert_eq!(key_to_bytes(ev(KeyCode::Up, KeyModifiers::NONE)), &[27, b'[', b'A']);
+  assert_eq!(key_to_bytes(ev(KeyCode::Down, KeyModifiers::NONE)), &[27, b'[', b'B']);
   assert_eq!(key_to_bytes(ev(KeyCode::Right, KeyModifiers::NONE)), &[27, b'[', b'C']);
-  assert_eq!(key_to_bytes(ev(KeyCode::Left, KeyModifiers::NONE)),  &[27, b'[', b'D']);
+  assert_eq!(key_to_bytes(ev(KeyCode::Left, KeyModifiers::NONE)), &[27, b'[', b'D']);
 }
 
 #[test]
@@ -70,11 +72,20 @@ fn key_to_bytes_ctrl_alpha_produces_control_codes() {
 
 #[test]
 fn key_to_bytes_page_navigation() {
-  assert_eq!(key_to_bytes(ev(KeyCode::PageUp,   KeyModifiers::NONE)), &[27, b'[', b'5', b'~']);
-  assert_eq!(key_to_bytes(ev(KeyCode::PageDown, KeyModifiers::NONE)), &[27, b'[', b'6', b'~']);
-  assert_eq!(key_to_bytes(ev(KeyCode::Home,     KeyModifiers::NONE)), &[27, b'[', b'H']);
-  assert_eq!(key_to_bytes(ev(KeyCode::End,      KeyModifiers::NONE)), &[27, b'[', b'F']);
-  assert_eq!(key_to_bytes(ev(KeyCode::Delete,   KeyModifiers::NONE)), &[27, b'[', b'3', b'~']);
+  assert_eq!(
+    key_to_bytes(ev(KeyCode::PageUp, KeyModifiers::NONE)),
+    &[27, b'[', b'5', b'~']
+  );
+  assert_eq!(
+    key_to_bytes(ev(KeyCode::PageDown, KeyModifiers::NONE)),
+    &[27, b'[', b'6', b'~']
+  );
+  assert_eq!(key_to_bytes(ev(KeyCode::Home, KeyModifiers::NONE)), &[27, b'[', b'H']);
+  assert_eq!(key_to_bytes(ev(KeyCode::End, KeyModifiers::NONE)), &[27, b'[', b'F']);
+  assert_eq!(
+    key_to_bytes(ev(KeyCode::Delete, KeyModifiers::NONE)),
+    &[27, b'[', b'3', b'~']
+  );
 }
 
 // ── App state-machine (no PTY needed) ─────────────────────────────────────
@@ -94,9 +105,8 @@ fn close_pty_overlay_is_noop_when_no_overlay_is_open() {
 #[test]
 fn pty_overlay_spawn_process_is_alive() {
   let (_dir, app) = make_app();
-  let mut pty =
-    PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
-      .expect("PTY spawn must succeed on Unix");
+  let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
   assert!(pty.is_alive(), "process must be alive right after spawn");
   pty.kill();
 }
@@ -105,9 +115,8 @@ fn pty_overlay_spawn_process_is_alive() {
 #[test]
 fn pty_overlay_is_dead_after_kill() {
   let (_dir, app) = make_app();
-  let mut pty =
-    PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
-      .expect("PTY spawn must succeed on Unix");
+  let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
   pty.kill();
   std::thread::sleep(std::time::Duration::from_millis(150));
   assert!(!pty.is_alive(), "process must be dead after kill");
@@ -117,9 +126,8 @@ fn pty_overlay_is_dead_after_kill() {
 #[test]
 fn open_pty_overlay_switches_view_to_pty() {
   let (_dir, mut app) = make_app();
-  let pty =
-    PtyOverlay::spawn(PtyKind::LazyGit, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
-      .expect("PTY spawn must succeed on Unix");
+  let pty = PtyOverlay::spawn(PtyKind::LazyGit, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
   app.open_pty_overlay(pty);
   assert_eq!(app.view, View::Pty, "open_pty_overlay must switch to View::Pty");
   assert!(app.pty_overlay.is_some(), "pty_overlay must be Some after opening");
@@ -130,9 +138,8 @@ fn open_pty_overlay_switches_view_to_pty() {
 #[test]
 fn close_pty_overlay_returns_view_to_list() {
   let (_dir, mut app) = make_app();
-  let pty =
-    PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
-      .expect("PTY spawn must succeed on Unix");
+  let pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
   app.open_pty_overlay(pty);
   app.close_pty_overlay();
   assert_eq!(app.view, View::List, "close_pty_overlay must return to View::List");
@@ -143,9 +150,8 @@ fn close_pty_overlay_returns_view_to_list() {
 #[test]
 fn pty_overlay_poll_bytes_does_not_panic_on_output() {
   let (_dir, app) = make_app();
-  let mut pty =
-    PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "echo hello"], &app.workdir, 80, 24)
-      .expect("PTY spawn must succeed on Unix");
+  let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "echo hello"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
   std::thread::sleep(std::time::Duration::from_millis(150));
   // poll_bytes drains the reader channel; must not panic even if the process
   // already exited and the channel is closed or has leftover output.

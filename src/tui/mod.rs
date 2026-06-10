@@ -189,13 +189,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     // so the next frame reflects the freshest output. If the process has
     // already exited, close the overlay so the list view is rendered instead.
     if app.view == View::Pty {
-      let is_dead = app
-        .pty_overlay
-        .as_mut()
-        .is_none_or(|p| {
-          p.poll_bytes();
-          !p.is_alive()
-        });
+      let is_dead = app.pty_overlay.as_mut().is_none_or(|p| {
+        p.poll_bytes();
+        !p.is_alive()
+      });
       if is_dead {
         app.close_pty_overlay();
       }

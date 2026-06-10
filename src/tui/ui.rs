@@ -1,10 +1,10 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
-use super::state::pty_overlay::PtyKind;
 use super::keymap::{Action, Keymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
+use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
