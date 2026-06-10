@@ -3216,6 +3216,61 @@ fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
+#[test]
+fn sidebar_diff_line_renders_counts_in_theme_roles() {
+  // A passed `DiffLineStat` surfaces a `Diff +<ins> -<del>` line whose
+  // insertions wear the `untracked` role and deletions the `prunable`
+  // role. Unique non-default `Rgb` values pin the wiring (a `Color::Green`
+  // hardcode would pass against defaults but fail here — #170/#211 rule).
+  let w = detailed_worktree_fixture();
+  let theme = Theme {
+    untracked: Color::Rgb(10, 20, 30),
+    prunable: Color::Rgb(40, 50, 60),
+    ..Theme::default()
+  };
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, Some(diff), &theme);
+
+  let diff_line = sections
+    .worktree
+    .iter()
+    .find(|l| section_text_single(l).contains("Diff"))
+    .expect("identity card must carry a Diff line when a stat is supplied");
+  let ins = diff_line.spans.iter().find(|s| s.content.contains("+12")).unwrap();
+  assert_eq!(
+    ins.style.fg,
+    Some(Color::Rgb(10, 20, 30)),
+    "insertions wear `untracked`"
+  );
+  let del = diff_line.spans.iter().find(|s| s.content.contains("-4")).unwrap();
+  assert_eq!(del.style.fg, Some(Color::Rgb(40, 50, 60)), "deletions wear `prunable`");
+}
+
+#[test]
+fn sidebar_diff_line_absent_for_empty_or_missing_stat() {
+  // No stat (`None`) and an all-zero stat both leave the card without a
+  // Diff line — the `+0 -0` case is suppressed.
+  let w = detailed_worktree_fixture();
+  for diff in [None, Some(gwm::worktree::DiffLineStat::default())] {
+    let sections = build_sidebar_sections(
+      &w,
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+      diff,
+      &Theme::default(),
+    );
+    assert!(
+      !sections
+        .worktree
+        .iter()
+        .any(|l| section_text_single(l).contains("Diff")),
+      "no Diff line should render for {diff:?}"
+    );
+  }
+}
+
 // ---- working_tree_status_line (issue #179) ---------------------------------
 // Colourisation of each `git status --short` entry in the Working Tree sidebar
 // block, with three distinct status colours so modified ≠ created at a glance:

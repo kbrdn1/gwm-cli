@@ -704,9 +704,27 @@ fn working_tree_counts_footer_shows_only_nonzero_colored_segments() {
     "a zero count must be omitted entirely: {text:?}"
   );
 
-  // Colour roles: created → green (`untracked`), deleted → red (`prunable`).
+  // Colour roles must be wired to the *theme*, not hardcoded literals.
+  // Drive a theme whose `untracked` / `prunable` are unique non-default
+  // `Rgb` values and assert those exact colours land — a `Color::Green`
+  // hardcode (which equals the default `untracked`) would pass against the
+  // default theme but fail here (mirrors the #170/#211 audit rule).
+  let theme = Theme {
+    untracked: Color::Rgb(1, 2, 3),
+    prunable: Color::Rgb(4, 5, 6),
+    ..Theme::default()
+  };
+  let line = working_tree_counts_footer(&counts, &theme).unwrap();
   let created_span = line.spans.iter().find(|s| s.content.contains(WT_CREATED_ICON)).unwrap();
-  assert_eq!(created_span.style.fg, Some(Color::Green), "created paints green");
+  assert_eq!(
+    created_span.style.fg,
+    Some(Color::Rgb(1, 2, 3)),
+    "created paints the `untracked` role"
+  );
   let deleted_span = line.spans.iter().find(|s| s.content.contains(WT_DELETED_ICON)).unwrap();
-  assert_eq!(deleted_span.style.fg, Some(Color::Red), "deleted paints red");
+  assert_eq!(
+    deleted_span.style.fg,
+    Some(Color::Rgb(4, 5, 6)),
+    "deleted paints the `prunable` role"
+  );
 }
