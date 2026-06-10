@@ -23,5 +23,6 @@ pub mod create_form;
 pub mod filter;
 pub mod github_fetch;
 pub mod link_prompt;
+pub mod pty_overlay;
 pub mod sidebar;
 pub mod spinner;

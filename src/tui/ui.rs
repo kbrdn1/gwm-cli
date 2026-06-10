@@ -1,4 +1,5 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
+use super::state::pty_overlay::PtyKind;
 use super::keymap::{Action, Keymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
@@ -162,6 +163,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Pty => draw_pty_overlay(f, app),
     View::List => {}
   }
 }
@@ -3333,6 +3335,35 @@ fn draw_report(f: &mut Frame, app: &App) {
     Paragraph::new(modal_hint_for_context(HintContext::Report, &app.keymap, &app.theme)),
     layout[4],
   );
+}
+
+// ── PTY overlay (issue #35) ────────────────────────────────────────────────
+
+/// Render the embedded PTY overlay (lazygit or native terminal). The overlay
+/// occupies ~90 % × 90 % of the terminal, centred and drawn over the list
+/// view. The rendered PTY content fills the entire inner area of the block
+/// so the child process gets as much screen real-estate as possible.
+fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
+  let term = f.area();
+  let area = centered(90, 90, term);
+
+  f.render_widget(Clear, area);
+
+  let title = match app.pty_overlay.as_ref().map(|p| &p.kind) {
+    Some(PtyKind::LazyGit) => " lazygit ",
+    Some(PtyKind::Terminal) => " terminal ",
+    None => " overlay ",
+  };
+  let block = overlay_block(app.theme.accent)
+    .title(title)
+    .title_alignment(ratatui::layout::Alignment::Center);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+
+  if let Some(pty) = app.pty_overlay.as_ref() {
+    let pseudo_terminal = tui_term::widget::PseudoTerminal::new(pty.parser.screen());
+    f.render_widget(pseudo_terminal, inner);
+  }
 }
 
 fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {

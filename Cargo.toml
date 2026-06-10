@@ -61,6 +61,12 @@ glob = "0.3"
 nucleo-matcher = "0.3"
 shell-words = "1"
 tempfile = "3"
+# Issue #35: PTY overlay for embedded lazygit / native terminal.
+# portable-pty provides the cross-platform PTY pair; tui-term renders the
+# vt100 parser output as a ratatui widget. tui-term 0.3 re-exports its own
+# vt100 0.16 as `tui_term::vt100` — use that, not a standalone vt100 crate.
+portable-pty = "0.9"
+tui-term = "0.3"
 # Issue #95: SHA-256 over the raw bytes of `.gwm.toml` for the TOFU
 # trust ledger. Whitespace-sensitive on purpose — `rm -rf /tmp/` and
 # `rm -rf /tmp /` are visually close but semantically different, so

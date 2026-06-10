@@ -97,6 +97,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "launch the [git_tui] launcher (default lazygit)",
     },
     PaletteEntry {
+      action: Action::GitTuiOverlay,
+      name: "git-tui-overlay",
+      description: "open lazygit in an embedded PTY overlay (issue #35)",
+    },
+    PaletteEntry {
+      action: Action::OpenTerminalOverlay,
+      name: "open-terminal-overlay",
+      description: "open a native $SHELL in an embedded PTY overlay (issue #35)",
+    },
+    PaletteEntry {
       action: Action::Review,
       name: "review",
       description: "run the [review] launcher against the resolved base",

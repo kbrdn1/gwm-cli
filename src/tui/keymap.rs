@@ -121,9 +121,11 @@ define_actions! {
   ToggleDeleteBranch => "delete_branch",
   // Hand-offs
   GitTui            => "git_tui",
+  GitTuiOverlay     => "git_tui_overlay",
   Review            => "review",
   Yank              => "yank",
   Open              => "open",
+  OpenTerminalOverlay => "open_terminal_overlay",
   OpenMenu          => "open_menu",
   OpenDocs          => "open_docs",
   LinkPrompt        => "link",
@@ -405,10 +407,16 @@ impl Keymap {
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),
       def(Action::ToggleDeleteBranch, &["p"]),
-      def(Action::GitTui, &["l"]),
+      // Issue #35: `l` now opens the embedded lazygit PTY overlay instead
+      // of suspending the TUI fullscreen. `o` opens an embedded native
+      // terminal PTY overlay. The old fullscreen actions (`GitTui`, `Open`)
+      // remain in the Action enum so users who prefer the old behaviour can
+      // rebind them via `[tui.keys]` in `.gwm.toml`; they have no default
+      // binding out of the box.
+      def(Action::GitTuiOverlay, &["l"]),
       def(Action::Review, &["R"]),
       def(Action::Yank, &["y"]),
-      def(Action::Open, &["o"]),
+      def(Action::OpenTerminalOverlay, &["o"]),
       def(Action::OpenMenu, &["O"]),
       def(Action::OpenDocs, &["."]),
       def(Action::LinkPrompt, &["L"]),
