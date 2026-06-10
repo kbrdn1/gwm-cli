@@ -388,3 +388,39 @@ fn list_returns_entries_with_source() {
     .expect("Up should appear in list()");
   assert_eq!(up_entry.source, Source::Default);
 }
+
+// ── Issue #35 backward-compat: old slug overrides must not conflict ────────
+// Users who had `git_tui = ["l"]` or `open = ["o"]` in their config before
+// #35 switched the defaults to the overlay variants must be able to upgrade
+// without a "chord conflict" load error. The rule: a user override that
+// claims a chord previously held by a *default* binding on a different action
+// silently wins — the default chord is vacated.
+
+#[test]
+fn user_override_git_tui_reclaims_l_from_overlay_default() {
+  let mut km = Keymap::defaults();
+  // By default `l` is bound to GitTuiOverlay. Binding GitTui to `l` must
+  // succeed (not fail with "chord conflict") and GitTuiOverlay must lose `l`.
+  km.apply_override(Action::GitTui, vec![KeyStroke::parse_chord("l").unwrap()])
+    .unwrap();
+
+  let l = KeyStroke::parse_chord("l").unwrap();
+  assert!(
+    matches!(km.lookup(&l), ChordResolution::Matched(Action::GitTui)),
+    "l must resolve to GitTui after the override"
+  );
+}
+
+#[test]
+fn user_override_open_reclaims_o_from_overlay_default() {
+  let mut km = Keymap::defaults();
+  // Same as above for the `open` / `open_terminal_overlay` pair.
+  km.apply_override(Action::Open, vec![KeyStroke::parse_chord("o").unwrap()])
+    .unwrap();
+
+  let o = KeyStroke::parse_chord("o").unwrap();
+  assert!(
+    matches!(km.lookup(&o), ChordResolution::Matched(Action::Open)),
+    "o must resolve to Open after the override"
+  );
+}
