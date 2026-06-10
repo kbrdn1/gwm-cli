@@ -11,7 +11,9 @@ use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, bootstrap_report_lines, centered_abs, confirm_buttons_line, create_buttons_line, ellipsize_middle,
   field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, recent_items_pane_title,
-  status_pane_title, type_selector_line, working_tree_pane_title, worktrees_pane_title,
+  status_pane_title, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 use gwm::tui::{
   confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
@@ -645,4 +647,66 @@ fn centered_abs_caps_height_taller_than_the_area() {
       height: 40
     }
   );
+}
+
+// ---- working_tree_status_counts / footer (issue #287) ----------------------
+
+#[test]
+fn working_tree_status_counts_buckets_each_file_once() {
+  // One line per porcelain family; created wins over deleted wins over
+  // modified so every line increments exactly one counter.
+  let status = "\
+?? new.rs
+ M mod.rs
+ D del.rs
+A  added.rs
+AM both.rs
+R  renamed.rs
+";
+  let c = working_tree_status_counts(status);
+  assert_eq!(c.created, 3, "?? + A + AM → created: {c:?}");
+  assert_eq!(c.modified, 2, " M + R → modified: {c:?}");
+  assert_eq!(c.deleted, 1, " D → deleted: {c:?}");
+}
+
+#[test]
+fn working_tree_status_counts_empty_string_is_clean() {
+  assert!(working_tree_status_counts("").is_empty());
+}
+
+#[test]
+fn working_tree_counts_footer_is_none_when_all_zero() {
+  // A clean tree must produce no footer at all (rather than a bare ` 0 `).
+  let counts = WorkingTreeCounts::default();
+  assert!(working_tree_counts_footer(&counts, &Theme::default()).is_none());
+}
+
+#[test]
+fn working_tree_counts_footer_shows_only_nonzero_colored_segments() {
+  let counts = WorkingTreeCounts {
+    created: 3,
+    modified: 0,
+    deleted: 1,
+  };
+  let line = working_tree_counts_footer(&counts, &Theme::default()).expect("non-empty counts → footer");
+
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    text.contains(WT_CREATED_ICON) && text.contains('3'),
+    "created segment shown: {text:?}"
+  );
+  assert!(
+    text.contains(WT_DELETED_ICON) && text.contains('1'),
+    "deleted segment shown: {text:?}"
+  );
+  assert!(
+    !text.contains(WT_MODIFIED_ICON),
+    "a zero count must be omitted entirely: {text:?}"
+  );
+
+  // Colour roles: created → green (`untracked`), deleted → red (`prunable`).
+  let created_span = line.spans.iter().find(|s| s.content.contains(WT_CREATED_ICON)).unwrap();
+  assert_eq!(created_span.style.fg, Some(Color::Green), "created paints green");
+  let deleted_span = line.spans.iter().find(|s| s.content.contains(WT_DELETED_ICON)).unwrap();
+  assert_eq!(deleted_span.style.fg, Some(Color::Red), "deleted paints red");
 }
