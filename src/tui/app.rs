@@ -1221,7 +1221,7 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
-      View::Pty => self.pane_hint_context(),
+      View::Pty => super::ui::HintContext::Pty,
       View::List => self.pane_hint_context(),
     }
   }

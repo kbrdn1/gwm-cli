@@ -1699,6 +1699,9 @@ pub enum HintContext {
   Report,
   /// Keybindings help overlay.
   Help,
+  /// PTY overlay (embedded lazygit / terminal). All keys pass through to the
+  /// child process; Esc is the only gwm-level escape hatch.
+  Pty,
 }
 
 impl HintContext {
@@ -1716,6 +1719,7 @@ impl HintContext {
       HintContext::CommandPalette => "command",
       HintContext::Report => "report",
       HintContext::Help => "help",
+      HintContext::Pty => "terminal",
     }
   }
 
@@ -1800,6 +1804,7 @@ impl HintContext {
         Hint::Lit("h/l", "pan"),
         Hint::Lit("Esc/q", "close"),
       ],
+      HintContext::Pty => &[Hint::Lit("Esc", "close")],
     }
   }
 

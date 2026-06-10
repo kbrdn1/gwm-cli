@@ -7,7 +7,7 @@ mod common;
 
 use common::init_repo;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gwm::tui::{key_to_bytes, App, View};
+use gwm::tui::{key_to_bytes, App, HintContext, View};
 #[cfg(unix)]
 use gwm::tui::{PtyKind, PtyOverlay};
 
@@ -98,6 +98,21 @@ fn key_to_bytes_page_navigation() {
 }
 
 // ── App state-machine (no PTY needed) ─────────────────────────────────────
+
+#[test]
+fn hint_context_in_pty_view_is_pty_not_pane() {
+  // While the PTY overlay is active, the footer must not show the underlying
+  // list-view hints (new/delete/open/git) — the user can only interact via
+  // the terminal, and Esc is the only gwm action available. The context must
+  // be HintContext::Pty (not Worktrees/Status).
+  let (_dir, mut app) = make_app();
+  app.view = View::Pty;
+  assert_eq!(
+    app.hint_context(),
+    HintContext::Pty,
+    "hint_context must return Pty when View::Pty is active"
+  );
+}
 
 #[test]
 fn close_pty_overlay_is_noop_when_no_overlay_is_open() {
