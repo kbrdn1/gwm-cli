@@ -71,6 +71,15 @@ fn key_to_bytes_ctrl_alpha_produces_control_codes() {
 }
 
 #[test]
+fn key_to_bytes_alt_char_sends_meta_escape_prefix() {
+  // Alt+<char> must send ESC followed by the UTF-8 bytes of the char so that
+  // readline/bash word-navigation (Alt+f, Alt+b) and lazygit shortcuts work.
+  assert_eq!(key_to_bytes(ev(KeyCode::Char('f'), KeyModifiers::ALT)), &[27, b'f']);
+  assert_eq!(key_to_bytes(ev(KeyCode::Char('b'), KeyModifiers::ALT)), &[27, b'b']);
+  assert_eq!(key_to_bytes(ev(KeyCode::Char('.'), KeyModifiers::ALT)), &[27, b'.']);
+}
+
+#[test]
 fn key_to_bytes_page_navigation() {
   assert_eq!(
     key_to_bytes(ev(KeyCode::PageUp, KeyModifiers::NONE)),

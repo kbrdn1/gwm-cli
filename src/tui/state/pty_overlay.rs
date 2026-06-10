@@ -183,7 +183,14 @@ pub fn key_to_bytes(key: KeyEvent) -> Vec<u8> {
       }
       let mut buf = [0u8; 4];
       let s = c.encode_utf8(&mut buf);
-      s.as_bytes().to_vec()
+      let bytes = s.as_bytes().to_vec();
+      // Alt+<char>: readline/bash Meta convention — prefix with ESC (0x1b).
+      if key.modifiers.contains(KeyModifiers::ALT) {
+        let mut out = vec![27u8];
+        out.extend_from_slice(&bytes);
+        return out;
+      }
+      bytes
     }
     KeyCode::Enter => vec![b'\r'],
     KeyCode::Backspace => vec![127],
