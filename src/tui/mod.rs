@@ -669,14 +669,19 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // instead of suspending the TUI fullscreen. Picker-gated: reviews are
     // branch-specific, meaningless inside `gwm switch`.
     Action::ReviewOverlay if !app.picker_mode => {
-      if let Some(plan) = app.prepare_review() {
+      if let Some(mut plan) = app.prepare_review() {
         let sz = terminal.size().unwrap_or_default();
         let inner_cols = (sz.width * 90 / 100).saturating_sub(6).max(20);
         let inner_rows = (sz.height * 90 / 100).saturating_sub(4).max(5);
         let argv: Vec<String> = plan.expanded.argv.clone();
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // Transfer diff_file ownership into the overlay so it stays alive
+        // until the child exits (issue #291).
         match PtyOverlay::spawn(PtyKind::Review, &argv_refs, &plan.cwd, inner_cols, inner_rows) {
-          Ok(pty) => app.open_pty_overlay(pty),
+          Ok(mut pty) => {
+            pty.diff_file = plan.expanded.diff_file.take();
+            app.open_pty_overlay(pty);
+          }
           Err(e) => app.status = format!("review overlay failed: {}", e),
         }
       }

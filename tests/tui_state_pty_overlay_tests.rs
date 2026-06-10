@@ -200,6 +200,32 @@ fn kill_reaps_child_no_zombie() {
   );
 }
 
+// ── diff_file lifetime ────────────────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn diff_file_survives_while_overlay_is_alive() {
+  let (_dir, app) = make_app();
+  let tmp = tempfile::NamedTempFile::new().expect("tempfile must be created");
+  let path = tmp.path().to_path_buf();
+  assert!(path.exists(), "tempfile must exist before attaching to overlay");
+
+  let mut pty = PtyOverlay::spawn(PtyKind::Review, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
+  pty.diff_file = Some(tmp);
+
+  // The file must still exist while the overlay is alive.
+  assert!(path.exists(), "diff tempfile must survive while PTY overlay is alive");
+
+  pty.kill();
+  drop(pty);
+  // After the overlay is dropped, the tempfile must be deleted.
+  assert!(
+    !path.exists(),
+    "diff tempfile must be deleted when PTY overlay is dropped"
+  );
+}
+
 // ── PtyKind::Review discriminator ─────────────────────────────────────────
 
 #[cfg(unix)]

@@ -42,6 +42,10 @@ pub struct PtyOverlay {
   pub cols: u16,
   /// Current PTY row count (kept in sync by [`resize`]).
   pub rows: u16,
+  /// Optional diff tempfile whose lifetime must match the overlay's (issue #291).
+  /// Set by the `ReviewOverlay` dispatcher when `[review].command` uses `{diff}`.
+  /// Dropped (and thus unlinked) when the overlay closes.
+  pub diff_file: Option<tempfile::NamedTempFile>,
 }
 
 impl std::fmt::Debug for PtyOverlay {
@@ -120,6 +124,7 @@ impl PtyOverlay {
       rx,
       cols,
       rows,
+      diff_file: None,
     })
   }
 
