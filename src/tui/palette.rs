@@ -109,7 +109,12 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
     PaletteEntry {
       action: Action::Review,
       name: "review",
-      description: "run the [review] launcher against the resolved base",
+      description: "run the [review] launcher against the resolved base (fullscreen)",
+    },
+    PaletteEntry {
+      action: Action::ReviewOverlay,
+      name: "review-overlay",
+      description: "run the [review] launcher in an embedded PTY overlay (issue #35)",
     },
     PaletteEntry {
       action: Action::Yank,

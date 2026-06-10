@@ -181,3 +181,12 @@ fn pty_overlay_poll_bytes_does_not_panic_on_output() {
   // already exited and the channel is closed or has leftover output.
   pty.poll_bytes();
 }
+
+// ── PtyKind::Review discriminator ─────────────────────────────────────────
+
+#[cfg(unix)]
+#[test]
+fn pty_kind_review_discriminates_from_lazygit_and_terminal() {
+  assert_ne!(PtyKind::Review, PtyKind::LazyGit);
+  assert_ne!(PtyKind::Review, PtyKind::Terminal);
+}

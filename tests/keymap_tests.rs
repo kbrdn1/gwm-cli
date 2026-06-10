@@ -424,3 +424,44 @@ fn user_override_open_reclaims_o_from_overlay_default() {
     "o must resolve to Open after the override"
   );
 }
+
+#[test]
+fn review_overlay_has_default_binding_r() {
+  let km = Keymap::defaults();
+  let r = KeyStroke::parse_chord("r").unwrap();
+  assert!(
+    matches!(km.lookup(&r), ChordResolution::Matched(Action::ReviewOverlay)),
+    "r must resolve to ReviewOverlay by default"
+  );
+}
+
+#[test]
+fn refresh_default_binding_does_not_include_r() {
+  let km = Keymap::defaults();
+  // `r` moved to ReviewOverlay — Refresh must only keep `f`.
+  let binding = km
+    .list()
+    .into_iter()
+    .find(|b| b.action == Action::Refresh)
+    .expect("Refresh must be in keymap");
+  let r = KeyStroke::parse_chord("r").unwrap();
+  assert!(
+    !binding.chords.contains(&r),
+    "Refresh must not include `r` after it was reassigned to ReviewOverlay"
+  );
+}
+
+#[test]
+fn user_override_review_reclaims_r_from_overlay_default() {
+  let mut km = Keymap::defaults();
+  // `r` defaults to ReviewOverlay. Rebinding Review to `r` must succeed
+  // (no conflict error) and ReviewOverlay must lose `r`.
+  km.apply_override(Action::Review, vec![KeyStroke::parse_chord("r").unwrap()])
+    .unwrap();
+
+  let r = KeyStroke::parse_chord("r").unwrap();
+  assert!(
+    matches!(km.lookup(&r), ChordResolution::Matched(Action::Review)),
+    "r must resolve to Review after the user override"
+  );
+}

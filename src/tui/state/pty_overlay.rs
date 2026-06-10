@@ -23,6 +23,8 @@ pub enum PtyKind {
   LazyGit,
   /// The user's `$SHELL` (or `/bin/sh`) rooted at the selected worktree.
   Terminal,
+  /// The `[review]` launcher (e.g. `codex review --base dev`) in PTY overlay.
+  Review,
 }
 
 /// Live PTY overlay — one spawned process, one vt100 parser, one mpsc reader

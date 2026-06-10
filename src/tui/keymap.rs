@@ -123,6 +123,7 @@ define_actions! {
   GitTui            => "git_tui",
   GitTuiOverlay     => "git_tui_overlay",
   Review            => "review",
+  ReviewOverlay     => "review_overlay",
   Yank              => "yank",
   Open              => "open",
   OpenTerminalOverlay => "open_terminal_overlay",
@@ -399,7 +400,7 @@ impl Keymap {
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
       def(Action::Filter, &["/"]),
-      def(Action::Refresh, &["f", "r"]),
+      def(Action::Refresh, &["f"]),
       // `s` is taken by ToggleSidebarMode, so Sync defaults to `S` — an
       // uppercase lifecycle verb alongside `F` (FetchGithub) / `R` (Review).
       def(Action::Sync, &["S"]),
@@ -415,6 +416,10 @@ impl Keymap {
       // binding out of the box.
       def(Action::GitTuiOverlay, &["l"]),
       def(Action::Review, &["R"]),
+      // Issue #35: `r` (lowercase) opens the review tool in an embedded PTY
+      // overlay instead of suspending the TUI fullscreen. The uppercase `R`
+      // (Action::Review) keeps its fullscreen behaviour for users who prefer it.
+      def(Action::ReviewOverlay, &["r"]),
       def(Action::Yank, &["y"]),
       def(Action::OpenTerminalOverlay, &["o"]),
       def(Action::OpenMenu, &["O"]),

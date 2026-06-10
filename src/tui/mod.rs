@@ -661,6 +661,23 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
       }
     }
+    // Issue #35: `r` (lowercase) opens the review tool in an embedded PTY
+    // overlay. Same contract as `R` (Action::Review) but spawns via PTY
+    // instead of suspending the TUI fullscreen. Picker-gated: reviews are
+    // branch-specific, meaningless inside `gwm switch`.
+    Action::ReviewOverlay if !app.picker_mode => {
+      if let Some(plan) = app.prepare_review() {
+        let sz = terminal.size().unwrap_or_default();
+        let inner_cols = (sz.width * 90 / 100).saturating_sub(6).max(20);
+        let inner_rows = (sz.height * 90 / 100).saturating_sub(4).max(5);
+        let argv: Vec<String> = plan.expanded.argv.clone();
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        match PtyOverlay::spawn(PtyKind::Review, &argv_refs, &plan.cwd, inner_cols, inner_rows) {
+          Ok(pty) => app.open_pty_overlay(pty),
+          Err(e) => app.status = format!("review overlay failed: {}", e),
+        }
+      }
+    }
     Action::Create if !app.picker_mode => app.enter_create(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
