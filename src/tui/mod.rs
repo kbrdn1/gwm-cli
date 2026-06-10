@@ -253,6 +253,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 
     // Global keys
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+      // Inside the PTY overlay, Ctrl+C must reach the child process (interrupt
+      // a running command) rather than quit gwm. Forward the byte and continue.
+      if app.view == View::Pty {
+        if let Some(ref mut pty) = app.pty_overlay {
+          let _ = pty.write_key(key);
+        }
+        continue;
+      }
       app.should_quit = true;
       if app.can_quit_now() {
         break;
