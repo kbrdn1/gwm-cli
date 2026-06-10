@@ -40,8 +40,10 @@ pub struct SidebarSections {
   pub worktree: Vec<Line<'static>>,
   /// `git status --short` lines, or `✓ clean`, or a load error.
   pub working_tree: Vec<Line<'static>>,
-  /// Number of changed files reported by `git status --short`.
-  pub working_tree_file_count: usize,
+  /// Per-category counts of changed files (issue #287): created / modified
+  /// / deleted, driving the colour-coded nerdfont footer of the Working
+  /// Tree pane.
+  pub working_tree_counts: WorkingTreeCounts,
   /// Up to 10 oneline commits, or an empty / error notice.
   pub recent_commits: Vec<Line<'static>>,
 }
@@ -612,9 +614,16 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     None => true,
   };
   if needs_refresh {
+    // Committed diff of the branch vs its base trunk (issue #287). Resolved
+    // through `config.doctor.trunks` so the figure matches the base
+    // `gwm pr` would target; folded into the cached payload so the git
+    // call only fires on a selection / mode change, not every frame.
+    let diff = worktree::git_diff_stat_vs_base(&w.path, &app.config.doctor.trunks)
+      .ok()
+      .flatten();
     app.sidebar.cache = Some((
       (w.path.clone(), active_mode),
-      build_sidebar_sections(&w, active_mode, &theme),
+      build_sidebar_sections(&w, active_mode, diff, &theme),
     ));
   }
 
@@ -629,13 +638,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // Read the cached section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
   // worktree section gains +1 row for the live header prefix.
-  let (worktree_len, working_tree_len, working_tree_file_count, commits_len) = {
+  let (worktree_len, working_tree_len, working_tree_counts, commits_len) = {
     let cache = app.sidebar.cache.as_ref();
     let s = cache.map(|(_, s)| s);
     (
       s.map(|s| s.worktree.len()).unwrap_or(0) + 1,
       s.map(|s| s.working_tree.len()).unwrap_or(0),
-      s.map(|s| s.working_tree_file_count).unwrap_or(0),
+      s.map(|s| s.working_tree_counts).unwrap_or_default(),
       s.map(|s| s.recent_commits.len()).unwrap_or(0) as u16,
     )
   };
@@ -701,10 +710,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   };
   let issue_pr_title = issue_pr_pane_title(&app.keymap);
   let working_tree_title = working_tree_pane_title(&app.keymap);
+  // Working Tree footer (issue #287): colour-coded created / modified /
+  // deleted counts. `None` in stashes mode (no section) and on a clean tree
+  // (all-zero counts → `working_tree_counts_footer` returns `None`), so the
+  // footer disappears instead of showing a bare ` 0 `.
   let working_tree_footer = if working_tree_len == 0 {
     None
   } else {
-    Some(format!(" {} ", working_tree_file_count))
+    working_tree_counts_footer(&working_tree_counts, &theme)
   };
 
   // The render borrow: cached sections are read by reference and never
@@ -753,7 +766,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       SectionBody::new(&cache.recent_commits),
       border_color,
       scroll,
-      panel_footer,
+      panel_footer.map(ratatui::text::Line::from),
     );
   }
 }
@@ -804,7 +817,7 @@ fn render_section(
   body: SectionBody<'_>,
   border_color: Color,
   scroll: u16,
-  footer: Option<String>,
+  footer: Option<ratatui::text::Line<'static>>,
 ) {
   let SectionBody { prefix, lines } = body;
   let mut block = Block::default()
@@ -813,7 +826,7 @@ fn render_section(
     .title(title.into())
     .border_style(Style::default().fg(border_color));
   if let Some(f) = footer {
-    block = block.title_bottom(ratatui::text::Line::from(f).right_aligned());
+    block = block.title_bottom(f.right_aligned());
   }
   // Pad content with one leading space per line for breathing room against
   // the left border. Each padded line BORROWS its span content from the
@@ -879,6 +892,7 @@ fn sidebar_status_dot(app: &App) -> (&'static str, Color) {
 pub fn build_sidebar_sections(
   w: &WorktreeInfo,
   mode: super::state::sidebar::SidebarMode,
+  diff: Option<worktree::DiffLineStat>,
   theme: &Theme,
 ) -> SidebarSections {
   use super::state::sidebar::SidebarMode;
@@ -895,14 +909,14 @@ pub fn build_sidebar_sections(
     // follow-up list; v1 ships `<ref>  <subject>` only.
     SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
-  let (working_tree, working_tree_file_count) = match mode {
+  let (working_tree, working_tree_counts) = match mode {
     SidebarMode::Commits => working_tree_lines(w, theme),
-    SidebarMode::Stashes => (Vec::new(), 0),
+    SidebarMode::Stashes => (Vec::new(), WorkingTreeCounts::default()),
   };
   SidebarSections {
-    worktree: worktree_identity_lines(w, theme),
+    worktree: worktree_identity_lines(w, diff.as_ref(), theme),
     working_tree,
-    working_tree_file_count,
+    working_tree_counts,
     recent_commits: body,
   }
 }
@@ -950,8 +964,12 @@ fn stash_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'stati
 /// not cached here, so the dot can track GitHub fetch state without
 /// invalidating the git-preview cache. Skips badges whose flags are
 /// false to avoid visual noise.
-fn worktree_identity_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
-  let mut out: Vec<Line<'static>> = Vec::with_capacity(4);
+fn worktree_identity_lines(
+  w: &WorktreeInfo,
+  diff: Option<&worktree::DiffLineStat>,
+  theme: &Theme,
+) -> Vec<Line<'static>> {
+  let mut out: Vec<Line<'static>> = Vec::with_capacity(5);
   let label_w = "Created".chars().count();
   let label_style = Style::default().fg(theme.muted);
 
@@ -980,7 +998,24 @@ fn worktree_identity_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>
     Span::styled(branch_age_label(w), Style::default().fg(branch_age_color(w, theme))),
   ]));
 
-  // Line 3 — "State  <badges>" with optional flag badges. Only renders the badges
+  // Line 3 (issue #287) — "Diff  +<ins> -<del>" of the branch versus its
+  // base trunk (three-dot merge-base diff, matching `gwm pr`'s base).
+  // Insertions paint green (`untracked` role), deletions red (`prunable`
+  // role). Skipped when there's no base, HEAD is the trunk, or the branch
+  // has no committed diff yet — `diff` arrives `None` / empty in those
+  // cases so the card stays compact.
+  if let Some(d) = diff {
+    if !d.is_empty() {
+      out.push(Line::from(vec![
+        Span::styled(format!("{:<label_w$}  ", "Diff", label_w = label_w), label_style),
+        Span::styled(format!("+{}", d.insertions), Style::default().fg(theme.untracked)),
+        Span::raw(" "),
+        Span::styled(format!("-{}", d.deletions), Style::default().fg(theme.prunable)),
+      ]));
+    }
+  }
+
+  // Line 4 — "State  <badges>" with optional flag badges. Only renders the badges
   // that are *true* / *interesting*; the false cases stay invisible.
   let mut state_spans = vec![Span::styled(
     format!("{:<label_w$}  ", "State", label_w = label_w),
@@ -1059,46 +1094,175 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, usize) {
+fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
     Ok(s) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
       ))],
-      0,
+      WorkingTreeCounts::default(),
     ),
     Ok(s) => {
+      let counts = working_tree_status_counts(&s);
       let lines: Vec<Line<'static>> = s.lines().map(|line| working_tree_status_line(line, theme)).collect();
-      let count = lines.len();
-      (lines, count)
+      (lines, counts)
     }
     Err(e) => (
       vec![Line::from(Span::styled(
         format!("! {}", e),
         Style::default().fg(theme.prunable),
       ))],
-      0,
+      WorkingTreeCounts::default(),
     ),
   }
 }
 
-/// Colourise one `git status --short` porcelain line (issue #179).
+/// Per-category counts of changed files in the Working Tree pane (issue
+/// #287), derived from `git status --short`. Each tracked / untracked file
+/// is counted once, into the single category that dominates its porcelain
+/// `XY` status pair.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkingTreeCounts {
+  /// Untracked or added files (`??`, or `A` in either column).
+  pub created: usize,
+  /// Files changed in place (`M`, `R`, `C`, `T`, `U`, …).
+  pub modified: usize,
+  /// Files removed (`D` in either column).
+  pub deleted: usize,
+}
+
+impl WorkingTreeCounts {
+  /// True when no file falls in any category — a clean (or empty) status,
+  /// so the Working Tree footer renders nothing rather than a bare ` 0 `.
+  pub fn is_empty(&self) -> bool {
+    self.created == 0 && self.modified == 0 && self.deleted == 0
+  }
+}
+
+/// Nerdfont codicon glyphs for the Working Tree footer counts (issue #287):
+/// `diff-added` / `diff-modified` / `diff-removed`, the purpose-built file-
+/// status trio.
+pub const WT_CREATED_ICON: &str = "\u{eadc}";
+pub const WT_MODIFIED_ICON: &str = "\u{eadd}";
+pub const WT_DELETED_ICON: &str = "\u{eade}";
+
+/// The single change-category a `git status --short` `XY` pair falls into
+/// (issue #287). Shared by the Working-Tree footer counts and the per-row
+/// colouring so a file's row colour always equals the footer segment it's
+/// counted in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WtCategory {
+  Created,
+  Modified,
+  Deleted,
+}
+
+/// Classify a porcelain `XY` status pair into its dominant
+/// [`WtCategory`], with a deterministic precedence (created > deleted >
+/// modified) so each file maps to exactly one bucket:
 ///
-/// The short format is `XY<space>PATH`, where `X` is the index (staged)
-/// status and `Y` the worktree status. Three distinct colours keep modified
-/// and created files visually apart:
+/// - `??` (untracked) or an `A` in either column → **created**,
+/// - else a `D` in either column → **deleted**,
+/// - else anything changed (`M`, `R`, `C`, `T`, `U`, …) → **modified**.
+fn working_tree_category(x: char, y: char) -> WtCategory {
+  if (x == '?' && y == '?') || x == 'A' || y == 'A' {
+    WtCategory::Created
+  } else if x == 'D' || y == 'D' {
+    WtCategory::Deleted
+  } else {
+    WtCategory::Modified
+  }
+}
+
+/// Theme colour for a change category (issue #287): created → `untracked`
+/// (green), modified → `modified` (yellow), deleted → `prunable` (red).
+fn working_tree_category_color(cat: WtCategory, theme: &Theme) -> Color {
+  match cat {
+    WtCategory::Created => theme.untracked,
+    WtCategory::Modified => theme.modified,
+    WtCategory::Deleted => theme.prunable,
+  }
+}
+
+/// Tally `git status --short` porcelain output into per-category
+/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Lines
+/// too short to carry an `XY` pair, or an all-blank pair, are skipped —
+/// real porcelain output never produces them, but the helper is `pub` so a
+/// non-git caller could.
+pub fn working_tree_status_counts(status_short: &str) -> WorkingTreeCounts {
+  let mut c = WorkingTreeCounts::default();
+  for line in status_short.lines() {
+    let mut chars = line.chars();
+    let x = match chars.next() {
+      Some(ch) => ch,
+      None => continue,
+    };
+    let y = match chars.next() {
+      Some(ch) => ch,
+      None => continue,
+    };
+    if x == ' ' && y == ' ' {
+      continue;
+    }
+    match working_tree_category(x, y) {
+      WtCategory::Created => c.created += 1,
+      WtCategory::Modified => c.modified += 1,
+      WtCategory::Deleted => c.deleted += 1,
+    }
+  }
+  c
+}
+
+/// Build the Working Tree pane footer (issue #287): per-category file
+/// counts as colour-coded nerdfont segments — created (green / `untracked`
+/// role), modified (yellow / `modified` role), deleted (red / `prunable`
+/// role). Each segment renders only when its count is non-zero; an all-zero
+/// (clean) tally yields `None` so the footer disappears entirely instead of
+/// showing a bare ` 0 `.
+pub fn working_tree_counts_footer(counts: &WorkingTreeCounts, theme: &Theme) -> Option<Line<'static>> {
+  if counts.is_empty() {
+    return None;
+  }
+  let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+  if counts.created > 0 {
+    spans.push(Span::styled(
+      format!("{} {} ", WT_CREATED_ICON, counts.created),
+      Style::default().fg(theme.untracked),
+    ));
+  }
+  if counts.modified > 0 {
+    spans.push(Span::styled(
+      format!("{} {} ", WT_MODIFIED_ICON, counts.modified),
+      Style::default().fg(theme.modified),
+    ));
+  }
+  if counts.deleted > 0 {
+    spans.push(Span::styled(
+      format!("{} {} ", WT_DELETED_ICON, counts.deleted),
+      Style::default().fg(theme.prunable),
+    ));
+  }
+  Some(Line::from(spans))
+}
+
+/// Colourise one `git status --short` porcelain line (issue #179, recoloured
+/// in #287).
 ///
-/// - staged change (`X` column) → cyan,
-/// - modified-in-worktree (`Y` column) → yellow,
-/// - `??` (untracked / created) → green,
-/// - the **file name** → the dominant status colour: green when untracked,
-///   else yellow when the worktree side carries a change, else cyan when only
-///   the index side does.
+/// The short format is `XY<space>PATH`. The whole row — both status columns
+/// and the file name — is painted by the file's single change category, so
+/// a row's colour always equals the Working-Tree footer segment it's
+/// counted in:
 ///
-/// The separator space is left unstyled. The rendered text is byte-for-byte
-/// identical to the input — only `Span` styling is added — so the sidebar
-/// keeps showing the exact `git status --short` codes it always did.
+/// - created (`??` / `A`) → green (`untracked` role),
+/// - modified (`M`, `R`, `C`, `T`, `U`, …) → yellow (`modified` role),
+/// - deleted (`D`) → red (`prunable` role).
+///
+/// Precedence created > deleted > modified mirrors
+/// [`working_tree_status_counts`] via the shared [`working_tree_category`].
+/// The pre-#287 staged-vs-worktree (cyan `X` column) distinction is dropped
+/// in favour of this add/modify/delete scheme. The separator space is left
+/// unstyled; the rendered text is byte-for-byte identical to the input.
 pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   // Porcelain short output is always `XY<space>PATH` with ASCII status
   // codes, but the helper is `pub` — a non-git caller could pass arbitrary
@@ -1110,7 +1274,7 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
     Some(c) => c,
     None => return Line::from(raw.to_string()),
   };
-  let (y_at, y) = match indices.next() {
+  let (_y_at, y) = match indices.next() {
     Some(c) => c,
     None => return Line::from(raw.to_string()),
   };
@@ -1120,49 +1284,15 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   };
   // Byte offset where the path begins (just past the separator char).
   let path_at = sep_at + sep.len_utf8();
-  let untracked = x == '?' && y == '?';
 
-  // The three git-status families paint through their own roles (issue
-  // #211; defaults cyan/yellow/green match the pre-#211 borrowed
-  // accent/dirty/clean, so a `[theme]`-less config is unchanged):
-  // staged → `staged`, worktree-modified → `modified`, untracked/created
-  // → `untracked`.
-  let staged = Style::default().fg(theme.staged);
-  let modified = Style::default().fg(theme.modified);
-  let created = Style::default().fg(theme.untracked);
-  // X column: untracked `?` → created, other staged change → staged.
-  let x_style = if x == '?' {
-    created
-  } else if x != ' ' {
-    staged
-  } else {
-    Style::default()
-  };
-  // Y column: untracked `?` → created, worktree modification → modified.
-  let y_style = if y == '?' {
-    created
-  } else if y != ' ' {
-    modified
-  } else {
-    Style::default()
-  };
-  // File name takes the dominant status colour: created wins, then a
-  // worktree modification, then a staged-only change.
-  let name_style = if untracked {
-    created
-  } else if y != ' ' {
-    modified
-  } else if x != ' ' {
-    staged
-  } else {
-    Style::default()
-  };
+  // One colour for the whole row, from the file's change category — so the
+  // row and the footer count agree (issue #287).
+  let style = Style::default().fg(working_tree_category_color(working_tree_category(x, y), theme));
 
   Line::from(vec![
-    Span::styled(raw[x_at..y_at].to_string(), x_style),
-    Span::styled(raw[y_at..sep_at].to_string(), y_style),
+    Span::styled(raw[x_at..sep_at].to_string(), style),
     Span::raw(raw[sep_at..path_at].to_string()),
-    Span::styled(raw[path_at..].to_string(), name_style),
+    Span::styled(raw[path_at..].to_string(), style),
   ])
 }
 

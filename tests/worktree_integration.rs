@@ -921,3 +921,112 @@ fn resolve_trunk_prefers_configured_over_fallback() {
   let resolved = worktree::resolve_trunk(&repo, &["dev".to_string()]);
   assert_eq!(resolved.as_deref(), Some("dev"));
 }
+
+// ---- git_diff_stat_vs_base / parse_diff_shortstat (issue #287) -------------
+
+/// Run a `git` CLI command in `dir`, asserting success. Used to author
+/// commits with controlled line counts so the shortstat diff is
+/// deterministic — the helper itself shells out to `git diff`, so driving
+/// the fixture through the same CLI mirrors the production path.
+fn git_in(dir: &Path, args: &[&str]) {
+  let out = std::process::Command::new("git")
+    .current_dir(dir)
+    .args(args)
+    .env("GIT_AUTHOR_NAME", "gwm-test")
+    .env("GIT_AUTHOR_EMAIL", "gwm@test")
+    .env("GIT_COMMITTER_NAME", "gwm-test")
+    .env("GIT_COMMITTER_EMAIL", "gwm@test")
+    .output()
+    .unwrap();
+  assert!(
+    out.status.success(),
+    "git {:?} failed: {}",
+    args,
+    String::from_utf8_lossy(&out.stderr)
+  );
+}
+
+#[test]
+fn parse_diff_shortstat_reads_both_clauses() {
+  let s = worktree::parse_diff_shortstat(" 3 files changed, 12 insertions(+), 4 deletions(-)");
+  assert_eq!(s.insertions, 12);
+  assert_eq!(s.deletions, 4);
+}
+
+#[test]
+fn parse_diff_shortstat_handles_missing_clause_and_singular() {
+  // All-additions diff omits the deletions clause entirely.
+  let add_only = worktree::parse_diff_shortstat(" 1 file changed, 5 insertions(+)");
+  assert_eq!(add_only.insertions, 5);
+  assert_eq!(add_only.deletions, 0);
+
+  // All-deletions, and the singular `1 deletion(-)` form.
+  let del_only = worktree::parse_diff_shortstat(" 1 file changed, 1 deletion(-)");
+  assert_eq!(del_only.insertions, 0);
+  assert_eq!(del_only.deletions, 1);
+
+  // Empty diff → empty string → zeroed stat.
+  let empty = worktree::parse_diff_shortstat("");
+  assert!(empty.is_empty());
+}
+
+#[test]
+fn diff_stat_vs_base_counts_branch_insertions_and_deletions() {
+  // init_repo seeds an empty commit on `main`. Author a base file there,
+  // then branch and change it so the three-dot diff is deterministic.
+  let (dir, _repo) = init_repo();
+  let path = dir.path();
+
+  std::fs::write(path.join("f.txt"), "a\nb\nc\n").unwrap();
+  git_in(path, &["add", "f.txt"]);
+  git_in(path, &["commit", "-m", "base file"]);
+
+  // Branch off main and replace 1 of the 3 lines: +1 insertion, -1 deletion
+  // versus the merge-base.
+  git_in(path, &["checkout", "-b", "feat/#287-x"]);
+  std::fs::write(path.join("f.txt"), "a\nB\nc\n").unwrap();
+  git_in(path, &["commit", "-am", "tweak"]);
+
+  let stat = worktree::git_diff_stat_vs_base(path, &["main".to_string()])
+    .unwrap()
+    .expect("a feature branch off main must yield a diff stat");
+  assert_eq!(stat.insertions, 1, "one line replaced → one insertion");
+  assert_eq!(stat.deletions, 1, "one line replaced → one deletion");
+}
+
+#[test]
+fn diff_stat_vs_base_is_none_when_head_is_the_trunk() {
+  // The main worktree resting on its trunk has no base distinct from
+  // itself — the helper short-circuits to `None` so the sidebar paints no
+  // Diff line rather than a misleading `+0 -0`.
+  let (dir, _repo) = init_repo();
+  let stat = worktree::git_diff_stat_vs_base(dir.path(), &["main".to_string()]).unwrap();
+  assert!(stat.is_none(), "HEAD on the trunk must yield None, got {stat:?}");
+}
+
+#[test]
+fn diff_stat_vs_base_is_none_for_a_later_trunk_worktree() {
+  // Issue #287 review (P2): with the default `["dev", "main"]`, a worktree
+  // whose HEAD is on `main` resolves its base to `dev` (the earlier
+  // candidate). A naive `head == resolved_base` check would leak a
+  // `dev...main` diff onto a trunk worktree; HEAD being *any* trunk must
+  // suppress the row.
+  let (dir, repo) = init_repo(); // seeds `main`
+  let head_oid = repo.head().unwrap().target().unwrap();
+  let head_commit = repo.find_commit(head_oid).unwrap();
+  repo.branch("dev", &head_commit, false).unwrap();
+
+  let stat = worktree::git_diff_stat_vs_base(dir.path(), &["dev".to_string(), "main".to_string()]).unwrap();
+  assert!(
+    stat.is_none(),
+    "a worktree on the `main` trunk must yield None even when `dev` resolves as base, got {stat:?}"
+  );
+}
+
+#[test]
+fn is_trunk_branch_matches_configured_and_common_defaults() {
+  assert!(worktree::is_trunk_branch("main", &[]));
+  assert!(worktree::is_trunk_branch("develop", &[]));
+  assert!(worktree::is_trunk_branch("release", &["release".to_string()]));
+  assert!(!worktree::is_trunk_branch("feat/#287-x", &[]));
+}

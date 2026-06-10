@@ -25,7 +25,10 @@
 //! dot) and `Color::Reset` (unlinked marker) still carry no semantic role.
 //! Since #211 the git-status families have dedicated roles `staged`
 //! (default cyan) / `modified` (yellow) / `untracked` (green) rather
-//! than borrowing accent / dirty / clean.
+//! than borrowing accent / dirty / clean. Since #287 the Working Tree
+//! *rows* are painted by change category — created → `untracked` (green) /
+//! modified → `modified` (yellow) / deleted → `prunable` (red) — to match
+//! the footer counts; the `staged` cyan column split is retired there.
 
 mod common;
 
@@ -287,31 +290,43 @@ fn table_marker_resolves_through_theme_roles() {
 }
 
 // ---------------------------------------------------------------------------
-// working_tree_status_line — #211: git-status families have dedicated roles
+// working_tree_status_line — #287: each row painted by its change category
+// (created → untracked, modified → modified, deleted → prunable), matching
+// the Working Tree footer counts. Supersedes the #211 staged/modified/
+// untracked column split.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn working_tree_status_line_resolves_status_families_through_dedicated_roles() {
+fn working_tree_status_line_resolves_change_categories_through_dedicated_roles() {
   let t = audit_theme();
 
-  // The dedicated roles are distinct from the accent/dirty/clean they used
-  // to borrow, so this fixture proves the families decoupled (a regression
-  // back to the borrow would resolve to accent/dirty/clean and fail here).
-  assert_ne!(t.staged, t.accent, "fixture: staged must differ from accent");
-  assert_ne!(t.modified, t.dirty, "fixture: modified must differ from dirty");
-  assert_ne!(t.untracked, t.clean, "fixture: untracked must differ from clean");
+  // Distinct fixture values per role prove the wiring (a regression to a
+  // literal, or to the wrong role, would fail here).
+  assert_ne!(t.untracked, t.modified, "fixture: untracked must differ from modified");
+  assert_ne!(t.prunable, t.modified, "fixture: prunable must differ from modified");
+  assert_ne!(t.untracked, t.prunable, "fixture: untracked must differ from prunable");
 
-  // Staged change (X column set, Y blank) → `staged` on both the status
-  // code column and the file name.
-  let staged = working_tree_status_line("A  staged.rs", &t);
-  assert_eq!(staged.spans[0].style.fg, Some(t.staged), "staged code → staged role");
+  // Added (`A`) and untracked (`??`) are *created* → `untracked` role on
+  // both the status code and the file name.
+  let added = working_tree_status_line("A  staged.rs", &t);
   assert_eq!(
-    fg_containing(&staged, "staged.rs"),
-    Some(t.staged),
-    "staged name → staged role"
+    added.spans[0].style.fg,
+    Some(t.untracked),
+    "added code → untracked role"
+  );
+  assert_eq!(
+    fg_containing(&added, "staged.rs"),
+    Some(t.untracked),
+    "added name → untracked role"
+  );
+  let untracked = working_tree_status_line("?? new.rs", &t);
+  assert_eq!(
+    fg_containing(&untracked, "new.rs"),
+    Some(t.untracked),
+    "untracked name → untracked role"
   );
 
-  // Worktree modification (Y column set) → `modified`.
+  // Worktree / index modification → `modified`.
   let modified = working_tree_status_line(" M tracked.rs", &t);
   assert_eq!(
     fg_containing(&modified, "tracked.rs"),
@@ -319,29 +334,39 @@ fn working_tree_status_line_resolves_status_families_through_dedicated_roles() {
     "modified name → modified role"
   );
 
-  // Untracked (`??`) → `untracked`.
-  let untracked = working_tree_status_line("?? new.rs", &t);
+  // Deletion (`D`) → `prunable` (red).
+  let deleted = working_tree_status_line(" D gone.rs", &t);
   assert_eq!(
-    fg_containing(&untracked, "new.rs"),
-    Some(t.untracked),
-    "untracked name → untracked role"
+    deleted.spans[0].style.fg,
+    Some(t.prunable),
+    "deleted code → prunable role"
+  );
+  assert_eq!(
+    fg_containing(&deleted, "gone.rs"),
+    Some(t.prunable),
+    "deleted name → prunable role"
   );
 }
 
 #[test]
-fn working_tree_status_families_default_to_legacy_cyan_yellow_green() {
-  // Guard the "no visible change without [theme]" contract: with the
-  // default theme the families keep their pre-#211 cyan/yellow/green.
+fn working_tree_status_categories_default_to_green_yellow_red() {
+  // Guard the default appearance: created → green, modified → yellow,
+  // deleted → red, untracked → green (issue #287).
   let d = Theme::default();
   assert_eq!(
     working_tree_status_line("A  s.rs", &d).spans[0].style.fg,
-    Some(Color::Cyan),
-    "default staged → Cyan"
+    Some(Color::Green),
+    "default added → Green"
   );
   assert_eq!(
     fg_containing(&working_tree_status_line(" M t.rs", &d), "t.rs"),
     Some(Color::Yellow),
     "default modified → Yellow"
+  );
+  assert_eq!(
+    working_tree_status_line(" D g.rs", &d).spans[0].style.fg,
+    Some(Color::Red),
+    "default deleted → Red"
   );
   assert_eq!(
     fg_containing(&working_tree_status_line("?? n.rs", &d), "n.rs"),
@@ -704,7 +729,7 @@ fn sidebar_identity_badges_resolve_through_theme_roles() {
   w.is_prunable = true;
   w.status = dirty_status();
 
-  let sections = build_sidebar_sections(&w, SidebarMode::Commits, &t);
+  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &t);
 
   // The badges_line lives in the worktree identity section. Flatten its
   // spans and assert each flag badge wears its role colour.
@@ -742,7 +767,7 @@ fn sidebar_identity_default_theme_preserves_legacy_palette() {
   w.is_main = true;
   w.is_locked = true;
   w.is_prunable = true;
-  let sections = build_sidebar_sections(&w, SidebarMode::Commits, &d);
+  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &d);
   let badge_fg = |needle: &str| -> Option<Color> {
     sections
       .worktree

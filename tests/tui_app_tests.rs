@@ -3115,7 +3115,12 @@ fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
 #[test]
 fn sidebar_sections_omit_commands_block() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -3145,7 +3150,12 @@ fn sidebar_sections_omit_inline_section_headers() {
   // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
   // disappear from the content lines.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -3160,7 +3170,12 @@ fn sidebar_sections_omit_inline_section_headers() {
 #[test]
 fn sidebar_worktree_section_is_compact_identity() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let text = section_text(&sections.worktree);
 
   assert!(text.contains("api-rest"), "name on top line: {}", text);
@@ -3183,7 +3198,12 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
   // Compact identity block: name, branch · head, badges, path → 4 lines target.
   // Allow ≤5 to leave headroom for variable badges.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   assert!(
     sections.worktree.len() <= 5,
     "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
@@ -3196,13 +3216,68 @@ fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-// ---- working_tree_status_line (issue #179) ---------------------------------
-// Colourisation of each `git status --short` entry in the Working Tree sidebar
-// block, with three distinct status colours so modified ≠ created at a glance:
-//   - staged (X column)        → cyan
-//   - modified (Y column)      → yellow
-//   - untracked (`??`)         → green
-// The file name takes the dominant status colour.
+#[test]
+fn sidebar_diff_line_renders_counts_in_theme_roles() {
+  // A passed `DiffLineStat` surfaces a `Diff +<ins> -<del>` line whose
+  // insertions wear the `untracked` role and deletions the `prunable`
+  // role. Unique non-default `Rgb` values pin the wiring (a `Color::Green`
+  // hardcode would pass against defaults but fail here — #170/#211 rule).
+  let w = detailed_worktree_fixture();
+  let theme = Theme {
+    untracked: Color::Rgb(10, 20, 30),
+    prunable: Color::Rgb(40, 50, 60),
+    ..Theme::default()
+  };
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, Some(diff), &theme);
+
+  let diff_line = sections
+    .worktree
+    .iter()
+    .find(|l| section_text_single(l).contains("Diff"))
+    .expect("identity card must carry a Diff line when a stat is supplied");
+  let ins = diff_line.spans.iter().find(|s| s.content.contains("+12")).unwrap();
+  assert_eq!(
+    ins.style.fg,
+    Some(Color::Rgb(10, 20, 30)),
+    "insertions wear `untracked`"
+  );
+  let del = diff_line.spans.iter().find(|s| s.content.contains("-4")).unwrap();
+  assert_eq!(del.style.fg, Some(Color::Rgb(40, 50, 60)), "deletions wear `prunable`");
+}
+
+#[test]
+fn sidebar_diff_line_absent_for_empty_or_missing_stat() {
+  // No stat (`None`) and an all-zero stat both leave the card without a
+  // Diff line — the `+0 -0` case is suppressed.
+  let w = detailed_worktree_fixture();
+  for diff in [None, Some(gwm::worktree::DiffLineStat::default())] {
+    let sections = build_sidebar_sections(
+      &w,
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+      diff,
+      &Theme::default(),
+    );
+    assert!(
+      !sections
+        .worktree
+        .iter()
+        .any(|l| section_text_single(l).contains("Diff")),
+      "no Diff line should render for {diff:?}"
+    );
+  }
+}
+
+// ---- working_tree_status_line (issue #179, recoloured in #287) -------------
+// The whole row is painted by the file's change category so it matches the
+// Working Tree footer count it belongs to:
+//   - created (`??` / `A`)     → green
+//   - modified (`M`, `R`, …)   → yellow
+//   - deleted (`D`)            → red
+// (The pre-#287 staged-vs-worktree cyan `X`-column split is gone.)
 use gwm::tui::working_tree_status_line;
 
 fn filename_span_fg(line: &ratatui::text::Line<'static>, needle: &str) -> Option<Color> {
@@ -3223,6 +3298,7 @@ fn working_tree_status_line_preserves_raw_text() {
     "A  staged.rs",
     "AM both.rs",
     " M tracked.rs",
+    " D gone.rs",
     "?? untracked.rs",
     "R  old.rs -> new.rs",
   ] {
@@ -3236,26 +3312,21 @@ fn working_tree_status_line_preserves_raw_text() {
 }
 
 #[test]
-fn working_tree_status_line_staged_only_is_cyan() {
+fn working_tree_status_line_added_is_green() {
+  // `A` (added / staged) is a *created* file → green, status code + name.
   let line = working_tree_status_line("A  staged.rs", &Theme::default());
-  assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "added code → green");
   assert_eq!(
     filename_span_fg(&line, "staged.rs"),
-    Some(Color::Cyan),
-    "staged-only filename → cyan"
+    Some(Color::Green),
+    "added filename → green"
   );
 }
 
 #[test]
-fn working_tree_status_line_unstaged_modified_is_yellow() {
+fn working_tree_status_line_modified_is_yellow() {
   let line = working_tree_status_line(" M tracked.rs", &Theme::default());
-  assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(
-    line.spans[1].style.fg,
-    Some(Color::Yellow),
-    "Y column (modified) → yellow"
-  );
+  assert_eq!(line.spans[0].style.fg, Some(Color::Yellow), "modified code → yellow");
   assert_eq!(
     filename_span_fg(&line, "tracked.rs"),
     Some(Color::Yellow),
@@ -3264,10 +3335,23 @@ fn working_tree_status_line_unstaged_modified_is_yellow() {
 }
 
 #[test]
+fn working_tree_status_line_deleted_is_red() {
+  // `D` (deleted) → red, matching the footer's deleted segment (issue #287).
+  for raw in ["D  gone.rs", " D gone.rs"] {
+    let line = working_tree_status_line(raw, &Theme::default());
+    assert_eq!(line.spans[0].style.fg, Some(Color::Red), "deleted code → red: {raw:?}");
+    assert_eq!(
+      filename_span_fg(&line, "gone.rs"),
+      Some(Color::Red),
+      "deleted filename → red: {raw:?}"
+    );
+  }
+}
+
+#[test]
 fn working_tree_status_line_untracked_is_green() {
   let line = working_tree_status_line("?? untracked.rs", &Theme::default());
-  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked code → green");
   assert_eq!(
     filename_span_fg(&line, "untracked.rs"),
     Some(Color::Green),
@@ -3291,18 +3375,16 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
 }
 
 #[test]
-fn working_tree_status_line_partially_staged_splits_status_columns() {
-  // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
-  // dominant worktree colour (yellow) since it carries unstaged changes.
+fn working_tree_status_line_added_then_modified_is_green() {
+  // `AM`: created wins over a later modification (precedence created >
+  // deleted > modified), so the whole row is green — matching the bucket
+  // the file is counted in.
   let line = working_tree_status_line("AM both.rs", &Theme::default());
-  assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
-  assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y=M modified → yellow");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "AM (created wins) → green");
   assert_eq!(
     filename_span_fg(&line, "both.rs"),
-    Some(Color::Yellow),
-    "filename with modified change → yellow"
+    Some(Color::Green),
+    "AM filename → green"
   );
 }
 
@@ -3312,7 +3394,12 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
   // those flags — only the ones that are true add visual noise.
   let mut w = detailed_worktree_fixture();
   w.is_main = false;
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let text = section_text(&sections.worktree);
   assert!(
     !text.contains("★ main"),
@@ -3345,7 +3432,12 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     behind: 0,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -3365,7 +3457,12 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     behind: 3,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -3381,7 +3478,12 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
   // synced label *should* still display `✓`. Guards against an over-eager
   // fix that would drop the sigil everywhere.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
   assert!(badge.contains("synced"), "label must still say synced: {}", badge);
@@ -3952,7 +4054,12 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 30); // 31 total commits
   let w = worktree_pointing_at_dir(dir.path());
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   assert_eq!(
     sections.recent_commits.len(),
     31,
