@@ -191,13 +191,38 @@ fn kill_reaps_child_no_zombie() {
   let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "sleep 60"], &app.workdir, 80, 24)
     .expect("PTY spawn must succeed on Unix");
   pty.kill();
-  // After kill(), try_wait() must return Ok(Some(_)) immediately — meaning
-  // the process was reaped and will not linger as a zombie.
+  // After kill(), the process must be reaped — try_wait() returns Some.
+  // We use try_wait_after_kill() which polls after the blocking wait in kill().
   let status = pty.try_wait_after_kill();
   assert!(
     status.is_some(),
-    "try_wait_after_kill must return Some(exit_status) — process should be reaped"
+    "try_wait_after_kill must return Some(exit_status) after kill() — process must be reaped"
   );
+}
+
+#[cfg(unix)]
+#[test]
+fn poll_bytes_caps_chunks_per_frame() {
+  let (_dir, app) = make_app();
+  // Spawn a process that writes a lot of output at once.
+  let mut pty = PtyOverlay::spawn(
+    PtyKind::Terminal,
+    &["sh", "-c", "yes | head -10000"],
+    &app.workdir,
+    80,
+    24,
+  )
+  .expect("PTY spawn must succeed on Unix");
+  std::thread::sleep(std::time::Duration::from_millis(200));
+  // poll_bytes must return without hanging even when there is a large backlog.
+  // If it drains unboundedly it would hang/allocate without limit on continuous output.
+  let t0 = std::time::Instant::now();
+  pty.poll_bytes();
+  assert!(
+    t0.elapsed().as_millis() < 500,
+    "poll_bytes must return quickly even with large backlog (cap per frame)"
+  );
+  pty.kill();
 }
 
 // ── diff_file lifetime ────────────────────────────────────────────────────

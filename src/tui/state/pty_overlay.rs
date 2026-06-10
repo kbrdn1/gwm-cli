@@ -130,9 +130,17 @@ impl PtyOverlay {
 
   /// Drain the reader channel and feed pending bytes into the vt100 parser.
   /// Call once per event-loop tick, before the ratatui draw.
+  ///
+  /// Capped at 64 chunks per frame so continuous-output programs (e.g.
+  /// `yes`, verbose builds) cannot stall the TUI event loop or allocate
+  /// without bound. Residual bytes remain in the channel and are consumed
+  /// on the next tick.
   pub fn poll_bytes(&mut self) {
-    while let Ok(bytes) = self.rx.try_recv() {
-      self.parser.process(&bytes);
+    for _ in 0..64 {
+      match self.rx.try_recv() {
+        Ok(bytes) => self.parser.process(&bytes),
+        Err(_) => break,
+      }
     }
   }
 
@@ -167,16 +175,15 @@ impl PtyOverlay {
   }
 
   /// Send SIGKILL (or the platform equivalent) to the child process and
-  /// attempt a non-blocking reap so the process does not linger as a zombie.
-  /// Returns the exit status if the child has already been reaped, or `None`
-  /// if it is still shutting down (the OS will clean it up on `gwm` exit).
+  /// block until it is reaped. SIGKILL is near-instant so the wait is
+  /// effectively free; this guarantees no zombie is left on Unix.
   pub fn kill(&mut self) {
     let _ = self.child.kill();
-    let _ = self.child.try_wait();
+    let _ = self.child.wait();
   }
 
-  /// After calling [`kill`], poll the exit status once. Exposed for tests that
-  /// need to assert the child was reaped without sleeping.
+  /// Poll the exit status without blocking. Exposed for tests that need to
+  /// assert reap state without re-entering the blocking path of [`kill`].
   pub fn try_wait_after_kill(&mut self) -> Option<portable_pty::ExitStatus> {
     self.child.try_wait().ok().flatten()
   }
