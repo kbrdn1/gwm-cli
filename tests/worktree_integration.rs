@@ -1164,3 +1164,73 @@ fn rename_worktree_moves_dir_only_when_branch_unchanged() {
     "the unchanged branch must survive the path-only move"
   );
 }
+
+#[test]
+fn rename_worktree_rejected_remote_push_is_atomic_and_rolls_back() {
+  // Codex review on PR #292 (P1): the two-refspec remote rename must be
+  // atomic, so a rejected push can never leave origin without the old branch.
+  // We force a rejection with `receive.denyDeletes` on the bare remote: the
+  // `:old` delete is refused, and `--atomic` makes that reject the whole push
+  // (so `new` is never created and `old` survives). The local branch + dir
+  // must roll back to their original state.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-8-old");
+  worktree::add(&repo, "feat-8-old", &old_path, "feat/#8-old", false).unwrap();
+  Command::new("git")
+    .args(["push", "origin", "feat/#8-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap();
+
+  // Make the remote refuse branch deletions → the `:old` refspec is rejected.
+  Command::new("git")
+    .args(["config", "receive.denyDeletes", "true"])
+    .current_dir(remote_dir.path())
+    .output()
+    .unwrap();
+
+  let new_path = wt_root.path().join("feat-8-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#8-old", &new_path, "feat/#8-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // Remote integrity: old branch still there, new branch never created.
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(
+    refs.contains("feat/#8-old"),
+    "atomic reject must keep the old remote branch: {refs}"
+  );
+  assert!(
+    !refs.contains("feat/#8-new"),
+    "the new remote branch must never have been created: {refs}"
+  );
+
+  // Local rollback: branch back to old, directory back to old_path.
+  assert!(
+    repo.find_branch("feat/#8-old", git2::BranchType::Local).is_ok(),
+    "local branch must roll back to feat/#8-old"
+  );
+  assert!(
+    repo.find_branch("feat/#8-new", git2::BranchType::Local).is_err(),
+    "the new local branch must be rolled back"
+  );
+  assert!(old_path.exists(), "the worktree directory must roll back to old_path");
+  assert!(!new_path.exists(), "the new directory must not survive a failed rename");
+}

@@ -446,11 +446,13 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
 /// 3. When the branch name changes, `git branch -m <old> <new>` from the
 ///    moved directory. On failure, roll the move back and return the error. A
 ///    path-only edit (same branch) skips this and every remote step.
-/// 4. If `<old_branch>` exists on `origin`, `git push origin :<old> <new>:<new>`
-///    renames the remote branch, then `git branch --set-upstream-to` re-points
-///    tracking (non-fatal — a failure leaves the rename done, just untracked).
-///    A rejected push rolls back both the local rename and the move so the
-///    repo is never left half-renamed.
+/// 4. If `<old_branch>` exists on `origin`, `git push --atomic origin :<old>
+///    <new>:<new>` renames the remote branch (the `--atomic` flag makes the
+///    delete-old + create-new pair all-or-nothing, so a rejected push can't
+///    leave the remote with neither branch), then `git branch
+///    --set-upstream-to` re-points tracking (non-fatal). A rejected push rolls
+///    back both the local rename and the move so the repo is never left
+///    half-renamed.
 ///
 /// Returns `true` when the remote branch was also renamed (it existed on
 /// `origin`), `false` when only the local branch + directory changed (or a
@@ -531,10 +533,16 @@ pub fn rename_worktree(
     .unwrap_or(false);
   let mut remote_renamed = false;
   if remote_exists {
+    // `--atomic` makes the two-refspec push all-or-nothing: without it git can
+    // delete `origin/<old>` and then fail on `<new>`, leaving the remote with
+    // neither branch — and the local rollback below can't restore a deleted
+    // remote ref (Codex review on PR #292). With `--atomic`, a rejected push
+    // leaves `origin/<old>` intact, so the local rollback fully restores state.
     if let Err(e) = git_in(
       branch_dir,
       &[
         "push",
+        "--atomic",
         "origin",
         &format!(":{old_branch}"),
         &format!("{new_branch}:{new_branch}"),
