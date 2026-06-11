@@ -1168,6 +1168,61 @@ fn rename_worktree_renames_remote_branch_when_pushed() {
 }
 
 #[test]
+fn rename_worktree_remote_push_carries_a_force_with_lease() {
+  // Codex review on PR #292 (P1): the remote rename must lease the delete
+  // refspec against the fetched old tip so a commit pushed by someone else in
+  // the fetch→push window flips the lease and gets rejected instead of being
+  // silently dropped. The exact tip race isn't reachable from the public API
+  // (the fetch is internal), so assert the *intent*: the recorded push argv
+  // carries `--force-with-lease=feat/#7-lease:<oid>`.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  assert!(Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap()
+    .status
+    .success());
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-7-lease");
+  worktree::add(&repo, "feat-7-lease", &old_path, "feat/#7-lease", false).unwrap();
+  assert!(Command::new("git")
+    .args(["push", "origin", "feat/#7-lease"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap()
+    .status
+    .success());
+
+  let new_path = wt_root.path().join("feat-7-leased");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#7-lease", &new_path, "feat/#7-leased").unwrap();
+
+  let recorded = gwm::command_log::snapshot();
+  let push = recorded
+    .iter()
+    .find(|e| e.command.starts_with("git push") && e.command.contains("feat/#7-lease"))
+    .expect("the remote rename push must be recorded");
+  assert!(
+    push.command.contains("--force-with-lease=feat/#7-lease:"),
+    "the push must lease the delete against the fetched old tip: {}",
+    push.command
+  );
+  assert!(
+    push.command.contains("--atomic"),
+    "the push must stay atomic: {}",
+    push.command
+  );
+}
+
+#[test]
 fn rename_worktree_refuses_preexisting_target_without_touching_refs() {
   // Codex review on PR #292: the directory move runs first and is preflighted,
   // so a pre-existing target is rejected before any ref is renamed — the repo

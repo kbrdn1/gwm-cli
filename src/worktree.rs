@@ -597,19 +597,29 @@ pub fn rename_worktree(
       .args(["rev-parse", "FETCH_HEAD"])
       .current_dir(branch_dir)
       .output();
-    let up_to_date = match remote_tip {
-      Ok(o) if o.status.success() => {
-        let tip = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    // Keep the fetched old tip so the push can lease against it (Codex review
+    // on PR #292, P1): the ancestor check below only proves the tip we *saw*
+    // is contained locally — it cannot stop `origin/<old>` from advancing in
+    // the window between this fetch and the push. The `--force-with-lease`
+    // makes the delete refspec conditional on this exact tip, so a concurrent
+    // push lands the rename in the rejected/rollback path instead of dropping
+    // the other writer's commits.
+    let fetched_old_tip = match &remote_tip {
+      Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+      _ => None,
+    };
+    let up_to_date = match &fetched_old_tip {
+      Some(tip) => {
         // The remote tip must be an ancestor of (already contained in) the
         // local branch — otherwise origin carries commits we don't have.
         Command::new("git")
-          .args(["merge-base", "--is-ancestor", &tip, new_branch])
+          .args(["merge-base", "--is-ancestor", tip, new_branch])
           .current_dir(branch_dir)
           .output()
           .map(|o| o.status.success())
           .unwrap_or(false)
       }
-      _ => false,
+      None => false,
     };
     if !up_to_date {
       let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
@@ -623,16 +633,24 @@ pub fn rename_worktree(
     // neither branch — and the local rollback below can't restore a deleted
     // remote ref (Codex review on PR #292). With `--atomic`, a rejected push
     // leaves `origin/<old>` intact, so the local rollback fully restores state.
-    if let Err(e) = git_in(
-      branch_dir,
-      &[
-        "push",
-        "--atomic",
-        "origin",
-        &format!(":{old_branch}"),
-        &format!("{new_branch}:{new_branch}"),
-      ],
-    ) {
+    //
+    // `--force-with-lease=<old>:<fetched tip>` guards the delete refspec: the
+    // server only honours `:{old_branch}` while `origin/<old>` still points at
+    // the tip we fetched and proved contained locally. A commit pushed by
+    // someone else in the fetch→push window flips the lease, the atomic push
+    // is rejected as a whole, and we roll back instead of dropping their work
+    // (Codex review on PR #292, P1).
+    let lease = fetched_old_tip
+      .as_deref()
+      .map(|tip| format!("--force-with-lease={old_branch}:{tip}"));
+    let mut push_args: Vec<&str> = vec!["push", "--atomic"];
+    if let Some(lease) = lease.as_deref() {
+      push_args.push(lease);
+    }
+    let old_refspec = format!(":{old_branch}");
+    let new_refspec = format!("{new_branch}:{new_branch}");
+    push_args.extend(["origin", &old_refspec, &new_refspec]);
+    if let Err(e) = git_in(branch_dir, &push_args) {
       // The remote push was rejected (protected branch, auth/network, or an
       // existing remote target). Undo the local branch rename and the move so
       // the repo is not left half-renamed (Codex review on PR #292).
