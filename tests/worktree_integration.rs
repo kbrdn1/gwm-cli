@@ -125,8 +125,22 @@ fn find_fuzzy_errors_on_ambiguous() {
   // find_fuzzy matches on the display name (the directory basename, #290), so
   // the dirs must carry the searched substring — as gwm-created worktrees do
   // (basename == slug).
-  worktree::add(&repo, "feat-1-foo", &wt_root.path().join("feat-1-foo"), "feat/#1-foo", false).unwrap();
-  worktree::add(&repo, "feat-2-foo", &wt_root.path().join("feat-2-foo"), "feat/#2-foo", false).unwrap();
+  worktree::add(
+    &repo,
+    "feat-1-foo",
+    &wt_root.path().join("feat-1-foo"),
+    "feat/#1-foo",
+    false,
+  )
+  .unwrap();
+  worktree::add(
+    &repo,
+    "feat-2-foo",
+    &wt_root.path().join("feat-2-foo"),
+    "feat/#2-foo",
+    false,
+  )
+  .unwrap();
 
   let err = worktree::find_fuzzy(&repo, "foo").unwrap_err();
   assert!(matches!(err, gwm::error::GwmError::Other(_)));
@@ -1308,4 +1322,103 @@ fn list_uses_new_slug_as_display_name_after_rename_but_keeps_id() {
   // Remove must still resolve the worktree via its (unchanged) id.
   worktree::remove(&repo, &renamed.id, false).unwrap();
   assert!(!new_path.exists(), "remove via id must delete the moved worktree");
+}
+
+#[test]
+fn rename_worktree_aborts_when_remote_has_unfetched_commits() {
+  // Codex review on PR #292 (P1): the remote rename deletes origin/<old> and
+  // recreates it from the LOCAL tip. If origin/<old> advanced with commits the
+  // worktree never fetched, that would drop them — so refuse and roll back.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-12-old");
+  worktree::add(&repo, "feat-12-old", &old_path, "feat/#12-old", false).unwrap();
+  // Push the branch at its current tip A, then advance origin/feat/#12-old to a
+  // commit B (made in the main repo) that the worktree never fetches.
+  Command::new("git")
+    .args(["push", "origin", "feat/#12-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap();
+  std::fs::write(dir.path().join("extra.txt"), "x").unwrap();
+  Command::new("git")
+    .args(["add", "extra.txt"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  Command::new("git")
+    .args(["commit", "-m", "B"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  let pushed = Command::new("git")
+    .args(["push", "origin", "HEAD:feat/#12-old"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  assert!(
+    pushed.status.success(),
+    "advancing the remote branch must succeed: {}",
+    String::from_utf8_lossy(&pushed.stderr)
+  );
+
+  let new_path = wt_root.path().join("feat-12-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#12-old", &new_path, "feat/#12-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // Remote integrity: the old branch is still there (not deleted/rewound).
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(
+    refs.contains("feat/#12-old"),
+    "stale rename must leave the old remote branch intact: {refs}"
+  );
+  assert!(
+    !refs.contains("feat/#12-new"),
+    "the new remote branch must not be created: {refs}"
+  );
+
+  // Local rollback.
+  assert!(repo.find_branch("feat/#12-old", git2::BranchType::Local).is_ok());
+  assert!(repo.find_branch("feat/#12-new", git2::BranchType::Local).is_err());
+  assert!(old_path.exists());
+  assert!(!new_path.exists());
+}
+
+#[test]
+fn find_fuzzy_reports_ambiguous_duplicate_display_names() {
+  // Codex review on PR #292 (P2): since #290 derives the display name from the
+  // path basename, two worktrees in different parents can share a name. An
+  // exact match on a duplicated name must be ambiguous, not "take the first".
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let a = wt_root.path().join("a").join("dup");
+  let b = wt_root.path().join("b").join("dup");
+  std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+  std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+  worktree::add(&repo, "feat-1-dup", &a, "feat/#1-dup", false).unwrap();
+  worktree::add(&repo, "feat-2-dup", &b, "feat/#2-dup", false).unwrap();
+
+  let err = worktree::find_fuzzy(&repo, "dup").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
+    "duplicate display names must resolve as ambiguous, got: {err:?}"
+  );
 }

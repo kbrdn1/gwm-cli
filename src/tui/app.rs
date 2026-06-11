@@ -885,11 +885,12 @@ impl App {
           if !self.tasks.complete(TaskKind::Pull, generation) {
             continue;
           }
+          // Refresh on both arms: a failed pull can still mutate the tree (a
+          // merge/rebase conflict leaves it dirty / mid-rebase), so the table
+          // must not keep showing the pre-pull clean state (Codex review #292).
+          let _ = self.refresh();
           match result {
-            Ok(msg) => {
-              let _ = self.refresh();
-              self.status = format!("pulled {}: {}", name, msg);
-            }
+            Ok(msg) => self.status = format!("pulled {}: {}", name, msg),
             Err(e) => self.status = format!("pull failed: {}", e),
           }
           applied = true;

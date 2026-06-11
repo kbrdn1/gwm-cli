@@ -582,6 +582,36 @@ pub fn rename_worktree(
   };
   let mut remote_renamed = false;
   if remote_exists {
+    // Lease check (Codex review on PR #292): the rename deletes `origin/<old>`
+    // and recreates it from the LOCAL tip. If `origin/<old>` has commits this
+    // worktree never fetched, that would silently drop them. Fetch the current
+    // remote tip and refuse unless it is already contained in the local branch.
+    let _ = git_in(branch_dir, &["fetch", "origin", old_branch]);
+    let remote_tip = Command::new("git")
+      .args(["rev-parse", "FETCH_HEAD"])
+      .current_dir(branch_dir)
+      .output();
+    let up_to_date = match remote_tip {
+      Ok(o) if o.status.success() => {
+        let tip = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        // The remote tip must be an ancestor of (already contained in) the
+        // local branch — otherwise origin carries commits we don't have.
+        Command::new("git")
+          .args(["merge-base", "--is-ancestor", &tip, new_branch])
+          .current_dir(branch_dir)
+          .output()
+          .map(|o| o.status.success())
+          .unwrap_or(false)
+      }
+      _ => false,
+    };
+    if !up_to_date {
+      let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+      rollback_move();
+      return Err(GwmError::CommandFailed(format!(
+        "origin/{old_branch} has commits not in your local branch; fetch/merge before renaming"
+      )));
+    }
     // `--atomic` makes the two-refspec push all-or-nothing: without it git can
     // delete `origin/<old>` and then fail on `<new>`, leaving the remote with
     // neither branch — and the local rollback below can't restore a deleted
@@ -1133,8 +1163,20 @@ pub fn format_relative_duration(d: Duration) -> String {
 /// Resolve a worktree by exact name first, then by substring (case-insensitive) within the dir name.
 pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
   let all = list(repo)?;
-  if let Some(exact) = all.iter().find(|w| w.name == pattern && !w.is_main) {
-    return Ok(exact.clone());
+  // Exact display-name match. Since #290 derives `name` from the path basename,
+  // it is no longer guaranteed unique (two worktrees in different parent dirs
+  // can share a basename), so an exact match that hits more than one row is
+  // ambiguous rather than "take the first" (Codex review on PR #292).
+  let exact: Vec<&WorktreeInfo> = all.iter().filter(|w| w.name == pattern && !w.is_main).collect();
+  match exact.len() {
+    1 => return Ok(exact[0].clone()),
+    n if n > 1 => {
+      return Err(GwmError::Other(format!(
+        "name '{}' is ambiguous ({} worktrees share it); disambiguate by path",
+        pattern, n
+      )));
+    }
+    _ => {}
   }
   let pat = pattern.to_lowercase();
   let mut matches: Vec<&WorktreeInfo> = all

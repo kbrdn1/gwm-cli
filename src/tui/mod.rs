@@ -937,64 +937,65 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     app.status = format!("macro{} not configured — add [tui.macro{}] to .gwm.toml", n, n);
     return Ok(());
   };
-  let cwd = app.selected().map(|w| w.path.clone());
-  match macro_cfg.open_in {
-    MacroOpenMode::Pty => {
-      let path = cwd.unwrap_or_else(|| app.workdir.clone());
-      let sz = terminal.size().unwrap_or_default();
-      let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
-      let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
-      #[cfg(windows)]
-      let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-      #[cfg(not(windows))]
-      let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-      // cmd.exe takes `/C`, POSIX shells take `-c` (Codex review on PR #292).
-      let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
-      let argv = [shell.as_str(), shell_flag, macro_cfg.command.as_str()];
-      match PtyOverlay::spawn(PtyKind::Terminal, &argv, &path, inner_cols, inner_rows) {
-        Ok(pty) => app.open_pty_overlay(pty),
-        Err(e) => app.status = format!("macro{} overlay failed: {}", n, e),
-      }
+  use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+  let path = app
+    .selected()
+    .map(|w| w.path.clone())
+    .unwrap_or_else(|| app.workdir.clone());
+
+  #[cfg(windows)]
+  let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+  #[cfg(not(windows))]
+  let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+  let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+
+  // Resolve the mux command up front so a `mux_pane` macro can fall back to the
+  // PTY overlay when no multiplexer is active (the documented behaviour — Codex
+  // review on PR #292), rather than no-oping.
+  let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
+    let label = format!("macro{}", n);
+    if detect_tmux(std::env::var("TMUX").ok()) {
+      Some(build_tmux_command(&label, &path, SpawnMode::Split))
+    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
+      Some(build_zellij_command(&label, &path, SpawnMode::Split))
+    } else {
+      app.status = format!("macro{}: no multiplexer — falling back to PTY overlay", n);
+      None
     }
-    MacroOpenMode::MuxPane => {
-      use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
-      let path = cwd.unwrap_or_else(|| app.workdir.clone());
-      let label = format!("macro{}", n);
-      // `open_in = "mux_pane"` promises a pane → split, not a new window/tab
-      // (Codex review on PR #292).
-      let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-        build_tmux_command(&label, &path, SpawnMode::Split)
-      } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-        build_zellij_command(&label, &path, SpawnMode::Split)
-      } else {
-        app.status = format!("macro{}: no multiplexer detected", n);
-        return Ok(());
-      };
-      let bin = cmd[0].as_str();
-      let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-      #[cfg(windows)]
-      let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-      #[cfg(not(windows))]
-      let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-      let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
-      if bin == "zellij" {
-        // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
-        // shell, so a command with spaces/shell syntax must be wrapped in
-        // `-- <shell> -c <cmd>` (Codex review on PR #292).
-        full_cmd.push("--");
-        full_cmd.push(shell.as_str());
-        full_cmd.push(shell_flag);
-        full_cmd.push(macro_cfg.command.as_str());
-      } else {
-        // tmux takes the command as a SINGLE shell-command operand and hands
-        // it to the shell itself, so we pass it as one trailing argument
-        // rather than pre-splitting into `sh -c <cmd>`.
-        full_cmd.push(macro_cfg.command.as_str());
-      }
-      match std::process::Command::new(bin).args(&full_cmd).spawn() {
-        Ok(_) => app.status = format!("macro{} opened in mux pane", n),
-        Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
-      }
+  } else {
+    None
+  };
+
+  if let Some(cmd) = mux_cmd {
+    let bin = cmd[0].as_str();
+    let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+    if bin == "zellij" {
+      // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
+      // shell, so a command with spaces/shell syntax must be wrapped in
+      // `-- <shell> -c <cmd>` (Codex review on PR #292).
+      full_cmd.push("--");
+      full_cmd.push(shell.as_str());
+      full_cmd.push(shell_flag);
+      full_cmd.push(macro_cfg.command.as_str());
+    } else {
+      // tmux takes the command as a SINGLE shell-command operand and hands it
+      // to the shell itself, so we pass it as one trailing argument rather than
+      // pre-splitting into `sh -c <cmd>`.
+      full_cmd.push(macro_cfg.command.as_str());
+    }
+    match std::process::Command::new(bin).args(&full_cmd).spawn() {
+      Ok(_) => app.status = format!("macro{} opened in mux pane", n),
+      Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
+    }
+  } else {
+    // PTY overlay: the explicit `pty` mode, or the `mux_pane` fallback above.
+    let sz = terminal.size().unwrap_or_default();
+    let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+    let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+    let argv = [shell.as_str(), shell_flag, macro_cfg.command.as_str()];
+    match PtyOverlay::spawn(PtyKind::Terminal, &argv, &path, inner_cols, inner_rows) {
+      Ok(pty) => app.open_pty_overlay(pty),
+      Err(e) => app.status = format!("macro{} overlay failed: {}", n, e),
     }
   }
   Ok(())
