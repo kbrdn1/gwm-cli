@@ -389,6 +389,82 @@ fn list_returns_entries_with_source() {
   assert_eq!(up_entry.source, Source::Default);
 }
 
+// ── Issue #290: keymap redesign — new bindings for existing actions ────────
+// These tests assert the *new* default key assignments introduced in #290.
+// They are intentionally written *before* the keymap is updated (TDD red)
+// and will fail until `Keymap::defaults()` is updated in the implementation
+// commit.
+
+#[test]
+fn sync_binds_to_lowercase_s_not_uppercase() {
+  // #290: `s` (lowercase) is now Sync — more ergonomic than `S`.
+  // `ToggleSidebarMode` is unbound by default; users who want it can rebind.
+  let km = Keymap::defaults();
+
+  let s = KeyStroke::parse_chord("s").unwrap();
+  assert!(
+    matches!(km.lookup(&s), ChordResolution::Matched(Action::Sync)),
+    "s must resolve to Sync after #290"
+  );
+
+  // The old `S` must no longer fire Sync.
+  let big_s = KeyStroke::parse_chord("S").unwrap();
+  assert!(
+    !matches!(km.lookup(&big_s), ChordResolution::Matched(Action::Sync)),
+    "S must not resolve to Sync after #290 (s is the new binding)"
+  );
+}
+
+#[test]
+fn toggle_sidebar_position_binds_to_v_not_uppercase_h() {
+  // #290: `v` (lowercase) is now ToggleSidebarPosition — replaces old `H`.
+  // `ToggleSidebar` is unbound by default; users who want it can rebind.
+  let km = Keymap::defaults();
+
+  let v = KeyStroke::parse_chord("v").unwrap();
+  assert!(
+    matches!(km.lookup(&v), ChordResolution::Matched(Action::ToggleSidebarPosition)),
+    "v must resolve to ToggleSidebarPosition after #290"
+  );
+
+  // The old `H` must not be ToggleSidebarPosition any more.
+  let h = KeyStroke::parse_chord("H").unwrap();
+  assert!(
+    !matches!(km.lookup(&h), ChordResolution::Matched(Action::ToggleSidebarPosition)),
+    "H must not resolve to ToggleSidebarPosition after #290"
+  );
+}
+
+#[test]
+fn toggle_delete_branch_binds_to_uppercase_d_not_p() {
+  // #290: `D` is now ToggleDeleteBranch — `p` is repurposed as Pull.
+  let km = Keymap::defaults();
+
+  let big_d = KeyStroke::parse_chord("D").unwrap();
+  assert!(
+    matches!(km.lookup(&big_d), ChordResolution::Matched(Action::ToggleDeleteBranch)),
+    "D must resolve to ToggleDeleteBranch after #290"
+  );
+
+  let p = KeyStroke::parse_chord("p").unwrap();
+  assert!(
+    !matches!(km.lookup(&p), ChordResolution::Matched(Action::ToggleDeleteBranch)),
+    "p must not resolve to ToggleDeleteBranch after #290 (p is Pull)"
+  );
+}
+
+#[test]
+fn link_prompt_binds_to_i_not_uppercase_l() {
+  // #290: `i` is now LinkPrompt — `L` is repurposed as LazyGitFullscreen.
+  let km = Keymap::defaults();
+
+  let i = KeyStroke::parse_chord("i").unwrap();
+  assert!(
+    matches!(km.lookup(&i), ChordResolution::Matched(Action::LinkPrompt)),
+    "i must resolve to LinkPrompt after #290"
+  );
+}
+
 // ── Issue #35 backward-compat: old slug overrides must not conflict ────────
 // Users who had `git_tui = ["l"]` or `open = ["o"]` in their config before
 // #35 switched the defaults to the overlay variants must be able to upgrade
