@@ -133,7 +133,7 @@ fn uppercase_binding_matches_shift_modifier_variants() {
   let (_dir, mut app) = make_app();
   assert_eq!(
     app.dispatch_key(press_shift_upper('V')),
-    Some(Action::CycleSidebarLayout),
+    Some(Action::ToggleSidebar),
     "uppercase char + SHIFT must resolve the `V` binding"
   );
   assert_eq!(

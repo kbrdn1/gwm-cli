@@ -191,11 +191,16 @@ fn keymap_lookup_returns_no_match_for_unbound_key() {
 
 #[test]
 fn default_keymap_binds_sidebar_layout_and_position() {
-  // #290: `V` cycles the sidebar orientation; `v` toggles the left/right
-  // position (was `H` before #290). `ToggleSidebar` is now unbound by default.
+  // #290: V=toggle show/hide, Space=cycle orientation, v=toggle left/right position.
   let km = Keymap::defaults();
 
-  let cycle = KeyStroke::parse_chord("V").unwrap();
+  let toggle = KeyStroke::parse_chord("V").unwrap();
+  assert!(matches!(
+    km.lookup(&toggle),
+    ChordResolution::Matched(Action::ToggleSidebar)
+  ));
+
+  let cycle = KeyStroke::parse_chord("Space").unwrap();
   assert!(matches!(
     km.lookup(&cycle),
     ChordResolution::Matched(Action::CycleSidebarLayout)
@@ -210,18 +215,19 @@ fn default_keymap_binds_sidebar_layout_and_position() {
 
 #[test]
 fn default_keymap_binds_sync_to_lowercase_s() {
-  // #290: `s` (lowercase) is now Sync — the pre-#290 `S` (uppercase) mapping
-  // is replaced. `ToggleSidebarMode` is now unbound by default.
+  // #290: `s` (lowercase) = Sync; `S` (uppercase) = ToggleSidebarMode (Commits↔Stashes).
   let km = Keymap::defaults();
 
   let sync = KeyStroke::parse_chord("s").unwrap();
   assert!(matches!(km.lookup(&sync), ChordResolution::Matched(Action::Sync)));
 
-  // `S` is now unbound (ToggleSidebarMode no longer has a default key).
-  let uppercase_s = KeyStroke::parse_chord("S").unwrap();
+  let sidebar_mode = KeyStroke::parse_chord("S").unwrap();
   assert!(
-    matches!(km.lookup(&uppercase_s), ChordResolution::NoMatch),
-    "S must be unbound after #290 keymap redesign"
+    matches!(
+      km.lookup(&sidebar_mode),
+      ChordResolution::Matched(Action::ToggleSidebarMode)
+    ),
+    "S must bind ToggleSidebarMode (Commits↔Stashes)"
   );
 }
 

@@ -426,10 +426,11 @@ impl Keymap {
       def(Action::Up, &["k", "Up"]),
       def(Action::Top, &["g g"]),
       def(Action::Bottom, &["G", "End"]),
-      // #290: ToggleSidebar and ToggleSidebarMode are unbound by default;
-      // users who want them can rebind via [tui.keys].
-      def(Action::CycleSidebarLayout, &["V"]),
-      // #290: `v` is now toggle_sidebar_position (was `H` before #290).
+      // #290: V=toggle show/hide, S=cycle content (Commits↔Stashes),
+      // Space=cycle orientation (auto/side-by-side/stacked), v=toggle position.
+      def(Action::ToggleSidebar, &["V"]),
+      def(Action::ToggleSidebarMode, &["S"]),
+      def(Action::CycleSidebarLayout, &["Space"]),
       def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::FocusWorktrees, &["1"]),
