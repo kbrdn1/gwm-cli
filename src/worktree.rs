@@ -668,10 +668,18 @@ pub fn rename_worktree(
     let lease = fetched_old_tip
       .as_deref()
       .map(|tip| format!("--force-with-lease={old_branch}:{tip}"));
+    // Absence lease on the new ref (Codex review on PR #292, P1, iter 4): a
+    // zero-OID expected value makes `<new>:<new>` a *create-only* push. The
+    // preflight `ls-remote` above has a window — another client can create
+    // `origin/<new>` before our push — and without this lease an atomic push
+    // would fast-forward that ref while deleting `origin/<old>`. The zero-OID
+    // lease makes the server reject the whole push if `origin/<new>` exists.
+    let new_absence_lease = format!("--force-with-lease={new_branch}:{}", "0".repeat(40));
     let mut push_args: Vec<&str> = vec!["push", "--atomic"];
     if let Some(lease) = lease.as_deref() {
       push_args.push(lease);
     }
+    push_args.push(&new_absence_lease);
     let old_refspec = format!(":{old_branch}");
     let new_refspec = format!("{new_branch}:{new_branch}");
     push_args.extend(["origin", &old_refspec, &new_refspec]);
@@ -1251,12 +1259,13 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
       return Ok(exact[0].clone());
     }
     n if n > 1 => {
-      // Duplicate display names: let the caller still target one by its unique
-      // internal id (the original slug), and list those ids so they know what
-      // to type (Codex review on PR #292).
-      if let Some(by_id) = all.iter().find(|w| w.id == pattern && !w.is_main) {
-        return Ok(by_id.clone());
-      }
+      // Duplicate display names are always ambiguous — even if one worktree's
+      // internal id equals the typed token. Resolving to that id-match would
+      // silently pick one row while the same visible name labels another, so a
+      // user typing the duplicated name (e.g. `gwm remove dup`) is forced to
+      // disambiguate by a unique id instead (Codex review on PR #292, iter 4).
+      // Ids that differ from any duplicated name stay reachable through the
+      // unique-name-not-found branch below.
       let ids = exact.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(", ");
       return Err(GwmError::Other(format!(
         "name '{}' is ambiguous ({} worktrees share it); target one by id: {}",

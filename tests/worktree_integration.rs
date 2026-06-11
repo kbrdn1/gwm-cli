@@ -1215,6 +1215,17 @@ fn rename_worktree_remote_push_carries_a_force_with_lease() {
     "the push must lease the delete against the fetched old tip: {}",
     push.command
   );
+  // Codex review on PR #292 (P1, iter 4): the *new* ref needs an absence lease
+  // (zero-OID expected) so a branch created by another client between the
+  // preflight and the push can't be fast-forwarded while origin/<old> is
+  // deleted in the same atomic push.
+  assert!(
+    push
+      .command
+      .contains("--force-with-lease=feat/#7-leased:0000000000000000000000000000000000000000"),
+    "the push must lease the new ref as create-only (absent): {}",
+    push.command
+  );
   assert!(
     push.command.contains("--atomic"),
     "the push must stay atomic: {}",
@@ -1634,4 +1645,32 @@ fn find_fuzzy_treats_display_name_equal_to_another_id_as_ambiguous() {
 
   // Each worktree stays reachable by its own unambiguous id.
   assert_eq!(worktree::find_fuzzy(&repo, "bid").unwrap().id, "bid");
+}
+
+#[test]
+fn find_fuzzy_duplicate_names_stay_ambiguous_even_when_an_id_matches() {
+  // Codex review on PR #292 (P2, iter 4): when the display name is shown twice
+  // by `gwm list`/the TUI AND one worktree's internal id equals that name, the
+  // exact-name branch must NOT silently resolve to the id-match — a user typing
+  // the visible duplicated name (e.g. `gwm remove dup`) must be forced to
+  // disambiguate instead of acting on one of them by accident.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  // A: id "dup", display name "dup" (basename). B: id "idb", display name "dup".
+  let a = wt_root.path().join("pa").join("dup");
+  let b = wt_root.path().join("pb").join("dup");
+  std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+  std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+  worktree::add(&repo, "dup", &a, "feat/#1-dup", false).unwrap();
+  worktree::add(&repo, "idb", &b, "feat/#2-dup", false).unwrap();
+
+  let err = worktree::find_fuzzy(&repo, "dup").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
+    "a duplicated display name must stay ambiguous even though id 'dup' matches, got: {err:?}"
+  );
+
+  // The non-colliding worktree is still reachable by its unique id.
+  assert_eq!(worktree::find_fuzzy(&repo, "idb").unwrap().id, "idb");
 }
