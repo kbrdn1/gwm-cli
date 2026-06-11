@@ -935,8 +935,13 @@ impl App {
               self.create_form.reset();
               self.view = View::List;
             }
-            // Keep the modal open so the user can fix the form and retry.
-            Err(e) => self.edit_failure = Some(e),
+            // Keep the modal open so the user can fix the form and retry, and
+            // replace the "renaming worktree…" loading status so the bar no
+            // longer reads as in-progress (Codex review on PR #292, P3).
+            Err(e) => {
+              self.status = format!("rename failed: {}", e);
+              self.edit_failure = Some(e);
+            }
           }
           applied = true;
           refresh_applied = true;

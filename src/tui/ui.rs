@@ -3173,7 +3173,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   content.push(Line::from(""));
   content.push(confirm_delete_branch_line(
     app.delete_branch_on_remove,
-    "p",
+    // Derive the live chord (Codex review on PR #292): ToggleDeleteBranch is
+    // `D` since #290, not the pre-#290 `p`, and tracks `[tui.keys]` overrides.
+    &action_chord(&app.keymap, Action::ToggleDeleteBranch, "D"),
     label_w,
     app.theme.accent,
     muted,

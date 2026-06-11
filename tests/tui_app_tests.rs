@@ -2047,6 +2047,43 @@ fn filter_clamping_resets_fetch_state_when_selection_moves() {
 }
 
 #[test]
+fn edit_worktree_failure_replaces_the_loading_status() {
+  // Codex review on PR #292 (P3): a recoverable rename failure keeps the modal
+  // open (edit_failure set) but must not leave the status bar on the
+  // "renaming worktree…" loading label, which reads as still-in-progress.
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app
+    .tasks
+    .request(TaskKind::EditWorktree)
+    .expect("a fresh task generation");
+  app.status = TaskKind::EditWorktree.loading_label().into();
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::EditWorktree(
+    generation,
+    Err("target path already exists".into()),
+  ))
+  .unwrap();
+  app.drain_task_results();
+
+  assert_ne!(
+    app.status,
+    TaskKind::EditWorktree.loading_label(),
+    "the loading label must be replaced after a failure"
+  );
+  assert!(
+    app.status.contains("target path already exists"),
+    "status must surface the rename failure: {}",
+    app.status
+  );
+  assert_eq!(
+    app.edit_failure.as_deref(),
+    Some("target path already exists"),
+    "the modal keeps the failure for inline display"
+  );
+}
+
+#[test]
 fn fullscreen_child_stdout_routes_to_tty_only_when_gwm_stdout_is_captured() {
   // Codex review on PR #292 (P2): a fullscreen launcher (L/O/R) must keep its
   // stdout off the `cd "$(gwm)"` command-substitution pipe. Policy: reroute to

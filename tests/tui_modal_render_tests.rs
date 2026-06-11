@@ -231,6 +231,31 @@ fn confirm_modal_renders_title_target_and_buttons() {
 }
 
 #[test]
+fn confirm_modal_delete_branch_row_uses_the_live_toggle_chord() {
+  // Codex review on PR #292 (P2): ToggleDeleteBranch moved to `D` in #290, but
+  // the delete modal's "Delete Branch" row hardcoded `p`. It must show the live
+  // chord (`D`) — a key that actually toggles the option in the confirm context.
+  let (_dir, mut app) = make_app();
+  app.worktrees.push(deletable_worktree("feat-290-togglekey"));
+  app.list_state.select(Some(app.worktrees.len() - 1));
+  app.view = View::Confirm;
+  let buf = render(&mut app);
+  let row = row_strings(&buf)
+    .into_iter()
+    .find(|r| r.contains("Delete Branch"))
+    .expect("a Delete Branch row");
+  // The ` D ` chip (space-padded) is distinct from the 'D' in "Delete Branch".
+  assert!(
+    row.contains(" D "),
+    "delete-branch row must show the live `D` chord chip: {row:?}"
+  );
+  assert!(
+    !row.contains(" p "),
+    "stale `p` chip must be gone from the delete-branch row: {row:?}"
+  );
+}
+
+#[test]
 fn confirm_modal_renders_delete_loader_while_delete_is_in_flight() {
   let (_dir, mut app) = make_app();
   app.worktrees.push(deletable_worktree("feat-257-loader"));
