@@ -784,6 +784,32 @@ fn run_palette_action(
 /// Errors are never propagated — the user pressed a key in the TUI,
 /// and surfacing failures via the status bar is the documented
 /// contract (see [`Self::run_lazygit`] in the pre-issue-#75 codebase).
+/// Whether a fullscreen child's stdout must be re-routed to the controlling
+/// terminal. True exactly when gwm's own stdout is *not* a tty — i.e. it is
+/// the command-substitution pipe of a `cd "$(gwm)"` wrapper reading the
+/// exit-to-worktree path (#290). Inheriting that pipe would send the child's
+/// TUI frames / ANSI into the captured path (Codex review on PR #292). Pure
+/// so the policy is unit-testable without a real pipe.
+pub fn wants_child_stdout_on_tty(stdout_is_terminal: bool) -> bool {
+  !stdout_is_terminal
+}
+
+/// Point `command`'s stdout at `/dev/tty` when gwm's stdout is captured, so a
+/// fullscreen child never writes into the `cd "$(gwm)"` pipe. No-op when
+/// stdout is already a tty, on non-unix, or when `/dev/tty` can't be opened
+/// (then inherit and accept the captured-pipe risk rather than fail the
+/// launch).
+fn route_fullscreen_child_stdout(command: &mut std::process::Command) {
+  use std::io::IsTerminal;
+  if !wants_child_stdout_on_tty(std::io::stdout().is_terminal()) {
+    return;
+  }
+  #[cfg(unix)]
+  if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+    command.stdout(std::process::Stdio::from(tty));
+  }
+}
+
 fn run_launcher(
   terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   plan: app::LauncherPlan,
@@ -812,7 +838,10 @@ fn run_launcher(
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
-    let spawn = Command::new(bin).args(rest).current_dir(&plan.cwd).status();
+    let mut cmd = Command::new(bin);
+    cmd.args(rest).current_dir(&plan.cwd);
+    route_fullscreen_child_stdout(&mut cmd);
+    let spawn = cmd.status();
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
@@ -880,6 +909,7 @@ fn run_subshell(
   if let Some(dir) = cwd {
     command.current_dir(dir);
   }
+  route_fullscreen_child_stdout(&mut command);
   let spawn = command.status();
 
   // Always restore the TUI, even if the child failed to spawn or exited non-zero.

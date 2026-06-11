@@ -628,6 +628,31 @@ pub fn rename_worktree(
         "origin/{old_branch} has commits not in your local branch; fetch/merge before renaming"
       )));
     }
+    // Prove `origin/<new_branch>` is absent before pushing (Codex review on
+    // PR #292, P1). If it already exists and is an ancestor of our local tip,
+    // the `<new>:<new>` refspec is a fast-forward, not a create — the atomic
+    // push would move that pre-existing remote branch AND delete origin/<old>,
+    // silently overwriting another worktree's branch. Refuse up front and roll
+    // the local rename + move back. (`ls-remote --exit-code` exits 0 when the
+    // ref is found.)
+    let target_exists = Command::new("git")
+      .args([
+        "ls-remote",
+        "--exit-code",
+        "origin",
+        &format!("refs/heads/{new_branch}"),
+      ])
+      .current_dir(branch_dir)
+      .output()
+      .map(|o| o.status.success())
+      .unwrap_or(false);
+    if target_exists {
+      let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+      rollback_move();
+      return Err(GwmError::CommandFailed(format!(
+        "origin/{new_branch} already exists; choose another name or delete it on the remote first"
+      )));
+    }
     // `--atomic` makes the two-refspec push all-or-nothing: without it git can
     // delete `origin/<old>` and then fail on `<new>`, leaving the remote with
     // neither branch — and the local rollback below can't restore a deleted

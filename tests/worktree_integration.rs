@@ -1223,6 +1223,86 @@ fn rename_worktree_remote_push_carries_a_force_with_lease() {
 }
 
 #[test]
+fn rename_worktree_refuses_when_remote_target_branch_already_exists() {
+  // Codex review on PR #292 (P1): if `origin/<new>` already exists, the rename
+  // push would fast-forward/move that pre-existing remote branch AND delete
+  // `origin/<old>` — overwriting someone else's branch. The rename must prove
+  // the destination ref is absent before pushing, and roll back otherwise.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  assert!(Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap()
+    .status
+    .success());
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-8-old");
+  worktree::add(&repo, "feat-8-old", &old_path, "feat/#8-old", false).unwrap();
+  assert!(Command::new("git")
+    .args(["push", "origin", "feat/#8-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap()
+    .status
+    .success());
+
+  // Pre-create `origin/feat/#8-new` (remote only): branch at main HEAD, push,
+  // then drop the local ref so the local `branch -m` doesn't collide.
+  for args in [
+    &["branch", "feat/#8-new"][..],
+    &["push", "origin", "feat/#8-new"][..],
+    &["branch", "-D", "feat/#8-new"][..],
+  ] {
+    assert!(Command::new("git")
+      .args(args)
+      .current_dir(dir.path())
+      .output()
+      .unwrap()
+      .status
+      .success());
+  }
+
+  let new_path = wt_root.path().join("feat-8-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#8-old", &new_path, "feat/#8-new").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::CommandFailed(_)),
+    "an existing remote target must refuse the rename, got: {err:?}"
+  );
+
+  // Full rollback: local old branch + dir restored, new dir gone.
+  assert!(
+    repo.find_branch("feat/#8-old", git2::BranchType::Local).is_ok(),
+    "old local branch must be restored"
+  );
+  assert!(old_path.exists(), "old worktree dir must be restored");
+  assert!(!new_path.exists(), "new worktree dir must not linger");
+  // The remote is untouched: both branches still present, none overwritten.
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", "origin"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(
+    refs.contains("feat/#8-old"),
+    "origin must still carry the old branch: {refs}"
+  );
+  assert!(
+    refs.contains("feat/#8-new"),
+    "the pre-existing remote target must be untouched: {refs}"
+  );
+}
+
+#[test]
 fn rename_worktree_refuses_preexisting_target_without_touching_refs() {
   // Codex review on PR #292: the directory move runs first and is preflighted,
   // so a pre-existing target is rejected before any ref is renamed — the repo

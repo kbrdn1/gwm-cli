@@ -1276,6 +1276,14 @@ fn open_menu_pick_returns_none_when_no_link() {
     "status should mention missing PR link: {}",
     app.status
   );
+  // Codex review on PR #292 (P3): the "press X to link" hint must point at
+  // LinkPrompt's real binding (`i` since #290), not the stale `L` (now
+  // LazyGitFullscreen).
+  assert!(
+    app.status.contains("press i to link"),
+    "status must use LinkPrompt's real chord, not the stale `L`: {}",
+    app.status
+  );
 }
 
 #[test]
@@ -2036,6 +2044,23 @@ fn filter_clamping_resets_fetch_state_when_selection_moves() {
                              // the filter operation can drop selection back to index 0 on the
                              // filtered subset. The contract: any selection-state mutation refreshes.
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn fullscreen_child_stdout_routes_to_tty_only_when_gwm_stdout_is_captured() {
+  // Codex review on PR #292 (P2): a fullscreen launcher (L/O/R) must keep its
+  // stdout off the `cd "$(gwm)"` command-substitution pipe. Policy: reroute to
+  // the tty exactly when gwm's own stdout is NOT a terminal (captured). The
+  // actual /dev/tty open is env-dependent I/O; the decision is pure and pinned
+  // here.
+  assert!(
+    gwm::tui::wants_child_stdout_on_tty(false),
+    "captured stdout (pipe) → child stdout must be rerouted to the tty"
+  );
+  assert!(
+    !gwm::tui::wants_child_stdout_on_tty(true),
+    "a real tty stdout → inherit, no reroute"
+  );
 }
 
 #[test]

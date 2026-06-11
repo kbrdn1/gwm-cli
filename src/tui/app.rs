@@ -2445,6 +2445,17 @@ impl App {
   /// indexes `filtered_indices()`, not the raw vec, so selecting a raw index
   /// under an active filter lands on the wrong visible row or none (Codex
   /// review on PR #292). A no-op when the path is filtered out.
+  /// The chord that opens the issue/PR link prompt (`i` by default since
+  /// #290), resolved from the live keymap so "press X to link" status hints
+  /// track the binding and any `[tui.keys]` override (Codex review on PR
+  /// #292, P3).
+  fn link_prompt_chord(&self) -> String {
+    self
+      .keymap
+      .primary_chord(Action::LinkPrompt)
+      .unwrap_or_else(|| "i".into())
+  }
+
   pub fn reselect_by_path(&mut self, path: &Path) {
     let Some(raw) = self.worktrees.iter().position(|w| w.path == path) else {
       return;
@@ -2754,7 +2765,10 @@ impl App {
     }
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
-      self.status = "nothing linked — press L to link an issue or PR".into();
+      self.status = format!(
+        "nothing linked — press {} to link an issue or PR",
+        self.link_prompt_chord()
+      );
       return;
     }
     let Some(slug) = slug else {
@@ -2994,14 +3008,14 @@ impl App {
       LinkTarget::Issue => match self.github.link.issue {
         Some(n) => github::issue_url(&slug, n),
         None => {
-          self.status = "no issue linked — press L to link one".into();
+          self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
         Some(n) => github::pr_url(&slug, n),
         None => {
-          self.status = "no PR linked — press L to link one".into();
+          self.status = format!("no PR linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
