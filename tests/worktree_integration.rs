@@ -8,6 +8,7 @@ use common::{init_repo, paths_equal};
 use git2::{Repository, Signature, Time};
 use gwm::worktree;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -1029,4 +1030,83 @@ fn is_trunk_branch_matches_configured_and_common_defaults() {
   assert!(worktree::is_trunk_branch("develop", &[]));
   assert!(worktree::is_trunk_branch("release", &["release".to_string()]));
   assert!(!worktree::is_trunk_branch("feat/#287-x", &[]));
+}
+
+// ---- rename_worktree (#290) ----------------------------------------------
+
+#[test]
+fn rename_worktree_renames_local_branch_and_moves_dir() {
+  // No origin remote: rename_worktree renames the local branch and moves the
+  // worktree directory on disk, and reports remote_renamed == false.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let remote_renamed =
+    worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "feat/#1-new").unwrap();
+
+  assert!(!remote_renamed, "no origin remote → remote branch not renamed");
+  assert!(new_path.exists(), "worktree directory must move to the new path");
+  assert!(!old_path.exists(), "old worktree directory must be gone");
+  assert!(
+    repo.find_branch("feat/#1-new", git2::BranchType::Local).is_ok(),
+    "local branch must be renamed to feat/#1-new"
+  );
+  assert!(
+    repo.find_branch("feat/#1-old", git2::BranchType::Local).is_err(),
+    "old local branch must no longer exist"
+  );
+}
+
+#[test]
+fn rename_worktree_renames_remote_branch_when_pushed() {
+  // With the old branch pushed to a bare origin, rename_worktree also renames
+  // the remote branch (delete old ref + push new) and reports remote_renamed.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  let ok = Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap()
+    .status
+    .success();
+  assert!(ok, "bare remote init must succeed");
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-2-old");
+  worktree::add(&repo, "feat-2-old", &old_path, "feat/#2-old", false).unwrap();
+  let pushed = Command::new("git")
+    .args(["push", "origin", "feat/#2-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap();
+  assert!(
+    pushed.status.success(),
+    "push of the old branch must succeed: {}",
+    String::from_utf8_lossy(&pushed.stderr)
+  );
+
+  let new_path = wt_root.path().join("feat-2-new");
+  let remote_renamed =
+    worktree::rename_worktree(dir.path(), &old_path, "feat/#2-old", &new_path, "feat/#2-new").unwrap();
+
+  assert!(remote_renamed, "origin had the branch → remote_renamed must be true");
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", "origin"])
+    .current_dir(&new_path)
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(refs.contains("feat/#2-new"), "remote must carry the new branch: {refs}");
+  assert!(!refs.contains("feat/#2-old"), "remote must drop the old branch: {refs}");
 }

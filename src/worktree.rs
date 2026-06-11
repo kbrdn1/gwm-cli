@@ -415,6 +415,93 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
   Ok(())
 }
 
+/// Run a `git` subcommand in `dir`, returning trimmed stdout on success or a
+/// [`GwmError::CommandFailed`] carrying stderr on a non-zero exit. Shared by
+/// the worktree-rename steps (#290) so each step reports a precise error.
+fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
+  let out = Command::new("git").args(args).current_dir(dir).output()?;
+  if out.status.success() {
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+  } else {
+    Err(GwmError::CommandFailed(
+      String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+  }
+}
+
+/// Rename a worktree's branch (local + remote) and move its directory on
+/// disk (`c` in the TUI, #290). Three steps, each fatal on failure except
+/// the upstream re-track:
+///
+/// 1. `git branch -m <old_branch> <new_branch>` — rename the local branch.
+/// 2. If `<old_branch>` exists on `origin`, `git push origin :<old> <new>:<new>`
+///    renames the remote branch, then `git branch --set-upstream-to` re-points
+///    tracking (non-fatal — a failure leaves the rename done, just untracked).
+/// 3. If the path changes, `git worktree move <old_path> <new_path>` (run from
+///    `workdir`, the main repo, so the CWD is never inside the moved dir).
+///
+/// Returns `true` when the remote branch was also renamed (it existed on
+/// `origin`), `false` when only the local branch + directory changed.
+pub fn rename_worktree(
+  workdir: &Path,
+  old_path: &Path,
+  old_branch: &str,
+  new_path: &Path,
+  new_branch: &str,
+) -> Result<bool> {
+  // 1. Local branch rename.
+  git_in(old_path, &["branch", "-m", old_branch, new_branch])
+    .map_err(|e| GwmError::CommandFailed(format!("local rename failed: {e}")))?;
+
+  // 2. Remote branch rename, only when the old branch is on origin.
+  let remote_exists = Command::new("git")
+    .args(["ls-remote", "--exit-code", "--heads", "origin", old_branch])
+    .current_dir(old_path)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+  let mut remote_renamed = false;
+  if remote_exists {
+    git_in(
+      old_path,
+      &[
+        "push",
+        "origin",
+        &format!(":{old_branch}"),
+        &format!("{new_branch}:{new_branch}"),
+      ],
+    )
+    .map_err(|e| GwmError::CommandFailed(format!("remote rename failed: {e}")))?;
+    // Re-track the new upstream. Non-fatal: the rename is already done.
+    let _ = git_in(
+      old_path,
+      &[
+        "branch",
+        "--set-upstream-to",
+        &format!("origin/{new_branch}"),
+        new_branch,
+      ],
+    );
+    remote_renamed = true;
+  }
+
+  // 3. Move the worktree directory so the slug stays in sync.
+  if new_path != old_path {
+    git_in(
+      workdir,
+      &[
+        "worktree",
+        "move",
+        &old_path.to_string_lossy(),
+        &new_path.to_string_lossy(),
+      ],
+    )
+    .map_err(|e| GwmError::CommandFailed(format!("worktree move failed: {e}")))?;
+  }
+
+  Ok(remote_renamed)
+}
+
 /// One prunable worktree entry as surfaced by `gwm prune --dry-run`
 /// (issue #31). The `reason` field is a human-readable rationale that
 /// is currently hard-coded to "working dir missing" — that is the only
