@@ -3396,10 +3396,10 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.pty_overlay.as_ref().map(|p| &p.kind) {
-    Some(PtyKind::LazyGit) => " lazygit ",
-    Some(PtyKind::Terminal) => " terminal ",
-    Some(PtyKind::Review) => " review ",
-    None => " overlay ",
+    Some(PtyKind::LazyGit) => " LazyGit ",
+    Some(PtyKind::Terminal) => " Terminal ",
+    Some(PtyKind::Review) => " Review ",
+    None => " Overlay ",
   };
   let block = overlay_block(app.theme.accent)
     .title(title)
