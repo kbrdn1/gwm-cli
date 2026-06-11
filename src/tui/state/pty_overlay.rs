@@ -11,6 +11,8 @@
 
 use crate::error::{GwmError, Result};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+#[cfg(unix)]
+use libc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -177,10 +179,39 @@ impl PtyOverlay {
   }
 
   /// Send SIGKILL (or the platform equivalent) to the child process and
-  /// block until it is reaped. SIGKILL is near-instant so the wait is
-  /// effectively free; this guarantees no zombie is left on Unix.
+  /// wait until it is reaped. On Unix the entire process group is killed so
+  /// that sub-processes spawned by the shell (e.g. `yes | head`) are also
+  /// terminated.
+  ///
+  /// On macOS a PTY child that is blocked in a kernel write (D-state) will
+  /// not react to SIGKILL until the PTY master drains enough data to allow
+  /// the write to complete. We therefore keep draining the reader channel
+  /// while polling `try_wait`, breaking any such deadlock. A 500 ms timeout
+  /// guards against the unexpected: after that we fall back to a blocking
+  /// `wait()`.
   pub fn kill(&mut self) {
+    #[cfg(unix)]
+    if let Some(pid) = self.child.process_id() {
+      // portable-pty calls setsid() in pre_exec so the child is session
+      // leader: PGID == PID.  Killing -PGID terminates the whole pipeline.
+      unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    }
     let _ = self.child.kill();
+    // Drain up to 128 buffered chunks per tick so the reader thread can keep
+    // consuming from the PTY master fd, preventing a kernel D-state deadlock.
+    for _ in 0..100 {
+      match self.child.try_wait() {
+        Ok(Some(_)) => return,
+        _ => {
+          for _ in 0..128 {
+            if self.rx.try_recv().is_err() {
+              break;
+            }
+          }
+          std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+      }
+    }
     let _ = self.child.wait();
   }
 
