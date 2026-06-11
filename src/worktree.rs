@@ -1171,12 +1171,25 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
   match exact.len() {
     1 => return Ok(exact[0].clone()),
     n if n > 1 => {
+      // Duplicate display names: let the caller still target one by its unique
+      // internal id (the original slug), and list those ids so they know what
+      // to type (Codex review on PR #292).
+      if let Some(by_id) = all.iter().find(|w| w.id == pattern && !w.is_main) {
+        return Ok(by_id.clone());
+      }
+      let ids = exact.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(", ");
       return Err(GwmError::Other(format!(
-        "name '{}' is ambiguous ({} worktrees share it); disambiguate by path",
-        pattern, n
+        "name '{}' is ambiguous ({} worktrees share it); target one by id: {}",
+        pattern, n, ids
       )));
     }
-    _ => {}
+    // Unique display name not found: allow an exact id match before falling
+    // back to substring search, so a renamed worktree stays reachable by id.
+    _ => {
+      if let Some(by_id) = all.iter().find(|w| w.id == pattern && !w.is_main) {
+        return Ok(by_id.clone());
+      }
+    }
   }
   let pat = pattern.to_lowercase();
   let mut matches: Vec<&WorktreeInfo> = all

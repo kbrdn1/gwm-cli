@@ -1421,4 +1421,13 @@ fn find_fuzzy_reports_ambiguous_duplicate_display_names() {
     matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
     "duplicate display names must resolve as ambiguous, got: {err:?}"
   );
+
+  // ...but each duplicate is still reachable by its unique internal id.
+  let by_id = worktree::find_fuzzy(&repo, "feat-1-dup").unwrap();
+  assert_eq!(by_id.id, "feat-1-dup");
+  assert!(
+    by_id.path.ends_with("a/dup"),
+    "id match must resolve the right worktree: {:?}",
+    by_id.path
+  );
 }

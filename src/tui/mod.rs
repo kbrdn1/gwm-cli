@@ -938,10 +938,13 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut Ap
     return Ok(());
   };
   use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
-  let path = app
-    .selected()
-    .map(|w| w.path.clone())
-    .unwrap_or_else(|| app.workdir.clone());
+  // Macros run in the selected worktree. With nothing selected (e.g. a filter
+  // with no matches), refuse rather than silently running in the main repo —
+  // a destructive command must not hit the wrong tree (Codex review on #292).
+  let Some(path) = app.selected().map(|w| w.path.clone()) else {
+    app.status = format!("macro{}: nothing selected", n);
+    return Ok(());
+  };
 
   #[cfg(windows)]
   let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
