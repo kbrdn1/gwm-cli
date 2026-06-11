@@ -8,6 +8,7 @@ use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
+use super::state::pty_overlay::PtyOverlay;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
 use super::theme::Theme;
@@ -82,6 +83,12 @@ pub enum View {
   /// (repo / user / default). Opened on `4`, scrolled like the help
   /// overlay; state lives on [`App::config_panel`].
   Config,
+  /// Embedded PTY overlay (issue #35). A ~90% fullscreen modal that renders
+  /// a live PTY session (lazygit on `l`, native terminal on `o`) over the
+  /// worktree list. All keys are forwarded to the child process; `Esc`
+  /// kills the child and returns to the list. State lives on
+  /// [`App::pty_overlay`].
+  Pty,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -339,6 +346,11 @@ pub struct App {
   /// config was loaded from — `None` in tests / sandboxed runs with no
   /// global file, matching [`Config::load_layered`]'s injection point.
   global_path: Option<PathBuf>,
+
+  /// Live PTY overlay state (issue #35). `Some` while a lazygit or native
+  /// terminal PTY session is open; `None` at all other times.
+  /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
+  pub pty_overlay: Option<PtyOverlay>,
 }
 
 impl App {
@@ -422,6 +434,7 @@ impl App {
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
       global_path: global_path.map(Path::to_path_buf),
+      pty_overlay: None,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -1208,6 +1221,7 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
+      View::Pty => super::ui::HintContext::Pty,
       View::List => self.pane_hint_context(),
     }
   }
@@ -1277,6 +1291,26 @@ impl App {
     }
     self.config_panel.reset();
     self.view = View::Config;
+  }
+
+  // ── PTY overlay (issue #35) ────────────────────────────────────────────
+
+  /// Open the PTY overlay: store `pty` and switch to [`View::Pty`].
+  pub fn open_pty_overlay(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
+    self.pty_overlay = Some(pty);
+    self.view = View::Pty;
+  }
+
+  /// Close the PTY overlay: kill the child process, drop the state, and
+  /// return to [`View::List`]. Safe to call when no overlay is open.
+  pub fn close_pty_overlay(&mut self) {
+    if let Some(ref mut pty) = self.pty_overlay {
+      pty.kill();
+    }
+    self.pty_overlay = None;
+    if self.view == View::Pty {
+      self.view = View::List;
+    }
   }
 
   /// Activate the selected Settings field (issue #279): cycle a choice field

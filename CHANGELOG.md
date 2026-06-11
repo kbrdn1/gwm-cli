@@ -10,6 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **PTY overlay for lazygit and native terminal** (issue #35): press `l` to
+  open lazygit inside a ~90 % fullscreen embedded PTY overlay; press `o` to
+  open a native `$SHELL` session. Both overlays stay inside the TUI — no
+  alternate screen swap. `Esc` closes the overlay (gwm intercepts it); typing
+  `q` inside lazygit quits lazygit and auto-closes the overlay via process-exit
+  detection. The new keybindings (`git_tui_overlay`, `open_terminal_overlay`)
+  are fully rebindable in `[tui.keys]`. Powered by `portable-pty 0.9` +
+  `tui-term 0.3` (`tui_term::vt100` — bundled vt100 0.16).
+
+### Dependencies
+
+- Added `portable-pty 0.9` (cross-platform PTY pair) and `tui-term 0.3`
+  (ratatui widget rendering a vt100 parser buffer).
+
 ## Past releases
 
 In reverse chronological order:

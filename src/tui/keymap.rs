@@ -121,9 +121,12 @@ define_actions! {
   ToggleDeleteBranch => "delete_branch",
   // Hand-offs
   GitTui            => "git_tui",
+  GitTuiOverlay     => "git_tui_overlay",
   Review            => "review",
+  ReviewOverlay     => "review_overlay",
   Yank              => "yank",
   Open              => "open",
+  OpenTerminalOverlay => "open_terminal_overlay",
   OpenMenu          => "open_menu",
   OpenDocs          => "open_docs",
   LinkPrompt        => "link",
@@ -397,7 +400,7 @@ impl Keymap {
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
       def(Action::Filter, &["/"]),
-      def(Action::Refresh, &["f", "r"]),
+      def(Action::Refresh, &["f"]),
       // `s` is taken by ToggleSidebarMode, so Sync defaults to `S` — an
       // uppercase lifecycle verb alongside `F` (FetchGithub) / `R` (Review).
       def(Action::Sync, &["S"]),
@@ -405,10 +408,20 @@ impl Keymap {
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),
       def(Action::ToggleDeleteBranch, &["p"]),
-      def(Action::GitTui, &["l"]),
+      // Issue #35: `l` now opens the embedded lazygit PTY overlay instead
+      // of suspending the TUI fullscreen. `o` opens an embedded native
+      // terminal PTY overlay. The old fullscreen actions (`GitTui`, `Open`)
+      // remain in the Action enum so users who prefer the old behaviour can
+      // rebind them via `[tui.keys]` in `.gwm.toml`; they have no default
+      // binding out of the box.
+      def(Action::GitTuiOverlay, &["l"]),
       def(Action::Review, &["R"]),
+      // Issue #35: `r` (lowercase) opens the review tool in an embedded PTY
+      // overlay instead of suspending the TUI fullscreen. The uppercase `R`
+      // (Action::Review) keeps its fullscreen behaviour for users who prefer it.
+      def(Action::ReviewOverlay, &["r"]),
       def(Action::Yank, &["y"]),
-      def(Action::Open, &["o"]),
+      def(Action::OpenTerminalOverlay, &["o"]),
       def(Action::OpenMenu, &["O"]),
       def(Action::OpenDocs, &["."]),
       def(Action::LinkPrompt, &["L"]),
@@ -432,12 +445,25 @@ impl Keymap {
   /// left untouched on error so callers can surface the message and
   /// move on.
   pub fn apply_override(&mut self, action: Action, chords: Vec<Vec<KeyStroke>>) -> Result<()> {
+    // Build the candidate list. For default bindings on other actions, silently
+    // vacate any chord that the new user override is claiming — user intent is
+    // explicit and wins over shipped defaults. User-vs-user conflicts still
+    // fail validation below.
+    let new_chord_set: std::collections::HashSet<&[KeyStroke]> = chords.iter().map(|c| c.as_slice()).collect();
     let mut candidate: Vec<(Action, Vec<Vec<KeyStroke>>)> = self
       .entries
       .iter()
       .map(|b| {
         if b.action == action {
           (b.action, chords.clone())
+        } else if b.source == Source::Default {
+          let pruned: Vec<Vec<KeyStroke>> = b
+            .chords
+            .iter()
+            .filter(|c| !new_chord_set.contains(c.as_slice()))
+            .cloned()
+            .collect();
+          (b.action, pruned)
         } else {
           (b.action, b.chords.clone())
         }
@@ -447,6 +473,14 @@ impl Keymap {
       candidate.push((action, chords.clone()));
     }
     Self::validate(&candidate)?;
+
+    // Commit: vacate the claimed chords from default bindings on other actions,
+    // then update (or insert) the overridden action's binding.
+    for entry in self.entries.iter_mut() {
+      if entry.action != action && entry.source == Source::Default {
+        entry.chords.retain(|c| !new_chord_set.contains(c.as_slice()));
+      }
+    }
 
     let mut replaced = false;
     for entry in self.entries.iter_mut() {

@@ -33,6 +33,7 @@ pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
+pub use state::pty_overlay::{key_to_bytes, PtyKind, PtyOverlay};
 pub use state::sidebar::SidebarState;
 
 /// Ordered list of clipboard tools to try for the host OS (issue #73).
@@ -183,6 +184,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
     }
     app.maybe_auto_refresh(now);
 
+    // Issue #35: drain PTY output and detect process death before drawing.
+    // `poll_bytes` feeds pending reader-thread bytes into the vt100 parser
+    // so the next frame reflects the freshest output. If the process has
+    // already exited, close the overlay so the list view is rendered instead.
+    if app.view == View::Pty {
+      let is_dead = app.pty_overlay.as_mut().is_none_or(|p| {
+        p.poll_bytes();
+        !p.is_alive()
+      });
+      if is_dead {
+        app.close_pty_overlay();
+      }
+    }
+
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
     // Tick the confirm-overlay safety countdown (issue #30) before
@@ -209,16 +224,43 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       }
     }
 
-    if !event::poll(Duration::from_millis(200))? {
+    // Issue #35: tighten the poll cadence while the PTY is open so typed
+    // characters and arrow keys feel responsive (< 50 ms round-trip vs.
+    // the normal 200 ms status-refresh interval).
+    let poll_ms = if app.view == View::Pty { 50 } else { 200 };
+    if !event::poll(Duration::from_millis(poll_ms))? {
       continue;
     }
-    let Event::Key(key) = event::read()? else { continue };
+    let ev = event::read()?;
+    // Issue #35: resize the PTY when the host terminal is resized so the
+    // child program (lazygit, shell) sees the updated dimensions.
+    if let Event::Resize(cols, rows) = ev {
+      if app.view == View::Pty {
+        if let Some(ref mut pty) = app.pty_overlay {
+          // 90% × 90% overlay minus overlay_block overhead (6 cols, 4 rows).
+          let inner_cols = ((cols as u32 * 90 / 100) as u16).saturating_sub(6).max(10);
+          let inner_rows = ((rows as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+          pty.resize(inner_cols, inner_rows);
+        }
+      }
+      terminal.clear()?;
+      continue;
+    }
+    let Event::Key(key) = ev else { continue };
     if key.kind != KeyEventKind::Press {
       continue;
     }
 
     // Global keys
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+      // Inside the PTY overlay, Ctrl+C must reach the child process (interrupt
+      // a running command) rather than quit gwm. Forward the byte and continue.
+      if app.view == View::Pty {
+        if let Some(ref mut pty) = app.pty_overlay {
+          let _ = pty.write_key(key);
+        }
+        continue;
+      }
       app.should_quit = true;
       if app.can_quit_now() {
         break;
@@ -444,6 +486,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
         LinkPromptKey::Cancel => app.link_prompt_cancel(),
         LinkPromptKey::Handled => {}
       },
+      // Issue #35: PTY overlay. All keys are forwarded to the child process
+      // via `write_key` — lazygit and the shell consume them directly. `Esc`
+      // is the only key gwm intercepts: it kills the child and closes the
+      // overlay so the user can exit even if the program does not respond to
+      // `q`. Process death (natural exit via lazygit's `q`) is detected by
+      // the pre-draw `is_alive()` check above and also closes the overlay.
+      View::Pty => match key.code {
+        KeyCode::Esc => app.close_pty_overlay(),
+        _ => {
+          if let Some(ref mut pty) = app.pty_overlay {
+            let _ = pty.write_key(key);
+          }
+        }
+      },
       // Issue #32: command palette overlay. Palette entry names
       // are restricted to `[a-z0-9_-]` (see
       // `tests/palette_tests.rs::registry_names_are_unique_and_lowercase_words`),
@@ -564,9 +620,70 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         run_subshell(terminal, &command, &[&path_str], None, app, "editor")?
       }
     },
+    // Issue #35: open a native terminal ($SHELL) inside an embedded PTY
+    // overlay rooted at the selected worktree's path.
+    Action::OpenTerminalOverlay => {
+      let cwd = app.selected().map(|wt| wt.path.clone());
+      match cwd {
+        None => app.status = "nothing selected".into(),
+        Some(path) => {
+          #[cfg(windows)]
+          let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+          #[cfg(not(windows))]
+          let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+          let sz = terminal.size().unwrap_or_default();
+          let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+          let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+          match PtyOverlay::spawn(PtyKind::Terminal, &[shell.as_str()], &path, inner_cols, inner_rows) {
+            Ok(pty) => app.open_pty_overlay(pty),
+            Err(e) => app.status = format!("terminal overlay failed: {}", e),
+          }
+        }
+      }
+    }
     Action::GitTui => {
       if let Some(plan) = app.prepare_git_tui() {
         run_launcher(terminal, plan, app)?;
+      }
+    }
+    // Issue #35: open lazygit inside an embedded PTY overlay so the TUI
+    // stays alive. Reuses `prepare_git_tui` to expand the `[git_tui]`
+    // template (honouring any user override in .gwm.toml), then spawns it
+    // in a PTY sized to match the 90% × 90% overlay inner area.
+    Action::GitTuiOverlay => {
+      if let Some(plan) = app.prepare_git_tui() {
+        let sz = terminal.size().unwrap_or_default();
+        // 90% × 90% overlay minus overlay_block overhead (6 cols, 4 rows).
+        let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+        let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+        let argv: Vec<String> = plan.expanded.argv.clone();
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        match PtyOverlay::spawn(PtyKind::LazyGit, &argv_refs, &plan.cwd, inner_cols, inner_rows) {
+          Ok(pty) => app.open_pty_overlay(pty),
+          Err(e) => app.status = format!("lazygit overlay failed: {}", e),
+        }
+      }
+    }
+    // Issue #35: `r` (lowercase) opens the review tool in an embedded PTY
+    // overlay. Same contract as `R` (Action::Review) but spawns via PTY
+    // instead of suspending the TUI fullscreen. Picker-gated: reviews are
+    // branch-specific, meaningless inside `gwm switch`.
+    Action::ReviewOverlay if !app.picker_mode => {
+      if let Some(mut plan) = app.prepare_review() {
+        let sz = terminal.size().unwrap_or_default();
+        let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+        let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+        let argv: Vec<String> = plan.expanded.argv.clone();
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        // Transfer diff_file ownership into the overlay so it stays alive
+        // until the child exits (issue #291).
+        match PtyOverlay::spawn(PtyKind::Review, &argv_refs, &plan.cwd, inner_cols, inner_rows) {
+          Ok(mut pty) => {
+            pty.diff_file = plan.expanded.diff_file.take();
+            app.open_pty_overlay(pty);
+          }
+          Err(e) => app.status = format!("review overlay failed: {}", e),
+        }
       }
     }
     Action::Create if !app.picker_mode => app.enter_create(),

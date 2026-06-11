@@ -4,6 +4,7 @@ use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
+use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
@@ -162,6 +163,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Pty => draw_pty_overlay(f, app),
     View::List => {}
   }
 }
@@ -1697,6 +1699,9 @@ pub enum HintContext {
   Report,
   /// Keybindings help overlay.
   Help,
+  /// PTY overlay (embedded lazygit / terminal). All keys pass through to the
+  /// child process; Esc is the only gwm-level escape hatch.
+  Pty,
 }
 
 impl HintContext {
@@ -1714,6 +1719,7 @@ impl HintContext {
       HintContext::CommandPalette => "command",
       HintContext::Report => "report",
       HintContext::Help => "help",
+      HintContext::Pty => "terminal",
     }
   }
 
@@ -1798,6 +1804,7 @@ impl HintContext {
         Hint::Lit("h/l", "pan"),
         Hint::Lit("Esc/q", "close"),
       ],
+      HintContext::Pty => &[Hint::Lit("Esc", "close")],
     }
   }
 
@@ -3333,6 +3340,36 @@ fn draw_report(f: &mut Frame, app: &App) {
     Paragraph::new(modal_hint_for_context(HintContext::Report, &app.keymap, &app.theme)),
     layout[4],
   );
+}
+
+// ── PTY overlay (issue #35) ────────────────────────────────────────────────
+
+/// Render the embedded PTY overlay (lazygit or native terminal). The overlay
+/// occupies ~90 % × 90 % of the terminal, centred and drawn over the list
+/// view. The rendered PTY content fills the entire inner area of the block
+/// so the child process gets as much screen real-estate as possible.
+fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
+  let term = f.area();
+  let area = centered(90, 90, term);
+
+  f.render_widget(Clear, area);
+
+  let title = match app.pty_overlay.as_ref().map(|p| &p.kind) {
+    Some(PtyKind::LazyGit) => " lazygit ",
+    Some(PtyKind::Terminal) => " terminal ",
+    Some(PtyKind::Review) => " review ",
+    None => " overlay ",
+  };
+  let block = overlay_block(app.theme.accent)
+    .title(title)
+    .title_alignment(ratatui::layout::Alignment::Center);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+
+  if let Some(pty) = app.pty_overlay.as_ref() {
+    let pseudo_terminal = tui_term::widget::PseudoTerminal::new(pty.parser.screen());
+    f.render_widget(pseudo_terminal, inner);
+  }
 }
 
 fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
