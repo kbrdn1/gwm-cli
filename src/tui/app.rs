@@ -1263,9 +1263,7 @@ impl App {
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
-      // The edit-worktree modal (#290) is a simple inline input; reuse the
-      // underlying pane context so the statusbar hint keeps making sense.
-      View::Edit => self.pane_hint_context(),
+      View::Edit => HintContext::Rename,
       View::List => self.pane_hint_context(),
     }
   }

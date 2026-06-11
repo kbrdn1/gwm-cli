@@ -1704,6 +1704,8 @@ pub enum HintContext {
   /// PTY overlay (embedded lazygit / terminal). All keys pass through to the
   /// child process; Esc is the only gwm-level escape hatch.
   Pty,
+  /// Branch-rename modal (`View::Edit`, #290).
+  Rename,
 }
 
 impl HintContext {
@@ -1722,6 +1724,7 @@ impl HintContext {
       HintContext::Report => "report",
       HintContext::Help => "help",
       HintContext::Pty => "terminal",
+      HintContext::Rename => "rename",
     }
   }
 
@@ -1807,6 +1810,7 @@ impl HintContext {
         Hint::Lit("Esc/q", "close"),
       ],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
+      HintContext::Rename => &[Hint::Lit("Enter", "confirm"), Hint::Lit("Esc", "cancel")],
     }
   }
 
@@ -3580,29 +3584,56 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 /// bottom of the screen, styled like the filter bar. `Enter` submits, `Esc`
 /// cancels. State lives on `App::edit_branch_buffer`.
 fn draw_edit_worktree(f: &mut Frame, app: &App) {
-  let area = f.area();
-  // One row at the very bottom of the screen.
-  let row = Rect {
-    x: area.x,
-    y: area.y + area.height.saturating_sub(1),
-    width: area.width,
-    height: 1,
-  };
   let accent = app.theme.accent;
-  let label = " rename branch: ";
-  let value_w = (row.width as usize).saturating_sub(label.len());
-  let value = &app.edit_branch_buffer;
-  let display: String = if value.len() > value_w {
-    format!("…{}", &value[value.len().saturating_sub(value_w.saturating_sub(1))..])
-  } else {
-    format!("{:<width$}", value, width = value_w)
-  };
-  let line = Line::from(vec![
-    Span::styled(label, Style::default().fg(accent).add_modifier(Modifier::BOLD)),
-    Span::styled(display, Style::default().bg(app.theme.selection_bg)),
-  ]);
-  f.render_widget(Clear, row);
-  f.render_widget(Paragraph::new(line), row);
+  let muted = app.theme.muted;
+  let clean = app.theme.clean;
+  let surface = app.theme.selection_bg;
+  let term = f.area();
+
+  let block = overlay_block(clean);
+  let outer = centered_box(70, 72, 1, term);
+  let inner_w = block.inner(outer).width as usize;
+  let label_w = 6usize; // "Branch"
+  let gutter = 2 + label_w + 2;
+  let value_w = inner_w.saturating_sub(gutter);
+
+  let old_branch = app.selected().and_then(|w| w.branch.as_deref()).unwrap_or("(none)");
+  let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From : ".len()));
+
+  let mut lines = overlay_title_lines("Rename Branch", clean);
+  lines.push(Line::from(vec![
+    Span::raw("  From : "),
+    Span::styled(old_display, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &format!("{:<label_w$}", "Branch"),
+    &app.edit_branch_buffer,
+    true,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+
+  let height = lines.len() as u16 + 2 /* hint gap + hint */ + 2 /* border */ + 2 /* padding */;
+  let area = centered_box(70, 72, height, term);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // title + fields
+      Constraint::Length(1), // spacer
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
+
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(lines), inner[0]);
+  f.render_widget(
+    Paragraph::new(modal_hint_for_context(HintContext::Rename, &app.keymap, &app.theme)),
+    inner[2],
+  );
 }
 
 fn draw_command_palette(f: &mut Frame, app: &App) {
