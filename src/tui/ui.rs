@@ -3822,8 +3822,12 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   let mut lines: Vec<Line<'static>> = Vec::new();
 
   if link.issue.is_none() && link.pr.is_none() {
+    // Derive LinkPrompt's chord from the live keymap so the hint tracks the
+    // binding (and any `[tui.keys]` override) instead of drifting — the `L`
+    // hardcoded pre-#290 now belongs to LazyGitFullscreen.
+    let chord = action_chord(&app.keymap, Action::LinkPrompt, "i");
     lines.push(Line::from(Span::styled(
-      trunc("no link · press L to link", max_width),
+      trunc(&format!("no link · press {chord} to link"), max_width),
       Style::default().fg(app.theme.muted),
     )));
     return lines;

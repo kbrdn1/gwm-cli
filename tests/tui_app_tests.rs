@@ -3552,6 +3552,27 @@ fn github_status_idle_body_does_not_render_fetch_prompt() {
 }
 
 #[test]
+fn github_status_no_link_hint_uses_the_real_link_prompt_chord() {
+  // Regression (#290 keymap redesign): the "no link" hint hardcoded `L`,
+  // which pre-#290 opened the link menu but is now LazyGitFullscreen. The
+  // hint must derive LinkPrompt's real chord (`i`) from the keymap so it
+  // never drifts from the binding (and tracks `[tui.keys]` overrides).
+  // A branch with no `#N` auto-detects no issue, so the link is empty and
+  // the no-link row renders.
+  let (_dir, _repo, app) = make_app_on_branch("scratch");
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+    .collect::<Vec<_>>()
+    .join("");
+  assert!(text.contains("no link"), "the no-link hint should render: {text}");
+  assert!(
+    text.contains("press i to link"),
+    "hint must use LinkPrompt's real chord, not the stale `L`: {text}"
+  );
+}
+
+#[test]
 fn github_status_loading_uses_the_animated_spinner_frame() {
   use gwm::tui::FetchKey;
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
