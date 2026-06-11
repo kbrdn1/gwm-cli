@@ -1784,10 +1784,12 @@ impl App {
   fn spawn_pull(&self, generation: u64, path: PathBuf, name: String) {
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let result = std::process::Command::new("git")
-        .args(["pull"])
-        .current_dir(&path)
-        .output()
+      let mut cmd = std::process::Command::new("git");
+      cmd.args(["pull"]).current_dir(&path);
+      // Route through the command-log chokepoint so `git pull` lands in the
+      // Command Logs modal (#290) — a user-triggered mutating op the user
+      // expects to find in the transcript.
+      let result = crate::command_log::run_logged(&mut cmd, "git pull".to_string())
         .map_err(|e| e.to_string())
         .and_then(|out| {
           if out.status.success() {
@@ -1824,10 +1826,12 @@ impl App {
   fn spawn_push(&self, generation: u64, path: PathBuf, name: String) {
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let result = std::process::Command::new("git")
-        .args(["push"])
-        .current_dir(&path)
-        .output()
+      let mut cmd = std::process::Command::new("git");
+      cmd.args(["push"]).current_dir(&path);
+      // Route through the command-log chokepoint so `git push` lands in the
+      // Command Logs modal (#290). git writes its progress to stderr, so the
+      // status line still reads stderr on success.
+      let result = crate::command_log::run_logged(&mut cmd, "git push".to_string())
         .map_err(|e| e.to_string())
         .and_then(|out| {
           if out.status.success() {

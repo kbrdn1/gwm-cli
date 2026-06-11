@@ -439,7 +439,13 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
 /// [`GwmError::CommandFailed`] carrying stderr on a non-zero exit. Shared by
 /// the worktree-rename steps (#290) so each step reports a precise error.
 fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
-  let out = Command::new("git").args(args).current_dir(dir).output()?;
+  let mut cmd = Command::new("git");
+  cmd.args(args).current_dir(dir);
+  // Route through the command-log chokepoint so the rename's mutating steps
+  // (`worktree move`, `branch -m`, the lease `fetch`, `push --atomic`) surface
+  // in the Command Logs modal (#290). `git_in` is rename-only, so this never
+  // spams the log with read-only sidebar previews.
+  let out = crate::command_log::run_logged(&mut cmd, format!("git {}", args.join(" ")))?;
   if out.status.success() {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
   } else {
@@ -858,17 +864,33 @@ fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
 /// non-zero exit (or the spawn error if `git` could not be launched).
 ///
 /// This is the single shell-out helper for the read-side git invocations
-/// (sidebar previews, PR-body fillers) and for `gwm sync`'s mutating steps
-/// (issue #237 deduped five hand-rolled copies of this exact pattern).
+/// (sidebar previews, PR-body fillers). Read-only previews fire on every
+/// selection change, so this variant is deliberately **not** logged — see
+/// [`run_git_logged`] for the mutating-step counterpart used by `gwm sync`.
 /// Callers that need trimming, truncation, or field parsing post-process the
 /// returned `String` themselves.
 pub fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
-  let out = Command::new("git")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
+  run_git_inner(dir, args, false)
+}
+
+/// Like [`run_git`] but records the call on the process-global command log so
+/// it surfaces in the Command Logs modal (#290). Used for `gwm sync`'s
+/// mutating steps (`fetch` / `rebase` / `merge` / `--abort`), which are
+/// user-triggered operations the user expects to find in the transcript —
+/// unlike the read-only previews that go through [`run_git`].
+pub fn run_git_logged(dir: &Path, args: &[&str]) -> Result<String> {
+  run_git_inner(dir, args, true)
+}
+
+fn run_git_inner(dir: &Path, args: &[&str], log: bool) -> Result<String> {
+  let mut cmd = Command::new("git");
+  cmd.arg("-C").arg(dir).args(args);
+  let out = if log {
+    crate::command_log::run_logged(&mut cmd, format!("git {}", args.join(" ")))
+  } else {
+    cmd.output()
+  }
+  .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
   if !out.status.success() {
     return Err(GwmError::CommandFailed(format!(
       "git {} exited {}: {}",

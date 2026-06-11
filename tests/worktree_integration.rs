@@ -1079,6 +1079,45 @@ fn rename_worktree_renames_local_branch_and_moves_dir() {
 }
 
 #[test]
+fn rename_worktree_records_its_git_steps_in_the_command_log() {
+  // The rename action (`c`, #290) shells out to `git worktree move` +
+  // `git branch -m` through the captured-output path; those mutating steps
+  // must surface in the Command Logs modal. Before this fix they ran through
+  // an unlogged helper, so the user could not find them in the log.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-99-cmdlog-old");
+  worktree::add(&repo, "feat-99-cmdlog-old", &old_path, "feat/#99-cmdlog-old", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-99-cmdlog-new");
+  worktree::rename_worktree(
+    dir.path(),
+    &old_path,
+    "feat/#99-cmdlog-old",
+    &new_path,
+    "feat/#99-cmdlog-new",
+  )
+  .unwrap();
+
+  // Presence by the unique branch name: a sibling test cannot collide.
+  let recorded = gwm::command_log::snapshot();
+  assert!(
+    recorded
+      .iter()
+      .any(|e| e.command.starts_with("git worktree move") && e.command.contains("feat-99-cmdlog-new")),
+    "the `git worktree move` step must be recorded; got: {:?}",
+    recorded.iter().map(|e| &e.command).collect::<Vec<_>>()
+  );
+  assert!(
+    recorded
+      .iter()
+      .any(|e| e.command.starts_with("git branch -m") && e.command.contains("feat/#99-cmdlog-new")),
+    "the `git branch -m` step must be recorded"
+  );
+}
+
+#[test]
 fn rename_worktree_renames_remote_branch_when_pushed() {
   // With the old branch pushed to a bare origin, rename_worktree also renames
   // the remote branch (delete old ref + push new) and reports remote_renamed.
