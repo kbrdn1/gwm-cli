@@ -561,7 +561,7 @@ impl TuiKeysConfig {
 
     let mut km = Keymap::defaults();
     for (action_slug, chord_strings) in &self.bindings {
-      let action = Action::from_slug(action_slug).ok_or_else(|| {
+      let action = Action::from_slug_compat(action_slug).ok_or_else(|| {
         GwmError::Config(format!(
           "tui.keys: unknown action {:?} (run `gwm tui keys` for the full list)",
           action_slug

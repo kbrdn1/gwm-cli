@@ -148,6 +148,34 @@ define_actions! {
   CommandPalette    => "command_palette",
 }
 
+impl Action {
+  /// Like [`Action::from_slug`] but also accepts the pre-#290 slugs that were
+  /// renamed. Use this in config deserialization so existing `.gwm.toml` files
+  /// with the old key names keep working after the upgrade.
+  ///
+  /// The canonical slug is tried first; only on a miss do the compat aliases
+  /// fire. The aliases are intentionally one-way: `Action::slug()` still
+  /// returns the new canonical slug, so `gwm tui keys` and the help overlay
+  /// stay up-to-date.
+  pub fn from_slug_compat(s: &str) -> Option<Self> {
+    if let Some(a) = Self::from_slug(s) {
+      return Some(a);
+    }
+    // Compat aliases for slugs that were renamed in #290.
+    match s {
+      "git_tui" => Some(Action::LazyGitFullscreen),
+      "git_tui_overlay" => Some(Action::LazyGitPty),
+      "review" => Some(Action::ReviewFullscreen),
+      "review_overlay" => Some(Action::ReviewPty),
+      "yank" => Some(Action::YankPath),
+      "open" => Some(Action::TerminalFullscreen),
+      "open_terminal_overlay" => Some(Action::TerminalPty),
+      "open_menu" => Some(Action::BrowseLinks),
+      _ => None,
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Key-string parser
 // ---------------------------------------------------------------------------

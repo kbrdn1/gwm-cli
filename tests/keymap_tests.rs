@@ -532,3 +532,44 @@ fn user_override_review_fullscreen_reclaims_r_from_pty_default() {
     "r must resolve to ReviewFullscreen after the user override"
   );
 }
+
+// ---------------------------------------------------------------------------
+// Backward-compatibility aliases (issue #290 slug renames)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_slug_compat_accepts_pre_290_slugs() {
+  // Users with existing .gwm.toml [tui.keys] blocks that use the pre-#290
+  // slug names must not get a config error after upgrading.
+  let cases = [
+    ("git_tui", Action::LazyGitFullscreen),
+    ("git_tui_overlay", Action::LazyGitPty),
+    ("review", Action::ReviewFullscreen),
+    ("review_overlay", Action::ReviewPty),
+    ("yank", Action::YankPath),
+    ("open", Action::TerminalFullscreen),
+    ("open_terminal_overlay", Action::TerminalPty),
+    ("open_menu", Action::BrowseLinks),
+  ];
+  for (old_slug, expected) in cases {
+    assert_eq!(
+      Action::from_slug_compat(old_slug),
+      Some(expected),
+      "compat alias for {:?} must resolve to {:?}",
+      old_slug,
+      expected
+    );
+  }
+}
+
+#[test]
+fn from_slug_compat_still_resolves_canonical_slugs() {
+  // The compat wrapper must not break the canonical path.
+  assert_eq!(
+    Action::from_slug_compat("lazygit_fullscreen"),
+    Some(Action::LazyGitFullscreen)
+  );
+  assert_eq!(Action::from_slug_compat("yank_path"), Some(Action::YankPath));
+  assert_eq!(Action::from_slug_compat("down"), Some(Action::Down));
+  assert_eq!(Action::from_slug_compat("nonexistent_slug_xyz"), None);
+}
