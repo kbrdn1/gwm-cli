@@ -328,6 +328,56 @@ fn status_hints_resolve_user_rebindings() {
 }
 
 #[test]
+fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
+  // The footer is truncated right-to-left when narrow, so the order is also a
+  // priority: actions are grouped by family (worktree lifecycle → act on the
+  // selected worktree → find / navigate panes → global) with the most-used
+  // verb of each family first.
+  use gwm::tui::keymap::Keymap;
+  let labels: Vec<String> = HintContext::Worktrees
+    .resolve(&Keymap::defaults())
+    .into_iter()
+    .map(|(_, l)| l)
+    .collect();
+  assert_eq!(
+    labels,
+    vec![
+      "new", "del", "boot", // lifecycle
+      "open", "git", "review", "yank", // act on the selected worktree
+      "filter", "status", "logs", "settings", // find / navigate
+      "help", "quit", // global
+    ],
+    "worktrees footer hints must follow the grouped order"
+  );
+}
+
+#[test]
+fn status_hints_are_grouped_read_then_sidebar_then_navigate_then_global() {
+  use gwm::tui::keymap::Keymap;
+  let labels: Vec<String> = HintContext::Status
+    .resolve(&Keymap::defaults())
+    .into_iter()
+    .map(|(_, l)| l)
+    .collect();
+  assert_eq!(
+    labels,
+    vec![
+      "scroll",
+      "fetch", // read the status pane
+      "mode",
+      "layout", // sidebar mode / layout
+      "worktrees",
+      "filter",
+      "logs",
+      "settings", // navigate panes
+      "help",
+      "quit", // global
+    ],
+    "status footer hints must follow the grouped order"
+  );
+}
+
+#[test]
 fn confirm_hints_include_delete_branch_toggle_binding() {
   use gwm::tui::keymap::Keymap;
   let resolved = HintContext::Confirm.resolve(&Keymap::defaults());

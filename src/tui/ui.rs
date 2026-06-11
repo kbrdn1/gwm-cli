@@ -1735,39 +1735,52 @@ impl HintContext {
   fn hint_specs(self) -> &'static [Hint] {
     use super::keymap::Action::*;
     match self {
+      // Grouped by family, most-used verb of each first; the order doubles as
+      // the right-to-left truncation priority (#290 footer reorg).
       HintContext::Worktrees => &[
+        // Worktree lifecycle.
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
+        // Act on the selected worktree.
         Hint::Key(TerminalFullscreen, "open"),
-        Hint::Key(YankPath, "yank"),
         Hint::Key(LazyGitFullscreen, "git"),
         Hint::Key(ReviewFullscreen, "review"),
+        Hint::Key(YankPath, "yank"),
+        // Find / navigate panes.
+        Hint::Key(Filter, "filter"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
         Hint::Key(ConfigPanel, "settings"),
-        Hint::Key(Filter, "filter"),
+        // Global.
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
       HintContext::Status => &[
+        // Read the status pane.
         Hint::Key(Down, "scroll"),
+        Hint::Key(FetchGithub, "fetch"),
+        // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
-        Hint::Key(FetchGithub, "fetch"),
+        // Navigate panes.
         Hint::Key(FocusWorktrees, "worktrees"),
+        Hint::Key(Filter, "filter"),
         Hint::Key(CommandLogs, "logs"),
         Hint::Key(ConfigPanel, "settings"),
-        Hint::Key(Filter, "filter"),
+        // Global.
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
       HintContext::Picker => &[
+        // Pick / dismiss.
         Hint::Lit("Enter", "select"),
         Hint::Lit("Esc", "cancel"),
+        // Act on the highlighted worktree.
         Hint::Key(TerminalFullscreen, "open"),
-        Hint::Key(YankPath, "yank"),
         Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(YankPath, "yank"),
+        // Find / global.
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
