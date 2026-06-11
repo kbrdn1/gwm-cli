@@ -925,11 +925,10 @@ impl App {
               } else {
                 format!("renamed to {} (local only)", res.new_branch)
               };
-              // Re-select the renamed worktree by its new path so the
-              // cursor stays on the row the user just edited.
-              if let Some(i) = self.worktrees.iter().position(|w| w.path == res.new_path) {
-                self.list_state.select(Some(i));
-              }
+              // Re-select the renamed worktree by its new path so the cursor
+              // stays on the row the user just edited (mapped through the
+              // filter — Codex review on PR #292).
+              self.reselect_by_path(&res.new_path);
               self.edit_original_branch = None;
               self.edit_original_path = None;
               self.edit_failure = None;
@@ -2439,6 +2438,21 @@ impl App {
       None => self.list_state.select(Some(0)),
     }
     self.refresh_link();
+  }
+
+  /// Move the cursor onto the worktree at `path`, mapping its raw index in
+  /// `self.worktrees` to its slot in the *filtered* list — `list_state`
+  /// indexes `filtered_indices()`, not the raw vec, so selecting a raw index
+  /// under an active filter lands on the wrong visible row or none (Codex
+  /// review on PR #292). A no-op when the path is filtered out.
+  pub fn reselect_by_path(&mut self, path: &Path) {
+    let Some(raw) = self.worktrees.iter().position(|w| w.path == path) else {
+      return;
+    };
+    let pos = self.filtered_indices().iter().position(|&idx| idx == raw);
+    if let Some(pos) = pos {
+      self.list_state.select(Some(pos));
+    }
   }
 
   // ---- Bootstrap flow ------------------------------------------------------

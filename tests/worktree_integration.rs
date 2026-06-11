@@ -1525,3 +1525,33 @@ fn find_fuzzy_reports_ambiguous_duplicate_display_names() {
     by_id.path
   );
 }
+
+#[test]
+fn find_fuzzy_treats_display_name_equal_to_another_id_as_ambiguous() {
+  // Codex review on PR #292 (P2): a `git worktree move` leaves the stable `id`
+  // as the old slug while `name` tracks the new basename. If a *different*
+  // worktree's display name happens to equal that old slug, the exact-name
+  // shortcut would return the wrong row before ever consulting the id. The
+  // token is genuinely ambiguous (it is one worktree's id and another's name)
+  // and must be reported as such, not silently resolved.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  // A: internal id "shared", display name "adir" (basename of its path).
+  let a = wt_root.path().join("pa").join("adir");
+  // B: internal id "bid", display name "shared" (basename of its path).
+  let b = wt_root.path().join("pb").join("shared");
+  std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+  std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+  worktree::add(&repo, "shared", &a, "feat/#1-a", false).unwrap();
+  worktree::add(&repo, "bid", &b, "feat/#2-b", false).unwrap();
+
+  let err = worktree::find_fuzzy(&repo, "shared").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
+    "a token that is one worktree's id and another's name must be ambiguous, got: {err:?}"
+  );
+
+  // Each worktree stays reachable by its own unambiguous id.
+  assert_eq!(worktree::find_fuzzy(&repo, "bid").unwrap().id, "bid");
+}

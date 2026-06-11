@@ -2922,10 +2922,22 @@ fn draw_create(f: &mut Frame, app: &App) {
 /// chip rather than defaulting focus to Cancel. Pure so the chip contract
 /// is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  primary_cancel_buttons_line(" Create ", accent, muted)
+}
+
+/// Button row for the rename (`c`) modal: a reversed-accent `Rename` chip
+/// beside a muted `Cancel`. Mirrors [`create_buttons_line`] but labels the
+/// primary action "Rename" so the modal's button matches its title and the
+/// Enter action (Codex review on PR #292, P3).
+pub fn rename_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  primary_cancel_buttons_line(" Rename ", accent, muted)
+}
+
+fn primary_cancel_buttons_line(primary_label: &'static str, accent: Color, muted: Color) -> Line<'static> {
   let primary = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   Line::from(vec![
-    Span::styled(" Create ", primary),
+    Span::styled(primary_label, primary),
     Span::raw("   "),
     Span::styled(" Cancel ", idle),
   ])
@@ -3720,7 +3732,7 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
 
   if !app.is_edit_worktree_loading() {
     f.render_widget(
-      Paragraph::new(create_buttons_line(accent, muted)).alignment(Alignment::Center),
+      Paragraph::new(rename_buttons_line(accent, muted)).alignment(Alignment::Center),
       inner[2],
     );
     f.render_widget(

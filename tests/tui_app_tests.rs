@@ -2039,6 +2039,38 @@ fn filter_clamping_resets_fetch_state_when_selection_moves() {
 }
 
 #[test]
+fn reselect_by_path_maps_the_renamed_row_through_an_active_filter() {
+  // Codex review on PR #292 (P2): after a rename with a filter active, the
+  // cursor must land on the renamed row via its slot in the *filtered* list,
+  // not its raw index — a raw index points at a different visible row or none.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),     // raw 0 — filtered out by "zz"
+    worktree_fixture("beta-zz"),   // raw 1 — filtered slot 0
+    worktree_fixture("target-zz"), // raw 2 — filtered slot 1
+  ];
+  app.enter_filter();
+  for c in "zz".chars() {
+    app.filter_push_char(c);
+  }
+
+  app.reselect_by_path(&PathBuf::from("/tmp/gwm-test/target-zz"));
+
+  // The raw index (2) overflows the 2-row filtered list; only the mapped
+  // filtered slot (1) lands on the renamed worktree.
+  assert_eq!(
+    app.list_state.selected(),
+    Some(1),
+    "selection must be the filtered slot, not the raw index"
+  );
+  assert_eq!(
+    app.selected().expect("a selection").name,
+    "target-zz",
+    "cursor must land on the renamed row through the filter"
+  );
+}
+
+#[test]
 fn refresh_worktrees_resets_fetch_state() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.apply_pr_fetch_result(Err("stale".into()));

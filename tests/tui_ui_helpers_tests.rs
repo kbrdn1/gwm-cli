@@ -357,6 +357,31 @@ fn create_buttons_render_as_chips_with_create_highlighted() {
 }
 
 #[test]
+fn rename_buttons_say_rename_not_create() {
+  // Codex review on PR #292 (P3): the `c` modal is titled "Rename Worktree"
+  // and Enter renames, so its primary button must read "Rename", not the
+  // create overlay's "Create".
+  let line = gwm::tui::rename_buttons_line(Color::Magenta, Color::Gray);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("Rename"), "missing Rename label: {text:?}");
+  assert!(text.contains("Cancel"), "missing Cancel label: {text:?}");
+  assert!(
+    !text.contains("Create"),
+    "the rename modal must not say Create: {text:?}"
+  );
+  let primary = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Rename"))
+    .expect("a Rename span");
+  assert!(
+    primary.style.add_modifier.contains(Modifier::REVERSED),
+    "primary Rename button must be the reversed chip"
+  );
+  assert_eq!(primary.style.fg, Some(Color::Magenta), "Rename chip carries the accent");
+}
+
+#[test]
 fn type_selector_shows_horizontal_arrows_and_focus_accent() {
   // The branch-type field is a horizontal `‹ name ›` selector (was a
   // bordered up/down box). Focused, the selected type reads in the accent.

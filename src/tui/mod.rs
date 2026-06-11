@@ -63,11 +63,12 @@ pub use ui::{
   help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
   hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
   link_prompt_modal_width, link_target_line, modal_hint_line, palette_name_style, pane_counter, panel_border_color,
-  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, status_line, status_pane_title,
-  table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON,
-  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, rename_buttons_line, status_line,
+  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
+  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
+  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer

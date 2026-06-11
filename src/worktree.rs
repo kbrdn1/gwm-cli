@@ -1209,7 +1209,22 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
   // ambiguous rather than "take the first" (Codex review on PR #292).
   let exact: Vec<&WorktreeInfo> = all.iter().filter(|w| w.name == pattern && !w.is_main).collect();
   match exact.len() {
-    1 => return Ok(exact[0].clone()),
+    1 => {
+      // A *different* worktree's stable id can equal this display name (an old
+      // slug left behind by `git worktree move`). Returning the name-match
+      // would silently shadow it, so a token that is one worktree's id and
+      // another's name is ambiguous (Codex review on PR #292).
+      if let Some(by_id) = all
+        .iter()
+        .find(|w| w.id == pattern && w.id != exact[0].id && !w.is_main)
+      {
+        return Err(GwmError::Other(format!(
+          "'{}' is ambiguous: the display name of '{}' and the id of '{}'; target one by its unique id",
+          pattern, exact[0].id, by_id.id
+        )));
+      }
+      return Ok(exact[0].clone());
+    }
     n if n > 1 => {
       // Duplicate display names: let the caller still target one by its unique
       // internal id (the original slug), and list those ids so they know what
