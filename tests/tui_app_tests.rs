@@ -32,6 +32,7 @@ fn env_lock() -> &'static Mutex<()> {
 fn worktree_fixture(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/gwm-test/{}", name)),
     branch: Some(format!("feat/#0-{}", name)),
     head: None,
@@ -3084,6 +3085,7 @@ use gwm::tui::build_sidebar_sections;
 fn detailed_worktree_fixture() -> WorktreeInfo {
   WorktreeInfo {
     name: "api-rest".into(),
+    id: "api-rest".into(),
     path: PathBuf::from("/Users/test/cc-worktree/api-rest"),
     branch: Some("feat/#42-api-rest".into()),
     head: Some("08d1029f1234567890abcdef".into()),
@@ -3936,6 +3938,7 @@ fn add_commits(repo: &git2::Repository, count: usize) {
 fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
   WorktreeInfo {
     name: "test".into(),
+    id: "test".into(),
     path: dir.to_path_buf(),
     branch: Some("main".into()),
     head: None,
@@ -6307,6 +6310,54 @@ fn request_pull_refuses_while_another_mutation_runs() {
   assert!(
     app.status.contains("before pulling"),
     "status must explain the block: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_edit_worktree_refuses_unconfigured_branch_type() {
+  // Codex review on PR #292: a branch whose parsed type is not in branch_types
+  // must refuse to open the rename modal rather than silently preselecting the
+  // first configured type (which Enter would then rename the branch to).
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  // `zzz` is a well-formed <type>/#<issue>-<desc> but not a configured type.
+  wt.branch = Some("zzz/#7-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("not configured"),
+    "status must explain: {}",
+    app.status
+  );
+}
+
+#[test]
+fn request_sync_refuses_while_another_mutation_runs() {
+  // Codex review on PR #292: the concurrent-mutation guard is centralized, so
+  // sync also refuses to start while a different mutating task is in flight.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.tasks.request(TaskKind::Pull);
+
+  app.request_sync();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sync),
+    "sync must not start while a pull is in flight"
+  );
+  assert!(
+    app.status.contains("before syncing"),
+    "status must explain: {}",
     app.status
   );
 }

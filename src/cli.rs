@@ -1473,7 +1473,7 @@ fn cmd_remove(
     // contract" requirement. The journal hook MUST NOT fire here —
     // a preview that wrote to the journal would let the user "undo"
     // something that never happened.
-    worktree::remove_dry_run(&repo, &found.name)?;
+    worktree::remove_dry_run(&repo, &found.id)?;
     print!(
       "{}",
       format_remove_plan(&found.name, &found.path, found.branch.as_deref(), delete_branch)
@@ -1530,7 +1530,7 @@ fn cmd_remove(
     );
   }
 
-  worktree::remove(&repo, &found.name, delete_branch)?;
+  worktree::remove(&repo, &found.id, delete_branch)?;
   println!("✓ removed {} ({})", found.name, found.path.display());
   if delete_branch {
     if let Some(b) = &found.branch {

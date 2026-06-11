@@ -65,6 +65,7 @@ fn make_app() -> (tempfile::TempDir, App) {
 fn deletable_worktree(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/gwm-test/{}", name)),
     branch: Some(format!("feat/#235-{}", name)),
     head: Some("0123456789abcdef0123456789abcdef01234567".into()),

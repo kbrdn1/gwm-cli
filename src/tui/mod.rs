@@ -121,16 +121,20 @@ pub fn run_picker() -> Result<Option<PathBuf>> {
 /// Enable raw mode + alternate screen + mouse capture and hand back a
 /// configured `Terminal`. Centralised so `run` and `run_picker` cannot
 /// drift on the setup recipe.
-fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   enable_raw_mode()?;
-  let mut stdout = io::stdout();
-  execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-  Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+  // Render the TUI to STDERR, not stdout: `exit_to_worktree` (#290) prints the
+  // selected path to stdout for the `cd "$(gwm)"` shell wrapper, so stdout must
+  // stay free of alt-screen / ANSI frames (the fzf/skim pattern). stderr is the
+  // tty in an interactive session, so the UI still draws (Codex review #292).
+  let mut stderr = io::stderr();
+  execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+  Ok(Terminal::new(CrosstermBackend::new(stderr))?)
 }
 
 /// Inverse of `enter_terminal`. Always called from the same scope as
 /// `enter_terminal` so the order of teardown matches the order of setup.
-fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> Result<()> {
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
   terminal.show_cursor()?;
@@ -159,7 +163,7 @@ fn confirm_fire(app: &mut App) {
   }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
     let now = Instant::now();
     // Generic off-thread tasks (issue #231; GitHub fetch folded in by #255):
@@ -602,7 +606,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// honour it from any caller and defer the actual exit while a mutating
 /// worker is still in flight. The loop checks the flag at the top and
 /// bottom of every iteration.
-fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, action: Action) -> Result<()> {
+fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, action: Action) -> Result<()> {
   match action {
     // Issue #32/#267: signal quit via `app.should_quit` so palette
     // and keymap paths share the same graceful-shutdown gate.
@@ -767,7 +771,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
 /// path. Distinct name keeps stack traces meaningful — if a feature
 /// fires only from the palette and breaks, the frame name names it.
 fn run_palette_action(
-  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   app: &mut App,
   action: Action,
 ) -> Result<()> {
@@ -780,7 +784,7 @@ fn run_palette_action(
 /// and surfacing failures via the status bar is the documented
 /// contract (see [`Self::run_lazygit`] in the pre-issue-#75 codebase).
 fn run_launcher(
-  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   plan: app::LauncherPlan,
   app: &mut App,
 ) -> Result<()> {
@@ -859,7 +863,7 @@ fn run_launcher(
 ///
 /// `label` is the noun used in status-bar messages (`"shell"`, `"editor"`).
 fn run_subshell(
-  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   cmd: &str,
   args: &[&str],
   cwd: Option<&std::path::Path>,
@@ -922,7 +926,7 @@ fn yank_selected_worktree_name_to_clipboard(app: &mut App) {
 
 /// Fire a user macro (#290). `n` is 1 for `Macro1`/`h`, 2 for `Macro2`/`H`.
 /// Reads `[tui.macro1]` / `[tui.macro2]` from config; no-ops when absent.
-fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, n: u8) -> Result<()> {
+fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, n: u8) -> Result<()> {
   use crate::config::MacroOpenMode;
   let cfg = if n == 1 {
     app.config.tui.macro1.clone()
@@ -967,13 +971,26 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
         return Ok(());
       };
       let bin = cmd[0].as_str();
-      // tmux `new-window` / zellij `new-tab` take the command as a SINGLE
-      // shell-command operand and hand it to the shell themselves, so we must
-      // not pre-split it into `sh -c <cmd>` — that would reach tmux as
-      // separate argv and break parsing (Codex review on PR #292). Append the
-      // raw command as one trailing argument.
       let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-      full_cmd.push(macro_cfg.command.as_str());
+      #[cfg(windows)]
+      let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+      #[cfg(not(windows))]
+      let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+      let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+      if bin == "zellij" {
+        // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
+        // shell, so a command with spaces/shell syntax must be wrapped in
+        // `-- <shell> -c <cmd>` (Codex review on PR #292).
+        full_cmd.push("--");
+        full_cmd.push(shell.as_str());
+        full_cmd.push(shell_flag);
+        full_cmd.push(macro_cfg.command.as_str());
+      } else {
+        // tmux takes the command as a SINGLE shell-command operand and hands
+        // it to the shell itself, so we pass it as one trailing argument
+        // rather than pre-splitting into `sh -c <cmd>`.
+        full_cmd.push(macro_cfg.command.as_str());
+      }
       match std::process::Command::new(bin).args(&full_cmd).spawn() {
         Ok(_) => app.status = format!("macro{} opened in mux pane", n),
         Err(e) => app.status = format!("macro{} mux failed: {}", n, e),

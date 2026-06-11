@@ -821,6 +821,7 @@ branch = "#abcdef"
 fn base_worktree(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/gwm-theme-audit/{}", name)),
     branch: Some(format!("feat/#170-{}", name)),
     head: Some("0123456789abcdef0123456789abcdef01234567".into()),

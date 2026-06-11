@@ -685,6 +685,10 @@ impl App {
       self.status = "no worktree selected to sync".into();
       return;
     };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Sync) {
+      self.status = self.busy_mutation_status("syncing");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Sync) else {
       // A sync is already in flight — coalesce onto it.
       return;
@@ -1855,7 +1859,14 @@ impl App {
       );
       return;
     };
-    let type_index = self.branch_types.iter().position(|t| t.name == spec.type_).unwrap_or(0);
+    // Refuse rather than silently preselect type index 0: a branch whose
+    // parsed type isn't configured (config change, manual branch) would
+    // otherwise be renamed to the first configured type on Enter (Codex
+    // review on PR #292).
+    let Some(type_index) = self.branch_types.iter().position(|t| t.name == spec.type_) else {
+      self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
+      return;
+    };
     self.create_form.reset();
     self.create_form.type_index = type_index;
     self.create_form.issue = spec.issue;
@@ -2212,8 +2223,10 @@ impl App {
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
-    let (name, label) = match self.selected() {
-      Some(s) => (s.name.clone(), s.path.display().to_string()),
+    // `worktree::remove` resolves by the internal git id, which can diverge
+    // from the display name after a rename (#290), so pass `id` here.
+    let (id, label) = match self.selected() {
+      Some(s) => (s.id.clone(), s.path.display().to_string()),
       None => return Ok(()),
     };
     if self.is_delete_worktree_loading() {
@@ -2235,18 +2248,18 @@ impl App {
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::DeleteWorktree.loading_label().into();
-    self.spawn_delete_worktree(generation, name, label, delete_branch);
+    self.spawn_delete_worktree(generation, id, label, delete_branch);
     Ok(())
   }
 
-  fn spawn_delete_worktree(&self, generation: u64, name: String, label: String, delete_branch: bool) {
+  fn spawn_delete_worktree(&self, generation: u64, id: String, label: String, delete_branch: bool) {
     let tx = self.task_tx.clone();
     let workdir = self.workdir.clone();
     std::thread::spawn(move || {
       let result = worktree::discover_repo(Some(&workdir))
-        .and_then(|repo| worktree::remove(&repo, &name, delete_branch))
+        .and_then(|repo| worktree::remove(&repo, &id, delete_branch))
         .map_err(|e| e.to_string());
-      let _ = tx.send(TaskMsg::DeleteWorktree(generation, name, label, result));
+      let _ = tx.send(TaskMsg::DeleteWorktree(generation, id, label, result));
     });
   }
 
@@ -2494,6 +2507,10 @@ impl App {
     // itself moves to a worker, with the `View::Report` transition deferred
     // to `drain_task_results`. A second `b` press while one is in flight
     // coalesces (no `Some(generation)`), so two bootstraps never race.
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Bootstrap) {
+      self.status = self.busy_mutation_status("bootstrapping");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Bootstrap) else {
       return;
     };

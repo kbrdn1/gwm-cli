@@ -26,7 +26,17 @@ static RECENT_COMMITS_CACHE: LazyLock<Mutex<HashMap<RecentCommitCacheKey, Vec<Co
 
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
+  /// Display name — the basename of the worktree directory on disk. This is
+  /// what the user sees, yanks, and filters on, so after a `git worktree move`
+  /// (the `c` rename, #290) it reflects the new slug rather than the stale
+  /// internal id (Codex review on PR #292).
   pub name: String,
+  /// Internal git worktree id — the `.git/worktrees/<id>` entry from
+  /// `repo.worktrees()`. `git worktree move` does NOT rename it, so it can
+  /// diverge from [`Self::name`] after a rename. Use this (not `name`) for
+  /// `worktree::remove` / `find_worktree`, which resolve by id. Equal to
+  /// `name` for a freshly created worktree and for the main worktree.
+  pub id: String,
   pub path: PathBuf,
   pub branch: Option<String>,
   pub head: Option<String>,
@@ -196,11 +206,14 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
     let age = branch.as_deref().and_then(|b| branch_age(repo, b));
+    let main_name = workdir
+      .file_name()
+      .map(|n| n.to_string_lossy().to_string())
+      .unwrap_or_else(|| "main".into());
     out.push(WorktreeInfo {
-      name: workdir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "main".into()),
+      // The main worktree has no `.git/worktrees/<id>` entry; id == display.
+      id: main_name.clone(),
+      name: main_name,
       path: workdir.to_path_buf(),
       branch,
       head,
@@ -260,8 +273,15 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       .as_deref()
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
+    // Display name = basename of the on-disk path (tracks `git worktree move`);
+    // id = the `repo.worktrees()` entry (stable, used for remove/find).
+    let display_name = path
+      .file_name()
+      .map(|n| n.to_string_lossy().to_string())
+      .unwrap_or_else(|| name.to_string());
     out.push(WorktreeInfo {
-      name: name.to_string(),
+      name: display_name,
+      id: name.to_string(),
       path,
       branch,
       head,

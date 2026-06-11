@@ -122,8 +122,11 @@ fn find_fuzzy_errors_on_ambiguous() {
   let (dir, _) = init_repo();
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
-  worktree::add(&repo, "feat-1-foo", &wt_root.path().join("a"), "feat/#1-foo", false).unwrap();
-  worktree::add(&repo, "feat-2-foo", &wt_root.path().join("b"), "feat/#2-foo", false).unwrap();
+  // find_fuzzy matches on the display name (the directory basename, #290), so
+  // the dirs must carry the searched substring — as gwm-created worktrees do
+  // (basename == slug).
+  worktree::add(&repo, "feat-1-foo", &wt_root.path().join("feat-1-foo"), "feat/#1-foo", false).unwrap();
+  worktree::add(&repo, "feat-2-foo", &wt_root.path().join("feat-2-foo"), "feat/#2-foo", false).unwrap();
 
   let err = worktree::find_fuzzy(&repo, "foo").unwrap_err();
   assert!(matches!(err, gwm::error::GwmError::Other(_)));
@@ -1271,4 +1274,38 @@ fn rename_worktree_aborts_and_rolls_back_on_remote_lookup_failure() {
     !new_path.exists(),
     "the new directory must not survive an aborted rename"
   );
+}
+
+#[test]
+fn list_uses_new_slug_as_display_name_after_rename_but_keeps_id() {
+  // Codex review on PR #292: `git worktree move` updates the path but not the
+  // internal `.git/worktrees/<id>` entry. After a rename, `WorktreeInfo.name`
+  // (display) must track the new directory slug, while `id` stays the original
+  // — and `remove` must still resolve via that id.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-10-old");
+  worktree::add(&repo, "feat-10-old", &old_path, "feat/#10-old", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-10-new");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#10-old", &new_path, "feat/#10-new").unwrap();
+
+  let trees = worktree::list(&repo).unwrap();
+  let renamed = trees
+    .iter()
+    .find(|w| !w.is_main)
+    .expect("the renamed worktree must be listed");
+  assert_eq!(
+    renamed.name, "feat-10-new",
+    "display name must follow the moved directory slug"
+  );
+  assert_eq!(
+    renamed.id, "feat-10-old",
+    "internal git id is unchanged by `git worktree move`"
+  );
+
+  // Remove must still resolve the worktree via its (unchanged) id.
+  worktree::remove(&repo, &renamed.id, false).unwrap();
+  assert!(!new_path.exists(), "remove via id must delete the moved worktree");
 }
