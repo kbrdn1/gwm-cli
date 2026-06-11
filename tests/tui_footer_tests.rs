@@ -332,7 +332,7 @@ fn confirm_hints_include_delete_branch_toggle_binding() {
   use gwm::tui::keymap::Keymap;
   let resolved = HintContext::Confirm.resolve(&Keymap::defaults());
   assert!(
-    resolved.iter().any(|(k, l)| k == "p" && l == "branch"),
+    resolved.iter().any(|(k, l)| k == "D" && l == "branch"),
     "Delete Worktree hints should advertise the branch toggle binding: {resolved:?}"
   );
 }

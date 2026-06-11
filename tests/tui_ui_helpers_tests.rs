@@ -184,15 +184,21 @@ fn sidebar_subpane_titles_surface_live_bindings() {
   assert_eq!(working_tree_pane_title(&km), " Working Tree [R] ");
   assert_eq!(
     recent_items_pane_title(SidebarMode::Commits, &km),
-    " Recent Commits [l] "
+    " Recent Commits [L] "
   );
 
   km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
     .unwrap();
-  km.apply_override(Action::Review, vec![KeyStroke::parse_chord("Ctrl+r").unwrap()])
-    .unwrap();
-  km.apply_override(Action::GitTui, vec![KeyStroke::parse_chord("Ctrl+l").unwrap()])
-    .unwrap();
+  km.apply_override(
+    Action::ReviewFullscreen,
+    vec![KeyStroke::parse_chord("Ctrl+r").unwrap()],
+  )
+  .unwrap();
+  km.apply_override(
+    Action::LazyGitFullscreen,
+    vec![KeyStroke::parse_chord("Ctrl+l").unwrap()],
+  )
+  .unwrap();
 
   assert_eq!(issue_pr_pane_title(&km), " Issue / PR [Ctrl+g] ");
   assert_eq!(working_tree_pane_title(&km), " Working Tree [Ctrl+r] ");

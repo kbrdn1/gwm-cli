@@ -1663,11 +1663,12 @@ fn tui_keys_rejects_chord_that_is_strict_prefix() {
   // creates a chord/prefix ambiguity. Per the design note on PR #87
   // this is a hard error at load — never a runtime timeout.
   let dir = TempDir::new().unwrap();
+  // `terminal_fullscreen` replaces the old `open` slug (#290).
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
 [tui.keys]
-open = ["g"]
+terminal_fullscreen = ["g"]
 "#,
   )
   .unwrap();

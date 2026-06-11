@@ -191,8 +191,8 @@ fn keymap_lookup_returns_no_match_for_unbound_key() {
 
 #[test]
 fn default_keymap_binds_sidebar_layout_and_position() {
-  // Issue #188: `V` cycles the sidebar orientation, `H` toggles the
-  // left/right position. Both must be distinct from `v` (ToggleSidebar).
+  // #290: `V` cycles the sidebar orientation; `v` toggles the left/right
+  // position (was `H` before #290). `ToggleSidebar` is now unbound by default.
   let km = Keymap::defaults();
 
   let cycle = KeyStroke::parse_chord("V").unwrap();
@@ -201,36 +201,28 @@ fn default_keymap_binds_sidebar_layout_and_position() {
     ChordResolution::Matched(Action::CycleSidebarLayout)
   ));
 
-  let toggle_pos = KeyStroke::parse_chord("H").unwrap();
+  let toggle_pos = KeyStroke::parse_chord("v").unwrap();
   assert!(matches!(
     km.lookup(&toggle_pos),
     ChordResolution::Matched(Action::ToggleSidebarPosition)
   ));
-
-  let open = KeyStroke::parse_chord("v").unwrap();
-  assert!(matches!(
-    km.lookup(&open),
-    ChordResolution::Matched(Action::ToggleSidebar)
-  ));
 }
 
 #[test]
-fn default_keymap_binds_sync_to_uppercase_s() {
-  // Issue #258: `S` runs `gwm sync` on the selected worktree. It must be
-  // uppercase `S` because lowercase `s` is already ToggleSidebarMode — the
-  // mnemonic sits with the other uppercase lifecycle verbs (`F`, `R`).
+fn default_keymap_binds_sync_to_lowercase_s() {
+  // #290: `s` (lowercase) is now Sync — the pre-#290 `S` (uppercase) mapping
+  // is replaced. `ToggleSidebarMode` is now unbound by default.
   let km = Keymap::defaults();
 
-  let sync = KeyStroke::parse_chord("S").unwrap();
+  let sync = KeyStroke::parse_chord("s").unwrap();
   assert!(matches!(km.lookup(&sync), ChordResolution::Matched(Action::Sync)));
 
-  // Guard the conflict that motivated the choice: lowercase `s` stays the
-  // sidebar-mode toggle, untouched.
-  let sidebar_mode = KeyStroke::parse_chord("s").unwrap();
-  assert!(matches!(
-    km.lookup(&sidebar_mode),
-    ChordResolution::Matched(Action::ToggleSidebarMode)
-  ));
+  // `S` is now unbound (ToggleSidebarMode no longer has a default key).
+  let uppercase_s = KeyStroke::parse_chord("S").unwrap();
+  assert!(
+    matches!(km.lookup(&uppercase_s), ChordResolution::NoMatch),
+    "S must be unbound after #290 keymap redesign"
+  );
 }
 
 #[test]
@@ -334,7 +326,7 @@ fn chord_that_is_strict_prefix_of_existing_binding_is_rejected() {
   // Default `g g` is bound to Top. Trying to bind `g` alone to anything
   // else creates a prefix collision and MUST fail.
   let err = km
-    .apply_override(Action::Open, vec![KeyStroke::parse_chord("g").unwrap()])
+    .apply_override(Action::TerminalFullscreen, vec![KeyStroke::parse_chord("g").unwrap()])
     .unwrap_err();
   assert!(
     err.to_string().to_lowercase().contains("prefix"),
@@ -465,56 +457,55 @@ fn link_prompt_binds_to_i_not_uppercase_l() {
   );
 }
 
-// ── Issue #35 backward-compat: old slug overrides must not conflict ────────
-// Users who had `git_tui = ["l"]` or `open = ["o"]` in their config before
-// #35 switched the defaults to the overlay variants must be able to upgrade
-// without a "chord conflict" load error. The rule: a user override that
-// claims a chord previously held by a *default* binding on a different action
-// silently wins — the default chord is vacated.
+// ── #290 backward-compat: user slug overrides must not conflict ───────────
+// Users who had `lazygit_pty = ["l"]` or `terminal_fullscreen = ["o"]` in
+// their config must be able to upgrade without a "chord conflict" load error.
+// The rule: a user override that claims a chord previously held by a *default*
+// binding on a different action silently wins — the default chord is vacated.
 
 #[test]
-fn user_override_git_tui_reclaims_l_from_overlay_default() {
+fn user_override_lazygit_fullscreen_reclaims_l_from_pty_default() {
   let mut km = Keymap::defaults();
-  // By default `l` is bound to GitTuiOverlay. Binding GitTui to `l` must
-  // succeed (not fail with "chord conflict") and GitTuiOverlay must lose `l`.
-  km.apply_override(Action::GitTui, vec![KeyStroke::parse_chord("l").unwrap()])
+  // By default `l` is bound to LazyGitPty (#290). Binding LazyGitFullscreen
+  // to `l` must succeed and LazyGitPty must lose `l`.
+  km.apply_override(Action::LazyGitFullscreen, vec![KeyStroke::parse_chord("l").unwrap()])
     .unwrap();
 
   let l = KeyStroke::parse_chord("l").unwrap();
   assert!(
-    matches!(km.lookup(&l), ChordResolution::Matched(Action::GitTui)),
-    "l must resolve to GitTui after the override"
+    matches!(km.lookup(&l), ChordResolution::Matched(Action::LazyGitFullscreen)),
+    "l must resolve to LazyGitFullscreen after the override"
   );
 }
 
 #[test]
-fn user_override_open_reclaims_o_from_overlay_default() {
+fn user_override_terminal_fullscreen_reclaims_o_from_pty_default() {
   let mut km = Keymap::defaults();
-  // Same as above for the `open` / `open_terminal_overlay` pair.
-  km.apply_override(Action::Open, vec![KeyStroke::parse_chord("o").unwrap()])
+  // Same as above for the terminal pair (TerminalFullscreen / TerminalPty).
+  km.apply_override(Action::TerminalFullscreen, vec![KeyStroke::parse_chord("o").unwrap()])
     .unwrap();
 
   let o = KeyStroke::parse_chord("o").unwrap();
   assert!(
-    matches!(km.lookup(&o), ChordResolution::Matched(Action::Open)),
-    "o must resolve to Open after the override"
+    matches!(km.lookup(&o), ChordResolution::Matched(Action::TerminalFullscreen)),
+    "o must resolve to TerminalFullscreen after the override"
   );
 }
 
 #[test]
-fn review_overlay_has_default_binding_r() {
+fn review_pty_has_default_binding_r() {
   let km = Keymap::defaults();
   let r = KeyStroke::parse_chord("r").unwrap();
   assert!(
-    matches!(km.lookup(&r), ChordResolution::Matched(Action::ReviewOverlay)),
-    "r must resolve to ReviewOverlay by default"
+    matches!(km.lookup(&r), ChordResolution::Matched(Action::ReviewPty)),
+    "r must resolve to ReviewPty by default (#290)"
   );
 }
 
 #[test]
 fn refresh_default_binding_does_not_include_r() {
   let km = Keymap::defaults();
-  // `r` moved to ReviewOverlay — Refresh must only keep `f`.
+  // `r` moved to ReviewPty — Refresh must only keep `f`.
   let binding = km
     .list()
     .into_iter()
@@ -523,21 +514,21 @@ fn refresh_default_binding_does_not_include_r() {
   let r = KeyStroke::parse_chord("r").unwrap();
   assert!(
     !binding.chords.contains(&r),
-    "Refresh must not include `r` after it was reassigned to ReviewOverlay"
+    "Refresh must not include `r` after it was reassigned to ReviewPty"
   );
 }
 
 #[test]
-fn user_override_review_reclaims_r_from_overlay_default() {
+fn user_override_review_fullscreen_reclaims_r_from_pty_default() {
   let mut km = Keymap::defaults();
-  // `r` defaults to ReviewOverlay. Rebinding Review to `r` must succeed
-  // (no conflict error) and ReviewOverlay must lose `r`.
-  km.apply_override(Action::Review, vec![KeyStroke::parse_chord("r").unwrap()])
+  // `r` defaults to ReviewPty (#290). Rebinding ReviewFullscreen to `r` must
+  // succeed and ReviewPty must lose `r`.
+  km.apply_override(Action::ReviewFullscreen, vec![KeyStroke::parse_chord("r").unwrap()])
     .unwrap();
 
   let r = KeyStroke::parse_chord("r").unwrap();
   assert!(
-    matches!(km.lookup(&r), ChordResolution::Matched(Action::Review)),
-    "r must resolve to Review after the user override"
+    matches!(km.lookup(&r), ChordResolution::Matched(Action::ReviewFullscreen)),
+    "r must resolve to ReviewFullscreen after the user override"
   );
 }
