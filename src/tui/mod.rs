@@ -808,6 +808,11 @@ fn route_fullscreen_child_stdout(command: &mut std::process::Command) {
   if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
     command.stdout(std::process::Stdio::from(tty));
   }
+  // No `/dev/tty` equivalent here, so the child inherits stdout. Bind the
+  // param to silence the unused-variable error under `-D warnings` on the
+  // non-unix build (CI windows-latest caught this).
+  #[cfg(not(unix))]
+  let _ = command;
 }
 
 fn run_launcher(
