@@ -164,6 +164,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
     View::Pty => draw_pty_overlay(f, app),
+    // #290: branch-rename inline modal renders over the list.
+    View::Edit => draw_edit_worktree(f, app),
     View::List => {}
   }
 }
@@ -1734,10 +1736,10 @@ impl HintContext {
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
-        Hint::Key(Open, "open"),
-        Hint::Key(Yank, "yank"),
-        Hint::Key(GitTui, "git"),
-        Hint::Key(Review, "review"),
+        Hint::Key(TerminalFullscreen, "open"),
+        Hint::Key(YankPath, "yank"),
+        Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(ReviewFullscreen, "review"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
         Hint::Key(ConfigPanel, "settings"),
@@ -1760,9 +1762,9 @@ impl HintContext {
       HintContext::Picker => &[
         Hint::Lit("Enter", "select"),
         Hint::Lit("Esc", "cancel"),
-        Hint::Key(Open, "open"),
-        Hint::Key(Yank, "yank"),
-        Hint::Key(GitTui, "git"),
+        Hint::Key(TerminalFullscreen, "open"),
+        Hint::Key(YankPath, "yank"),
+        Hint::Key(LazyGitFullscreen, "git"),
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1834,13 +1836,19 @@ pub fn issue_pr_pane_title(keymap: &Keymap) -> String {
 }
 
 pub fn working_tree_pane_title(keymap: &Keymap) -> String {
-  format!(" Working Tree [{}] ", action_chord(keymap, Action::Review, "R"))
+  format!(
+    " Working Tree [{}] ",
+    action_chord(keymap, Action::ReviewFullscreen, "R")
+  )
 }
 
 pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
   match mode {
-    SidebarMode::Commits => format!(" Recent Commits [{}] ", action_chord(keymap, Action::GitTui, "l")),
-    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::GitTui, "l")),
+    SidebarMode::Commits => format!(
+      " Recent Commits [{}] ",
+      action_chord(keymap, Action::LazyGitFullscreen, "l")
+    ),
+    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::LazyGitFullscreen, "l")),
   }
 }
 
@@ -2203,10 +2211,20 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::DeleteConfirm, "delete selected"));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
-  rows.push(entry(Action::Open, "open per [tui.open] — shell / editor / finder"));
+  rows.push(entry(
+    Action::TerminalFullscreen,
+    "open per [tui.open] — shell / editor / finder",
+  ));
+  rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
   rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
-  rows.push(entry(Action::Yank, "yank selected path to system clipboard"));
-  rows.push(entry(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
+  rows.push(entry(Action::YankPath, "yank selected worktree path to clipboard"));
+  rows.push(entry(Action::YankBranchName, "yank selected branch name to clipboard"));
+  rows.push(entry(
+    Action::YankWorktreeName,
+    "yank selected worktree name to clipboard",
+  ));
+  rows.push(entry(Action::LazyGitFullscreen, "launch lazygit fullscreen"));
+  rows.push(entry(Action::LazyGitPty, "open lazygit in embedded PTY overlay"));
   rows.push(entry(Action::ToggleSidebar, "toggle git preview sidebar"));
   rows.push(entry(
     Action::ToggleSidebarMode,
@@ -2232,14 +2250,28 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
     rows.push(entry(Action::Sync, "sync selected worktree onto its upstream (rebase)"));
+    rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
+    rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
+    rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
+    rows.push(entry(
+      Action::ExitToWorktree,
+      "quit TUI and print selected path to stdout",
+    ));
+    rows.push(entry(Action::MuxPane, "open selected worktree in new mux pane/tab"));
+    rows.push(entry(Action::Macro1, "run [tui.macro1] command"));
+    rows.push(entry(Action::Macro2, "run [tui.macro2] command"));
     rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
-    rows.push(entry(Action::Review, "run [review] launcher against the resolved base"));
+    rows.push(entry(Action::ReviewFullscreen, "run [review] launcher fullscreen"));
+    rows.push(entry(
+      Action::ReviewPty,
+      "run [review] launcher in embedded PTY overlay",
+    ));
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
     rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
-    rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
+    rows.push(entry(Action::BrowseLinks, "open menu — i=issue · p=pull request"));
     rows.push(entry(
       Action::LinkPrompt,
       "link prompt — j/k + enter, or i/p, then digits",
@@ -3544,6 +3576,35 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 /// bottom row. The highlight follows the user's cycle key
 /// (`Up` / `Down` / `Tab`); `Enter` fires the highlighted entry,
 /// `Esc` cancels.
+/// Inline branch-rename modal (#290). A single-line input anchored at the
+/// bottom of the screen, styled like the filter bar. `Enter` submits, `Esc`
+/// cancels. State lives on `App::edit_branch_buffer`.
+fn draw_edit_worktree(f: &mut Frame, app: &App) {
+  let area = f.area();
+  // One row at the very bottom of the screen.
+  let row = Rect {
+    x: area.x,
+    y: area.y + area.height.saturating_sub(1),
+    width: area.width,
+    height: 1,
+  };
+  let accent = app.theme.accent;
+  let label = " rename branch: ";
+  let value_w = (row.width as usize).saturating_sub(label.len());
+  let value = &app.edit_branch_buffer;
+  let display: String = if value.len() > value_w {
+    format!("…{}", &value[value.len().saturating_sub(value_w.saturating_sub(1))..])
+  } else {
+    format!("{:<width$}", value, width = value_w)
+  };
+  let line = Line::from(vec![
+    Span::styled(label, Style::default().fg(accent).add_modifier(Modifier::BOLD)),
+    Span::styled(display, Style::default().bg(app.theme.selection_bg)),
+  ]);
+  f.render_widget(Clear, row);
+  f.render_widget(Paragraph::new(line), row);
+}
+
 fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered(60, 50, f.area());
   f.render_widget(Clear, area);
