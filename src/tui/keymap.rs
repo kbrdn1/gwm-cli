@@ -119,18 +119,26 @@ define_actions! {
   DeleteConfirm     => "delete",
   Bootstrap         => "bootstrap",
   ToggleDeleteBranch => "delete_branch",
-  // Hand-offs
-  GitTui            => "git_tui",
-  GitTuiOverlay     => "git_tui_overlay",
-  Review            => "review",
-  ReviewOverlay     => "review_overlay",
-  Yank              => "yank",
-  Open              => "open",
-  OpenTerminalOverlay => "open_terminal_overlay",
-  OpenMenu          => "open_menu",
+  Pull              => "pull",
+  Push              => "push",
+  EditWorktree      => "edit_worktree",
+  ExitToWorktree    => "exit_to_worktree",
+  LazyGitPty        => "lazygit_pty",
+  LazyGitFullscreen => "lazygit_fullscreen",
+  ReviewFullscreen  => "review_fullscreen",
+  ReviewPty         => "review_pty",
+  YankPath          => "yank_path",
+  YankBranchName    => "yank_branch_name",
+  YankWorktreeName  => "yank_worktree_name",
+  TerminalPty       => "terminal_pty",
+  TerminalFullscreen => "terminal_fullscreen",
+  BrowseLinks       => "browse_links",
   OpenDocs          => "open_docs",
   LinkPrompt        => "link",
   FetchGithub       => "fetch_github",
+  MuxPane           => "mux_pane",
+  Macro1            => "macro_one",
+  Macro2            => "macro_two",
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
@@ -390,10 +398,11 @@ impl Keymap {
       def(Action::Up, &["k", "Up"]),
       def(Action::Top, &["g g"]),
       def(Action::Bottom, &["G", "End"]),
-      def(Action::ToggleSidebar, &["v"]),
-      def(Action::ToggleSidebarMode, &["s"]),
+      // #290: ToggleSidebar and ToggleSidebarMode are unbound by default;
+      // users who want them can rebind via [tui.keys].
       def(Action::CycleSidebarLayout, &["V"]),
-      def(Action::ToggleSidebarPosition, &["H"]),
+      // #290: `v` is now toggle_sidebar_position (was `H` before #290).
+      def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::FocusWorktrees, &["1"]),
       def(Action::FocusStatus, &["2"]),
@@ -401,31 +410,50 @@ impl Keymap {
       def(Action::ConfigPanel, &["4"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f"]),
-      // `s` is taken by ToggleSidebarMode, so Sync defaults to `S` — an
-      // uppercase lifecycle verb alongside `F` (FetchGithub) / `R` (Review).
-      def(Action::Sync, &["S"]),
+      // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
+      def(Action::Sync, &["s"]),
       def(Action::Create, &["n"]),
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),
-      def(Action::ToggleDeleteBranch, &["p"]),
-      // Issue #35: `l` now opens the embedded lazygit PTY overlay instead
-      // of suspending the TUI fullscreen. `o` opens an embedded native
-      // terminal PTY overlay. The old fullscreen actions (`GitTui`, `Open`)
-      // remain in the Action enum so users who prefer the old behaviour can
-      // rebind them via `[tui.keys]` in `.gwm.toml`; they have no default
-      // binding out of the box.
-      def(Action::GitTuiOverlay, &["l"]),
-      def(Action::Review, &["R"]),
-      // Issue #35: `r` (lowercase) opens the review tool in an embedded PTY
-      // overlay instead of suspending the TUI fullscreen. The uppercase `R`
-      // (Action::Review) keeps its fullscreen behaviour for users who prefer it.
-      def(Action::ReviewOverlay, &["r"]),
-      def(Action::Yank, &["y"]),
-      def(Action::OpenTerminalOverlay, &["o"]),
-      def(Action::OpenMenu, &["O"]),
+      // #290: `D` (uppercase) is now ToggleDeleteBranch — `p` repurposed as Pull.
+      def(Action::ToggleDeleteBranch, &["D"]),
+      // #290: `p` is now Pull (was ToggleDeleteBranch before).
+      def(Action::Pull, &["p"]),
+      // #290: `P` is Push.
+      def(Action::Push, &["P"]),
+      // #290: `c` opens the edit-worktree modal (rename branch).
+      def(Action::EditWorktree, &["c"]),
+      // #290: `e` exits the TUI and prints the selected worktree path to stdout.
+      def(Action::ExitToWorktree, &["e"]),
+      // #35/#290: `l` opens lazygit in an embedded PTY overlay.
+      def(Action::LazyGitPty, &["l"]),
+      // #290: `L` opens lazygit fullscreen (was unbound before #290).
+      def(Action::LazyGitFullscreen, &["L"]),
+      // #290: `R` opens the review launcher fullscreen (renamed from review).
+      def(Action::ReviewFullscreen, &["R"]),
+      // #35/#290: `r` opens the review launcher in an embedded PTY overlay.
+      def(Action::ReviewPty, &["r"]),
+      // #290: `Y` yanks the worktree path (was `y` before #290).
+      def(Action::YankPath, &["Y"]),
+      // #290: `y` yanks the branch name (was yank-path `y` before #290).
+      def(Action::YankBranchName, &["y"]),
+      // #290: `w` yanks the worktree slug/name.
+      def(Action::YankWorktreeName, &["w"]),
+      // #35/#290: `o` opens a native terminal PTY overlay (renamed from open_terminal_overlay).
+      def(Action::TerminalPty, &["o"]),
+      // #290: `O` opens a native terminal fullscreen (was unbound before #290).
+      def(Action::TerminalFullscreen, &["O"]),
+      // #290: `B` opens the browse-links menu (was `O` for open_menu before #290).
+      def(Action::BrowseLinks, &["B"]),
       def(Action::OpenDocs, &["."]),
-      def(Action::LinkPrompt, &["L"]),
+      // #290: `i` links the selected worktree to an issue/PR (was `L` before #290).
+      def(Action::LinkPrompt, &["i"]),
       def(Action::FetchGithub, &["F"]),
+      // #290: `t` opens the selected worktree in a new multiplexer pane/tab.
+      def(Action::MuxPane, &["t"]),
+      // #290: `h`/`H` fire user-configured macro1/macro2.
+      def(Action::Macro1, &["h"]),
+      def(Action::Macro2, &["H"]),
       def(Action::Help, &["?"]),
       def(Action::Quit, &["q"]),
       def(Action::CommandPalette, &[":"]),
