@@ -965,16 +965,13 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
         return Ok(());
       };
       let bin = cmd[0].as_str();
-      // Append the shell -c <command> to run inside the new pane.
+      // tmux `new-window` / zellij `new-tab` take the command as a SINGLE
+      // shell-command operand and hand it to the shell themselves, so we must
+      // not pre-split it into `sh -c <cmd>` — that would reach tmux as
+      // separate argv and break parsing (Codex review on PR #292). Append the
+      // raw command as one trailing argument.
       let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
-      #[cfg(windows)]
-      let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
-      #[cfg(not(windows))]
-      let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-      // cmd.exe takes `/C`, POSIX shells take `-c` (Codex review on PR #292).
-      let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
-      let sh_args = [shell.as_str(), shell_flag, macro_cfg.command.as_str()];
-      full_cmd.extend_from_slice(&sh_args);
+      full_cmd.push(macro_cfg.command.as_str());
       match std::process::Command::new(bin).args(&full_cmd).spawn() {
         Ok(_) => app.status = format!("macro{} opened in mux pane", n),
         Err(e) => app.status = format!("macro{} mux failed: {}", n, e),

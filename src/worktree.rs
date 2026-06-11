@@ -443,14 +443,18 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
 /// 2. `git worktree move <old_path> <new_path>` (run from `workdir`, the main
 ///    repo, so the CWD is never inside the moved dir). Skipped when the path
 ///    is unchanged.
-/// 3. `git branch -m <old_branch> <new_branch>` from the moved directory. On
-///    failure, roll the move back and return the error.
+/// 3. When the branch name changes, `git branch -m <old> <new>` from the
+///    moved directory. On failure, roll the move back and return the error. A
+///    path-only edit (same branch) skips this and every remote step.
 /// 4. If `<old_branch>` exists on `origin`, `git push origin :<old> <new>:<new>`
 ///    renames the remote branch, then `git branch --set-upstream-to` re-points
 ///    tracking (non-fatal — a failure leaves the rename done, just untracked).
+///    A rejected push rolls back both the local rename and the move so the
+///    repo is never left half-renamed.
 ///
 /// Returns `true` when the remote branch was also renamed (it existed on
-/// `origin`), `false` when only the local branch + directory changed.
+/// `origin`), `false` when only the local branch + directory changed (or a
+/// path-only move with no branch change).
 pub fn rename_worktree(
   workdir: &Path,
   old_path: &Path,
@@ -487,9 +491,9 @@ pub fn rename_worktree(
   // From here on the branch lives in `branch_dir`.
   let branch_dir = if moves { new_path } else { old_path };
 
-  // 3. Local branch rename. Roll the directory move back on failure so the
-  //    worktree is not left moved-but-not-renamed.
-  if let Err(e) = git_in(branch_dir, &["branch", "-m", old_branch, new_branch]) {
+  // Roll the directory move back to its original location. Used when a later
+  // step fails so the worktree is never left moved-but-not-renamed.
+  let rollback_move = || {
     if moves {
       let _ = git_in(
         workdir,
@@ -501,6 +505,20 @@ pub fn rename_worktree(
         ],
       );
     }
+  };
+
+  // A path-only edit (same branch, different dir — e.g. a changed
+  // `[worktree].base`) must skip every ref mutation: `git branch -m old old`
+  // is an error, which would roll a valid move back (Codex review on PR #292).
+  let renames_branch = new_branch != old_branch;
+  if !renames_branch {
+    return Ok(false);
+  }
+
+  // 3. Local branch rename. Roll the directory move back on failure so the
+  //    worktree is not left moved-but-not-renamed.
+  if let Err(e) = git_in(branch_dir, &["branch", "-m", old_branch, new_branch]) {
+    rollback_move();
     return Err(GwmError::CommandFailed(format!("local rename failed: {e}")));
   }
 
@@ -513,7 +531,7 @@ pub fn rename_worktree(
     .unwrap_or(false);
   let mut remote_renamed = false;
   if remote_exists {
-    git_in(
+    if let Err(e) = git_in(
       branch_dir,
       &[
         "push",
@@ -521,8 +539,14 @@ pub fn rename_worktree(
         &format!(":{old_branch}"),
         &format!("{new_branch}:{new_branch}"),
       ],
-    )
-    .map_err(|e| GwmError::CommandFailed(format!("remote rename failed: {e}")))?;
+    ) {
+      // The remote push was rejected (protected branch, auth/network, or an
+      // existing remote target). Undo the local branch rename and the move so
+      // the repo is not left half-renamed (Codex review on PR #292).
+      let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+      rollback_move();
+      return Err(GwmError::CommandFailed(format!("remote rename failed: {e}")));
+    }
     // Re-track the new upstream. Non-fatal: the rename is already done.
     let _ = git_in(
       branch_dir,

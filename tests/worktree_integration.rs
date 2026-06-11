@@ -1140,3 +1140,27 @@ fn rename_worktree_refuses_preexisting_target_without_touching_refs() {
   );
   assert!(old_path.exists(), "old worktree directory must stay put");
 }
+
+#[test]
+fn rename_worktree_moves_dir_only_when_branch_unchanged() {
+  // Codex review on PR #292: a path-only edit (same branch name, different
+  // directory) must move the dir without running `git branch -m old old`
+  // (which git rejects). The branch stays intact and the move succeeds.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-6-old");
+  worktree::add(&repo, "feat-6-old", &old_path, "feat/#6-keep", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-6-new");
+  let remote_renamed =
+    worktree::rename_worktree(dir.path(), &old_path, "feat/#6-keep", &new_path, "feat/#6-keep").unwrap();
+
+  assert!(!remote_renamed, "no branch change → nothing remote");
+  assert!(new_path.exists(), "directory must move to the new path");
+  assert!(!old_path.exists(), "old directory must be gone");
+  assert!(
+    repo.find_branch("feat/#6-keep", git2::BranchType::Local).is_ok(),
+    "the unchanged branch must survive the path-only move"
+  );
+}
