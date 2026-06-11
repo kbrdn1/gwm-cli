@@ -944,7 +944,9 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
       let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
       #[cfg(not(windows))]
       let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-      let argv = [shell.as_str(), "-c", macro_cfg.command.as_str()];
+      // cmd.exe takes `/C`, POSIX shells take `-c` (Codex review on PR #292).
+      let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+      let argv = [shell.as_str(), shell_flag, macro_cfg.command.as_str()];
       match PtyOverlay::spawn(PtyKind::Terminal, &argv, &path, inner_cols, inner_rows) {
         Ok(pty) => app.open_pty_overlay(pty),
         Err(e) => app.status = format!("macro{} overlay failed: {}", n, e),
@@ -969,7 +971,9 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
       let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
       #[cfg(not(windows))]
       let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-      let sh_args = [shell.as_str(), "-c", macro_cfg.command.as_str()];
+      // cmd.exe takes `/C`, POSIX shells take `-c` (Codex review on PR #292).
+      let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+      let sh_args = [shell.as_str(), shell_flag, macro_cfg.command.as_str()];
       full_cmd.extend_from_slice(&sh_args);
       match std::process::Command::new(bin).args(&full_cmd).spawn() {
         Ok(_) => app.status = format!("macro{} opened in mux pane", n),

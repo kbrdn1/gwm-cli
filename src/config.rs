@@ -432,9 +432,12 @@ impl SidebarPosition {
 }
 
 /// Where a macro command runs when fired from the TUI (#290).
-/// Serialised as lowercase strings in `[tui.macro1]` / `[tui.macro2]`.
+/// Serialised as snake_case strings in `[tui.macro1]` / `[tui.macro2]`
+/// (`open_in = "pty"` / `open_in = "mux_pane"`) — `snake_case`, not
+/// `lowercase`, so the documented `"mux_pane"` value deserialises (Codex
+/// review on PR #292: `lowercase` produced `"muxpane"`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum MacroOpenMode {
   /// Open the command in an embedded PTY overlay (same as lazygit-pty /
   /// terminal-pty). The TUI suspends until the command exits.

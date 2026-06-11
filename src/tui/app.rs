@@ -896,7 +896,13 @@ impl App {
             continue;
           }
           match result {
-            Ok(msg) => self.status = format!("pushed {}: {}", name, msg),
+            Ok(msg) => {
+              // Pushing updates the remote-tracking ref + ahead/behind, so
+              // refresh the table before overwriting the status, mirroring
+              // the pull/sync path (Codex review on PR #292).
+              let _ = self.refresh();
+              self.status = format!("pushed {}: {}", name, msg);
+            }
             Err(e) => self.status = format!("push failed: {}", e),
           }
           applied = true;

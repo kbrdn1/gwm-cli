@@ -430,15 +430,24 @@ fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
 }
 
 /// Rename a worktree's branch (local + remote) and move its directory on
-/// disk (`c` in the TUI, #290). Three steps, each fatal on failure except
-/// the upstream re-track:
+/// disk (`c` in the TUI, #290).
 ///
-/// 1. `git branch -m <old_branch> <new_branch>` — rename the local branch.
-/// 2. If `<old_branch>` exists on `origin`, `git push origin :<old> <new>:<new>`
+/// The directory move is the step most likely to fail (the row is the main
+/// or a locked worktree, or the target path already exists), so it runs
+/// **first** — a failure there leaves every ref untouched (Codex review on
+/// PR #292). Only once the directory is in place are the refs renamed, and a
+/// branch-rename failure rolls the move back so the worktree is never left
+/// in a half-renamed state. Order of operations:
+///
+/// 1. Preflight: refuse if `<new_path>` already exists (the move would fail).
+/// 2. `git worktree move <old_path> <new_path>` (run from `workdir`, the main
+///    repo, so the CWD is never inside the moved dir). Skipped when the path
+///    is unchanged.
+/// 3. `git branch -m <old_branch> <new_branch>` from the moved directory. On
+///    failure, roll the move back and return the error.
+/// 4. If `<old_branch>` exists on `origin`, `git push origin :<old> <new>:<new>`
 ///    renames the remote branch, then `git branch --set-upstream-to` re-points
 ///    tracking (non-fatal — a failure leaves the rename done, just untracked).
-/// 3. If the path changes, `git worktree move <old_path> <new_path>` (run from
-///    `workdir`, the main repo, so the CWD is never inside the moved dir).
 ///
 /// Returns `true` when the remote branch was also renamed (it existed on
 /// `origin`), `false` when only the local branch + directory changed.
@@ -449,44 +458,21 @@ pub fn rename_worktree(
   new_path: &Path,
   new_branch: &str,
 ) -> Result<bool> {
-  // 1. Local branch rename.
-  git_in(old_path, &["branch", "-m", old_branch, new_branch])
-    .map_err(|e| GwmError::CommandFailed(format!("local rename failed: {e}")))?;
+  let moves = new_path != old_path;
 
-  // 2. Remote branch rename, only when the old branch is on origin.
-  let remote_exists = Command::new("git")
-    .args(["ls-remote", "--exit-code", "--heads", "origin", old_branch])
-    .current_dir(old_path)
-    .output()
-    .map(|o| o.status.success())
-    .unwrap_or(false);
-  let mut remote_renamed = false;
-  if remote_exists {
-    git_in(
-      old_path,
-      &[
-        "push",
-        "origin",
-        &format!(":{old_branch}"),
-        &format!("{new_branch}:{new_branch}"),
-      ],
-    )
-    .map_err(|e| GwmError::CommandFailed(format!("remote rename failed: {e}")))?;
-    // Re-track the new upstream. Non-fatal: the rename is already done.
-    let _ = git_in(
-      old_path,
-      &[
-        "branch",
-        "--set-upstream-to",
-        &format!("origin/{new_branch}"),
-        new_branch,
-      ],
-    );
-    remote_renamed = true;
+  // 1. Preflight — a pre-existing target would make `git worktree move`
+  //    fail anyway, so reject it up front before touching any ref.
+  if moves && new_path.exists() {
+    return Err(GwmError::CommandFailed(format!(
+      "target path already exists: {}",
+      new_path.display()
+    )));
   }
 
-  // 3. Move the worktree directory so the slug stays in sync.
-  if new_path != old_path {
+  // 2. Move the worktree directory first: it is the most failure-prone step
+  //    (main/locked worktree, busy dir), and failing here leaves all refs
+  //    untouched.
+  if moves {
     git_in(
       workdir,
       &[
@@ -497,6 +483,57 @@ pub fn rename_worktree(
       ],
     )
     .map_err(|e| GwmError::CommandFailed(format!("worktree move failed: {e}")))?;
+  }
+  // From here on the branch lives in `branch_dir`.
+  let branch_dir = if moves { new_path } else { old_path };
+
+  // 3. Local branch rename. Roll the directory move back on failure so the
+  //    worktree is not left moved-but-not-renamed.
+  if let Err(e) = git_in(branch_dir, &["branch", "-m", old_branch, new_branch]) {
+    if moves {
+      let _ = git_in(
+        workdir,
+        &[
+          "worktree",
+          "move",
+          &new_path.to_string_lossy(),
+          &old_path.to_string_lossy(),
+        ],
+      );
+    }
+    return Err(GwmError::CommandFailed(format!("local rename failed: {e}")));
+  }
+
+  // 4. Remote branch rename, only when the old branch is on origin.
+  let remote_exists = Command::new("git")
+    .args(["ls-remote", "--exit-code", "--heads", "origin", old_branch])
+    .current_dir(branch_dir)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+  let mut remote_renamed = false;
+  if remote_exists {
+    git_in(
+      branch_dir,
+      &[
+        "push",
+        "origin",
+        &format!(":{old_branch}"),
+        &format!("{new_branch}:{new_branch}"),
+      ],
+    )
+    .map_err(|e| GwmError::CommandFailed(format!("remote rename failed: {e}")))?;
+    // Re-track the new upstream. Non-fatal: the rename is already done.
+    let _ = git_in(
+      branch_dir,
+      &[
+        "branch",
+        "--set-upstream-to",
+        &format!("origin/{new_branch}"),
+        new_branch,
+      ],
+    );
+    remote_renamed = true;
   }
 
   Ok(remote_renamed)

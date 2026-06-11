@@ -1110,3 +1110,33 @@ fn rename_worktree_renames_remote_branch_when_pushed() {
   assert!(refs.contains("feat/#2-new"), "remote must carry the new branch: {refs}");
   assert!(!refs.contains("feat/#2-old"), "remote must drop the old branch: {refs}");
 }
+
+#[test]
+fn rename_worktree_refuses_preexisting_target_without_touching_refs() {
+  // Codex review on PR #292: the directory move runs first and is preflighted,
+  // so a pre-existing target is rejected before any ref is renamed — the repo
+  // is never left half-renamed.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-5-old");
+  worktree::add(&repo, "feat-5-old", &old_path, "feat/#5-old", false).unwrap();
+
+  // A directory already sitting at the target path makes the move impossible.
+  let new_path = wt_root.path().join("feat-5-new");
+  std::fs::create_dir(&new_path).unwrap();
+
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#5-old", &new_path, "feat/#5-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // No ref touched: old branch survives, new branch absent, old dir intact.
+  assert!(
+    repo.find_branch("feat/#5-old", git2::BranchType::Local).is_ok(),
+    "old branch must survive a rejected rename"
+  );
+  assert!(
+    repo.find_branch("feat/#5-new", git2::BranchType::Local).is_err(),
+    "new branch must not be created when the move is rejected"
+  );
+  assert!(old_path.exists(), "old worktree directory must stay put");
+}
