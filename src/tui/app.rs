@@ -1746,18 +1746,34 @@ impl App {
   }
 
   /// Request an off-thread `git pull` of the selected worktree's branch
-  /// (#290). Coalesces if a pull is already in flight.
+  /// (#290). Coalesces if a pull is already in flight, and refuses to start
+  /// while a *different* mutating task (sync / bootstrap / push / rename /
+  /// create / delete) runs in the same worktree (Codex review on PR #292).
   pub fn request_pull(&mut self) {
     let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
       self.status = "no worktree selected".into();
       return;
     };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Pull) {
+      self.status = self.busy_mutation_status("pulling");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Pull) else {
       return;
     };
     self.spinner.reset();
     self.status = TaskKind::Pull.loading_label().into();
     self.spawn_pull(generation, path, name);
+  }
+
+  /// Status line shown when a mutating verb is pressed while another mutating
+  /// task is in flight. `action` is the gerund of the blocked verb
+  /// (e.g. "pulling", "pushing").
+  fn busy_mutation_status(&self, action: &str) -> String {
+    match self.tasks.mutating_loading_label() {
+      Some(label) => format!("finish {} before {}", label.trim_end_matches('…'), action),
+      None => format!("finish current task before {}", action),
+    }
   }
 
   fn spawn_pull(&self, generation: u64, path: PathBuf, name: String) {
@@ -1780,12 +1796,18 @@ impl App {
   }
 
   /// Request an off-thread `git push` of the selected worktree's branch
-  /// (#290). Coalesces if a push is already in flight.
+  /// (#290). Coalesces if a push is already in flight, and refuses to start
+  /// while a *different* mutating task runs in the same worktree (Codex review
+  /// on PR #292).
   pub fn request_push(&mut self) {
     let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
       self.status = "no worktree selected".into();
       return;
     };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Push) {
+      self.status = self.busy_mutation_status("pushing");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Push) else {
       return;
     };
@@ -1967,10 +1989,13 @@ impl App {
     };
     let path = w.path.clone();
     let name = w.name.clone();
+    // `mux_pane` promises a pane, so split the current pane (tmux
+    // `split-window` / zellij `new-pane`) rather than opening a new
+    // window/tab (Codex review on PR #292).
     let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-      build_tmux_command(&name, &path, SpawnMode::Window)
+      build_tmux_command(&name, &path, SpawnMode::Split)
     } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-      build_zellij_command(&name, &path, SpawnMode::Window)
+      build_zellij_command(&name, &path, SpawnMode::Split)
     } else {
       self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
       return;

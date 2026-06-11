@@ -525,12 +525,41 @@ pub fn rename_worktree(
   }
 
   // 4. Remote branch rename, only when the old branch is on origin.
-  let remote_exists = Command::new("git")
-    .args(["ls-remote", "--exit-code", "--heads", "origin", old_branch])
+  //    First decide whether an `origin` remote is even configured: with no
+  //    remote a local-only rename is perfectly valid (don't abort). Only when
+  //    `origin` exists do we look the branch up — and there, with
+  //    `--exit-code`, `git ls-remote` exits 0 when the branch is found and 2
+  //    when it is genuinely absent. Any other status (auth, network, server)
+  //    is a lookup *failure*, not "absent": treating it as absent would skip
+  //    the remote rename and report local-only success while `origin/<old>`
+  //    lives on, so abort + roll back instead (Codex review on PR #292).
+  let has_origin = Command::new("git")
+    .args(["remote", "get-url", "origin"])
     .current_dir(branch_dir)
     .output()
     .map(|o| o.status.success())
     .unwrap_or(false);
+  let remote_exists = if has_origin {
+    let ls = Command::new("git")
+      .args(["ls-remote", "--exit-code", "--heads", "origin", old_branch])
+      .current_dir(branch_dir)
+      .output();
+    match ls {
+      Ok(o) if o.status.success() => true,
+      Ok(o) if o.status.code() == Some(2) => false,
+      other => {
+        let detail = match other {
+          Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+          Err(e) => e.to_string(),
+        };
+        let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+        rollback_move();
+        return Err(GwmError::CommandFailed(format!("remote lookup failed: {detail}")));
+      }
+    }
+  } else {
+    false
+  };
   let mut remote_renamed = false;
   if remote_exists {
     // `--atomic` makes the two-refspec push all-or-nothing: without it git can

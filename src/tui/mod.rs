@@ -956,10 +956,12 @@ fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut Ap
       use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
       let path = cwd.unwrap_or_else(|| app.workdir.clone());
       let label = format!("macro{}", n);
+      // `open_in = "mux_pane"` promises a pane → split, not a new window/tab
+      // (Codex review on PR #292).
       let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
-        build_tmux_command(&label, &path, SpawnMode::Window)
+        build_tmux_command(&label, &path, SpawnMode::Split)
       } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
-        build_zellij_command(&label, &path, SpawnMode::Window)
+        build_zellij_command(&label, &path, SpawnMode::Split)
       } else {
         app.status = format!("macro{}: no multiplexer detected", n);
         return Ok(());

@@ -1234,3 +1234,41 @@ fn rename_worktree_rejected_remote_push_is_atomic_and_rolls_back() {
   assert!(old_path.exists(), "the worktree directory must roll back to old_path");
   assert!(!new_path.exists(), "the new directory must not survive a failed rename");
 }
+
+#[test]
+fn rename_worktree_aborts_and_rolls_back_on_remote_lookup_failure() {
+  // Codex review on PR #292: when `origin` is set but `git ls-remote` fails
+  // (here: it points at a non-existent repo, so the lookup errors rather than
+  // returning exit 2 "absent"), the rename must abort and roll back rather
+  // than silently reporting local-only success.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  Command::new("git")
+    .args(["remote", "add", "origin", "/nonexistent/path/to/repo.git"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-9-old");
+  worktree::add(&repo, "feat-9-old", &old_path, "feat/#9-old", false).unwrap();
+  let new_path = wt_root.path().join("feat-9-new");
+
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#9-old", &new_path, "feat/#9-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // Full rollback: local branch + directory restored to their original state.
+  assert!(
+    repo.find_branch("feat/#9-old", git2::BranchType::Local).is_ok(),
+    "local branch must roll back to feat/#9-old after a remote lookup failure"
+  );
+  assert!(
+    repo.find_branch("feat/#9-new", git2::BranchType::Local).is_err(),
+    "the new branch must not survive an aborted rename"
+  );
+  assert!(old_path.exists(), "the worktree directory must roll back to old_path");
+  assert!(
+    !new_path.exists(),
+    "the new directory must not survive an aborted rename"
+  );
+}

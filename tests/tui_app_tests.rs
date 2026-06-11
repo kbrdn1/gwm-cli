@@ -6261,3 +6261,52 @@ fn cancel_edit_worktree_resets_state() {
   assert!(app.edit_original_branch.is_none());
   assert!(app.edit_original_path.is_none());
 }
+
+#[test]
+fn request_push_refuses_while_another_mutation_runs() {
+  // Codex review on PR #292: pressing `P` while a different mutating task is
+  // in flight must not start a concurrent push in the same worktree.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  // A sync is already running (a different mutating kind).
+  app.tasks.request(TaskKind::Sync);
+
+  app.request_push();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Push),
+    "push must not start while a sync is in flight"
+  );
+  assert!(
+    app.status.contains("before pushing"),
+    "status must explain the block: {}",
+    app.status
+  );
+}
+
+#[test]
+fn request_pull_refuses_while_another_mutation_runs() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.tasks.request(TaskKind::Bootstrap);
+
+  app.request_pull();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Pull),
+    "pull must not start while a bootstrap is in flight"
+  );
+  assert!(
+    app.status.contains("before pulling"),
+    "status must explain the block: {}",
+    app.status
+  );
+}
