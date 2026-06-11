@@ -6200,3 +6200,64 @@ fn activate_is_a_noop_on_the_read_only_all_tab() {
     "the read-only All tab must not write anything"
   );
 }
+
+// ---- Edit-worktree modal (rename, #290) ----------------------------------
+
+#[test]
+fn enter_edit_worktree_prefills_create_form_from_branch() {
+  // `c` opens the rename modal by decomposing the current branch into the
+  // Create form (Type / Issue / Desc), so renaming is symmetric with create.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("fix/#42-broken-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit);
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "broken-thing");
+  assert_eq!(
+    app.branch_types[app.create_form.type_index].name, "fix",
+    "the type selector must point at the parsed branch type"
+  );
+  assert_eq!(app.edit_original_branch.as_deref(), Some("fix/#42-broken-thing"));
+  assert!(
+    app.edit_original_path.is_some(),
+    "the original path is captured for git worktree move"
+  );
+}
+
+#[test]
+fn enter_edit_worktree_rejects_unparseable_branch() {
+  // A branch that isn't `<type>/#<issue>-<desc>` (e.g. `main`) can't be
+  // decomposed into the form, so the modal refuses to open.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("main".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "unparseable branch must not open the modal");
+  assert!(app.edit_original_branch.is_none());
+}
+
+#[test]
+fn cancel_edit_worktree_resets_state() {
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.cancel_edit_worktree();
+
+  assert_eq!(app.view, View::List);
+  assert!(app.edit_original_branch.is_none());
+  assert!(app.edit_original_path.is_none());
+}

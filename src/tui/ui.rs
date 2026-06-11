@@ -1810,7 +1810,12 @@ impl HintContext {
         Hint::Lit("Esc/q", "close"),
       ],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
-      HintContext::Rename => &[Hint::Lit("Enter", "confirm"), Hint::Lit("Esc", "cancel")],
+      HintContext::Rename => &[
+        Hint::Lit("Tab", "field"),
+        Hint::Lit("↑/↓", "type"),
+        Hint::Lit("Enter", "submit"),
+        Hint::Lit("Esc", "cancel"),
+      ],
     }
   }
 
@@ -3579,50 +3584,101 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 /// occupies the top of the inner area, input bar is pinned to the
 /// bottom row. The highlight follows the user's cycle key
 /// (`Up` / `Down` / `Tab`); `Enter` fires the highlighted entry,
-/// `Esc` cancels.
-/// Inline branch-rename modal (#290). A single-line input anchored at the
-/// bottom of the screen, styled like the filter bar. `Enter` submits, `Esc`
-/// cancels. State lives on `App::edit_branch_buffer`.
+/// Worktree-rename modal (#290). Mirrors [`draw_create`] — it reuses the
+/// same Create form state (Type / Issue / Desc) pre-filled from the current
+/// branch — plus a `From :` line showing the original branch, an async
+/// "renaming…" loader, and an inline failure surfaced from
+/// `App::edit_failure`. State lives on `App::create_form` +
+/// `App::edit_original_branch`.
 fn draw_edit_worktree(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
   let clean = app.theme.clean;
   let surface = app.theme.selection_bg;
-  let term = f.area();
+
+  let (type_str, type_desc) = app
+    .branch_types
+    .get(app.create_form.type_index)
+    .map(|t| (t.name.as_str(), t.description.as_str()))
+    .unwrap_or(("", "(no branch types configured)"));
 
   let block = overlay_block(clean);
+  let term = f.area();
   let outer = centered_box(70, 72, 1, term);
   let inner_w = block.inner(outer).width as usize;
-  let label_w = 6usize; // "Branch"
+  let label_w = 5usize;
   let gutter = 2 + label_w + 2;
   let value_w = inner_w.saturating_sub(gutter);
 
-  let old_branch = app.selected().and_then(|w| w.branch.as_deref()).unwrap_or("(none)");
-  let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From : ".len()));
+  let label = |s: &str| format!("{:<label_w$}", s);
+  let old_branch = app
+    .edit_original_branch
+    .as_deref()
+    .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
+    .unwrap_or("(none)");
+  let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From   : ".len()));
+  let branch = ellipsize_middle(
+    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Branch : ".len()),
+  );
+  let dirname = ellipsize_middle(
+    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Dir    : ".len()),
+  );
 
-  let mut lines = overlay_title_lines("Rename Branch", clean);
+  let mut lines = overlay_title_lines("Rename Worktree", clean);
   lines.push(Line::from(vec![
-    Span::raw("  From : "),
-    Span::styled(old_display, Style::default().fg(app.theme.branch)),
+    Span::raw("  From   : "),
+    Span::styled(old_display, Style::default().fg(muted)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(type_selector_line(
+    &label("Type"),
+    type_str,
+    type_desc,
+    app.create_form.field == Field::Type,
+    accent,
+    muted,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(vec![
+    Span::raw("  Branch : "),
+    Span::styled(branch, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(vec![
+    Span::raw("  Dir    : "),
+    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
   ]));
   lines.push(Line::from(String::new()));
   lines.push(field_input_line(
-    &format!("{:<label_w$}", "Branch"),
-    &app.edit_branch_buffer,
-    true,
+    &label("Issue"),
+    &app.create_form.issue,
+    app.create_form.field == Field::Issue,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Desc"),
+    &app.create_form.desc,
+    app.create_form.field == Field::Desc,
     value_w,
     accent,
     muted,
     surface,
   ));
 
-  let height = lines.len() as u16 + 2 /* hint gap + hint */ + 2 /* border */ + 2 /* padding */;
+  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
   let area = centered_box(70, 72, height, term);
   let inner = Layout::default()
     .direction(Direction::Vertical)
     .constraints([
-      Constraint::Min(1),    // title + fields
-      Constraint::Length(1), // spacer
+      Constraint::Min(1),    // title + form fields
+      Constraint::Length(1), // loader / failure
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
       Constraint::Length(1), // hint
     ])
     .split(block.inner(area));
@@ -3630,10 +3686,35 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
   f.render_widget(Clear, area);
   f.render_widget(block, area);
   f.render_widget(Paragraph::new(lines), inner[0]);
-  f.render_widget(
-    Paragraph::new(modal_hint_for_context(HintContext::Rename, &app.keymap, &app.theme)),
-    inner[2],
-  );
+
+  if app.is_edit_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::EditWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.edit_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("rename failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  }
+
+  if !app.is_edit_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(create_buttons_line(accent, muted)).alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(HintContext::Rename, &app.keymap, &app.theme)),
+      inner[4],
+    );
+  }
 }
 
 fn draw_command_palette(f: &mut Frame, app: &App) {

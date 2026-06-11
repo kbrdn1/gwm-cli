@@ -14,11 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **TUI keymap redesign** (issue #290): unified, consistent key bindings across
   the worktree list. New actions and default bindings:
-  - `p` → `pull` — git pull --rebase on the selected worktree's branch (async,
+  - `p` → `pull` — git pull on the selected worktree's branch (async,
     progress shown in status bar).
   - `P` → `push` — git push on the selected worktree's branch (async).
-  - `c` → `edit_worktree` — inline branch-rename modal; type the new name,
-    `Enter` to confirm, `Esc` to cancel.
+  - `c` → `edit_worktree` — rename modal mirroring New Worktree (Type / Issue /
+    Desc), pre-filled by parsing the current branch. Submitting renames the
+    local branch (`git branch -m`), the remote branch when it exists on origin
+    (`git push origin :<old> <new>:<new>` + upstream re-track), and moves the
+    worktree directory on disk (`git worktree move`) so the slug stays in sync
+    — all off-thread.
   - `e` → `exit_to_worktree` — quit TUI and print the selected path to stdout,
     enabling `cd "$(gwm)"` shell patterns.
   - `y` → `yank_branch_name` — copy the selected branch name to clipboard.
@@ -27,9 +31,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `h` / `H` → `macro_one` / `macro_two` — run user-configured commands from
     `[tui.macro1]` / `[tui.macro2]` in the project `.gwm.toml`.
   - `s` (was `S`) → `sync`; `D` (was `p`) → `toggle_delete_branch`;
-    `l` → `lazygit_pty`; `r` → `review_pty`; `v` → `toggle_sidebar_position`.
+    `l` → `lazygit_pty`; `r` → `review_pty`.
+  - Sidebar keys: `V` → `toggle_sidebar` (show/hide), `S` → `toggle_sidebar_mode`
+    (Commits ↔ Stashes), `Space` → `cycle_sidebar_layout` (auto / side-by-side /
+    stacked), `v` → `toggle_sidebar_position` (left ↔ right).
   - Action slugs aligned: `lazygit_fullscreen`, `terminal_pty`,
     `terminal_fullscreen`, `review_fullscreen`, `yank_path`.
+  - Pre-#290 `[tui.keys]` slugs (`git_tui`, `review`, `yank`, `open`,
+    `open_menu`, …) still load via backward-compat aliases.
 - **`[tui.macro1]` / `[tui.macro2]` config** (issue #290): user-defined
   commands launched from the TUI. Each entry accepts a `command` string and an
   optional `open_in` field (`"pty"` — default; `"mux_pane"` for a new

@@ -505,19 +505,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           }
         }
       },
-      // #290: branch-rename inline modal. Esc cancels, Enter submits.
-      // Backspace pops a char; all other printable chars are appended.
-      View::Edit => match key.code {
-        KeyCode::Esc => {
-          app.edit_branch_buffer.clear();
-          app.view = View::List;
+      // #290: worktree-rename modal. Reuses the Create form input handler
+      // (Type / Issue / Desc), but routes submit to the rename worker. Input
+      // is swallowed while the async rename is in flight, mirroring create.
+      View::Edit if app.is_edit_worktree_loading() => {}
+      View::Edit => match app.handle_create_key(key) {
+        CreateKey::Submit => {
+          if let Err(e) = app.submit_edit_worktree() {
+            app.status = format!("rename failed: {}", e);
+          }
         }
-        KeyCode::Enter => app.submit_edit_branch(),
-        KeyCode::Backspace => {
-          app.edit_branch_buffer.pop();
-        }
-        KeyCode::Char(c) => app.edit_branch_buffer.push(c),
-        _ => {}
+        CreateKey::Cancel => app.cancel_edit_worktree(),
+        CreateKey::Handled => {}
       },
       // Issue #32: command palette overlay. Palette entry names
       // are restricted to `[a-z0-9_-]` (see

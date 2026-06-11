@@ -1,6 +1,6 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
-use super::state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
@@ -89,9 +89,11 @@ pub enum View {
   /// kills the child and returns to the list. State lives on
   /// [`App::pty_overlay`].
   Pty,
-  /// Inline branch-rename modal (#290). A one-line input at the bottom of
-  /// the list, pre-filled with the current branch name. `Enter` submits,
-  /// `Esc` cancels. State lives on [`App::edit_branch_buffer`].
+  /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
+  /// Desc) pre-filled by parsing the current branch; submitting renames the
+  /// local + remote branch and moves the worktree directory. State lives on
+  /// [`App::create_form`] plus [`App::edit_original_branch`] /
+  /// [`App::edit_original_path`].
   Edit,
 }
 
@@ -361,10 +363,19 @@ pub struct App {
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
   pub should_exit_to: Option<PathBuf>,
 
-  /// Input buffer for the branch-rename modal (`View::Edit`, #290).
-  /// Pre-filled with the selected worktree's branch name when the modal
-  /// opens; cleared on cancel.
-  pub edit_branch_buffer: String,
+  /// The selected worktree's branch name captured when the rename modal
+  /// (`View::Edit`, #290) opens — the `<old>` in `git branch -m <old> <new>`.
+  /// `None` while the modal is closed.
+  pub edit_original_branch: Option<String>,
+
+  /// The selected worktree's on-disk path captured when the rename modal
+  /// opens — the source for `git worktree move <old_path> <new_path>`.
+  pub edit_original_path: Option<PathBuf>,
+
+  /// Last rename failure, surfaced inside the Edit modal (mirrors
+  /// [`Self::create_failure`]) so the user can correct and retry without
+  /// losing the form. Cleared when the modal reopens.
+  pub edit_failure: Option<String>,
 }
 
 impl App {
@@ -450,7 +461,9 @@ impl App {
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       should_exit_to: None,
-      edit_branch_buffer: String::new(),
+      edit_original_branch: None,
+      edit_original_path: None,
+      edit_failure: None,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -885,6 +898,35 @@ impl App {
           match result {
             Ok(msg) => self.status = format!("pushed {}: {}", name, msg),
             Err(e) => self.status = format!("push failed: {}", e),
+          }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::EditWorktree(generation, result) => {
+          if !self.tasks.complete(TaskKind::EditWorktree, generation) {
+            continue;
+          }
+          match result {
+            Ok(res) => {
+              let _ = self.refresh();
+              self.status = if res.remote_renamed {
+                format!("renamed to {} (local + remote)", res.new_branch)
+              } else {
+                format!("renamed to {} (local only)", res.new_branch)
+              };
+              // Re-select the renamed worktree by its new path so the
+              // cursor stays on the row the user just edited.
+              if let Some(i) = self.worktrees.iter().position(|w| w.path == res.new_path) {
+                self.list_state.select(Some(i));
+              }
+              self.edit_original_branch = None;
+              self.edit_original_path = None;
+              self.edit_failure = None;
+              self.create_form.reset();
+              self.view = View::List;
+            }
+            // Keep the modal open so the user can fix the form and retry.
+            Err(e) => self.edit_failure = Some(e),
           }
           applied = true;
           refresh_applied = true;
@@ -1716,7 +1758,7 @@ impl App {
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
       let result = std::process::Command::new("git")
-        .args(["pull", "--rebase"])
+        .args(["pull"])
         .current_dir(&path)
         .output()
         .map_err(|e| e.to_string())
@@ -1765,55 +1807,147 @@ impl App {
     });
   }
 
-  /// Open the branch-rename modal for the selected worktree (`c`, #290).
-  /// Pre-fills the buffer with the current branch name.
+  /// Open the rename modal for the selected worktree (`c`, #290). Reuses the
+  /// Create form (Type / Issue / Desc) pre-filled by parsing the current
+  /// branch name, so renaming is symmetric with creating. A branch that does
+  /// not match the `<type>/#<issue>-<desc>` pattern can't be decomposed into
+  /// the form, so the modal refuses to open and explains why.
   pub fn enter_edit_worktree(&mut self) {
-    let branch = match self.selected().and_then(|w| w.branch.clone()) {
-      Some(b) => b,
-      None => {
-        self.status = "no branch to rename (detached HEAD or nothing selected)".into();
-        return;
-      }
+    let Some((branch, path)) = self
+      .selected()
+      .and_then(|w| w.branch.clone().map(|b| (b, w.path.clone())))
+    else {
+      self.status = "no branch to rename (detached HEAD or nothing selected)".into();
+      return;
     };
-    self.edit_branch_buffer = branch;
+    let Some(spec) = crate::naming::parse_branch(&branch) else {
+      self.status = format!(
+        "branch '{}' doesn't match <type>/#<issue>-<desc>; can't rename here",
+        branch
+      );
+      return;
+    };
+    let type_index = self.branch_types.iter().position(|t| t.name == spec.type_).unwrap_or(0);
+    self.create_form.reset();
+    self.create_form.type_index = type_index;
+    self.create_form.issue = spec.issue;
+    self.create_form.desc = spec.desc;
+    self.create_form.field = Field::Desc;
+    self.edit_original_branch = Some(branch);
+    self.edit_original_path = Some(path);
+    self.edit_failure = None;
     self.view = View::Edit;
   }
 
-  /// Submit the branch rename from the `View::Edit` modal (#290).
-  /// Renames the branch in the local repo via `git branch -m`, then closes
-  /// the modal. Does not push the remote rename — that is a separate step
-  /// (`git push origin :<old> <new>:<new>`) deferred to a follow-up action.
-  pub fn submit_edit_branch(&mut self) {
-    let new_branch = self.edit_branch_buffer.trim().to_string();
-    if new_branch.is_empty() {
-      self.status = "branch name cannot be empty".into();
-      return;
-    }
-    let Some(path) = self.selected().map(|w| w.path.clone()) else {
-      self.view = View::List;
-      return;
-    };
-    let result = std::process::Command::new("git")
-      .args(["branch", "-m", &new_branch])
-      .current_dir(&path)
-      .output()
-      .map_err(|e| e.to_string())
-      .and_then(|out| {
-        if out.status.success() {
-          Ok(())
-        } else {
-          Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-        }
-      });
-    self.edit_branch_buffer.clear();
+  /// `true` while the async rename worker is in flight (#290). The run loop
+  /// swallows input in `View::Edit` while this holds, mirroring create.
+  pub fn is_edit_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::EditWorktree)
+  }
+
+  /// Cancel the rename modal (`Esc`): drop the captured original branch/path
+  /// and return to the list without touching git.
+  pub fn cancel_edit_worktree(&mut self) {
+    self.edit_original_branch = None;
+    self.edit_original_path = None;
+    self.edit_failure = None;
+    self.create_form.reset();
     self.view = View::List;
-    match result {
-      Ok(()) => {
-        let _ = self.refresh();
-        self.status = format!("branch renamed to {}", new_branch);
+  }
+
+  /// Submit the rename from the `View::Edit` modal (#290). Composes the new
+  /// branch name + worktree path from the form, then spawns an off-thread
+  /// worker that renames the local branch (`git branch -m`), the remote
+  /// branch when it exists (`git push origin :<old> <new>:<new>` + re-track),
+  /// and moves the worktree directory (`git worktree move`). A no-op rename
+  /// (nothing changed) just closes the modal.
+  pub fn submit_edit_worktree(&mut self) -> Result<()> {
+    let type_ = self
+      .branch_types
+      .get(self.create_form.type_index)
+      .map(|t| t.name.clone())
+      .unwrap_or_default();
+    let spec = match BranchSpec::new_with_types(
+      type_,
+      self.create_form.issue.clone(),
+      self.create_form.desc.clone(),
+      &self.branch_types,
+    ) {
+      Ok(s) => s,
+      Err(e) => {
+        self.edit_failure = Some(e.to_string());
+        return Ok(());
       }
-      Err(e) => self.status = format!("rename failed: {}", e),
+    };
+    let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
+    let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
+    let new_path = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
+
+    let Some(old_branch) = self.edit_original_branch.clone() else {
+      self.cancel_edit_worktree();
+      return Ok(());
+    };
+    let Some(old_path) = self.edit_original_path.clone() else {
+      self.cancel_edit_worktree();
+      return Ok(());
+    };
+
+    // Nothing changed — close without shelling out to git.
+    if new_branch == old_branch && new_path == old_path {
+      self.status = "no change".into();
+      self.cancel_edit_worktree();
+      return Ok(());
     }
+
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before renaming", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before renaming".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::EditWorktree) else {
+      return Ok(());
+    };
+    self.edit_failure = None;
+    self.spinner.reset();
+    self.status = TaskKind::EditWorktree.loading_label().into();
+    self.spawn_edit_worktree(
+      generation,
+      old_branch,
+      old_path,
+      new_branch,
+      new_path,
+      new_name,
+      self.workdir.clone(),
+    );
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn spawn_edit_worktree(
+    &self,
+    generation: u64,
+    old_branch: String,
+    old_path: PathBuf,
+    new_branch: String,
+    new_path: PathBuf,
+    new_name: String,
+    workdir: PathBuf,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = crate::worktree::rename_worktree(&workdir, &old_path, &old_branch, &new_path, &new_branch)
+        .map(|remote_renamed| EditWorktreeResult {
+          new_branch,
+          new_path,
+          new_name,
+          remote_renamed,
+        })
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::EditWorktree(generation, result));
+    });
   }
 
   /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
