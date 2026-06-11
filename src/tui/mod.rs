@@ -632,8 +632,8 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
           #[cfg(not(windows))]
           let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
           let sz = terminal.size().unwrap_or_default();
-          let inner_cols = (sz.width * 90 / 100).saturating_sub(6).max(20);
-          let inner_rows = (sz.height * 90 / 100).saturating_sub(4).max(5);
+          let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+          let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
           match PtyOverlay::spawn(PtyKind::Terminal, &[shell.as_str()], &path, inner_cols, inner_rows) {
             Ok(pty) => app.open_pty_overlay(pty),
             Err(e) => app.status = format!("terminal overlay failed: {}", e),
