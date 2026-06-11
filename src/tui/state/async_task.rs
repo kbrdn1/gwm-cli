@@ -83,6 +83,18 @@ pub enum TaskKind {
   /// directory, and optionally delete the branch, so it must not block the
   /// render loop while the confirm modal is open.
   DeleteWorktree,
+  /// Off-thread `git pull` of the selected worktree's branch (#290). One
+  /// global slot — a second `p` press coalesces while one is in flight.
+  Pull,
+  /// Off-thread `git push` of the selected worktree's branch to its remote
+  /// (#290). One global slot — a second `P` press coalesces.
+  Push,
+  /// Off-thread rename of the selected worktree (`c`, #290): renames the
+  /// local branch (`git branch -m`), the remote branch when it exists
+  /// (`git push origin :<old> <new>:<new>` + re-track), and moves the
+  /// worktree directory on disk (`git worktree move`) so the slug stays in
+  /// sync. One global slot — a second `c` submit coalesces.
+  EditWorktree,
 }
 
 impl TaskKind {
@@ -97,6 +109,9 @@ impl TaskKind {
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
       TaskKind::DeleteWorktree => "deleting worktree…",
+      TaskKind::Pull => "pulling…",
+      TaskKind::Push => "pushing…",
+      TaskKind::EditWorktree => "renaming worktree…",
     }
   }
 
@@ -114,7 +129,13 @@ impl TaskKind {
   pub fn is_mutating(self) -> bool {
     matches!(
       self,
-      TaskKind::CreateWorktree | TaskKind::Sync | TaskKind::Bootstrap | TaskKind::DeleteWorktree
+      TaskKind::CreateWorktree
+        | TaskKind::Sync
+        | TaskKind::Bootstrap
+        | TaskKind::DeleteWorktree
+        | TaskKind::Pull
+        | TaskKind::Push
+        | TaskKind::EditWorktree
     )
   }
 }
@@ -124,6 +145,18 @@ pub struct CreateWorktreeResult {
   pub branch: String,
   pub created: PathBuf,
   pub report: BootstrapReport,
+}
+
+/// Successful result of an Edit-modal worker (`c`, #290). Carries the new
+/// branch name, the new on-disk path (after `git worktree move`), and the
+/// new worktree display name so the drain can refresh the list and report
+/// the rename in the status bar.
+pub struct EditWorktreeResult {
+  pub new_branch: String,
+  pub new_path: PathBuf,
+  pub new_name: String,
+  /// `true` when the remote branch was also renamed (it existed on origin).
+  pub remote_renamed: bool,
 }
 
 /// Result of an off-thread task, posted from a worker thread back to the
@@ -159,6 +192,16 @@ pub enum TaskMsg {
   /// deleted worktree's display name + path label for the status line, and
   /// the deletion outcome.
   DeleteWorktree(u64, String, String, std::result::Result<(), String>),
+  /// A `git pull` result (#290): the worker's generation, the worktree's
+  /// display name, and the outcome (a one-line status string on success or
+  /// a stringified error).
+  Pull(u64, String, std::result::Result<String, String>),
+  /// A `git push` result (#290): same shape as [`Self::Pull`].
+  Push(u64, String, std::result::Result<String, String>),
+  /// An edit-worktree result (`c`, #290): the worker's generation and the
+  /// rename outcome (new branch/path/name on success, or a stringified error
+  /// from `git branch -m` / `git push` / `git worktree move`).
+  EditWorktree(u64, std::result::Result<EditWorktreeResult, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
@@ -267,6 +310,12 @@ impl TaskRunner {
       Some(TaskKind::Bootstrap.loading_label())
     } else if self.running.contains(&TaskKind::DeleteWorktree) {
       Some(TaskKind::DeleteWorktree.loading_label())
+    } else if self.running.contains(&TaskKind::Pull) {
+      Some(TaskKind::Pull.loading_label())
+    } else if self.running.contains(&TaskKind::Push) {
+      Some(TaskKind::Push.loading_label())
+    } else if self.running.contains(&TaskKind::EditWorktree) {
+      Some(TaskKind::EditWorktree.loading_label())
     } else {
       None
     }

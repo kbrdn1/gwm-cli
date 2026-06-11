@@ -1,6 +1,6 @@
 use gwm::config::{
   expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, Config, ConfigRow, ConfigSource,
-  SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+  MacroOpenMode, SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
 };
 use tempfile::TempDir;
 
@@ -1663,11 +1663,12 @@ fn tui_keys_rejects_chord_that_is_strict_prefix() {
   // creates a chord/prefix ambiguity. Per the design note on PR #87
   // this is a hard error at load — never a runtime timeout.
   let dir = TempDir::new().unwrap();
+  // `terminal_fullscreen` replaces the old `open` slug (#290).
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
 [tui.keys]
-open = ["g"]
+terminal_fullscreen = ["g"]
 "#,
   )
   .unwrap();
@@ -1909,4 +1910,51 @@ fn config_source_labels_are_stable() {
   assert_eq!(ConfigSource::Repo.label(), "repo");
   assert_eq!(ConfigSource::User.label(), "user");
   assert_eq!(ConfigSource::Default.label(), "default");
+}
+
+#[test]
+fn macro_open_in_accepts_documented_pty_and_mux_pane_values() {
+  // #290 / Codex review on PR #292: `MacroOpenMode` must deserialize the
+  // documented `open_in = "mux_pane"` (snake_case) — under the earlier
+  // `rename_all = "lowercase"` serde expected "muxpane" and a config
+  // following the docs failed to load, taking the whole TUI down.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.macro1]
+command = "make test"
+open_in = "mux_pane"
+
+[tui.macro2]
+command = "codex"
+open_in = "pty"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let m1 = cfg.tui.macro1.expect("macro1 must parse");
+  assert_eq!(m1.command, "make test");
+  assert_eq!(m1.open_in, MacroOpenMode::MuxPane, "\"mux_pane\" must map to MuxPane");
+  let m2 = cfg.tui.macro2.expect("macro2 must parse");
+  assert_eq!(m2.open_in, MacroOpenMode::Pty, "\"pty\" must map to Pty");
+}
+
+#[test]
+fn macro_open_in_defaults_to_pty_when_omitted() {
+  // `open_in` is optional and defaults to Pty (the in-overlay mode).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.macro1]
+command = "lazygit"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let m1 = cfg.tui.macro1.expect("macro1 must parse");
+  assert_eq!(m1.open_in, MacroOpenMode::Pty);
 }

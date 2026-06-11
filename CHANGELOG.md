@@ -12,12 +12,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI keymap redesign** (issue #290): unified, consistent key bindings across
+  the worktree list. New actions and default bindings:
+  - `p` → `pull` — git pull on the selected worktree's branch (async,
+    progress shown in status bar).
+  - `P` → `push` — git push on the selected worktree's branch (async).
+  - `c` → `edit_worktree` — rename modal mirroring New Worktree (Type / Issue /
+    Desc), pre-filled by parsing the current branch. Submitting renames the
+    local branch (`git branch -m`), the remote branch when it exists on origin
+    (`git push origin :<old> <new>:<new>` + upstream re-track), and moves the
+    worktree directory on disk (`git worktree move`) so the slug stays in sync
+    — all off-thread.
+  - `e` → `exit_to_worktree` — quit TUI and print the selected path to stdout,
+    enabling `cd "$(gwm)"` shell patterns.
+  - `y` → `yank_branch_name` — copy the selected branch name to clipboard.
+  - `w` → `yank_worktree_name` — copy the selected worktree name to clipboard.
+  - `t` → `mux_pane` — open the selected worktree in a new tmux/zellij pane.
+  - `h` / `H` → `macro_one` / `macro_two` — run user-configured commands from
+    `[tui.macro1]` / `[tui.macro2]` in the project `.gwm.toml`.
+  - `s` (was `S`) → `sync`; `D` (was `p`) → `toggle_delete_branch`;
+    `l` → `lazygit_pty`; `r` → `review_pty`.
+  - Sidebar keys: `V` → `toggle_sidebar` (show/hide), `S` → `toggle_sidebar_mode`
+    (Commits ↔ Stashes), `Space` → `cycle_sidebar_layout` (auto / side-by-side /
+    stacked), `v` → `toggle_sidebar_position` (left ↔ right).
+  - Action slugs aligned: `lazygit_fullscreen`, `terminal_pty`,
+    `terminal_fullscreen`, `review_fullscreen`, `yank_path`.
+  - Pre-#290 `[tui.keys]` slugs (`git_tui`, `review`, `yank`, `open`,
+    `open_menu`, …) still load via backward-compat aliases.
+- **`[tui.macro1]` / `[tui.macro2]` config** (issue #290): user-defined
+  commands launched from the TUI. Each entry accepts a `command` string and an
+  optional `open_in` field (`"pty"` — default; `"mux_pane"` for a new
+  tmux/zellij pane).
+
 - **PTY overlay for lazygit and native terminal** (issue #35): press `l` to
-  open lazygit inside a ~90 % fullscreen embedded PTY overlay; press `o` to
-  open a native `$SHELL` session. Both overlays stay inside the TUI — no
-  alternate screen swap. `Esc` closes the overlay (gwm intercepts it); typing
-  `q` inside lazygit quits lazygit and auto-closes the overlay via process-exit
-  detection. The new keybindings (`git_tui_overlay`, `open_terminal_overlay`)
+  open lazygit inside a ~90 % fullscreen embedded PTY overlay; press `L` to
+  open it fullscreen; `o` / `O` do the same for a native `$SHELL` session. Both
+  overlays stay inside the TUI — no alternate screen swap. `Esc` closes the
+  overlay; `q` inside lazygit quits lazygit and auto-closes. The keybindings
+  (`lazygit_pty`, `lazygit_fullscreen`, `terminal_pty`, `terminal_fullscreen`)
   are fully rebindable in `[tui.keys]`. Powered by `portable-pty 0.9` +
   `tui-term 0.3` (`tui_term::vt100` — bundled vt100 0.16).
 

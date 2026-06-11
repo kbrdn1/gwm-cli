@@ -63,11 +63,12 @@ pub use ui::{
   help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
   hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
   link_prompt_modal_width, link_target_line, modal_hint_line, palette_name_style, pane_counter, panel_border_color,
-  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, status_line, status_pane_title,
-  table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
-  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
-  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON,
-  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, rename_buttons_line, status_line,
+  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
+  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
+  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
+  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -94,7 +95,12 @@ pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   let mut terminal = enter_terminal()?;
   let result = run_app(&mut terminal, app);
   leave_terminal(&mut terminal)?;
-  result.map(|_| ())
+  // #290: ExitToWorktree prints the selected path to stdout so a shell
+  // wrapper (`cd "$(gwm)"`) can change directory.
+  if let Some(path) = result? {
+    println!("{}", path.display());
+  }
+  Ok(())
 }
 
 /// `gwm switch` entry point: open the same TUI in picker mode and return
@@ -116,16 +122,20 @@ pub fn run_picker() -> Result<Option<PathBuf>> {
 /// Enable raw mode + alternate screen + mouse capture and hand back a
 /// configured `Terminal`. Centralised so `run` and `run_picker` cannot
 /// drift on the setup recipe.
-fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stdout>>> {
+fn enter_terminal() -> Result<Terminal<CrosstermBackend<io::Stderr>>> {
   enable_raw_mode()?;
-  let mut stdout = io::stdout();
-  execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-  Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+  // Render the TUI to STDERR, not stdout: `exit_to_worktree` (#290) prints the
+  // selected path to stdout for the `cd "$(gwm)"` shell wrapper, so stdout must
+  // stay free of alt-screen / ANSI frames (the fzf/skim pattern). stderr is the
+  // tty in an interactive session, so the UI still draws (Codex review #292).
+  let mut stderr = io::stderr();
+  execute!(stderr, EnterAlternateScreen, EnableMouseCapture)?;
+  Ok(Terminal::new(CrosstermBackend::new(stderr))?)
 }
 
 /// Inverse of `enter_terminal`. Always called from the same scope as
 /// `enter_terminal` so the order of teardown matches the order of setup.
-fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Result<()> {
+fn leave_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> Result<()> {
   disable_raw_mode()?;
   execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
   terminal.show_cursor()?;
@@ -154,7 +164,7 @@ fn confirm_fire(app: &mut App) {
   }
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> Result<Option<PathBuf>> {
+fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) -> Result<Option<PathBuf>> {
   loop {
     let now = Instant::now();
     // Generic off-thread tasks (issue #231; GitHub fetch folded in by #255):
@@ -500,6 +510,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
           }
         }
       },
+      // #290: worktree-rename modal. Reuses the Create form input handler
+      // (Type / Issue / Desc), but routes submit to the rename worker. Input
+      // is swallowed while the async rename is in flight, mirroring create.
+      View::Edit if app.is_edit_worktree_loading() => {}
+      View::Edit => match app.handle_create_key(key) {
+        CreateKey::Submit => {
+          if let Err(e) = app.submit_edit_worktree() {
+            app.status = format!("rename failed: {}", e);
+          }
+        }
+        CreateKey::Cancel => app.cancel_edit_worktree(),
+        CreateKey::Handled => {}
+      },
       // Issue #32: command palette overlay. Palette entry names
       // are restricted to `[a-z0-9_-]` (see
       // `tests/palette_tests.rs::registry_names_are_unique_and_lowercase_words`),
@@ -552,7 +575,8 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
       app.defer_quit_for_mutating_task();
     }
   }
-  Ok(app.picker_result)
+  // #290: ExitToWorktree stores the path; normal quit leaves it None.
+  Ok(app.should_exit_to.or(app.picker_result))
 }
 
 /// Dispatch a [`LauncherPlan`] from [`App::prepare_git_tui`] /
@@ -583,7 +607,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) 
 /// honour it from any caller and defer the actual exit while a mutating
 /// worker is still in flight. The loop checks the flag at the top and
 /// bottom of every iteration.
-fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App, action: Action) -> Result<()> {
+fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, action: Action) -> Result<()> {
   match action {
     // Issue #32/#267: signal quit via `app.should_quit` so palette
     // and keymap paths share the same graceful-shutdown gate.
@@ -610,8 +634,15 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     // now surfaces on the status bar instead of tearing down the loop.
     Action::Refresh => app.request_refresh(),
     Action::Help => app.enter_help(),
-    Action::Yank => yank_selected_path_to_clipboard(app),
-    Action::Open => match app.resolve_open_target() {
+    // #290: `Y` yanks the worktree path (was `y` before #290).
+    Action::YankPath => yank_selected_path_to_clipboard(app),
+    // #290: `y` yanks the branch name.
+    Action::YankBranchName => yank_selected_branch_to_clipboard(app),
+    // #290: `w` yanks the worktree slug/name.
+    Action::YankWorktreeName => yank_selected_worktree_name_to_clipboard(app),
+    // #290: TerminalFullscreen replaces Open — open the shell/editor/finder
+    // target fullscreen (honours [tui.open] config, same as the old `o`).
+    Action::TerminalFullscreen => match app.resolve_open_target() {
       None => app.status = "nothing selected".into(),
       Some(OpenTarget::Finder { .. }) => app.open_selected_in_finder(),
       Some(OpenTarget::Shell { path, command }) => run_subshell(terminal, &command, &[], Some(&path), app, "shell")?,
@@ -620,9 +651,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         run_subshell(terminal, &command, &[&path_str], None, app, "editor")?
       }
     },
-    // Issue #35: open a native terminal ($SHELL) inside an embedded PTY
-    // overlay rooted at the selected worktree's path.
-    Action::OpenTerminalOverlay => {
+    // #290: TerminalPty replaces OpenTerminalOverlay — open a native $SHELL
+    // in an embedded PTY overlay rooted at the selected worktree's path.
+    Action::TerminalPty => {
       let cwd = app.selected().map(|wt| wt.path.clone());
       match cwd {
         None => app.status = "nothing selected".into(),
@@ -641,19 +672,17 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
       }
     }
-    Action::GitTui => {
+    // #290: LazyGitFullscreen replaces GitTui.
+    Action::LazyGitFullscreen => {
       if let Some(plan) = app.prepare_git_tui() {
         run_launcher(terminal, plan, app)?;
       }
     }
-    // Issue #35: open lazygit inside an embedded PTY overlay so the TUI
-    // stays alive. Reuses `prepare_git_tui` to expand the `[git_tui]`
-    // template (honouring any user override in .gwm.toml), then spawns it
-    // in a PTY sized to match the 90% × 90% overlay inner area.
-    Action::GitTuiOverlay => {
+    // #290: LazyGitPty replaces GitTuiOverlay — open lazygit in an embedded
+    // PTY overlay sized to 90% × 90% of the terminal.
+    Action::LazyGitPty => {
       if let Some(plan) = app.prepare_git_tui() {
         let sz = terminal.size().unwrap_or_default();
-        // 90% × 90% overlay minus overlay_block overhead (6 cols, 4 rows).
         let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
         let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
         let argv: Vec<String> = plan.expanded.argv.clone();
@@ -664,19 +693,16 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
         }
       }
     }
-    // Issue #35: `r` (lowercase) opens the review tool in an embedded PTY
-    // overlay. Same contract as `R` (Action::Review) but spawns via PTY
-    // instead of suspending the TUI fullscreen. Picker-gated: reviews are
-    // branch-specific, meaningless inside `gwm switch`.
-    Action::ReviewOverlay if !app.picker_mode => {
+    // #290: ReviewPty replaces ReviewOverlay — open the review tool in an
+    // embedded PTY overlay. Picker-gated: branch-specific, meaningless in
+    // `gwm switch`.
+    Action::ReviewPty if !app.picker_mode => {
       if let Some(mut plan) = app.prepare_review() {
         let sz = terminal.size().unwrap_or_default();
         let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
         let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
         let argv: Vec<String> = plan.expanded.argv.clone();
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        // Transfer diff_file ownership into the overlay so it stays alive
-        // until the child exits (issue #291).
         match PtyOverlay::spawn(PtyKind::Review, &argv_refs, &plan.cwd, inner_cols, inner_rows) {
           Ok(mut pty) => {
             pty.diff_file = plan.expanded.diff_file.take();
@@ -689,19 +715,29 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
     Action::Create if !app.picker_mode => app.enter_create(),
     Action::DeleteConfirm if !app.picker_mode => app.enter_confirm_delete(),
     Action::Bootstrap if !app.picker_mode => app.bootstrap_selected(),
-    // Issue #258: `gwm sync` of the selected worktree, off-thread on the
-    // spine. Mutating, so disabled in picker mode like create / delete.
+    // Issue #258: `gwm sync` of the selected worktree, off-thread.
     Action::Sync if !app.picker_mode => app.request_sync(),
+    // #290: `p` pulls, `P` pushes, both off-thread.
+    Action::Pull if !app.picker_mode => app.request_pull(),
+    Action::Push if !app.picker_mode => app.request_push(),
+    // #290: `c` opens the branch-rename modal.
+    Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
+    // #290: `e` exits TUI and prints selected path to stdout.
+    Action::ExitToWorktree => app.exit_to_worktree(),
+    // #290: `t` opens the selected worktree in a new mux pane/tab.
+    Action::MuxPane if !app.picker_mode => app.open_in_mux_pane(),
+    // #290: `h`/`H` fire user macros from [tui.macro1]/[tui.macro2].
+    Action::Macro1 if !app.picker_mode => run_macro(terminal, app, 1)?,
+    Action::Macro2 if !app.picker_mode => run_macro(terminal, app, 2)?,
     Action::ToggleDeleteBranch if !app.picker_mode => app.toggle_delete_branch(),
-    Action::OpenMenu if !app.picker_mode => app.enter_open_menu(),
-    // Read-only and selection-independent, like `open` / `yank` / `git_tui`
-    // — not picker-gated, so `gwm switch` can open the docs too (issue #233,
-    // Codex review on #268). Gating it would silently no-op a key the help
-    // overlay advertises in picker mode.
+    // #290: BrowseLinks replaces OpenMenu.
+    Action::BrowseLinks if !app.picker_mode => app.enter_open_menu(),
+    // Not picker-gated — `gwm switch` can open docs too.
     Action::OpenDocs => open_url(DOCS_URL, app),
     Action::LinkPrompt if !app.picker_mode => app.enter_link_prompt(),
     Action::FetchGithub if !app.picker_mode => app.refresh_github_status(),
-    Action::Review if !app.picker_mode => {
+    // #290: ReviewFullscreen replaces Review.
+    Action::ReviewFullscreen if !app.picker_mode => {
       if let Some(plan) = app.prepare_review() {
         run_launcher(terminal, plan, app)?;
       }
@@ -736,7 +772,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut A
 /// path. Distinct name keeps stack traces meaningful — if a feature
 /// fires only from the palette and breaks, the frame name names it.
 fn run_palette_action(
-  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   app: &mut App,
   action: Action,
 ) -> Result<()> {
@@ -748,8 +784,39 @@ fn run_palette_action(
 /// Errors are never propagated — the user pressed a key in the TUI,
 /// and surfacing failures via the status bar is the documented
 /// contract (see [`Self::run_lazygit`] in the pre-issue-#75 codebase).
+/// Whether a fullscreen child's stdout must be re-routed to the controlling
+/// terminal. True exactly when gwm's own stdout is *not* a tty — i.e. it is
+/// the command-substitution pipe of a `cd "$(gwm)"` wrapper reading the
+/// exit-to-worktree path (#290). Inheriting that pipe would send the child's
+/// TUI frames / ANSI into the captured path (Codex review on PR #292). Pure
+/// so the policy is unit-testable without a real pipe.
+pub fn wants_child_stdout_on_tty(stdout_is_terminal: bool) -> bool {
+  !stdout_is_terminal
+}
+
+/// Point `command`'s stdout at `/dev/tty` when gwm's stdout is captured, so a
+/// fullscreen child never writes into the `cd "$(gwm)"` pipe. No-op when
+/// stdout is already a tty, on non-unix, or when `/dev/tty` can't be opened
+/// (then inherit and accept the captured-pipe risk rather than fail the
+/// launch).
+fn route_fullscreen_child_stdout(command: &mut std::process::Command) {
+  use std::io::IsTerminal;
+  if !wants_child_stdout_on_tty(std::io::stdout().is_terminal()) {
+    return;
+  }
+  #[cfg(unix)]
+  if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+    command.stdout(std::process::Stdio::from(tty));
+  }
+  // No `/dev/tty` equivalent here, so the child inherits stdout. Bind the
+  // param to silence the unused-variable error under `-D warnings` on the
+  // non-unix build (CI windows-latest caught this).
+  #[cfg(not(unix))]
+  let _ = command;
+}
+
 fn run_launcher(
-  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   plan: app::LauncherPlan,
   app: &mut App,
 ) -> Result<()> {
@@ -776,7 +843,10 @@ fn run_launcher(
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
     terminal.show_cursor()?;
 
-    let spawn = Command::new(bin).args(rest).current_dir(&plan.cwd).status();
+    let mut cmd = Command::new(bin);
+    cmd.args(rest).current_dir(&plan.cwd);
+    route_fullscreen_child_stdout(&mut cmd);
+    let spawn = cmd.status();
 
     enable_raw_mode()?;
     execute!(terminal.backend_mut(), EnterAlternateScreen, EnableMouseCapture)?;
@@ -828,7 +898,7 @@ fn run_launcher(
 ///
 /// `label` is the noun used in status-bar messages (`"shell"`, `"editor"`).
 fn run_subshell(
-  terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+  terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
   cmd: &str,
   args: &[&str],
   cwd: Option<&std::path::Path>,
@@ -844,6 +914,7 @@ fn run_subshell(
   if let Some(dir) = cwd {
     command.current_dir(dir);
   }
+  route_fullscreen_child_stdout(&mut command);
   let spawn = command.status();
 
   // Always restore the TUI, even if the child failed to spawn or exited non-zero.
@@ -871,6 +942,102 @@ fn yank_selected_path_to_clipboard(app: &mut App) {
   };
   let text = path.display().to_string();
   copy_text_to_clipboard(app, &text, "yanked path");
+}
+
+fn yank_selected_branch_to_clipboard(app: &mut App) {
+  let Some(branch) = app.yank_selected_branch() else {
+    app.status = "nothing selected or no branch (detached HEAD)".into();
+    return;
+  };
+  copy_text_to_clipboard(app, &branch, "yanked branch name");
+}
+
+fn yank_selected_worktree_name_to_clipboard(app: &mut App) {
+  let Some(name) = app.yank_selected_worktree_name() else {
+    app.status = "nothing selected".into();
+    return;
+  };
+  copy_text_to_clipboard(app, &name, "yanked worktree name");
+}
+
+/// Fire a user macro (#290). `n` is 1 for `Macro1`/`h`, 2 for `Macro2`/`H`.
+/// Reads `[tui.macro1]` / `[tui.macro2]` from config; no-ops when absent.
+fn run_macro(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, n: u8) -> Result<()> {
+  use crate::config::MacroOpenMode;
+  let cfg = if n == 1 {
+    app.config.tui.macro1.clone()
+  } else {
+    app.config.tui.macro2.clone()
+  };
+  let Some(macro_cfg) = cfg else {
+    app.status = format!("macro{} not configured — add [tui.macro{}] to .gwm.toml", n, n);
+    return Ok(());
+  };
+  use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+  // Macros run in the selected worktree. With nothing selected (e.g. a filter
+  // with no matches), refuse rather than silently running in the main repo —
+  // a destructive command must not hit the wrong tree (Codex review on #292).
+  let Some(path) = app.selected().map(|w| w.path.clone()) else {
+    app.status = format!("macro{}: nothing selected", n);
+    return Ok(());
+  };
+
+  #[cfg(windows)]
+  let shell = std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into());
+  #[cfg(not(windows))]
+  let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+  let shell_flag = if cfg!(windows) { "/C" } else { "-c" };
+
+  // Resolve the mux command up front so a `mux_pane` macro can fall back to the
+  // PTY overlay when no multiplexer is active (the documented behaviour — Codex
+  // review on PR #292), rather than no-oping.
+  let mux_cmd = if matches!(macro_cfg.open_in, MacroOpenMode::MuxPane) {
+    let label = format!("macro{}", n);
+    if detect_tmux(std::env::var("TMUX").ok()) {
+      Some(build_tmux_command(&label, &path, SpawnMode::Split))
+    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
+      Some(build_zellij_command(&label, &path, SpawnMode::Split))
+    } else {
+      app.status = format!("macro{}: no multiplexer — falling back to PTY overlay", n);
+      None
+    }
+  } else {
+    None
+  };
+
+  if let Some(cmd) = mux_cmd {
+    let bin = cmd[0].as_str();
+    let mut full_cmd: Vec<&str> = cmd[1..].iter().map(String::as_str).collect();
+    if bin == "zellij" {
+      // `zellij action new-pane` runs the trailing argv DIRECTLY, not via a
+      // shell, so a command with spaces/shell syntax must be wrapped in
+      // `-- <shell> -c <cmd>` (Codex review on PR #292).
+      full_cmd.push("--");
+      full_cmd.push(shell.as_str());
+      full_cmd.push(shell_flag);
+      full_cmd.push(macro_cfg.command.as_str());
+    } else {
+      // tmux takes the command as a SINGLE shell-command operand and hands it
+      // to the shell itself, so we pass it as one trailing argument rather than
+      // pre-splitting into `sh -c <cmd>`.
+      full_cmd.push(macro_cfg.command.as_str());
+    }
+    match std::process::Command::new(bin).args(&full_cmd).spawn() {
+      Ok(_) => app.status = format!("macro{} opened in mux pane", n),
+      Err(e) => app.status = format!("macro{} mux failed: {}", n, e),
+    }
+  } else {
+    // PTY overlay: the explicit `pty` mode, or the `mux_pane` fallback above.
+    let sz = terminal.size().unwrap_or_default();
+    let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+    let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+    let argv = [shell.as_str(), shell_flag, macro_cfg.command.as_str()];
+    match PtyOverlay::spawn(PtyKind::Terminal, &argv, &path, inner_cols, inner_rows) {
+      Ok(pty) => app.open_pty_overlay(pty),
+      Err(e) => app.status = format!("macro{} overlay failed: {}", n, e),
+    }
+  }
+  Ok(())
 }
 
 /// Copy the Command Logs transcript to the clipboard (issue #279, `y`).

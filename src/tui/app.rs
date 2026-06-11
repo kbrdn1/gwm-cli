@@ -1,6 +1,6 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::palette::PaletteState;
-use super::state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
@@ -89,6 +89,12 @@ pub enum View {
   /// kills the child and returns to the list. State lives on
   /// [`App::pty_overlay`].
   Pty,
+  /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
+  /// Desc) pre-filled by parsing the current branch; submitting renames the
+  /// local + remote branch and moves the worktree directory. State lives on
+  /// [`App::create_form`] plus [`App::edit_original_branch`] /
+  /// [`App::edit_original_path`].
+  Edit,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -351,6 +357,25 @@ pub struct App {
   /// terminal PTY session is open; `None` at all other times.
   /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
   pub pty_overlay: Option<PtyOverlay>,
+
+  /// Set by `Action::ExitToWorktree` (#290): the path the main loop
+  /// should print to stdout just before quitting so the shell wrapper
+  /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
+  pub should_exit_to: Option<PathBuf>,
+
+  /// The selected worktree's branch name captured when the rename modal
+  /// (`View::Edit`, #290) opens — the `<old>` in `git branch -m <old> <new>`.
+  /// `None` while the modal is closed.
+  pub edit_original_branch: Option<String>,
+
+  /// The selected worktree's on-disk path captured when the rename modal
+  /// opens — the source for `git worktree move <old_path> <new_path>`.
+  pub edit_original_path: Option<PathBuf>,
+
+  /// Last rename failure, surfaced inside the Edit modal (mirrors
+  /// [`Self::create_failure`]) so the user can correct and retry without
+  /// losing the form. Cleared when the modal reopens.
+  pub edit_failure: Option<String>,
 }
 
 impl App {
@@ -435,6 +460,10 @@ impl App {
       config_panel: ConfigPanel::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
+      should_exit_to: None,
+      edit_original_branch: None,
+      edit_original_path: None,
+      edit_failure: None,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
@@ -656,6 +685,10 @@ impl App {
       self.status = "no worktree selected to sync".into();
       return;
     };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Sync) {
+      self.status = self.busy_mutation_status("syncing");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Sync) else {
       // A sync is already in flight — coalesce onto it.
       return;
@@ -846,6 +879,71 @@ impl App {
           }
           applied = true;
           // Delete owns the status line this tick.
+          refresh_applied = true;
+        }
+        TaskMsg::Pull(generation, name, result) => {
+          if !self.tasks.complete(TaskKind::Pull, generation) {
+            continue;
+          }
+          // Refresh on both arms: a failed pull can still mutate the tree (a
+          // merge/rebase conflict leaves it dirty / mid-rebase), so the table
+          // must not keep showing the pre-pull clean state (Codex review #292).
+          let _ = self.refresh();
+          match result {
+            Ok(msg) => self.status = format!("pulled {}: {}", name, msg),
+            Err(e) => self.status = format!("pull failed: {}", e),
+          }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::Push(generation, name, result) => {
+          if !self.tasks.complete(TaskKind::Push, generation) {
+            continue;
+          }
+          match result {
+            Ok(msg) => {
+              // Pushing updates the remote-tracking ref + ahead/behind, so
+              // refresh the table before overwriting the status, mirroring
+              // the pull/sync path (Codex review on PR #292).
+              let _ = self.refresh();
+              self.status = format!("pushed {}: {}", name, msg);
+            }
+            Err(e) => self.status = format!("push failed: {}", e),
+          }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::EditWorktree(generation, result) => {
+          if !self.tasks.complete(TaskKind::EditWorktree, generation) {
+            continue;
+          }
+          match result {
+            Ok(res) => {
+              let _ = self.refresh();
+              self.status = if res.remote_renamed {
+                format!("renamed to {} (local + remote)", res.new_branch)
+              } else {
+                format!("renamed to {} (local only)", res.new_branch)
+              };
+              // Re-select the renamed worktree by its new path so the cursor
+              // stays on the row the user just edited (mapped through the
+              // filter — Codex review on PR #292).
+              self.reselect_by_path(&res.new_path);
+              self.edit_original_branch = None;
+              self.edit_original_path = None;
+              self.edit_failure = None;
+              self.create_form.reset();
+              self.view = View::List;
+            }
+            // Keep the modal open so the user can fix the form and retry, and
+            // replace the "renaming worktree…" loading status so the bar no
+            // longer reads as in-progress (Codex review on PR #292, P3).
+            Err(e) => {
+              self.status = format!("rename failed: {}", e);
+              self.edit_failure = Some(e);
+            }
+          }
+          applied = true;
           refresh_applied = true;
         }
       }
@@ -1222,6 +1320,7 @@ impl App {
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
+      View::Edit => HintContext::Rename,
       View::List => self.pane_hint_context(),
     }
   }
@@ -1626,12 +1725,306 @@ impl App {
     }
   }
 
-  /// Return the path that the `y: yank` key should push into the system
-  /// clipboard, or `None` when nothing is selected. Pure — the actual
-  /// shell-out (`pbcopy` / `wl-copy` / `xclip` / `clip`) is handled by
-  /// the event loop so this method stays trivially testable.
+  /// Return the path that the `Y: yank-path` key should push into the
+  /// system clipboard, or `None` when nothing is selected. Pure — the
+  /// shell-out is handled by the event loop.
   pub fn yank_selected_path(&self) -> Option<PathBuf> {
     self.selected().map(|w| w.path.clone())
+  }
+
+  /// Return the branch name for the `y: yank-branch-name` key (#290).
+  pub fn yank_selected_branch(&self) -> Option<String> {
+    self.selected()?.branch.clone()
+  }
+
+  /// Return the worktree slug/name for the `w: yank-worktree-name` key (#290).
+  pub fn yank_selected_worktree_name(&self) -> Option<String> {
+    self.selected().map(|w| w.name.clone())
+  }
+
+  /// Signal the event loop to print the selected worktree path to stdout
+  /// before quitting (`e: exit-to-worktree`, #290). The loop checks
+  /// `should_exit_to` after `can_quit_now` to emit the path.
+  pub fn exit_to_worktree(&mut self) {
+    let Some(path) = self.selected().map(|w| w.path.clone()) else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    self.should_exit_to = Some(path);
+    self.should_quit = true;
+  }
+
+  /// Request an off-thread `git pull` of the selected worktree's branch
+  /// (#290). Coalesces if a pull is already in flight, and refuses to start
+  /// while a *different* mutating task (sync / bootstrap / push / rename /
+  /// create / delete) runs in the same worktree (Codex review on PR #292).
+  pub fn request_pull(&mut self) {
+    let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Pull) {
+      self.status = self.busy_mutation_status("pulling");
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::Pull) else {
+      return;
+    };
+    self.spinner.reset();
+    self.status = TaskKind::Pull.loading_label().into();
+    self.spawn_pull(generation, path, name);
+  }
+
+  /// Status line shown when a mutating verb is pressed while another mutating
+  /// task is in flight. `action` is the gerund of the blocked verb
+  /// (e.g. "pulling", "pushing").
+  fn busy_mutation_status(&self, action: &str) -> String {
+    match self.tasks.mutating_loading_label() {
+      Some(label) => format!("finish {} before {}", label.trim_end_matches('…'), action),
+      None => format!("finish current task before {}", action),
+    }
+  }
+
+  fn spawn_pull(&self, generation: u64, path: PathBuf, name: String) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let mut cmd = std::process::Command::new("git");
+      cmd.args(["pull"]).current_dir(&path);
+      // Route through the command-log chokepoint so `git pull` lands in the
+      // Command Logs modal (#290) — a user-triggered mutating op the user
+      // expects to find in the transcript.
+      let result = crate::command_log::run_logged(&mut cmd, "git pull".to_string())
+        .map_err(|e| e.to_string())
+        .and_then(|out| {
+          if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+          } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+          }
+        });
+      let _ = tx.send(TaskMsg::Pull(generation, name, result));
+    });
+  }
+
+  /// Request an off-thread `git push` of the selected worktree's branch
+  /// (#290). Coalesces if a push is already in flight, and refuses to start
+  /// while a *different* mutating task runs in the same worktree (Codex review
+  /// on PR #292).
+  pub fn request_push(&mut self) {
+    let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Push) {
+      self.status = self.busy_mutation_status("pushing");
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::Push) else {
+      return;
+    };
+    self.spinner.reset();
+    self.status = TaskKind::Push.loading_label().into();
+    self.spawn_push(generation, path, name);
+  }
+
+  fn spawn_push(&self, generation: u64, path: PathBuf, name: String) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let mut cmd = std::process::Command::new("git");
+      cmd.args(["push"]).current_dir(&path);
+      // Route through the command-log chokepoint so `git push` lands in the
+      // Command Logs modal (#290). git writes its progress to stderr, so the
+      // status line still reads stderr on success.
+      let result = crate::command_log::run_logged(&mut cmd, "git push".to_string())
+        .map_err(|e| e.to_string())
+        .and_then(|out| {
+          if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stderr).trim().to_string())
+          } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+          }
+        });
+      let _ = tx.send(TaskMsg::Push(generation, name, result));
+    });
+  }
+
+  /// Open the rename modal for the selected worktree (`c`, #290). Reuses the
+  /// Create form (Type / Issue / Desc) pre-filled by parsing the current
+  /// branch name, so renaming is symmetric with creating. A branch that does
+  /// not match the `<type>/#<issue>-<desc>` pattern can't be decomposed into
+  /// the form, so the modal refuses to open and explains why.
+  pub fn enter_edit_worktree(&mut self) {
+    let Some((branch, path)) = self
+      .selected()
+      .and_then(|w| w.branch.clone().map(|b| (b, w.path.clone())))
+    else {
+      self.status = "no branch to rename (detached HEAD or nothing selected)".into();
+      return;
+    };
+    let Some(spec) = crate::naming::parse_branch(&branch) else {
+      self.status = format!(
+        "branch '{}' doesn't match <type>/#<issue>-<desc>; can't rename here",
+        branch
+      );
+      return;
+    };
+    // Refuse rather than silently preselect type index 0: a branch whose
+    // parsed type isn't configured (config change, manual branch) would
+    // otherwise be renamed to the first configured type on Enter (Codex
+    // review on PR #292).
+    let Some(type_index) = self.branch_types.iter().position(|t| t.name == spec.type_) else {
+      self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
+      return;
+    };
+    self.create_form.reset();
+    self.create_form.type_index = type_index;
+    self.create_form.issue = spec.issue;
+    self.create_form.desc = spec.desc;
+    self.create_form.field = Field::Desc;
+    self.edit_original_branch = Some(branch);
+    self.edit_original_path = Some(path);
+    self.edit_failure = None;
+    self.view = View::Edit;
+  }
+
+  /// `true` while the async rename worker is in flight (#290). The run loop
+  /// swallows input in `View::Edit` while this holds, mirroring create.
+  pub fn is_edit_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::EditWorktree)
+  }
+
+  /// Cancel the rename modal (`Esc`): drop the captured original branch/path
+  /// and return to the list without touching git.
+  pub fn cancel_edit_worktree(&mut self) {
+    self.edit_original_branch = None;
+    self.edit_original_path = None;
+    self.edit_failure = None;
+    self.create_form.reset();
+    self.view = View::List;
+  }
+
+  /// Submit the rename from the `View::Edit` modal (#290). Composes the new
+  /// branch name + worktree path from the form, then spawns an off-thread
+  /// worker that renames the local branch (`git branch -m`), the remote
+  /// branch when it exists (`git push origin :<old> <new>:<new>` + re-track),
+  /// and moves the worktree directory (`git worktree move`). A no-op rename
+  /// (nothing changed) just closes the modal.
+  pub fn submit_edit_worktree(&mut self) -> Result<()> {
+    let type_ = self
+      .branch_types
+      .get(self.create_form.type_index)
+      .map(|t| t.name.clone())
+      .unwrap_or_default();
+    let spec = match BranchSpec::new_with_types(
+      type_,
+      self.create_form.issue.clone(),
+      self.create_form.desc.clone(),
+      &self.branch_types,
+    ) {
+      Ok(s) => s,
+      Err(e) => {
+        self.edit_failure = Some(e.to_string());
+        return Ok(());
+      }
+    };
+    let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
+    let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
+    let new_path = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
+
+    let Some(old_branch) = self.edit_original_branch.clone() else {
+      self.cancel_edit_worktree();
+      return Ok(());
+    };
+    let Some(old_path) = self.edit_original_path.clone() else {
+      self.cancel_edit_worktree();
+      return Ok(());
+    };
+
+    // Nothing changed — close without shelling out to git.
+    if new_branch == old_branch && new_path == old_path {
+      self.status = "no change".into();
+      self.cancel_edit_worktree();
+      return Ok(());
+    }
+
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before renaming", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before renaming".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::EditWorktree) else {
+      return Ok(());
+    };
+    self.edit_failure = None;
+    self.spinner.reset();
+    self.status = TaskKind::EditWorktree.loading_label().into();
+    self.spawn_edit_worktree(
+      generation,
+      old_branch,
+      old_path,
+      new_branch,
+      new_path,
+      new_name,
+      self.workdir.clone(),
+    );
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn spawn_edit_worktree(
+    &self,
+    generation: u64,
+    old_branch: String,
+    old_path: PathBuf,
+    new_branch: String,
+    new_path: PathBuf,
+    new_name: String,
+    workdir: PathBuf,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = crate::worktree::rename_worktree(&workdir, &old_path, &old_branch, &new_path, &new_branch)
+        .map(|remote_renamed| EditWorktreeResult {
+          new_branch,
+          new_path,
+          new_name,
+          remote_renamed,
+        })
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::EditWorktree(generation, result));
+    });
+  }
+
+  /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
+  /// Detects tmux / zellij at runtime via environment variables; prints a
+  /// status message when no supported multiplexer is active.
+  pub fn open_in_mux_pane(&mut self) {
+    use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+    let Some(w) = self.selected() else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    let path = w.path.clone();
+    let name = w.name.clone();
+    // `mux_pane` promises a pane, so split the current pane (tmux
+    // `split-window` / zellij `new-pane`) rather than opening a new
+    // window/tab (Codex review on PR #292).
+    let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
+      build_tmux_command(&name, &path, SpawnMode::Split)
+    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
+      build_zellij_command(&name, &path, SpawnMode::Split)
+    } else {
+      self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
+      return;
+    };
+    let bin = cmd[0].as_str();
+    match std::process::Command::new(bin).args(&cmd[1..]).spawn() {
+      Ok(_) => self.status = format!("opened {} in new pane", name),
+      Err(e) => self.status = format!("mux-pane failed: {}", e),
+    }
   }
 
   /// Resolve what the `o` key should do for the currently selected
@@ -1839,8 +2232,10 @@ impl App {
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
-    let (name, label) = match self.selected() {
-      Some(s) => (s.name.clone(), s.path.display().to_string()),
+    // `worktree::remove` resolves by the internal git id, which can diverge
+    // from the display name after a rename (#290), so pass `id` here.
+    let (id, label) = match self.selected() {
+      Some(s) => (s.id.clone(), s.path.display().to_string()),
       None => return Ok(()),
     };
     if self.is_delete_worktree_loading() {
@@ -1862,18 +2257,18 @@ impl App {
     self.confirm.dismiss();
     self.spinner.reset();
     self.status = TaskKind::DeleteWorktree.loading_label().into();
-    self.spawn_delete_worktree(generation, name, label, delete_branch);
+    self.spawn_delete_worktree(generation, id, label, delete_branch);
     Ok(())
   }
 
-  fn spawn_delete_worktree(&self, generation: u64, name: String, label: String, delete_branch: bool) {
+  fn spawn_delete_worktree(&self, generation: u64, id: String, label: String, delete_branch: bool) {
     let tx = self.task_tx.clone();
     let workdir = self.workdir.clone();
     std::thread::spawn(move || {
       let result = worktree::discover_repo(Some(&workdir))
-        .and_then(|repo| worktree::remove(&repo, &name, delete_branch))
+        .and_then(|repo| worktree::remove(&repo, &id, delete_branch))
         .map_err(|e| e.to_string());
-      let _ = tx.send(TaskMsg::DeleteWorktree(generation, name, label, result));
+      let _ = tx.send(TaskMsg::DeleteWorktree(generation, id, label, result));
     });
   }
 
@@ -2050,6 +2445,32 @@ impl App {
     self.refresh_link();
   }
 
+  /// Move the cursor onto the worktree at `path`, mapping its raw index in
+  /// `self.worktrees` to its slot in the *filtered* list — `list_state`
+  /// indexes `filtered_indices()`, not the raw vec, so selecting a raw index
+  /// under an active filter lands on the wrong visible row or none (Codex
+  /// review on PR #292). A no-op when the path is filtered out.
+  /// The chord that opens the issue/PR link prompt (`i` by default since
+  /// #290), resolved from the live keymap so "press X to link" status hints
+  /// track the binding and any `[tui.keys]` override (Codex review on PR
+  /// #292, P3).
+  fn link_prompt_chord(&self) -> String {
+    self
+      .keymap
+      .primary_chord(Action::LinkPrompt)
+      .unwrap_or_else(|| "i".into())
+  }
+
+  pub fn reselect_by_path(&mut self, path: &Path) {
+    let Some(raw) = self.worktrees.iter().position(|w| w.path == path) else {
+      return;
+    };
+    let pos = self.filtered_indices().iter().position(|&idx| idx == raw);
+    if let Some(pos) = pos {
+      self.list_state.select(Some(pos));
+    }
+  }
+
   // ---- Bootstrap flow ------------------------------------------------------
 
   // ---- Picker mode (issue #22) --------------------------------------------
@@ -2121,6 +2542,10 @@ impl App {
     // itself moves to a worker, with the `View::Report` transition deferred
     // to `drain_task_results`. A second `b` press while one is in flight
     // coalesces (no `Some(generation)`), so two bootstraps never race.
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Bootstrap) {
+      self.status = self.busy_mutation_status("bootstrapping");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Bootstrap) else {
       return;
     };
@@ -2345,7 +2770,10 @@ impl App {
     }
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
-      self.status = "nothing linked — press L to link an issue or PR".into();
+      self.status = format!(
+        "nothing linked — press {} to link an issue or PR",
+        self.link_prompt_chord()
+      );
       return;
     }
     let Some(slug) = slug else {
@@ -2585,14 +3013,14 @@ impl App {
       LinkTarget::Issue => match self.github.link.issue {
         Some(n) => github::issue_url(&slug, n),
         None => {
-          self.status = "no issue linked — press L to link one".into();
+          self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
         Some(n) => github::pr_url(&slug, n),
         None => {
-          self.status = "no PR linked — press L to link one".into();
+          self.status = format!("no PR linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },

@@ -133,12 +133,12 @@ fn uppercase_binding_matches_shift_modifier_variants() {
   let (_dir, mut app) = make_app();
   assert_eq!(
     app.dispatch_key(press_shift_upper('V')),
-    Some(Action::CycleSidebarLayout),
+    Some(Action::ToggleSidebar),
     "uppercase char + SHIFT must resolve the `V` binding"
   );
   assert_eq!(
     app.dispatch_key(press_shift_lower('h')),
-    Some(Action::ToggleSidebarPosition),
+    Some(Action::Macro2),
     "base char + SHIFT (kitty-style) must resolve the `H` binding"
   );
   // And the pre-existing bare-uppercase path still works.
@@ -200,24 +200,17 @@ fn help_overlay_lists_pane_focus_bindings() {
 }
 
 #[test]
-fn s_dispatches_toggle_sidebar_mode() {
-  // Issue #34: pressing `s` in the list view must cycle the sidebar
-  // preview mode (Commits ↔ Stashes). The binding is wired through
-  // the rebindable keymap (`Action::ToggleSidebarMode`) so users can
-  // remap it via `[tui.keys]` if `s` clashes with their muscle
-  // memory.
+fn s_dispatches_sync() {
+  // #290: `s` is now bound to `Sync` (git fetch + pull --rebase).
+  // `ToggleSidebarMode` was moved to an unbound action.
   let (_dir, mut app) = make_app();
-  assert_eq!(
-    app.dispatch_key(press('s')),
-    Some(gwm::tui::keymap::Action::ToggleSidebarMode)
-  );
+  assert_eq!(app.dispatch_key(press('s')), Some(gwm::tui::keymap::Action::Sync));
 }
 
 #[test]
-fn help_overlay_lists_toggle_sidebar_mode() {
-  // The keymap-driven help overlay surfaces the new action with its
-  // default `s` binding so users discover the stashes mode through
-  // `?` rather than the changelog.
+fn help_overlay_lists_sync() {
+  // #290: `s` → Sync. The help overlay must show `s` next to the
+  // sync/pull+fetch entry, not `toggle_sidebar_mode`.
   use gwm::tui::help_lines;
   use gwm::tui::keymap::Keymap;
 
@@ -225,15 +218,8 @@ fn help_overlay_lists_toggle_sidebar_mode() {
   let lines = help_lines(&km, false);
   let row = lines
     .iter()
-    .find(|l| l.contains("sidebar mode") || l.contains("stash") || l.contains("toggle_sidebar_mode"))
-    .unwrap_or_else(|| panic!("expected a sidebar-mode row in:\n{}", lines.join("\n")));
-  // Target the keys column specifically. `help_lines` formats every
-  // row as `  {keys:<13} {label}`, so the default `s` binding
-  // surfaces as exactly `"  s            "` at the row start.
-  // Pre-review the assertion was `row.contains('s')`, which passed
-  // trivially because the description carries words like
-  // "stashes" / "sidebar" — a regression in the binding column
-  // would not have failed.
+    .find(|l| l.contains("sync") || l.contains("pull") || l.contains("fetch"))
+    .unwrap_or_else(|| panic!("expected a sync row in:\n{}", lines.join("\n")));
   assert!(
     row.starts_with("  s ") || row.starts_with("  s\t"),
     "expected the default `s` binding in the keys column, got: {row}"

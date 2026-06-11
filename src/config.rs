@@ -431,6 +431,38 @@ impl SidebarPosition {
   }
 }
 
+/// Where a macro command runs when fired from the TUI (#290).
+/// Serialised as snake_case strings in `[tui.macro1]` / `[tui.macro2]`
+/// (`open_in = "pty"` / `open_in = "mux_pane"`) — `snake_case`, not
+/// `lowercase`, so the documented `"mux_pane"` value deserialises (Codex
+/// review on PR #292: `lowercase` produced `"muxpane"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacroOpenMode {
+  /// Open the command in an embedded PTY overlay (same as lazygit-pty /
+  /// terminal-pty). The TUI suspends until the command exits.
+  #[default]
+  Pty,
+  /// Open the command in a new pane of the running multiplexer (tmux /
+  /// Zellij / GNU Screen). Falls back to `Pty` when no multiplexer is
+  /// detected.
+  MuxPane,
+}
+
+/// `[tui.macro1]` / `[tui.macro2]` sub-table — a user-defined command
+/// that the `h` / `H` keys fire from inside the worktree TUI (#290).
+/// Absent → the key does nothing (no-op). Present → the command is run
+/// in the worktree's directory in the mode requested by `open_in`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TuiMacroConfig {
+  /// Shell command to execute. Forwarded to the OS shell (`sh -c`).
+  pub command: String,
+  /// How the command is opened. Defaults to `pty`.
+  #[serde(default)]
+  pub open_in: MacroOpenMode,
+}
+
 /// `[tui]` table — runtime knobs for the worktree TUI. Currently exposes
 /// the safety countdown on the delete-confirm overlay (issue #30): when
 /// `delete_branch_on_remove` has been toggled ON, the modal forces the
@@ -481,6 +513,16 @@ pub struct TuiConfig {
   /// empty array (`down = []`) unbinds the action entirely.
   #[serde(default)]
   pub keys: TuiKeysConfig,
+
+  /// `[tui.macro1]` — user-defined command bound to `h` by default (#290).
+  /// Absent → the key does nothing.
+  #[serde(default)]
+  pub macro1: Option<TuiMacroConfig>,
+
+  /// `[tui.macro2]` — user-defined command bound to `H` by default (#290).
+  /// Absent → the key does nothing.
+  #[serde(default)]
+  pub macro2: Option<TuiMacroConfig>,
 }
 
 impl Default for TuiConfig {
@@ -491,6 +533,8 @@ impl Default for TuiConfig {
       open: TuiOpenConfig::default(),
       sidebar_position: SidebarPosition::default(),
       keys: TuiKeysConfig::default(),
+      macro1: None,
+      macro2: None,
     }
   }
 }
@@ -520,7 +564,7 @@ impl TuiKeysConfig {
 
     let mut km = Keymap::defaults();
     for (action_slug, chord_strings) in &self.bindings {
-      let action = Action::from_slug(action_slug).ok_or_else(|| {
+      let action = Action::from_slug_compat(action_slug).ok_or_else(|| {
         GwmError::Config(format!(
           "tui.keys: unknown action {:?} (run `gwm tui keys` for the full list)",
           action_slug

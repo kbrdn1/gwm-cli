@@ -32,6 +32,7 @@ fn env_lock() -> &'static Mutex<()> {
 fn worktree_fixture(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/gwm-test/{}", name)),
     branch: Some(format!("feat/#0-{}", name)),
     head: None,
@@ -1275,6 +1276,14 @@ fn open_menu_pick_returns_none_when_no_link() {
     "status should mention missing PR link: {}",
     app.status
   );
+  // Codex review on PR #292 (P3): the "press X to link" hint must point at
+  // LinkPrompt's real binding (`i` since #290), not the stale `L` (now
+  // LazyGitFullscreen).
+  assert!(
+    app.status.contains("press i to link"),
+    "status must use LinkPrompt's real chord, not the stale `L`: {}",
+    app.status
+  );
 }
 
 #[test]
@@ -2035,6 +2044,92 @@ fn filter_clamping_resets_fetch_state_when_selection_moves() {
                              // the filter operation can drop selection back to index 0 on the
                              // filtered subset. The contract: any selection-state mutation refreshes.
   assert!(matches!(app.issue_fetch_state(), GitHubFetchState::Idle));
+}
+
+#[test]
+fn edit_worktree_failure_replaces_the_loading_status() {
+  // Codex review on PR #292 (P3): a recoverable rename failure keeps the modal
+  // open (edit_failure set) but must not leave the status bar on the
+  // "renaming worktree…" loading label, which reads as still-in-progress.
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app
+    .tasks
+    .request(TaskKind::EditWorktree)
+    .expect("a fresh task generation");
+  app.status = TaskKind::EditWorktree.loading_label().into();
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::EditWorktree(
+    generation,
+    Err("target path already exists".into()),
+  ))
+  .unwrap();
+  app.drain_task_results();
+
+  assert_ne!(
+    app.status,
+    TaskKind::EditWorktree.loading_label(),
+    "the loading label must be replaced after a failure"
+  );
+  assert!(
+    app.status.contains("target path already exists"),
+    "status must surface the rename failure: {}",
+    app.status
+  );
+  assert_eq!(
+    app.edit_failure.as_deref(),
+    Some("target path already exists"),
+    "the modal keeps the failure for inline display"
+  );
+}
+
+#[test]
+fn fullscreen_child_stdout_routes_to_tty_only_when_gwm_stdout_is_captured() {
+  // Codex review on PR #292 (P2): a fullscreen launcher (L/O/R) must keep its
+  // stdout off the `cd "$(gwm)"` command-substitution pipe. Policy: reroute to
+  // the tty exactly when gwm's own stdout is NOT a terminal (captured). The
+  // actual /dev/tty open is env-dependent I/O; the decision is pure and pinned
+  // here.
+  assert!(
+    gwm::tui::wants_child_stdout_on_tty(false),
+    "captured stdout (pipe) → child stdout must be rerouted to the tty"
+  );
+  assert!(
+    !gwm::tui::wants_child_stdout_on_tty(true),
+    "a real tty stdout → inherit, no reroute"
+  );
+}
+
+#[test]
+fn reselect_by_path_maps_the_renamed_row_through_an_active_filter() {
+  // Codex review on PR #292 (P2): after a rename with a filter active, the
+  // cursor must land on the renamed row via its slot in the *filtered* list,
+  // not its raw index — a raw index points at a different visible row or none.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),     // raw 0 — filtered out by "zz"
+    worktree_fixture("beta-zz"),   // raw 1 — filtered slot 0
+    worktree_fixture("target-zz"), // raw 2 — filtered slot 1
+  ];
+  app.enter_filter();
+  for c in "zz".chars() {
+    app.filter_push_char(c);
+  }
+
+  app.reselect_by_path(&PathBuf::from("/tmp/gwm-test/target-zz"));
+
+  // The raw index (2) overflows the 2-row filtered list; only the mapped
+  // filtered slot (1) lands on the renamed worktree.
+  assert_eq!(
+    app.list_state.selected(),
+    Some(1),
+    "selection must be the filtered slot, not the raw index"
+  );
+  assert_eq!(
+    app.selected().expect("a selection").name,
+    "target-zz",
+    "cursor must land on the renamed row through the filter"
+  );
 }
 
 #[test]
@@ -3084,6 +3179,7 @@ use gwm::tui::build_sidebar_sections;
 fn detailed_worktree_fixture() -> WorktreeInfo {
   WorktreeInfo {
     name: "api-rest".into(),
+    id: "api-rest".into(),
     path: PathBuf::from("/Users/test/cc-worktree/api-rest"),
     branch: Some("feat/#42-api-rest".into()),
     head: Some("08d1029f1234567890abcdef".into()),
@@ -3550,6 +3646,27 @@ fn github_status_idle_body_does_not_render_fetch_prompt() {
 }
 
 #[test]
+fn github_status_no_link_hint_uses_the_real_link_prompt_chord() {
+  // Regression (#290 keymap redesign): the "no link" hint hardcoded `L`,
+  // which pre-#290 opened the link menu but is now LazyGitFullscreen. The
+  // hint must derive LinkPrompt's real chord (`i`) from the keymap so it
+  // never drifts from the binding (and tracks `[tui.keys]` overrides).
+  // A branch with no `#N` auto-detects no issue, so the link is empty and
+  // the no-link row renders.
+  let (_dir, _repo, app) = make_app_on_branch("scratch");
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+    .collect::<Vec<_>>()
+    .join("");
+  assert!(text.contains("no link"), "the no-link hint should render: {text}");
+  assert!(
+    text.contains("press i to link"),
+    "hint must use LinkPrompt's real chord, not the stale `L`: {text}"
+  );
+}
+
+#[test]
 fn github_status_loading_uses_the_animated_spinner_frame() {
   use gwm::tui::FetchKey;
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
@@ -3936,6 +4053,7 @@ fn add_commits(repo: &git2::Repository, count: usize) {
 fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
   WorktreeInfo {
     name: "test".into(),
+    id: "test".into(),
     path: dir.to_path_buf(),
     branch: Some("main".into()),
     head: None,
@@ -6198,5 +6316,163 @@ fn activate_is_a_noop_on_the_read_only_all_tab() {
   assert!(
     !dir.path().join(".gwm.toml").exists(),
     "the read-only All tab must not write anything"
+  );
+}
+
+// ---- Edit-worktree modal (rename, #290) ----------------------------------
+
+#[test]
+fn enter_edit_worktree_prefills_create_form_from_branch() {
+  // `c` opens the rename modal by decomposing the current branch into the
+  // Create form (Type / Issue / Desc), so renaming is symmetric with create.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("fix/#42-broken-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit);
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "broken-thing");
+  assert_eq!(
+    app.branch_types[app.create_form.type_index].name, "fix",
+    "the type selector must point at the parsed branch type"
+  );
+  assert_eq!(app.edit_original_branch.as_deref(), Some("fix/#42-broken-thing"));
+  assert!(
+    app.edit_original_path.is_some(),
+    "the original path is captured for git worktree move"
+  );
+}
+
+#[test]
+fn enter_edit_worktree_rejects_unparseable_branch() {
+  // A branch that isn't `<type>/#<issue>-<desc>` (e.g. `main`) can't be
+  // decomposed into the form, so the modal refuses to open.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("main".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "unparseable branch must not open the modal");
+  assert!(app.edit_original_branch.is_none());
+}
+
+#[test]
+fn cancel_edit_worktree_resets_state() {
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.cancel_edit_worktree();
+
+  assert_eq!(app.view, View::List);
+  assert!(app.edit_original_branch.is_none());
+  assert!(app.edit_original_path.is_none());
+}
+
+#[test]
+fn request_push_refuses_while_another_mutation_runs() {
+  // Codex review on PR #292: pressing `P` while a different mutating task is
+  // in flight must not start a concurrent push in the same worktree.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  // A sync is already running (a different mutating kind).
+  app.tasks.request(TaskKind::Sync);
+
+  app.request_push();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Push),
+    "push must not start while a sync is in flight"
+  );
+  assert!(
+    app.status.contains("before pushing"),
+    "status must explain the block: {}",
+    app.status
+  );
+}
+
+#[test]
+fn request_pull_refuses_while_another_mutation_runs() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.tasks.request(TaskKind::Bootstrap);
+
+  app.request_pull();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Pull),
+    "pull must not start while a bootstrap is in flight"
+  );
+  assert!(
+    app.status.contains("before pulling"),
+    "status must explain the block: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_edit_worktree_refuses_unconfigured_branch_type() {
+  // Codex review on PR #292: a branch whose parsed type is not in branch_types
+  // must refuse to open the rename modal rather than silently preselecting the
+  // first configured type (which Enter would then rename the branch to).
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  // `zzz` is a well-formed <type>/#<issue>-<desc> but not a configured type.
+  wt.branch = Some("zzz/#7-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("not configured"),
+    "status must explain: {}",
+    app.status
+  );
+}
+
+#[test]
+fn request_sync_refuses_while_another_mutation_runs() {
+  // Codex review on PR #292: the concurrent-mutation guard is centralized, so
+  // sync also refuses to start while a different mutating task is in flight.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.tasks.request(TaskKind::Pull);
+
+  app.request_sync();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sync),
+    "sync must not start while a pull is in flight"
+  );
+  assert!(
+    app.status.contains("before syncing"),
+    "status must explain: {}",
+    app.status
   );
 }

@@ -46,6 +46,7 @@ fn fixture_repo(commit_count: usize) -> (TempDir, Repository, WorktreeInfo) {
   let head = repo.head().unwrap().target().unwrap().to_string();
   let info = WorktreeInfo {
     name: "bench".into(),
+    id: "bench".into(),
     path: dir.path().to_path_buf(),
     branch: Some("main".into()),
     head: Some(head),

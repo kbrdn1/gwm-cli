@@ -134,8 +134,8 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   // 3. Fetch. After this the in-memory `repo` ref cache is stale, so
   //    everything past here re-resolves against a freshly opened repo.
   match &remote {
-    Some(r) => worktree::run_git(&workdir, &["fetch", r])?,
-    None => worktree::run_git(&workdir, &["fetch"])?,
+    Some(r) => worktree::run_git_logged(&workdir, &["fetch", r])?,
+    None => worktree::run_git_logged(&workdir, &["fetch"])?,
   };
 
   // 4. Recompute ahead/behind against the now-updated upstream.
@@ -156,8 +156,8 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
   // 5. Integrate. On failure (conflicts), abort so the worktree is
   //    not left mid-rebase/merge, then surface a conflict error.
   let integrate = match strategy {
-    SyncStrategy::Rebase => worktree::run_git(&workdir, &["rebase", &upstream_short]),
-    SyncStrategy::Merge => worktree::run_git(&workdir, &["merge", "--no-edit", &upstream_short]),
+    SyncStrategy::Rebase => worktree::run_git_logged(&workdir, &["rebase", &upstream_short]),
+    SyncStrategy::Merge => worktree::run_git_logged(&workdir, &["merge", "--no-edit", &upstream_short]),
   };
   if let Err(e) = integrate {
     // Distinguish a genuine conflict from any other failure (a failing
@@ -170,7 +170,7 @@ pub fn sync(start: &Path, strategy: SyncStrategy) -> Result<SyncReport> {
       .and_then(|r| r.index().ok())
       .map(|idx| idx.has_conflicts())
       .unwrap_or(false);
-    let _ = worktree::run_git(&workdir, &[strategy.verb(), "--abort"]);
+    let _ = worktree::run_git_logged(&workdir, &[strategy.verb(), "--abort"]);
     if conflicted {
       return Err(GwmError::Other(format!(
         "{} onto {} hit conflicts and was aborted; reconcile manually with `git {} {}`",

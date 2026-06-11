@@ -164,6 +164,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
     View::Pty => draw_pty_overlay(f, app),
+    // #290: branch-rename inline modal renders over the list.
+    View::Edit => draw_edit_worktree(f, app),
     View::List => {}
   }
 }
@@ -1702,6 +1704,8 @@ pub enum HintContext {
   /// PTY overlay (embedded lazygit / terminal). All keys pass through to the
   /// child process; Esc is the only gwm-level escape hatch.
   Pty,
+  /// Branch-rename modal (`View::Edit`, #290).
+  Rename,
 }
 
 impl HintContext {
@@ -1720,6 +1724,7 @@ impl HintContext {
       HintContext::Report => "report",
       HintContext::Help => "help",
       HintContext::Pty => "terminal",
+      HintContext::Rename => "rename",
     }
   }
 
@@ -1730,39 +1735,52 @@ impl HintContext {
   fn hint_specs(self) -> &'static [Hint] {
     use super::keymap::Action::*;
     match self {
+      // Grouped by family, most-used verb of each first; the order doubles as
+      // the right-to-left truncation priority (#290 footer reorg).
       HintContext::Worktrees => &[
+        // Worktree lifecycle.
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
-        Hint::Key(Open, "open"),
-        Hint::Key(Yank, "yank"),
-        Hint::Key(GitTui, "git"),
-        Hint::Key(Review, "review"),
+        // Act on the selected worktree.
+        Hint::Key(TerminalFullscreen, "open"),
+        Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(ReviewFullscreen, "review"),
+        Hint::Key(YankPath, "yank"),
+        // Find / navigate panes.
+        Hint::Key(Filter, "filter"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
         Hint::Key(ConfigPanel, "settings"),
-        Hint::Key(Filter, "filter"),
+        // Global.
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
       HintContext::Status => &[
+        // Read the status pane.
         Hint::Key(Down, "scroll"),
+        Hint::Key(FetchGithub, "fetch"),
+        // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
-        Hint::Key(FetchGithub, "fetch"),
+        // Navigate panes.
         Hint::Key(FocusWorktrees, "worktrees"),
+        Hint::Key(Filter, "filter"),
         Hint::Key(CommandLogs, "logs"),
         Hint::Key(ConfigPanel, "settings"),
-        Hint::Key(Filter, "filter"),
+        // Global.
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
       HintContext::Picker => &[
+        // Pick / dismiss.
         Hint::Lit("Enter", "select"),
         Hint::Lit("Esc", "cancel"),
-        Hint::Key(Open, "open"),
-        Hint::Key(Yank, "yank"),
-        Hint::Key(GitTui, "git"),
+        // Act on the highlighted worktree.
+        Hint::Key(TerminalFullscreen, "open"),
+        Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(YankPath, "yank"),
+        // Find / global.
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
@@ -1805,6 +1823,12 @@ impl HintContext {
         Hint::Lit("Esc/q", "close"),
       ],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
+      HintContext::Rename => &[
+        Hint::Lit("Tab", "field"),
+        Hint::Lit("↑/↓", "type"),
+        Hint::Lit("Enter", "submit"),
+        Hint::Lit("Esc", "cancel"),
+      ],
     }
   }
 
@@ -1834,13 +1858,19 @@ pub fn issue_pr_pane_title(keymap: &Keymap) -> String {
 }
 
 pub fn working_tree_pane_title(keymap: &Keymap) -> String {
-  format!(" Working Tree [{}] ", action_chord(keymap, Action::Review, "R"))
+  format!(
+    " Working Tree [{}] ",
+    action_chord(keymap, Action::ReviewFullscreen, "R")
+  )
 }
 
 pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
   match mode {
-    SidebarMode::Commits => format!(" Recent Commits [{}] ", action_chord(keymap, Action::GitTui, "l")),
-    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::GitTui, "l")),
+    SidebarMode::Commits => format!(
+      " Recent Commits [{}] ",
+      action_chord(keymap, Action::LazyGitFullscreen, "l")
+    ),
+    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::LazyGitFullscreen, "l")),
   }
 }
 
@@ -2203,10 +2233,20 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::DeleteConfirm, "delete selected"));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
-  rows.push(entry(Action::Open, "open per [tui.open] — shell / editor / finder"));
+  rows.push(entry(
+    Action::TerminalFullscreen,
+    "open per [tui.open] — shell / editor / finder",
+  ));
+  rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
   rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
-  rows.push(entry(Action::Yank, "yank selected path to system clipboard"));
-  rows.push(entry(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
+  rows.push(entry(Action::YankPath, "yank selected worktree path to clipboard"));
+  rows.push(entry(Action::YankBranchName, "yank selected branch name to clipboard"));
+  rows.push(entry(
+    Action::YankWorktreeName,
+    "yank selected worktree name to clipboard",
+  ));
+  rows.push(entry(Action::LazyGitFullscreen, "launch lazygit fullscreen"));
+  rows.push(entry(Action::LazyGitPty, "open lazygit in embedded PTY overlay"));
   rows.push(entry(Action::ToggleSidebar, "toggle git preview sidebar"));
   rows.push(entry(
     Action::ToggleSidebarMode,
@@ -2232,14 +2272,28 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
     rows.push(entry(Action::Sync, "sync selected worktree onto its upstream (rebase)"));
+    rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
+    rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
+    rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
+    rows.push(entry(
+      Action::ExitToWorktree,
+      "quit TUI and print selected path to stdout",
+    ));
+    rows.push(entry(Action::MuxPane, "open selected worktree in new mux pane/tab"));
+    rows.push(entry(Action::Macro1, "run [tui.macro1] command"));
+    rows.push(entry(Action::Macro2, "run [tui.macro2] command"));
     rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
-    rows.push(entry(Action::Review, "run [review] launcher against the resolved base"));
+    rows.push(entry(Action::ReviewFullscreen, "run [review] launcher fullscreen"));
+    rows.push(entry(
+      Action::ReviewPty,
+      "run [review] launcher in embedded PTY overlay",
+    ));
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
     rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
-    rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
+    rows.push(entry(Action::BrowseLinks, "open menu — i=issue · p=pull request"));
     rows.push(entry(
       Action::LinkPrompt,
       "link prompt — j/k + enter, or i/p, then digits",
@@ -2868,10 +2922,22 @@ fn draw_create(f: &mut Frame, app: &App) {
 /// chip rather than defaulting focus to Cancel. Pure so the chip contract
 /// is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  primary_cancel_buttons_line(" Create ", accent, muted)
+}
+
+/// Button row for the rename (`c`) modal: a reversed-accent `Rename` chip
+/// beside a muted `Cancel`. Mirrors [`create_buttons_line`] but labels the
+/// primary action "Rename" so the modal's button matches its title and the
+/// Enter action (Codex review on PR #292, P3).
+pub fn rename_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  primary_cancel_buttons_line(" Rename ", accent, muted)
+}
+
+fn primary_cancel_buttons_line(primary_label: &'static str, accent: Color, muted: Color) -> Line<'static> {
   let primary = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   Line::from(vec![
-    Span::styled(" Create ", primary),
+    Span::styled(primary_label, primary),
     Span::raw("   "),
     Span::styled(" Cancel ", idle),
   ])
@@ -3107,7 +3173,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   content.push(Line::from(""));
   content.push(confirm_delete_branch_line(
     app.delete_branch_on_remove,
-    "p",
+    // Derive the live chord (Codex review on PR #292): ToggleDeleteBranch is
+    // `D` since #290, not the pre-#290 `p`, and tracks `[tui.keys]` overrides.
+    &action_chord(&app.keymap, Action::ToggleDeleteBranch, "D"),
     label_w,
     app.theme.accent,
     muted,
@@ -3355,10 +3423,10 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
   f.render_widget(Clear, area);
 
   let title = match app.pty_overlay.as_ref().map(|p| &p.kind) {
-    Some(PtyKind::LazyGit) => " lazygit ",
-    Some(PtyKind::Terminal) => " terminal ",
-    Some(PtyKind::Review) => " review ",
-    None => " overlay ",
+    Some(PtyKind::LazyGit) => " LazyGit ",
+    Some(PtyKind::Terminal) => " Terminal ",
+    Some(PtyKind::Review) => " Review ",
+    None => " Overlay ",
   };
   let block = overlay_block(app.theme.accent)
     .title(title)
@@ -3543,7 +3611,139 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 /// occupies the top of the inner area, input bar is pinned to the
 /// bottom row. The highlight follows the user's cycle key
 /// (`Up` / `Down` / `Tab`); `Enter` fires the highlighted entry,
-/// `Esc` cancels.
+/// Worktree-rename modal (#290). Mirrors [`draw_create`] — it reuses the
+/// same Create form state (Type / Issue / Desc) pre-filled from the current
+/// branch — plus a `From :` line showing the original branch, an async
+/// "renaming…" loader, and an inline failure surfaced from
+/// `App::edit_failure`. State lives on `App::create_form` +
+/// `App::edit_original_branch`.
+fn draw_edit_worktree(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let clean = app.theme.clean;
+  let surface = app.theme.selection_bg;
+
+  let (type_str, type_desc) = app
+    .branch_types
+    .get(app.create_form.type_index)
+    .map(|t| (t.name.as_str(), t.description.as_str()))
+    .unwrap_or(("", "(no branch types configured)"));
+
+  let block = overlay_block(clean);
+  let term = f.area();
+  let outer = centered_box(70, 72, 1, term);
+  let inner_w = block.inner(outer).width as usize;
+  let label_w = 5usize;
+  let gutter = 2 + label_w + 2;
+  let value_w = inner_w.saturating_sub(gutter);
+
+  let label = |s: &str| format!("{:<label_w$}", s);
+  let old_branch = app
+    .edit_original_branch
+    .as_deref()
+    .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
+    .unwrap_or("(none)");
+  let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From   : ".len()));
+  let branch = ellipsize_middle(
+    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Branch : ".len()),
+  );
+  let dirname = ellipsize_middle(
+    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Dir    : ".len()),
+  );
+
+  let mut lines = overlay_title_lines("Rename Worktree", clean);
+  lines.push(Line::from(vec![
+    Span::raw("  From   : "),
+    Span::styled(old_display, Style::default().fg(muted)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(type_selector_line(
+    &label("Type"),
+    type_str,
+    type_desc,
+    app.create_form.field == Field::Type,
+    accent,
+    muted,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(vec![
+    Span::raw("  Branch : "),
+    Span::styled(branch, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(vec![
+    Span::raw("  Dir    : "),
+    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Issue"),
+    &app.create_form.issue,
+    app.create_form.field == Field::Issue,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Desc"),
+    &app.create_form.desc,
+    app.create_form.field == Field::Desc,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+
+  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let area = centered_box(70, 72, height, term);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // title + form fields
+      Constraint::Length(1), // loader / failure
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
+
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(lines), inner[0]);
+
+  if app.is_edit_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::EditWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.edit_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("rename failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  }
+
+  if !app.is_edit_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(rename_buttons_line(accent, muted)).alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(HintContext::Rename, &app.keymap, &app.theme)),
+      inner[4],
+    );
+  }
+}
+
 fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered(60, 50, f.area());
   f.render_widget(Clear, area);
@@ -3649,8 +3849,12 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   let mut lines: Vec<Line<'static>> = Vec::new();
 
   if link.issue.is_none() && link.pr.is_none() {
+    // Derive LinkPrompt's chord from the live keymap so the hint tracks the
+    // binding (and any `[tui.keys]` override) instead of drifting — the `L`
+    // hardcoded pre-#290 now belongs to LazyGitFullscreen.
+    let chord = action_chord(&app.keymap, Action::LinkPrompt, "i");
     lines.push(Line::from(Span::styled(
-      trunc("no link · press L to link", max_width),
+      trunc(&format!("no link · press {chord} to link"), max_width),
       Style::default().fg(app.theme.muted),
     )));
     return lines;

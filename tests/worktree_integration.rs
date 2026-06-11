@@ -8,6 +8,7 @@ use common::{init_repo, paths_equal};
 use git2::{Repository, Signature, Time};
 use gwm::worktree;
 use std::path::Path;
+use std::process::Command;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -121,8 +122,25 @@ fn find_fuzzy_errors_on_ambiguous() {
   let (dir, _) = init_repo();
   let repo = worktree::discover_repo(Some(dir.path())).unwrap();
   let wt_root = TempDir::new().unwrap();
-  worktree::add(&repo, "feat-1-foo", &wt_root.path().join("a"), "feat/#1-foo", false).unwrap();
-  worktree::add(&repo, "feat-2-foo", &wt_root.path().join("b"), "feat/#2-foo", false).unwrap();
+  // find_fuzzy matches on the display name (the directory basename, #290), so
+  // the dirs must carry the searched substring — as gwm-created worktrees do
+  // (basename == slug).
+  worktree::add(
+    &repo,
+    "feat-1-foo",
+    &wt_root.path().join("feat-1-foo"),
+    "feat/#1-foo",
+    false,
+  )
+  .unwrap();
+  worktree::add(
+    &repo,
+    "feat-2-foo",
+    &wt_root.path().join("feat-2-foo"),
+    "feat/#2-foo",
+    false,
+  )
+  .unwrap();
 
   let err = worktree::find_fuzzy(&repo, "foo").unwrap_err();
   assert!(matches!(err, gwm::error::GwmError::Other(_)));
@@ -1029,4 +1047,630 @@ fn is_trunk_branch_matches_configured_and_common_defaults() {
   assert!(worktree::is_trunk_branch("develop", &[]));
   assert!(worktree::is_trunk_branch("release", &["release".to_string()]));
   assert!(!worktree::is_trunk_branch("feat/#287-x", &[]));
+}
+
+// ---- rename_worktree (#290) ----------------------------------------------
+
+#[test]
+fn rename_worktree_renames_local_branch_and_moves_dir() {
+  // No origin remote: rename_worktree renames the local branch and moves the
+  // worktree directory on disk, and reports remote_renamed == false.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-1-old");
+  worktree::add(&repo, "feat-1-old", &old_path, "feat/#1-old", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-1-new");
+  let remote_renamed =
+    worktree::rename_worktree(dir.path(), &old_path, "feat/#1-old", &new_path, "feat/#1-new").unwrap();
+
+  assert!(!remote_renamed, "no origin remote → remote branch not renamed");
+  assert!(new_path.exists(), "worktree directory must move to the new path");
+  assert!(!old_path.exists(), "old worktree directory must be gone");
+  assert!(
+    repo.find_branch("feat/#1-new", git2::BranchType::Local).is_ok(),
+    "local branch must be renamed to feat/#1-new"
+  );
+  assert!(
+    repo.find_branch("feat/#1-old", git2::BranchType::Local).is_err(),
+    "old local branch must no longer exist"
+  );
+}
+
+#[test]
+fn rename_worktree_records_its_git_steps_in_the_command_log() {
+  // The rename action (`c`, #290) shells out to `git worktree move` +
+  // `git branch -m` through the captured-output path; those mutating steps
+  // must surface in the Command Logs modal. Before this fix they ran through
+  // an unlogged helper, so the user could not find them in the log.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-99-cmdlog-old");
+  worktree::add(&repo, "feat-99-cmdlog-old", &old_path, "feat/#99-cmdlog-old", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-99-cmdlog-new");
+  worktree::rename_worktree(
+    dir.path(),
+    &old_path,
+    "feat/#99-cmdlog-old",
+    &new_path,
+    "feat/#99-cmdlog-new",
+  )
+  .unwrap();
+
+  // Presence by the unique branch name: a sibling test cannot collide.
+  let recorded = gwm::command_log::snapshot();
+  assert!(
+    recorded
+      .iter()
+      .any(|e| e.command.starts_with("git worktree move") && e.command.contains("feat-99-cmdlog-new")),
+    "the `git worktree move` step must be recorded; got: {:?}",
+    recorded.iter().map(|e| &e.command).collect::<Vec<_>>()
+  );
+  assert!(
+    recorded
+      .iter()
+      .any(|e| e.command.starts_with("git branch -m") && e.command.contains("feat/#99-cmdlog-new")),
+    "the `git branch -m` step must be recorded"
+  );
+}
+
+#[test]
+fn rename_worktree_renames_remote_branch_when_pushed() {
+  // With the old branch pushed to a bare origin, rename_worktree also renames
+  // the remote branch (delete old ref + push new) and reports remote_renamed.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  let ok = Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap()
+    .status
+    .success();
+  assert!(ok, "bare remote init must succeed");
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-2-old");
+  worktree::add(&repo, "feat-2-old", &old_path, "feat/#2-old", false).unwrap();
+  let pushed = Command::new("git")
+    .args(["push", "origin", "feat/#2-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap();
+  assert!(
+    pushed.status.success(),
+    "push of the old branch must succeed: {}",
+    String::from_utf8_lossy(&pushed.stderr)
+  );
+
+  let new_path = wt_root.path().join("feat-2-new");
+  let remote_renamed =
+    worktree::rename_worktree(dir.path(), &old_path, "feat/#2-old", &new_path, "feat/#2-new").unwrap();
+
+  assert!(remote_renamed, "origin had the branch → remote_renamed must be true");
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", "origin"])
+    .current_dir(&new_path)
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(refs.contains("feat/#2-new"), "remote must carry the new branch: {refs}");
+  assert!(!refs.contains("feat/#2-old"), "remote must drop the old branch: {refs}");
+}
+
+#[test]
+fn rename_worktree_remote_push_carries_a_force_with_lease() {
+  // Codex review on PR #292 (P1): the remote rename must lease the delete
+  // refspec against the fetched old tip so a commit pushed by someone else in
+  // the fetch→push window flips the lease and gets rejected instead of being
+  // silently dropped. The exact tip race isn't reachable from the public API
+  // (the fetch is internal), so assert the *intent*: the recorded push argv
+  // carries `--force-with-lease=feat/#7-lease:<oid>`.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  assert!(Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap()
+    .status
+    .success());
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-7-lease");
+  worktree::add(&repo, "feat-7-lease", &old_path, "feat/#7-lease", false).unwrap();
+  assert!(Command::new("git")
+    .args(["push", "origin", "feat/#7-lease"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap()
+    .status
+    .success());
+
+  let new_path = wt_root.path().join("feat-7-leased");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#7-lease", &new_path, "feat/#7-leased").unwrap();
+
+  let recorded = gwm::command_log::snapshot();
+  let push = recorded
+    .iter()
+    .find(|e| e.command.starts_with("git push") && e.command.contains("feat/#7-lease"))
+    .expect("the remote rename push must be recorded");
+  assert!(
+    push.command.contains("--force-with-lease=feat/#7-lease:"),
+    "the push must lease the delete against the fetched old tip: {}",
+    push.command
+  );
+  // Codex review on PR #292 (P1, iter 4): the *new* ref needs an absence lease
+  // (zero-OID expected) so a branch created by another client between the
+  // preflight and the push can't be fast-forwarded while origin/<old> is
+  // deleted in the same atomic push.
+  assert!(
+    push
+      .command
+      .contains("--force-with-lease=feat/#7-leased:0000000000000000000000000000000000000000"),
+    "the push must lease the new ref as create-only (absent): {}",
+    push.command
+  );
+  assert!(
+    push.command.contains("--atomic"),
+    "the push must stay atomic: {}",
+    push.command
+  );
+}
+
+#[test]
+fn rename_worktree_refuses_when_remote_target_branch_already_exists() {
+  // Codex review on PR #292 (P1): if `origin/<new>` already exists, the rename
+  // push would fast-forward/move that pre-existing remote branch AND delete
+  // `origin/<old>` — overwriting someone else's branch. The rename must prove
+  // the destination ref is absent before pushing, and roll back otherwise.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  assert!(Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap()
+    .status
+    .success());
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-8-old");
+  worktree::add(&repo, "feat-8-old", &old_path, "feat/#8-old", false).unwrap();
+  assert!(Command::new("git")
+    .args(["push", "origin", "feat/#8-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap()
+    .status
+    .success());
+
+  // Pre-create `origin/feat/#8-new` (remote only): branch at main HEAD, push,
+  // then drop the local ref so the local `branch -m` doesn't collide.
+  for args in [
+    &["branch", "feat/#8-new"][..],
+    &["push", "origin", "feat/#8-new"][..],
+    &["branch", "-D", "feat/#8-new"][..],
+  ] {
+    assert!(Command::new("git")
+      .args(args)
+      .current_dir(dir.path())
+      .output()
+      .unwrap()
+      .status
+      .success());
+  }
+
+  let new_path = wt_root.path().join("feat-8-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#8-old", &new_path, "feat/#8-new").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::CommandFailed(_)),
+    "an existing remote target must refuse the rename, got: {err:?}"
+  );
+
+  // Full rollback: local old branch + dir restored, new dir gone.
+  assert!(
+    repo.find_branch("feat/#8-old", git2::BranchType::Local).is_ok(),
+    "old local branch must be restored"
+  );
+  assert!(old_path.exists(), "old worktree dir must be restored");
+  assert!(!new_path.exists(), "new worktree dir must not linger");
+  // The remote is untouched: both branches still present, none overwritten.
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", "origin"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(
+    refs.contains("feat/#8-old"),
+    "origin must still carry the old branch: {refs}"
+  );
+  assert!(
+    refs.contains("feat/#8-new"),
+    "the pre-existing remote target must be untouched: {refs}"
+  );
+}
+
+#[test]
+fn rename_worktree_refuses_preexisting_target_without_touching_refs() {
+  // Codex review on PR #292: the directory move runs first and is preflighted,
+  // so a pre-existing target is rejected before any ref is renamed — the repo
+  // is never left half-renamed.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-5-old");
+  worktree::add(&repo, "feat-5-old", &old_path, "feat/#5-old", false).unwrap();
+
+  // A directory already sitting at the target path makes the move impossible.
+  let new_path = wt_root.path().join("feat-5-new");
+  std::fs::create_dir(&new_path).unwrap();
+
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#5-old", &new_path, "feat/#5-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // No ref touched: old branch survives, new branch absent, old dir intact.
+  assert!(
+    repo.find_branch("feat/#5-old", git2::BranchType::Local).is_ok(),
+    "old branch must survive a rejected rename"
+  );
+  assert!(
+    repo.find_branch("feat/#5-new", git2::BranchType::Local).is_err(),
+    "new branch must not be created when the move is rejected"
+  );
+  assert!(old_path.exists(), "old worktree directory must stay put");
+}
+
+#[test]
+fn rename_worktree_moves_dir_only_when_branch_unchanged() {
+  // Codex review on PR #292: a path-only edit (same branch name, different
+  // directory) must move the dir without running `git branch -m old old`
+  // (which git rejects). The branch stays intact and the move succeeds.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-6-old");
+  worktree::add(&repo, "feat-6-old", &old_path, "feat/#6-keep", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-6-new");
+  let remote_renamed =
+    worktree::rename_worktree(dir.path(), &old_path, "feat/#6-keep", &new_path, "feat/#6-keep").unwrap();
+
+  assert!(!remote_renamed, "no branch change → nothing remote");
+  assert!(new_path.exists(), "directory must move to the new path");
+  assert!(!old_path.exists(), "old directory must be gone");
+  assert!(
+    repo.find_branch("feat/#6-keep", git2::BranchType::Local).is_ok(),
+    "the unchanged branch must survive the path-only move"
+  );
+}
+
+#[test]
+fn rename_worktree_rejected_remote_push_is_atomic_and_rolls_back() {
+  // Codex review on PR #292 (P1): the two-refspec remote rename must be
+  // atomic, so a rejected push can never leave origin without the old branch.
+  // We force a rejection with `receive.denyDeletes` on the bare remote: the
+  // `:old` delete is refused, and `--atomic` makes that reject the whole push
+  // (so `new` is never created and `old` survives). The local branch + dir
+  // must roll back to their original state.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-8-old");
+  worktree::add(&repo, "feat-8-old", &old_path, "feat/#8-old", false).unwrap();
+  Command::new("git")
+    .args(["push", "origin", "feat/#8-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap();
+
+  // Make the remote refuse branch deletions → the `:old` refspec is rejected.
+  Command::new("git")
+    .args(["config", "receive.denyDeletes", "true"])
+    .current_dir(remote_dir.path())
+    .output()
+    .unwrap();
+
+  let new_path = wt_root.path().join("feat-8-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#8-old", &new_path, "feat/#8-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // Remote integrity: old branch still there, new branch never created.
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(
+    refs.contains("feat/#8-old"),
+    "atomic reject must keep the old remote branch: {refs}"
+  );
+  assert!(
+    !refs.contains("feat/#8-new"),
+    "the new remote branch must never have been created: {refs}"
+  );
+
+  // Local rollback: branch back to old, directory back to old_path.
+  assert!(
+    repo.find_branch("feat/#8-old", git2::BranchType::Local).is_ok(),
+    "local branch must roll back to feat/#8-old"
+  );
+  assert!(
+    repo.find_branch("feat/#8-new", git2::BranchType::Local).is_err(),
+    "the new local branch must be rolled back"
+  );
+  assert!(old_path.exists(), "the worktree directory must roll back to old_path");
+  assert!(!new_path.exists(), "the new directory must not survive a failed rename");
+}
+
+#[test]
+fn rename_worktree_aborts_and_rolls_back_on_remote_lookup_failure() {
+  // Codex review on PR #292: when `origin` is set but `git ls-remote` fails
+  // (here: it points at a non-existent repo, so the lookup errors rather than
+  // returning exit 2 "absent"), the rename must abort and roll back rather
+  // than silently reporting local-only success.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  Command::new("git")
+    .args(["remote", "add", "origin", "/nonexistent/path/to/repo.git"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-9-old");
+  worktree::add(&repo, "feat-9-old", &old_path, "feat/#9-old", false).unwrap();
+  let new_path = wt_root.path().join("feat-9-new");
+
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#9-old", &new_path, "feat/#9-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // Full rollback: local branch + directory restored to their original state.
+  assert!(
+    repo.find_branch("feat/#9-old", git2::BranchType::Local).is_ok(),
+    "local branch must roll back to feat/#9-old after a remote lookup failure"
+  );
+  assert!(
+    repo.find_branch("feat/#9-new", git2::BranchType::Local).is_err(),
+    "the new branch must not survive an aborted rename"
+  );
+  assert!(old_path.exists(), "the worktree directory must roll back to old_path");
+  assert!(
+    !new_path.exists(),
+    "the new directory must not survive an aborted rename"
+  );
+}
+
+#[test]
+fn list_uses_new_slug_as_display_name_after_rename_but_keeps_id() {
+  // Codex review on PR #292: `git worktree move` updates the path but not the
+  // internal `.git/worktrees/<id>` entry. After a rename, `WorktreeInfo.name`
+  // (display) must track the new directory slug, while `id` stays the original
+  // — and `remove` must still resolve via that id.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-10-old");
+  worktree::add(&repo, "feat-10-old", &old_path, "feat/#10-old", false).unwrap();
+
+  let new_path = wt_root.path().join("feat-10-new");
+  worktree::rename_worktree(dir.path(), &old_path, "feat/#10-old", &new_path, "feat/#10-new").unwrap();
+
+  let trees = worktree::list(&repo).unwrap();
+  let renamed = trees
+    .iter()
+    .find(|w| !w.is_main)
+    .expect("the renamed worktree must be listed");
+  assert_eq!(
+    renamed.name, "feat-10-new",
+    "display name must follow the moved directory slug"
+  );
+  assert_eq!(
+    renamed.id, "feat-10-old",
+    "internal git id is unchanged by `git worktree move`"
+  );
+
+  // Remove must still resolve the worktree via its (unchanged) id.
+  worktree::remove(&repo, &renamed.id, false).unwrap();
+  assert!(!new_path.exists(), "remove via id must delete the moved worktree");
+}
+
+#[test]
+fn rename_worktree_aborts_when_remote_has_unfetched_commits() {
+  // Codex review on PR #292 (P1): the remote rename deletes origin/<old> and
+  // recreates it from the LOCAL tip. If origin/<old> advanced with commits the
+  // worktree never fetched, that would drop them — so refuse and roll back.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+
+  let remote_dir = TempDir::new().unwrap();
+  Command::new("git")
+    .args(["init", "--bare", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  Command::new("git")
+    .args(["remote", "add", "origin", &remote_dir.path().to_string_lossy()])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+
+  let wt_root = TempDir::new().unwrap();
+  let old_path = wt_root.path().join("feat-12-old");
+  worktree::add(&repo, "feat-12-old", &old_path, "feat/#12-old", false).unwrap();
+  // Push the branch at its current tip A, then advance origin/feat/#12-old to a
+  // commit B (made in the main repo) that the worktree never fetches.
+  Command::new("git")
+    .args(["push", "origin", "feat/#12-old"])
+    .current_dir(&old_path)
+    .output()
+    .unwrap();
+  std::fs::write(dir.path().join("extra.txt"), "x").unwrap();
+  Command::new("git")
+    .args(["add", "extra.txt"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  Command::new("git")
+    .args(["commit", "-m", "B"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  let pushed = Command::new("git")
+    .args(["push", "origin", "HEAD:feat/#12-old"])
+    .current_dir(dir.path())
+    .output()
+    .unwrap();
+  assert!(
+    pushed.status.success(),
+    "advancing the remote branch must succeed: {}",
+    String::from_utf8_lossy(&pushed.stderr)
+  );
+
+  let new_path = wt_root.path().join("feat-12-new");
+  let err = worktree::rename_worktree(dir.path(), &old_path, "feat/#12-old", &new_path, "feat/#12-new").unwrap_err();
+  assert!(matches!(err, gwm::error::GwmError::CommandFailed(_)));
+
+  // Remote integrity: the old branch is still there (not deleted/rewound).
+  let ls = Command::new("git")
+    .args(["ls-remote", "--heads", &remote_dir.path().to_string_lossy()])
+    .output()
+    .unwrap();
+  let refs = String::from_utf8_lossy(&ls.stdout);
+  assert!(
+    refs.contains("feat/#12-old"),
+    "stale rename must leave the old remote branch intact: {refs}"
+  );
+  assert!(
+    !refs.contains("feat/#12-new"),
+    "the new remote branch must not be created: {refs}"
+  );
+
+  // Local rollback.
+  assert!(repo.find_branch("feat/#12-old", git2::BranchType::Local).is_ok());
+  assert!(repo.find_branch("feat/#12-new", git2::BranchType::Local).is_err());
+  assert!(old_path.exists());
+  assert!(!new_path.exists());
+}
+
+#[test]
+fn find_fuzzy_reports_ambiguous_duplicate_display_names() {
+  // Codex review on PR #292 (P2): since #290 derives the display name from the
+  // path basename, two worktrees in different parents can share a name. An
+  // exact match on a duplicated name must be ambiguous, not "take the first".
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  let a = wt_root.path().join("a").join("dup");
+  let b = wt_root.path().join("b").join("dup");
+  std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+  std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+  worktree::add(&repo, "feat-1-dup", &a, "feat/#1-dup", false).unwrap();
+  worktree::add(&repo, "feat-2-dup", &b, "feat/#2-dup", false).unwrap();
+
+  let err = worktree::find_fuzzy(&repo, "dup").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
+    "duplicate display names must resolve as ambiguous, got: {err:?}"
+  );
+
+  // ...but each duplicate is still reachable by its unique internal id.
+  let by_id = worktree::find_fuzzy(&repo, "feat-1-dup").unwrap();
+  assert_eq!(by_id.id, "feat-1-dup");
+  assert!(
+    by_id.path.ends_with("a/dup"),
+    "id match must resolve the right worktree: {:?}",
+    by_id.path
+  );
+}
+
+#[test]
+fn find_fuzzy_treats_display_name_equal_to_another_id_as_ambiguous() {
+  // Codex review on PR #292 (P2): a `git worktree move` leaves the stable `id`
+  // as the old slug while `name` tracks the new basename. If a *different*
+  // worktree's display name happens to equal that old slug, the exact-name
+  // shortcut would return the wrong row before ever consulting the id. The
+  // token is genuinely ambiguous (it is one worktree's id and another's name)
+  // and must be reported as such, not silently resolved.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  // A: internal id "shared", display name "adir" (basename of its path).
+  let a = wt_root.path().join("pa").join("adir");
+  // B: internal id "bid", display name "shared" (basename of its path).
+  let b = wt_root.path().join("pb").join("shared");
+  std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+  std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+  worktree::add(&repo, "shared", &a, "feat/#1-a", false).unwrap();
+  worktree::add(&repo, "bid", &b, "feat/#2-b", false).unwrap();
+
+  let err = worktree::find_fuzzy(&repo, "shared").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
+    "a token that is one worktree's id and another's name must be ambiguous, got: {err:?}"
+  );
+
+  // Each worktree stays reachable by its own unambiguous id.
+  assert_eq!(worktree::find_fuzzy(&repo, "bid").unwrap().id, "bid");
+}
+
+#[test]
+fn find_fuzzy_duplicate_names_stay_ambiguous_even_when_an_id_matches() {
+  // Codex review on PR #292 (P2, iter 4): when the display name is shown twice
+  // by `gwm list`/the TUI AND one worktree's internal id equals that name, the
+  // exact-name branch must NOT silently resolve to the id-match — a user typing
+  // the visible duplicated name (e.g. `gwm remove dup`) must be forced to
+  // disambiguate instead of acting on one of them by accident.
+  let (dir, _) = init_repo();
+  let repo = worktree::discover_repo(Some(dir.path())).unwrap();
+  let wt_root = TempDir::new().unwrap();
+  // A: id "dup", display name "dup" (basename). B: id "idb", display name "dup".
+  let a = wt_root.path().join("pa").join("dup");
+  let b = wt_root.path().join("pb").join("dup");
+  std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+  std::fs::create_dir_all(b.parent().unwrap()).unwrap();
+  worktree::add(&repo, "dup", &a, "feat/#1-dup", false).unwrap();
+  worktree::add(&repo, "idb", &b, "feat/#2-dup", false).unwrap();
+
+  let err = worktree::find_fuzzy(&repo, "dup").unwrap_err();
+  assert!(
+    matches!(err, gwm::error::GwmError::Other(ref m) if m.contains("ambiguous")),
+    "a duplicated display name must stay ambiguous even though id 'dup' matches, got: {err:?}"
+  );
+
+  // The non-colliding worktree is still reachable by its unique id.
+  assert_eq!(worktree::find_fuzzy(&repo, "idb").unwrap().id, "idb");
 }

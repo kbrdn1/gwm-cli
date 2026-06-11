@@ -30,6 +30,7 @@ use std::path::PathBuf;
 fn wt(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/{}", name)),
     branch: None,
     head: None,

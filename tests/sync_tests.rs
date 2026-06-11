@@ -198,6 +198,33 @@ fn sync_rebases_branch_that_is_behind_upstream() {
 }
 
 #[test]
+fn sync_records_its_git_steps_in_the_command_log() {
+  // The Sync action shells out to `git fetch` + `git rebase` through the
+  // captured-output path; those mutating steps must land in the Command Logs
+  // modal (#226 scope note promised sync joins "once it has a TUI action").
+  // Before #290 the sync steps ran through the unlogged `run_git`, so the user
+  // could not find them in the log.
+  let (td, origin, local) = local_tracking_origin();
+  push_upstream_commit(td.path(), &origin, "file.txt", "base\nupstream\n", "upstream-change");
+
+  let report = sync::sync(&local, SyncStrategy::Rebase).unwrap();
+  assert_eq!(report.action, SyncAction::Integrated);
+
+  // Presence, not count: a sibling test may record concurrently to the same
+  // process-global ring, so assert the fetch + rebase verbs are present.
+  let recorded = gwm::command_log::snapshot();
+  assert!(
+    recorded.iter().any(|e| e.command.starts_with("git fetch")),
+    "sync's `git fetch` should be recorded in the command log; got: {:?}",
+    recorded.iter().map(|e| &e.command).collect::<Vec<_>>()
+  );
+  assert!(
+    recorded.iter().any(|e| e.command.starts_with("git rebase")),
+    "sync's `git rebase` should be recorded in the command log"
+  );
+}
+
+#[test]
 fn sync_merge_strategy_integrates_upstream() {
   let (td, origin, local) = local_tracking_origin();
   push_upstream_commit(td.path(), &origin, "other.txt", "added upstream\n", "upstream-feature");
