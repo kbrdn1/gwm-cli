@@ -83,6 +83,13 @@ pub enum TaskKind {
   /// directory, and optionally delete the branch, so it must not block the
   /// render loop while the confirm modal is open.
   DeleteWorktree,
+  /// Off-thread `git pull` (or `git fetch + rebase`) of the selected
+  /// worktree's branch (#290). One global slot — a second `p` press
+  /// coalesces while one is in flight.
+  Pull,
+  /// Off-thread `git push` of the selected worktree's branch to its remote
+  /// (#290). One global slot — a second `P` press coalesces.
+  Push,
 }
 
 impl TaskKind {
@@ -97,6 +104,8 @@ impl TaskKind {
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
       TaskKind::DeleteWorktree => "deleting worktree…",
+      TaskKind::Pull => "pulling…",
+      TaskKind::Push => "pushing…",
     }
   }
 
@@ -114,7 +123,12 @@ impl TaskKind {
   pub fn is_mutating(self) -> bool {
     matches!(
       self,
-      TaskKind::CreateWorktree | TaskKind::Sync | TaskKind::Bootstrap | TaskKind::DeleteWorktree
+      TaskKind::CreateWorktree
+        | TaskKind::Sync
+        | TaskKind::Bootstrap
+        | TaskKind::DeleteWorktree
+        | TaskKind::Pull
+        | TaskKind::Push
     )
   }
 }
@@ -159,6 +173,12 @@ pub enum TaskMsg {
   /// deleted worktree's display name + path label for the status line, and
   /// the deletion outcome.
   DeleteWorktree(u64, String, String, std::result::Result<(), String>),
+  /// A `git pull` result (#290): the worker's generation, the worktree's
+  /// display name, and the outcome (a one-line status string on success or
+  /// a stringified error).
+  Pull(u64, String, std::result::Result<String, String>),
+  /// A `git push` result (#290): same shape as [`Self::Pull`].
+  Push(u64, String, std::result::Result<String, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
@@ -267,6 +287,10 @@ impl TaskRunner {
       Some(TaskKind::Bootstrap.loading_label())
     } else if self.running.contains(&TaskKind::DeleteWorktree) {
       Some(TaskKind::DeleteWorktree.loading_label())
+    } else if self.running.contains(&TaskKind::Pull) {
+      Some(TaskKind::Pull.loading_label())
+    } else if self.running.contains(&TaskKind::Push) {
+      Some(TaskKind::Push.loading_label())
     } else {
       None
     }
