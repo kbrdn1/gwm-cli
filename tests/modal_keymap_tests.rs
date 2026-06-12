@@ -3,7 +3,7 @@
 //! Ratatui-free: every assertion drives the pure [`ModalKeymap`] model so
 //! the routing contract is pinned without spawning a terminal.
 
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gwm::tui::keymap::{KeyStroke, Source};
 use gwm::tui::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 
@@ -258,4 +258,26 @@ fn bindings_for_returns_only_that_contexts_verbs() {
   assert!(confirm.iter().all(|b| b.action.context() == KeyContext::Confirm));
   // confirm has six verbs
   assert_eq!(confirm.len(), 6);
+}
+
+// ── BackTab / Shift-Tab terminal disagreement (issue #219 review) ──────────
+
+#[test]
+fn backtab_with_shift_modifier_resolves_like_plain_backtab() {
+  // Some terminals report Shift-Tab as `KeyCode::BackTab` WITH a SHIFT
+  // modifier; others as bare `BackTab`. Both mean the same keystroke, so the
+  // modal resolver must fire the prev-field / prev-tab verb bound to the
+  // modifier-less `"BackTab"` default in either case. Without normalisation
+  // the shifted variant compared unequal and the default silently did
+  // nothing — a regression vs the old hard-coded `KeyCode::BackTab` branch.
+  let km = ModalKeymap::defaults();
+  let shifted = KeyStroke::from_event(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+  assert_eq!(
+    km.resolve(KeyContext::Create, &shifted),
+    Some(ModalAction::CreatePrevField)
+  );
+  assert_eq!(
+    km.resolve(KeyContext::Config, &shifted),
+    Some(ModalAction::ConfigPrevTab)
+  );
 }
