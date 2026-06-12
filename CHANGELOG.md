@@ -12,6 +12,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Rebindable modal keys with contextual actions** (issue #219): the
+  modal/overlay keys that used to be hard-coded (create form, delete-confirm,
+  link prompt, settings panel, command logs, help, open-menu, command palette,
+  bootstrap report) are now remappable under nested `[tui.keys.<context>]`
+  sub-tables in `.gwm.toml`. Each context owns typed verbs, so the same
+  physical key can mean different things in different modals (`Enter` is
+  `submit` in the create form but `activate` in the delete-confirm modal).
+  - Modal bindings are single keystrokes only (no chord timeout); a
+    multi-stroke chord is rejected at load time.
+  - Two-stage surfaces use a dotted path — `[tui.keys.link.choose_target]`,
+    `[tui.keys.link.input_number]`, `[tui.keys.config.edit]`.
+  - `gwm tui keys` lists every context and verb; `gwm doctor` validates the
+    contextual bindings and reports per-context conflicts.
+  - The Keybindings help overlay and the statusbar footer hints now resolve
+    modal keys from the override layer instead of fixed strings.
+  - `Ctrl+C`, the list view's contextual `Esc`/`Enter`, and the PTY overlay's
+    emergency `Esc` stay hard-coded by design.
 - **TUI keymap redesign** (issue #290): unified, consistent key bindings across
   the worktree list. New actions and default bindings:
   - `p` → `pull` — git pull on the selected worktree's branch (async,
