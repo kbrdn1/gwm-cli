@@ -1822,8 +1822,10 @@ impl HintContext {
         Hint::Modal(ModalAction::OpenMenuClose, "close"),
       ],
       HintContext::LinkPrompt => &[
-        Hint::Lit("j/k", "move"),
-        Hint::Lit("i/p", "kind"),
+        Hint::Modal(ModalAction::LinkChoosePrev, "prev"),
+        Hint::Modal(ModalAction::LinkChooseNext, "next"),
+        Hint::Modal(ModalAction::LinkChooseIssue, "issue"),
+        Hint::Modal(ModalAction::LinkChoosePr, "pr"),
         Hint::Modal(ModalAction::LinkChooseAccept, "link"),
         Hint::Key(FetchGithub, "fetch"),
         Hint::Modal(ModalAction::LinkChooseCancel, "cancel"),
