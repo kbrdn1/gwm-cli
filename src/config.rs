@@ -540,30 +540,54 @@ impl Default for TuiConfig {
 }
 
 /// `[tui.keys]` — user-facing override table for the TUI keymap.
-/// Stored as `action-slug -> [chord, …]` so the TOML stays declarative
-/// and copy-pastable across machines.
 ///
-/// Resolution / validation happens in [`Self::resolved_keymap`], which
-/// is called from `Config::load_for_repo` so a malformed override is
-/// surfaced at load time (action name typos, parse errors, chord
-/// conflicts, prefix collisions) rather than as a silent no-op in the
-/// TUI. The raw map is preserved on `Self` so `gwm tui keys` can show
-/// both the user's source and the resolved bindings.
+/// Two kinds of entry live side by side, disambiguated by value type
+/// (issue #219):
+///
+/// - **array value** → a *global* `View::List` verb, e.g. `quit = ["q"]`.
+///   Resolved by [`Self::resolved_keymap`] into a
+///   [`crate::tui::keymap::Keymap`].
+/// - **table value** → a *contextual* modal sub-table, e.g.
+///   `[tui.keys.confirm]` or `[tui.keys.link.choose_target]`. Resolved by
+///   [`Self::resolved_modal_keymap`] into a
+///   [`crate::tui::modal_keymap::ModalKeymap`].
+///
+/// A few names exist in both worlds (`create`, `help`, `command_logs`,
+/// `link` are global actions *and* modal contexts). TOML forbids defining
+/// the same key twice, so a user picks one per file; the value type is
+/// what the walkers below key off. Resolution / validation runs at
+/// `Config::load_for_repo` time via [`Config::validate_tui_keys`] so a
+/// malformed override (unknown action / context / verb, parse error,
+/// per-context conflict, multi-stroke modal chord) is surfaced at load
+/// rather than as a silent no-op in the TUI. The raw table is preserved so
+/// `gwm tui keys` can show both the user's source and the resolved set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TuiKeysConfig {
-  pub bindings: std::collections::BTreeMap<String, Vec<String>>,
+  pub raw: toml::Table,
 }
 
 impl TuiKeysConfig {
-  /// Apply this user override layer on top of the built-in defaults.
-  /// Returns a fully-resolved [`crate::tui::keymap::Keymap`] ready to
-  /// hand to the TUI event loop.
+  /// Resolve the **global** `View::List` keymap: the top-level array
+  /// entries of `[tui.keys]`. Table entries (modal contexts) are skipped
+  /// here and handled by [`Self::resolved_modal_keymap`].
   pub fn resolved_keymap(&self) -> Result<crate::tui::keymap::Keymap> {
     use crate::tui::keymap::{Action, KeyStroke, Keymap};
 
     let mut km = Keymap::defaults();
-    for (action_slug, chord_strings) in &self.bindings {
+    for (action_slug, value) in &self.raw {
+      let chord_strings = match value {
+        toml::Value::Array(_) => as_chord_list(action_slug, value)?,
+        // A table is a contextual modal block — resolved elsewhere.
+        toml::Value::Table(_) => continue,
+        other => {
+          return Err(GwmError::Config(format!(
+            "tui.keys.{}: expected an array of chords or a context table, got {}",
+            action_slug,
+            other.type_str()
+          )))
+        }
+      };
       let action = Action::from_slug_compat(action_slug).ok_or_else(|| {
         GwmError::Config(format!(
           "tui.keys: unknown action {:?} (run `gwm tui keys` for the full list)",
@@ -571,29 +595,137 @@ impl TuiKeysConfig {
         ))
       })?;
       let mut parsed = Vec::with_capacity(chord_strings.len());
-      for chord_str in chord_strings {
-        let chord = KeyStroke::parse_chord(chord_str).map_err(|e| {
-          // Re-wrap so the user sees `tui.keys.<action>` as the
-          // coordinate rather than the bare "keymap:" prefix from
-          // the parser.
-          let inner = match e {
-            GwmError::Config(msg) => msg,
-            other => other.to_string(),
-          };
-          GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
-        })?;
+      for chord_str in &chord_strings {
+        let chord = KeyStroke::parse_chord(chord_str).map_err(|e| rewrap(&format!("tui.keys.{}", action_slug), e))?;
         parsed.push(chord);
       }
-      km.apply_override(action, parsed).map_err(|e| {
-        let inner = match e {
-          GwmError::Config(msg) => msg,
-          other => other.to_string(),
-        };
-        GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
-      })?;
+      km.apply_override(action, parsed)
+        .map_err(|e| rewrap(&format!("tui.keys.{}", action_slug), e))?;
     }
     Ok(km)
   }
+
+  /// Resolve the **contextual** modal keymap: the top-level table entries
+  /// of `[tui.keys]`, recursed into stages (`link.choose_target`,
+  /// `config.edit`). Array entries (global actions) are skipped here.
+  pub fn resolved_modal_keymap(&self) -> Result<crate::tui::modal_keymap::ModalKeymap> {
+    use crate::tui::modal_keymap::ModalKeymap;
+
+    let mut mk = ModalKeymap::defaults();
+    for (key, value) in &self.raw {
+      match value {
+        toml::Value::Table(table) => walk_modal_context(key, table, &mut mk)?,
+        // An array is a global action — resolved by `resolved_keymap`.
+        toml::Value::Array(_) => continue,
+        other => {
+          return Err(GwmError::Config(format!(
+            "tui.keys.{}: expected an array of chords or a context table, got {}",
+            key,
+            other.type_str()
+          )))
+        }
+      }
+    }
+    Ok(mk)
+  }
+}
+
+/// Extract a `["a", "b"]` chord list from a TOML array value, erroring on a
+/// non-string element. `coord` is the dotted `tui.keys.…` path for messages.
+fn as_chord_list(coord: &str, value: &toml::Value) -> Result<Vec<String>> {
+  let arr = value
+    .as_array()
+    .expect("as_chord_list called on a non-array — caller must match Value::Array first");
+  let mut out = Vec::with_capacity(arr.len());
+  for v in arr {
+    let s = v.as_str().ok_or_else(|| {
+      GwmError::Config(format!(
+        "tui.keys.{}: chord list must contain strings, got {}",
+        coord,
+        v.type_str()
+      ))
+    })?;
+    out.push(s.to_string());
+  }
+  Ok(out)
+}
+
+/// `true` when `path` is a non-leaf context *group* — i.e. some real
+/// context nests below it (`link` → `link.choose_target`). Used to give a
+/// precise "bind under a stage" error instead of "unknown context".
+fn is_modal_context_group(path: &str) -> bool {
+  let prefix = format!("{}.", path);
+  crate::tui::modal_keymap::KeyContext::all()
+    .iter()
+    .any(|c| c.config_path().starts_with(&prefix))
+}
+
+/// Walk one `[tui.keys.<ctx_path>]` sub-table, applying every `verb = [keys]`
+/// entry to `mk` and recursing into nested stage sub-tables.
+fn walk_modal_context(
+  ctx_path: &str,
+  table: &toml::Table,
+  mk: &mut crate::tui::modal_keymap::ModalKeymap,
+) -> Result<()> {
+  use crate::tui::modal_keymap::{parse_single, KeyContext, ModalAction};
+
+  let ctx = KeyContext::from_config_path(ctx_path);
+  if ctx.is_none() && !is_modal_context_group(ctx_path) {
+    return Err(GwmError::Config(format!(
+      "tui.keys.{}: unknown modal context (run `gwm tui keys` for the list)",
+      ctx_path
+    )));
+  }
+
+  for (key, value) in table {
+    match value {
+      toml::Value::Array(_) => {
+        let ctx = ctx.ok_or_else(|| {
+          GwmError::Config(format!(
+            "tui.keys.{path}: {path:?} is a context group, not a leaf — bind under a stage (e.g. {path}.<stage>)",
+            path = ctx_path
+          ))
+        })?;
+        let coord = format!("{}.{}", ctx_path, key);
+        let chords = as_chord_list(&coord, value)?;
+        let action = ModalAction::from_context_verb(ctx, key).ok_or_else(|| {
+          GwmError::Config(format!(
+            "tui.keys.{}: unknown verb {:?} (run `gwm tui keys` for the list)",
+            ctx_path, key
+          ))
+        })?;
+        let mut parsed = Vec::with_capacity(chords.len());
+        for s in &chords {
+          parsed.push(parse_single(s).map_err(|e| rewrap(&coord, e))?);
+        }
+        mk.apply_override(action, parsed)
+          .map_err(|e| rewrap(&format!("tui.keys.{}", ctx_path), e))?;
+      }
+      toml::Value::Table(sub) => {
+        let child = format!("{}.{}", ctx_path, key);
+        walk_modal_context(&child, sub, mk)?;
+      }
+      other => {
+        return Err(GwmError::Config(format!(
+          "tui.keys.{}.{}: expected an array of keys or a sub-table, got {}",
+          ctx_path,
+          key,
+          other.type_str()
+        )))
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Re-wrap a parser / keymap error so the user sees the `tui.keys.<coord>`
+/// coordinate rather than the bare `keymap:` prefix from the inner layer.
+fn rewrap(coord: &str, e: GwmError) -> GwmError {
+  let inner = match e {
+    GwmError::Config(msg) => msg,
+    other => other.to_string(),
+  };
+  GwmError::Config(format!("{}: {}", coord, inner))
 }
 
 /// `[theme]` block (issue #33) — role-based TUI colour scheme.
@@ -986,7 +1118,11 @@ impl Config {
   /// (it's rebuilt by the TUI at startup); the call is only kept for
   /// its error side-effects.
   pub(crate) fn validate_tui_keys(&self) -> Result<()> {
-    self.tui.keys.resolved_keymap().map(|_| ())
+    // Global verbs (array entries) and contextual modal verbs (table
+    // entries) are validated in one pass each; the resolved keymaps are
+    // discarded — they're rebuilt by the TUI at startup.
+    self.tui.keys.resolved_keymap().map(|_| ())?;
+    self.tui.keys.resolved_modal_keymap().map(|_| ())
   }
 
   /// Reject `[theme]` entries that name an unknown preset, unknown

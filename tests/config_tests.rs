@@ -1578,7 +1578,7 @@ fn tui_keys_default_is_empty_map() {
   // layer then keeps every built-in default. Mirrors the `labels` /
   // `milestones` "no override declared" contract.
   let cfg = Config::default();
-  assert!(cfg.tui.keys.bindings.is_empty());
+  assert!(cfg.tui.keys.raw.is_empty());
 }
 
 #[test]
@@ -1596,18 +1596,22 @@ top  = ["g g"]
   .unwrap();
 
   let cfg = Config::load_layered(dir.path(), None).unwrap();
-  assert_eq!(
-    cfg.tui.keys.bindings.get("down").map(Vec::as_slice),
-    Some(["j".to_string(), "Ctrl+n".to_string()].as_slice())
-  );
-  assert_eq!(
-    cfg.tui.keys.bindings.get("up").map(Vec::as_slice),
-    Some(["k".to_string(), "Ctrl+p".to_string()].as_slice())
-  );
-  assert_eq!(
-    cfg.tui.keys.bindings.get("top").map(Vec::as_slice),
-    Some(["g g".to_string()].as_slice())
-  );
+  // The raw `[tui.keys]` table preserves the user's source verbatim
+  // (issue #219 stores it as a `toml::Table` to also carry contextual
+  // sub-tables); pull each chord list back out as strings.
+  let chords = |slug: &str| -> Vec<String> {
+    cfg
+      .tui
+      .keys
+      .raw
+      .get(slug)
+      .and_then(|v| v.as_array())
+      .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+      .unwrap_or_default()
+  };
+  assert_eq!(chords("down"), vec!["j".to_string(), "Ctrl+n".to_string()]);
+  assert_eq!(chords("up"), vec!["k".to_string(), "Ctrl+p".to_string()]);
+  assert_eq!(chords("top"), vec!["g g".to_string()]);
 }
 
 #[test]
@@ -1957,4 +1961,190 @@ command = "lazygit"
   let cfg = Config::load_layered(dir.path(), None).unwrap();
   let m1 = cfg.tui.macro1.expect("macro1 must parse");
   assert_eq!(m1.open_in, MacroOpenMode::Pty);
+}
+
+// --- [tui.keys.<context>] contextual modal bindings (issue #219) ---------
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use gwm::tui::keymap::KeyStroke;
+use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+
+fn ks(code: KeyCode) -> KeyStroke {
+  KeyStroke::new(code, KeyModifiers::empty())
+}
+fn kc(c: char) -> KeyStroke {
+  KeyStroke::new(KeyCode::Char(c), KeyModifiers::empty())
+}
+
+#[test]
+fn modal_keys_nested_context_resolves() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.confirm]
+confirm = ["o"]
+cancel  = ["n", "Esc"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  // new key fires, old default `y` is gone
+  assert_eq!(
+    mk.resolve(KeyContext::Confirm, &kc('o')),
+    Some(ModalAction::ConfirmConfirm)
+  );
+  assert_eq!(mk.resolve(KeyContext::Confirm, &kc('y')), None);
+}
+
+#[test]
+fn modal_keys_link_stage_uses_dotted_table() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.link.choose_target]
+issue = ["x"]
+
+[tui.keys.link.input_number]
+submit = ["Right"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(
+    mk.resolve(KeyContext::LinkChooseTarget, &kc('x')),
+    Some(ModalAction::LinkChooseIssue)
+  );
+  assert_eq!(
+    mk.resolve(KeyContext::LinkInputNumber, &ks(KeyCode::Right)),
+    Some(ModalAction::LinkInputSubmit)
+  );
+}
+
+#[test]
+fn modal_keys_config_edit_substage_resolves() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.config]
+close = ["q"]
+
+[tui.keys.config.edit]
+cancel = ["Backspace"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(mk.resolve(KeyContext::Config, &kc('q')), Some(ModalAction::ConfigClose));
+  assert_eq!(
+    mk.resolve(KeyContext::ConfigEdit, &ks(KeyCode::Backspace)),
+    Some(ModalAction::ConfigEditCancel)
+  );
+}
+
+#[test]
+fn modal_keys_global_and_contextual_coexist() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+quit = ["Q"]
+
+[tui.keys.confirm]
+confirm = ["o"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  // global path sees the array entry
+  let km = cfg.tui.keys.resolved_keymap().unwrap();
+  assert_eq!(km.primary_chord(gwm::tui::keymap::Action::Quit).as_deref(), Some("Q"));
+  // contextual path sees the table entry
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(
+    mk.resolve(KeyContext::Confirm, &kc('o')),
+    Some(ModalAction::ConfirmConfirm)
+  );
+}
+
+#[test]
+fn modal_keys_reject_unknown_context() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.confrm]
+confirm = ["y"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("typo'd context must reject");
+  assert!(err.to_string().contains("unknown modal context"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_unknown_verb() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.confirm]
+gallop = ["y"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown verb must reject");
+  assert!(err.to_string().contains("unknown verb"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_multistroke_chord() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.confirm]
+confirm = ["g g"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("modal chords must be single strokes");
+  assert!(err.to_string().contains("single keystroke"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_in_context_conflict() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.confirm]
+confirm = ["x"]
+cancel  = ["x"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("two verbs sharing a key must conflict");
+  assert!(err.to_string().contains("conflict"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_array_directly_under_group() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.link]
+issue = ["i"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("link needs a stage");
+  assert!(err.to_string().contains("context group"), "{err}");
 }

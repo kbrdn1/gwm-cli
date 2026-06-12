@@ -1,4 +1,5 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
+use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
@@ -231,6 +232,12 @@ pub struct App {
   /// change, mirroring how every other knob in `[tui]` behaves.
   pub keymap: Keymap,
 
+  /// Resolved contextual keymap for modals / overlays (issue #219).
+  /// Built from the `[tui.keys.<context>]` sub-tables at construction
+  /// time alongside [`Self::keymap`]; consulted by the modal routing in
+  /// `src/tui/mod.rs` to turn a keystroke into a typed [`ModalAction`].
+  pub modal_keymap: ModalKeymap,
+
   /// Resolved colour theme for this TUI session (issue #33). Built
   /// from `[theme]` in `.gwm.toml` at construction time. Threaded
   /// through `draw_*` calls so user overrides reach every visual
@@ -404,6 +411,9 @@ impl App {
     // fresh error — but we re-`?` it rather than `.expect()` so a
     // future hot-reload path could exercise the same call.
     let keymap = config.tui.keys.resolved_keymap()?;
+    // Issue #219: resolve the contextual modal keymap once, same lifecycle
+    // as the global keymap above. Pre-validated by `Config::load_for_repo`.
+    let modal_keymap = config.tui.keys.resolved_modal_keymap()?;
     // Issue #33: resolve the colour theme once at construction.
     // Validated by `Config::load_for_repo` already, so this can
     // only surface a fresh error if the loader pre-validation is
@@ -439,6 +449,7 @@ impl App {
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
+      modal_keymap,
       theme,
       filter: FilterState::new(),
       picker_mode: false,
@@ -1175,6 +1186,14 @@ impl App {
       self.keymap.lookup(&[KeyStroke::from_event(&key)]),
       ChordResolution::Matched(found) if found == action
     )
+  }
+
+  /// Resolve a keystroke against the contextual modal keymap (issue #219).
+  /// Returns the [`ModalAction`] bound to `key` in `ctx`, or `None` when
+  /// nothing in that context binds it — the modal routing then applies its
+  /// text-input / default fallback (digits, free-text, sub-state guards).
+  pub fn resolve_modal(&self, ctx: KeyContext, key: KeyEvent) -> Option<ModalAction> {
+    self.modal_keymap.resolve(ctx, &KeyStroke::from_event(&key))
   }
 
   /// Mirror the new `pending_chord` buffer into the legacy
