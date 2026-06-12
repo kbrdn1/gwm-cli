@@ -873,19 +873,16 @@ fn doctor_reports_modal_binding_count_on_default_keymap() {
 #[test]
 fn doctor_fails_on_in_context_modal_conflict() {
   // A `[tui.keys.confirm]` block binding two verbs to the same key is a
-  // per-context conflict. Inject it past load-time validation (which would
-  // otherwise reject it) to prove `gwm doctor` independently catches it.
+  // per-context conflict. Written to disk (load-time validation rejects it, so
+  // the lenient doctor context defaults ctx.config away) to prove `gwm doctor`
+  // re-reads the file and independently catches it.
   let (dir, repo) = init_repo();
-  let mut config = Config::default();
-  let mut confirm = toml::Table::new();
-  confirm.insert("confirm".into(), toml::Value::Array(vec!["x".into()]));
-  confirm.insert("cancel".into(), toml::Value::Array(vec!["x".into()]));
-  config
-    .tui
-    .keys
-    .raw
-    .insert("confirm".into(), toml::Value::Table(confirm));
-
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys.confirm]\nconfirm = [\"x\"]\ncancel = [\"x\"]\n",
+  )
+  .unwrap();
+  let config = Config::default();
   let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
   let c = report
     .checks
@@ -896,6 +893,46 @@ fn doctor_fails_on_in_context_modal_conflict() {
   assert!(
     c.detail.contains("conflict"),
     "detail must explain the conflict, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_fails_on_disk_modal_error_even_when_context_defaulted() {
+  // #219 review (P2): `repo_context_lenient` returns `Config::default()` when
+  // `load_for_repo` rejects the user's `.gwm.toml` (here a multi-stroke modal
+  // chord, which load-time validation refuses). If doctor only re-validated
+  // that defaulted ctx.config it would report OK for a config that actually
+  // refuses to start the TUI — so the keymap check must re-read the on-disk
+  // file. This reproduces the real lenient path (the existing conflict test
+  // injects straight into ctx.config and never exercises the default-away).
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys.confirm]\nconfirm = [\"g g\"]\n",
+  )
+  .unwrap();
+  // The file must be load-invalid (so the lenient loader would default it).
+  assert!(
+    Config::load_layered(dir.path(), None).is_err(),
+    "the on-disk modal chord must be rejected at load time for this regression"
+  );
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(
+    c.status,
+    CheckStatus::Failed,
+    "doctor must flag the on-disk modal error, not the defaulted ctx.config: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.contains("single keystroke"),
+    "detail must explain the multi-stroke modal chord rejection, got: {}",
     c.detail
   );
 }

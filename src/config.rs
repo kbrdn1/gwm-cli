@@ -1082,6 +1082,27 @@ impl Config {
   /// the merge contract can be pinned by a test without touching the
   /// runner's real `$HOME` / `$XDG_CONFIG_HOME`.
   pub fn load_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
+    let cfg = Self::merge_layered(repo_root, global_path)?;
+    cfg.validate_branch_types()?;
+    cfg.validate_bootstrap_paths()?;
+    cfg.validate_bootstrap_guards()?;
+    cfg.validate_labels()?;
+    cfg.validate_aliases()?;
+    cfg.validate_tui_keys()?;
+    cfg.validate_theme()?;
+    Ok(cfg)
+  }
+
+  /// Build the effective (deep-merged) config from disk **without** running
+  /// the semantic validators. Same merge rule as [`Self::load_layered`]; only
+  /// the TOML structure must be sound (a parse / shape error still fails).
+  ///
+  /// `gwm doctor` uses this to re-check one section against the real on-disk
+  /// config even when the lenient `repo_context_lenient` defaulted the whole
+  /// config away after `load_for_repo` rejected it — otherwise a check would
+  /// validate the default and mask the very error it promises to surface
+  /// (issue #219 review).
+  pub(crate) fn merge_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
     let repo_path = repo_root.join(CONFIG_FILE);
     let global_val = match global_path {
       Some(p) if p.exists() => Some(read_config_value(p)?),
@@ -1093,21 +1114,19 @@ impl Config {
       None
     };
 
-    let cfg: Config = match (global_val, repo_val) {
-      (None, None) => return Ok(Self::default()),
+    Ok(match (global_val, repo_val) {
+      (None, None) => Self::default(),
       (Some(g), None) => g.try_into()?,
       (None, Some(r)) => r.try_into()?,
       (Some(g), Some(r)) => merge_toml(g, r).try_into()?,
-    };
+    })
+  }
 
-    cfg.validate_branch_types()?;
-    cfg.validate_bootstrap_paths()?;
-    cfg.validate_bootstrap_guards()?;
-    cfg.validate_labels()?;
-    cfg.validate_aliases()?;
-    cfg.validate_tui_keys()?;
-    cfg.validate_theme()?;
-    Ok(cfg)
+  /// Effective merged config from disk for `repo_root`, layering the global
+  /// config under the repo's `.gwm.toml` exactly as [`Self::load_for_repo`]
+  /// does, but **unvalidated** — see [`Self::merge_layered`].
+  pub(crate) fn merge_for_repo_unvalidated(repo_root: &Path) -> Result<Self> {
+    Self::merge_layered(repo_root, global_config_path().as_deref())
   }
 
   /// Reject `[tui.keys]` entries that name an unknown action, list a

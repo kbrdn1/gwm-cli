@@ -157,7 +157,18 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
 fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
   let name = "[tui.keys] keymap resolves";
 
-  let keymap = match ctx.config.tui.keys.resolved_keymap() {
+  // Re-derive `[tui.keys]` from the on-disk config (#219 review): the lenient
+  // `repo_context_lenient` returns `Config::default()` when `load_for_repo`
+  // rejects the user's file, so validating `ctx.config` here would silently
+  // OK a config that actually refuses to start the TUI. Fall back to
+  // `ctx.config` only when the *merge* fails — that is a parse / shape error
+  // already surfaced by `check_config_parses`.
+  let keys = match Config::merge_for_repo_unvalidated(ctx.repo_workdir) {
+    Ok(cfg) => cfg.tui.keys,
+    Err(_) => ctx.config.tui.keys.clone(),
+  };
+
+  let keymap = match keys.resolved_keymap() {
     Ok(km) => km,
     Err(e) => {
       return Check::failed(name, format!("{}", e))
@@ -197,7 +208,7 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
   // validated the same way — an unknown context / verb, a multi-stroke
   // chord, or a per-context conflict surfaces here with the offending
   // coordinate so `gwm doctor` flags it before the user hits it live.
-  let modal = match ctx.config.tui.keys.resolved_modal_keymap() {
+  let modal = match keys.resolved_modal_keymap() {
     Ok(mk) => mk,
     Err(e) => {
       return Check::failed(name, format!("{}", e)).with_hint(
