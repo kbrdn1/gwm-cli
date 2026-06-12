@@ -1843,11 +1843,14 @@ impl HintContext {
         Hint::Modal(ModalAction::CommandPaletteAccept, "run"),
         Hint::Modal(ModalAction::CommandPaletteClose, "cancel"),
       ],
-      HintContext::Report => &[Hint::Lit("Enter/Esc", "close")],
+      // #219: `close` is a single rebindable verb, so it resolves through the
+      // modal keymap; the scroll/pan pairs stay literal (no single resolved
+      // key captures `j/k` / `h/l`, matching the Create/Confirm convention).
+      HintContext::Report => &[Hint::Modal(ModalAction::ReportClose, "close")],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
-        Hint::Lit("Esc/q", "close"),
+        Hint::Modal(ModalAction::HelpClose, "close"),
       ],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
       // Rename reuses the create-form input handler, hence the `create`
@@ -1918,6 +1921,21 @@ pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
     spans.push(Span::styled(format!(" {}", label), label_style));
   }
   Line::from(spans).centered()
+}
+
+/// Settings-panel footer hints shown while a field is being edited (#219
+/// review): `save` / `cancel` resolve from the `ConfigEdit*` modal bindings so
+/// a rebind of `[tui.keys.config.edit]` shows through instead of the literal
+/// `Enter` / `Esc`. An unbound verb is dropped rather than advertised with a
+/// phantom key, mirroring the statusbar's `HintContext::resolve`.
+pub fn config_edit_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  [
+    (ModalAction::ConfigEditSubmit, "save"),
+    (ModalAction::ConfigEditCancel, "cancel"),
+  ]
+  .into_iter()
+  .filter_map(|(action, label)| modal.primary_key(action).map(|k| (k, label.to_string())))
+  .collect()
 }
 
 fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
@@ -2809,9 +2827,12 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
-  // the current tab / edit mode.
-  let footer_hints: Vec<(&str, &str)> = if editing {
-    vec![("Enter", "save"), ("Esc", "cancel")]
+  // the current tab / edit mode. While editing, save/cancel resolve from the
+  // ConfigEdit* modal bindings (#219 review) so a rebind of
+  // `[tui.keys.config.edit]` shows through instead of the literal Enter/Esc.
+  let edit_footer = editing.then(|| config_edit_footer_hints(&app.modal_keymap));
+  let footer_hints: Vec<(&str, &str)> = if let Some(hints) = &edit_footer {
+    hints.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect()
   } else if tab == SettingsTab::All {
     vec![("j/k", "scroll"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
   } else if selected_kind == Some(FieldKind::Choice) {
@@ -3152,19 +3173,38 @@ pub fn help_body_section_color(theme: &Theme) -> Color {
   theme.locked
 }
 
+/// Direct-pick keys (`issue`, `pr`) for the link / open-menu target chips,
+/// resolved from the active context's modal bindings (#219 review) so a
+/// rebind of `[tui.keys.link.choose_target]` / `[tui.keys.open_menu]` shows
+/// through instead of the literal `i` / `p`. An unbound verb yields an empty
+/// string — the chip then renders label-only rather than a phantom key.
+pub fn link_target_keys(ctx: HintContext, modal: &ModalKeymap) -> (String, String) {
+  let (issue, pr) = match ctx {
+    HintContext::OpenMenu => (ModalAction::OpenMenuIssue, ModalAction::OpenMenuPr),
+    _ => (ModalAction::LinkChooseIssue, ModalAction::LinkChoosePr),
+  };
+  (
+    modal.primary_key(issue).unwrap_or_default(),
+    modal.primary_key(pr).unwrap_or_default(),
+  )
+}
+
 pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
-  let mut lines = overlay_title_lines(title, accent);
-  lines.extend(github_status_lines(app, 56));
-  lines.push(Line::from(""));
-  lines.push(link_target_line("i", "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
-  lines.push(link_target_line("p", "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
   let ctx = if title == "Link" {
     HintContext::LinkPrompt
   } else {
     HintContext::OpenMenu
   };
+  // #219: the direct-pick chips track the active context's issue/pr bindings
+  // (like the footer below) so a rebind shows through instead of `i` / `p`.
+  let (issue_key, pr_key) = link_target_keys(ctx, &app.modal_keymap);
+  let mut lines = overlay_title_lines(title, accent);
+  lines.extend(github_status_lines(app, 56));
+  lines.push(Line::from(""));
+  lines.push(link_target_line(&issue_key, "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
+  lines.push(link_target_line(&pr_key, "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
   push_modal_hint(&mut lines, ctx, &app.keymap, &app.modal_keymap, &app.theme);
   lines
 }

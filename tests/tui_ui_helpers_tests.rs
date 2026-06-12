@@ -491,6 +491,83 @@ fn link_target_line_highlights_the_selected_row() {
 }
 
 #[test]
+fn link_target_keys_track_rebinding_per_context() {
+  // #219 review (P3): the Issue / PR direct-pick chips hard-coded `i` / `p`.
+  // They must resolve from the active context's modal bindings so a rebind of
+  // `[tui.keys.link.choose_target]` (or `[tui.keys.open_menu]`) shows through,
+  // and the two contexts stay independent (the whole point of #219).
+  use gwm::tui::link_target_keys;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::HintContext;
+
+  assert_eq!(
+    link_target_keys(HintContext::LinkPrompt, &ModalKeymap::defaults()),
+    ("i".to_string(), "p".to_string()),
+    "defaults must keep the historical i / p direct-pick keys"
+  );
+  assert_eq!(
+    link_target_keys(HintContext::OpenMenu, &ModalKeymap::defaults()),
+    ("i".to_string(), "p".to_string()),
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::LinkChooseIssue, vec![parse_single("x").unwrap()])
+    .unwrap();
+  assert_eq!(
+    link_target_keys(HintContext::LinkPrompt, &modal),
+    ("x".to_string(), "p".to_string()),
+    "rebinding the link choose-target issue key must show through the chip"
+  );
+  assert_eq!(
+    link_target_keys(HintContext::OpenMenu, &modal),
+    ("i".to_string(), "p".to_string()),
+    "the open-menu chips are an independent context and must not change"
+  );
+}
+
+#[test]
+fn config_edit_footer_hints_track_rebinding() {
+  // #219 review (P2): the Settings panel edit footer printed a fixed
+  // `Enter save / Esc cancel`. Once `[tui.keys.config.edit]` is rebound the
+  // handler stops treating Enter/Esc as save/cancel, so the footer must
+  // resolve those hints from the ConfigEdit* modal bindings too.
+  use gwm::tui::config_edit_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  assert_eq!(
+    config_edit_footer_hints(&ModalKeymap::defaults()),
+    vec![
+      ("Enter".to_string(), "save".to_string()),
+      ("Esc".to_string(), "cancel".to_string()),
+    ],
+    "default settings edit footer must read Enter save / Esc cancel"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ConfigEditSubmit, vec![parse_single("Ctrl+s").unwrap()])
+    .unwrap();
+  assert_eq!(
+    config_edit_footer_hints(&modal),
+    vec![
+      ("Ctrl+s".to_string(), "save".to_string()),
+      ("Esc".to_string(), "cancel".to_string()),
+    ],
+    "rebinding config.edit submit must change the save hint"
+  );
+
+  // Unbinding a verb drops it rather than advertising a phantom key.
+  let mut unbound = ModalKeymap::defaults();
+  unbound.apply_override(ModalAction::ConfigEditCancel, vec![]).unwrap();
+  let hints = config_edit_footer_hints(&unbound);
+  assert!(
+    !hints.iter().any(|(_, l)| l == "cancel"),
+    "an unbound cancel must drop from the settings edit footer: {hints:?}"
+  );
+}
+
+#[test]
 fn link_prompt_width_stays_compact_on_wide_terminals() {
   assert_eq!(link_prompt_modal_width(80), 64);
   assert_eq!(

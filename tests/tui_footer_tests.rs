@@ -388,3 +388,62 @@ fn confirm_hints_include_delete_branch_toggle_binding() {
     "Delete Worktree hints should advertise the branch toggle binding: {resolved:?}"
   );
 }
+
+#[test]
+fn report_close_hint_resolves_user_rebinding() {
+  // #219 review (P3): the report overlay footer advertised a literal
+  // `Enter/Esc` even after `[tui.keys.report] close` was rebound — the event
+  // loop already routes close through the modal keymap, so the footer must
+  // follow it instead of printing a stale key.
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  let km = Keymap::defaults();
+  let default = HintContext::Report.resolve(&km, &ModalKeymap::defaults());
+  assert!(
+    default.iter().any(|(k, l)| k == "Esc" && l == "close"),
+    "default report footer must advertise the primary `Esc` close: {default:?}"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ReportClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  let resolved = HintContext::Report.resolve(&km, &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebinding report close must change the footer hint: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(k, _)| k == "Enter/Esc"),
+    "the stale literal `Enter/Esc` must not linger after the rebind: {resolved:?}"
+  );
+}
+
+#[test]
+fn help_close_hint_resolves_user_rebinding() {
+  // #219 review (P3): same staleness on the Keybindings overlay — rebinding
+  // `[tui.keys.help] close` must show through the footer (scroll/pan pairs
+  // stay literal because no single resolved key captures `j/k` / `h/l`).
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  let km = Keymap::defaults();
+  let default = HintContext::Help.resolve(&km, &ModalKeymap::defaults());
+  assert!(
+    default.iter().any(|(k, l)| k == "Esc" && l == "close"),
+    "default help footer must advertise the primary `Esc` close: {default:?}"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::HelpClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  let resolved = HintContext::Help.resolve(&km, &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebinding help close must change the footer hint: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(k, _)| k == "Esc/q"),
+    "the stale literal `Esc/q` must not linger after the rebind: {resolved:?}"
+  );
+}
