@@ -898,6 +898,37 @@ fn doctor_fails_on_in_context_modal_conflict() {
 }
 
 #[test]
+fn doctor_modal_error_outranks_the_quit_warning() {
+  // #219 review (P2): an invalid modal binding is a hard Failed. When the same
+  // config also unbinds `quit` (a Warning), the modal error must still win —
+  // otherwise the quit-warning early return hides the actionable modal error.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys]\nquit = []\n\n[tui.keys.confirm]\nconfirm = [\"g g\"]\n",
+  )
+  .unwrap();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(
+    c.status,
+    CheckStatus::Failed,
+    "the modal error must outrank the quit warning, got: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.contains("single keystroke"),
+    "detail must be the modal error, not the quit warning, got: {}",
+    c.detail
+  );
+}
+
+#[test]
 fn doctor_fails_on_disk_modal_error_even_when_context_defaulted() {
   // #219 review (P2): `repo_context_lenient` returns `Config::default()` when
   // `load_for_repo` rejects the user's `.gwm.toml` (here a multi-stroke modal
