@@ -1085,6 +1085,40 @@ fn confirm_press_y_a_second_time_disarms_the_timer() {
 }
 
 #[test]
+fn countdown_status_uses_rebound_confirm_keys() {
+  // #219 review (P3): the armed/disarmed countdown status copy hard-coded
+  // `y` / `Esc`. When the confirm context's confirm/cancel verbs are rebound,
+  // the instructions must name the live keys, not the defaults.
+  use gwm::tui::modal_keymap::{parse_single, ModalAction};
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmConfirm, vec![parse_single("c").unwrap()])
+    .unwrap();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmCancel, vec![parse_single("x").unwrap()])
+    .unwrap();
+  app.toggle_delete_branch();
+
+  let t0 = Instant::now();
+  app.confirm_press_y(t0); // arms
+  assert!(
+    app.status.contains("press c again or x to cancel"),
+    "armed copy must use the rebound confirm/cancel keys: {}",
+    app.status
+  );
+
+  let action = app.confirm_press_y(t0 + Duration::from_millis(500)); // disarms
+  assert_eq!(action, ConfirmKeyAction::Disarmed);
+  assert!(
+    app.status.contains("press c to re-arm"),
+    "disarmed copy must use the rebound confirm key: {}",
+    app.status
+  );
+}
+
+#[test]
 fn confirm_dismiss_resets_timer_and_returns_to_list() {
   let (_dir, mut app) = make_app();
   app.toggle_delete_branch();

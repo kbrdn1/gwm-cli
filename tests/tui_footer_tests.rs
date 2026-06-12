@@ -420,6 +420,38 @@ fn report_close_hint_resolves_user_rebinding() {
 }
 
 #[test]
+fn link_input_number_drops_fetch_hint_when_shadowed() {
+  // #219 review (P3): in the number-input stage the footer advertises the
+  // global `F fetch` fallback, but if a modal verb is rebound onto `F` the
+  // event loop resolves `F` as that verb first, leaving the fetch hint
+  // pointing at an unreachable action. The footer must drop a global hint
+  // whose key is shadowed by a modal binding in the active context.
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  let km = Keymap::defaults();
+
+  let default = HintContext::LinkInputNumber.resolve(&km, &ModalKeymap::defaults());
+  assert!(
+    default.iter().any(|(k, l)| k == "F" && l == "fetch"),
+    "by default `F fetch` is reachable during number input: {default:?}"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::LinkInputSubmit, vec![parse_single("F").unwrap()])
+    .unwrap();
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "the shadowed `F fetch` hint must be dropped: {resolved:?}"
+  );
+  assert!(
+    resolved.iter().any(|(k, l)| k == "F" && l == "submit"),
+    "F now resolves as submit and must show through: {resolved:?}"
+  );
+}
+
+#[test]
 fn help_close_hint_resolves_user_rebinding() {
   // #219 review (P3): same staleness on the Keybindings overlay — rebinding
   // `[tui.keys.help] close` must show through the footer (scroll/pan pairs

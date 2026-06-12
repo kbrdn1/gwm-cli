@@ -2338,14 +2338,29 @@ impl App {
       ConfirmKeyAction::FireNow => {}
       ConfirmKeyAction::Disarmed => {
         let secs = total.as_secs();
-        self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
+        let confirm = self.confirm_key_hint(ModalAction::ConfirmConfirm, "y");
+        self.status = format!("countdown cancelled — press {confirm} to re-arm ({secs}s safety delay)");
       }
       ConfirmKeyAction::Armed => {
         let secs = total.as_secs();
-        self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
+        // #219 review: name the live confirm / cancel keys, not the defaults —
+        // they are rebindable via `[tui.keys.confirm]`.
+        let confirm = self.confirm_key_hint(ModalAction::ConfirmConfirm, "y");
+        let cancel = self.confirm_key_hint(ModalAction::ConfirmCancel, "Esc");
+        self.status = format!("armed — auto-fires in {secs}s · press {confirm} again or {cancel} to cancel");
       }
     }
     action
+  }
+
+  /// The live primary key bound to a confirm-modal verb, for inline status
+  /// copy (#219 review). Falls back to the historical literal when the verb is
+  /// unbound so the destructive-modal instructions never go blank.
+  fn confirm_key_hint(&self, action: ModalAction, fallback: &str) -> String {
+    self
+      .modal_keymap
+      .primary_key(action)
+      .unwrap_or_else(|| fallback.to_string())
   }
 
   /// Handle the dismissal keys (`n` / `Esc`) inside the confirm overlay.

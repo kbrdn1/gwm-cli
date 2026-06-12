@@ -1,6 +1,6 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, Keymap};
-use super::modal_keymap::{ModalAction, ModalKeymap};
+use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
@@ -1874,11 +1874,47 @@ impl HintContext {
       .hint_specs()
       .iter()
       .filter_map(|h| match h {
-        Hint::Key(action, label) => keymap.primary_chord(*action).map(|k| (k, label.to_string())),
+        // #219: a global verb whose key is claimed by a modal binding in the
+        // active context is resolved as that modal verb first — the event loop
+        // never reaches the global action. Drop the hint rather than advertise
+        // a duplicate key for an unreachable action.
+        Hint::Key(action, label) => keymap
+          .primary_chord(*action)
+          .filter(|k| !self.key_shadowed_by_modal(k, modal))
+          .map(|k| (k, label.to_string())),
         Hint::Modal(action, label) => modal.primary_key(*action).map(|k| (k, label.to_string())),
         Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
       })
       .collect()
+  }
+
+  /// The modal [`KeyContext`] this hint context renders, when it is a modal /
+  /// overlay surface (the global panes have none). Used to detect a global
+  /// hint key shadowed by a modal binding in the same context.
+  fn modal_context(self) -> Option<KeyContext> {
+    Some(match self {
+      HintContext::Create | HintContext::Rename => KeyContext::Create,
+      HintContext::Confirm => KeyContext::Confirm,
+      HintContext::OpenMenu => KeyContext::OpenMenu,
+      HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
+      HintContext::LinkInputNumber => KeyContext::LinkInputNumber,
+      HintContext::CommandPalette => KeyContext::CommandPalette,
+      HintContext::Report => KeyContext::Report,
+      HintContext::Help => KeyContext::Help,
+      HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
+    })
+  }
+
+  /// `true` when `key` is bound to a modal verb in this context — i.e. the
+  /// modal keymap intercepts it before any global action with the same key.
+  fn key_shadowed_by_modal(self, key: &str, modal: &ModalKeymap) -> bool {
+    match self.modal_context() {
+      Some(ctx) => modal
+        .bindings_for(ctx)
+        .iter()
+        .any(|b| b.keys.iter().any(|ks| ks.to_string() == key)),
+      None => false,
+    }
   }
 }
 
@@ -1936,6 +1972,63 @@ pub fn config_edit_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   .into_iter()
   .filter_map(|(action, label)| modal.primary_key(action).map(|k| (k, label.to_string())))
   .collect()
+}
+
+/// Settings-panel footer hints in *navigation* mode (#219 review): the
+/// single-key verbs (`section` / `layer` / `close`, plus `cycle` / `edit` via
+/// `activate`) resolve from the `Config*` modal bindings so a rebind of
+/// `[tui.keys.config]` shows through. The `j/k` scroll pair stays literal —
+/// no single resolved key captures a movement pair (same rule as Help). The
+/// leading verb depends on the active tab / field kind, mirroring the historic
+/// hard-coded branches.
+pub fn config_nav_footer_hints(
+  modal: &ModalKeymap,
+  tab: SettingsTab,
+  selected_kind: Option<FieldKind>,
+) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = Vec::new();
+  if tab == SettingsTab::All {
+    hints.push(("j/k".to_string(), "scroll".to_string()));
+  } else {
+    let label = if selected_kind == Some(FieldKind::Choice) {
+      "cycle"
+    } else {
+      "edit"
+    };
+    if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  for (action, label) in [
+    (ModalAction::ConfigNextTab, "section"),
+    (ModalAction::ConfigToggleLayer, "layer"),
+    (ModalAction::ConfigClose, "close"),
+  ] {
+    if let Some(k) = modal.primary_key(action) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  hints
+}
+
+/// Command Logs overlay footer hints (#219 review): `copy` / `close` resolve
+/// from the `CommandLogs*` modal bindings so a rebind of
+/// `[tui.keys.command_logs]` shows through; the scroll / top-bottom movement
+/// pairs stay literal (no single resolved key captures `j/k` / `g/G`).
+pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  for (action, label) in [
+    (ModalAction::CommandLogsCopy, "copy"),
+    (ModalAction::CommandLogsClose, "close"),
+  ] {
+    if let Some(k) = modal.primary_key(action) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  hints
 }
 
 fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
@@ -2650,18 +2743,11 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let x_scroll = app.command_logs.x_scroll;
   f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
-  f.render_widget(
-    modal_hint_line(
-      &[
-        ("j/k", "scroll"),
-        ("g/G", "top/bottom"),
-        ("y", "copy"),
-        ("Esc", "close"),
-      ],
-      &app.theme,
-    ),
-    footer_area,
-  );
+  // #219 review: copy / close resolve from the command_logs modal bindings so
+  // a rebind shows through; the scroll / top-bottom pairs stay literal.
+  let footer_owned = command_logs_footer_hints(&app.modal_keymap);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
 /// Render a vertical scrollbar on the right edge of `area` when the content
@@ -2827,19 +2913,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
-  // the current tab / edit mode. While editing, save/cancel resolve from the
-  // ConfigEdit* modal bindings (#219 review) so a rebind of
-  // `[tui.keys.config.edit]` shows through instead of the literal Enter/Esc.
-  let edit_footer = editing.then(|| config_edit_footer_hints(&app.modal_keymap));
-  let footer_hints: Vec<(&str, &str)> = if let Some(hints) = &edit_footer {
-    hints.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect()
-  } else if tab == SettingsTab::All {
-    vec![("j/k", "scroll"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
-  } else if selected_kind == Some(FieldKind::Choice) {
-    vec![("Space", "cycle"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  // the current tab / edit mode. Both the edit and nav rows resolve their
+  // single-key verbs from the Config* modal bindings (#219 review) so a rebind
+  // of `[tui.keys.config(.edit)]` shows through instead of literal keys.
+  let footer_owned = if editing {
+    config_edit_footer_hints(&app.modal_keymap)
   } else {
-    vec![("Enter", "edit"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind)
   };
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
   let block = overlay_block(accent);
   let inner = block.inner(area);
