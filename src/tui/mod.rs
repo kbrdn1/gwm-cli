@@ -7,6 +7,7 @@ mod app;
 #[doc(hidden)]
 pub mod commit_graph;
 pub mod keymap;
+pub mod modal_keymap;
 pub mod palette;
 pub mod state;
 pub mod theme;
