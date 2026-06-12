@@ -6610,3 +6610,33 @@ fn hint_context_switches_to_link_input_number_while_typing() {
   assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
   assert_eq!(app.hint_context(), HintContext::LinkInputNumber, "number-input stage");
 }
+
+#[test]
+fn link_modal_binding_on_fetch_key_wins_over_fetch_fallback() {
+  // #293 review: the global fetch shortcut is a FALLBACK after the stage
+  // context, so a contextual binding on that key is reachable. Rebinding the
+  // number-input submit onto `F` (also the default fetch key) must submit,
+  // not refresh.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::LinkPromptKey;
+
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::LinkInputSubmit,
+      vec![KeyStroke::new(KeyCode::Char('F'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue); // → InputNumber stage
+  assert!(
+    matches!(
+      app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE)),
+      LinkPromptKey::Submit
+    ),
+    "a contextual binding on the fetch key must win over the fetch fallback"
+  );
+}

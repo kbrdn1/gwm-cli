@@ -3086,14 +3086,13 @@ impl App {
   /// (submit shell-out, view transition).
   pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
     use crate::tui::state::link_prompt::LinkPromptStage;
-    if self.key_matches_action(key, Action::FetchGithub) {
-      return LinkPromptKey::Refresh;
-    }
     // #219: each stage is its own modal context. ChooseTarget is a vertical
     // two-row picker — `next` / `prev` both flip the highlight (a single
     // flip serves j/k/Up/Down alike), while `issue` / `pr` are direct picks.
     // InputNumber routes `submit` / `cancel` through the context and treats
-    // everything else as digit input.
+    // everything else as digit input. The global `fetch_github` key is a
+    // FALLBACK after the stage context, so a contextual binding on that key
+    // (e.g. `submit = ["F"]`) wins over the fetch shortcut (#293 review).
     match self.link_prompt.stage {
       LinkPromptStage::ChooseTarget => match self.resolve_modal(KeyContext::LinkChooseTarget, key) {
         Some(ModalAction::LinkChooseCancel) => return LinkPromptKey::Cancel,
@@ -3104,11 +3103,13 @@ impl App {
           let target = self.link_prompt.selected;
           self.link_prompt_choose(target);
         }
+        _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
         _ => {}
       },
       LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
         Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
         Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,
+        _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
         _ => match key.code {
           KeyCode::Char(c) => self.link_prompt_push_char(c),
           KeyCode::Backspace => self.link_prompt_pop_char(),
