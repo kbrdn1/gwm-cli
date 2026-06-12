@@ -2451,26 +2451,45 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(HelpRow::Blank);
     // #219 review: the direct-pick keys named in these descriptions are the
     // OpenMenu / LinkChooseTarget modal verbs — resolve them so a rebind shows
-    // through instead of the stale literal i / p / j / k.
-    let mkey = |action: ModalAction, fallback: &str| modal.primary_key(action).unwrap_or_else(|| fallback.to_string());
-    rows.push(entry(
-      Action::BrowseLinks,
-      &format!(
-        "open menu — {}=issue · {}=pull request",
-        mkey(ModalAction::OpenMenuIssue, "i"),
-        mkey(ModalAction::OpenMenuPr, "p"),
-      ),
-    ));
+    // through, and DROP any verb the user explicitly unbound rather than
+    // advertise a phantom literal (matching every other modal hint).
+    let open_picks: Vec<String> = [
+      (ModalAction::OpenMenuIssue, "issue"),
+      (ModalAction::OpenMenuPr, "pull request"),
+    ]
+    .into_iter()
+    .filter_map(|(a, l)| modal.primary_key(a).map(|k| format!("{k}={l}")))
+    .collect();
+    let open_desc = if open_picks.is_empty() {
+      "open menu".to_string()
+    } else {
+      format!("open menu — {}", open_picks.join(" · "))
+    };
+    rows.push(entry(Action::BrowseLinks, &open_desc));
+
+    let key = |a: ModalAction| modal.primary_key(a);
+    let nav: Vec<String> = [ModalAction::LinkChooseNext, ModalAction::LinkChoosePrev]
+      .into_iter()
+      .filter_map(key)
+      .collect();
+    let picks: Vec<String> = [ModalAction::LinkChooseIssue, ModalAction::LinkChoosePr]
+      .into_iter()
+      .filter_map(key)
+      .collect();
+    let mut parts: Vec<String> = Vec::new();
+    match (nav.is_empty(), key(ModalAction::LinkChooseAccept)) {
+      (false, Some(a)) => parts.push(format!("{} + {a}", nav.join("/"))),
+      (false, None) => parts.push(nav.join("/")),
+      (true, Some(a)) => parts.push(a),
+      (true, None) => {}
+    }
+    if !picks.is_empty() {
+      parts.push(format!("or {}", picks.join("/")));
+    }
+    parts.push("then digits".to_string());
     rows.push(entry(
       Action::LinkPrompt,
-      &format!(
-        "link prompt — {}/{} + {}, or {}/{}, then digits",
-        mkey(ModalAction::LinkChooseNext, "j"),
-        mkey(ModalAction::LinkChoosePrev, "k"),
-        mkey(ModalAction::LinkChooseAccept, "enter"),
-        mkey(ModalAction::LinkChooseIssue, "i"),
-        mkey(ModalAction::LinkChoosePr, "p"),
-      ),
+      &format!("link prompt — {}", parts.join(", ")),
     ));
   }
   rows.push(entry(Action::Help, "this help"));

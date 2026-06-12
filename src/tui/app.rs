@@ -2338,29 +2338,30 @@ impl App {
       ConfirmKeyAction::FireNow => {}
       ConfirmKeyAction::Disarmed => {
         let secs = total.as_secs();
-        let confirm = self.confirm_key_hint(ModalAction::ConfirmConfirm, "y");
-        self.status = format!("countdown cancelled — press {confirm} to re-arm ({secs}s safety delay)");
+        // #219 review: name the live confirm key, and drop the clause entirely
+        // when it is unbound — never advertise a key that no longer re-arms.
+        self.status = match self.modal_keymap.primary_key(ModalAction::ConfirmConfirm) {
+          Some(c) => format!("countdown cancelled — press {c} to re-arm ({secs}s safety delay)"),
+          None => format!("countdown cancelled ({secs}s safety delay)"),
+        };
       }
       ConfirmKeyAction::Armed => {
         let secs = total.as_secs();
-        // #219 review: name the live confirm / cancel keys, not the defaults —
-        // they are rebindable via `[tui.keys.modal.confirm]`.
-        let confirm = self.confirm_key_hint(ModalAction::ConfirmConfirm, "y");
-        let cancel = self.confirm_key_hint(ModalAction::ConfirmCancel, "Esc");
-        self.status = format!("armed — auto-fires in {secs}s · press {confirm} again or {cancel} to cancel");
+        // #219 review: name the live confirm / cancel keys (rebindable via
+        // `[tui.keys.modal.confirm]`), dropping either clause when its verb is
+        // unbound rather than advertising a phantom key while the timer runs.
+        let confirm = self.modal_keymap.primary_key(ModalAction::ConfirmConfirm);
+        let cancel = self.modal_keymap.primary_key(ModalAction::ConfirmCancel);
+        let tail = match (confirm, cancel) {
+          (Some(c), Some(x)) => format!(" · press {c} again or {x} to cancel"),
+          (Some(c), None) => format!(" · press {c} again to disarm"),
+          (None, Some(x)) => format!(" · press {x} to cancel"),
+          (None, None) => String::new(),
+        };
+        self.status = format!("armed — auto-fires in {secs}s{tail}");
       }
     }
     action
-  }
-
-  /// The live primary key bound to a confirm-modal verb, for inline status
-  /// copy (#219 review). Falls back to the historical literal when the verb is
-  /// unbound so the destructive-modal instructions never go blank.
-  fn confirm_key_hint(&self, action: ModalAction, fallback: &str) -> String {
-    self
-      .modal_keymap
-      .primary_key(action)
-      .unwrap_or_else(|| fallback.to_string())
   }
 
   /// Handle the dismissal keys (`n` / `Esc`) inside the confirm overlay.

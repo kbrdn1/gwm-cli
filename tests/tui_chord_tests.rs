@@ -413,6 +413,47 @@ fn help_rows_link_descriptions_track_modal_rebindings() {
 }
 
 #[test]
+fn help_rows_link_descriptions_drop_unbound_keys() {
+  // #219 review (P3): when a direct-pick verb is explicitly unbound, the help
+  // description must not fall back to the literal `i` / `enter` — drop the
+  // clause like every other modal hint instead of advertising a dead key.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let mut modal = ModalKeymap::defaults();
+  modal.apply_override(ModalAction::OpenMenuIssue, vec![]).unwrap();
+  modal.apply_override(ModalAction::LinkChooseIssue, vec![]).unwrap();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+  let label_of = |needle: &str| -> String {
+    rows
+      .iter()
+      .find_map(|r| match r {
+        HelpRow::Entry { label, .. } if label.contains(needle) => Some(label.clone()),
+        _ => None,
+      })
+      .unwrap_or_else(|| panic!("no help entry containing {needle:?}"))
+  };
+
+  let open_menu = label_of("open menu");
+  assert!(
+    !open_menu.contains("=issue"),
+    "an unbound open-menu issue pick must drop from the help text: {open_menu:?}"
+  );
+  assert!(
+    open_menu.contains("pull request"),
+    "the still-bound pr pick must remain: {open_menu:?}"
+  );
+  let link_prompt = label_of("link prompt");
+  assert!(
+    !link_prompt.contains("i/p"),
+    "the unbound link issue pick must drop (no `i/p`): {link_prompt:?}"
+  );
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in

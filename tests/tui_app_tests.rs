@@ -1119,6 +1119,32 @@ fn countdown_status_uses_rebound_confirm_keys() {
 }
 
 #[test]
+fn countdown_status_omits_an_unbound_cancel_key() {
+  // #219 review (P2): with `[tui.keys.modal.confirm] cancel = []`, Esc no
+  // longer cancels — the armed status must not advertise a phantom cancel key
+  // (it would tell the user to press a key that does nothing while the delete
+  // timer runs). Drop it instead of falling back to the literal.
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmCancel, vec![])
+    .unwrap();
+  app.toggle_delete_branch();
+  app.confirm_press_y(Instant::now()); // arms
+  assert!(
+    !app.status.contains("Esc") && !app.status.contains("to cancel"),
+    "armed status must not advertise an unbound cancel key: {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("press y again"),
+    "the still-bound confirm key must remain in the copy: {}",
+    app.status
+  );
+}
+
+#[test]
 fn confirm_dismiss_resets_timer_and_returns_to_list() {
   let (_dir, mut app) = make_app();
   app.toggle_delete_branch();
