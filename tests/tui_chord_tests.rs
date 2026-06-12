@@ -186,7 +186,7 @@ fn help_overlay_lists_pane_focus_bindings() {
   use gwm::tui::keymap::Keymap;
 
   let km = Keymap::defaults();
-  let lines = help_lines(&km, false);
+  let lines = help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), false);
   assert!(
     lines.iter().any(|l| l.starts_with("  1 ")),
     "expected the default `1` focus binding in the help overlay:\n{}",
@@ -215,7 +215,7 @@ fn help_overlay_lists_sync() {
   use gwm::tui::keymap::Keymap;
 
   let km = Keymap::defaults();
-  let lines = help_lines(&km, false);
+  let lines = help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), false);
   let row = lines
     .iter()
     .find(|l| l.contains("sync") || l.contains("pull") || l.contains("fetch"))
@@ -243,7 +243,7 @@ fn help_overlay_reflects_user_keymap_override() {
   )
   .unwrap();
 
-  let lines = help_lines(&km, false);
+  let lines = help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), false);
   let next_line = lines
     .iter()
     .find(|l| l.contains("next"))
@@ -297,7 +297,11 @@ fn help_rows_structures_title_sections_and_entries() {
   use gwm::tui::{HelpRow, HintContext};
 
   let km = Keymap::defaults();
-  let rows = help_rows(&km, HintContext::Worktrees);
+  let rows = help_rows(
+    &km,
+    &gwm::tui::modal_keymap::ModalKeymap::defaults(),
+    HintContext::Worktrees,
+  );
 
   // Issue #217: the overlay title is now "Keybindings", followed by a
   // context subtitle reflecting the focused pane.
@@ -381,7 +385,7 @@ fn help_lines_is_help_rows_flattened() {
     } else {
       HintContext::Worktrees
     };
-    let expected: Vec<String> = help_rows(&km, ctx)
+    let expected: Vec<String> = help_rows(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), ctx)
       .into_iter()
       .map(|row| match row {
         HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
@@ -392,7 +396,11 @@ fn help_lines_is_help_rows_flattened() {
         }
       })
       .collect();
-    assert_eq!(help_lines(&km, picker_mode), expected, "picker_mode={picker_mode}");
+    assert_eq!(
+      help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), picker_mode),
+      expected,
+      "picker_mode={picker_mode}"
+    );
   }
 }
 
@@ -410,10 +418,47 @@ fn help_subtitle_tracks_the_pane_context() {
     (HintContext::Status, "status"),
     (HintContext::Picker, "switch"),
   ] {
-    let rows = help_rows(&km, ctx);
+    let rows = help_rows(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), ctx);
     assert!(
       rows.iter().any(|r| matches!(r, HelpRow::Subtitle(s) if s == want)),
       "expected `{want}` subtitle for {want} context"
     );
   }
+}
+
+#[test]
+fn help_overlay_reflects_a_modal_rebind() {
+  // #219: the Create Form / Delete Worktree help rows resolve from the
+  // contextual modal keymap, so `[tui.keys.confirm] confirm = ["o"]` shows
+  // `o` next to the "confirm" row instead of the default `y`.
+  use gwm::tui::help_lines;
+  use gwm::tui::keymap::{KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+
+  let km = Keymap::defaults();
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(
+      ModalAction::ConfirmConfirm,
+      vec![KeyStroke::new(KeyCode::Char('o'), KeyModifiers::empty())],
+    )
+    .unwrap();
+
+  let lines = help_lines(&km, &modal, false);
+  let row = lines
+    .iter()
+    .find(|l| l.trim_end().ends_with("confirm") && !l.contains("Confirm"))
+    .unwrap_or_else(|| panic!("expected a `confirm` row in:\n{}", lines.join("\n")));
+  assert!(
+    row.starts_with("  o "),
+    "expected the confirm row to show the rebound `o`, got: {row}"
+  );
+  // The default `y` row for confirm must be gone.
+  assert!(
+    !lines
+      .iter()
+      .any(|l| l.starts_with("  y ") && l.trim_end().ends_with("confirm")),
+    "the default `y` binding must not remain after the modal rebind:\n{}",
+    lines.join("\n")
+  );
 }

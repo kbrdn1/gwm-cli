@@ -413,6 +413,31 @@ impl ModalKeymap {
   pub fn list(&self) -> &[ModalBinding] {
     &self.entries
   }
+
+  /// The first key bound to `action`, rendered for an inline hint (the
+  /// statusbar chip / help-overlay footer). `None` when the verb is
+  /// unbound — the caller drops it rather than advertise a phantom key.
+  /// Mirrors [`crate::tui::keymap::Keymap::primary_chord`].
+  pub fn primary_key(&self, action: ModalAction) -> Option<String> {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .and_then(|b| b.keys.first())
+      .map(|k| k.to_string())
+  }
+
+  /// Every key bound to `action`, comma-joined (`"n, Esc"`) or empty when
+  /// unbound — the help-overlay row form, matching the global keymap's
+  /// `keys_for` rendering.
+  pub fn keys_display(&self, action: ModalAction) -> String {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", "))
+      .unwrap_or_default()
+  }
 }
 
 impl Default for ModalKeymap {
