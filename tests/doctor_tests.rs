@@ -11,6 +11,8 @@ fn ctx_for<'a>(repo: &'a git2::Repository, workdir: &'a std::path::Path, config:
     repo_workdir: workdir,
     repo,
     config,
+    // Isolated by default: no global layer is read for injected test contexts.
+    global_config_path: None,
   }
 }
 
@@ -894,6 +896,58 @@ fn doctor_fails_on_in_context_modal_conflict() {
     c.detail.contains("conflict"),
     "detail must explain the conflict, got: {}",
     c.detail
+  );
+}
+
+#[test]
+fn doctor_keymap_check_reads_only_the_threaded_global_layer() {
+  // #219 review (P2): the keymap check must merge the global layer that was
+  // *threaded into the context*, never an ambient `global_config_path()` read —
+  // otherwise a developer's real `~/.config/gwm` would make an isolated temp
+  // repo's check flap. A bad global is seen only when explicitly threaded.
+  let (dir, repo) = init_repo();
+  let global = dir.path().join("global.toml");
+  std::fs::write(&global, "[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n").unwrap();
+  let config = Config::default();
+
+  // Threaded → the bad global keymap surfaces.
+  let with = DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: Some(global.as_path()),
+  };
+  let c = doctor::run(&with)
+    .unwrap()
+    .checks
+    .into_iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("keymap check");
+  assert_eq!(
+    c.status,
+    CheckStatus::Failed,
+    "a threaded bad global must fail the check: {}",
+    c.detail
+  );
+
+  // Not threaded (None) → the very same file is ignored; the check is clean.
+  let without = DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: None,
+  };
+  let c2 = doctor::run(&without)
+    .unwrap()
+    .checks
+    .into_iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("keymap check");
+  assert_eq!(
+    c2.status,
+    CheckStatus::Ok,
+    "an un-threaded global config must be ignored: {}",
+    c2.detail
   );
 }
 

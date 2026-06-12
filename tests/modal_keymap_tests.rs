@@ -249,6 +249,21 @@ fn parse_single_accepts_one_stroke_rejects_chords() {
   );
 }
 
+#[test]
+fn parse_single_rejects_the_reserved_ctrl_c() {
+  // #219 review (P2): Ctrl+C is the emergency quit handled in `run_app` before
+  // any modal lookup, so a modal binding to it would never fire. Reject it at
+  // parse time rather than advertise an unreachable action in `gwm tui keys`.
+  use gwm::tui::modal_keymap::parse_single;
+  for s in ["Ctrl+c", "Ctrl+C"] {
+    let err = parse_single(s).expect_err("Ctrl+C must be rejected as reserved");
+    assert!(
+      err.to_string().contains("Ctrl+C") || err.to_string().to_lowercase().contains("reserved"),
+      "message should explain the reserved key: {err}"
+    );
+  }
+}
+
 // ── listing ────────────────────────────────────────────────────────────────
 
 #[test]

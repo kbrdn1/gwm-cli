@@ -62,6 +62,7 @@
 
 use crate::error::{GwmError, Result};
 use crate::tui::keymap::{KeyStroke, Source};
+use crossterm::event::{KeyCode, KeyModifiers};
 use std::collections::HashMap;
 
 // ---------------------------------------------------------------------------
@@ -294,13 +295,27 @@ impl ModalAction {
 /// hard error (returned to the user verbatim by the config walker).
 pub fn parse_single(s: &str) -> Result<KeyStroke> {
   let strokes = KeyStroke::parse_chord(s)?;
-  match strokes.into_iter().collect::<Vec<_>>().as_slice() {
-    [one] => Ok(one.clone()),
-    _ => Err(GwmError::Config(format!(
-      "modal bindings must be a single keystroke, got chord {:?} (modals have no chord timeout)",
+  let stroke = match strokes.into_iter().collect::<Vec<_>>().as_slice() {
+    [one] => one.clone(),
+    _ => {
+      return Err(GwmError::Config(format!(
+        "modal bindings must be a single keystroke, got chord {:?} (modals have no chord timeout)",
+        s
+      )))
+    }
+  };
+  // Ctrl+C is the emergency quit handled in `run_app` ahead of every lookup,
+  // so a modal binding to it would never fire — reject it rather than let
+  // `gwm tui keys` / footer hints advertise an unreachable action (#219 review).
+  if stroke.modifiers.contains(KeyModifiers::CONTROL)
+    && matches!(stroke.code, KeyCode::Char(c) if c.eq_ignore_ascii_case(&'c'))
+  {
+    return Err(GwmError::Config(format!(
+      "modal bindings cannot use {:?}: Ctrl+C is the reserved emergency quit (handled before any modal lookup)",
       s
-    ))),
+    )));
   }
+  Ok(stroke)
 }
 
 // ---------------------------------------------------------------------------

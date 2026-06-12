@@ -1144,13 +1144,6 @@ impl Config {
     })
   }
 
-  /// Effective merged config from disk for `repo_root`, layering the global
-  /// config under the repo's `.gwm.toml` exactly as [`Self::load_for_repo`]
-  /// does, but **unvalidated** — see [`Self::merge_layered`].
-  pub(crate) fn merge_for_repo_unvalidated(repo_root: &Path) -> Result<Self> {
-    Self::merge_layered(repo_root, global_config_path().as_deref())
-  }
-
   /// Reject `[tui.keys]` entries that name an unknown action, list a
   /// chord that does not parse, or create a conflict / prefix
   /// collision with another binding (issue #87). Delegates to

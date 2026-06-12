@@ -1713,10 +1713,15 @@ fn cmd_prune(dry_run: bool) -> Result<()> {
 fn cmd_doctor() -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context_lenient(None)?;
 
+  // Thread the real global layer so the keymap check re-reads exactly what the
+  // TUI loads, while keeping the ambient read out of `doctor::run` itself
+  // (issue #219 review — injected contexts stay deterministic).
+  let global = crate::config::global_config_path();
   let ctx = DoctorCtx {
     repo_workdir: &workdir,
     repo: &repo,
     config: &config,
+    global_config_path: global.as_deref(),
   };
   let report = doctor::run(&ctx)?;
   print_doctor_report(&report);
