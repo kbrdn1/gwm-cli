@@ -6570,3 +6570,43 @@ fn resolve_modal_reflects_a_confirm_rebind() {
     None
   );
 }
+
+#[test]
+fn link_input_number_context_advertises_its_own_hints() {
+  // #219 review: while typing the number, the hints must resolve submit /
+  // cancel from `[tui.keys.link.input_number]` (including a rebind), not the
+  // choose-target keys.
+  use crossterm::event::{KeyCode, KeyModifiers};
+  use gwm::tui::keymap::{KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  use gwm::tui::HintContext;
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(
+      ModalAction::LinkInputSubmit,
+      vec![KeyStroke::new(KeyCode::Char('x'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  let resolved = HintContext::LinkInputNumber.resolve(&Keymap::defaults(), &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| l == "submit" && k == "x"),
+    "submit hint must show the rebound key, got {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "kind" || l == "move"),
+    "the input-number stage must not advertise choose-target hints: {resolved:?}"
+  );
+}
+
+#[test]
+fn hint_context_switches_to_link_input_number_while_typing() {
+  use gwm::tui::HintContext;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.hint_context(), HintContext::LinkPrompt, "choose-target stage");
+  // Commit a target → InputNumber stage; the statusbar context must follow.
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+  assert_eq!(app.hint_context(), HintContext::LinkInputNumber, "number-input stage");
+}

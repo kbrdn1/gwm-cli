@@ -1327,7 +1327,16 @@ impl App {
       View::Create => HintContext::Create,
       View::Confirm => HintContext::Confirm,
       View::OpenMenu => HintContext::OpenMenu,
-      View::LinkPrompt => HintContext::LinkPrompt,
+      // #219: the two link-prompt stages advertise different keys — the
+      // choose-target picker vs the number-input submit/cancel — so the
+      // statusbar tracks whichever stage is live.
+      View::LinkPrompt => {
+        if self.link_prompt_stage() == crate::tui::state::link_prompt::LinkPromptStage::InputNumber {
+          HintContext::LinkInputNumber
+        } else {
+          HintContext::LinkPrompt
+        }
+      }
       View::CommandPalette => HintContext::CommandPalette,
       View::Report => HintContext::Report,
       View::Help => HintContext::Help,

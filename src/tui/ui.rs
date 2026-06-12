@@ -1699,8 +1699,12 @@ pub enum HintContext {
   Confirm,
   /// Open issue/PR URL menu.
   OpenMenu,
-  /// Two-stage issue/PR link prompt.
+  /// Issue/PR link prompt, stage 1 — choose issue vs PR.
   LinkPrompt,
+  /// Issue/PR link prompt, stage 2 — typing the number (#219): submit /
+  /// cancel resolve from `[tui.keys.link.input_number]`, not the choose
+  /// stage's keys.
+  LinkInputNumber,
   /// Command palette overlay.
   CommandPalette,
   /// Bootstrap report overlay.
@@ -1726,6 +1730,7 @@ impl HintContext {
       HintContext::Confirm => "confirm",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
+      HintContext::LinkInputNumber => "link",
       HintContext::CommandPalette => "command",
       HintContext::Report => "report",
       HintContext::Help => "help",
@@ -1822,6 +1827,14 @@ impl HintContext {
         Hint::Modal(ModalAction::LinkChooseAccept, "link"),
         Hint::Key(FetchGithub, "fetch"),
         Hint::Modal(ModalAction::LinkChooseCancel, "cancel"),
+      ],
+      // #219: while typing the number, submit / cancel come from the
+      // input-number context — not the choose-target keys above.
+      HintContext::LinkInputNumber => &[
+        Hint::Lit("0-9", "number"),
+        Hint::Modal(ModalAction::LinkInputSubmit, "submit"),
+        Hint::Key(FetchGithub, "fetch"),
+        Hint::Modal(ModalAction::LinkInputCancel, "cancel"),
       ],
       HintContext::CommandPalette => &[
         Hint::Lit("↑/↓", "move"),
@@ -3646,7 +3659,7 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
       push_modal_hint(
         &mut lines,
-        HintContext::LinkPrompt,
+        HintContext::LinkInputNumber,
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
