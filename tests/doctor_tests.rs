@@ -849,3 +849,53 @@ quit = []
     c.detail
   );
 }
+
+#[test]
+fn doctor_reports_modal_binding_count_on_default_keymap() {
+  // Issue #219: the keymap check now also resolves the contextual modal
+  // keymap and folds its bound count into the detail line.
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    c.detail.contains("modal"),
+    "detail must mention the modal binding count, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_fails_on_in_context_modal_conflict() {
+  // A `[tui.keys.confirm]` block binding two verbs to the same key is a
+  // per-context conflict. Inject it past load-time validation (which would
+  // otherwise reject it) to prove `gwm doctor` independently catches it.
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  let mut confirm = toml::Table::new();
+  confirm.insert("confirm".into(), toml::Value::Array(vec!["x".into()]));
+  confirm.insert("cancel".into(), toml::Value::Array(vec!["x".into()]));
+  config
+    .tui
+    .keys
+    .raw
+    .insert("confirm".into(), toml::Value::Table(confirm));
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(c.status, CheckStatus::Failed);
+  assert!(
+    c.detail.contains("conflict"),
+    "detail must explain the conflict, got: {}",
+    c.detail
+  );
+}

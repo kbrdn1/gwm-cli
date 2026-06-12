@@ -192,7 +192,24 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
   // `gwm doctor` output and misleading the user about how many
   // actions are actually reachable.
   let bound_count = bindings.iter().filter(|b| !b.chords.is_empty()).count();
-  Check::ok(name, format!("{} action(s) bound", bound_count))
+
+  // Issue #219: the contextual modal keymap (`[tui.keys.<context>]`) is
+  // validated the same way — an unknown context / verb, a multi-stroke
+  // chord, or a per-context conflict surfaces here with the offending
+  // coordinate so `gwm doctor` flags it before the user hits it live.
+  let modal = match ctx.config.tui.keys.resolved_modal_keymap() {
+    Ok(mk) => mk,
+    Err(e) => {
+      return Check::failed(name, format!("{}", e)).with_hint(
+        "fix the `[tui.keys.<context>]` entry called out above; `gwm tui keys` lists every context and verb",
+      );
+    }
+  };
+  let modal_bound = modal.list().iter().filter(|b| !b.keys.is_empty()).count();
+  Check::ok(
+    name,
+    format!("{} global + {} modal binding(s) bound", bound_count, modal_bound),
+  )
 }
 
 /// Check #1: `.gwm.toml` parses cleanly. Missing config is fine — defaults

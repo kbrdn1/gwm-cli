@@ -899,22 +899,23 @@ fn cmd_theme_show(name: &str) -> Result<()> {
 /// validation pass, so the column contents stay in sync.
 fn cmd_tui_keys() -> Result<()> {
   use crate::tui::keymap::{Keymap, Source};
+  use crate::tui::modal_keymap::{KeyContext, ModalKeymap};
 
-  // Build the resolved keymap. Outside a repo, OR inside a bare
+  // Build the resolved keymaps. Outside a repo, OR inside a bare
   // repo (no workdir to read `.gwm.toml` from), fall back to
   // defaults so the command stays useful for new users discovering
   // the binary. Same fallback path either way — surfacing
   // `NotInGitRepo` on a bare repo would be misleading because the
   // command itself is repo-agnostic.
-  let keymap = match worktree::discover_repo(None) {
+  let (keymap, modal) = match worktree::discover_repo(None) {
     Ok(repo) => match repo.workdir() {
       Some(workdir) => {
         let cfg = Config::load_for_repo(workdir)?;
-        cfg.tui.keys.resolved_keymap()?
+        (cfg.tui.keys.resolved_keymap()?, cfg.tui.keys.resolved_modal_keymap()?)
       }
-      None => Keymap::defaults(),
+      None => (Keymap::defaults(), ModalKeymap::defaults()),
     },
-    Err(_) => Keymap::defaults(),
+    Err(_) => (Keymap::defaults(), ModalKeymap::defaults()),
   };
 
   let rows = keymap.list();
@@ -960,6 +961,47 @@ fn cmd_tui_keys() -> Result<()> {
       aw = action_w,
       kw = keys_w
     );
+  }
+
+  // Issue #219: contextual modal / overlay bindings, grouped by context.
+  // Printed under their `[tui.keys.<context>]` heading so the user can copy
+  // a heading straight into `.gwm.toml` to start an override.
+  let fmt_keys = |keys: &[crate::tui::keymap::KeyStroke]| -> String {
+    keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")
+  };
+  for ctx in KeyContext::all() {
+    let bindings = modal.bindings_for(*ctx);
+    if bindings.is_empty() {
+      continue;
+    }
+    println!("\n[tui.keys.{}]", ctx.config_path());
+    let verb_w = bindings
+      .iter()
+      .map(|b| b.action.verb().len())
+      .max()
+      .unwrap_or(0)
+      .max("verb".len());
+    let keys_w = bindings
+      .iter()
+      .map(|b| fmt_keys(&b.keys).len())
+      .max()
+      .unwrap_or(0)
+      .max("keys".len());
+    println!("{:<vw$}  {:<kw$}  source", "verb", "keys", vw = verb_w, kw = keys_w);
+    for binding in bindings {
+      let source = match binding.source {
+        Source::Default => "default",
+        Source::UserConfig => ".gwm.toml",
+      };
+      println!(
+        "{:<vw$}  {:<kw$}  {}",
+        binding.action.verb(),
+        fmt_keys(&binding.keys),
+        source,
+        vw = verb_w,
+        kw = keys_w
+      );
+    }
   }
   Ok(())
 }
