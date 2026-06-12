@@ -219,6 +219,13 @@ fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
   cfg.validate_bootstrap_guards()?;
   cfg.validate_labels()?;
   cfg.validate_aliases()?;
+  // `[tui.keys]` / `[theme]` deserialize into raw tables resolved lazily, so a
+  // malformed keymap or theme passes `toml::from_str` cleanly. Run the same
+  // validators `Config::load_for_repo` does (issue #219 review) — otherwise
+  // `gwm config validate` / validate-before-write greenlights a config the
+  // loader will later reject.
+  cfg.validate_tui_keys()?;
+  cfg.validate_theme()?;
   Ok(())
 }
 
