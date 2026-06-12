@@ -1,4 +1,5 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
+use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
@@ -231,6 +232,12 @@ pub struct App {
   /// change, mirroring how every other knob in `[tui]` behaves.
   pub keymap: Keymap,
 
+  /// Resolved contextual keymap for modals / overlays (issue #219).
+  /// Built from the `[tui.keys.modal.<context>]` sub-tables at construction
+  /// time alongside [`Self::keymap`]; consulted by the modal routing in
+  /// `src/tui/mod.rs` to turn a keystroke into a typed [`ModalAction`].
+  pub modal_keymap: ModalKeymap,
+
   /// Resolved colour theme for this TUI session (issue #33). Built
   /// from `[theme]` in `.gwm.toml` at construction time. Threaded
   /// through `draw_*` calls so user overrides reach every visual
@@ -404,6 +411,9 @@ impl App {
     // fresh error — but we re-`?` it rather than `.expect()` so a
     // future hot-reload path could exercise the same call.
     let keymap = config.tui.keys.resolved_keymap()?;
+    // Issue #219: resolve the contextual modal keymap once, same lifecycle
+    // as the global keymap above. Pre-validated by `Config::load_for_repo`.
+    let modal_keymap = config.tui.keys.resolved_modal_keymap()?;
     // Issue #33: resolve the colour theme once at construction.
     // Validated by `Config::load_for_repo` already, so this can
     // only surface a fresh error if the loader pre-validation is
@@ -439,6 +449,7 @@ impl App {
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
+      modal_keymap,
       theme,
       filter: FilterState::new(),
       picker_mode: false,
@@ -1177,6 +1188,14 @@ impl App {
     )
   }
 
+  /// Resolve a keystroke against the contextual modal keymap (issue #219).
+  /// Returns the [`ModalAction`] bound to `key` in `ctx`, or `None` when
+  /// nothing in that context binds it — the modal routing then applies its
+  /// text-input / default fallback (digits, free-text, sub-state guards).
+  pub fn resolve_modal(&self, ctx: KeyContext, key: KeyEvent) -> Option<ModalAction> {
+    self.modal_keymap.resolve(ctx, &KeyStroke::from_event(&key))
+  }
+
   /// Mirror the new `pending_chord` buffer into the legacy
   /// `pending_g` boolean so pre-#87 tests that read it as a field
   /// stay green. Removed when those tests migrate to
@@ -1308,7 +1327,16 @@ impl App {
       View::Create => HintContext::Create,
       View::Confirm => HintContext::Confirm,
       View::OpenMenu => HintContext::OpenMenu,
-      View::LinkPrompt => HintContext::LinkPrompt,
+      // #219: the two link-prompt stages advertise different keys — the
+      // choose-target picker vs the number-input submit/cancel — so the
+      // statusbar tracks whichever stage is live.
+      View::LinkPrompt => {
+        if self.link_prompt_stage() == crate::tui::state::link_prompt::LinkPromptStage::InputNumber {
+          HintContext::LinkInputNumber
+        } else {
+          HintContext::LinkPrompt
+        }
+      }
       View::CommandPalette => HintContext::CommandPalette,
       View::Report => HintContext::Report,
       View::Help => HintContext::Help,
@@ -2103,26 +2131,30 @@ impl App {
       return CreateKey::Handled;
     }
     let on_type = self.create_form.field == Field::Type;
-    match key.code {
-      KeyCode::Esc => return CreateKey::Cancel,
-      KeyCode::Tab => self.create_next_field(),
-      KeyCode::BackTab => self.create_prev_field(),
-      KeyCode::Enter => {
+    // #219: verbs resolve through the `create` context. The type-cycling
+    // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
+    // Type field; on a text field their keys fall through to literal input
+    // so `h` / `l` are never swallowed while typing a description.
+    match self.resolve_modal(KeyContext::Create, key) {
+      Some(ModalAction::CreateCancel) => return CreateKey::Cancel,
+      Some(ModalAction::CreateNextField) => self.create_next_field(),
+      Some(ModalAction::CreatePrevField) => self.create_prev_field(),
+      Some(ModalAction::CreateSubmit) => {
         if self.create_form.field == Field::Desc {
           return CreateKey::Submit;
         }
         self.create_next_field();
       }
-      KeyCode::Up | KeyCode::Left if on_type => self.create_prev_type(),
-      KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
-      KeyCode::Char('h') if on_type => self.create_prev_type(),
-      KeyCode::Char('l') if on_type => self.create_next_type(),
-      KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
-        self.status = "issue accepts digits only".into();
-      }
-      KeyCode::Char(c) if !on_type => self.create_push_char(c),
-      KeyCode::Backspace if !on_type => self.create_pop_char(),
-      _ => {}
+      Some(ModalAction::CreatePrevType) if on_type => self.create_prev_type(),
+      Some(ModalAction::CreateNextType) if on_type => self.create_next_type(),
+      _ => match key.code {
+        KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
+          self.status = "issue accepts digits only".into();
+        }
+        KeyCode::Char(c) if !on_type => self.create_push_char(c),
+        KeyCode::Backspace if !on_type => self.create_pop_char(),
+        _ => {}
+      },
     }
     CreateKey::Handled
   }
@@ -2306,11 +2338,27 @@ impl App {
       ConfirmKeyAction::FireNow => {}
       ConfirmKeyAction::Disarmed => {
         let secs = total.as_secs();
-        self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
+        // #219 review: name the live confirm key, and drop the clause entirely
+        // when it is unbound — never advertise a key that no longer re-arms.
+        self.status = match self.modal_keymap.primary_key(ModalAction::ConfirmConfirm) {
+          Some(c) => format!("countdown cancelled — press {c} to re-arm ({secs}s safety delay)"),
+          None => format!("countdown cancelled ({secs}s safety delay)"),
+        };
       }
       ConfirmKeyAction::Armed => {
         let secs = total.as_secs();
-        self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
+        // #219 review: name the live confirm / cancel keys (rebindable via
+        // `[tui.keys.modal.confirm]`), dropping either clause when its verb is
+        // unbound rather than advertising a phantom key while the timer runs.
+        let confirm = self.modal_keymap.primary_key(ModalAction::ConfirmConfirm);
+        let cancel = self.modal_keymap.primary_key(ModalAction::ConfirmCancel);
+        let tail = match (confirm, cancel) {
+          (Some(c), Some(x)) => format!(" · press {c} again or {x} to cancel"),
+          (Some(c), None) => format!(" · press {c} again to disarm"),
+          (None, Some(x)) => format!(" · press {x} to cancel"),
+          (None, None) => String::new(),
+        };
+        self.status = format!("armed — auto-fires in {secs}s{tail}");
       }
     }
     action
@@ -3054,29 +3102,36 @@ impl App {
   /// (submit shell-out, view transition).
   pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
     use crate::tui::state::link_prompt::LinkPromptStage;
-    if self.key_matches_action(key, Action::FetchGithub) {
-      return LinkPromptKey::Refresh;
-    }
-    match (self.link_prompt.stage, key.code) {
-      (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
-      // ChooseTarget: a vertical selectable list. j/k (and arrows) move the
-      // highlight, Enter links the highlighted row, i/p stay direct picks.
-      // With exactly two targets, up and down land on the same other row, so
-      // a single flip serves j/k/Up/Down alike.
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up) => {
-        self.link_prompt.toggle_selection()
-      }
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => self.link_prompt_choose(LinkTarget::Issue),
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => self.link_prompt_choose(LinkTarget::Pr),
-      (LinkPromptStage::ChooseTarget, KeyCode::Enter) => {
-        let target = self.link_prompt.selected;
-        self.link_prompt_choose(target);
-      }
-      // InputNumber: type the digits, Enter submits, Backspace deletes.
-      (LinkPromptStage::InputNumber, KeyCode::Enter) => return LinkPromptKey::Submit,
-      (LinkPromptStage::InputNumber, KeyCode::Char(c)) => self.link_prompt_push_char(c),
-      (LinkPromptStage::InputNumber, KeyCode::Backspace) => self.link_prompt_pop_char(),
-      _ => {}
+    // #219: each stage is its own modal context. ChooseTarget is a vertical
+    // two-row picker — `next` / `prev` both flip the highlight (a single
+    // flip serves j/k/Up/Down alike), while `issue` / `pr` are direct picks.
+    // InputNumber routes `submit` / `cancel` through the context and treats
+    // everything else as digit input. The global `fetch_github` key is a
+    // FALLBACK after the stage context, so a contextual binding on that key
+    // (e.g. `submit = ["F"]`) wins over the fetch shortcut (#293 review).
+    match self.link_prompt.stage {
+      LinkPromptStage::ChooseTarget => match self.resolve_modal(KeyContext::LinkChooseTarget, key) {
+        Some(ModalAction::LinkChooseCancel) => return LinkPromptKey::Cancel,
+        Some(ModalAction::LinkChooseNext) | Some(ModalAction::LinkChoosePrev) => self.link_prompt.toggle_selection(),
+        Some(ModalAction::LinkChooseIssue) => self.link_prompt_choose(LinkTarget::Issue),
+        Some(ModalAction::LinkChoosePr) => self.link_prompt_choose(LinkTarget::Pr),
+        Some(ModalAction::LinkChooseAccept) => {
+          let target = self.link_prompt.selected;
+          self.link_prompt_choose(target);
+        }
+        _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
+        _ => {}
+      },
+      LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
+        Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
+        Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,
+        _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
+        _ => match key.code {
+          KeyCode::Char(c) => self.link_prompt_push_char(c),
+          KeyCode::Backspace => self.link_prompt_pop_char(),
+          _ => {}
+        },
+      },
     }
     LinkPromptKey::Handled
   }

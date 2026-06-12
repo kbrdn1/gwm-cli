@@ -7,6 +7,7 @@ mod app;
 #[doc(hidden)]
 pub mod commit_graph;
 pub mod keymap;
+pub mod modal_keymap;
 pub mod palette;
 pub mod state;
 pub mod theme;
@@ -14,6 +15,7 @@ mod ui;
 
 use crate::error::Result;
 use crate::tui::keymap::Action;
+use crate::tui::modal_keymap::{KeyContext, ModalAction};
 use crossterm::{
   event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers},
   execute,
@@ -57,18 +59,18 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
-  build_sidebar_sections, centered_abs, chip_style, confirm_buttons_line, confirm_delete_branch_line,
-  confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle, field_input_line,
-  filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines, header_line,
-  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
-  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
-  link_prompt_modal_width, link_target_line, modal_hint_line, palette_name_style, pane_counter, panel_border_color,
-  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, rename_buttons_line, status_line,
-  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
-  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
-  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
-  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  build_sidebar_sections, centered_abs, chip_style, command_logs_footer_hints, config_edit_footer_hints,
+  config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line,
+  delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, format_status,
+  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
+  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
+  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
+  modal_hint_line, palette_name_style, pane_counter, panel_border_color, pr_badge_color, pr_summary_line,
+  recent_commits_lines, recent_items_pane_title, rename_buttons_line, status_line, status_pane_title, table_marker,
+  tilde_compress_with_home, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, working_tree_status_line, worktree_name_style, worktree_path_style, worktrees_pane_title,
+  HelpRow, HintContext, SidebarSections, WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON,
+  RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -345,30 +347,33 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           }
         }
       }
-      View::Help => match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => app.view = View::List,
-        // Scroll the Keybindings overlay when it outgrows the modal (#217).
-        KeyCode::Down | KeyCode::Char('j') => app.help_scroll_down(),
-        KeyCode::Up | KeyCode::Char('k') => app.help_scroll_up(),
-        KeyCode::Right | KeyCode::Char('l') => app.help_scroll_right(),
-        KeyCode::Left | KeyCode::Char('h') => app.help_scroll_left(),
-        KeyCode::Home | KeyCode::Char('g') => app.help_scroll = 0,
-        KeyCode::End | KeyCode::Char('G') => app.help_scroll = app.help_max_scroll,
+      // #219: keys resolved through the `help` modal context. Scroll the
+      // Keybindings overlay when it outgrows the modal (#217).
+      View::Help => match app.resolve_modal(KeyContext::Help, key) {
+        Some(ModalAction::HelpClose) => app.view = View::List,
+        Some(ModalAction::HelpScrollDown) => app.help_scroll_down(),
+        Some(ModalAction::HelpScrollUp) => app.help_scroll_up(),
+        Some(ModalAction::HelpScrollRight) => app.help_scroll_right(),
+        Some(ModalAction::HelpScrollLeft) => app.help_scroll_left(),
+        Some(ModalAction::HelpScrollTop) => app.help_scroll = 0,
+        Some(ModalAction::HelpScrollBottom) => app.help_scroll = app.help_max_scroll,
         _ => {}
       },
       // Command Logs overlay (issue #226). Scrolls like the help overlay;
       // closes on Esc / `q` or the bound `command_logs` key (default `3`)
       // so the open key toggles it shut even when rebound.
-      View::CommandLogs => match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
+      // #219: keys resolved through the `command_logs` modal context. The
+      // bound global `command_logs` key still toggles the overlay shut.
+      View::CommandLogs => match app.resolve_modal(KeyContext::CommandLogs, key) {
+        Some(ModalAction::CommandLogsClose) => app.view = View::List,
         // `y` copies the whole transcript to the clipboard (issue #279).
-        KeyCode::Char('y') => copy_command_logs_to_clipboard(&mut app),
-        KeyCode::Down | KeyCode::Char('j') => app.command_logs.scroll_down(),
-        KeyCode::Up | KeyCode::Char('k') => app.command_logs.scroll_up(),
-        KeyCode::Right | KeyCode::Char('l') => app.command_logs.scroll_right(),
-        KeyCode::Left | KeyCode::Char('h') => app.command_logs.scroll_left(),
-        KeyCode::Home | KeyCode::Char('g') => app.command_logs.scroll_to_top(),
-        KeyCode::End | KeyCode::Char('G') => app.command_logs.scroll_to_bottom(),
+        Some(ModalAction::CommandLogsCopy) => copy_command_logs_to_clipboard(&mut app),
+        Some(ModalAction::CommandLogsScrollDown) => app.command_logs.scroll_down(),
+        Some(ModalAction::CommandLogsScrollUp) => app.command_logs.scroll_up(),
+        Some(ModalAction::CommandLogsScrollRight) => app.command_logs.scroll_right(),
+        Some(ModalAction::CommandLogsScrollLeft) => app.command_logs.scroll_left(),
+        Some(ModalAction::CommandLogsScrollTop) => app.command_logs.scroll_to_top(),
+        Some(ModalAction::CommandLogsScrollBottom) => app.command_logs.scroll_to_bottom(),
         _ if app.key_matches_action(key, Action::CommandLogs) => app.view = View::List,
         _ => {}
       },
@@ -379,49 +384,51 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // edit layer, Up/Down select fields (or scroll on the read-only `All`
       // tab), Space/Enter cycle a choice or open the numeric input, and
       // Esc / `q` / the bound `config_panel` key (default `4`) close.
-      View::Config if app.config_panel.editing.is_some() => match key.code {
-        KeyCode::Enter => app.commit_settings_edit(),
-        KeyCode::Esc => app.config_panel.cancel_edit(),
-        KeyCode::Backspace => app.config_panel.pop_edit_char(),
-        KeyCode::Char(c) => app.config_panel.push_edit_char(c),
-        _ => {}
+      // #219: edit sub-mode keys resolve through the `config.edit` context;
+      // anything else is literal input into the numeric edit buffer.
+      View::Config if app.config_panel.editing.is_some() => match app.resolve_modal(KeyContext::ConfigEdit, key) {
+        Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
+        Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
+        _ => match key.code {
+          KeyCode::Backspace => app.config_panel.pop_edit_char(),
+          KeyCode::Char(c) => app.config_panel.push_edit_char(c),
+          _ => {}
+        },
       },
-      View::Config => match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => app.view = View::List,
-        KeyCode::Tab => app.config_panel.next_tab(),
-        KeyCode::BackTab => app.config_panel.prev_tab(),
-        KeyCode::Char('L') => app.config_panel.toggle_layer(),
-        KeyCode::Char(' ') | KeyCode::Enter => app.activate_selected_setting(),
-        KeyCode::Down | KeyCode::Char('j') => {
-          if app.config_panel.tab == SettingsTab::All {
-            app.config_panel.scroll_down();
-          } else {
-            app.config_panel.select_next();
+      // #219: nav keys resolve through the `config` context. Select vs scroll
+      // and the horizontal pan / jump verbs stay gated on the read-only `All`
+      // tab exactly as before; the bound global `config_panel` key still
+      // toggles the overlay shut.
+      View::Config => {
+        let on_all = app.config_panel.tab == SettingsTab::All;
+        match app.resolve_modal(KeyContext::Config, key) {
+          Some(ModalAction::ConfigClose) => app.view = View::List,
+          Some(ModalAction::ConfigNextTab) => app.config_panel.next_tab(),
+          Some(ModalAction::ConfigPrevTab) => app.config_panel.prev_tab(),
+          Some(ModalAction::ConfigToggleLayer) => app.config_panel.toggle_layer(),
+          Some(ModalAction::ConfigActivate) => app.activate_selected_setting(),
+          Some(ModalAction::ConfigSelectNext) => {
+            if on_all {
+              app.config_panel.scroll_down();
+            } else {
+              app.config_panel.select_next();
+            }
           }
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-          if app.config_panel.tab == SettingsTab::All {
-            app.config_panel.scroll_up();
-          } else {
-            app.config_panel.select_prev();
+          Some(ModalAction::ConfigSelectPrev) => {
+            if on_all {
+              app.config_panel.scroll_up();
+            } else {
+              app.config_panel.select_prev();
+            }
           }
+          Some(ModalAction::ConfigScrollRight) if on_all => app.config_panel.scroll_right(),
+          Some(ModalAction::ConfigScrollLeft) if on_all => app.config_panel.scroll_left(),
+          Some(ModalAction::ConfigScrollTop) if on_all => app.config_panel.scroll_to_top(),
+          Some(ModalAction::ConfigScrollBottom) if on_all => app.config_panel.scroll_to_bottom(),
+          _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
+          _ => {}
         }
-        // Horizontal pan + jump only matter on the long read-only `All` tab.
-        KeyCode::Right | KeyCode::Char('l') if app.config_panel.tab == SettingsTab::All => {
-          app.config_panel.scroll_right()
-        }
-        KeyCode::Left | KeyCode::Char('h') if app.config_panel.tab == SettingsTab::All => {
-          app.config_panel.scroll_left()
-        }
-        KeyCode::Home | KeyCode::Char('g') if app.config_panel.tab == SettingsTab::All => {
-          app.config_panel.scroll_to_top()
-        }
-        KeyCode::End | KeyCode::Char('G') if app.config_panel.tab == SettingsTab::All => {
-          app.config_panel.scroll_to_bottom()
-        }
-        _ if app.key_matches_action(key, Action::ConfigPanel) => app.view = View::List,
-        _ => {}
-      },
+      }
       // Create-overlay keys live in a testable `App` method (issue #217);
       // the loop only owns the two side effects (submit / close). While the
       // async create worker is in flight (#276), keep the modal locked so a
@@ -437,46 +444,50 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         CreateKey::Handled => {}
       },
       View::Confirm if app.is_delete_worktree_loading() => {}
-      View::Confirm => match key.code {
-        // `y` confirms directly regardless of which button is focused
-        // (unchanged muscle memory). `Enter` activates the *focused*
-        // button — and focus defaults to Cancel (#187), so a stray
-        // Enter on a freshly-opened modal cancels rather than deletes.
-        KeyCode::Char('y') => confirm_fire(&mut app),
-        KeyCode::Enter => match app.confirm.focused_button() {
+      // #219: keys resolve through the `confirm` context. `confirm` (def `y`)
+      // fires regardless of focus (unchanged muscle memory); `activate` (def
+      // Enter) acts on the *focused* button — focus defaults to Cancel (#187),
+      // so a stray Enter on a freshly-opened modal cancels rather than
+      // deletes. The bound global `delete_branch` key still toggles the
+      // branch-deletion checkbox. Focus nav (#187): `focus_confirm` (←/h),
+      // `focus_cancel` (→/l), `toggle_focus` (Tab).
+      View::Confirm => match app.resolve_modal(KeyContext::Confirm, key) {
+        Some(ModalAction::ConfirmConfirm) => confirm_fire(&mut app),
+        Some(ModalAction::ConfirmActivate) => match app.confirm.focused_button() {
           ConfirmButton::Confirm => confirm_fire(&mut app),
           ConfirmButton::Cancel => app.confirm_dismiss(),
         },
-        KeyCode::Char('n') | KeyCode::Esc => app.confirm_dismiss(),
+        Some(ModalAction::ConfirmCancel) => app.confirm_dismiss(),
+        Some(ModalAction::ConfirmFocusConfirm) => app.confirm.focus_confirm(),
+        Some(ModalAction::ConfirmFocusCancel) => app.confirm.focus_cancel(),
+        Some(ModalAction::ConfirmToggleFocus) => app.confirm.toggle_focus(),
         _ if app.key_matches_action(key, Action::ToggleDeleteBranch) => app.toggle_delete_branch(),
-        // Button focus navigation (#187). `←` / `h` → Confirm,
-        // `→` / `l` → Cancel, `Tab` toggles.
-        KeyCode::Left | KeyCode::Char('h') => app.confirm.focus_confirm(),
-        KeyCode::Right | KeyCode::Char('l') => app.confirm.focus_cancel(),
-        KeyCode::Tab => app.confirm.toggle_focus(),
         _ => {}
       },
-      View::Report => match key.code {
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+      // #219: the bootstrap-report overlay closes (and refreshes) on the
+      // `report` context's `close` verb (def Esc / q / Enter).
+      View::Report => {
+        if let Some(ModalAction::ReportClose) = app.resolve_modal(KeyContext::Report, key) {
           app.view = View::List;
           app.refresh()?;
         }
-        _ => {}
-      },
-      View::OpenMenu => match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => app.exit_open_menu(),
-        KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up => app.open_menu_toggle_selection(),
-        KeyCode::Enter => {
+      }
+      // #219: keys resolve through the `open_menu` context. The bound global
+      // `fetch_github` key still refreshes the GitHub status in place.
+      View::OpenMenu => match app.resolve_modal(KeyContext::OpenMenu, key) {
+        Some(ModalAction::OpenMenuClose) => app.exit_open_menu(),
+        Some(ModalAction::OpenMenuToggle) => app.open_menu_toggle_selection(),
+        Some(ModalAction::OpenMenuAccept) => {
           if let Some(url) = app.open_menu_pick(app.open_menu_selected) {
             open_url(&url, &mut app);
           }
         }
-        KeyCode::Char('i') => {
+        Some(ModalAction::OpenMenuIssue) => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Issue) {
             open_url(&url, &mut app);
           }
         }
-        KeyCode::Char('p') => {
+        Some(ModalAction::OpenMenuPr) => {
           if let Some(url) = app.open_menu_pick(LinkTarget::Pr) {
             open_url(&url, &mut app);
           }
@@ -502,6 +513,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // overlay so the user can exit even if the program does not respond to
       // `q`. Process death (natural exit via lazygit's `q`) is detected by
       // the pre-draw `is_alive()` check above and also closes the overlay.
+      //
+      // #219: this `Esc` stays hard-coded by design — it is an *emergency*
+      // detach, and routing it through a rebindable context would silently
+      // steal a keystroke from the child program. See the `modal_keymap`
+      // module note ("What stays hard-coded").
       View::Pty => match key.code {
         KeyCode::Esc => app.close_pty_overlay(),
         _ => {
@@ -534,26 +550,30 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // search) that share the input bar don't inherit a "swallow
       // everything" contract by accident. Esc / Enter / arrows /
       // Tab still exit or navigate; Backspace edits.
-      View::CommandPalette => match key.code {
-        KeyCode::Esc => app.close_command_palette(),
-        KeyCode::Enter => {
+      // #219: close / accept / prev / next resolve through the `palette`
+      // context; every other key is literal input into the fuzzy buffer.
+      View::CommandPalette => match app.resolve_modal(KeyContext::CommandPalette, key) {
+        Some(ModalAction::CommandPaletteClose) => app.close_command_palette(),
+        Some(ModalAction::CommandPaletteAccept) => {
           if let Some(action) = app.accept_command_palette() {
             run_palette_action(terminal, &mut app, action)?;
           }
         }
-        KeyCode::Up => app.palette_cycle_up(),
-        KeyCode::Down | KeyCode::Tab => app.palette_cycle_down(),
-        KeyCode::Backspace => app.palette_pop_char(),
-        KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
-          app.palette_push_char(c);
-        }
-        // Any other char (including the palette trigger `:`, the
-        // help glyph `?`, uppercase letters) is dropped — there is
-        // no palette entry name that could match it. Silently
-        // ignoring is friendlier than appending and producing zero
-        // matches with no explanation.
-        KeyCode::Char(_) => {}
-        _ => {}
+        Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
+        Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
+        _ => match key.code {
+          KeyCode::Backspace => app.palette_pop_char(),
+          KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+            app.palette_push_char(c);
+          }
+          // Any other char (including the palette trigger `:`, the
+          // help glyph `?`, uppercase letters) is dropped — there is
+          // no palette entry name that could match it. Silently
+          // ignoring is friendlier than appending and producing zero
+          // matches with no explanation.
+          KeyCode::Char(_) => {}
+          _ => {}
+        },
       },
     }
 

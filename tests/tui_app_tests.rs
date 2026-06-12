@@ -1085,6 +1085,66 @@ fn confirm_press_y_a_second_time_disarms_the_timer() {
 }
 
 #[test]
+fn countdown_status_uses_rebound_confirm_keys() {
+  // #219 review (P3): the armed/disarmed countdown status copy hard-coded
+  // `y` / `Esc`. When the confirm context's confirm/cancel verbs are rebound,
+  // the instructions must name the live keys, not the defaults.
+  use gwm::tui::modal_keymap::{parse_single, ModalAction};
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmConfirm, vec![parse_single("c").unwrap()])
+    .unwrap();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmCancel, vec![parse_single("x").unwrap()])
+    .unwrap();
+  app.toggle_delete_branch();
+
+  let t0 = Instant::now();
+  app.confirm_press_y(t0); // arms
+  assert!(
+    app.status.contains("press c again or x to cancel"),
+    "armed copy must use the rebound confirm/cancel keys: {}",
+    app.status
+  );
+
+  let action = app.confirm_press_y(t0 + Duration::from_millis(500)); // disarms
+  assert_eq!(action, ConfirmKeyAction::Disarmed);
+  assert!(
+    app.status.contains("press c to re-arm"),
+    "disarmed copy must use the rebound confirm key: {}",
+    app.status
+  );
+}
+
+#[test]
+fn countdown_status_omits_an_unbound_cancel_key() {
+  // #219 review (P2): with `[tui.keys.modal.confirm] cancel = []`, Esc no
+  // longer cancels — the armed status must not advertise a phantom cancel key
+  // (it would tell the user to press a key that does nothing while the delete
+  // timer runs). Drop it instead of falling back to the literal.
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmCancel, vec![])
+    .unwrap();
+  app.toggle_delete_branch();
+  app.confirm_press_y(Instant::now()); // arms
+  assert!(
+    !app.status.contains("Esc") && !app.status.contains("to cancel"),
+    "armed status must not advertise an unbound cancel key: {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("press y again"),
+    "the still-bound confirm key must remain in the copy: {}",
+    app.status
+  );
+}
+
+#[test]
 fn confirm_dismiss_resets_timer_and_returns_to_list() {
   let (_dir, mut app) = make_app();
   app.toggle_delete_branch();
@@ -6474,5 +6534,169 @@ fn request_sync_refuses_while_another_mutation_runs() {
     app.status.contains("before syncing"),
     "status must explain: {}",
     app.status
+  );
+}
+
+// --- contextual modal rebinding (issue #219) -----------------------------
+
+#[test]
+fn create_modal_honours_a_rebound_submit_key() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  // Rebind create.submit from Enter to F2.
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::CreateSubmit,
+      vec![KeyStroke::new(KeyCode::F(2), KeyModifiers::empty())],
+    )
+    .unwrap();
+
+  // Advance Type -> Issue -> Desc using the default `next_field` (Tab).
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+  assert_eq!(app.create_form.field, Field::Desc);
+
+  // The rebound key submits…
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+    CreateKey::Submit
+  );
+  // …and the old default Enter no longer submits (it is unbound now).
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  );
+}
+
+#[test]
+fn create_modal_type_cycle_keys_stay_literal_on_text_fields() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  // On the Desc field, `l` is literal text — it must NOT cycle the type
+  // (the default next_type binding includes `l`, gated on the Type field).
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Issue
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Desc
+  assert_eq!(app.create_form.field, Field::Desc);
+  let before = app.create_form.type_index;
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+    CreateKey::Handled
+  );
+  assert_eq!(
+    app.create_form.type_index, before,
+    "type must not cycle while typing a description"
+  );
+  assert!(
+    app.create_form.desc.contains('l'),
+    "`l` must reach the description buffer as literal text"
+  );
+}
+
+#[test]
+fn resolve_modal_reflects_a_confirm_rebind() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::ConfirmConfirm,
+      vec![KeyStroke::new(KeyCode::Char('o'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  // The inline confirm routing resolves through App::resolve_modal, so a
+  // rebind is observable there: `o` now means confirm, `y` no longer does.
+  assert_eq!(
+    app.resolve_modal(
+      KeyContext::Confirm,
+      KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)
+    ),
+    Some(ModalAction::ConfirmConfirm)
+  );
+  assert_eq!(
+    app.resolve_modal(
+      KeyContext::Confirm,
+      KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+    ),
+    None
+  );
+}
+
+#[test]
+fn link_input_number_context_advertises_its_own_hints() {
+  // #219 review: while typing the number, the hints must resolve submit /
+  // cancel from `[tui.keys.modal.link.input_number]` (including a rebind), not the
+  // choose-target keys.
+  use crossterm::event::{KeyCode, KeyModifiers};
+  use gwm::tui::keymap::{KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  use gwm::tui::HintContext;
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(
+      ModalAction::LinkInputSubmit,
+      vec![KeyStroke::new(KeyCode::Char('x'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  let resolved = HintContext::LinkInputNumber.resolve(&Keymap::defaults(), &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| l == "submit" && k == "x"),
+    "submit hint must show the rebound key, got {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "kind" || l == "move"),
+    "the input-number stage must not advertise choose-target hints: {resolved:?}"
+  );
+}
+
+#[test]
+fn hint_context_switches_to_link_input_number_while_typing() {
+  use gwm::tui::HintContext;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.hint_context(), HintContext::LinkPrompt, "choose-target stage");
+  // Commit a target → InputNumber stage; the statusbar context must follow.
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+  assert_eq!(app.hint_context(), HintContext::LinkInputNumber, "number-input stage");
+}
+
+#[test]
+fn link_modal_binding_on_fetch_key_wins_over_fetch_fallback() {
+  // #293 review: the global fetch shortcut is a FALLBACK after the stage
+  // context, so a contextual binding on that key is reachable. Rebinding the
+  // number-input submit onto `F` (also the default fetch key) must submit,
+  // not refresh.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::LinkPromptKey;
+
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::LinkInputSubmit,
+      vec![KeyStroke::new(KeyCode::Char('F'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue); // → InputNumber stage
+  assert!(
+    matches!(
+      app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE)),
+      LinkPromptKey::Submit
+    ),
+    "a contextual binding on the fetch key must win over the fetch fallback"
   );
 }

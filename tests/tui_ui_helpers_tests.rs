@@ -491,6 +491,174 @@ fn link_target_line_highlights_the_selected_row() {
 }
 
 #[test]
+fn link_target_keys_track_rebinding_per_context() {
+  // #219 review (P3): the Issue / PR direct-pick chips hard-coded `i` / `p`.
+  // They must resolve from the active context's modal bindings so a rebind of
+  // `[tui.keys.modal.link.choose_target]` (or `[tui.keys.modal.open_menu]`) shows through,
+  // and the two contexts stay independent (the whole point of #219).
+  use gwm::tui::link_target_keys;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::HintContext;
+
+  assert_eq!(
+    link_target_keys(HintContext::LinkPrompt, &ModalKeymap::defaults()),
+    ("i".to_string(), "p".to_string()),
+    "defaults must keep the historical i / p direct-pick keys"
+  );
+  assert_eq!(
+    link_target_keys(HintContext::OpenMenu, &ModalKeymap::defaults()),
+    ("i".to_string(), "p".to_string()),
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::LinkChooseIssue, vec![parse_single("x").unwrap()])
+    .unwrap();
+  assert_eq!(
+    link_target_keys(HintContext::LinkPrompt, &modal),
+    ("x".to_string(), "p".to_string()),
+    "rebinding the link choose-target issue key must show through the chip"
+  );
+  assert_eq!(
+    link_target_keys(HintContext::OpenMenu, &modal),
+    ("i".to_string(), "p".to_string()),
+    "the open-menu chips are an independent context and must not change"
+  );
+}
+
+#[test]
+fn config_edit_footer_hints_track_rebinding() {
+  // #219 review (P2): the Settings panel edit footer printed a fixed
+  // `Enter save / Esc cancel`. Once `[tui.keys.modal.config.edit]` is rebound the
+  // handler stops treating Enter/Esc as save/cancel, so the footer must
+  // resolve those hints from the ConfigEdit* modal bindings too.
+  use gwm::tui::config_edit_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  assert_eq!(
+    config_edit_footer_hints(&ModalKeymap::defaults()),
+    vec![
+      ("Enter".to_string(), "save".to_string()),
+      ("Esc".to_string(), "cancel".to_string()),
+    ],
+    "default settings edit footer must read Enter save / Esc cancel"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ConfigEditSubmit, vec![parse_single("Ctrl+s").unwrap()])
+    .unwrap();
+  assert_eq!(
+    config_edit_footer_hints(&modal),
+    vec![
+      ("Ctrl+s".to_string(), "save".to_string()),
+      ("Esc".to_string(), "cancel".to_string()),
+    ],
+    "rebinding config.edit submit must change the save hint"
+  );
+
+  // Unbinding a verb drops it rather than advertising a phantom key.
+  let mut unbound = ModalKeymap::defaults();
+  unbound.apply_override(ModalAction::ConfigEditCancel, vec![]).unwrap();
+  let hints = config_edit_footer_hints(&unbound);
+  assert!(
+    !hints.iter().any(|(_, l)| l == "cancel"),
+    "an unbound cancel must drop from the settings edit footer: {hints:?}"
+  );
+}
+
+#[test]
+fn config_nav_footer_hints_track_rebinding() {
+  // #219 review (P3): the Settings panel *nav* footer (non-edit) still printed
+  // hard-coded Tab / L / Esc / Enter / Space. Resolve the single-key verbs
+  // (section / layer / close / activate) from the Config modal bindings; the
+  // j/k scroll pair stays literal (no single resolved key captures it).
+  use gwm::tui::config_nav_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::{FieldKind, SettingsTab};
+
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None);
+  assert_eq!(
+    all[0],
+    ("j/k".to_string(), "scroll".to_string()),
+    "All tab leads with the literal scroll pair"
+  );
+  assert!(all.iter().any(|(k, l)| k == "Tab" && l == "section"));
+  assert!(all.iter().any(|(k, l)| k == "L" && l == "layer"));
+  assert!(all.iter().any(|(k, l)| k == "Esc" && l == "close"));
+
+  // An editable field advertises `edit`; a Choice field advertises `cycle`.
+  let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
+  assert!(
+    editable.iter().any(|(_, l)| l == "edit"),
+    "editable field footer: {editable:?}"
+  );
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
+  assert!(
+    choice.iter().any(|(_, l)| l == "cycle"),
+    "choice field footer: {choice:?}"
+  );
+
+  // Rebinding close + next_tab shows through.
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ConfigClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  modal
+    .apply_override(ModalAction::ConfigNextTab, vec![parse_single("n").unwrap()])
+    .unwrap();
+  let rebound = config_nav_footer_hints(&modal, SettingsTab::All, None);
+  assert!(
+    rebound.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebound close: {rebound:?}"
+  );
+  assert!(
+    rebound.iter().any(|(k, l)| k == "n" && l == "section"),
+    "rebound section: {rebound:?}"
+  );
+  assert!(
+    !rebound.iter().any(|(k, _)| k == "Tab" || k == "Esc"),
+    "stale Tab / Esc must not linger after the rebind: {rebound:?}"
+  );
+}
+
+#[test]
+fn command_logs_footer_hints_track_rebinding() {
+  // #219 review (P3): the Command Logs overlay footer hard-coded j/k, g/G, y,
+  // Esc. Resolve copy / close from the CommandLogs modal bindings (movement
+  // pairs stay literal, as on Help).
+  use gwm::tui::command_logs_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  let default = command_logs_footer_hints(&ModalKeymap::defaults());
+  assert!(default.iter().any(|(k, l)| k == "j/k" && l == "scroll"));
+  assert!(default.iter().any(|(k, l)| k == "g/G" && l == "top/bottom"));
+  assert!(default.iter().any(|(k, l)| k == "y" && l == "copy"));
+  assert!(default.iter().any(|(k, l)| k == "Esc" && l == "close"));
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::CommandLogsCopy, vec![parse_single("c").unwrap()])
+    .unwrap();
+  modal
+    .apply_override(ModalAction::CommandLogsClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  let rebound = command_logs_footer_hints(&modal);
+  assert!(
+    rebound.iter().any(|(k, l)| k == "c" && l == "copy"),
+    "rebound copy: {rebound:?}"
+  );
+  assert!(
+    rebound.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebound close: {rebound:?}"
+  );
+  assert!(
+    !rebound.iter().any(|(k, l)| k == "y" && l == "copy"),
+    "stale `y copy` must not linger after the rebind: {rebound:?}"
+  );
+}
+
+#[test]
 fn link_prompt_width_stays_compact_on_wide_terminals() {
   assert_eq!(link_prompt_modal_width(80), 64);
   assert_eq!(

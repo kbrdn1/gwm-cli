@@ -309,6 +309,29 @@ fn config_validate_rejects_unknown_schema_keys_with_hint() {
 }
 
 #[test]
+fn config_validate_rejects_malformed_keymap() {
+  // #219 review (P2): `[tui.keys]` deserializes into a raw `toml::Table`, so a
+  // malformed keymap no longer fails `toml::from_str::<Config>`. The validate /
+  // validate-before-write path must run the keymap validators too — otherwise
+  // `gwm config validate` greenlights a config that `load_for_repo` later
+  // rejects.
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n",
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["config", "validate"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("single keystroke"));
+}
+
+#[test]
 fn config_edit_opens_editor_on_config_path() {
   let (dir, _repo) = init_repo();
   fs::write(dir.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();

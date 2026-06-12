@@ -221,12 +221,23 @@ impl KeyStroke {
   /// modifier) matches every variant. Without this, the bound chord and
   /// the runtime event compared unequal on SHIFT-reporting terminals and
   /// every uppercase binding (`G`, `R`, `V`, `H`, …) silently did nothing
-  /// (PR #192). Non-`Char` codes (e.g. `Shift+Tab` → `BackTab`) keep their
-  /// SHIFT bit untouched.
+  /// (PR #192).
+  ///
+  /// `BackTab` gets the same treatment for the same reason: it *is* the
+  /// shifted Tab, but terminals disagree on whether they additionally set
+  /// the `SHIFT` bit (some send bare `BackTab`, others `BackTab` + `SHIFT`,
+  /// kitty `BackTab` + `SHIFT`). We canonicalise to bare `BackTab` so a
+  /// binding written `"BackTab"` matches every variant. Without this the
+  /// modal `prev_field` / `prev_tab` defaults silently stopped firing on
+  /// SHIFT-reporting terminals once they routed through the keymap instead
+  /// of a modifier-blind `match KeyCode::BackTab` (issue #219 review).
   fn normalize(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
     match code {
       KeyCode::Char(c) if modifiers.contains(KeyModifiers::SHIFT) => {
         (KeyCode::Char(c.to_ascii_uppercase()), modifiers - KeyModifiers::SHIFT)
+      }
+      KeyCode::BackTab if modifiers.contains(KeyModifiers::SHIFT) => {
+        (KeyCode::BackTab, modifiers - KeyModifiers::SHIFT)
       }
       _ => (code, modifiers),
     }

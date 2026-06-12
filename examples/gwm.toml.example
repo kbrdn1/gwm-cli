@@ -245,6 +245,56 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [tui]
 # sidebar_position = "left"
 
+# --- TUI keymap: `[tui.keys]` (issues #87 / #219) ----------------------------
+# Remap any TUI key. An override REPLACES the default for that verb; an empty
+# array unbinds it. Run `gwm tui keys` for the full list of actions, contexts,
+# and verbs, and `gwm doctor` to validate overrides.
+#
+# Global list-view verbs are arrays keyed by action slug (multi-key chords
+# like "g g" allowed here):
+# [tui.keys]
+# quit = ["q", "Esc"]
+# down = ["j", "Down"]
+# top  = ["g g"]
+#
+# Modal / overlay verbs are nested under the dedicated `[tui.keys.modal]`
+# namespace, keyed by context (issue #219). The separate namespace keeps a
+# modal context from colliding with a same-named global action (create / help /
+# command_logs / link are both): a global `create` array and a modal
+# `[tui.keys.modal.create]` table can coexist. These are SINGLE keystrokes
+# only — modals have no chord timeout. The same physical key can mean different
+# verbs in different contexts:
+# [tui.keys.modal.create]
+# next_field = ["Tab"]
+# prev_field = ["BackTab"]
+# submit     = ["Enter"]
+# cancel     = ["Esc"]
+#
+# [tui.keys.modal.confirm]
+# confirm       = ["y"]
+# cancel        = ["n", "Esc"]
+# focus_confirm = ["Left", "h"]
+# focus_cancel  = ["Right", "l"]
+# activate      = ["Enter"]
+#
+# The link prompt and the settings editor are two-stage, addressed with a
+# dotted context path:
+# [tui.keys.modal.link.choose_target]
+# issue  = ["i"]
+# pr     = ["p"]
+# next   = ["j", "Down"]
+# prev   = ["k", "Up"]
+# accept = ["Enter"]
+# cancel = ["Esc"]
+#
+# [tui.keys.modal.link.input_number]
+# submit = ["Enter"]
+# cancel = ["Esc"]
+#
+# [tui.keys.modal.config.edit]
+# submit = ["Enter"]
+# cancel = ["Esc"]
+
 # --- TUI launcher: `l` (git_tui) keybinding (issue #75) ----------------------
 # The `l` key suspends the gwm TUI and launches a git TUI on the selected
 # worktree. Placeholders: {path}. Default (no section) → `lazygit -p {path}`

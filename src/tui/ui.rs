@@ -1,5 +1,6 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, Keymap};
+use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
@@ -1667,9 +1668,14 @@ pub fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, 
 /// rebound.
 #[derive(Debug, Clone, Copy)]
 enum Hint {
-  /// Resolve the displayed key from the keymap (honours `[tui.keys]`).
+  /// Resolve the displayed key from the global keymap (honours `[tui.keys]`).
   Key(super::keymap::Action, &'static str),
-  /// A fixed key + label for a non-rebindable contextual keystroke.
+  /// Resolve the displayed key from the contextual modal keymap (honours
+  /// `[tui.keys.modal.<context>]`, issue #219). Used for modal verbs whose hint
+  /// is a single rebindable key (cancel / submit / confirm / issue / pr).
+  Modal(ModalAction, &'static str),
+  /// A fixed key + label for a non-rebindable keystroke or a multi-key
+  /// movement pair (`↑/↓`, `j/k`) that no single resolved key captures.
   Lit(&'static str, &'static str),
 }
 
@@ -1693,8 +1699,12 @@ pub enum HintContext {
   Confirm,
   /// Open issue/PR URL menu.
   OpenMenu,
-  /// Two-stage issue/PR link prompt.
+  /// Issue/PR link prompt, stage 1 — choose issue vs PR.
   LinkPrompt,
+  /// Issue/PR link prompt, stage 2 — typing the number (#219): submit /
+  /// cancel resolve from `[tui.keys.modal.link.input_number]`, not the choose
+  /// stage's keys.
+  LinkInputNumber,
   /// Command palette overlay.
   CommandPalette,
   /// Bootstrap report overlay.
@@ -1720,6 +1730,7 @@ impl HintContext {
       HintContext::Confirm => "confirm",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
+      HintContext::LinkInputNumber => "link",
       HintContext::CommandPalette => "command",
       HintContext::Report => "report",
       HintContext::Help => "help",
@@ -1729,9 +1740,12 @@ impl HintContext {
   }
 
   /// Static hint specs for this context. List-view contexts use rebindable
-  /// [`Hint::Key`] verbs (resolved live by [`Self::resolve`]); modal /
-  /// overlay contexts use [`Hint::Lit`] because their keys are hard-coded
-  /// contextual escape hatches (Esc / Enter / digits), not keymap actions.
+  /// [`Hint::Key`] verbs (resolved against the global keymap); modal /
+  /// overlay contexts use [`Hint::Modal`] for their single-key rebindable
+  /// verbs (resolved against the contextual keymap, issue #219) and
+  /// [`Hint::Lit`] only for movement pairs (`↑/↓`, `j/k`) and the genuinely
+  /// hard-coded escape hatches (the PTY overlay's `Esc`). All resolved live
+  /// by [`Self::resolve`].
   fn hint_specs(self) -> &'static [Hint] {
     use super::keymap::Action::*;
     match self {
@@ -1785,49 +1799,67 @@ impl HintContext {
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
+      // #219: single-key modal verbs use Hint::Modal so a rebind shows
+      // through; multi-key movement pairs (↑/↓, j/k, ←/→) stay literal
+      // because no single resolved key captures them.
       HintContext::Create => &[
-        Hint::Lit("Tab", "field"),
+        Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
-        Hint::Lit("Enter", "submit"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
       HintContext::Confirm => &[
-        Hint::Lit("y", "confirm"),
+        Hint::Modal(ModalAction::ConfirmConfirm, "confirm"),
         Hint::Key(ToggleDeleteBranch, "branch"),
         Hint::Lit("←/→", "move"),
-        Hint::Lit("Enter", "activate"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::ConfirmActivate, "activate"),
+        Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
       ],
       HintContext::OpenMenu => &[
-        Hint::Lit("i", "issue"),
-        Hint::Lit("p", "pr"),
+        Hint::Modal(ModalAction::OpenMenuIssue, "issue"),
+        Hint::Modal(ModalAction::OpenMenuPr, "pr"),
         Hint::Key(FetchGithub, "fetch"),
-        Hint::Lit("Esc", "close"),
+        Hint::Modal(ModalAction::OpenMenuClose, "close"),
       ],
       HintContext::LinkPrompt => &[
-        Hint::Lit("j/k", "move"),
-        Hint::Lit("i/p", "kind"),
-        Hint::Lit("Enter", "link"),
+        Hint::Modal(ModalAction::LinkChoosePrev, "prev"),
+        Hint::Modal(ModalAction::LinkChooseNext, "next"),
+        Hint::Modal(ModalAction::LinkChooseIssue, "issue"),
+        Hint::Modal(ModalAction::LinkChoosePr, "pr"),
+        Hint::Modal(ModalAction::LinkChooseAccept, "link"),
         Hint::Key(FetchGithub, "fetch"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::LinkChooseCancel, "cancel"),
+      ],
+      // #219: while typing the number, submit / cancel come from the
+      // input-number context — not the choose-target keys above.
+      HintContext::LinkInputNumber => &[
+        Hint::Lit("0-9", "number"),
+        Hint::Modal(ModalAction::LinkInputSubmit, "submit"),
+        Hint::Key(FetchGithub, "fetch"),
+        Hint::Modal(ModalAction::LinkInputCancel, "cancel"),
       ],
       HintContext::CommandPalette => &[
         Hint::Lit("↑/↓", "move"),
-        Hint::Lit("Enter", "run"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::CommandPaletteAccept, "run"),
+        Hint::Modal(ModalAction::CommandPaletteClose, "cancel"),
       ],
-      HintContext::Report => &[Hint::Lit("Enter/Esc", "close")],
+      // #219: `close` is a single rebindable verb, so it resolves through the
+      // modal keymap; the scroll/pan pairs stay literal (no single resolved
+      // key captures `j/k` / `h/l`, matching the Create/Confirm convention).
+      HintContext::Report => &[Hint::Modal(ModalAction::ReportClose, "close")],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
-        Hint::Lit("Esc/q", "close"),
+        Hint::Modal(ModalAction::HelpClose, "close"),
       ],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
+      // Rename reuses the create-form input handler, hence the `create`
+      // context's verbs (#290 / #219).
       HintContext::Rename => &[
-        Hint::Lit("Tab", "field"),
+        Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
-        Hint::Lit("Enter", "submit"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
     }
   }
@@ -1837,15 +1869,52 @@ impl HintContext {
   /// binding (issue #217 review) — the same `primary_chord` source the help
   /// overlay and the Issue/PR prompt use. An unbound action is dropped from
   /// the row rather than advertised with a phantom key.
-  pub fn resolve(self, keymap: &super::keymap::Keymap) -> Vec<(String, String)> {
+  pub fn resolve(self, keymap: &super::keymap::Keymap, modal: &ModalKeymap) -> Vec<(String, String)> {
     self
       .hint_specs()
       .iter()
       .filter_map(|h| match h {
-        Hint::Key(action, label) => keymap.primary_chord(*action).map(|k| (k, label.to_string())),
+        // #219: a global verb whose key is claimed by a modal binding in the
+        // active context is resolved as that modal verb first — the event loop
+        // never reaches the global action. Drop the hint rather than advertise
+        // a duplicate key for an unreachable action.
+        Hint::Key(action, label) => keymap
+          .primary_chord(*action)
+          .filter(|k| !self.key_shadowed_by_modal(k, modal))
+          .map(|k| (k, label.to_string())),
+        Hint::Modal(action, label) => modal.primary_key(*action).map(|k| (k, label.to_string())),
         Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
       })
       .collect()
+  }
+
+  /// The modal [`KeyContext`] this hint context renders, when it is a modal /
+  /// overlay surface (the global panes have none). Used to detect a global
+  /// hint key shadowed by a modal binding in the same context.
+  fn modal_context(self) -> Option<KeyContext> {
+    Some(match self {
+      HintContext::Create | HintContext::Rename => KeyContext::Create,
+      HintContext::Confirm => KeyContext::Confirm,
+      HintContext::OpenMenu => KeyContext::OpenMenu,
+      HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
+      HintContext::LinkInputNumber => KeyContext::LinkInputNumber,
+      HintContext::CommandPalette => KeyContext::CommandPalette,
+      HintContext::Report => KeyContext::Report,
+      HintContext::Help => KeyContext::Help,
+      HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
+    })
+  }
+
+  /// `true` when `key` is bound to a modal verb in this context — i.e. the
+  /// modal keymap intercepts it before any global action with the same key.
+  fn key_shadowed_by_modal(self, key: &str, modal: &ModalKeymap) -> bool {
+    match self.modal_context() {
+      Some(ctx) => modal
+        .bindings_for(ctx)
+        .iter()
+        .any(|b| b.keys.iter().any(|ks| ks.to_string() == key)),
+      None => false,
+    }
   }
 }
 
@@ -1890,15 +1959,93 @@ pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
   Line::from(spans).centered()
 }
 
-fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, theme: &Theme) -> Line<'static> {
-  let resolved = ctx.resolve(keymap);
+/// Settings-panel footer hints shown while a field is being edited (#219
+/// review): `save` / `cancel` resolve from the `ConfigEdit*` modal bindings so
+/// a rebind of `[tui.keys.modal.config.edit]` shows through instead of the literal
+/// `Enter` / `Esc`. An unbound verb is dropped rather than advertised with a
+/// phantom key, mirroring the statusbar's `HintContext::resolve`.
+pub fn config_edit_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  [
+    (ModalAction::ConfigEditSubmit, "save"),
+    (ModalAction::ConfigEditCancel, "cancel"),
+  ]
+  .into_iter()
+  .filter_map(|(action, label)| modal.primary_key(action).map(|k| (k, label.to_string())))
+  .collect()
+}
+
+/// Settings-panel footer hints in *navigation* mode (#219 review): the
+/// single-key verbs (`section` / `layer` / `close`, plus `cycle` / `edit` via
+/// `activate`) resolve from the `Config*` modal bindings so a rebind of
+/// `[tui.keys.modal.config]` shows through. The `j/k` scroll pair stays literal —
+/// no single resolved key captures a movement pair (same rule as Help). The
+/// leading verb depends on the active tab / field kind, mirroring the historic
+/// hard-coded branches.
+pub fn config_nav_footer_hints(
+  modal: &ModalKeymap,
+  tab: SettingsTab,
+  selected_kind: Option<FieldKind>,
+) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = Vec::new();
+  if tab == SettingsTab::All {
+    hints.push(("j/k".to_string(), "scroll".to_string()));
+  } else {
+    let label = if selected_kind == Some(FieldKind::Choice) {
+      "cycle"
+    } else {
+      "edit"
+    };
+    if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  for (action, label) in [
+    (ModalAction::ConfigNextTab, "section"),
+    (ModalAction::ConfigToggleLayer, "layer"),
+    (ModalAction::ConfigClose, "close"),
+  ] {
+    if let Some(k) = modal.primary_key(action) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  hints
+}
+
+/// Command Logs overlay footer hints (#219 review): `copy` / `close` resolve
+/// from the `CommandLogs*` modal bindings so a rebind of
+/// `[tui.keys.modal.command_logs]` shows through; the scroll / top-bottom movement
+/// pairs stay literal (no single resolved key captures `j/k` / `g/G`).
+pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  for (action, label) in [
+    (ModalAction::CommandLogsCopy, "copy"),
+    (ModalAction::CommandLogsClose, "close"),
+  ] {
+    if let Some(k) = modal.primary_key(action) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  hints
+}
+
+fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
+  let resolved = ctx.resolve(keymap, modal);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)
 }
 
-fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Keymap, theme: &Theme) {
+fn push_modal_hint(
+  lines: &mut Vec<Line<'static>>,
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+) {
   lines.push(Line::from(String::new()));
-  lines.push(modal_hint_for_context(ctx, keymap, theme));
+  lines.push(modal_hint_for_context(ctx, keymap, modal, theme));
 }
 
 /// Build the single-line statusline (issue #180).
@@ -2110,7 +2257,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Resolve the rebindable hint keys against the live keymap (issue #217
   // review) so a user override shows through, then borrow into the slice
   // `status_line` expects.
-  let resolved = ctx.resolve(&app.keymap);
+  let resolved = ctx.resolve(&app.keymap, &app.modal_keymap);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   let line = status_line(
     ctx.label(),
@@ -2166,7 +2313,7 @@ pub enum HelpRow {
 /// picker-only / non-picker sections render. `HintContext::Picker` is the
 /// `gwm switch` overlay; `Worktrees` / `Status` are the two list-view panes
 /// (same body, the subtitle just names the focused pane).
-pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
+pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintContext) -> Vec<HelpRow> {
   use super::keymap::Action;
 
   let picker_mode = matches!(ctx, HintContext::Picker);
@@ -2202,10 +2349,19 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     }
   };
   // A fixed entry: a non-rebindable surface documented with a literal
-  // key string (Ctrl-C, contextual Enter, create-form / confirm keys).
+  // key string (Ctrl-C, contextual Enter, the picker's hard-coded Enter).
   let fixed = |keys: &str, label: &str| -> HelpRow {
     HelpRow::Entry {
       keys: keys.to_string(),
+      label: label.to_string(),
+    }
+  };
+  // A rebindable modal entry: keys resolved from the contextual keymap
+  // (issue #219) so the create-form / delete-confirm rows track
+  // `[tui.keys.modal.<context>]` overrides instead of a frozen literal.
+  let modal_entry = |action: ModalAction, label: &str| -> HelpRow {
+    HelpRow::Entry {
+      keys: modal.keys_display(action),
       label: label.to_string(),
     }
   };
@@ -2293,10 +2449,47 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(HelpRow::Blank);
     rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
-    rows.push(entry(Action::BrowseLinks, "open menu — i=issue · p=pull request"));
+    // #219 review: the direct-pick keys named in these descriptions are the
+    // OpenMenu / LinkChooseTarget modal verbs — resolve them so a rebind shows
+    // through, and DROP any verb the user explicitly unbound rather than
+    // advertise a phantom literal (matching every other modal hint).
+    let open_picks: Vec<String> = [
+      (ModalAction::OpenMenuIssue, "issue"),
+      (ModalAction::OpenMenuPr, "pull request"),
+    ]
+    .into_iter()
+    .filter_map(|(a, l)| modal.primary_key(a).map(|k| format!("{k}={l}")))
+    .collect();
+    let open_desc = if open_picks.is_empty() {
+      "open menu".to_string()
+    } else {
+      format!("open menu — {}", open_picks.join(" · "))
+    };
+    rows.push(entry(Action::BrowseLinks, &open_desc));
+
+    let key = |a: ModalAction| modal.primary_key(a);
+    let nav: Vec<String> = [ModalAction::LinkChooseNext, ModalAction::LinkChoosePrev]
+      .into_iter()
+      .filter_map(key)
+      .collect();
+    let picks: Vec<String> = [ModalAction::LinkChooseIssue, ModalAction::LinkChoosePr]
+      .into_iter()
+      .filter_map(key)
+      .collect();
+    let mut parts: Vec<String> = Vec::new();
+    match (nav.is_empty(), key(ModalAction::LinkChooseAccept)) {
+      (false, Some(a)) => parts.push(format!("{} + {a}", nav.join("/"))),
+      (false, None) => parts.push(nav.join("/")),
+      (true, Some(a)) => parts.push(a),
+      (true, None) => {}
+    }
+    if !picks.is_empty() {
+      parts.push(format!("or {}", picks.join("/")));
+    }
+    parts.push("then digits".to_string());
     rows.push(entry(
       Action::LinkPrompt,
-      "link prompt — j/k + enter, or i/p, then digits",
+      &format!("link prompt — {}", parts.join(", ")),
     ));
   }
   rows.push(entry(Action::Help, "this help"));
@@ -2308,17 +2501,24 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
       HelpRow::Blank,
       HelpRow::Section("Create Form".to_string()),
       HelpRow::Blank,
-      fixed("←/→ ↑/↓", "change branch type"),
-      fixed("Tab/Shift-Tab", "next/prev field"),
-      fixed("Enter (desc)", "submit"),
-      fixed("Esc", "cancel"),
+      modal_entry(ModalAction::CreatePrevType, "previous branch type"),
+      modal_entry(ModalAction::CreateNextType, "next branch type"),
+      modal_entry(ModalAction::CreateNextField, "next field"),
+      modal_entry(ModalAction::CreatePrevField, "previous field"),
+      modal_entry(ModalAction::CreateSubmit, "submit (on description) / next field"),
+      modal_entry(ModalAction::CreateCancel, "cancel"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
       HelpRow::Blank,
-      fixed("←/→ Tab", "move focus between Confirm / Cancel"),
-      fixed("Enter", "activate the focused button (defaults to Cancel)"),
-      fixed("y", "confirm"),
-      fixed("n / Esc", "cancel"),
+      modal_entry(ModalAction::ConfirmFocusConfirm, "focus the Confirm button"),
+      modal_entry(ModalAction::ConfirmFocusCancel, "focus the Cancel button"),
+      modal_entry(ModalAction::ConfirmToggleFocus, "toggle the focused button"),
+      modal_entry(
+        ModalAction::ConfirmActivate,
+        "activate the focused button (defaults to Cancel)",
+      ),
+      modal_entry(ModalAction::ConfirmConfirm, "confirm"),
+      modal_entry(ModalAction::ConfirmCancel, "cancel"),
     ]);
   }
   rows
@@ -2329,7 +2529,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
 /// `tests/tui_chord_tests.rs` asserts against: every entry renders as
 /// `  {keys:<13} {label}`, sections / title as their bare text, blanks
 /// as empty strings. The width 13 is wide enough for `Ctrl+Shift+Tab`.
-pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
+pub fn help_lines(km: &super::keymap::Keymap, modal: &ModalKeymap, picker_mode: bool) -> Vec<String> {
   // The bool signature is kept for `gwm tui keys` and the chord tests; map
   // it to the context enum (issue #217). The list-view help body is the same
   // for either pane, so `Worktrees` stands in for the non-picker case.
@@ -2338,7 +2538,7 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
   } else {
     HintContext::Worktrees
   };
-  help_rows(km, ctx)
+  help_rows(km, modal, ctx)
     .into_iter()
     .map(|row| match row {
       HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
@@ -2399,7 +2599,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // Use the underlying pane context, not the view-priority `hint_context`
   // (which would be `Help` while this overlay is up) — `?` documents the
   // pane you opened it from, and the picker gating depends on it.
-  let rows = help_rows(&app.keymap, app.pane_hint_context());
+  let rows = help_rows(&app.keymap, &app.modal_keymap, app.pane_hint_context());
 
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
@@ -2477,7 +2677,7 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   let x_scroll = app.help_x_scroll;
   f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
   f.render_widget(
-    modal_hint_for_context(HintContext::Help, &app.keymap, &app.theme),
+    modal_hint_for_context(HintContext::Help, &app.keymap, &app.modal_keymap, &app.theme),
     footer_area,
   );
 }
@@ -2580,18 +2780,11 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let x_scroll = app.command_logs.x_scroll;
   f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
-  f.render_widget(
-    modal_hint_line(
-      &[
-        ("j/k", "scroll"),
-        ("g/G", "top/bottom"),
-        ("y", "copy"),
-        ("Esc", "close"),
-      ],
-      &app.theme,
-    ),
-    footer_area,
-  );
+  // #219 review: copy / close resolve from the command_logs modal bindings so
+  // a rebind shows through; the scroll / top-bottom pairs stay literal.
+  let footer_owned = command_logs_footer_hints(&app.modal_keymap);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
 /// Render a vertical scrollbar on the right edge of `area` when the content
@@ -2757,16 +2950,15 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
-  // the current tab / edit mode.
-  let footer_hints: Vec<(&str, &str)> = if editing {
-    vec![("Enter", "save"), ("Esc", "cancel")]
-  } else if tab == SettingsTab::All {
-    vec![("j/k", "scroll"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
-  } else if selected_kind == Some(FieldKind::Choice) {
-    vec![("Space", "cycle"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+  // the current tab / edit mode. Both the edit and nav rows resolve their
+  // single-key verbs from the Config* modal bindings (#219 review) so a rebind
+  // of `[tui.keys.modal.config(.edit)]` shows through instead of literal keys.
+  let footer_owned = if editing {
+    config_edit_footer_hints(&app.modal_keymap)
   } else {
-    vec![("Enter", "edit"), ("Tab", "section"), ("L", "layer"), ("Esc", "close")]
+    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind)
   };
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
   let block = overlay_block(accent);
   let inner = block.inner(area);
@@ -2910,7 +3102,12 @@ fn draw_create(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(HintContext::Create, &app.keymap, &app.theme)),
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Create,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      )),
       inner[4],
     );
   }
@@ -3095,20 +3292,39 @@ pub fn help_body_section_color(theme: &Theme) -> Color {
   theme.locked
 }
 
+/// Direct-pick keys (`issue`, `pr`) for the link / open-menu target chips,
+/// resolved from the active context's modal bindings (#219 review) so a
+/// rebind of `[tui.keys.modal.link.choose_target]` / `[tui.keys.modal.open_menu]` shows
+/// through instead of the literal `i` / `p`. An unbound verb yields an empty
+/// string — the chip then renders label-only rather than a phantom key.
+pub fn link_target_keys(ctx: HintContext, modal: &ModalKeymap) -> (String, String) {
+  let (issue, pr) = match ctx {
+    HintContext::OpenMenu => (ModalAction::OpenMenuIssue, ModalAction::OpenMenuPr),
+    _ => (ModalAction::LinkChooseIssue, ModalAction::LinkChoosePr),
+  };
+  (
+    modal.primary_key(issue).unwrap_or_default(),
+    modal.primary_key(pr).unwrap_or_default(),
+  )
+}
+
 pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
-  let mut lines = overlay_title_lines(title, accent);
-  lines.extend(github_status_lines(app, 56));
-  lines.push(Line::from(""));
-  lines.push(link_target_line("i", "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
-  lines.push(link_target_line("p", "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
   let ctx = if title == "Link" {
     HintContext::LinkPrompt
   } else {
     HintContext::OpenMenu
   };
-  push_modal_hint(&mut lines, ctx, &app.keymap, &app.theme);
+  // #219: the direct-pick chips track the active context's issue/pr bindings
+  // (like the footer below) so a rebind shows through instead of `i` / `p`.
+  let (issue_key, pr_key) = link_target_keys(ctx, &app.modal_keymap);
+  let mut lines = overlay_title_lines(title, accent);
+  lines.extend(github_status_lines(app, 56));
+  lines.push(Line::from(""));
+  lines.push(link_target_line(&issue_key, "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
+  lines.push(link_target_line(&pr_key, "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
+  push_modal_hint(&mut lines, ctx, &app.keymap, &app.modal_keymap, &app.theme);
   lines
 }
 
@@ -3254,7 +3470,12 @@ fn draw_confirm(f: &mut Frame, app: &App) {
     );
 
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(HintContext::Confirm, &app.keymap, &app.theme)),
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Confirm,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      )),
       inner[4],
     );
   }
@@ -3405,7 +3626,12 @@ fn draw_report(f: &mut Frame, app: &App) {
   );
   render_section(f, layout[2], " Logs ", SectionBody::new(&logs), accent, 0, None);
   f.render_widget(
-    Paragraph::new(modal_hint_for_context(HintContext::Report, &app.keymap, &app.theme)),
+    Paragraph::new(modal_hint_for_context(
+      HintContext::Report,
+      &app.keymap,
+      &app.modal_keymap,
+      &app.theme,
+    )),
     layout[4],
   );
 }
@@ -3592,7 +3818,13 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
         accent,
       );
       lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
-      push_modal_hint(&mut lines, HintContext::LinkPrompt, &app.keymap, &app.theme);
+      push_modal_hint(
+        &mut lines,
+        HintContext::LinkInputNumber,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      );
       lines
     }
   };
@@ -3738,7 +3970,12 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
       inner[2],
     );
     f.render_widget(
-      Paragraph::new(modal_hint_for_context(HintContext::Rename, &app.keymap, &app.theme)),
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Rename,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      )),
       inner[4],
     );
   }
@@ -3832,6 +4069,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     Paragraph::new(modal_hint_for_context(
       HintContext::CommandPalette,
       &app.keymap,
+      &app.modal_keymap,
       &app.theme,
     )),
     layout[6],

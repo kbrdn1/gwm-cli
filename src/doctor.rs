@@ -107,6 +107,13 @@ pub struct DoctorCtx<'a> {
   pub repo_workdir: &'a Path,
   pub repo: &'a git2::Repository,
   pub config: &'a Config,
+  /// Global config layer to merge under the repo `.gwm.toml` when a check
+  /// re-reads the on-disk config (the `[tui.keys]` keymap check). Threaded
+  /// explicitly — rather than read ambiently via `global_config_path()` — so
+  /// `doctor::run` stays deterministic for embedders and unit tests that
+  /// inject an isolated context (issue #219 review). `None` skips the global
+  /// layer entirely.
+  pub global_config_path: Option<&'a Path>,
 }
 
 pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
@@ -157,11 +164,40 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
 fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
   let name = "[tui.keys] keymap resolves";
 
-  let keymap = match ctx.config.tui.keys.resolved_keymap() {
+  // Re-derive `[tui.keys]` from the on-disk config (#219 review): the lenient
+  // `repo_context_lenient` returns `Config::default()` when `load_for_repo`
+  // rejects the user's file, so validating `ctx.config` here would silently
+  // OK a config that actually refuses to start the TUI. The global layer is
+  // the one threaded into the context (not an ambient `global_config_path()`
+  // read) so the check stays deterministic for injected contexts. Fall back to
+  // `ctx.config` only when the *merge* fails — a parse / shape error already
+  // surfaced by `check_config_parses`.
+  let keys = match Config::merge_layered(ctx.repo_workdir, ctx.global_config_path) {
+    Ok(cfg) => cfg.tui.keys,
+    Err(_) => ctx.config.tui.keys.clone(),
+  };
+
+  let keymap = match keys.resolved_keymap() {
     Ok(km) => km,
     Err(e) => {
       return Check::failed(name, format!("{}", e))
         .with_hint("fix the `[tui.keys]` entry called out above; the full list of action slugs is `gwm tui keys`");
+    }
+  };
+
+  // Issue #219: the contextual modal keymap (`[tui.keys.modal.<context>]`) is
+  // validated the same way — an unknown context / verb, a multi-stroke
+  // chord, or a per-context conflict surfaces here with the offending
+  // coordinate so `gwm doctor` flags it before the user hits it live.
+  // #219 review (P2): resolve it *before* the quit warning so a hard modal
+  // error (Failed) is never downgraded to the `quit` Warning when a config
+  // carries both an unbound `quit` and an invalid modal binding.
+  let modal = match keys.resolved_modal_keymap() {
+    Ok(mk) => mk,
+    Err(e) => {
+      return Check::failed(name, format!("{}", e)).with_hint(
+        "fix the `[tui.keys.modal.<context>]` entry called out above; `gwm tui keys` lists every context and verb",
+      );
     }
   };
 
@@ -192,7 +228,11 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
   // `gwm doctor` output and misleading the user about how many
   // actions are actually reachable.
   let bound_count = bindings.iter().filter(|b| !b.chords.is_empty()).count();
-  Check::ok(name, format!("{} action(s) bound", bound_count))
+  let modal_bound = modal.list().iter().filter(|b| !b.keys.is_empty()).count();
+  Check::ok(
+    name,
+    format!("{} global + {} modal binding(s) bound", bound_count, modal_bound),
+  )
 }
 
 /// Check #1: `.gwm.toml` parses cleanly. Missing config is fine — defaults
