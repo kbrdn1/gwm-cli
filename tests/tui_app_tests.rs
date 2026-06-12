@@ -6476,3 +6476,97 @@ fn request_sync_refuses_while_another_mutation_runs() {
     app.status
   );
 }
+
+// --- contextual modal rebinding (issue #219) -----------------------------
+
+#[test]
+fn create_modal_honours_a_rebound_submit_key() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  // Rebind create.submit from Enter to F2.
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::CreateSubmit,
+      vec![KeyStroke::new(KeyCode::F(2), KeyModifiers::empty())],
+    )
+    .unwrap();
+
+  // Advance Type -> Issue -> Desc using the default `next_field` (Tab).
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+  assert_eq!(app.create_form.field, Field::Desc);
+
+  // The rebound key submits…
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+    CreateKey::Submit
+  );
+  // …and the old default Enter no longer submits (it is unbound now).
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  );
+}
+
+#[test]
+fn create_modal_type_cycle_keys_stay_literal_on_text_fields() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  // On the Desc field, `l` is literal text — it must NOT cycle the type
+  // (the default next_type binding includes `l`, gated on the Type field).
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Issue
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Desc
+  assert_eq!(app.create_form.field, Field::Desc);
+  let before = app.create_form.type_index;
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+    CreateKey::Handled
+  );
+  assert_eq!(
+    app.create_form.type_index, before,
+    "type must not cycle while typing a description"
+  );
+  assert!(
+    app.create_form.desc.contains('l'),
+    "`l` must reach the description buffer as literal text"
+  );
+}
+
+#[test]
+fn resolve_modal_reflects_a_confirm_rebind() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::ConfirmConfirm,
+      vec![KeyStroke::new(KeyCode::Char('o'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  // The inline confirm routing resolves through App::resolve_modal, so a
+  // rebind is observable there: `o` now means confirm, `y` no longer does.
+  assert_eq!(
+    app.resolve_modal(
+      KeyContext::Confirm,
+      KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)
+    ),
+    Some(ModalAction::ConfirmConfirm)
+  );
+  assert_eq!(
+    app.resolve_modal(
+      KeyContext::Confirm,
+      KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+    ),
+    None
+  );
+}

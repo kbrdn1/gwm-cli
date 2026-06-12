@@ -2122,26 +2122,30 @@ impl App {
       return CreateKey::Handled;
     }
     let on_type = self.create_form.field == Field::Type;
-    match key.code {
-      KeyCode::Esc => return CreateKey::Cancel,
-      KeyCode::Tab => self.create_next_field(),
-      KeyCode::BackTab => self.create_prev_field(),
-      KeyCode::Enter => {
+    // #219: verbs resolve through the `create` context. The type-cycling
+    // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
+    // Type field; on a text field their keys fall through to literal input
+    // so `h` / `l` are never swallowed while typing a description.
+    match self.resolve_modal(KeyContext::Create, key) {
+      Some(ModalAction::CreateCancel) => return CreateKey::Cancel,
+      Some(ModalAction::CreateNextField) => self.create_next_field(),
+      Some(ModalAction::CreatePrevField) => self.create_prev_field(),
+      Some(ModalAction::CreateSubmit) => {
         if self.create_form.field == Field::Desc {
           return CreateKey::Submit;
         }
         self.create_next_field();
       }
-      KeyCode::Up | KeyCode::Left if on_type => self.create_prev_type(),
-      KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
-      KeyCode::Char('h') if on_type => self.create_prev_type(),
-      KeyCode::Char('l') if on_type => self.create_next_type(),
-      KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
-        self.status = "issue accepts digits only".into();
-      }
-      KeyCode::Char(c) if !on_type => self.create_push_char(c),
-      KeyCode::Backspace if !on_type => self.create_pop_char(),
-      _ => {}
+      Some(ModalAction::CreatePrevType) if on_type => self.create_prev_type(),
+      Some(ModalAction::CreateNextType) if on_type => self.create_next_type(),
+      _ => match key.code {
+        KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
+          self.status = "issue accepts digits only".into();
+        }
+        KeyCode::Char(c) if !on_type => self.create_push_char(c),
+        KeyCode::Backspace if !on_type => self.create_pop_char(),
+        _ => {}
+      },
     }
     CreateKey::Handled
   }
@@ -3076,26 +3080,32 @@ impl App {
     if self.key_matches_action(key, Action::FetchGithub) {
       return LinkPromptKey::Refresh;
     }
-    match (self.link_prompt.stage, key.code) {
-      (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
-      // ChooseTarget: a vertical selectable list. j/k (and arrows) move the
-      // highlight, Enter links the highlighted row, i/p stay direct picks.
-      // With exactly two targets, up and down land on the same other row, so
-      // a single flip serves j/k/Up/Down alike.
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up) => {
-        self.link_prompt.toggle_selection()
-      }
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => self.link_prompt_choose(LinkTarget::Issue),
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => self.link_prompt_choose(LinkTarget::Pr),
-      (LinkPromptStage::ChooseTarget, KeyCode::Enter) => {
-        let target = self.link_prompt.selected;
-        self.link_prompt_choose(target);
-      }
-      // InputNumber: type the digits, Enter submits, Backspace deletes.
-      (LinkPromptStage::InputNumber, KeyCode::Enter) => return LinkPromptKey::Submit,
-      (LinkPromptStage::InputNumber, KeyCode::Char(c)) => self.link_prompt_push_char(c),
-      (LinkPromptStage::InputNumber, KeyCode::Backspace) => self.link_prompt_pop_char(),
-      _ => {}
+    // #219: each stage is its own modal context. ChooseTarget is a vertical
+    // two-row picker — `next` / `prev` both flip the highlight (a single
+    // flip serves j/k/Up/Down alike), while `issue` / `pr` are direct picks.
+    // InputNumber routes `submit` / `cancel` through the context and treats
+    // everything else as digit input.
+    match self.link_prompt.stage {
+      LinkPromptStage::ChooseTarget => match self.resolve_modal(KeyContext::LinkChooseTarget, key) {
+        Some(ModalAction::LinkChooseCancel) => return LinkPromptKey::Cancel,
+        Some(ModalAction::LinkChooseNext) | Some(ModalAction::LinkChoosePrev) => self.link_prompt.toggle_selection(),
+        Some(ModalAction::LinkChooseIssue) => self.link_prompt_choose(LinkTarget::Issue),
+        Some(ModalAction::LinkChoosePr) => self.link_prompt_choose(LinkTarget::Pr),
+        Some(ModalAction::LinkChooseAccept) => {
+          let target = self.link_prompt.selected;
+          self.link_prompt_choose(target);
+        }
+        _ => {}
+      },
+      LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
+        Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
+        Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,
+        _ => match key.code {
+          KeyCode::Char(c) => self.link_prompt_push_char(c),
+          KeyCode::Backspace => self.link_prompt_pop_char(),
+          _ => {}
+        },
+      },
     }
     LinkPromptKey::Handled
   }
