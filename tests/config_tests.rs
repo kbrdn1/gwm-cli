@@ -1963,7 +1963,7 @@ command = "lazygit"
   assert_eq!(m1.open_in, MacroOpenMode::Pty);
 }
 
-// --- [tui.keys.<context>] contextual modal bindings (issue #219) ---------
+// --- [tui.keys.modal.<context>] contextual modal bindings (issue #219) ---
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use gwm::tui::keymap::KeyStroke;
@@ -1982,7 +1982,7 @@ fn modal_keys_nested_context_resolves() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.confirm]
+[tui.keys.modal.confirm]
 confirm = ["o"]
 cancel  = ["n", "Esc"]
 "#,
@@ -2004,10 +2004,10 @@ fn modal_keys_link_stage_uses_dotted_table() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.link.choose_target]
+[tui.keys.modal.link.choose_target]
 issue = ["x"]
 
-[tui.keys.link.input_number]
+[tui.keys.modal.link.input_number]
 submit = ["Right"]
 "#,
   )
@@ -2030,10 +2030,10 @@ fn modal_keys_config_edit_substage_resolves() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.config]
+[tui.keys.modal.config]
 close = ["q"]
 
-[tui.keys.config.edit]
+[tui.keys.modal.config.edit]
 cancel = ["Backspace"]
 "#,
   )
@@ -2056,7 +2056,7 @@ fn modal_keys_global_and_contextual_coexist() {
 [tui.keys]
 quit = ["Q"]
 
-[tui.keys.confirm]
+[tui.keys.modal.confirm]
 confirm = ["o"]
 "#,
   )
@@ -2074,12 +2074,49 @@ confirm = ["o"]
 }
 
 #[test]
+fn modal_namespace_does_not_collide_with_a_same_named_global_action() {
+  // #219 review (P2): before the dedicated `[tui.keys.modal]` namespace, a
+  // global `[tui.keys] create = ["c"]` and a modal `[tui.keys.create]` shared
+  // the `tui.keys.create` path. The layered merge saw array-vs-table at the
+  // same path, replaced the global array with the modal table, and silently
+  // dropped the user's global override (`resolved_keymap` then skipped the
+  // table). With the disjoint namespace the two live at different paths
+  // (`tui.keys.create` vs `tui.keys.modal.create`) and both survive the merge.
+  let global = TempDir::new().unwrap();
+  let global_path = global.path().join("global.toml");
+  std::fs::write(&global_path, "[tui.keys]\ncreate = [\"c\"]\n").unwrap();
+  let repo = TempDir::new().unwrap();
+  std::fs::write(
+    repo.path().join(CONFIG_FILE),
+    "[tui.keys.modal.create]\ncancel = [\"x\"]\n",
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(repo.path(), Some(&global_path)).unwrap();
+
+  // The global `create` override survives the merge (was silently lost before).
+  let km = cfg.tui.keys.resolved_keymap().unwrap();
+  assert_eq!(
+    km.primary_chord(gwm::tui::keymap::Action::Create).as_deref(),
+    Some("c"),
+    "the global create override must survive a same-named modal context"
+  );
+
+  // ...and the modal `create.cancel` override resolves independently.
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(
+    mk.resolve(KeyContext::Create, &kc('x')),
+    Some(ModalAction::CreateCancel)
+  );
+}
+
+#[test]
 fn modal_keys_reject_unknown_context() {
   let dir = TempDir::new().unwrap();
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.confrm]
+[tui.keys.modal.confrm]
 confirm = ["y"]
 "#,
   )
@@ -2094,7 +2131,7 @@ fn modal_keys_reject_unknown_verb() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.confirm]
+[tui.keys.modal.confirm]
 gallop = ["y"]
 "#,
   )
@@ -2109,7 +2146,7 @@ fn modal_keys_reject_multistroke_chord() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.confirm]
+[tui.keys.modal.confirm]
 confirm = ["g g"]
 "#,
   )
@@ -2124,7 +2161,7 @@ fn modal_keys_reject_in_context_conflict() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.confirm]
+[tui.keys.modal.confirm]
 confirm = ["x"]
 cancel  = ["x"]
 "#,
@@ -2140,7 +2177,7 @@ fn modal_keys_reject_array_directly_under_group() {
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
-[tui.keys.link]
+[tui.keys.modal.link]
 issue = ["i"]
 "#,
   )

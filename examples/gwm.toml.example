@@ -257,16 +257,20 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # down = ["j", "Down"]
 # top  = ["g g"]
 #
-# Modal / overlay verbs are nested sub-tables keyed by context (issue #219).
-# These are SINGLE keystrokes only — modals have no chord timeout. The same
-# physical key can mean different verbs in different contexts:
-# [tui.keys.create]
+# Modal / overlay verbs are nested under the dedicated `[tui.keys.modal]`
+# namespace, keyed by context (issue #219). The separate namespace keeps a
+# modal context from colliding with a same-named global action (create / help /
+# command_logs / link are both): a global `create` array and a modal
+# `[tui.keys.modal.create]` table can coexist. These are SINGLE keystrokes
+# only — modals have no chord timeout. The same physical key can mean different
+# verbs in different contexts:
+# [tui.keys.modal.create]
 # next_field = ["Tab"]
 # prev_field = ["BackTab"]
 # submit     = ["Enter"]
 # cancel     = ["Esc"]
 #
-# [tui.keys.confirm]
+# [tui.keys.modal.confirm]
 # confirm       = ["y"]
 # cancel        = ["n", "Esc"]
 # focus_confirm = ["Left", "h"]
@@ -275,7 +279,7 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # The link prompt and the settings editor are two-stage, addressed with a
 # dotted context path:
-# [tui.keys.link.choose_target]
+# [tui.keys.modal.link.choose_target]
 # issue  = ["i"]
 # pr     = ["p"]
 # next   = ["j", "Down"]
@@ -283,11 +287,11 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # accept = ["Enter"]
 # cancel = ["Esc"]
 #
-# [tui.keys.link.input_number]
+# [tui.keys.modal.link.input_number]
 # submit = ["Enter"]
 # cancel = ["Esc"]
 #
-# [tui.keys.config.edit]
+# [tui.keys.modal.config.edit]
 # submit = ["Enter"]
 # cancel = ["Esc"]
 

@@ -872,14 +872,14 @@ fn doctor_reports_modal_binding_count_on_default_keymap() {
 
 #[test]
 fn doctor_fails_on_in_context_modal_conflict() {
-  // A `[tui.keys.confirm]` block binding two verbs to the same key is a
+  // A `[tui.keys.modal.confirm]` block binding two verbs to the same key is a
   // per-context conflict. Written to disk (load-time validation rejects it, so
   // the lenient doctor context defaults ctx.config away) to prove `gwm doctor`
   // re-reads the file and independently catches it.
   let (dir, repo) = init_repo();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[tui.keys.confirm]\nconfirm = [\"x\"]\ncancel = [\"x\"]\n",
+    "[tui.keys.modal.confirm]\nconfirm = [\"x\"]\ncancel = [\"x\"]\n",
   )
   .unwrap();
   let config = Config::default();
@@ -905,7 +905,7 @@ fn doctor_modal_error_outranks_the_quit_warning() {
   let (dir, repo) = init_repo();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[tui.keys]\nquit = []\n\n[tui.keys.confirm]\nconfirm = [\"g g\"]\n",
+    "[tui.keys]\nquit = []\n\n[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n",
   )
   .unwrap();
   let config = Config::default();
@@ -940,7 +940,7 @@ fn doctor_fails_on_disk_modal_error_even_when_context_defaulted() {
   let (dir, repo) = init_repo();
   std::fs::write(
     dir.path().join(".gwm.toml"),
-    "[tui.keys.confirm]\nconfirm = [\"g g\"]\n",
+    "[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n",
   )
   .unwrap();
   // The file must be load-invalid (so the lenient loader would default it).

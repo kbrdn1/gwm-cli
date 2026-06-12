@@ -176,7 +176,7 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
     }
   };
 
-  // Issue #219: the contextual modal keymap (`[tui.keys.<context>]`) is
+  // Issue #219: the contextual modal keymap (`[tui.keys.modal.<context>]`) is
   // validated the same way — an unknown context / verb, a multi-stroke
   // chord, or a per-context conflict surfaces here with the offending
   // coordinate so `gwm doctor` flags it before the user hits it live.
@@ -187,7 +187,7 @@ fn check_tui_keymap(ctx: &DoctorCtx<'_>) -> Check {
     Ok(mk) => mk,
     Err(e) => {
       return Check::failed(name, format!("{}", e)).with_hint(
-        "fix the `[tui.keys.<context>]` entry called out above; `gwm tui keys` lists every context and verb",
+        "fix the `[tui.keys.modal.<context>]` entry called out above; `gwm tui keys` lists every context and verb",
       );
     }
   };

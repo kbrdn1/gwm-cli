@@ -34,18 +34,24 @@
 //!
 //! ## Config surface
 //!
-//! Bindings live under `[tui.keys.<context-path>]` in `.gwm.toml`, nested
-//! below the existing global `[tui.keys]` table:
+//! Bindings live under `[tui.keys.modal.<context-path>]` in `.gwm.toml`,
+//! nested below a dedicated `modal` namespace inside the global `[tui.keys]`
+//! table. The separate namespace keeps a modal context from colliding with a
+//! same-named global action (`create` / `help` / `command_logs` / `link` are
+//! both) at the `tui.keys.<name>` path — a collision the layered merge would
+//! otherwise resolve by silently dropping the global override (issue #219
+//! review):
 //!
 //! ```toml
-//! [tui.keys]            # global verbs — unchanged
-//! quit = ["q"]
+//! [tui.keys]                  # global verbs — arrays, unchanged
+//! quit   = ["q"]
+//! create = ["c"]              # global action; coexists with the modal below
 //!
-//! [tui.keys.confirm]    # contextual verbs — new
+//! [tui.keys.modal.confirm]    # contextual verbs — single strokes
 //! confirm = ["y"]
 //! cancel  = ["n", "Esc"]
 //!
-//! [tui.keys.link.choose_target]
+//! [tui.keys.modal.link.choose_target]
 //! issue = ["i"]
 //! pr    = ["p"]
 //! ```
@@ -64,8 +70,8 @@ use std::collections::HashMap;
 
 /// One modal / overlay surface whose keys are independently rebindable.
 ///
-/// `config_path` is the dotted key under `[tui.keys]` that addresses the
-/// context's sub-table (`confirm`, `link.choose_target`, `config.edit`).
+/// `config_path` is the dotted key under `[tui.keys.modal]` that addresses
+/// the context's sub-table (`confirm`, `link.choose_target`, `config.edit`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum KeyContext {
   /// Create-worktree modal (also reused by the rename / `View::Edit` modal).
@@ -95,7 +101,7 @@ pub enum KeyContext {
 }
 
 impl KeyContext {
-  /// Dotted key under `[tui.keys]` addressing this context's sub-table.
+  /// Dotted key under `[tui.keys.modal]` addressing this context's sub-table.
   pub fn config_path(self) -> &'static str {
     match self {
       KeyContext::Create => "create",
@@ -113,7 +119,7 @@ impl KeyContext {
   }
 
   /// Inverse of [`Self::config_path`] — used by the config walker to map a
-  /// `[tui.keys.<path>]` sub-table back to a typed context.
+  /// `[tui.keys.modal.<path>]` sub-table back to a typed context.
   pub fn from_config_path(path: &str) -> Option<Self> {
     Self::all().iter().copied().find(|c| c.config_path() == path)
   }
@@ -160,7 +166,7 @@ macro_rules! define_modal_actions {
         match self { $( $( ModalAction::$variant => KeyContext::$ctx, )* )* }
       }
 
-      /// The context-local verb slug used under `[tui.keys.<context>]`.
+      /// The context-local verb slug used under `[tui.keys.modal.<context>]`.
       pub fn verb(self) -> &'static str {
         match self { $( $( ModalAction::$variant => $verb, )* )* }
       }
@@ -263,7 +269,7 @@ define_modal_actions! {
 
 impl ModalAction {
   /// Resolve a `(context, verb-slug)` pair to a typed verb. Used by the
-  /// config walker to translate `[tui.keys.<context>].<verb>` keys.
+  /// config walker to translate `[tui.keys.modal.<context>].<verb>` keys.
   pub fn from_context_verb(ctx: KeyContext, verb: &str) -> Option<Self> {
     Self::all().find(|a| a.context() == ctx && a.verb() == verb)
   }
@@ -361,7 +367,7 @@ impl ModalKeymap {
     for k in &keys {
       if let Some(prev) = map.get(k) {
         return Err(GwmError::Config(format!(
-          "tui.keys.{}: key {} bound to both {:?} and {:?} — conflict",
+          "context {}: key {} bound to both {:?} and {:?} — conflict",
           ctx.config_path(),
           k,
           prev.verb(),

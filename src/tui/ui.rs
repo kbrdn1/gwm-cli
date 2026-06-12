@@ -1671,7 +1671,7 @@ enum Hint {
   /// Resolve the displayed key from the global keymap (honours `[tui.keys]`).
   Key(super::keymap::Action, &'static str),
   /// Resolve the displayed key from the contextual modal keymap (honours
-  /// `[tui.keys.<context>]`, issue #219). Used for modal verbs whose hint
+  /// `[tui.keys.modal.<context>]`, issue #219). Used for modal verbs whose hint
   /// is a single rebindable key (cancel / submit / confirm / issue / pr).
   Modal(ModalAction, &'static str),
   /// A fixed key + label for a non-rebindable keystroke or a multi-key
@@ -1702,7 +1702,7 @@ pub enum HintContext {
   /// Issue/PR link prompt, stage 1 — choose issue vs PR.
   LinkPrompt,
   /// Issue/PR link prompt, stage 2 — typing the number (#219): submit /
-  /// cancel resolve from `[tui.keys.link.input_number]`, not the choose
+  /// cancel resolve from `[tui.keys.modal.link.input_number]`, not the choose
   /// stage's keys.
   LinkInputNumber,
   /// Command palette overlay.
@@ -1961,7 +1961,7 @@ pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
 
 /// Settings-panel footer hints shown while a field is being edited (#219
 /// review): `save` / `cancel` resolve from the `ConfigEdit*` modal bindings so
-/// a rebind of `[tui.keys.config.edit]` shows through instead of the literal
+/// a rebind of `[tui.keys.modal.config.edit]` shows through instead of the literal
 /// `Enter` / `Esc`. An unbound verb is dropped rather than advertised with a
 /// phantom key, mirroring the statusbar's `HintContext::resolve`.
 pub fn config_edit_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
@@ -1977,7 +1977,7 @@ pub fn config_edit_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
 /// Settings-panel footer hints in *navigation* mode (#219 review): the
 /// single-key verbs (`section` / `layer` / `close`, plus `cycle` / `edit` via
 /// `activate`) resolve from the `Config*` modal bindings so a rebind of
-/// `[tui.keys.config]` shows through. The `j/k` scroll pair stays literal —
+/// `[tui.keys.modal.config]` shows through. The `j/k` scroll pair stays literal —
 /// no single resolved key captures a movement pair (same rule as Help). The
 /// leading verb depends on the active tab / field kind, mirroring the historic
 /// hard-coded branches.
@@ -2013,7 +2013,7 @@ pub fn config_nav_footer_hints(
 
 /// Command Logs overlay footer hints (#219 review): `copy` / `close` resolve
 /// from the `CommandLogs*` modal bindings so a rebind of
-/// `[tui.keys.command_logs]` shows through; the scroll / top-bottom movement
+/// `[tui.keys.modal.command_logs]` shows through; the scroll / top-bottom movement
 /// pairs stay literal (no single resolved key captures `j/k` / `g/G`).
 pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   let mut hints: Vec<(String, String)> = vec![
@@ -2358,7 +2358,7 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   };
   // A rebindable modal entry: keys resolved from the contextual keymap
   // (issue #219) so the create-form / delete-confirm rows track
-  // `[tui.keys.<context>]` overrides instead of a frozen literal.
+  // `[tui.keys.modal.<context>]` overrides instead of a frozen literal.
   let modal_entry = |action: ModalAction, label: &str| -> HelpRow {
     HelpRow::Entry {
       keys: modal.keys_display(action),
@@ -2449,10 +2449,28 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(HelpRow::Blank);
     rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
-    rows.push(entry(Action::BrowseLinks, "open menu — i=issue · p=pull request"));
+    // #219 review: the direct-pick keys named in these descriptions are the
+    // OpenMenu / LinkChooseTarget modal verbs — resolve them so a rebind shows
+    // through instead of the stale literal i / p / j / k.
+    let mkey = |action: ModalAction, fallback: &str| modal.primary_key(action).unwrap_or_else(|| fallback.to_string());
+    rows.push(entry(
+      Action::BrowseLinks,
+      &format!(
+        "open menu — {}=issue · {}=pull request",
+        mkey(ModalAction::OpenMenuIssue, "i"),
+        mkey(ModalAction::OpenMenuPr, "p"),
+      ),
+    ));
     rows.push(entry(
       Action::LinkPrompt,
-      "link prompt — j/k + enter, or i/p, then digits",
+      &format!(
+        "link prompt — {}/{} + {}, or {}/{}, then digits",
+        mkey(ModalAction::LinkChooseNext, "j"),
+        mkey(ModalAction::LinkChoosePrev, "k"),
+        mkey(ModalAction::LinkChooseAccept, "enter"),
+        mkey(ModalAction::LinkChooseIssue, "i"),
+        mkey(ModalAction::LinkChoosePr, "p"),
+      ),
     ));
   }
   rows.push(entry(Action::Help, "this help"));
@@ -2915,7 +2933,7 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
   // the current tab / edit mode. Both the edit and nav rows resolve their
   // single-key verbs from the Config* modal bindings (#219 review) so a rebind
-  // of `[tui.keys.config(.edit)]` shows through instead of literal keys.
+  // of `[tui.keys.modal.config(.edit)]` shows through instead of literal keys.
   let footer_owned = if editing {
     config_edit_footer_hints(&app.modal_keymap)
   } else {
@@ -3257,7 +3275,7 @@ pub fn help_body_section_color(theme: &Theme) -> Color {
 
 /// Direct-pick keys (`issue`, `pr`) for the link / open-menu target chips,
 /// resolved from the active context's modal bindings (#219 review) so a
-/// rebind of `[tui.keys.link.choose_target]` / `[tui.keys.open_menu]` shows
+/// rebind of `[tui.keys.modal.link.choose_target]` / `[tui.keys.modal.open_menu]` shows
 /// through instead of the literal `i` / `p`. An unbound verb yields an empty
 /// string — the chip then renders label-only rather than a phantom key.
 pub fn link_target_keys(ctx: HintContext, modal: &ModalKeymap) -> (String, String) {

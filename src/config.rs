@@ -548,7 +548,7 @@ impl Default for TuiConfig {
 ///   Resolved by [`Self::resolved_keymap`] into a
 ///   [`crate::tui::keymap::Keymap`].
 /// - **table value** → a *contextual* modal sub-table, e.g.
-///   `[tui.keys.confirm]` or `[tui.keys.link.choose_target]`. Resolved by
+///   `[tui.keys.modal.confirm]` or `[tui.keys.modal.link.choose_target]`. Resolved by
 ///   [`Self::resolved_modal_keymap`] into a
 ///   [`crate::tui::modal_keymap::ModalKeymap`].
 ///
@@ -569,20 +569,28 @@ pub struct TuiKeysConfig {
 
 impl TuiKeysConfig {
   /// Resolve the **global** `View::List` keymap: the top-level array
-  /// entries of `[tui.keys]`. Table entries (modal contexts) are skipped
-  /// here and handled by [`Self::resolved_modal_keymap`].
+  /// entries of `[tui.keys]`. The `[tui.keys.modal]` sub-table (modal
+  /// contexts) is skipped here and handled by [`Self::resolved_modal_keymap`].
   pub fn resolved_keymap(&self) -> Result<crate::tui::keymap::Keymap> {
     use crate::tui::keymap::{Action, KeyStroke, Keymap};
 
     let mut km = Keymap::defaults();
     for (action_slug, value) in &self.raw {
+      // Modal contexts live under `[tui.keys.modal.<context>]` and are
+      // resolved by `resolved_modal_keymap`. The dedicated namespace (issue
+      // #219 review) keeps a global action and a same-named modal context
+      // (`create` / `help` / `command_logs` / `link`) from colliding at the
+      // `tui.keys.<name>` path during the layered merge — which previously
+      // replaced the global array with the modal table and silently dropped
+      // the user's global override.
+      if action_slug == TUI_KEYS_MODAL_NAMESPACE {
+        continue;
+      }
       let chord_strings = match value {
         toml::Value::Array(_) => as_chord_list(action_slug, value)?,
-        // A table is a contextual modal block — resolved elsewhere.
-        toml::Value::Table(_) => continue,
         other => {
           return Err(GwmError::Config(format!(
-            "tui.keys.{}: expected an array of chords or a context table, got {}",
+            "tui.keys.{}: expected an array of chords; modal contexts go under [tui.keys.modal.<context>], got {}",
             action_slug,
             other.type_str()
           )))
@@ -605,22 +613,32 @@ impl TuiKeysConfig {
     Ok(km)
   }
 
-  /// Resolve the **contextual** modal keymap: the top-level table entries
-  /// of `[tui.keys]`, recursed into stages (`link.choose_target`,
-  /// `config.edit`). Array entries (global actions) are skipped here.
+  /// Resolve the **contextual** modal keymap from the `[tui.keys.modal]`
+  /// sub-table, recursing into stages (`link.choose_target`, `config.edit`).
+  /// A missing `[tui.keys.modal]` table means no overrides — the built-in
+  /// defaults stand. The dedicated namespace (issue #219 review) keeps modal
+  /// contexts from colliding with same-named global actions during the
+  /// layered merge.
   pub fn resolved_modal_keymap(&self) -> Result<crate::tui::modal_keymap::ModalKeymap> {
     use crate::tui::modal_keymap::ModalKeymap;
 
     let mut mk = ModalKeymap::defaults();
-    for (key, value) in &self.raw {
+    let Some(modal_val) = self.raw.get(TUI_KEYS_MODAL_NAMESPACE) else {
+      return Ok(mk);
+    };
+    let table = modal_val.as_table().ok_or_else(|| {
+      GwmError::Config(format!(
+        "tui.keys.modal: expected a table of modal contexts, got {}",
+        modal_val.type_str()
+      ))
+    })?;
+    for (ctx_key, value) in table {
       match value {
-        toml::Value::Table(table) => walk_modal_context(key, table, &mut mk)?,
-        // An array is a global action — resolved by `resolved_keymap`.
-        toml::Value::Array(_) => continue,
+        toml::Value::Table(sub) => walk_modal_context(ctx_key, sub, &mut mk)?,
         other => {
           return Err(GwmError::Config(format!(
-            "tui.keys.{}: expected an array of chords or a context table, got {}",
-            key,
+            "tui.keys.modal.{}: expected a context table, got {}",
+            ctx_key,
             other.type_str()
           )))
         }
@@ -629,6 +647,10 @@ impl TuiKeysConfig {
     Ok(mk)
   }
 }
+
+/// Sub-table key under `[tui.keys]` that holds the contextual modal bindings
+/// (`[tui.keys.modal.<context>]`). See [`TuiKeysConfig::resolved_modal_keymap`].
+const TUI_KEYS_MODAL_NAMESPACE: &str = "modal";
 
 /// Extract a `["a", "b"]` chord list from a TOML array value, erroring on a
 /// non-string element. `coord` is the dotted `tui.keys.…` path for messages.
@@ -660,7 +682,7 @@ fn is_modal_context_group(path: &str) -> bool {
     .any(|c| c.config_path().starts_with(&prefix))
 }
 
-/// Walk one `[tui.keys.<ctx_path>]` sub-table, applying every `verb = [keys]`
+/// Walk one `[tui.keys.modal.<ctx_path>]` sub-table, applying every `verb = [keys]`
 /// entry to `mk` and recursing into nested stage sub-tables.
 fn walk_modal_context(
   ctx_path: &str,
@@ -672,7 +694,7 @@ fn walk_modal_context(
   let ctx = KeyContext::from_config_path(ctx_path);
   if ctx.is_none() && !is_modal_context_group(ctx_path) {
     return Err(GwmError::Config(format!(
-      "tui.keys.{}: unknown modal context (run `gwm tui keys` for the list)",
+      "tui.keys.modal.{}: unknown modal context (run `gwm tui keys` for the list)",
       ctx_path
     )));
   }
@@ -682,15 +704,15 @@ fn walk_modal_context(
       toml::Value::Array(_) => {
         let ctx = ctx.ok_or_else(|| {
           GwmError::Config(format!(
-            "tui.keys.{path}: {path:?} is a context group, not a leaf — bind under a stage (e.g. {path}.<stage>)",
+            "tui.keys.modal.{path}: {path:?} is a context group, not a leaf — bind under a stage (e.g. {path}.<stage>)",
             path = ctx_path
           ))
         })?;
-        let coord = format!("{}.{}", ctx_path, key);
+        let coord = format!("modal.{}.{}", ctx_path, key);
         let chords = as_chord_list(&coord, value)?;
         let action = ModalAction::from_context_verb(ctx, key).ok_or_else(|| {
           GwmError::Config(format!(
-            "tui.keys.{}: unknown verb {:?} (run `gwm tui keys` for the list)",
+            "tui.keys.modal.{}: unknown verb {:?} (run `gwm tui keys` for the list)",
             ctx_path, key
           ))
         })?;
@@ -699,7 +721,7 @@ fn walk_modal_context(
           parsed.push(parse_single(s).map_err(|e| rewrap(&coord, e))?);
         }
         mk.apply_override(action, parsed)
-          .map_err(|e| rewrap(&format!("tui.keys.{}", ctx_path), e))?;
+          .map_err(|e| rewrap(&format!("tui.keys.modal.{}", ctx_path), e))?;
       }
       toml::Value::Table(sub) => {
         let child = format!("{}.{}", ctx_path, key);
@@ -707,7 +729,7 @@ fn walk_modal_context(
       }
       other => {
         return Err(GwmError::Config(format!(
-          "tui.keys.{}.{}: expected an array of keys or a sub-table, got {}",
+          "tui.keys.modal.{}.{}: expected an array of keys or a sub-table, got {}",
           ctx_path,
           key,
           other.type_str()

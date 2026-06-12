@@ -964,7 +964,7 @@ fn cmd_tui_keys() -> Result<()> {
   }
 
   // Issue #219: contextual modal / overlay bindings, grouped by context.
-  // Printed under their `[tui.keys.<context>]` heading so the user can copy
+  // Printed under their `[tui.keys.modal.<context>]` heading so the user can copy
   // a heading straight into `.gwm.toml` to start an override.
   let fmt_keys = |keys: &[crate::tui::keymap::KeyStroke]| -> String {
     keys.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(", ")
@@ -974,7 +974,7 @@ fn cmd_tui_keys() -> Result<()> {
     if bindings.is_empty() {
       continue;
     }
-    println!("\n[tui.keys.{}]", ctx.config_path());
+    println!("\n[tui.keys.modal.{}]", ctx.config_path());
     let verb_w = bindings
       .iter()
       .map(|b| b.action.verb().len())

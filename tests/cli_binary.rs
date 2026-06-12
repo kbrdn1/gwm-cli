@@ -4203,7 +4203,7 @@ fn theme_show_output_round_trips_through_gwm_toml() {
 #[test]
 fn tui_keys_lists_modal_contexts() {
   // Issue #219: the listing prints the contextual modal bindings under
-  // their `[tui.keys.<context>]` headings, including nested link stages.
+  // their `[tui.keys.modal.<context>]` headings, including nested link stages.
   let (dir, _) = init_repo();
   Command::cargo_bin("gwm")
     .unwrap()
@@ -4211,7 +4211,7 @@ fn tui_keys_lists_modal_contexts() {
     .args(["tui", "keys"])
     .assert()
     .success()
-    .stdout(predicate::str::contains("[tui.keys.confirm]"))
+    .stdout(predicate::str::contains("[tui.keys.modal.confirm]"))
     .stdout(predicate::str::contains("focus_confirm"))
-    .stdout(predicate::str::contains("[tui.keys.link.choose_target]"));
+    .stdout(predicate::str::contains("[tui.keys.modal.link.choose_target]"));
 }

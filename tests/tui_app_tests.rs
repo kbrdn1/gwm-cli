@@ -6608,7 +6608,7 @@ fn resolve_modal_reflects_a_confirm_rebind() {
 #[test]
 fn link_input_number_context_advertises_its_own_hints() {
   // #219 review: while typing the number, the hints must resolve submit /
-  // cancel from `[tui.keys.link.input_number]` (including a rebind), not the
+  // cancel from `[tui.keys.modal.link.input_number]` (including a rebind), not the
   // choose-target keys.
   use crossterm::event::{KeyCode, KeyModifiers};
   use gwm::tui::keymap::{KeyStroke, Keymap};

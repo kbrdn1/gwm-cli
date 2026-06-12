@@ -494,7 +494,7 @@ fn link_target_line_highlights_the_selected_row() {
 fn link_target_keys_track_rebinding_per_context() {
   // #219 review (P3): the Issue / PR direct-pick chips hard-coded `i` / `p`.
   // They must resolve from the active context's modal bindings so a rebind of
-  // `[tui.keys.link.choose_target]` (or `[tui.keys.open_menu]`) shows through,
+  // `[tui.keys.modal.link.choose_target]` (or `[tui.keys.modal.open_menu]`) shows through,
   // and the two contexts stay independent (the whole point of #219).
   use gwm::tui::link_target_keys;
   use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
@@ -529,7 +529,7 @@ fn link_target_keys_track_rebinding_per_context() {
 #[test]
 fn config_edit_footer_hints_track_rebinding() {
   // #219 review (P2): the Settings panel edit footer printed a fixed
-  // `Enter save / Esc cancel`. Once `[tui.keys.config.edit]` is rebound the
+  // `Enter save / Esc cancel`. Once `[tui.keys.modal.config.edit]` is rebound the
   // handler stops treating Enter/Esc as save/cancel, so the footer must
   // resolve those hints from the ConfigEdit* modal bindings too.
   use gwm::tui::config_edit_footer_hints;

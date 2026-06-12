@@ -233,7 +233,7 @@ pub struct App {
   pub keymap: Keymap,
 
   /// Resolved contextual keymap for modals / overlays (issue #219).
-  /// Built from the `[tui.keys.<context>]` sub-tables at construction
+  /// Built from the `[tui.keys.modal.<context>]` sub-tables at construction
   /// time alongside [`Self::keymap`]; consulted by the modal routing in
   /// `src/tui/mod.rs` to turn a keystroke into a typed [`ModalAction`].
   pub modal_keymap: ModalKeymap,
@@ -2344,7 +2344,7 @@ impl App {
       ConfirmKeyAction::Armed => {
         let secs = total.as_secs();
         // #219 review: name the live confirm / cancel keys, not the defaults —
-        // they are rebindable via `[tui.keys.confirm]`.
+        // they are rebindable via `[tui.keys.modal.confirm]`.
         let confirm = self.confirm_key_hint(ModalAction::ConfirmConfirm, "y");
         let cancel = self.confirm_key_hint(ModalAction::ConfirmCancel, "Esc");
         self.status = format!("armed — auto-fires in {secs}s · press {confirm} again or {cancel} to cancel");

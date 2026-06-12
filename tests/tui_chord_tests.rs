@@ -370,6 +370,49 @@ fn help_rows_structures_title_sections_and_entries() {
 }
 
 #[test]
+fn help_rows_link_descriptions_track_modal_rebindings() {
+  // #219 review (P3): the help table's `open menu` / `link prompt` rows hard-
+  // coded `i=issue · p=pull request` and `j/k + enter, or i/p`. Those keys are
+  // the OpenMenu / LinkChooseTarget modal verbs, so a rebind must show through
+  // instead of advertising keys that no longer work.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::OpenMenuIssue, vec![parse_single("x").unwrap()])
+    .unwrap();
+  modal
+    .apply_override(ModalAction::LinkChooseIssue, vec![parse_single("z").unwrap()])
+    .unwrap();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+
+  let label_of = |needle: &str| -> String {
+    rows
+      .iter()
+      .find_map(|r| match r {
+        HelpRow::Entry { label, .. } if label.contains(needle) => Some(label.clone()),
+        _ => None,
+      })
+      .unwrap_or_else(|| panic!("no help entry containing {needle:?}: {rows:?}"))
+  };
+
+  let open_menu = label_of("open menu");
+  assert!(
+    open_menu.contains("x=issue") && !open_menu.contains("i=issue"),
+    "open-menu help must use the rebound issue key: {open_menu:?}"
+  );
+  let link_prompt = label_of("link prompt");
+  assert!(
+    link_prompt.contains('z'),
+    "link-prompt help must use the rebound choose-target issue key: {link_prompt:?}"
+  );
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in
@@ -429,7 +472,7 @@ fn help_subtitle_tracks_the_pane_context() {
 #[test]
 fn help_overlay_reflects_a_modal_rebind() {
   // #219: the Create Form / Delete Worktree help rows resolve from the
-  // contextual modal keymap, so `[tui.keys.confirm] confirm = ["o"]` shows
+  // contextual modal keymap, so `[tui.keys.modal.confirm] confirm = ["o"]` shows
   // `o` next to the "confirm" row instead of the default `y`.
   use gwm::tui::help_lines;
   use gwm::tui::keymap::{KeyStroke, Keymap};

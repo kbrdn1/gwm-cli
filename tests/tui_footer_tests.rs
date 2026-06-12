@@ -392,7 +392,7 @@ fn confirm_hints_include_delete_branch_toggle_binding() {
 #[test]
 fn report_close_hint_resolves_user_rebinding() {
   // #219 review (P3): the report overlay footer advertised a literal
-  // `Enter/Esc` even after `[tui.keys.report] close` was rebound — the event
+  // `Enter/Esc` even after `[tui.keys.modal.report] close` was rebound — the event
   // loop already routes close through the modal keymap, so the footer must
   // follow it instead of printing a stale key.
   use gwm::tui::keymap::Keymap;
@@ -454,7 +454,7 @@ fn link_input_number_drops_fetch_hint_when_shadowed() {
 #[test]
 fn help_close_hint_resolves_user_rebinding() {
   // #219 review (P3): same staleness on the Keybindings overlay — rebinding
-  // `[tui.keys.help] close` must show through the footer (scroll/pan pairs
+  // `[tui.keys.modal.help] close` must show through the footer (scroll/pan pairs
   // stay literal because no single resolved key captures `j/k` / `h/l`).
   use gwm::tui::keymap::Keymap;
   use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
