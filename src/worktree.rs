@@ -1164,16 +1164,18 @@ pub const STATUS_SCAN_CAP: usize = 5000;
 ///   parse filenames containing spaces, arrows, quotes, or UTF-8 bytes
 ///   without guesswork. The footer counts (issue #287) parse the same
 ///   stream.
-pub fn git_status_short(path: &Path) -> Result<String> {
+pub fn git_status_short(path: &Path) -> Result<(String, bool)> {
   git_status_short_capped(path, STATUS_SCAN_CAP)
 }
 
 /// Cap-injectable core of [`git_status_short`]. Spawns git with a piped
 /// stdout, reads NUL-terminated records until `cap` is reached (then kills
-/// the child so git stops walking the tree), and returns the bytes gathered
-/// so far. Exposed so integration tests can exercise truncation with a small
-/// `cap` instead of creating thousands of files.
-pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<String> {
+/// the child so git stops walking the tree), and returns `(bytes, truncated)`
+/// — the raw stdout gathered so far plus whether the cap was hit (so the
+/// caller reports a lower bound rather than an exact total). Exposed so
+/// integration tests can exercise truncation with a small `cap` instead of
+/// creating thousands of files.
+pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<(String, bool)> {
   use std::io::{BufRead, BufReader};
   use std::process::{Command, Stdio};
 
@@ -1190,6 +1192,17 @@ pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<String> {
     .stdout
     .take()
     .ok_or_else(|| GwmError::CommandFailed("git status: stdout pipe missing".to_string()))?;
+  // Drain stderr on its own thread so a chatty git (advisory warnings under
+  // `-uall`) can't fill the stderr pipe and deadlock against our stdout read.
+  let stderr_reader = child.stderr.take().map(|mut stderr| {
+    std::thread::spawn(move || {
+      use std::io::Read;
+      let mut buf = String::new();
+      let _ = stderr.read_to_string(&mut buf);
+      buf
+    })
+  });
+
   let mut reader = BufReader::new(stdout);
   let mut collected: Vec<u8> = Vec::new();
   let mut segment: Vec<u8> = Vec::new();
@@ -1223,24 +1236,21 @@ pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<String> {
   let status = child
     .wait()
     .map_err(|e| GwmError::CommandFailed(format!("git status: wait failed: {}", e)))?;
+  // Joining the drainer also closes our end of the stderr pipe.
+  let stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
 
   // A non-truncated, unsuccessful run is a real failure (e.g. not a repo) —
   // surface git's stderr. A truncated run was killed on purpose, so its
   // non-zero status is expected and ignored.
   if !truncated && !status.success() {
-    let mut err = String::new();
-    if let Some(mut stderr) = child.stderr.take() {
-      use std::io::Read;
-      let _ = stderr.read_to_string(&mut err);
-    }
     return Err(GwmError::CommandFailed(format!(
       "git status exited {}: {}",
       status,
-      err.trim()
+      stderr.trim()
     )));
   }
 
-  Ok(String::from_utf8_lossy(&collected).into_owned())
+  Ok((String::from_utf8_lossy(&collected).into_owned(), truncated))
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a

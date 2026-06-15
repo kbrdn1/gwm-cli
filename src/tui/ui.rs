@@ -1103,14 +1103,14 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
 
 fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
-    Ok(s) if s.trim().is_empty() => (
+    Ok((s, _)) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
       ))],
       WorkingTreeCounts::default(),
     ),
-    Ok(s) => {
+    Ok((s, scan_truncated)) => {
       let counts = working_tree_status_counts(&s);
       let records = wt_tree::parse_status_z(&s);
       // Cap the explorer for a pathological untracked-dir explosion (issue
@@ -1120,10 +1120,15 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
       let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
       let mut lines = working_tree_tree_lines(&tree, theme);
       if overflow > 0 {
-        lines.push(Line::from(Span::styled(
-          format!("… {} more", overflow),
-          Style::default().fg(theme.muted),
-        )));
+        // After a scan truncation the real remainder is unknown (git was
+        // killed at the cap), so `overflow` is only a lower bound — render
+        // `… N+ more` rather than claiming an exact count.
+        let label = if scan_truncated {
+          format!("… {}+ more", overflow)
+        } else {
+          format!("… {} more", overflow)
+        };
+        lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
       }
       (lines, counts)
     }
