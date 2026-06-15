@@ -267,6 +267,97 @@ fn cancelling_a_capture_writes_nothing() {
 }
 
 #[test]
+fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
+  // Codex #297 review (P2): `set_array_at` validates only the file it writes.
+  // A rebind that is valid in the project file alone but collides with the
+  // global layer once merged must NOT be left on disk — otherwise the next
+  // launch's layered load fails and the repo config is bricked.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config::Config;
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  // The global layer binds `top` to a two-stroke chord.
+  set_array_at(&global, "tui.keys.top", &["z z".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project; // write the repo file
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  // `z` alone is a prefix of the global `z z` — valid in the repo file by
+  // itself, invalid once the layers merge.
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "rejection surfaced: {}", app.status);
+  // The merged config still loads — nothing was left broken on disk.
+  assert!(
+    Config::load_layered(repo.path(), Some(&global)).is_ok(),
+    "the layered config must still load after a rolled-back rebind"
+  );
+  let repo_toml = repo.path().join(".gwm.toml");
+  if repo_toml.exists() {
+    let raw = std::fs::read_to_string(&repo_toml).unwrap();
+    assert!(!raw.contains("refresh"), "the rejected rebind was rolled back: {raw}");
+  }
+  // The previous binding survives — `f` still refreshes.
+  let f = KeyStroke::new(KeyCode::Char('f'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[f]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn a_shadowed_global_key_rebind_warns() {
+  // Codex #297 review (P3): editing the global layer for a key the repo
+  // overrides leaves the effective binding unchanged (repo wins). Mirror
+  // `apply_setting` and flag the shadow rather than reporting a clean set.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  // The repo pins `quit` to `x`, so a global rebind of `quit` is shadowed.
+  set_array_at(&repo.path().join(".gwm.toml"), "tui.keys.quit", &["x".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("shadowed"),
+    "a shadowed global rebind must warn: {}",
+    app.status
+  );
+}
+
+#[test]
 fn hint_context_follows_focus() {
   // Issue #217: the statusbar chip + help subtitle read the live focus. The
   // worktrees pane is the default; focusing the sidebar switches to Status.

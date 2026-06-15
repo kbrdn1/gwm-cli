@@ -1471,18 +1471,36 @@ impl App {
       },
     };
 
+    // Snapshot the target file first: `set_array_at` only validates the file
+    // it writes, not the layered merge, so a rebind that is valid in this file
+    // alone but collides with the *other* layer once merged (e.g. a prefix
+    // collision the global layer reveals) would slip past and brick the
+    // config for the next launch. Keep the prior bytes so we can roll back
+    // (Codex #297 review P2).
+    let prior = std::fs::read(&path).ok();
+
     if let Err(e) = crate::config_cli::set_array_at(&path, &config_key, &items) {
       self.status = format!("keys: {}", e);
       return;
     }
 
     // Reload the merged config and rebuild both keymaps so the new binding
-    // fires without a restart. The write already validated, so these resolve;
-    // route any error to the statusbar rather than panicking.
+    // fires without a restart.
     match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
       Ok(cfg) => self.config = cfg,
       Err(e) => {
-        self.status = format!("keys saved, but reload failed: {}", e);
+        // The single-file write validated but the layered merge is invalid —
+        // roll the file back to its prior state so the config is never left
+        // broken on disk, and keep the previous live keymaps.
+        match prior {
+          Some(bytes) => {
+            let _ = std::fs::write(&path, bytes);
+          }
+          None => {
+            let _ = std::fs::remove_file(&path);
+          }
+        }
+        self.status = format!("keys: rebind rejected — would break the merged config: {}", e);
         return;
       }
     }
@@ -1510,7 +1528,22 @@ impl App {
     } else {
       items.join(" ")
     };
-    self.status = format!("set {} = {} ({})", config_key, desc, self.config_panel.layer.label());
+    let mut status = format!("set {} = {} ({})", config_key, desc, self.config_panel.layer.label());
+    // Surface a shadowed edit: a global rebind for a key the repo overrides
+    // leaves the effective binding unchanged (repo wins), so the new key won't
+    // fire. Mirror `apply_setting`'s guidance (Codex #297 review P3).
+    if self.config_panel.layer == SettingsLayer::Global
+      && self
+        .config_panel
+        .key_rows
+        .iter()
+        .find(|r| r.target.config_key() == config_key)
+        .map(|r| r.source == crate::config::ConfigSource::Repo)
+        .unwrap_or(false)
+    {
+      status.push_str(" — shadowed by .gwm.toml");
+    }
+    self.status = status;
   }
 
   // ── PTY overlay (issue #35) ────────────────────────────────────────────
