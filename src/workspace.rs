@@ -88,6 +88,28 @@ pub fn discover(root: &Path) -> Result<Workspace> {
   })
 }
 
+/// Heuristic trigger for the auto-detect prompt (issue #36): when bare `gwm`
+/// is run in a directory that is *not* itself inside a git repo but *does*
+/// hold direct-child git repos, offer to open it as a workspace.
+///
+/// Returns the discovered [`Workspace`] when the heuristic fires, else `None`.
+/// The interactive prompt lives in the CLI layer — this is the pure decision
+/// so it can be tested without stdin. Being inside a repo (at `cwd` or any
+/// ancestor) always loses to single-repo mode.
+pub fn autodetect(cwd: &Path) -> Option<Workspace> {
+  // `discover` here is libgit2's repo discovery (walks up); an `Ok` means we
+  // are inside a repo, so single-repo mode wins and we never auto-workspace.
+  if Repository::discover(cwd).is_ok() {
+    return None;
+  }
+  let ws = discover(cwd).ok()?;
+  if ws.is_empty() {
+    None
+  } else {
+    Some(ws)
+  }
+}
+
 /// Merge every repo's worktree listing into one flat, repo-tagged table.
 ///
 /// Rows are grouped by repo in `workspace.repos` (alphabetical) order; within

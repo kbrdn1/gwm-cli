@@ -86,6 +86,45 @@ fn discover_missing_root_is_an_error() {
 }
 
 #[test]
+fn autodetect_fires_when_cwd_is_not_a_repo_but_holds_child_repos() {
+  let root = TempDir::new().unwrap();
+  init_repo_at(&root.path().join("alpha"));
+  init_repo_at(&root.path().join("beta"));
+
+  let ws = workspace::autodetect(root.path()).expect("a repo-free dir with child repos triggers");
+  let names: Vec<&str> = ws.repos.iter().map(|r| r.name.as_str()).collect();
+  assert_eq!(
+    names,
+    vec!["alpha", "beta"],
+    "auto-detected workspace lists the children"
+  );
+}
+
+#[test]
+fn autodetect_declines_when_cwd_is_itself_a_repo() {
+  // Inside a git repo, single-repo mode wins — never auto-open a workspace,
+  // even if the repo happens to contain nested child repos.
+  let root = TempDir::new().unwrap();
+  init_repo_at(root.path());
+  init_repo_at(&root.path().join("vendored"));
+
+  assert!(
+    workspace::autodetect(root.path()).is_none(),
+    "a directory that is itself a repo must not auto-open as a workspace"
+  );
+}
+
+#[test]
+fn autodetect_declines_when_no_child_repos() {
+  let root = TempDir::new().unwrap();
+  fs::create_dir_all(root.path().join("plain")).unwrap();
+  assert!(
+    workspace::autodetect(root.path()).is_none(),
+    "no child repos → nothing to open as a workspace"
+  );
+}
+
+#[test]
 fn merge_worktrees_tags_each_row_with_its_repo() {
   let root = TempDir::new().unwrap();
   init_repo_at(&root.path().join("alpha"));
