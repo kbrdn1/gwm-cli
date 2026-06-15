@@ -569,6 +569,34 @@ fn from_slug_compat_accepts_pre_290_slugs() {
 }
 
 #[test]
+fn compat_alias_slugs_is_the_reverse_of_from_slug_compat() {
+  // Every alias `compat_alias_slugs` reports for an action must resolve back to
+  // that action; a canonical-only action reports none (issue #294 — the Keys
+  // tab strips these from a legacy config on rewrite).
+  assert_eq!(
+    Action::BrowseLinks.compat_alias_slugs().collect::<Vec<_>>(),
+    vec!["open_menu"]
+  );
+  assert_eq!(
+    Action::LazyGitFullscreen.compat_alias_slugs().collect::<Vec<_>>(),
+    vec!["git_tui"]
+  );
+  assert!(
+    Action::Down.compat_alias_slugs().next().is_none(),
+    "an action with no rename reports no alias"
+  );
+  for action in Action::all() {
+    for alias in action.compat_alias_slugs() {
+      assert_eq!(
+        Action::from_slug_compat(alias),
+        Some(action),
+        "alias {alias:?} must resolve back to {action:?}"
+      );
+    }
+  }
+}
+
+#[test]
 fn from_slug_compat_still_resolves_canonical_slugs() {
   // The compat wrapper must not break the canonical path.
   assert_eq!(

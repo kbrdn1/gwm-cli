@@ -83,6 +83,21 @@ pub fn set_array_at(path: &Path, key: &str, items: &[String]) -> Result<()> {
   set_item_at(path, key, value(arr))
 }
 
+/// Remove `key` from the TOML file at an explicit `path` (issue #294): the
+/// layer-aware sibling of [`unset`], used by the in-TUI Keys tab to strip a
+/// pre-#290 alias when the canonical slug is rewritten. Tolerant — an absent
+/// file or missing key is a no-op (nothing to remove), so callers can clear a
+/// possible alias unconditionally. Validate-before-write like the setters.
+pub fn unset_at(path: &Path, key: &str) -> Result<()> {
+  if !path.exists() {
+    return Ok(());
+  }
+  let mut doc = load_document(path)?;
+  let segments = parse_key(key)?;
+  remove_value(doc.as_table_mut(), &segments)?;
+  write_and_validate(path, &doc)
+}
+
 /// Shared write path: ensure the parent dir exists, set `key` to `item` in
 /// the surgically-edited document, and validate-before-write so an invalid
 /// edit can never overwrite a good file.

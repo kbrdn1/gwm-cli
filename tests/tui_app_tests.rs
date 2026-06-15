@@ -358,6 +358,45 @@ fn a_shadowed_global_key_rebind_warns() {
 }
 
 #[test]
+fn rebinding_an_aliased_action_strips_the_legacy_alias() {
+  // Codex #297 review (P2): a pre-#290 config carrying `tui.keys.open_menu`
+  // (alias for `browse_links`) would, after a rebind writes the canonical
+  // `browse_links`, re-apply the alias last in the sorted override walk and
+  // silently shadow the new key. The commit must strip the alias so the new
+  // binding actually wins.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let toml = repo.path().join(".gwm.toml");
+  set_array_at(&toml, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::BrowseLinks))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  let raw = std::fs::read_to_string(&toml).unwrap();
+  assert!(!raw.contains("open_menu"), "the legacy alias was stripped: {raw}");
+  // The new key actually wins — the alias can no longer shadow it on reload.
+  let z = KeyStroke::new(KeyCode::Char('z'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[z]), ChordResolution::Matched(Action::BrowseLinks));
+}
+
+#[test]
 fn hint_context_follows_focus() {
   // Issue #217: the statusbar chip + help subtitle read the live focus. The
   // worktrees pane is the default; focusing the sidebar switches to Status.

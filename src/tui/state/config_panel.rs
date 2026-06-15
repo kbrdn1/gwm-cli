@@ -114,6 +114,17 @@ impl KeyTarget {
   pub fn single_only(self) -> bool {
     matches!(self, KeyTarget::Modal(_))
   }
+
+  /// Dotted `.gwm.toml` keys for any pre-#290 alias of a global action — to be
+  /// stripped from a legacy config when the canonical slug is (re)written so a
+  /// stale alias can't shadow the new binding (Codex #297 review). Empty for
+  /// modal verbs (they have no compat aliases).
+  pub fn compat_alias_keys(self) -> Vec<String> {
+    match self {
+      KeyTarget::Global(a) => a.compat_alias_slugs().map(|s| format!("tui.keys.{s}")).collect(),
+      KeyTarget::Modal(_) => Vec::new(),
+    }
+  }
 }
 
 /// One row of the Keys tab: a bindable target, its display scope/label, the

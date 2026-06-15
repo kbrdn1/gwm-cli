@@ -1454,10 +1454,11 @@ impl App {
     let Some(cap) = self.config_panel.take_capture() else {
       return;
     };
-    let config_key = match self.config_panel.key_rows.get(cap.row) {
-      Some(row) => row.target.config_key(),
+    let target = match self.config_panel.key_rows.get(cap.row) {
+      Some(row) => row.target,
       None => return,
     };
+    let config_key = target.config_key();
     let items = cap.as_config_items();
 
     let path = match self.config_panel.layer {
@@ -1482,6 +1483,18 @@ impl App {
     if let Err(e) = crate::config_cli::set_array_at(&path, &config_key, &items) {
       self.status = format!("keys: {}", e);
       return;
+    }
+
+    // Strip any pre-#290 alias of this action from the same file: a legacy
+    // config that still carries e.g. `tui.keys.open_menu` would, on reload,
+    // re-apply the alias after the canonical `browse_links` in the sorted
+    // override walk and silently shadow the new binding (Codex #297 review).
+    // Best-effort: the canonical key is already written, so a cleanup error
+    // is surfaced but does not abort the rebind.
+    for alias_key in target.compat_alias_keys() {
+      if let Err(e) = crate::config_cli::unset_at(&path, &alias_key) {
+        self.status = format!("keys: {}", e);
+      }
     }
 
     // Reload the merged config and rebuild both keymaps so the new binding

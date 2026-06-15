@@ -161,20 +161,36 @@ impl Action {
     if let Some(a) = Self::from_slug(s) {
       return Some(a);
     }
-    // Compat aliases for slugs that were renamed in #290.
-    match s {
-      "git_tui" => Some(Action::LazyGitFullscreen),
-      "git_tui_overlay" => Some(Action::LazyGitPty),
-      "review" => Some(Action::ReviewFullscreen),
-      "review_overlay" => Some(Action::ReviewPty),
-      "yank" => Some(Action::YankPath),
-      "open" => Some(Action::TerminalFullscreen),
-      "open_terminal_overlay" => Some(Action::TerminalPty),
-      "open_menu" => Some(Action::BrowseLinks),
-      _ => None,
-    }
+    COMPAT_ALIASES.iter().find(|(slug, _)| *slug == s).map(|(_, a)| *a)
+  }
+
+  /// The pre-#290 alias slug(s) that resolve to this action, if any. Used by
+  /// the in-TUI keymap editor (issue #294) to strip a stale alias from a
+  /// legacy config when the canonical slug is (re)written — otherwise the
+  /// alias, applied later in the sorted override walk, would silently shadow
+  /// the new binding (Codex #297 review).
+  pub fn compat_alias_slugs(self) -> impl Iterator<Item = &'static str> {
+    COMPAT_ALIASES
+      .iter()
+      .filter(move |(_, a)| *a == self)
+      .map(|(slug, _)| *slug)
   }
 }
+
+/// Pre-#290 slug aliases, accepted by [`Action::from_slug_compat`] so existing
+/// `.gwm.toml` files keep working after the #290 rename. The canonical slug is
+/// always preferred; these only fire on a miss. Single source of truth for both
+/// directions (resolve + [`Action::compat_alias_slugs`]).
+const COMPAT_ALIASES: &[(&str, Action)] = &[
+  ("git_tui", Action::LazyGitFullscreen),
+  ("git_tui_overlay", Action::LazyGitPty),
+  ("review", Action::ReviewFullscreen),
+  ("review_overlay", Action::ReviewPty),
+  ("yank", Action::YankPath),
+  ("open", Action::TerminalFullscreen),
+  ("open_terminal_overlay", Action::TerminalPty),
+  ("open_menu", Action::BrowseLinks),
+];
 
 // ---------------------------------------------------------------------------
 // Key-string parser

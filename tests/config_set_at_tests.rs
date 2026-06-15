@@ -8,7 +8,7 @@
 //! injected (tempdirs), never `$HOME`.
 
 use gwm::config::{Config, SidebarPosition, TuiOpenMode};
-use gwm::config_cli::{set_array_at, set_string_at, set_value_at};
+use gwm::config_cli::{set_array_at, set_string_at, set_value_at, unset_at};
 use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
 use gwm::tui::modal_keymap::{KeyContext, ModalAction};
 use std::path::Path;
@@ -199,6 +199,21 @@ fn set_array_at_rejects_a_prefix_collision_and_leaves_the_file_untouched() {
 
   assert!(result.is_err(), "a prefix collision must be rejected");
   assert!(!gwm_toml.exists(), "a rejected write must not create the file");
+}
+
+#[test]
+fn unset_at_removes_a_key_and_tolerates_absent_targets() {
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+  set_array_at(&gwm_toml, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  unset_at(&gwm_toml, "tui.keys.open_menu").unwrap();
+  let raw = std::fs::read_to_string(&gwm_toml).unwrap();
+  assert!(!raw.contains("open_menu"), "key removed: {raw}");
+
+  // Removing a missing key (or from an absent file) is a no-op, not an error.
+  unset_at(&gwm_toml, "tui.keys.does_not_exist").unwrap();
+  unset_at(&repo.path().join("nope.toml"), "tui.keys.x").unwrap();
 }
 
 #[test]
