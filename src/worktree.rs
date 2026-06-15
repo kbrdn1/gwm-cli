@@ -1136,10 +1136,17 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
-/// Shell out to `git status --short` inside `path` and return raw stdout.
-/// Used by the TUI sidebar to preview the working-tree state.
+/// Shell out to `git status --short --untracked-files=all` inside `path`
+/// and return raw stdout. Used by the TUI sidebar to preview the working-
+/// tree state.
+///
+/// `--untracked-files=all` (issue #300) expands an entirely-untracked
+/// directory into its individual files (`src/app/mod.rs`) instead of git's
+/// default single collapsed `src/` row, so the Working Tree file-explorer
+/// can nest them. Git-ignored paths (e.g. `target/`) stay excluded, so this
+/// never floods the pane with build artefacts.
 pub fn git_status_short(path: &Path) -> Result<String> {
-  run_git(path, &["status", "--short"])
+  run_git(path, &["status", "--short", "--untracked-files=all"])
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a

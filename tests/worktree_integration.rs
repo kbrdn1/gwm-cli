@@ -318,6 +318,22 @@ fn git_status_short_lists_untracked_file() {
 }
 
 #[test]
+fn git_status_short_expands_untracked_directory_into_files() {
+  // For the Working Tree file-explorer (issue #300) the porcelain must list
+  // individual files inside an untracked directory rather than collapsing
+  // it to a single `src/` row, so the tree builder can nest them.
+  let (dir, _) = init_repo();
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+  let out = worktree::git_status_short(dir.path()).unwrap();
+  assert!(
+    out.contains("src/app/mod.rs"),
+    "untracked dir must be expanded to its files, got: {:?}",
+    out
+  );
+}
+
+#[test]
 fn git_log_oneline_errors_outside_repo() {
   let empty = TempDir::new().unwrap();
   let err = worktree::git_log_oneline(empty.path(), 5);
