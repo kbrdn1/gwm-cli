@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Edit every keymap from the Settings panel** (issue #294): the Settings
+  panel (`4`) gains a **Keys** tab that lists every rebindable binding — the
+  global list-view actions (`[global]`) and every modal verb grouped by
+  context (`[modal.<context>]`) — each with its current key(s) and a
+  `default`/`user`/`repo` source badge. Select a binding, press the activate
+  key, and **capture** a new key live: the key column becomes a `[ … ]` input
+  that records the actual keystroke(s) pressed. A multi-stroke global chord
+  commits on `Enter` (`Backspace` drops the last stroke); a single-stroke
+  modal verb auto-commits on the first key; `Esc` cancels.
+  - The capture writes a TOML array to the layer the panel targets
+    (`[tui.keys]` for a global action, `[tui.keys.modal.<context>]` for a
+    modal verb), honouring the project ↔ global layer toggle (`L`).
+  - The write is validated before it touches disk — a conflict /
+    prefix-collision aborts it, leaves the previous binding live, and reports
+    the error on the statusbar — then the keymap reloads so the new key works
+    immediately, no restart.
+  - An empty capture unbinds the action (global). `Esc`, `Enter`, `Backspace`
+    and `Ctrl+C` can't be assigned via capture by design — hand-edit
+    `.gwm.toml` for those.
+  - New `config_cli::set_array_at` array write-back backs the persistence.
 - **Rebindable modal keys with contextual actions** (issue #219): the
   modal/overlay keys that used to be hard-coded (create form, delete-confirm,
   link prompt, settings panel, command logs, help, open-menu, command palette,
