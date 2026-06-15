@@ -126,6 +126,12 @@ pub enum Command {
     /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
+    /// In workspace mode (`--workspace <dir>`), which child repo gets the
+    /// new worktree (issue #36). Required there to disambiguate; ignored
+    /// in single-repo mode, where the worktree always lands in the
+    /// discovered repo.
+    #[arg(long, value_name = "NAME")]
+    repo: Option<String>,
   },
   /// Render the PR body from `[pr_template]` (issue #84), then
   /// `gh pr create` unless `--render` is passed.
@@ -762,7 +768,23 @@ pub fn run(cli: Cli) -> Result<()> {
       no_bootstrap,
       reuse_branch,
       skip_hooks,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
+      repo,
+    } => {
+      let start = match &cli.workspace {
+        Some(root) => Some(resolve_workspace_create_repo(root, repo)?),
+        None => None,
+      };
+      cmd_create(
+        branch_type,
+        issue,
+        desc,
+        no_bootstrap,
+        reuse_branch,
+        skip_hooks,
+        mode,
+        start.as_deref(),
+      )
+    }
     Command::New {
       branch_type,
       desc,
@@ -1324,6 +1346,28 @@ pub fn repo_context_lenient(start: Option<&Path>) -> Result<RepoContext> {
   Ok(RepoContext { repo, workdir, config })
 }
 
+/// Resolve which child repo a workspace-mode `gwm create` targets (issue #36).
+/// `--repo` is required there to disambiguate; an absent flag lists the
+/// candidates, an unknown name lists them too. Returns the chosen repo's path
+/// so [`cmd_create`] can discover from it instead of the current directory.
+fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<PathBuf> {
+  let ws = workspace::discover(root)?;
+  if ws.is_empty() {
+    return Err(GwmError::EmptyWorkspace {
+      root: root.display().to_string(),
+    });
+  }
+  let available = ws.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ");
+  let name = repo.ok_or_else(|| GwmError::WorkspaceRepoRequired {
+    available: available.clone(),
+  })?;
+  ws.repos
+    .iter()
+    .find(|r| r.name == name)
+    .map(|r| r.path.clone())
+    .ok_or(GwmError::WorkspaceRepoNotFound { name, available })
+}
+
 fn cmd_create(
   branch_type: String,
   issue: String,
@@ -1332,8 +1376,9 @@ fn cmd_create(
   reuse_branch: bool,
   skip_hooks: Option<String>,
   trust_mode: TrustMode,
+  start: Option<&Path>,
 ) -> Result<()> {
-  let RepoContext { repo, workdir, config } = repo_context(None)?;
+  let RepoContext { repo, workdir, config } = repo_context(start)?;
   let repo_name = worktree::repo_name(&repo);
 
   let resolved_types = config.resolved_branch_types();
@@ -1439,6 +1484,7 @@ fn cmd_new(
     reuse_branch,
     skip_hooks,
     trust_mode,
+    None,
   )
 }
 

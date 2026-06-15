@@ -88,6 +88,71 @@ fn list_workspace_empty_root_reports_no_repos() {
     .stderr(predicate::str::contains("no git repos"));
 }
 
+/// Minimal `.gwm.toml` pinning the worktree base into `base` with no
+/// bootstrap commands, so `create --no-bootstrap` never hits the trust prompt.
+fn write_min_config(repo_root: &Path, base: &Path) {
+  let body = format!(
+    "[worktree]\nbase = \"{}\"\npath_pattern = \"{{type}}-{{issue}}-{{desc}}\"\nbranch_pattern = \"{{type}}/#{{issue}}-{{desc}}\"\n",
+    base.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+  );
+  fs::write(repo_root.join(".gwm.toml"), body).unwrap();
+}
+
+#[test]
+fn create_in_workspace_without_repo_flag_fails() {
+  let root = workspace_root();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .arg("--workspace")
+    .arg(root.path())
+    .args(["create", "feat", "42", "demo", "--no-bootstrap"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("--repo"));
+}
+
+#[test]
+fn create_in_workspace_targets_the_named_repo() {
+  let root = workspace_root();
+  let base = TempDir::new().unwrap();
+  write_min_config(&root.path().join("alpha"), base.path());
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .arg("--workspace")
+    .arg(root.path())
+    .args(["create", "feat", "42", "demo", "--repo", "alpha", "--no-bootstrap"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("feat/#42-demo"));
+
+  // The branch lands in alpha, not beta.
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  assert!(
+    alpha.find_branch("feat/#42-demo", git2::BranchType::Local).is_ok(),
+    "branch must be created in the alpha repo"
+  );
+  let beta = Repository::open(root.path().join("beta")).unwrap();
+  assert!(
+    beta.find_branch("feat/#42-demo", git2::BranchType::Local).is_err(),
+    "branch must NOT leak into the beta repo"
+  );
+}
+
+#[test]
+fn create_in_workspace_with_unknown_repo_lists_available() {
+  let root = workspace_root();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .arg("--workspace")
+    .arg(root.path())
+    .args(["create", "feat", "42", "demo", "--repo", "ghost", "--no-bootstrap"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("ghost"))
+    .stderr(predicate::str::contains("alpha"));
+}
+
 #[test]
 fn list_workspace_names_format_lists_worktrees_per_repo() {
   // `--format names` in workspace mode qualifies each worktree with its repo

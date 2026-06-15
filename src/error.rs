@@ -124,6 +124,16 @@ pub enum GwmError {
   #[error("no git repos found directly under workspace root '{root}'")]
   EmptyWorkspace { root: String },
 
+  /// Issue #36: `gwm create` in workspace mode is ambiguous without an
+  /// explicit target repo — list the candidates so the user can pick one.
+  #[error("workspace mode: `gwm create` requires --repo <name> (one of: {available})")]
+  WorkspaceRepoRequired { available: String },
+
+  /// Issue #36: `--repo <name>` named a repo that is not present directly
+  /// under the workspace root.
+  #[error("repo '{name}' not found in workspace (available: {available})")]
+  WorkspaceRepoNotFound { name: String, available: String },
+
   #[error("{0}")]
   Other(String),
 }
