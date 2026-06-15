@@ -18,6 +18,7 @@ use crate::naming::{parse_branch, BranchSpec};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
+use crate::workspace;
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
@@ -44,6 +45,18 @@ pub struct Cli {
   /// execution path even if the ledger says trusted.
   #[arg(long, global = true, conflicts_with = "allow_bootstrap")]
   pub deny_bootstrap: bool,
+
+  /// Operate across every git repo one level below <DIR> (issue #36).
+  ///
+  /// Workspace mode is an orthogonal dimension on top of single-repo
+  /// mode: `gwm --workspace ~/Projects` opens the TUI over every
+  /// direct-child repo, and `gwm list --workspace ~/Projects` prints
+  /// the merged worktree table with a leading `REPO` column.
+  /// `.gwm.toml` stays per-repo — there is no workspace-level config.
+  /// `global = true` so the flag is accepted before or after the
+  /// subcommand.
+  #[arg(long, global = true, value_name = "DIR")]
+  pub workspace: Option<PathBuf>,
 
   #[command(subcommand)]
   pub command: Option<Command>,
@@ -738,7 +751,10 @@ pub fn run(cli: Cli) -> Result<()> {
 
   match cmd {
     Command::Init => cmd_init(),
-    Command::List { format, detect_pr } => cmd_list(format, detect_pr),
+    Command::List { format, detect_pr } => match cli.workspace {
+      Some(root) => cmd_list_workspace(&root, format, detect_pr),
+      None => cmd_list(format, detect_pr),
+    },
     Command::Create {
       branch_type,
       issue,
@@ -1110,6 +1126,125 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
         branch,
         status,
         w.path.display(),
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+      );
+    }
+  }
+  Ok(())
+}
+
+/// `gwm list --workspace <root>`: the merged, repo-tagged table across every
+/// git repo one level below `root` (issue #36). Mirrors [`cmd_list`]'s columns
+/// but prepends a `REPO` column; `--detect-pr` is honoured per row against the
+/// owning repo. `--format names` qualifies each worktree as `<repo>/<name>`
+/// (including the main worktree, which in workspace mode is the primary `cd`
+/// target) so a completion candidate is unambiguous across repos.
+fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Result<()> {
+  let ws = workspace::discover(root)?;
+  if ws.is_empty() {
+    return Err(GwmError::EmptyWorkspace {
+      root: root.display().to_string(),
+    });
+  }
+  let rows = workspace::merge_worktrees(&ws)?;
+
+  if format == ListFormat::Names {
+    for row in &rows {
+      println!("{}/{}", row.repo_name, row.info.name);
+    }
+    return Ok(());
+  }
+
+  // PR auto-detection (issue #181) resolved per row against its own repo.
+  let detected_prs: Vec<Option<u64>> = if detect_pr {
+    rows
+      .iter()
+      .map(|row| {
+        let repo = Repository::open(&row.repo_path).ok()?;
+        let branch = row.info.branch.as_deref()?;
+        let slug = github::repo_slug(&repo).ok()?;
+        github::read_link_with_pr_detection(&repo, branch, &slug)
+          .ok()
+          .and_then(|l| l.pr)
+      })
+      .collect()
+  } else {
+    Vec::new()
+  };
+
+  let repo_w = rows.iter().map(|r| r.repo_name.len()).max().unwrap_or(4).clamp(4, 30);
+  let name_w = rows.iter().map(|r| r.info.name.len()).max().unwrap_or(4).clamp(4, 40);
+  let branch_w = rows
+    .iter()
+    .map(|r| r.info.branch.as_deref().unwrap_or("-").len())
+    .max()
+    .unwrap_or(6)
+    .clamp(6, 40);
+  let status_w = 14;
+  let pr_w = 6;
+
+  if detect_pr {
+    println!(
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "REPO",
+      "NAME",
+      "BRANCH",
+      "STATUS",
+      "PR",
+      rw = repo_w,
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
+      pw = pr_w,
+    );
+  } else {
+    println!(
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "REPO",
+      "NAME",
+      "BRANCH",
+      "STATUS",
+      rw = repo_w,
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
+    );
+  }
+  for (i, row) in rows.iter().enumerate() {
+    let w = &row.info;
+    let mark = if w.is_main { "*" } else { " " };
+    let branch = w.branch.clone().unwrap_or_else(|| "-".into());
+    let status = format_status_text(w);
+    if detect_pr {
+      let pr = detected_prs.get(i).copied().flatten();
+      let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
+      println!(
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        mark,
+        row.repo_name,
+        w.name,
+        branch,
+        status,
+        pr_cell,
+        w.path.display(),
+        rw = repo_w,
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+        pw = pr_w,
+      );
+    } else {
+      println!(
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        mark,
+        row.repo_name,
+        w.name,
+        branch,
+        status,
+        w.path.display(),
+        rw = repo_w,
         nw = name_w,
         bw = branch_w,
         sw = status_w,

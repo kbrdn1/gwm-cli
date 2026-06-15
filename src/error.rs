@@ -118,6 +118,12 @@ pub enum GwmError {
   #[error("no {kind} linked to branch '{branch}'")]
   LinkMissing { kind: LinkKind, branch: String },
 
+  /// Issue #36: `--workspace <dir>` pointed at a directory that holds no
+  /// git repos directly below it. Surfaced rather than opening an empty
+  /// table / TUI so the user can tell a wrong path from an empty root.
+  #[error("no git repos found directly under workspace root '{root}'")]
+  EmptyWorkspace { root: String },
+
   #[error("{0}")]
   Other(String),
 }
