@@ -96,6 +96,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are fully rebindable in `[tui.keys]`. Powered by `portable-pty 0.9` +
   `tui-term 0.3` (`tui_term::vt100` — bundled vt100 0.16).
 
+### Changed
+
+- **Worktree table: label the issue/PR badge column** (issue #294): the second
+  table column (the `●` / `●` issue / PR pastilles) now carries an `I/P` header
+  so the badges read self-explanatory next to the `Worktree` / `Branch` columns.
+
 ### Dependencies
 
 - Added `portable-pty 0.9` (cross-platform PTY pair) and `tui-term 0.3`
