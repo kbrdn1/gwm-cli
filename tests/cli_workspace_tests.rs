@@ -154,6 +154,22 @@ fn create_in_workspace_with_unknown_repo_lists_available() {
 }
 
 #[test]
+fn workspace_flag_rejected_on_unsupported_subcommand() {
+  // `--workspace` is global, so clap accepts it on `remove`, but `run` only
+  // implements it for `list`/`create`/TUI. It must be rejected rather than
+  // silently acting on the current repo — a wrong-target footgun (#303 P2).
+  let root = workspace_root();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .arg("--workspace")
+    .arg(root.path())
+    .args(["remove", "foo"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("only supported with"));
+}
+
+#[test]
 fn bare_gwm_in_workspace_root_declines_autodetect_without_a_tty() {
   // assert_cmd pipes stdin (not a tty), so the auto-detect prompt must decline
   // silently and fall through to single-repo discovery — which then fails with

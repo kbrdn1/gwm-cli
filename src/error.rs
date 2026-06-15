@@ -134,6 +134,14 @@ pub enum GwmError {
   #[error("repo '{name}' not found in workspace (available: {available})")]
   WorkspaceRepoNotFound { name: String, available: String },
 
+  /// Issue #36: `--workspace` is a global flag, so clap accepts it for every
+  /// subcommand, but only `list`, `create` and bare `gwm` (the TUI) implement
+  /// it. Reject it elsewhere rather than silently ignoring it and acting on
+  /// the current single repo — a wrong-target footgun for destructive
+  /// commands like `gwm remove` (Codex review #303 P2).
+  #[error("--workspace is only supported with `gwm list`, `gwm create`, or bare `gwm` (the TUI) — refusing to run this subcommand against a single repo")]
+  WorkspaceUnsupportedCommand,
+
   #[error("{0}")]
   Other(String),
 }

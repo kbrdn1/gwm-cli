@@ -765,6 +765,14 @@ pub fn run(cli: Cli) -> Result<()> {
     return crate::tui::run(mode);
   };
 
+  // `--workspace` is global (clap accepts it everywhere) but only `list`,
+  // `create` and the bare TUI implement it. Reject it on any other subcommand
+  // rather than silently ignoring it and acting on the current single repo — a
+  // wrong-target footgun for destructive commands (Codex review #303 P2).
+  if cli.workspace.is_some() && !matches!(cmd, Command::List { .. } | Command::Create { .. }) {
+    return Err(GwmError::WorkspaceUnsupportedCommand);
+  }
+
   match cmd {
     Command::Init => cmd_init(),
     Command::List { format, detect_pr } => match cli.workspace {

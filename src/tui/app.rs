@@ -675,6 +675,35 @@ impl App {
     }
   }
 
+  /// Reload every workspace repo's cached config from disk (issue #36). Called
+  /// after a Global-layer settings edit, which changes the deep-merged config
+  /// for *all* repos — without this, navigating to a non-active repo would
+  /// restore the config it was loaded with at startup, reverting the edit for
+  /// that repo until relaunch (Codex review #303 P2). The active repo's live
+  /// `self.config` is already current (set by `set_active_config`); this
+  /// re-syncs its cached meta too, so it stays the single source of truth.
+  fn reload_workspace_repo_configs(&mut self) {
+    let Some(ws) = self.workspace.as_ref() else {
+      return;
+    };
+    let global = self.global_path.clone();
+    let targets: Vec<(usize, PathBuf)> = ws
+      .repos
+      .iter()
+      .enumerate()
+      .map(|(i, m)| (i, m.workdir.clone()))
+      .collect();
+    for (i, workdir) in targets {
+      if let Ok(cfg) = Config::load_layered(&workdir, global.as_deref()) {
+        if let Some(ws) = self.workspace.as_mut() {
+          if let Some(meta) = ws.repos.get_mut(i) {
+            meta.config = cfg;
+          }
+        }
+      }
+    }
+  }
+
   /// Per-row mask of whether each `worktrees` row belongs to the currently
   /// active repo. `None` in single-repo mode (every row qualifies). Issue/PR
   /// numbers are only unique *within* a repo, so the number-keyed GitHub state
@@ -2007,6 +2036,14 @@ impl App {
         self.status = format!("settings saved, but reload failed: {}", e);
         return;
       }
+    }
+    // A Global-layer edit changes config for *every* repo, not just the active
+    // one — refresh each cached `RepoMeta.config` so navigating to another repo
+    // doesn't restore the pre-edit global value (Codex review #303 P2). A
+    // Project-layer edit only touched the active repo's `.gwm.toml`, already
+    // handled by `set_active_config`.
+    if self.config_panel.layer == SettingsLayer::Global {
+      self.reload_workspace_repo_configs();
     }
     match self.config.theme.resolve() {
       Ok(theme) => self.theme = theme,

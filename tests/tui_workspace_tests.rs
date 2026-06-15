@@ -5,7 +5,7 @@
 //! ever drawing a frame.
 
 use git2::{Repository, Signature};
-use gwm::tui::{draw, App, SettingField};
+use gwm::tui::{draw, App, SettingField, SettingsLayer};
 use ratatui::{backend::TestBackend, Terminal};
 use std::fs;
 use std::path::Path;
@@ -196,6 +196,34 @@ fn workspace_settings_edit_survives_a_repo_swap_roundtrip() {
   assert_eq!(
     app.config.tui.auto_refresh_secs, 99,
     "the settings edit survived the repo-swap round-trip"
+  );
+}
+
+#[test]
+fn workspace_global_setting_edit_propagates_to_every_repo() {
+  // A Global-layer edit changes the deep-merged config for *every* repo. After
+  // it, navigating to another repo must see the new value, not the config that
+  // repo was loaded with at startup (Codex review #303 P2).
+  let root = workspace_root();
+  let global = root.path().join("global-config.toml");
+  fs::write(&global, "").unwrap();
+  let mut app = App::new_workspace_at_layered(root.path(), Some(&global)).unwrap();
+
+  app.config_panel.layer = SettingsLayer::Global;
+  app.apply_setting(SettingField::AutoRefreshSecs, "77");
+  assert_eq!(
+    app.config.tui.auto_refresh_secs, 77,
+    "global edit applies to the active repo"
+  );
+
+  // Navigate to beta: its cached config must reflect the global edit too.
+  let last = app.worktrees.len() - 1;
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "beta");
+  assert_eq!(
+    app.config.tui.auto_refresh_secs, 77,
+    "the global edit reached the other repo's cached config"
   );
 }
 
