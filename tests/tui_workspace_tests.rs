@@ -5,7 +5,7 @@
 //! ever drawing a frame.
 
 use git2::{Repository, Signature};
-use gwm::tui::{draw, App};
+use gwm::tui::{draw, App, SettingField};
 use ratatui::{backend::TestBackend, Terminal};
 use std::fs;
 use std::path::Path;
@@ -167,6 +167,35 @@ fn workspace_list_renders_a_repo_column_with_repo_names() {
   assert!(
     text.contains("beta"),
     "the beta repo name renders in a row, got:\n{text}"
+  );
+}
+
+#[test]
+fn workspace_settings_edit_survives_a_repo_swap_roundtrip() {
+  // Editing a setting in workspace mode must update the active repo's *cached*
+  // config too, not just `self.config` — otherwise navigating away and back
+  // restores the stale cached config and silently reverts the edit (Codex
+  // review #303 P3).
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  assert_eq!(app.repo_name, "alpha");
+
+  // Edit alpha's auto-refresh seconds via the Settings panel (Project layer).
+  app.apply_setting(SettingField::AutoRefreshSecs, "99");
+  assert_eq!(app.config.tui.auto_refresh_secs, 99, "edit applies live");
+
+  // Navigate to beta and back to alpha.
+  let last = app.worktrees.len() - 1;
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "beta");
+  app.list_state.select(Some(0));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "alpha");
+
+  assert_eq!(
+    app.config.tui.auto_refresh_secs, 99,
+    "the settings edit survived the repo-swap round-trip"
   );
 }
 

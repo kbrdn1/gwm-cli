@@ -660,6 +660,32 @@ impl App {
     }
   }
 
+  /// Set the active config, keeping the workspace cache coherent. In
+  /// workspace mode the per-repo `RepoMeta.config` is the source of truth that
+  /// `sync_active_repo` restores on activation, so a settings/keymap reload
+  /// that only updated `self.config` would be reverted the next time the user
+  /// navigated away and back (Codex review #303 P3). Write the reloaded config
+  /// through to the active repo's cached meta too.
+  fn set_active_config(&mut self, cfg: Config) {
+    self.config = cfg;
+    if let Some(ws) = self.workspace.as_mut() {
+      if let Some(meta) = ws.repos.get_mut(ws.active) {
+        meta.config = self.config.clone();
+      }
+    }
+  }
+
+  /// Per-row mask of whether each `worktrees` row belongs to the currently
+  /// active repo. `None` in single-repo mode (every row qualifies). Issue/PR
+  /// numbers are only unique *within* a repo, so the number-keyed GitHub state
+  /// stamping must be scoped to the active repo's rows in workspace mode —
+  /// otherwise a fetch for repo A's `#1` would stamp (and persist to the wrong
+  /// repo) every other repo's `#1` row (Codex review #303 P2).
+  fn active_repo_row_mask(&self) -> Option<Vec<bool>> {
+    let ws = self.workspace.as_ref()?;
+    Some(ws.row_repo.iter().map(|&r| r == ws.active).collect())
+  }
+
   /// Re-list every repo in the workspace and rebuild the merged table +
   /// row→repo map (issue #36). The single-repo async refresh would clobber the
   /// merged list with one repo's worktrees, so workspace refresh runs
@@ -804,26 +830,33 @@ impl App {
   /// the synchronous [`Self::refresh`] and by the off-thread drain in
   /// [`Self::drain_task_results`].
   fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
-    let issue_states: HashMap<u64, IssueState> = self
-      .worktrees
-      .iter()
-      .filter_map(|w| Some((w.link.issue?, w.issue_state?)))
-      .collect();
-    let pr_states = self
-      .worktrees
-      .iter()
-      .filter_map(|w| Some((w.link.pr?, w.pr_state?)))
-      .collect::<HashMap<_, _>>();
+    // The carry-over preserves this session's in-memory fetched issue/PR state
+    // across a re-list, keyed by number. In workspace mode that key collides
+    // across repos (two repos can both own `#1`), so skip it: the freshly
+    // listed rows already carry each repo's own *persisted* state from
+    // `read_link`, which is per-repo-correct (Codex review #303 P2).
+    if !self.is_workspace() {
+      let issue_states: HashMap<u64, IssueState> = self
+        .worktrees
+        .iter()
+        .filter_map(|w| Some((w.link.issue?, w.issue_state?)))
+        .collect();
+      let pr_states = self
+        .worktrees
+        .iter()
+        .filter_map(|w| Some((w.link.pr?, w.pr_state?)))
+        .collect::<HashMap<_, _>>();
 
-    for w in &mut worktrees {
-      if let Some(issue) = w.link.issue {
-        if let Some(state) = issue_states.get(&issue).copied() {
-          w.issue_state = Some(state);
+      for w in &mut worktrees {
+        if let Some(issue) = w.link.issue {
+          if let Some(state) = issue_states.get(&issue).copied() {
+            w.issue_state = Some(state);
+          }
         }
-      }
-      if let Some(pr) = w.link.pr {
-        if let Some(state) = pr_states.get(&pr).copied() {
-          w.pr_state = Some(state);
+        if let Some(pr) = w.link.pr {
+          if let Some(state) = pr_states.get(&pr).copied() {
+            w.pr_state = Some(state);
+          }
         }
       }
     }
@@ -1787,7 +1820,7 @@ impl App {
     // Reload the merged config and rebuild both keymaps so the new binding
     // fires without a restart.
     match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
-      Ok(cfg) => self.config = cfg,
+      Ok(cfg) => self.set_active_config(cfg),
       Err(e) => {
         // The single-file write validated but the layered merge is invalid —
         // roll the file back to its prior state so the config is never left
@@ -1969,7 +2002,7 @@ impl App {
     // Reload the merged config so every live read (open mode, confirm
     // countdown) and the re-seeded state below reflect the edit.
     match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
-      Ok(cfg) => self.config = cfg,
+      Ok(cfg) => self.set_active_config(cfg),
       Err(e) => {
         self.status = format!("settings saved, but reload failed: {}", e);
         return;
@@ -3144,7 +3177,15 @@ impl App {
         let _ = github::persist_issue_state(&self.repo, &branch, status.state);
       }
     }
-    for w in &mut self.worktrees {
+    // In workspace mode the fetch was for the active repo's selected issue, so
+    // only stamp/persist rows belonging to that repo — a number-only match
+    // would otherwise carry repo A's state onto repo B's same-numbered row and
+    // persist it through the wrong repo handle (Codex review #303 P2).
+    let mask = self.active_repo_row_mask();
+    for (i, w) in self.worktrees.iter_mut().enumerate() {
+      if mask.as_ref().is_some_and(|m| !m[i]) {
+        continue;
+      }
       if w.link.issue != Some(status.number) {
         continue;
       }
@@ -3172,7 +3213,13 @@ impl App {
         };
       }
     }
-    for w in &mut self.worktrees {
+    // Scope to the active repo's rows in workspace mode — see the matching
+    // note in `sync_issue_status_into_table` (Codex review #303 P2).
+    let mask = self.active_repo_row_mask();
+    for (i, w) in self.worktrees.iter_mut().enumerate() {
+      if mask.as_ref().is_some_and(|m| !m[i]) {
+        continue;
+      }
       if w.link.pr != Some(status.number) {
         continue;
       }

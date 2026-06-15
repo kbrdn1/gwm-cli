@@ -69,6 +69,27 @@ fn discover_does_not_recurse_below_one_level() {
 }
 
 #[test]
+fn discover_skips_a_linked_worktree_sibling() {
+  // A linked worktree of `main` sitting as a sibling under the root must NOT
+  // be admitted as its own repo: `main`'s `worktree::list` already emits it,
+  // so admitting it would duplicate rows (Codex review #303 P2).
+  let root = TempDir::new().unwrap();
+  let main = init_repo_at(&root.path().join("main"));
+  // Create a linked worktree at root/wt (a sibling of main, one level deep).
+  main
+    .worktree("wt", &root.path().join("wt"), None)
+    .expect("create linked worktree");
+
+  let ws = workspace::discover(root.path()).unwrap();
+  let names: Vec<&str> = ws.repos.iter().map(|r| r.name.as_str()).collect();
+  assert_eq!(
+    names,
+    vec!["main"],
+    "the linked worktree sibling is skipped, got {names:?}"
+  );
+}
+
+#[test]
 fn discover_empty_root_yields_no_repos() {
   let root = TempDir::new().unwrap();
   fs::create_dir_all(root.path().join("plain")).unwrap();

@@ -74,6 +74,13 @@ pub fn discover(root: &Path) -> Result<Workspace> {
     if repo.is_bare() {
       continue;
     }
+    // Skip a linked worktree that happens to sit as a sibling under the root:
+    // its owning repo's `worktree::list` already emits it, so admitting it as
+    // a separate `WorkspaceRepo` would duplicate rows and anchor some actions
+    // to the worktree path instead of the main repo (Codex review #303 P2).
+    if repo.is_worktree() {
+      continue;
+    }
     let name = path
       .file_name()
       .map(|n| n.to_string_lossy().to_string())
