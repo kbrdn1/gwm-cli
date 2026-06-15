@@ -181,6 +181,9 @@ impl Action {
         | Action::Push
         | Action::EditWorktree
         | Action::LinkPrompt
+        // FetchGithub persists detected PR/issue titles + states into the
+        // active repo's git config, so it writes through `App.repo` too (#304).
+        | Action::FetchGithub
     )
   }
 

@@ -120,6 +120,32 @@ fn discover_includes_an_orphan_linked_worktree_via_its_owner() {
 }
 
 #[test]
+fn discover_disambiguates_duplicate_repo_names() {
+  // Two orphan linked worktrees resolving to distinct owners that share a
+  // basename ("main") must get unique display names so `--repo` and the
+  // row→repo map can address each one (issue #304).
+  let owner_a = TempDir::new().unwrap();
+  let owner_b = TempDir::new().unwrap();
+  let a = init_repo_at(&owner_a.path().join("main"));
+  let b = init_repo_at(&owner_b.path().join("main"));
+  let root = TempDir::new().unwrap();
+  a.worktree("wt-a", &root.path().join("wt-a"), None).unwrap();
+  b.worktree("wt-b", &root.path().join("wt-b"), None).unwrap();
+
+  let ws = workspace::discover(root.path()).unwrap();
+  let mut names: Vec<&str> = ws.repos.iter().map(|r| r.name.as_str()).collect();
+  names.sort_unstable();
+  assert_eq!(ws.repos.len(), 2, "two distinct owners, got {:?}", ws.repos);
+  assert_eq!(
+    names,
+    vec!["main", "main-2"],
+    "duplicate basenames disambiguated, got {names:?}"
+  );
+  // The two paths are genuinely distinct repos.
+  assert_ne!(ws.repos[0].path, ws.repos[1].path, "distinct owner paths");
+}
+
+#[test]
 fn discover_skips_the_root_repos_own_git_dir() {
   // When the root is itself a git repo, `read_dir` surfaces its `.git/`, which
   // `Repository::open` resolves back to the root repo. That must NOT appear as

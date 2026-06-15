@@ -560,13 +560,21 @@ impl App {
     // branch types, and sets up the task channels exactly as single-repo mode.
     let mut app = Self::new_at_layered(Some(&repos[0].workdir), global_path)?;
 
-    // Replace the single-repo list with the merged, repo-tagged one.
-    let name_to_idx: HashMap<&str, usize> = repos.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
+    // Replace the single-repo list with the merged, repo-tagged one. Map each
+    // row to its repo by the repo's *workdir path*, not its display name —
+    // names can collide (a linked worktree resolving to an owner outside the
+    // root, symlinks), and a name-keyed map would then point rows at the wrong
+    // repo handle/config (Codex review #303 round-2 P2).
+    let path_to_idx: HashMap<&Path, usize> = repos
+      .iter()
+      .enumerate()
+      .map(|(i, m)| (m.workdir.as_path(), i))
+      .collect();
     let rows = crate::workspace::merge_worktrees(&ws)?;
     let mut worktrees = Vec::with_capacity(rows.len());
     let mut row_repo = Vec::with_capacity(rows.len());
     for row in &rows {
-      let idx = name_to_idx.get(row.repo_name.as_str()).copied().unwrap_or(0);
+      let idx = path_to_idx.get(row.repo_path.as_path()).copied().unwrap_or(0);
       worktrees.push(row.info.clone());
       row_repo.push(idx);
     }

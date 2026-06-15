@@ -113,6 +113,25 @@ pub fn discover(root: &Path) -> Result<Workspace> {
   }
 
   repos.sort_by(|a, b| a.name.cmp(&b.name));
+  // Display names come from the main workdir basename, which can collide for
+  // distinct repos (a linked worktree resolving to an owner outside the root,
+  // or symlinked children). `--repo <name>` and the TUI must address each repo
+  // unambiguously, so suffix any duplicate with the smallest free `-N` (#304).
+  let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+  for r in &mut repos {
+    if used.insert(r.name.clone()) {
+      continue;
+    }
+    let mut n = 2;
+    loop {
+      let candidate = format!("{}-{}", r.name, n);
+      if used.insert(candidate.clone()) {
+        r.name = candidate;
+        break;
+      }
+      n += 1;
+    }
+  }
   Ok(Workspace {
     root: root.to_path_buf(),
     repos,
