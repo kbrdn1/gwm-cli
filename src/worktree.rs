@@ -1136,9 +1136,19 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
-/// Shell out to `git status --porcelain -z --untracked-files=all` inside
-/// `path` and return raw stdout. Used by the TUI sidebar to preview the
-/// working-tree state.
+/// Hard cap on the number of NUL-terminated `git status -z` records read
+/// before the scan is abandoned (issue #300). `--untracked-files=all` makes
+/// git recurse into unignored generated/vendor directories; streaming the
+/// output and stopping here bounds **both** git's directory walk (the child
+/// is killed once the cap is hit) and our own parse / allocation, so a
+/// pathological worktree can't stall the TUI. Set well above any realistic
+/// change set; the file tree itself renders at most
+/// [`crate::tui::wt_tree::WT_TREE_MAX_FILES`].
+pub const STATUS_SCAN_CAP: usize = 5000;
+
+/// Stream `git status --porcelain -z --untracked-files=all` inside `path`
+/// and return raw stdout, capped at [`STATUS_SCAN_CAP`] records. Used by the
+/// TUI sidebar to preview the working-tree state.
 ///
 /// Two flags matter for the Working Tree file-explorer (issue #300):
 ///
@@ -1155,7 +1165,82 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
 ///   without guesswork. The footer counts (issue #287) parse the same
 ///   stream.
 pub fn git_status_short(path: &Path) -> Result<String> {
-  run_git(path, &["status", "--porcelain", "-z", "--untracked-files=all"])
+  git_status_short_capped(path, STATUS_SCAN_CAP)
+}
+
+/// Cap-injectable core of [`git_status_short`]. Spawns git with a piped
+/// stdout, reads NUL-terminated records until `cap` is reached (then kills
+/// the child so git stops walking the tree), and returns the bytes gathered
+/// so far. Exposed so integration tests can exercise truncation with a small
+/// `cap` instead of creating thousands of files.
+pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<String> {
+  use std::io::{BufRead, BufReader};
+  use std::process::{Command, Stdio};
+
+  let mut child = Command::new("git")
+    .arg("-C")
+    .arg(path)
+    .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
+
+  let stdout = child
+    .stdout
+    .take()
+    .ok_or_else(|| GwmError::CommandFailed("git status: stdout pipe missing".to_string()))?;
+  let mut reader = BufReader::new(stdout);
+  let mut collected: Vec<u8> = Vec::new();
+  let mut segment: Vec<u8> = Vec::new();
+  let mut records = 0usize;
+  let mut truncated = false;
+  loop {
+    if records >= cap {
+      truncated = true;
+      break;
+    }
+    segment.clear();
+    let n = reader
+      .read_until(0u8, &mut segment)
+      .map_err(|e| GwmError::CommandFailed(format!("git status: read failed: {}", e)))?;
+    if n == 0 {
+      break; // EOF — git produced fewer than `cap` records.
+    }
+    collected.extend_from_slice(&segment);
+    // A trailing NUL marks a complete record; a final unterminated chunk
+    // (only at true EOF) is kept verbatim and just isn't counted.
+    if segment.last() == Some(&0) {
+      records += 1;
+    }
+  }
+
+  if truncated {
+    // We have enough to render — stop git's directory walk. The kill is
+    // best-effort: the child may have already exited on a small tree.
+    let _ = child.kill();
+  }
+  let status = child
+    .wait()
+    .map_err(|e| GwmError::CommandFailed(format!("git status: wait failed: {}", e)))?;
+
+  // A non-truncated, unsuccessful run is a real failure (e.g. not a repo) —
+  // surface git's stderr. A truncated run was killed on purpose, so its
+  // non-zero status is expected and ignored.
+  if !truncated && !status.success() {
+    let mut err = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+      use std::io::Read;
+      let _ = stderr.read_to_string(&mut err);
+    }
+    return Err(GwmError::CommandFailed(format!(
+      "git status exited {}: {}",
+      status,
+      err.trim()
+    )));
+  }
+
+  Ok(String::from_utf8_lossy(&collected).into_owned())
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a

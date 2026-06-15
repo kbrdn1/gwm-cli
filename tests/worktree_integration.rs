@@ -334,6 +334,32 @@ fn git_status_short_expands_untracked_directory_into_files() {
 }
 
 #[test]
+fn git_status_short_caps_the_scan() {
+  // The streaming scan must stop after `cap` NUL-terminated records (issue
+  // #300) so an unignored directory with thousands of untracked files can't
+  // stall the TUI — git is killed once the cap is hit.
+  let (dir, _) = init_repo();
+  for i in 0..6 {
+    std::fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+  }
+  let out = worktree::git_status_short_capped(dir.path(), 3).unwrap();
+  let tokens = out.matches('\0').count();
+  assert!(tokens <= 3, "scan capped at 3 records, got {tokens}: {out:?}");
+  assert!(!out.is_empty(), "the first records are still returned: {out:?}");
+}
+
+#[test]
+fn git_status_short_returns_full_output_below_the_cap() {
+  // A normal change set (well under the cap) comes back in full, untruncated.
+  let (dir, _) = init_repo();
+  for i in 0..4 {
+    std::fs::write(dir.path().join(format!("g{i}.txt")), "x").unwrap();
+  }
+  let out = worktree::git_status_short_capped(dir.path(), 1000).unwrap();
+  assert_eq!(out.matches('\0').count(), 4, "all 4 records returned: {out:?}");
+}
+
+#[test]
 fn git_log_oneline_errors_outside_repo() {
   let empty = TempDir::new().unwrap();
   let err = worktree::git_log_oneline(empty.path(), 5);

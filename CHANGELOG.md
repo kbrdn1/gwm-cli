@@ -115,9 +115,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     only-new → green, only-deleted → red, mixed → neutral accent.
   - An **extra space** pads each nerd-font glyph (most render double-width in
     a single cell) so the following name isn't clipped.
-  - A pathological untracked directory is **capped at 500 file leaves**, with
-    the remainder shown as a single `… N more` row, so selecting such a
-    worktree can't flood the non-scrollable section.
+  - A pathological untracked directory is bounded at **two levels**: the
+    `git status` scan is streamed and **stopped after 5000 records** (git is
+    killed once the cap is hit, so its directory walk can't run away), and the
+    tree then renders at most **500 file leaves** with the remainder shown as
+    a single `… N more` row — selecting such a worktree can neither stall the
+    scan nor flood the non-scrollable section.
   - `git_status_short` now reads `git status --porcelain -z
     --untracked-files=all`: `-uall` expands an untracked directory into its
     individual files (git-ignored paths stay excluded), and `--porcelain -z`
