@@ -1179,7 +1179,13 @@ pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<(String, bool)
   use std::io::{BufRead, BufReader};
   use std::process::{Command, Stdio};
 
+  // `--no-optional-locks` keeps git from taking the index lock for its
+  // opportunistic stat-cache refresh (the flag git ships for status pollers
+  // like IDEs / watchman). Without it, killing the child at the cap could
+  // leave a stale `.git/index.lock` behind and break the next git command in
+  // that worktree.
   let mut child = Command::new("git")
+    .arg("--no-optional-locks")
     .arg("-C")
     .arg(path)
     .args(["status", "--porcelain", "-z", "--untracked-files=all"])

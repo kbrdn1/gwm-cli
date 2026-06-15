@@ -1185,7 +1185,10 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String,
         };
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
-          Span::styled(format!("{}  {}", WT_DIR_OPEN_ICON, name), Style::default().fg(color)),
+          Span::styled(
+            format!("{}  {}", WT_DIR_OPEN_ICON, wt_tree::sanitize_name(name)),
+            Style::default().fg(color),
+          ),
         ]));
         let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
         push_wt_nodes(out, children, child_prefix, theme);
@@ -1200,7 +1203,10 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String,
         out.push(Line::from(vec![
           Span::styled(connector, Style::default().fg(theme.muted)),
           Span::styled(format!("{} ", badge), Style::default().fg(color)),
-          Span::styled(format!("{}  {}", icon, name), Style::default().fg(color)),
+          Span::styled(
+            format!("{}  {}", icon, wt_tree::sanitize_name(name)),
+            Style::default().fg(color),
+          ),
         ]));
       }
     }

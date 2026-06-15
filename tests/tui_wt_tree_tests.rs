@@ -7,8 +7,8 @@
 //! counterpart lives in `tui_sidebar_render_tests.rs`.
 
 use gwm::tui::wt_tree::{
-  build_capped_tree, build_tree, file_icon, parse_status_z, status_badge, working_tree_category, StatusRecord,
-  WtCategory, WtNode, WT_FILE_ICON, WT_JSON_ICON, WT_MARKDOWN_ICON, WT_RUST_ICON, WT_TOML_ICON,
+  build_capped_tree, build_tree, file_icon, parse_status_z, sanitize_name, status_badge, working_tree_category,
+  StatusRecord, WtCategory, WtNode, WT_FILE_ICON, WT_JSON_ICON, WT_MARKDOWN_ICON, WT_RUST_ICON, WT_TOML_ICON,
 };
 
 /// Find a direct `Dir` child by name in a node slice.
@@ -189,6 +189,14 @@ fn working_tree_category_matches_badge_families() {
   assert_eq!(working_tree_category('D', ' '), WtCategory::Deleted);
   assert_eq!(working_tree_category(' ', 'M'), WtCategory::Modified);
   assert_eq!(working_tree_category('R', ' '), WtCategory::Modified);
+}
+
+#[test]
+fn sanitize_name_replaces_control_characters() {
+  assert_eq!(sanitize_name("normal.rs"), "normal.rs", "plain names pass through");
+  assert_eq!(sanitize_name("a\nb\t.rs"), "a?b?.rs", "newline and tab neutralised");
+  // An embedded ANSI escape can't reach the terminal as a control sequence.
+  assert_eq!(sanitize_name("x\u{1b}[2J.rs"), "x?[2J.rs");
 }
 
 #[test]

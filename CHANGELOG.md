@@ -119,8 +119,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `git status` scan is streamed and **stopped after 5000 records** (git is
     killed once the cap is hit, so its directory walk can't run away), and the
     tree then renders at most **500 file leaves** with the remainder shown as
-    a single `… N more` row — selecting such a worktree can neither stall the
-    scan nor flood the non-scrollable section.
+    a single `… N more` row (`… N+ more` when the scan itself was truncated,
+    since the true total is then unknown) — selecting such a worktree can
+    neither stall the scan nor flood the non-scrollable section. The scan
+    runs under `--no-optional-locks` so killing it at the cap can't leave a
+    stale `.git/index.lock`, and stderr is drained off-thread to avoid a pipe
+    deadlock.
+  - File and directory names are **sanitised** before rendering (control
+    characters → `?`), so a verbatim `-z` filename can't corrupt the sidebar
+    layout or inject terminal escape sequences.
   - `git_status_short` now reads `git status --porcelain -z
     --untracked-files=all`: `-uall` expands an untracked directory into its
     individual files (git-ignored paths stay excluded), and `--porcelain -z`

@@ -129,6 +129,16 @@ pub fn file_icon(name: &str) -> &'static str {
   }
 }
 
+/// Make a path segment safe to render in the TUI: every control character
+/// (newline, tab, carriage return, ANSI escape, …) becomes `?`. `-z` emits
+/// filenames verbatim, so a name carrying embedded control bytes could
+/// otherwise break the sidebar layout or inject terminal escape sequences;
+/// the real bytes still live in git, this only guards what reaches the
+/// screen.
+pub fn sanitize_name(name: &str) -> String {
+  name.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 /// A node in the Working Tree file-explorer model. A `Dir` carries its
 /// (possibly collapsed) display name, ordered children, and the aggregate
 /// change-category of its subtree (issue #300: `Some(c)` when every
