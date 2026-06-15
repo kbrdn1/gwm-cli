@@ -1136,17 +1136,26 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
-/// Shell out to `git status --short --untracked-files=all` inside `path`
-/// and return raw stdout. Used by the TUI sidebar to preview the working-
-/// tree state.
+/// Shell out to `git status --porcelain -z --untracked-files=all` inside
+/// `path` and return raw stdout. Used by the TUI sidebar to preview the
+/// working-tree state.
 ///
-/// `--untracked-files=all` (issue #300) expands an entirely-untracked
-/// directory into its individual files (`src/app/mod.rs`) instead of git's
-/// default single collapsed `src/` row, so the Working Tree file-explorer
-/// can nest them. Git-ignored paths (e.g. `target/`) stay excluded, so this
-/// never floods the pane with build artefacts.
+/// Two flags matter for the Working Tree file-explorer (issue #300):
+///
+/// - `--untracked-files=all` expands an entirely-untracked directory into
+///   its individual files (`src/app/mod.rs`) instead of git's default
+///   collapsed `src/` row, so the tree can nest them. Git-ignored paths
+///   (e.g. `target/`) stay excluded, so the pane never floods with build
+///   artefacts.
+/// - `--porcelain -z` emits paths **verbatim**, NUL-terminated — no double-
+///   quoting of non-ASCII / special-character names, and renames carry the
+///   source path as a separate NUL field instead of an ambiguous
+///   `old -> new` text join. This lets [`crate::tui::wt_tree::parse_status_z`]
+///   parse filenames containing spaces, arrows, quotes, or UTF-8 bytes
+///   without guesswork. The footer counts (issue #287) parse the same
+///   stream.
 pub fn git_status_short(path: &Path) -> Result<String> {
-  run_git(path, &["status", "--short", "--untracked-files=all"])
+  run_git(path, &["status", "--porcelain", "-z", "--untracked-files=all"])
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a

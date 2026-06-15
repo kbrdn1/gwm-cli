@@ -7,8 +7,8 @@
 //! counterpart lives in `tui_sidebar_render_tests.rs`.
 
 use gwm::tui::wt_tree::{
-  build_tree, file_icon, status_badge, working_tree_category, WtCategory, WtNode, WT_FILE_ICON, WT_JSON_ICON,
-  WT_MARKDOWN_ICON, WT_RUST_ICON, WT_TOML_ICON,
+  build_tree, file_icon, parse_status_z, status_badge, working_tree_category, WtCategory, WtNode, WT_FILE_ICON,
+  WT_JSON_ICON, WT_MARKDOWN_ICON, WT_RUST_ICON, WT_TOML_ICON,
 };
 
 /// Find a direct `Dir` child by name in a node slice.
@@ -30,14 +30,14 @@ fn children(node: &WtNode) -> &[WtNode] {
 #[test]
 fn build_tree_empty_status_is_empty() {
   assert!(build_tree("").is_empty());
-  assert!(build_tree("\n  \n").is_empty(), "blank lines yield no nodes");
+  assert!(build_tree("\0").is_empty(), "a lone trailing NUL yields no nodes");
 }
 
 #[test]
 fn build_tree_collapses_single_child_directory_chain() {
   // `src` → `tui` → `ui.rs`: the two single-child dirs fold into one
   // `src/tui` row, and `ui.rs` stays its own child (issue #300 example).
-  let tree = build_tree("?? src/tui/ui.rs\n");
+  let tree = build_tree("?? src/tui/ui.rs\0");
   assert_eq!(tree.len(), 1, "one top-level node: {tree:?}");
   let top = dir(&tree, "src/tui");
   let kids = children(top);
@@ -53,7 +53,7 @@ fn build_tree_collapses_single_child_directory_chain() {
 fn build_tree_does_not_collapse_a_dir_with_a_file_sibling() {
   // `src` has both a file (`lib.rs`) and a subdir (`tui`), so it must NOT
   // fold into its child — only single-*child* dir chains collapse.
-  let tree = build_tree("?? src/lib.rs\n?? src/tui/ui.rs\n");
+  let tree = build_tree("?? src/lib.rs\0?? src/tui/ui.rs\0");
   let src = dir(&tree, "src");
   let kids = children(src);
   assert_eq!(kids.len(), 2, "src keeps both children: {kids:?}");
@@ -64,12 +64,7 @@ fn build_tree_does_not_collapse_a_dir_with_a_file_sibling() {
 
 #[test]
 fn build_tree_sorts_dirs_before_files_alphabetically() {
-  let tree = build_tree(
-    "?? zebra.txt\n\
-     ?? alpha.txt\n\
-     ?? lib/mod.rs\n\
-     ?? abc/x.rs\n",
-  );
+  let tree = build_tree("?? zebra.txt\0?? alpha.txt\0?? lib/mod.rs\0?? abc/x.rs\0");
   let names: Vec<&str> = tree
     .iter()
     .map(|n| match n {
@@ -83,7 +78,7 @@ fn build_tree_sorts_dirs_before_files_alphabetically() {
 
 #[test]
 fn build_tree_file_carries_extension_icon_badge_and_category() {
-  let tree = build_tree(" M src/main.rs\n");
+  let tree = build_tree(" M src/main.rs\0");
   let kids = children(dir(&tree, "src"));
   match &kids[0] {
     WtNode::File {
@@ -103,9 +98,10 @@ fn build_tree_file_carries_extension_icon_badge_and_category() {
 
 #[test]
 fn build_tree_takes_destination_of_a_rename() {
-  // Porcelain renames render `R  old -> new`; the tree must key off the
-  // destination path and drop the source.
-  let tree = build_tree("R  old/a.rs -> new/b.rs\n");
+  // In `-z` porcelain a rename is `XY <dest>\0<source>\0`: the destination
+  // comes first, the source in the trailing NUL field. The tree keys off the
+  // destination and drops the source.
+  let tree = build_tree("R  new/b.rs\0old/a.rs\0");
   assert_eq!(tree.len(), 1, "only the destination dir survives: {tree:?}");
   let kids = children(dir(&tree, "new"));
   assert!(
@@ -116,52 +112,29 @@ fn build_tree_takes_destination_of_a_rename() {
 }
 
 #[test]
-fn build_tree_decodes_c_quoted_non_ascii_path() {
-  // `git status --short` wraps a path with non-ASCII bytes in double quotes
-  // with octal C-escapes (`core.quotePath` default). The builder must decode
-  // it back to the real UTF-8 name rather than nest the escaped literal.
-  let tree = build_tree("?? \"caf\\303\\251.rs\"\n");
-  assert_eq!(tree.len(), 1, "one decoded file: {tree:?}");
+fn build_tree_keeps_special_chars_in_names_verbatim() {
+  // `-z` emits paths verbatim — no quoting. A filename with a space, a
+  // literal ` -> `, and non-ASCII bytes nests with its real name intact (the
+  // edge cases that textual `--short` parsing would mangle).
+  let tree = build_tree("?? a -> café b.txt\0");
   assert!(
-    matches!(&tree[0], WtNode::File { name, icon, .. } if name == "café.rs" && *icon == WT_RUST_ICON),
-    "quoted path decoded to café.rs with the rust icon: {:?}",
+    matches!(&tree[0], WtNode::File { name, .. } if name == "a -> café b.txt"),
+    "special chars preserved verbatim: {:?}",
     tree[0]
   );
 }
 
 #[test]
-fn build_tree_decodes_c_quoted_escaped_quote() {
-  // An embedded double quote is escaped as `\"`; decoding restores it.
-  let tree = build_tree("?? \"a\\\"b.txt\"\n");
-  assert!(
-    matches!(&tree[0], WtNode::File { name, .. } if name == "a\"b.txt"),
-    "escaped quote decoded: {:?}",
-    tree[0]
-  );
-}
-
-#[test]
-fn build_tree_decodes_quoted_rename_destination() {
-  // A rename whose destination is quoted: decode the destination after the
-  // ` -> ` split.
-  let tree = build_tree("R  a.rs -> \"b\\303\\251.rs\"\n");
-  assert!(
-    matches!(&tree[0], WtNode::File { name, badge, .. } if name == "bé.rs" && *badge == 'M'),
-    "quoted rename destination decoded: {:?}",
-    tree[0]
-  );
-}
-
-#[test]
-fn build_tree_keeps_arrow_in_a_plain_untracked_filename() {
-  // ` -> ` is git's separator only on a rename/copy (`R`/`C`) status line;
-  // an untracked file literally named `a -> b.txt` must keep its name, not
-  // be truncated to the bogus "destination".
-  let tree = build_tree("?? a -> b.txt\n");
-  assert!(
-    matches!(&tree[0], WtNode::File { name, .. } if name == "a -> b.txt"),
-    "arrow kept verbatim in a non-rename filename: {:?}",
-    tree[0]
+fn parse_status_z_drops_rename_source_and_preserves_paths() {
+  // NUL-delimited records; the rename destination (`dst.rs`) is kept and its
+  // trailing source field (`src.rs`) dropped, while spaces in plain names
+  // survive untouched.
+  let recs = parse_status_z("?? a b.rs\0R  dst.rs\0src.rs\0 M c.rs\0");
+  let got: Vec<(char, char, &str)> = recs.iter().map(|r| (r.x, r.y, r.path.as_str())).collect();
+  assert_eq!(
+    got,
+    vec![('?', '?', "a b.rs"), ('R', ' ', "dst.rs"), (' ', 'M', "c.rs")],
+    "rename source dropped, paths verbatim: {got:?}"
   );
 }
 

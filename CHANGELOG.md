@@ -107,10 +107,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   badge, all painted in the file's change-category colour (so a row matches
   the footer count it belongs to). The counts footer is unchanged. The tree
   builder (flat status → tree model) is a pure, ratatui-free function with
-  unit tests. `git_status_short` now passes `--untracked-files=all` so an
-  untracked directory expands into its individual files (git-ignored paths
-  stay excluded). Paths git C-quotes (non-ASCII names, embedded quotes) are
-  decoded back to their real UTF-8 name before nesting.
+  unit tests. `git_status_short` now reads `git status --porcelain -z
+  --untracked-files=all`: `-uall` expands an untracked directory into its
+  individual files (git-ignored paths stay excluded), and `--porcelain -z`
+  emits paths verbatim and NUL-delimited — so filenames with spaces,
+  arrows, quotes, or non-ASCII bytes (and rename source/destination) parse
+  unambiguously. The footer counts share the same `-z` parser, so a rename
+  counts once and the total always matches the rows rendered.
 - **Worktree table: label the issue/PR badge column** (issue #294): the second
   table column (the `●` / `●` issue / PR pastilles) now carries an `I/P` header
   so the badges read self-explanatory next to the `Worktree` / `Branch` columns.

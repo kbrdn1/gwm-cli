@@ -147,20 +147,39 @@ pub enum WtNode {
   },
 }
 
-/// Build the nested Working Tree model from `git status --short` porcelain
-/// output. Each `XY PATH` line becomes a leaf at the end of its path
-/// segments; intermediate segments are directories. Renames
-/// (`R  old -> new`) key off the destination. The result is dir-first
-/// alphabetical at every level with single-child directory chains
-/// collapsed.
+/// One parsed `git status --porcelain -z` record: the two status columns
+/// and the working-tree path. For a rename/copy this is the **destination**
+/// (the source token is consumed and dropped during parsing), so every
+/// record is a live entry the tree can nest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatusRecord {
+  pub x: char,
+  pub y: char,
+  pub path: String,
+}
+
+/// Parse `git status --porcelain -z` output into [`StatusRecord`]s.
 ///
-/// Lines too short to carry an `XY` pair, or whose path is empty, are
-/// skipped — real porcelain output never produces them, but the helper
-/// stays total for non-git callers.
-pub fn build_tree(status_short: &str) -> Vec<WtNode> {
-  let mut root = DirBuilder::default();
-  for line in status_short.lines() {
-    let mut chars = line.chars();
+/// The `-z` format is a run of **NUL-terminated** tokens, each `XY<space>PATH`;
+/// a rename/copy entry (`R`/`C` in either status column) is immediately
+/// *followed* by a second NUL-terminated token carrying its original path,
+/// which is skipped. Crucially, `-z` emits paths **verbatim** — no double-
+/// quoting, no C-escapes — and delimits on NUL, so a filename containing a
+/// space, a literal ` -> `, a quote, or non-ASCII bytes is unambiguous.
+/// This is why the file-explorer reads `-z` rather than the human `--short`
+/// format: it removes every textual-parsing edge case at the source.
+///
+/// Tokens too short to carry an `XY` pair, or with an empty path, are
+/// skipped; the trailing NUL's empty token is ignored. The helper is total
+/// for non-git callers.
+pub fn parse_status_z(raw: &str) -> Vec<StatusRecord> {
+  let mut records = Vec::new();
+  let mut tokens = raw.split('\0');
+  while let Some(tok) = tokens.next() {
+    if tok.is_empty() {
+      continue;
+    }
+    let mut chars = tok.chars();
     let x = match chars.next() {
       Some(c) => c,
       None => continue,
@@ -169,126 +188,35 @@ pub fn build_tree(status_short: &str) -> Vec<WtNode> {
       Some(c) => c,
       None => continue,
     };
-    // Skip the separator char; the remainder (trimmed) is the path.
+    // Skip the single separator space between the `XY` pair and the path.
     if chars.next().is_none() {
       continue;
     }
-    let rest: String = chars.collect();
-    let trimmed = rest.trim();
-    // ` -> ` is git's separator only on a rename/copy line (`R`/`C` in either
-    // status column); on any other status a literal ` -> ` is part of the
-    // filename and must be kept. Decode git's C-quoting afterwards — the
-    // separator is added outside the quotes, so splitting first is safe.
-    let token = if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
-      rename_destination(trimmed)
-    } else {
-      trimmed
-    };
-    let path = decode_porcelain_path(token);
+    let path: String = chars.collect();
     if path.is_empty() {
       continue;
     }
-    root.insert(&path, x, y);
+    // A rename/copy entry is trailed by its source-path token — drop it so
+    // the source dir doesn't show up as a phantom entry.
+    if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+      tokens.next();
+    }
+    records.push(StatusRecord { x, y, path });
+  }
+  records
+}
+
+/// Build the nested Working Tree model from `git status --porcelain -z`
+/// output (via [`parse_status_z`]). Each record's path becomes a leaf at
+/// the end of its `/`-separated segments; intermediate segments are
+/// directories. The result is dir-first alphabetical at every level with
+/// single-child directory chains collapsed.
+pub fn build_tree(status_z: &str) -> Vec<WtNode> {
+  let mut root = DirBuilder::default();
+  for rec in parse_status_z(status_z) {
+    root.insert(&rec.path, rec.x, rec.y);
   }
   root.into_nodes()
-}
-
-/// Porcelain renames render the path as `old -> new`; keep only the
-/// destination. A plain path is returned unchanged.
-fn rename_destination(path: &str) -> &str {
-  match path.rsplit_once(" -> ") {
-    Some((_, dest)) => dest,
-    None => path,
-  }
-}
-
-/// Decode a `git status --short` path token. When a path carries "unusual"
-/// bytes (non-ASCII under the default `core.quotePath`, a literal `"` or
-/// `\`, or a control char) git wraps it in double quotes and C-escapes the
-/// payload; this reverses that quoting back to the real name. An unquoted
-/// token is returned as-is.
-fn decode_porcelain_path(token: &str) -> String {
-  let bytes = token.as_bytes();
-  if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
-    unquote_c(&token[1..token.len() - 1])
-  } else {
-    token.to_string()
-  }
-}
-
-/// Reverse git's C-style string quoting: the named escapes plus octal byte
-/// escapes (`\ooo`). Octal escapes are accumulated as raw bytes so a
-/// multi-byte UTF-8 codepoint (emitted as several `\ooo`) reassembles
-/// correctly; the byte buffer is then decoded lossily. An unrecognised
-/// escape keeps its backslash verbatim.
-fn unquote_c(s: &str) -> String {
-  let bytes = s.as_bytes();
-  let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-  let mut i = 0;
-  while i < bytes.len() {
-    if bytes[i] == b'\\' && i + 1 < bytes.len() {
-      match bytes[i + 1] {
-        b'n' => {
-          out.push(b'\n');
-          i += 2;
-        }
-        b't' => {
-          out.push(b'\t');
-          i += 2;
-        }
-        b'r' => {
-          out.push(b'\r');
-          i += 2;
-        }
-        b'a' => {
-          out.push(0x07);
-          i += 2;
-        }
-        b'b' => {
-          out.push(0x08);
-          i += 2;
-        }
-        b'f' => {
-          out.push(0x0c);
-          i += 2;
-        }
-        b'v' => {
-          out.push(0x0b);
-          i += 2;
-        }
-        b'"' => {
-          out.push(b'"');
-          i += 2;
-        }
-        b'\\' => {
-          out.push(b'\\');
-          i += 2;
-        }
-        b'0'..=b'7' => {
-          let mut val: u32 = 0;
-          let mut digits = 0;
-          let mut j = i + 1;
-          while j < bytes.len() && digits < 3 && bytes[j].is_ascii_digit() && bytes[j] < b'8' {
-            val = val * 8 + u32::from(bytes[j] - b'0');
-            j += 1;
-            digits += 1;
-          }
-          out.push(val as u8);
-          i = j;
-        }
-        _ => {
-          // Unknown escape: keep the backslash and let the next byte be
-          // handled on the following iteration.
-          out.push(b'\\');
-          i += 1;
-        }
-      }
-    } else {
-      out.push(bytes[i]);
-      i += 1;
-    }
-  }
-  String::from_utf8_lossy(&out).into_owned()
 }
 
 // Intermediate mutable builder kept private; `BTreeMap` gives the

@@ -1210,27 +1210,15 @@ fn working_tree_category_color(cat: WtCategory, theme: &Theme) -> Color {
   }
 }
 
-/// Tally `git status --short` porcelain output into per-category
-/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Lines
-/// too short to carry an `XY` pair, or an all-blank pair, are skipped —
-/// real porcelain output never produces them, but the helper is `pub` so a
-/// non-git caller could.
-pub fn working_tree_status_counts(status_short: &str) -> WorkingTreeCounts {
+/// Tally `git status --porcelain -z` output into per-category
+/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Shares
+/// the NUL-delimited parser ([`wt_tree::parse_status_z`]) with the file
+/// tree, so a rename counts once (its source token is dropped) and the
+/// footer total always matches the number of rows the tree renders.
+pub fn working_tree_status_counts(status_z: &str) -> WorkingTreeCounts {
   let mut c = WorkingTreeCounts::default();
-  for line in status_short.lines() {
-    let mut chars = line.chars();
-    let x = match chars.next() {
-      Some(ch) => ch,
-      None => continue,
-    };
-    let y = match chars.next() {
-      Some(ch) => ch,
-      None => continue,
-    };
-    if x == ' ' && y == ' ' {
-      continue;
-    }
-    match working_tree_category(x, y) {
+  for rec in wt_tree::parse_status_z(status_z) {
+    match working_tree_category(rec.x, rec.y) {
       WtCategory::Created => c.created += 1,
       WtCategory::Modified => c.modified += 1,
       WtCategory::Deleted => c.deleted += 1,
