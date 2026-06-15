@@ -6,8 +6,11 @@
 //! the modal paints. Mirrors the Command Logs slice's clamp tests —
 //! ratatui-free, no terminal backend.
 
+use crossterm::event::{KeyCode, KeyModifiers};
 use gwm::config::{Config, ConfigRow, ConfigSource};
-use gwm::tui::{ConfigPanel, FieldKind, SettingField, SettingsLayer, SettingsTab};
+use gwm::tui::keymap::{Action, KeyStroke, Keymap};
+use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+use gwm::tui::{build_key_rows, ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer, SettingsTab};
 
 fn sample_row() -> ConfigRow {
   ConfigRow {
@@ -99,13 +102,19 @@ fn new_panel_defaults_to_theme_tab_project_layer() {
 }
 
 #[test]
-fn next_tab_cycles_theme_worktree_tui_all_and_wraps() {
+fn next_tab_cycles_theme_worktree_tui_keys_all_and_wraps() {
   let mut panel = ConfigPanel::new();
   assert_eq!(panel.tab, SettingsTab::Theme);
   panel.next_tab();
   assert_eq!(panel.tab, SettingsTab::Worktree);
   panel.next_tab();
   assert_eq!(panel.tab, SettingsTab::Tui);
+  panel.next_tab();
+  assert_eq!(
+    panel.tab,
+    SettingsTab::Keys,
+    "Keys tab sits between TUI and All (issue #294)"
+  );
   panel.next_tab();
   assert_eq!(panel.tab, SettingsTab::All);
   panel.next_tab();
@@ -255,6 +264,164 @@ fn cancel_edit_discards_the_buffer() {
   panel.push_edit_char('2');
   panel.cancel_edit();
   assert!(panel.editing.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Keys tab (issue #294): the dynamic keymap-editor row model + the live
+// keystroke-capture state machine — all pure, ratatui-free.
+// ---------------------------------------------------------------------------
+
+fn ch(c: char) -> KeyStroke {
+  KeyStroke::new(KeyCode::Char(c), KeyModifiers::empty())
+}
+
+#[test]
+fn build_key_rows_enumerates_every_global_and_modal_binding() {
+  let rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  let expected = Action::all().count() + ModalAction::all().count();
+  assert_eq!(rows.len(), expected, "one row per global action + per modal verb");
+
+  // Global rows come first, in declaration order, scoped "global".
+  assert_eq!(rows[0].target, KeyTarget::Global(Action::all().next().unwrap()));
+  assert_eq!(rows[0].scope, "global");
+  // The modal block carries a context-qualified scope.
+  assert!(
+    rows.iter().any(|r| r.scope == "modal.confirm" && r.label == "confirm"),
+    "modal verbs are grouped by their context path"
+  );
+}
+
+#[test]
+fn key_rows_show_current_chords_and_source() {
+  let rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |key| {
+    if key == "tui.keys.quit" {
+      ConfigSource::Repo
+    } else {
+      ConfigSource::Default
+    }
+  });
+  let quit = rows
+    .iter()
+    .find(|r| r.target == KeyTarget::Global(Action::Quit))
+    .expect("quit row present");
+  assert_eq!(quit.keys, "q", "default quit chord shown");
+  assert_eq!(quit.source, ConfigSource::Repo, "source resolved via the lookup");
+}
+
+#[test]
+fn config_key_addresses_the_right_toml_table() {
+  assert_eq!(KeyTarget::Global(Action::Quit).config_key(), "tui.keys.quit");
+  assert_eq!(
+    KeyTarget::Modal(ModalAction::ConfirmConfirm).config_key(),
+    "tui.keys.modal.confirm.confirm"
+  );
+  // A staged (dotted) context keeps its dotted path.
+  assert_eq!(
+    KeyTarget::Modal(ModalAction::LinkChooseIssue).config_key(),
+    "tui.keys.modal.link.choose_target.issue"
+  );
+}
+
+#[test]
+fn modal_targets_are_single_only_globals_are_not() {
+  assert!(
+    !KeyTarget::Global(Action::Down).single_only(),
+    "global actions accept chords"
+  );
+  assert!(
+    KeyTarget::Modal(ModalAction::ConfirmConfirm).single_only(),
+    "modal verbs are single-stroke"
+  );
+}
+
+#[test]
+fn begin_capture_arms_only_on_the_keys_tab_with_a_selected_row() {
+  let mut panel = ConfigPanel::new();
+  panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+
+  // Not on the Keys tab → no-op.
+  panel.tab = SettingsTab::Theme;
+  panel.begin_capture();
+  assert!(panel.capture.is_none());
+
+  // On the Keys tab → arms with the row's single_only flag.
+  panel.tab = SettingsTab::Keys;
+  panel.selected = 0; // first global action
+  panel.begin_capture();
+  let cap = panel.capture.as_ref().expect("capture armed");
+  assert_eq!(cap.row, 0);
+  assert!(!cap.single_only, "first row is a global action");
+  assert!(cap.pending.is_empty());
+}
+
+#[test]
+fn capture_accumulates_strokes_and_pop_drops_the_last() {
+  let mut panel = ConfigPanel::new();
+  panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  panel.tab = SettingsTab::Keys;
+  panel.selected = 0;
+  panel.begin_capture();
+
+  panel.capture_push(ch('g'));
+  panel.capture_push(ch('g'));
+  assert_eq!(panel.capture.as_ref().unwrap().pending, vec![ch('g'), ch('g')]);
+  panel.capture_pop();
+  assert_eq!(panel.capture.as_ref().unwrap().pending, vec![ch('g')]);
+}
+
+#[test]
+fn cancel_capture_discards_pending() {
+  let mut panel = ConfigPanel::new();
+  panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  panel.tab = SettingsTab::Keys;
+  panel.begin_capture();
+  panel.capture_push(ch('x'));
+  panel.cancel_capture();
+  assert!(panel.capture.is_none());
+}
+
+#[test]
+fn capture_as_config_items_joins_a_chord_and_unbinds_when_empty() {
+  let mut panel = ConfigPanel::new();
+  panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  panel.tab = SettingsTab::Keys;
+  panel.selected = 0;
+  panel.begin_capture();
+
+  // A multi-stroke global chord serialises to one space-joined element.
+  panel.capture_push(ch('g'));
+  panel.capture_push(ch('g'));
+  assert_eq!(
+    panel.capture.as_ref().unwrap().as_config_items(),
+    vec!["g g".to_string()]
+  );
+
+  // Cleared pending → empty list (an unbind).
+  panel.capture_pop();
+  panel.capture_pop();
+  assert!(panel.capture.as_ref().unwrap().as_config_items().is_empty());
+}
+
+#[test]
+fn selection_clamps_to_key_rows_on_the_keys_tab() {
+  let mut panel = ConfigPanel::new();
+  panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  panel.tab = SettingsTab::Keys;
+  for _ in 0..(panel.key_rows.len() + 50) {
+    panel.select_next();
+  }
+  assert_eq!(panel.selected, panel.key_rows.len() - 1, "never past the last key row");
+}
+
+#[test]
+fn switching_tab_clears_an_armed_capture() {
+  let mut panel = ConfigPanel::new();
+  panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  panel.tab = SettingsTab::Keys;
+  panel.begin_capture();
+  assert!(panel.capture.is_some());
+  panel.next_tab();
+  assert!(panel.capture.is_none(), "tab change cancels capture");
 }
 
 #[test]

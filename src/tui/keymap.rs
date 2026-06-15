@@ -656,6 +656,18 @@ impl Keymap {
       .and_then(|b| b.chords.first())
       .map(|chord| format_chord(chord))
   }
+
+  /// Every chord bound to `action`, comma-joined (`"j, Down"`) or empty when
+  /// unbound — the help-overlay / Keys-tab row form. Mirrors
+  /// [`crate::tui::modal_keymap::ModalKeymap::keys_display`].
+  pub fn keys_display(&self, action: Action) -> String {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.chords.iter().map(|c| format_chord(c)).collect::<Vec<_>>().join(", "))
+      .unwrap_or_default()
+  }
 }
 
 /// Build a default `Binding` from a list of chord literals. Panics

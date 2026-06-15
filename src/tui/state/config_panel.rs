@@ -20,9 +20,12 @@
 //! the renderer each frame against the live viewport.
 
 use crate::config::{Config, ConfigRow, ConfigSource};
+use crate::tui::keymap::{Action, KeyStroke, Keymap};
+use crate::tui::modal_keymap::{ModalAction, ModalKeymap};
 
-/// The Settings categories, in tab order. `Theme` and `Tui` are editable;
-/// `All` is the read-only resolved-config view (the pre-#279 panel).
+/// The Settings categories, in tab order. `Theme`, `Worktree`, `Tui` and
+/// `Keys` are editable; `All` is the read-only resolved-config view (the
+/// pre-#279 panel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
   /// Theme preset selection (editable).
@@ -33,16 +36,21 @@ pub enum SettingsTab {
   /// TUI behaviour knobs: sidebar side, open mode + commands, confirm
   /// countdown.
   Tui,
+  /// Keymap editor (issue #294): every global action + modal verb, rebound
+  /// via live keystroke capture. Rows are dynamic ([`KeyRow`]), not the
+  /// `&'static [SettingField]` the other editable tabs use.
+  Keys,
   /// The full resolved config, read-only with source attribution.
   All,
 }
 
 impl SettingsTab {
   /// Tabs in display order — the navigation cycle.
-  pub const ALL: [SettingsTab; 4] = [
+  pub const ALL: [SettingsTab; 5] = [
     SettingsTab::Theme,
     SettingsTab::Worktree,
     SettingsTab::Tui,
+    SettingsTab::Keys,
     SettingsTab::All,
   ];
 
@@ -52,6 +60,7 @@ impl SettingsTab {
       SettingsTab::Theme => "Theme",
       SettingsTab::Worktree => "Worktree",
       SettingsTab::Tui => "TUI",
+      SettingsTab::Keys => "Keys",
       SettingsTab::All => "All",
     }
   }
@@ -74,8 +83,111 @@ impl SettingsTab {
         SettingField::OpenShellCmd,
         SettingField::OpenEditorCmd,
       ],
-      SettingsTab::All => &[],
+      // The Keys tab edits dynamic [`KeyRow`]s, not static fields, and `All`
+      // is read-only.
+      SettingsTab::Keys | SettingsTab::All => &[],
     }
+  }
+}
+
+/// What a [`KeyRow`] rebinds: a global `View::List` action ([`Action`], chords
+/// allowed) or a contextual modal verb ([`ModalAction`], single-stroke).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyTarget {
+  /// A global action under `[tui.keys]`.
+  Global(Action),
+  /// A modal verb under `[tui.keys.modal.<context>]`.
+  Modal(ModalAction),
+}
+
+impl KeyTarget {
+  /// The dotted `.gwm.toml` key the rebind writes (`config_cli::set_array_at`).
+  pub fn config_key(self) -> String {
+    match self {
+      KeyTarget::Global(a) => format!("tui.keys.{}", a.slug()),
+      KeyTarget::Modal(m) => format!("tui.keys.modal.{}.{}", m.context().config_path(), m.verb()),
+    }
+  }
+
+  /// Modal verbs are single-stroke (issue #219); global actions accept
+  /// multi-stroke chords. Drives the capture machine's accumulate-vs-commit.
+  pub fn single_only(self) -> bool {
+    matches!(self, KeyTarget::Modal(_))
+  }
+}
+
+/// One row of the Keys tab: a bindable target, its display scope/label, the
+/// current key(s), and the layer that sourced the binding. Built fresh on
+/// panel open by [`build_key_rows`] from the live keymaps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRow {
+  /// What this row rebinds.
+  pub target: KeyTarget,
+  /// `"global"` or `"modal.<context-path>"`.
+  pub scope: String,
+  /// The action slug (global) or context-local verb (modal).
+  pub label: String,
+  /// Current key(s), comma-joined (`"j, Down"`); empty when unbound.
+  pub keys: String,
+  /// The layer the binding came from (repo / user / default).
+  pub source: ConfigSource,
+}
+
+/// Build the full Keys-tab row list: every global action (declaration order),
+/// then every modal verb grouped by its context (declaration order). `source_of`
+/// maps a dotted config key to its layer — the App passes the same resolved-row
+/// attribution the `All` tab uses, so a hand-edited or in-TUI-set binding shows
+/// the right `repo`/`user` badge and an untouched one reads `default`.
+pub fn build_key_rows(keymap: &Keymap, modal: &ModalKeymap, source_of: impl Fn(&str) -> ConfigSource) -> Vec<KeyRow> {
+  let mut rows = Vec::new();
+  for action in Action::all() {
+    let target = KeyTarget::Global(action);
+    rows.push(KeyRow {
+      target,
+      scope: "global".to_string(),
+      label: action.slug().to_string(),
+      keys: keymap.keys_display(action),
+      source: source_of(&target.config_key()),
+    });
+  }
+  for action in ModalAction::all() {
+    let target = KeyTarget::Modal(action);
+    rows.push(KeyRow {
+      target,
+      scope: format!("modal.{}", action.context().config_path()),
+      label: action.verb().to_string(),
+      keys: modal.keys_display(action),
+      source: source_of(&target.config_key()),
+    });
+  }
+  rows
+}
+
+/// In-progress live keystroke capture for the selected [`KeyRow`] (issue
+/// #294). Pure: the routing layer feeds strokes in, the App reads
+/// [`Self::as_config_items`] to persist. `single_only` mirrors the target's
+/// kind so the router knows whether to auto-commit (modal) or accumulate a
+/// chord until the user confirms (global).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyCapture {
+  /// Index into [`ConfigPanel::key_rows`] being rebound.
+  pub row: usize,
+  /// Modal verb → true (one stroke, auto-commit); global → false (chord).
+  pub single_only: bool,
+  /// The strokes captured so far, in order.
+  pub pending: Vec<KeyStroke>,
+}
+
+impl KeyCapture {
+  /// The TOML array elements to write: one chord, the captured strokes
+  /// space-joined (`"g g"`), or an empty list when nothing was captured (an
+  /// unbind). Live capture sets a single binding; alternatives stay a
+  /// hand-edit.
+  pub fn as_config_items(&self) -> Vec<String> {
+    if self.pending.is_empty() {
+      return Vec::new();
+    }
+    vec![self.pending.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" ")]
   }
 }
 
@@ -281,6 +393,13 @@ pub struct ConfigPanel {
   /// When `Some`, the numeric-input edit buffer for the selected `Uint`
   /// field; keystrokes route here until commit (Enter) or cancel (Esc).
   pub editing: Option<String>,
+  /// Keys-tab rows (issue #294): every rebindable global action + modal verb
+  /// with its current binding + source. Rebuilt on panel open by the App from
+  /// the live keymaps; empty on the other tabs.
+  pub key_rows: Vec<KeyRow>,
+  /// When `Some`, a live keystroke capture is in progress on the Keys tab;
+  /// strokes route into it until commit / cancel.
+  pub capture: Option<KeyCapture>,
   /// Vertical scroll offset, in rows. Clamped to `max_scroll`.
   pub scroll: u16,
   /// Maximum vertical scroll offset, republished by the renderer each
@@ -308,13 +427,33 @@ impl ConfigPanel {
     self.fields().get(self.selected).copied()
   }
 
+  /// The selected Keys-tab row, if the active tab is `Keys`.
+  pub fn selected_key_row(&self) -> Option<&KeyRow> {
+    if self.tab == SettingsTab::Keys {
+      self.key_rows.get(self.selected)
+    } else {
+      None
+    }
+  }
+
+  /// Number of selectable rows in the current tab: the static fields, or the
+  /// dynamic key rows on the Keys tab.
+  fn selectable_count(&self) -> usize {
+    if self.tab == SettingsTab::Keys {
+      self.key_rows.len()
+    } else {
+      self.fields().len()
+    }
+  }
+
   /// Move to the next tab, wrapping. Resets the field selection and any
-  /// in-progress edit so the new tab starts clean.
+  /// in-progress edit / capture so the new tab starts clean.
   pub fn next_tab(&mut self) {
     let idx = SettingsTab::ALL.iter().position(|t| *t == self.tab).unwrap_or(0);
     self.tab = SettingsTab::ALL[(idx + 1) % SettingsTab::ALL.len()];
     self.selected = 0;
     self.editing = None;
+    self.capture = None;
     self.scroll = 0;
   }
 
@@ -325,6 +464,7 @@ impl ConfigPanel {
     self.tab = SettingsTab::ALL[(idx + len - 1) % len];
     self.selected = 0;
     self.editing = None;
+    self.capture = None;
     self.scroll = 0;
   }
 
@@ -333,21 +473,21 @@ impl ConfigPanel {
     self.layer = self.layer.toggled();
   }
 
-  /// Select the previous field in the current tab (no-op while editing or on
-  /// a tab with no fields).
+  /// Select the previous field / key row in the current tab (no-op while
+  /// editing or capturing, or on a tab with no rows).
   pub fn select_prev(&mut self) {
-    if self.editing.is_some() {
+    if self.editing.is_some() || self.capture.is_some() {
       return;
     }
     self.selected = self.selected.saturating_sub(1);
   }
 
-  /// Select the next field in the current tab, clamped to the last field.
+  /// Select the next field / key row in the current tab, clamped to the last.
   pub fn select_next(&mut self) {
-    if self.editing.is_some() {
+    if self.editing.is_some() || self.capture.is_some() {
       return;
     }
-    let count = self.fields().len();
+    let count = self.selectable_count();
     if count > 0 {
       self.selected = (self.selected + 1).min(count - 1);
     }
@@ -410,6 +550,49 @@ impl ConfigPanel {
     self.rows.iter().find(|r| r.key == field.key_path()).map(|r| r.source)
   }
 
+  // ── Keys tab: live keystroke capture (issue #294) ──────────────────────
+
+  /// Arm a live capture for the selected Keys-tab row. No-op off the Keys tab
+  /// or with no row selected. The capture inherits the row's `single_only`
+  /// flag so the router auto-commits a modal verb but accumulates a global
+  /// chord.
+  pub fn begin_capture(&mut self) {
+    if self.tab != SettingsTab::Keys {
+      return;
+    }
+    if let Some(row) = self.key_rows.get(self.selected) {
+      self.capture = Some(KeyCapture {
+        row: self.selected,
+        single_only: row.target.single_only(),
+        pending: Vec::new(),
+      });
+    }
+  }
+
+  /// Append a captured stroke to the in-progress capture.
+  pub fn capture_push(&mut self, stroke: KeyStroke) {
+    if let Some(cap) = self.capture.as_mut() {
+      cap.pending.push(stroke);
+    }
+  }
+
+  /// Drop the last captured stroke (Backspace during a multi-stroke capture).
+  pub fn capture_pop(&mut self) {
+    if let Some(cap) = self.capture.as_mut() {
+      cap.pending.pop();
+    }
+  }
+
+  /// Cancel the in-progress capture, discarding pending strokes.
+  pub fn cancel_capture(&mut self) {
+    self.capture = None;
+  }
+
+  /// Commit the in-progress capture, returning it for the App to persist.
+  pub fn take_capture(&mut self) -> Option<KeyCapture> {
+    self.capture.take()
+  }
+
   /// Scroll down one row, never past the last line.
   pub fn scroll_down(&mut self) {
     self.scroll = (self.scroll + 1).min(self.max_scroll);
@@ -447,5 +630,6 @@ impl ConfigPanel {
     self.x_scroll = 0;
     self.selected = 0;
     self.editing = None;
+    self.capture = None;
   }
 }

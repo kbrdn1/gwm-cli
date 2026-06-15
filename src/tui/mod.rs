@@ -29,7 +29,9 @@ use std::time::{Duration, Instant};
 pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
 pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 pub use state::command_logs::CommandLogs;
-pub use state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer, SettingsTab};
+pub use state::config_panel::{
+  build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
+};
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
 pub use state::filter::FilterState;
