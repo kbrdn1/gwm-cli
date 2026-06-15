@@ -423,6 +423,39 @@ fn settings_panel_all_tab_renders_title_section_and_source_column() {
 }
 
 #[test]
+fn settings_keys_tab_renders_scopes_bindings_and_capture_input() {
+  use gwm::config::ConfigSource;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{build_key_rows, KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.config_panel.key_rows = build_key_rows(&Keymap::defaults(), &ModalKeymap::defaults(), |_| ConfigSource::Default);
+  app.config_panel.tab = SettingsTab::Keys;
+  app.view = View::Config;
+
+  let buf = render(&mut app);
+  assert_present(&buf, "Keys", "the Keys tab label in the strip");
+  assert_present(&buf, "[global]", "global scope heading");
+  // `down` is the first global action, so it sits in the initial viewport
+  // (later rows like `quit` need a scroll, exercised by the capture below).
+  assert_present(&buf, "down", "the first global action slug");
+
+  // Arm a capture on the `quit` row → selecting it scrolls it into view and
+  // its key column becomes a `[ … ]` input.
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+  let buf = render(&mut app);
+  assert_present(&buf, "[ ", "capture input box rendered for the selected row");
+}
+
+#[test]
 fn settings_all_tab_horizontal_pan_reveals_the_last_column_past_the_scrollbar() {
   use gwm::config::{ConfigRow, ConfigSource};
   use gwm::tui::SettingsTab;
