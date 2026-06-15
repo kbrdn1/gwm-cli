@@ -153,6 +153,19 @@ fn build_tree_decodes_quoted_rename_destination() {
 }
 
 #[test]
+fn build_tree_keeps_arrow_in_a_plain_untracked_filename() {
+  // ` -> ` is git's separator only on a rename/copy (`R`/`C`) status line;
+  // an untracked file literally named `a -> b.txt` must keep its name, not
+  // be truncated to the bogus "destination".
+  let tree = build_tree("?? a -> b.txt\n");
+  assert!(
+    matches!(&tree[0], WtNode::File { name, .. } if name == "a -> b.txt"),
+    "arrow kept verbatim in a non-rename filename: {:?}",
+    tree[0]
+  );
+}
+
+#[test]
 fn status_badge_maps_each_porcelain_family() {
   assert_eq!(status_badge('?', '?'), '?', "untracked");
   assert_eq!(status_badge('A', ' '), 'A', "staged add");

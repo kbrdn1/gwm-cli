@@ -174,10 +174,17 @@ pub fn build_tree(status_short: &str) -> Vec<WtNode> {
       continue;
     }
     let rest: String = chars.collect();
-    // Take the rename destination (if any), then decode git's C-quoting —
-    // the ` -> ` separator is added outside the quotes, so splitting the raw
-    // token first is safe.
-    let path = decode_porcelain_path(rename_destination(rest.trim()));
+    let trimmed = rest.trim();
+    // ` -> ` is git's separator only on a rename/copy line (`R`/`C` in either
+    // status column); on any other status a literal ` -> ` is part of the
+    // filename and must be kept. Decode git's C-quoting afterwards — the
+    // separator is added outside the quotes, so splitting first is safe.
+    let token = if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+      rename_destination(trimmed)
+    } else {
+      trimmed
+    };
+    let path = decode_porcelain_path(token);
     if path.is_empty() {
       continue;
     }
