@@ -365,7 +365,7 @@ fn modal_capture_reserves_enter_and_backspace_as_controls() {
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use gwm::tui::keymap::KeyStroke;
   use gwm::tui::modal_keymap::{KeyContext, ModalAction};
-  use gwm::tui::{App, KeyTarget, SettingsTab};
+  use gwm::tui::{KeyTarget, SettingsTab};
 
   let (_dir, mut app) = make_app();
   app.enter_config_panel();
@@ -413,7 +413,7 @@ fn global_capture_commits_on_enter_and_pops_on_backspace() {
   // last, Enter commits — all through the testable handler.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
-  use gwm::tui::{App, KeyTarget, SettingsTab};
+  use gwm::tui::{KeyTarget, SettingsTab};
 
   let (_dir, mut app) = make_app();
   app.enter_config_panel();
