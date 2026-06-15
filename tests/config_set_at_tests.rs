@@ -8,7 +8,9 @@
 //! injected (tempdirs), never `$HOME`.
 
 use gwm::config::{Config, SidebarPosition, TuiOpenMode};
-use gwm::config_cli::{set_string_at, set_value_at};
+use gwm::config_cli::{set_array_at, set_string_at, set_value_at};
+use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+use gwm::tui::modal_keymap::{KeyContext, ModalAction};
 use std::path::Path;
 
 fn load(repo: &Path, global: Option<&Path>) -> Config {
@@ -118,6 +120,85 @@ fn editing_an_already_invalid_file_still_writes_the_change() {
     raw.contains("preset = \"gruvbox\""),
     "the unrelated edit must still be written to an already-invalid file: {raw}"
   );
+}
+
+// ── array write-back: keymaps (issue #294) ─────────────────────────────────
+
+#[test]
+fn set_array_at_writes_a_global_keymap_array_and_round_trips() {
+  // The in-TUI Keys tab rebinds a global action by writing its chord list as
+  // a TOML array under `[tui.keys]`. The write must round-trip through
+  // `resolved_keymap` so the new chord actually fires.
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+
+  set_array_at(&gwm_toml, "tui.keys.quit", &["Q".to_string()]).unwrap();
+
+  let raw = std::fs::read_to_string(&gwm_toml).unwrap();
+  assert!(raw.contains("quit = [\"Q\"]"), "must write a TOML array: {raw}");
+
+  let cfg = load(repo.path(), None);
+  let km = cfg.tui.keys.resolved_keymap().expect("keymap resolves");
+  let q = KeyStroke::new(
+    crossterm::event::KeyCode::Char('Q'),
+    crossterm::event::KeyModifiers::empty(),
+  );
+  assert_eq!(km.lookup(&[q]), ChordResolution::Matched(Action::Quit));
+}
+
+#[test]
+fn set_array_at_writes_a_modal_verb_into_its_nested_table() {
+  // A modal verb lives under `[tui.keys.modal.<context>]`; the dotted key must
+  // auto-vivify the `modal` -> context tables and round-trip through
+  // `resolved_modal_keymap`.
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+
+  set_array_at(&gwm_toml, "tui.keys.modal.confirm.confirm", &["o".to_string()]).unwrap();
+
+  let cfg = load(repo.path(), None);
+  let mk = cfg.tui.keys.resolved_modal_keymap().expect("modal keymap resolves");
+  let o = KeyStroke::new(
+    crossterm::event::KeyCode::Char('o'),
+    crossterm::event::KeyModifiers::empty(),
+  );
+  assert_eq!(mk.resolve(KeyContext::Confirm, &o), Some(ModalAction::ConfirmConfirm));
+}
+
+#[test]
+fn set_array_at_can_unbind_with_an_empty_array() {
+  // An empty capture writes `key = []` — a legitimate unbind. The file must
+  // round-trip (an unbound modal verb simply stops resolving).
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+
+  set_array_at(&gwm_toml, "tui.keys.modal.confirm.confirm", &[]).unwrap();
+
+  let cfg = load(repo.path(), None);
+  let mk = cfg.tui.keys.resolved_modal_keymap().expect("modal keymap resolves");
+  let y = KeyStroke::new(
+    crossterm::event::KeyCode::Char('y'),
+    crossterm::event::KeyModifiers::empty(),
+  );
+  assert_eq!(
+    mk.resolve(KeyContext::Confirm, &y),
+    None,
+    "the default `y` is gone once `confirm` is unbound"
+  );
+}
+
+#[test]
+fn set_array_at_rejects_a_prefix_collision_and_leaves_the_file_untouched() {
+  // Binding `refresh = ["g"]` while `top` keeps its default `g g` chord is a
+  // prefix collision — refused at the validate-before-write gate so a good
+  // (here: absent) file is never clobbered with an invalid keymap.
+  let repo = tempfile::tempdir().unwrap();
+  let gwm_toml = repo.path().join(".gwm.toml");
+
+  let result = set_array_at(&gwm_toml, "tui.keys.refresh", &["g".to_string()]);
+
+  assert!(result.is_err(), "a prefix collision must be rejected");
+  assert!(!gwm_toml.exists(), "a rejected write must not create the file");
 }
 
 #[test]

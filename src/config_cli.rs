@@ -66,6 +66,23 @@ pub fn set_string_at(path: &Path, key: &str, raw_value: &str) -> Result<()> {
   set_item_at(path, key, value(raw_value))
 }
 
+/// Array variant of [`set_value_at`] for the in-TUI Keys tab (issue #294):
+/// write `key = ["a", "b", …]` as a TOML array of strings at an explicit
+/// `path`. Backs the keymap rebind surface — a global action's chord list
+/// under `[tui.keys]`, or a modal verb's single-stroke list under
+/// `[tui.keys.modal.<context>]`. An empty `items` writes `key = []`, the
+/// legitimate "unbind" value. Reuses the same parent-dir creation, surgical
+/// `toml_edit` edit and validate-before-write as the scalar writers, so a
+/// rebind that produces a conflicting / prefix-colliding keymap is rejected
+/// before it can clobber a good file.
+pub fn set_array_at(path: &Path, key: &str, items: &[String]) -> Result<()> {
+  let mut arr = toml_edit::Array::new();
+  for item in items {
+    arr.push(item.as_str());
+  }
+  set_item_at(path, key, value(arr))
+}
+
 /// Shared write path: ensure the parent dir exists, set `key` to `item` in
 /// the surgically-edited document, and validate-before-write so an invalid
 /// edit can never overwrite a good file.
