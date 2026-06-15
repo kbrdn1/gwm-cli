@@ -27,4 +27,5 @@ pub mod sync;
 pub mod templating;
 pub mod trust;
 pub mod tui;
+pub mod workspace;
 pub mod worktree;
