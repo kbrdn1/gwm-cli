@@ -358,6 +358,132 @@ fn a_shadowed_global_key_rebind_warns() {
 }
 
 #[test]
+fn modal_capture_reserves_enter_and_backspace_as_controls() {
+  // Codex #297 review (P2): Enter / Backspace must stay reserved capture
+  // controls even for a single-stroke modal target — they can't be captured
+  // as a binding (hand-edit for those), matching the documented controls.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{App, KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  // Enter and Backspace are ignored — the capture stays armed, nothing bound.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "Enter must not capture a modal verb"
+  );
+  app.handle_capture_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "Backspace must not capture a modal verb"
+  );
+  let enter = KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE);
+  assert_ne!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &enter),
+    Some(ModalAction::ConfirmConfirm),
+    "Enter must not have become the binding"
+  );
+
+  // A real key auto-commits the single-stroke modal capture.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+  assert!(app.config_panel.capture.is_none(), "a real key commits the capture");
+  let o = KeyStroke::new(KeyCode::Char('o'), KeyModifiers::NONE);
+  assert_eq!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &o),
+    Some(ModalAction::ConfirmConfirm)
+  );
+}
+
+#[test]
+fn global_capture_commits_on_enter_and_pops_on_backspace() {
+  // The global (multi-stroke) path: real keys accumulate, Backspace drops the
+  // last, Enter commits — all through the testable handler.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "global chord accumulates, no auto-commit"
+  );
+  app.handle_capture_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)); // drop 'z'
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit "x"
+
+  assert!(app.config_panel.capture.is_none(), "Enter commits the global chord");
+  let x = KeyStroke::new(KeyCode::Char('x'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[x]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn an_unbind_shadowed_by_another_layer_warns() {
+  // Codex #297 review (P2): an empty capture (unbind) on a low-precedence
+  // layer is shadowed when a higher layer still binds the action — warn rather
+  // than report a clean `unbound`.
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  set_array_at(&repo.path().join(".gwm.toml"), "tui.keys.quit", &["x".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  // Empty capture → unbind written to the global layer.
+  app.config_panel.begin_capture();
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("unbound"),
+    "status reports the unbind: {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("shadowed"),
+    "a shadowed unbind must warn: {}",
+    app.status
+  );
+}
+
+#[test]
 fn a_cross_layer_alias_shadow_is_detected_and_warned() {
   // Codex #297 review (P2, cross-layer): the legacy alias lives in the OTHER
   // layer (global `open_menu`) while the canonical `browse_links` is rebound in

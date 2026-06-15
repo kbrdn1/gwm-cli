@@ -1443,6 +1443,53 @@ impl App {
     self.config_panel.capture_push(KeyStroke::from_event(&key));
   }
 
+  /// Drive a key through an armed Keys-tab capture (issue #294). The event loop
+  /// owns no logic — it just routes here when a capture is armed, mirroring
+  /// `handle_create_key` / `handle_link_prompt_key`. Controls (resolved through
+  /// the `config.edit` context so a rebind shows through):
+  ///
+  /// - `cancel` (def Esc) aborts the capture;
+  /// - `submit` (def Enter) commits a **multi-stroke global chord**;
+  /// - `Backspace` drops the last stroke of a global chord;
+  /// - any other key is captured — a **single-stroke modal** verb auto-commits
+  ///   on the first one, a global chord accumulates until `submit`.
+  ///
+  /// `Esc` / `Enter` / `Backspace` stay reserved controls in **both** modes and
+  /// are never themselves captured (a modal verb can't be bound to them via the
+  /// UI — hand-edit `.gwm.toml`), matching the documented capture controls and
+  /// the hard-coded escape-hatch policy.
+  pub fn handle_capture_key(&mut self, key: KeyEvent) {
+    let single = self
+      .config_panel
+      .capture
+      .as_ref()
+      .map(|c| c.single_only)
+      .unwrap_or(false);
+    match self.resolve_modal(KeyContext::ConfigEdit, key) {
+      Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_capture(),
+      Some(ModalAction::ConfigEditSubmit) => {
+        // Enter commits an accumulated global chord; for a single-stroke modal
+        // capture it is a reserved control (ignored, not captured).
+        if !single {
+          self.commit_key_capture();
+        }
+      }
+      _ if key.code == KeyCode::Backspace => {
+        // Backspace edits a global chord; reserved (ignored) while a
+        // single-stroke modal capture is armed.
+        if !single {
+          self.config_panel.capture_pop();
+        }
+      }
+      _ => {
+        self.push_key_capture(key);
+        if single {
+          self.commit_key_capture();
+        }
+      }
+    }
+  }
+
   /// Commit the in-progress Keys-tab capture (issue #294): write the captured
   /// chord as a TOML array to the selected target's `[tui.keys]` /
   /// `[tui.keys.modal.<context>]` key in the active layer, then reload the
@@ -1545,27 +1592,39 @@ impl App {
     // Verify the capture actually took effect in the *merged* keymap: a
     // higher-precedence layer, or a pre-#290 alias still declared in another
     // layer (which we deliberately don't edit), can shadow the write so the new
-    // key never fires even though it persisted. Warn instead of reporting a
-    // clean success (Codex #297 review). An unbind has nothing to verify.
-    if !items.is_empty() && !self.capture_took_effect(target, &cap.pending) {
+    // key never fires — or, for an unbind, keeps the action bound — even though
+    // it persisted. Warn instead of reporting a clean success (Codex #297
+    // review).
+    if !self.capture_took_effect(target, &cap.pending) {
       status.push_str(" — shadowed (a higher layer or legacy alias still binds it)");
     }
     self.status = status;
   }
 
-  /// Whether `strokes` resolve to `target`'s action in the live (merged)
-  /// keymap — i.e. the just-committed rebind is the *effective* binding and not
-  /// shadowed by another layer / a lingering legacy alias. Issue #294 (Codex
-  /// #297 review).
+  /// Whether the just-committed capture is the *effective* state in the live
+  /// (merged) keymap, i.e. not shadowed by another layer / a lingering legacy
+  /// alias. For a rebind (`strokes` non-empty) the captured chord must resolve
+  /// to the target's action; for an unbind (`strokes` empty) the action must
+  /// have no remaining binding. Issue #294 (Codex #297 review).
   fn capture_took_effect(&self, target: KeyTarget, strokes: &[KeyStroke]) -> bool {
     match target {
       KeyTarget::Global(action) => {
-        matches!(self.keymap.lookup(strokes), ChordResolution::Matched(a) if a == action)
+        if strokes.is_empty() {
+          self.keymap.keys_display(action).is_empty()
+        } else {
+          matches!(self.keymap.lookup(strokes), ChordResolution::Matched(a) if a == action)
+        }
       }
-      KeyTarget::Modal(action) => strokes
-        .first()
-        .map(|s| self.modal_keymap.resolve(action.context(), s) == Some(action))
-        .unwrap_or(false),
+      KeyTarget::Modal(action) => {
+        if strokes.is_empty() {
+          self.modal_keymap.keys_display(action).is_empty()
+        } else {
+          strokes
+            .first()
+            .map(|s| self.modal_keymap.resolve(action.context(), s) == Some(action))
+            .unwrap_or(false)
+        }
+      }
     }
   }
 
