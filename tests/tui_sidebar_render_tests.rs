@@ -131,6 +131,37 @@ fn working_tree_section_renders_colored_status_counts_footer() {
   assert!(text.contains("11"), "footer must render the created-file count: {text}");
 }
 
+#[test]
+fn working_tree_section_renders_file_tree_with_icons() {
+  // A nested untracked file must render as an explorer tree (issue #300):
+  // the collapsed `src/app` directory row with a folder glyph, then the
+  // `mod.rs` leaf with the Rust file-type glyph — not a flat `?? src/app/mod.rs`.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("src/app"),
+    "single-child dir chain renders collapsed: {text}"
+  );
+  assert!(text.contains("mod.rs"), "the leaf file name renders: {text}");
+  assert!(
+    text.contains(gwm::tui::wt_tree::WT_DIR_OPEN_ICON),
+    "directory row carries a folder glyph: {text}"
+  );
+  assert!(
+    text.contains(gwm::tui::wt_tree::WT_RUST_ICON),
+    "the .rs leaf carries the Rust file-type glyph: {text}"
+  );
+}
+
 /// Run a `git` CLI command in `dir`, asserting success. Lets a render test
 /// build a feature branch with a deterministic diff against `main`.
 fn git_in(dir: &std::path::Path, args: &[&str]) {

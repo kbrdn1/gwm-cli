@@ -12,6 +12,7 @@ pub mod palette;
 pub mod state;
 pub mod theme;
 mod ui;
+pub mod wt_tree;
 
 use crate::error::Result;
 use crate::tui::keymap::Action;

@@ -9,6 +9,7 @@ use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
+use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_OPEN_ICON};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
 use crate::config::ConfigSource;
@@ -1111,7 +1112,7 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
     ),
     Ok(s) => {
       let counts = working_tree_status_counts(&s);
-      let lines: Vec<Line<'static>> = s.lines().map(|line| working_tree_status_line(line, theme)).collect();
+      let lines = working_tree_tree_lines(&wt_tree::build_tree(&s), theme);
       (lines, counts)
     }
     Err(e) => (
@@ -1121,6 +1122,52 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
       ))],
       WorkingTreeCounts::default(),
     ),
+  }
+}
+
+/// Render the Working Tree file-explorer model (issue #300) into styled
+/// sidebar rows. Directories are emitted before their children with a
+/// folder glyph in the `accent` role; files carry a category-coloured
+/// status badge + a nerd-font file-type icon + the leaf name, all painted
+/// in the file's change-category colour so a row's colour matches the
+/// footer count it belongs to (the #287 invariant, preserved). Two spaces
+/// of indentation per depth level give the tree its shape.
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> Vec<Line<'static>> {
+  let mut out = Vec::new();
+  push_wt_nodes(&mut out, nodes, 0, theme);
+  out
+}
+
+/// Depth-first walk used by [`working_tree_tree_lines`]; recurses into each
+/// directory's children one indent level deeper.
+fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], depth: usize, theme: &Theme) {
+  let indent = "  ".repeat(depth);
+  for node in nodes {
+    match node {
+      WtNode::Dir { name, children } => {
+        out.push(Line::from(vec![
+          Span::raw(indent.clone()),
+          Span::styled(
+            format!("{} {}", WT_DIR_OPEN_ICON, name),
+            Style::default().fg(theme.accent),
+          ),
+        ]));
+        push_wt_nodes(out, children, depth + 1, theme);
+      }
+      WtNode::File {
+        name,
+        icon,
+        badge,
+        category,
+      } => {
+        let color = working_tree_category_color(*category, theme);
+        out.push(Line::from(vec![
+          Span::raw(indent.clone()),
+          Span::styled(format!("{} ", badge), Style::default().fg(color)),
+          Span::styled(format!("{} {}", icon, name), Style::default().fg(color)),
+        ]));
+      }
+    }
   }
 }
 
@@ -1152,34 +1199,6 @@ impl WorkingTreeCounts {
 pub const WT_CREATED_ICON: &str = "\u{eadc}";
 pub const WT_MODIFIED_ICON: &str = "\u{eadd}";
 pub const WT_DELETED_ICON: &str = "\u{eade}";
-
-/// The single change-category a `git status --short` `XY` pair falls into
-/// (issue #287). Shared by the Working-Tree footer counts and the per-row
-/// colouring so a file's row colour always equals the footer segment it's
-/// counted in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WtCategory {
-  Created,
-  Modified,
-  Deleted,
-}
-
-/// Classify a porcelain `XY` status pair into its dominant
-/// [`WtCategory`], with a deterministic precedence (created > deleted >
-/// modified) so each file maps to exactly one bucket:
-///
-/// - `??` (untracked) or an `A` in either column → **created**,
-/// - else a `D` in either column → **deleted**,
-/// - else anything changed (`M`, `R`, `C`, `T`, `U`, …) → **modified**.
-fn working_tree_category(x: char, y: char) -> WtCategory {
-  if (x == '?' && y == '?') || x == 'A' || y == 'A' {
-    WtCategory::Created
-  } else if x == 'D' || y == 'D' {
-    WtCategory::Deleted
-  } else {
-    WtCategory::Modified
-  }
-}
 
 /// Theme colour for a change category (issue #287): created → `untracked`
 /// (green), modified → `modified` (yellow), deleted → `prunable` (red).
