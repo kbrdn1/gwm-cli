@@ -109,7 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   builder (flat status → tree model) is a pure, ratatui-free function with
   unit tests. `git_status_short` now passes `--untracked-files=all` so an
   untracked directory expands into its individual files (git-ignored paths
-  stay excluded).
+  stay excluded). Paths git C-quotes (non-ASCII names, embedded quotes) are
+  decoded back to their real UTF-8 name before nesting.
 - **Worktree table: label the issue/PR badge column** (issue #294): the second
   table column (the `●` / `●` issue / PR pastilles) now carries an `I/P` header
   so the badges read self-explanatory next to the `Worktree` / `Branch` columns.

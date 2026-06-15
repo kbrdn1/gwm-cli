@@ -116,6 +116,43 @@ fn build_tree_takes_destination_of_a_rename() {
 }
 
 #[test]
+fn build_tree_decodes_c_quoted_non_ascii_path() {
+  // `git status --short` wraps a path with non-ASCII bytes in double quotes
+  // with octal C-escapes (`core.quotePath` default). The builder must decode
+  // it back to the real UTF-8 name rather than nest the escaped literal.
+  let tree = build_tree("?? \"caf\\303\\251.rs\"\n");
+  assert_eq!(tree.len(), 1, "one decoded file: {tree:?}");
+  assert!(
+    matches!(&tree[0], WtNode::File { name, icon, .. } if name == "café.rs" && *icon == WT_RUST_ICON),
+    "quoted path decoded to café.rs with the rust icon: {:?}",
+    tree[0]
+  );
+}
+
+#[test]
+fn build_tree_decodes_c_quoted_escaped_quote() {
+  // An embedded double quote is escaped as `\"`; decoding restores it.
+  let tree = build_tree("?? \"a\\\"b.txt\"\n");
+  assert!(
+    matches!(&tree[0], WtNode::File { name, .. } if name == "a\"b.txt"),
+    "escaped quote decoded: {:?}",
+    tree[0]
+  );
+}
+
+#[test]
+fn build_tree_decodes_quoted_rename_destination() {
+  // A rename whose destination is quoted: decode the destination after the
+  // ` -> ` split.
+  let tree = build_tree("R  a.rs -> \"b\\303\\251.rs\"\n");
+  assert!(
+    matches!(&tree[0], WtNode::File { name, badge, .. } if name == "bé.rs" && *badge == 'M'),
+    "quoted rename destination decoded: {:?}",
+    tree[0]
+  );
+}
+
+#[test]
 fn status_badge_maps_each_porcelain_family() {
   assert_eq!(status_badge('?', '?'), '?', "untracked");
   assert_eq!(status_badge('A', ' '), 'A', "staged add");

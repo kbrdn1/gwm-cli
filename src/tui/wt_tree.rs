@@ -174,11 +174,14 @@ pub fn build_tree(status_short: &str) -> Vec<WtNode> {
       continue;
     }
     let rest: String = chars.collect();
-    let path = rename_destination(rest.trim());
+    // Take the rename destination (if any), then decode git's C-quoting —
+    // the ` -> ` separator is added outside the quotes, so splitting the raw
+    // token first is safe.
+    let path = decode_porcelain_path(rename_destination(rest.trim()));
     if path.is_empty() {
       continue;
     }
-    root.insert(path, x, y);
+    root.insert(&path, x, y);
   }
   root.into_nodes()
 }
@@ -190,6 +193,95 @@ fn rename_destination(path: &str) -> &str {
     Some((_, dest)) => dest,
     None => path,
   }
+}
+
+/// Decode a `git status --short` path token. When a path carries "unusual"
+/// bytes (non-ASCII under the default `core.quotePath`, a literal `"` or
+/// `\`, or a control char) git wraps it in double quotes and C-escapes the
+/// payload; this reverses that quoting back to the real name. An unquoted
+/// token is returned as-is.
+fn decode_porcelain_path(token: &str) -> String {
+  let bytes = token.as_bytes();
+  if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
+    unquote_c(&token[1..token.len() - 1])
+  } else {
+    token.to_string()
+  }
+}
+
+/// Reverse git's C-style string quoting: the named escapes plus octal byte
+/// escapes (`\ooo`). Octal escapes are accumulated as raw bytes so a
+/// multi-byte UTF-8 codepoint (emitted as several `\ooo`) reassembles
+/// correctly; the byte buffer is then decoded lossily. An unrecognised
+/// escape keeps its backslash verbatim.
+fn unquote_c(s: &str) -> String {
+  let bytes = s.as_bytes();
+  let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+  let mut i = 0;
+  while i < bytes.len() {
+    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+      match bytes[i + 1] {
+        b'n' => {
+          out.push(b'\n');
+          i += 2;
+        }
+        b't' => {
+          out.push(b'\t');
+          i += 2;
+        }
+        b'r' => {
+          out.push(b'\r');
+          i += 2;
+        }
+        b'a' => {
+          out.push(0x07);
+          i += 2;
+        }
+        b'b' => {
+          out.push(0x08);
+          i += 2;
+        }
+        b'f' => {
+          out.push(0x0c);
+          i += 2;
+        }
+        b'v' => {
+          out.push(0x0b);
+          i += 2;
+        }
+        b'"' => {
+          out.push(b'"');
+          i += 2;
+        }
+        b'\\' => {
+          out.push(b'\\');
+          i += 2;
+        }
+        b'0'..=b'7' => {
+          let mut val: u32 = 0;
+          let mut digits = 0;
+          let mut j = i + 1;
+          while j < bytes.len() && digits < 3 && bytes[j].is_ascii_digit() && bytes[j] < b'8' {
+            val = val * 8 + u32::from(bytes[j] - b'0');
+            j += 1;
+            digits += 1;
+          }
+          out.push(val as u8);
+          i = j;
+        }
+        _ => {
+          // Unknown escape: keep the backslash and let the next byte be
+          // handled on the following iteration.
+          out.push(b'\\');
+          i += 1;
+        }
+      }
+    } else {
+      out.push(bytes[i]);
+      i += 1;
+    }
+  }
+  String::from_utf8_lossy(&out).into_owned()
 }
 
 // Intermediate mutable builder kept private; `BTreeMap` gives the
