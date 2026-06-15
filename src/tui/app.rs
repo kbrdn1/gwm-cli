@@ -637,9 +637,15 @@ impl App {
       return;
     };
     let Some(raw) = self.selected_raw_index() else {
+      // No visible/selected row (e.g. the filter hides everything): there is no
+      // active repo the selection points at, so writes must not fall through to
+      // the previously active repo — mark stale to block them (#304). Reached
+      // only in workspace mode (the `ws` guard above returns in single-repo).
+      self.workspace_active_stale = true;
       return;
     };
     let Some(&target) = ws.row_repo.get(raw) else {
+      self.workspace_active_stale = true;
       return;
     };
     if target == ws.active {

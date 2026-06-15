@@ -112,7 +112,11 @@ pub fn discover(root: &Path) -> Result<Workspace> {
     });
   }
 
-  repos.sort_by(|a, b| a.name.cmp(&b.name));
+  // Sort by name, then by path as a stable tie-breaker so two repos that share
+  // a basename always order the same way across runs / filesystems — otherwise
+  // the `-N` suffixing below would assign `main` / `main-2` non-deterministically
+  // and `--repo main-2` could target a different physical repo per run (#304).
+  repos.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.path.cmp(&b.path)));
   // Display names come from the main workdir basename, which can collide for
   // distinct repos (a linked worktree resolving to an owner outside the root,
   // or symlinked children). `--repo <name>` and the TUI must address each repo

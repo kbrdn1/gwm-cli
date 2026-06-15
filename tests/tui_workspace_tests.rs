@@ -164,6 +164,28 @@ fn failed_repo_activation_marks_the_selection_stale_then_recovers() {
 }
 
 #[test]
+fn no_visible_selection_marks_workspace_stale() {
+  // When the filter hides every row (no selection), workspace mode has no
+  // active repo the selection points at, so write actions must be blocked:
+  // `sync_active_repo` flags the state stale (issue #304).
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  assert!(!app.workspace_active_stale, "a fresh selection is not stale");
+
+  app.list_state.select(None);
+  app.sync_active_repo();
+  assert!(
+    app.workspace_active_stale,
+    "no selected row → stale (blocks create/etc.)"
+  );
+
+  // Restoring a selection clears it again.
+  app.list_state.select(Some(0));
+  app.sync_active_repo();
+  assert!(!app.workspace_active_stale, "a valid selection clears the stale flag");
+}
+
+#[test]
 fn repo_mutating_actions_are_classified() {
   // The guard in `run_action` keys off this classification (#304).
   assert!(Action::Create.is_repo_mutating());

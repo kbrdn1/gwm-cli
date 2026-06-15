@@ -133,16 +133,15 @@ fn discover_disambiguates_duplicate_repo_names() {
   b.worktree("wt-b", &root.path().join("wt-b"), None).unwrap();
 
   let ws = workspace::discover(root.path()).unwrap();
-  let mut names: Vec<&str> = ws.repos.iter().map(|r| r.name.as_str()).collect();
-  names.sort_unstable();
   assert_eq!(ws.repos.len(), 2, "two distinct owners, got {:?}", ws.repos);
+  // Deterministic: repos sort by (name, path), so the smaller-path owner always
+  // gets `main` and the other `main-2` — stable across runs / filesystems.
+  assert!(ws.repos[0].path < ws.repos[1].path, "stable path tie-break order");
+  assert_eq!(ws.repos[0].name, "main", "smaller-path owner keeps the bare name");
   assert_eq!(
-    names,
-    vec!["main", "main-2"],
-    "duplicate basenames disambiguated, got {names:?}"
+    ws.repos[1].name, "main-2",
+    "the collision is suffixed deterministically"
   );
-  // The two paths are genuinely distinct repos.
-  assert_ne!(ws.repos[0].path, ws.repos[1].path, "distinct owner paths");
 }
 
 #[test]
