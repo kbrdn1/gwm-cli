@@ -186,6 +186,34 @@ fn no_visible_selection_marks_workspace_stale() {
 }
 
 #[test]
+fn stale_selection_blocks_project_config_edits() {
+  // With a stale selection (the selected repo vanished), a Project-layer config
+  // edit would write to the previously active repo's `.gwm.toml` — refuse it
+  // (the wrong-target write the guard prevents); #304.
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  let before = app.config.tui.auto_refresh_secs;
+
+  fs::remove_dir_all(root.path().join("beta")).unwrap();
+  let last = app.worktrees.len() - 1;
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+  assert!(app.workspace_active_stale, "precondition: selection is stale");
+
+  // config_panel defaults to the Project layer.
+  app.apply_setting(SettingField::AutoRefreshSecs, "42");
+  assert_eq!(
+    app.config.tui.auto_refresh_secs, before,
+    "a Project-layer edit is refused while the selected repo is unavailable"
+  );
+  assert!(
+    app.status.contains("unavailable"),
+    "the refusal is surfaced on the status bar, got: {}",
+    app.status
+  );
+}
+
+#[test]
 fn repo_mutating_actions_are_classified() {
   // The guard in `run_action` keys off this classification (#304).
   assert!(Action::Create.is_repo_mutating());

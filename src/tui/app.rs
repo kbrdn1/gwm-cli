@@ -1836,6 +1836,13 @@ impl App {
     let config_key = target.config_key();
     let items = cap.as_config_items();
 
+    // A Project-layer write targets `self.workdir/.gwm.toml`. In workspace mode
+    // with a stale selection that path is the *previously* active repo, so
+    // refuse rather than rebind keys in the wrong repo (#304).
+    if self.workspace_active_stale && self.config_panel.layer == SettingsLayer::Project {
+      self.status = "workspace: selected repo is unavailable — can't edit its project keymap".into();
+      return;
+    }
     let path = match self.config_panel.layer {
       SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
       SettingsLayer::Global => match self.global_path.clone() {
@@ -2037,6 +2044,14 @@ impl App {
   /// `All` tab and the source attribution track the edit. Every fallible
   /// step routes its error to the status line — no `unwrap` on this path.
   pub fn apply_setting(&mut self, field: SettingField, value: &str) {
+    // A Project-layer write targets `self.workdir/.gwm.toml`. In workspace mode
+    // with a stale selection that path is the *previously* active repo, so
+    // refuse rather than write settings into the wrong repo (#304). Global-layer
+    // edits are repo-independent and stay allowed.
+    if self.workspace_active_stale && self.config_panel.layer == SettingsLayer::Project {
+      self.status = "workspace: selected repo is unavailable — can't edit its project config".into();
+      return;
+    }
     let path = match self.config_panel.layer {
       SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
       SettingsLayer::Global => match self.global_path.clone() {
