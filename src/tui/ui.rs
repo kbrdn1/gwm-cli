@@ -1112,7 +1112,19 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
     ),
     Ok(s) => {
       let counts = working_tree_status_counts(&s);
-      let lines = working_tree_tree_lines(&wt_tree::build_tree(&s), theme);
+      let records = wt_tree::parse_status_z(&s);
+      // Cap the explorer for a pathological untracked-dir explosion (issue
+      // #300): build at most WT_TREE_MAX_FILES leaves and surface the
+      // remainder as a single muted `… N more` row, so the non-scrollable
+      // section can't be sized from tens of thousands of files.
+      let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
+      let mut lines = working_tree_tree_lines(&tree, theme);
+      if overflow > 0 {
+        lines.push(Line::from(Span::styled(
+          format!("… {} more", overflow),
+          Style::default().fg(theme.muted),
+        )));
+      }
       (lines, counts)
     }
     Err(e) => (
@@ -1126,33 +1138,52 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
 }
 
 /// Render the Working Tree file-explorer model (issue #300) into styled
-/// sidebar rows. Directories are emitted before their children with a
-/// folder glyph in the `accent` role; files carry a category-coloured
-/// status badge + a nerd-font file-type icon + the leaf name, all painted
-/// in the file's change-category colour so a row's colour matches the
-/// footer count it belongs to (the #287 invariant, preserved). Two spaces
-/// of indentation per depth level give the tree its shape.
+/// sidebar rows.
+///
+/// - **Connector lines**: each row is prefixed with box-drawing branches
+///   (`├─ ` / `└─ ` with `│  ` / `   ` carried down from ancestors) in the
+///   muted role, so the hierarchy reads like `tree(1)`.
+/// - **Directory colour is retroactive**: a folder is painted by the
+///   aggregate git category of its subtree — only-modified → yellow,
+///   only-new → green, only-deleted → red, mixed (or none) → neutral
+///   `accent`.
+/// - **Files** carry a category-coloured status badge + a nerd-font
+///   file-type icon + the leaf name, painted in the file's change-category
+///   colour so a row's colour matches the footer count it belongs to (the
+///   #287 invariant, preserved).
+/// - An **extra space** follows each nerd-font glyph: most glyphs render
+///   double-width but occupy a single terminal cell, so the pad keeps the
+///   following text from being clipped.
 fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> Vec<Line<'static>> {
   let mut out = Vec::new();
-  push_wt_nodes(&mut out, nodes, 0, theme);
+  push_wt_nodes(&mut out, nodes, String::new(), theme);
   out
 }
 
-/// Depth-first walk used by [`working_tree_tree_lines`]; recurses into each
-/// directory's children one indent level deeper.
-fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], depth: usize, theme: &Theme) {
-  let indent = "  ".repeat(depth);
-  for node in nodes {
+/// Depth-first walk used by [`working_tree_tree_lines`]. `prefix` is the
+/// accumulated ancestor connector string; each child appends `├─ `/`└─ `
+/// for its own row and `│  `/`   ` for its descendants.
+fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String, theme: &Theme) {
+  let last = nodes.len().saturating_sub(1);
+  for (i, node) in nodes.iter().enumerate() {
+    let is_last = i == last;
+    let connector = format!("{}{}", prefix, if is_last { "└─ " } else { "├─ " });
     match node {
-      WtNode::Dir { name, children } => {
+      WtNode::Dir {
+        name,
+        children,
+        category,
+      } => {
+        let color = match category {
+          Some(c) => working_tree_category_color(*c, theme),
+          None => theme.accent,
+        };
         out.push(Line::from(vec![
-          Span::raw(indent.clone()),
-          Span::styled(
-            format!("{} {}", WT_DIR_OPEN_ICON, name),
-            Style::default().fg(theme.accent),
-          ),
+          Span::styled(connector, Style::default().fg(theme.muted)),
+          Span::styled(format!("{}  {}", WT_DIR_OPEN_ICON, name), Style::default().fg(color)),
         ]));
-        push_wt_nodes(out, children, depth + 1, theme);
+        let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
+        push_wt_nodes(out, children, child_prefix, theme);
       }
       WtNode::File {
         name,
@@ -1162,9 +1193,9 @@ fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], depth: usize, t
       } => {
         let color = working_tree_category_color(*category, theme);
         out.push(Line::from(vec![
-          Span::raw(indent.clone()),
+          Span::styled(connector, Style::default().fg(theme.muted)),
           Span::styled(format!("{} ", badge), Style::default().fg(color)),
-          Span::styled(format!("{} {}", icon, name), Style::default().fg(color)),
+          Span::styled(format!("{}  {}", icon, name), Style::default().fg(color)),
         ]));
       }
     }

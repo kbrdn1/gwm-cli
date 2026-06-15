@@ -160,6 +160,10 @@ fn working_tree_section_renders_file_tree_with_icons() {
     text.contains(gwm::tui::wt_tree::WT_RUST_ICON),
     "the .rs leaf carries the Rust file-type glyph: {text}"
   );
+  assert!(
+    text.contains('└') || text.contains('├'),
+    "rows are drawn with tree connector lines: {text}"
+  );
 }
 
 /// Run a `git` CLI command in `dir`, asserting success. Lets a render test

@@ -130,14 +130,18 @@ pub fn file_icon(name: &str) -> &'static str {
 }
 
 /// A node in the Working Tree file-explorer model. A `Dir` carries its
-/// (possibly collapsed) display name and ordered children; a `File` carries
-/// its leaf name plus the precomputed icon, badge glyph, and change
-/// category the renderer needs.
+/// (possibly collapsed) display name, ordered children, and the aggregate
+/// change-category of its subtree (issue #300: `Some(c)` when every
+/// descendant shares category `c`, `None` when the subtree mixes
+/// categories) so the directory row can be coloured by what it contains. A
+/// `File` carries its leaf name plus the precomputed icon, badge glyph, and
+/// change category the renderer needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WtNode {
   Dir {
     name: String,
     children: Vec<WtNode>,
+    category: Option<WtCategory>,
   },
   File {
     name: String,
@@ -145,6 +149,30 @@ pub enum WtNode {
     badge: char,
     category: WtCategory,
   },
+}
+
+/// Aggregate change-category of a directory subtree (issue #300): `Some(c)`
+/// when every categorised descendant shares category `c`, `None` when they
+/// mix (or the subtree is empty). A child directory that is itself mixed
+/// (`None`) makes its parent mixed too. Drives the retroactive directory
+/// colouring — a folder of only-modified files reads yellow, only-new
+/// green, only-deleted red, and a mixed folder a neutral accent.
+fn aggregate_category(children: &[WtNode]) -> Option<WtCategory> {
+  let mut found: Option<WtCategory> = None;
+  for child in children {
+    let cat = match child {
+      WtNode::File { category, .. } => *category,
+      WtNode::Dir { category: Some(c), .. } => *c,
+      // A child subtree that is already mixed makes this directory mixed.
+      WtNode::Dir { category: None, .. } => return None,
+    };
+    match found {
+      None => found = Some(cat),
+      Some(f) if f == cat => {}
+      Some(_) => return None,
+    }
+  }
+  found
 }
 
 /// One parsed `git status --porcelain -z` record: the two status columns
@@ -212,11 +240,29 @@ pub fn parse_status_z(raw: &str) -> Vec<StatusRecord> {
 /// directories. The result is dir-first alphabetical at every level with
 /// single-child directory chains collapsed.
 pub fn build_tree(status_z: &str) -> Vec<WtNode> {
+  build_capped_tree(&parse_status_z(status_z), usize::MAX).0
+}
+
+/// Maximum file leaves the Working Tree explorer builds in one pass (issue
+/// #300). `--untracked-files=all` makes git enumerate every file inside an
+/// unignored generated/vendor directory; without a cap the sidebar would
+/// build and cache one `Line` per file and size its non-scrollable section
+/// from that full length, so selecting such a worktree could flood the TUI.
+/// Past the cap, [`build_capped_tree`] stops and reports the remainder for
+/// a single `… N more` row.
+pub const WT_TREE_MAX_FILES: usize = 500;
+
+/// Build the nested model from at most `max` of `records`, returning the
+/// node list plus the number of records dropped past the cap (`0` when
+/// nothing was capped). The kept records are the first `max` in the order
+/// git emitted them.
+pub fn build_capped_tree(records: &[StatusRecord], max: usize) -> (Vec<WtNode>, usize) {
+  let shown = records.len().min(max);
   let mut root = DirBuilder::default();
-  for rec in parse_status_z(status_z) {
+  for rec in &records[..shown] {
     root.insert(&rec.path, rec.x, rec.y);
   }
-  root.into_nodes()
+  (root.into_nodes(), records.len() - shown)
 }
 
 // Intermediate mutable builder kept private; `BTreeMap` gives the
@@ -271,9 +317,12 @@ impl DirBuilder {
         name.push_str(&child_name);
         dir = child_dir;
       }
+      let children = dir.into_nodes();
+      let category = aggregate_category(&children);
       out.push(WtNode::Dir {
         name,
-        children: dir.into_nodes(),
+        children,
+        category,
       });
     }
     for (name, leaf) in self.files {

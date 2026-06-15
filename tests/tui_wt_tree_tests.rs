@@ -7,8 +7,8 @@
 //! counterpart lives in `tui_sidebar_render_tests.rs`.
 
 use gwm::tui::wt_tree::{
-  build_tree, file_icon, parse_status_z, status_badge, working_tree_category, WtCategory, WtNode, WT_FILE_ICON,
-  WT_JSON_ICON, WT_MARKDOWN_ICON, WT_RUST_ICON, WT_TOML_ICON,
+  build_capped_tree, build_tree, file_icon, parse_status_z, status_badge, working_tree_category, StatusRecord,
+  WtCategory, WtNode, WT_FILE_ICON, WT_JSON_ICON, WT_MARKDOWN_ICON, WT_RUST_ICON, WT_TOML_ICON,
 };
 
 /// Find a direct `Dir` child by name in a node slice.
@@ -122,6 +122,38 @@ fn build_tree_keeps_special_chars_in_names_verbatim() {
     "special chars preserved verbatim: {:?}",
     tree[0]
   );
+}
+
+#[test]
+fn build_tree_directory_category_is_uniform_or_mixed() {
+  // A directory whose descendants are all one category carries `Some(c)`;
+  // mixing categories flips it to `None` (the neutral / mixed colour).
+  let uniform = build_tree(" M app/a.rs\0 M app/sub/b.rs\0");
+  match dir(&uniform, "app") {
+    WtNode::Dir { category, .. } => assert_eq!(*category, Some(WtCategory::Modified), "all modified"),
+    other => panic!("expected a Dir, got {other:?}"),
+  }
+  let mixed = build_tree(" M app/a.rs\0?? app/c.rs\0");
+  match dir(&mixed, "app") {
+    WtNode::Dir { category, .. } => assert_eq!(*category, None, "modified + created → mixed"),
+    other => panic!("expected a Dir, got {other:?}"),
+  }
+}
+
+#[test]
+fn build_capped_tree_stops_at_max_and_reports_overflow() {
+  let recs: Vec<StatusRecord> = (0..10)
+    .map(|i| StatusRecord {
+      x: '?',
+      y: '?',
+      path: format!("f{i:02}.txt"),
+    })
+    .collect();
+  let (tree, overflow) = build_capped_tree(&recs, 4);
+  assert_eq!(overflow, 6, "10 records, cap 4 → 6 dropped");
+  let files = tree.iter().filter(|n| matches!(n, WtNode::File { .. })).count();
+  assert_eq!(files, 4, "only the first 4 records built into leaves");
+  assert_eq!(build_capped_tree(&recs, 100).1, 0, "cap above the count → no overflow");
 }
 
 #[test]
