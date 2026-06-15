@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Current-PR CI status indicator in the Status pane** (issue #299): the
+  Issue / PR section (`2`) now renders an overall CI state for the linked PR
+  instead of a bare ` · checks N/M`. A coloured nerd-font indicator
+  (` CI passing 9/9` green, ` CI failing 7/9` red, ` CI running 8/9` yellow)
+  is derived from the `statusCheckRollup` already fetched — no extra GitHub
+  request. The state follows **failing > running > passing** so a red check is
+  never hidden behind an in-flight one; a PR with no checks renders nothing.
+
 - **Edit every keymap from the Settings panel** (issue #294): the Settings
   panel (`4`) gains a **Keys** tab that lists every rebindable binding — the
   global list-view actions (`[global]`) and every modal verb grouped by
