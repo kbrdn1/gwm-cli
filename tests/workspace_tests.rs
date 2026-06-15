@@ -90,6 +90,36 @@ fn discover_skips_a_linked_worktree_sibling() {
 }
 
 #[test]
+fn discover_includes_an_orphan_linked_worktree_via_its_owner() {
+  // A linked worktree under the root whose *owner* main checkout lives OUTSIDE
+  // the root must not be dropped: it resolves to (and is listed as) its owner,
+  // so the checkout stays reachable (issue #304).
+  let owner_dir = TempDir::new().unwrap();
+  let owner = init_repo_at(owner_dir.path());
+  let root = TempDir::new().unwrap();
+  owner
+    .worktree("wt", &root.path().join("wt"), None)
+    .expect("create linked worktree under the root");
+
+  let ws = workspace::discover(root.path()).unwrap();
+  assert_eq!(
+    ws.repos.len(),
+    1,
+    "the orphan worktree resolves to one owner repo, got {:?}",
+    ws.repos
+  );
+  let got = ws.repos[0]
+    .path
+    .canonicalize()
+    .unwrap_or_else(|_| ws.repos[0].path.clone());
+  let want = owner_dir
+    .path()
+    .canonicalize()
+    .unwrap_or_else(|_| owner_dir.path().to_path_buf());
+  assert_eq!(got, want, "the workspace repo is the owner checkout");
+}
+
+#[test]
 fn discover_skips_the_root_repos_own_git_dir() {
   // When the root is itself a git repo, `read_dir` surfaces its `.git/`, which
   // `Repository::open` resolves back to the root repo. That must NOT appear as

@@ -60,6 +60,10 @@ pub fn discover(root: &Path) -> Result<Workspace> {
   let entries = std::fs::read_dir(root)?;
 
   let mut repos: Vec<WorkspaceRepo> = Vec::new();
+  // Canonical main-workdir of each repo already admitted, so two entries that
+  // resolve to the same main repo (a main checkout and one of its linked
+  // worktrees, both under the root) collapse to a single row.
+  let mut seen: Vec<PathBuf> = Vec::new();
   for entry in entries.flatten() {
     let path = entry.path();
     if !path.is_dir() {
@@ -74,27 +78,38 @@ pub fn discover(root: &Path) -> Result<Workspace> {
     if repo.is_bare() {
       continue;
     }
-    // Skip a linked worktree that happens to sit as a sibling under the root:
-    // its owning repo's `worktree::list` already emits it, so admitting it as
-    // a separate `WorkspaceRepo` would duplicate rows and anchor some actions
-    // to the worktree path instead of the main repo (Codex review #303 P2).
-    if repo.is_worktree() {
+    // Resolve the entry to the *main* repo it belongs to: a normal repo is its
+    // own main; a linked worktree resolves to the main checkout that owns it
+    // (which may live outside the root). `None` ⇒ unresolvable, skip.
+    let Some(main_workdir) = main_workdir(&repo) else {
+      continue;
+    };
+    // A non-worktree entry must BE its own repo root. When `--workspace` points
+    // at a directory that is itself a repo, `read_dir` surfaces the root's own
+    // `.git/`; `Repository::open` succeeds on it but resolves to the *parent*
+    // repo (main workdir = root, not `root/.git`), so this drops that bogus
+    // `.git` row (Codex review #303 P2).
+    if !repo.is_worktree() && !paths_equal(&main_workdir, &path) {
       continue;
     }
-    // The opened repo's workdir must BE this child dir. When `--workspace`
-    // points at a directory that is itself a repo, `read_dir` surfaces the
-    // root's own `.git/`, and `Repository::open` on it succeeds but resolves
-    // to the *parent* repo (workdir = root, not `root/.git`). Admitting it
-    // would add a bogus `.git` repo aimed at the parent (Codex review #303 P2).
-    let workdir_is_child = repo.workdir().is_some_and(|w| paths_equal(w, &path));
-    if !workdir_is_child {
+    // Dedupe by the resolved main workdir: a main checkout and a linked
+    // worktree of it that both sit under the root collapse to one row (the
+    // main repo's `worktree::list` already emits that worktree). A linked
+    // worktree whose owner is NOT under the root resolves to its owner and is
+    // still included — its checkout would otherwise be invisible (#304).
+    let canon = main_workdir.canonicalize().unwrap_or_else(|_| main_workdir.clone());
+    if seen.contains(&canon) {
       continue;
     }
-    let name = path
+    seen.push(canon);
+    let name = main_workdir
       .file_name()
       .map(|n| n.to_string_lossy().to_string())
       .unwrap_or_else(|| "repo".into());
-    repos.push(WorkspaceRepo { name, path });
+    repos.push(WorkspaceRepo {
+      name,
+      path: main_workdir,
+    });
   }
 
   repos.sort_by(|a, b| a.name.cmp(&b.name));
@@ -102,6 +117,22 @@ pub fn discover(root: &Path) -> Result<Workspace> {
     root: root.to_path_buf(),
     repos,
   })
+}
+
+/// The working directory of the *main* repo an opened entry belongs to. A
+/// normal repo is its own main (`workdir()`); a linked worktree resolves to
+/// the main checkout that owns it — its gitdir is
+/// `<main>/.git/worktrees/<id>/`, so three parents up is `<main>`, which we
+/// re-open to read its real workdir. `None` when the path layout can't be
+/// resolved or the repo has no workdir (bare).
+fn main_workdir(repo: &Repository) -> Option<PathBuf> {
+  if repo.is_worktree() {
+    let admin = repo.path();
+    let main = admin.parent()?.parent()?.parent()?;
+    Repository::open(main).ok()?.workdir().map(Path::to_path_buf)
+  } else {
+    repo.workdir().map(Path::to_path_buf)
+  }
 }
 
 /// Compare two paths for the same on-disk location, canonicalizing first so a

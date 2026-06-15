@@ -674,6 +674,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
 /// worker is still in flight. The loop checks the flag at the top and
 /// bottom of every iteration.
 fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut App, action: Action) -> Result<()> {
+  // Issue #304: in workspace mode, block repo-mutating actions while the
+  // selected row's repo could not be activated (moved/deleted/corrupt since
+  // listing) — `app.repo`/`workdir`/`config` still point at the previously
+  // active repo, so the write would hit the wrong repository. Navigation and
+  // refresh stay live so the user can recover (a refresh drops the dead repo).
+  if app.workspace_active_stale && action.is_repo_mutating() {
+    app.status = "workspace: selected repo is unavailable (moved/deleted?) — press r to refresh".into();
+    return Ok(());
+  }
+
   match action {
     // Issue #32/#267: signal quit via `app.should_quit` so palette
     // and keymap paths share the same graceful-shutdown gate.

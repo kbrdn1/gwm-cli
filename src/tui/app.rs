@@ -200,6 +200,12 @@ pub struct App {
   pub config: Config,
   /// Workspace-mode state (issue #36); `None` in single-repo mode.
   pub workspace: Option<WorkspaceState>,
+  /// Set when the selected row's repo could not be activated in workspace mode
+  /// (moved / deleted / corrupt since listing). While true, `repo`/`workdir`/
+  /// `config` still point at the previously active repo, so repo-mutating
+  /// actions are blocked to avoid a wrong-target write (#304). Always `false`
+  /// in single-repo mode and once a selection activates cleanly.
+  pub workspace_active_stale: bool,
   pub worktrees: Vec<WorktreeInfo>,
   pub list_state: TableState,
   pub view: View,
@@ -467,6 +473,7 @@ impl App {
       workdir,
       config,
       workspace: None,
+      workspace_active_stale: false,
       worktrees,
       list_state: state,
       view: View::List,
@@ -628,6 +635,9 @@ impl App {
       return;
     };
     if target == ws.active {
+      // The selection is on the live, already-activated repo — clear any stale
+      // flag left over from a previous unreachable selection.
+      self.workspace_active_stale = false;
       return;
     }
     let Some(meta) = ws.repos.get(target).cloned() else {
@@ -639,6 +649,7 @@ impl App {
         self.repo_name = meta.name;
         self.workdir = meta.workdir;
         self.config = meta.config;
+        self.workspace_active_stale = false;
         // The branch types drive the create form; re-resolve them from the
         // newly-active repo's config so a per-repo `[[branch_types]]` override
         // applies to the row being acted on (Codex review #303 P2).
@@ -655,7 +666,14 @@ impl App {
         self.refresh_link();
       }
       Err(e) => {
-        self.status = format!("workspace: failed to open repo '{}': {}", meta.name, e);
+        // Keep the previously active repo live but mark the selection stale so
+        // repo-mutating actions are blocked until the user moves to a
+        // reachable row (or a refresh drops the dead repo) — #304.
+        self.workspace_active_stale = true;
+        self.status = format!(
+          "workspace: repo '{}' is unavailable ({}) — press r to refresh",
+          meta.name, e
+        );
       }
     }
   }

@@ -5,6 +5,7 @@
 //! ever drawing a frame.
 
 use git2::{Repository, Signature};
+use gwm::tui::keymap::Action;
 use gwm::tui::{draw, App, SettingField, SettingsLayer};
 use ratatui::{backend::TestBackend, Terminal};
 use std::fs;
@@ -129,6 +130,51 @@ fn sync_active_repo_reresolves_branch_types_from_the_selected_repo() {
     vec!["wibble"],
     "branch types now follow beta's config, got {names:?}"
   );
+}
+
+#[test]
+fn failed_repo_activation_marks_the_selection_stale_then_recovers() {
+  // A repo that was listed but then vanished on disk must not silently leave
+  // the active context pointing at the previous repo: the selection is flagged
+  // stale (which blocks repo-mutating actions), and navigating back to a live
+  // repo clears it (issue #304).
+  let root = workspace_root(); // alpha, beta
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  assert!(!app.workspace_active_stale, "fresh workspace is not stale");
+
+  // Delete beta's checkout on disk, then select its (now-dead) row.
+  fs::remove_dir_all(root.path().join("beta")).unwrap();
+  let last = app.worktrees.len() - 1;
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+
+  assert!(app.workspace_active_stale, "an unreachable selected repo is stale");
+  assert_eq!(
+    app.repo_name, "alpha",
+    "the active repo stays on the last live one, not the dead beta"
+  );
+
+  // Navigating back to a reachable repo clears the stale flag.
+  app.list_state.select(Some(0));
+  app.sync_active_repo();
+  assert!(
+    !app.workspace_active_stale,
+    "selecting a live repo clears the stale flag"
+  );
+}
+
+#[test]
+fn repo_mutating_actions_are_classified() {
+  // The guard in `run_action` keys off this classification (#304).
+  assert!(Action::Create.is_repo_mutating());
+  assert!(Action::DeleteConfirm.is_repo_mutating());
+  assert!(Action::Bootstrap.is_repo_mutating());
+  assert!(Action::EditWorktree.is_repo_mutating());
+  assert!(Action::LinkPrompt.is_repo_mutating());
+  // Navigation / read-only launchers are not blocked.
+  assert!(!Action::Down.is_repo_mutating());
+  assert!(!Action::Refresh.is_repo_mutating());
+  assert!(!Action::YankPath.is_repo_mutating());
 }
 
 #[test]
