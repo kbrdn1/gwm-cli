@@ -575,9 +575,10 @@ impl App {
     });
     app.filter.invalidate();
     app.list_state.select(if wt_count == 0 { None } else { Some(0) });
-    // Resolve GitHub statuses across the full merged set (construction only
-    // refreshed the anchor repo's rows).
-    app.refresh_linked_github_statuses_for_worktrees();
+    // Resolve the initially-selected row's GitHub link/slug against its own
+    // repo (the anchor). Workspace mode fetches GitHub state per-selection, not
+    // in one cross-repo bulk pass — see `refresh_linked_github_statuses_for_worktrees`.
+    app.refresh_link();
     app.status = format!(
       "workspace {} — {} repo(s), {} worktree(s) · press ? for help",
       root.display(),
@@ -638,10 +639,20 @@ impl App {
         self.repo_name = meta.name;
         self.workdir = meta.workdir;
         self.config = meta.config;
+        // The branch types drive the create form; re-resolve them from the
+        // newly-active repo's config so a per-repo `[[branch_types]]` override
+        // applies to the row being acted on (Codex review #303 P2).
+        self.branch_types = self.config.resolved_branch_types().types;
         if let Some(ws) = self.workspace.as_mut() {
           ws.active = target;
         }
         self.invalidate_sidebar_cache();
+        // Re-resolve the GitHub link + slug against the now-active repo so the
+        // Issue/PR panel and the `F` refresh act on the selected row's own
+        // repo, not the previously-active one (Codex review #303 P2). The
+        // per-repo nav hook (`on_navigation`) ran `refresh_link` *before* this
+        // swap, while `self.repo` still pointed at the old repo.
+        self.refresh_link();
       }
       Err(e) => {
         self.status = format!("workspace: failed to open repo '{}': {}", meta.name, e);
@@ -682,8 +693,12 @@ impl App {
       ws.row_repo = row_repo;
     }
     self.apply_refreshed_worktrees(worktrees);
-    // The selection may now land on a different repo's row — re-align.
+    // The selection may now land on a different repo's row — re-align the
+    // active repo. `sync_active_repo` only refreshes the link when the repo
+    // actually changes, so re-resolve the selected row's link/slug here too
+    // (the bulk prefetch is a no-op in workspace mode).
     self.sync_active_repo();
+    self.refresh_link();
   }
 
   /// Builder-style setter for `trust_mode`. The TUI entrypoint
@@ -3296,6 +3311,16 @@ impl App {
   }
 
   fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    // Workspace mode (#36): this bulk prefetch resolves every merged row's
+    // issue/PR against a single repo's slug (`self.github.link_slug`), which
+    // mis-attributes numbers across child repos with different remotes (Codex
+    // review #303 P2). In workspace mode GitHub state is fetched per-selection
+    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, which
+    // re-resolves the slug from the selected row's own repo. So skip the bulk
+    // cross-repo prefetch here.
+    if self.is_workspace() {
+      return 0;
+    }
     let Some(slug) = self.github.link_slug.clone() else {
       return 0;
     };

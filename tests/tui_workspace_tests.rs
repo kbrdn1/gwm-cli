@@ -99,6 +99,39 @@ fn sync_active_repo_follows_the_selection_across_repos() {
 }
 
 #[test]
+fn sync_active_repo_reresolves_branch_types_from_the_selected_repo() {
+  // beta declares its own `[[branch_types]]`; alpha uses the defaults. After
+  // the active repo swaps to beta, the create form's branch types must follow
+  // beta's config, not stay on alpha's defaults (Codex review #303 P2).
+  let root = TempDir::new().unwrap();
+  init_repo_at(&root.path().join("alpha"));
+  init_repo_at(&root.path().join("beta"));
+  fs::write(
+    root.path().join("beta").join(".gwm.toml"),
+    "[[branch_types]]\nname = \"wibble\"\ndescription = \"custom\"\n",
+  )
+  .unwrap();
+
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  // alpha (row 0) → default types include `feat`, and not `wibble`.
+  assert!(
+    app.branch_types.iter().any(|t| t.name == "feat"),
+    "alpha uses default branch types"
+  );
+
+  let last = app.worktrees.len() - 1; // beta's main
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "beta", "swapped to beta");
+  let names: Vec<&str> = app.branch_types.iter().map(|t| t.name.as_str()).collect();
+  assert_eq!(
+    names,
+    vec!["wibble"],
+    "branch types now follow beta's config, got {names:?}"
+  );
+}
+
+#[test]
 fn sync_active_repo_is_a_noop_in_single_repo_mode() {
   // A non-workspace App must be unaffected by the swap hook.
   let (dir, _repo) = {
