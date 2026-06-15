@@ -95,13 +95,23 @@ If an issue still shows `open` on GitHub even though its work shipped, it's a tr
 
 Near-term TUI work, listed in **rough implementation order** — each item builds on the one above it. This is a dependency ordering, not a date commitment.
 
-The 0.10.0-rc.1 Settings-editability + TUI enrichment train has shipped to `dev` — see the Shipped highlights table above and [`changelogs/pre-releases/0.10.0-rc.1.md`](changelogs/pre-releases/0.10.0-rc.1.md) for the full delta. No small near-term TUI follow-up is queued right now; the next candidates are the larger Ambitious items below when demand warrants them.
+The 0.10.0-rc.1 Settings-editability + TUI enrichment train has shipped to `dev` — see the Shipped highlights table above and [`changelogs/pre-releases/0.10.0-rc.1.md`](changelogs/pre-releases/0.10.0-rc.1.md) for the full delta.
+
+A second post-rc.1 train has since landed on `dev`, queued for the next release (see [`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` for the delta):
+
+- [#35](https://github.com/kbrdn1/gwm-cli/issues/35) — embedded PTY overlay for lazygit / native terminal (`l` / `L` / `o` / `O`).
+- [#290](https://github.com/kbrdn1/gwm-cli/issues/290) — TUI keymap redesign (unified list-view bindings, `[tui.macro1]` / `[tui.macro2]`).
+- [#219](https://github.com/kbrdn1/gwm-cli/issues/219) — rebindable modal keys with contextual `[tui.keys.modal.<context>]` actions.
+- [#294](https://github.com/kbrdn1/gwm-cli/issues/294) — edit every keymap from the Settings panel (Keys tab, live keystroke capture, validated write-back).
+
+Queued near-term follow-up:
+
+- [#298](https://github.com/kbrdn1/gwm-cli/issues/298) — **Status-pane CI indicator + Working Tree file-explorer view** — surface the current PR's CI status in the Status pane when present (the `statusCheckRollup` is already fetched), and render the Working Tree pane as a true nerd-font file-explorer tree. Two independent surfaces → two PRs.
 
 ## Ambitious
 
 Larger investments with strategic payoff. Gated by user demand or a concrete first consumer.
 
-- [#35](https://github.com/kbrdn1/gwm-cli/issues/35) — **PTY-embedded lazygit overlay** — render lazygit live inside gwm (`portable-pty` + `tui-term`) as a **~90% fullscreen modal overlay** over the worktree list (not a beside / side pane), drawn like the other modals and outside the `Tab` focus cycle. Distinct from the existing `l` launcher: this one renders lazygit **inside** gwm rather than handing the alt-screen over.
 - [#36](https://github.com/kbrdn1/gwm-cli/issues/36) — **Multi-repo workspace mode** — `gwm --workspace ~/Projects` shows worktrees across every child repo in one TUI.
 - [#37](https://github.com/kbrdn1/gwm-cli/issues/37) — **Configuration presets** — `gwm init --preset laravel / nuxt / rust / go / python-uv` seeds an opinionated `.gwm.toml` for known stacks instead of the generic default.
 - [#38](https://github.com/kbrdn1/gwm-cli/issues/38) — **JSON-RPC / gRPC API + daemon mode** — `--format=json` on key commands, then a long-running daemon over `$XDG_RUNTIME_DIR/gwm.sock` for editor / statusbar integration.

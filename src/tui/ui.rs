@@ -463,7 +463,8 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     // caption; the glyphs (`2d`, `3w`, `1M`, `5y`, `-`) are self-evident
     // and a header would steal space from BRANCH on narrow terminals.
     Cell::from(""),
-    Cell::from(""),
+    // Issue / PR badge column (the `●/●` pastilles) — `I/P` fits its 3 cells.
+    Cell::from("I/P"),
     Cell::from("NAME"),
     Cell::from("BRANCH"),
     Cell::from("STATUS"),
@@ -1990,7 +1991,9 @@ pub fn config_nav_footer_hints(
   if tab == SettingsTab::All {
     hints.push(("j/k".to_string(), "scroll".to_string()));
   } else {
-    let label = if selected_kind == Some(FieldKind::Choice) {
+    let label = if tab == SettingsTab::Keys {
+      "rebind"
+    } else if selected_kind == Some(FieldKind::Choice) {
       "cycle"
     } else {
       "edit"
@@ -2007,6 +2010,29 @@ pub fn config_nav_footer_hints(
     if let Some(k) = modal.primary_key(action) {
       hints.push((k, label.to_string()));
     }
+  }
+  hints
+}
+
+/// Settings-panel footer hints while a live keystroke capture is armed on the
+/// Keys tab (issue #294). `cancel` (and, for a multi-stroke global chord,
+/// `save`) resolve from the `ConfigEdit*` modal bindings so a rebind of
+/// `[tui.keys.modal.config.edit]` shows through. A single-stroke modal capture
+/// auto-commits on the first key, so it advertises that instead of a `save`
+/// verb; the multi-stroke global path adds the literal `Backspace` deletes-last
+/// affordance (no modal verb binds it).
+pub fn config_capture_footer_hints(modal: &ModalKeymap, single_only: bool) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = Vec::new();
+  if single_only {
+    hints.push(("any key".to_string(), "bind".to_string()));
+  } else {
+    if let Some(k) = modal.primary_key(ModalAction::ConfigEditSubmit) {
+      hints.push((k, "save".to_string()));
+    }
+    hints.push(("Backspace".to_string(), "delete".to_string()));
+  }
+  if let Some(k) = modal.primary_key(ModalAction::ConfigEditCancel) {
+    hints.push((k, "cancel".to_string()));
   }
   hints
 }
@@ -2908,6 +2934,90 @@ fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static
   lines
 }
 
+/// Build the Keys-tab body (issue #294): the rebindable bindings grouped by
+/// scope (`[global]`, `[modal.<context>]`), each row showing its source badge,
+/// label and current key(s). The selected row is marked; while a live capture
+/// is armed its key column becomes a `[ … ]` input echoing the captured
+/// strokes. Returns the line index of the selected row so the caller can keep
+/// it in view (this body is far taller than the viewport). Mirrors
+/// [`settings_all_lines`]'s section grouping + source colours.
+fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+  let panel = &app.config_panel;
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut selected_line: Option<usize> = None;
+
+  if panel.key_rows.is_empty() {
+    lines.push(Line::from(Span::styled("No bindings resolved.", muted_style)));
+    return (lines, None);
+  }
+
+  let mut current_scope: Option<String> = None;
+  for (i, row) in panel.key_rows.iter().enumerate() {
+    if current_scope.as_deref() != Some(row.scope.as_str()) {
+      if current_scope.is_some() {
+        lines.push(Line::from(String::new()));
+      }
+      lines.push(Line::from(Span::styled(
+        format!("[{}]", row.scope),
+        help_section_style(accent),
+      )));
+      current_scope = Some(row.scope.clone());
+    }
+
+    let selected = i == panel.selected;
+    if selected {
+      selected_line = Some(lines.len());
+    }
+    let capturing = selected && panel.capture.is_some();
+    let marker = if selected { "›" } else { " " };
+    let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let src_color = match row.source {
+      ConfigSource::Repo => app.theme.clean,
+      ConfigSource::User => app.theme.branch,
+      ConfigSource::Default => muted,
+    };
+
+    let key_span = if capturing {
+      let pending = panel
+        .capture
+        .as_ref()
+        .map(|c| c.pending.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+      Span::styled(
+        format!("[ {pending}_ ]"),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      )
+    } else {
+      let shown = if row.keys.is_empty() {
+        "(unbound)".to_string()
+      } else {
+        row.keys.clone()
+      };
+      let style = if row.keys.is_empty() {
+        muted_style
+      } else if selected {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(Color::White)
+      };
+      Span::styled(shown, style)
+    };
+
+    lines.push(Line::from(vec![
+      Span::styled(format!(" {marker} "), marker_style),
+      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::raw(" "),
+      Span::styled(format!("{:<24}", row.label), label_style),
+      key_span,
+    ]));
+  }
+  (lines, selected_line)
+}
+
 /// Render the Settings overlay (issue #232; editable in #279): same modal
 /// size as the Keybindings overlay, with a fixed header (title + the edit
 /// layer as a subtitle + category tabs), a scrollable body (the active
@@ -2943,17 +3053,29 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   }
   let header_lines = vec![title, subtitle, Line::from(String::new()), Line::from(tab_spans)];
 
-  // Body depends on the active tab.
+  // Body depends on the active tab. The Keys tab (issue #294) also reports the
+  // line index of the selected row so the renderer can scroll it into view (it
+  // has ~100 rows, unlike the short field tabs).
+  let mut keys_selected_line: Option<usize> = None;
   let body_lines = match tab {
     SettingsTab::All => settings_all_lines(app),
+    SettingsTab::Keys => {
+      let (lines, sel) = settings_keys_lines(app);
+      keys_selected_line = sel;
+      lines
+    }
     other => settings_fields_lines(app, other.fields()),
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
-  // the current tab / edit mode. Both the edit and nav rows resolve their
-  // single-key verbs from the Config* modal bindings (#219 review) so a rebind
-  // of `[tui.keys.modal.config(.edit)]` shows through instead of literal keys.
-  let footer_owned = if editing {
+  // the current tab / edit / capture mode. The edit, capture and nav rows
+  // resolve their single-key verbs from the Config* modal bindings (#219
+  // review) so a rebind of `[tui.keys.modal.config(.edit)]` shows through
+  // instead of literal keys.
+  let capture_single = app.config_panel.capture.as_ref().map(|c| c.single_only);
+  let footer_owned = if let Some(single) = capture_single {
+    config_capture_footer_hints(&app.modal_keymap, single)
+  } else if editing {
     config_edit_footer_hints(&app.modal_keymap)
   } else {
     config_nav_footer_hints(&app.modal_keymap, tab, selected_kind)
@@ -2974,6 +3096,16 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // Publish scroll bounds against the BODY viewport only (issue #279).
   let body_viewport = body_area.height as usize;
   app.config_panel.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  // Keys tab (issue #294): follow the selected row so it stays on screen as
+  // selection moves (the field tabs are short enough to never need this).
+  if let Some(sel) = keys_selected_line {
+    let scroll = app.config_panel.scroll as usize;
+    if sel < scroll {
+      app.config_panel.scroll = sel as u16;
+    } else if body_viewport > 0 && sel >= scroll + body_viewport {
+      app.config_panel.scroll = (sel + 1 - body_viewport) as u16;
+    }
+  }
   app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
   let scroll = app.config_panel.scroll;
   // Reserve the scrollbar column first, then bound the pan (review P3).

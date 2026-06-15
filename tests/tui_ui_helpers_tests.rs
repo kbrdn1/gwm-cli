@@ -620,6 +620,49 @@ fn config_nav_footer_hints_track_rebinding() {
     !rebound.iter().any(|(k, _)| k == "Tab" || k == "Esc"),
     "stale Tab / Esc must not linger after the rebind: {rebound:?}"
   );
+
+  // Keys tab (issue #294): `activate` advertises `rebind`, not `edit`/`cycle`.
+  let keys = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Keys, None);
+  assert!(
+    keys.iter().any(|(_, l)| l == "rebind"),
+    "Keys tab footer advertises rebind: {keys:?}"
+  );
+}
+
+#[test]
+fn config_capture_footer_hints_differ_by_capture_kind() {
+  // Issue #294: while capturing, the footer resolves cancel (+ save for a
+  // multi-stroke global chord) from the ConfigEdit modal bindings; a
+  // single-stroke modal capture auto-commits, so it advertises the live
+  // prompt instead of a save verb.
+  use gwm::tui::config_capture_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  let global = config_capture_footer_hints(&ModalKeymap::defaults(), false);
+  assert!(global.iter().any(|(k, l)| k == "Enter" && l == "save"), "{global:?}");
+  assert!(
+    global.iter().any(|(k, l)| k == "Backspace" && l == "delete"),
+    "{global:?}"
+  );
+  assert!(global.iter().any(|(k, l)| k == "Esc" && l == "cancel"), "{global:?}");
+
+  let modal = config_capture_footer_hints(&ModalKeymap::defaults(), true);
+  assert!(
+    modal.iter().any(|(_, l)| l == "bind"),
+    "single-stroke prompt: {modal:?}"
+  );
+  assert!(modal.iter().any(|(_, l)| l == "cancel"), "{modal:?}");
+  assert!(
+    !modal.iter().any(|(_, l)| l == "save"),
+    "a single-stroke capture auto-commits, no save verb: {modal:?}"
+  );
+
+  // A rebind of the config.edit cancel verb shows through.
+  let mut mk = ModalKeymap::defaults();
+  mk.apply_override(ModalAction::ConfigEditCancel, vec![parse_single("q").unwrap()])
+    .unwrap();
+  let rebound = config_capture_footer_hints(&mk, false);
+  assert!(rebound.iter().any(|(k, l)| k == "q" && l == "cancel"), "{rebound:?}");
 }
 
 #[test]

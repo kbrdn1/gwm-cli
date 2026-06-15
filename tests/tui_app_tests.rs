@@ -138,6 +138,518 @@ fn enter_config_panel_opens_resolves_rows_and_resets_scroll() {
   assert_eq!(base.source, ConfigSource::Default);
 }
 
+// ── Keys tab: in-TUI keymap editor (issue #294) ────────────────────────────
+
+#[test]
+fn enter_config_panel_builds_the_keys_tab_rows() {
+  use gwm::tui::keymap::Action;
+  use gwm::tui::modal_keymap::ModalAction;
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+
+  let expected = Action::all().count() + ModalAction::all().count();
+  assert_eq!(
+    app.config_panel.key_rows.len(),
+    expected,
+    "opening the panel enumerates every global + modal binding"
+  );
+}
+
+#[test]
+fn capturing_a_global_chord_rebinds_it_live_and_writes_the_file() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .expect("quit row present");
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  // The live keymap reflects the rebind without a restart.
+  let q = KeyStroke::new(KeyCode::Char('Q'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[q]), ChordResolution::Matched(Action::Quit));
+
+  // …and it round-trips to disk under `[tui.keys]`.
+  let raw = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(raw.contains("quit = [\"Q\"]"), "binding persisted: {raw}");
+}
+
+#[test]
+fn capturing_a_modal_verb_rebinds_it_live() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .expect("confirm row present");
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  let o = KeyStroke::new(KeyCode::Char('o'), KeyModifiers::NONE);
+  assert_eq!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &o),
+    Some(ModalAction::ConfirmConfirm),
+    "the modal verb fires on its new key immediately"
+  );
+}
+
+#[test]
+fn an_invalid_rebind_is_rejected_and_leaves_the_binding_live() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .expect("refresh row present");
+  app.config_panel.selected = idx;
+
+  // `g` is a strict prefix of `top`'s default `g g` chord — a prefix
+  // collision the validate-before-write gate must reject.
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "error surfaced: {}", app.status);
+  // The previous binding survives — `f` still refreshes.
+  let f = KeyStroke::new(KeyCode::Char('f'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[f]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn cancelling_a_capture_writes_nothing() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.selected = 0;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.config_panel.cancel_capture();
+
+  assert!(app.config_panel.capture.is_none(), "capture cleared on cancel");
+  assert!(
+    !dir.path().join(".gwm.toml").exists(),
+    "a cancelled capture must not write the file"
+  );
+}
+
+#[test]
+fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
+  // Codex #297 review (P2): `set_array_at` validates only the file it writes.
+  // A rebind that is valid in the project file alone but collides with the
+  // global layer once merged must NOT be left on disk — otherwise the next
+  // launch's layered load fails and the repo config is bricked.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config::Config;
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  // The global layer binds `top` to a two-stroke chord.
+  set_array_at(&global, "tui.keys.top", &["z z".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project; // write the repo file
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  // `z` alone is a prefix of the global `z z` — valid in the repo file by
+  // itself, invalid once the layers merge.
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "rejection surfaced: {}", app.status);
+  // The merged config still loads — nothing was left broken on disk.
+  assert!(
+    Config::load_layered(repo.path(), Some(&global)).is_ok(),
+    "the layered config must still load after a rolled-back rebind"
+  );
+  let repo_toml = repo.path().join(".gwm.toml");
+  if repo_toml.exists() {
+    let raw = std::fs::read_to_string(&repo_toml).unwrap();
+    assert!(!raw.contains("refresh"), "the rejected rebind was rolled back: {raw}");
+  }
+  // The previous binding survives — `f` still refreshes.
+  let f = KeyStroke::new(KeyCode::Char('f'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[f]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn a_shadowed_global_key_rebind_warns() {
+  // Codex #297 review (P3): editing the global layer for a key the repo
+  // overrides leaves the effective binding unchanged (repo wins). Mirror
+  // `apply_setting` and flag the shadow rather than reporting a clean set.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  // The repo pins `quit` to `x`, so a global rebind of `quit` is shadowed.
+  set_array_at(&repo.path().join(".gwm.toml"), "tui.keys.quit", &["x".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("shadowed"),
+    "a shadowed global rebind must warn: {}",
+    app.status
+  );
+}
+
+#[test]
+fn physical_enter_stays_reserved_even_with_a_custom_config_edit_submit() {
+  // Codex #297 review (P2): rebinding `config.edit.submit` to e.g. Ctrl+s must
+  // not make the *physical* Enter assignable in capture — it stays a reserved
+  // control regardless of the config.edit lookup.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{App, KeyTarget, SettingsTab};
+
+  let (repo, _) = init_repo();
+  set_array_at(
+    &repo.path().join(".gwm.toml"),
+    "tui.keys.modal.config.edit.submit",
+    &["Ctrl+s".to_string()],
+  )
+  .unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  // Physical Enter is reserved: ignored, not captured — capture stays armed.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  assert!(app.config_panel.capture.is_some(), "physical Enter must stay reserved");
+  let enter = KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE);
+  assert_ne!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &enter),
+    Some(ModalAction::ConfirmConfirm),
+    "Enter must not have become the binding"
+  );
+}
+
+#[test]
+fn a_failed_write_to_an_already_invalid_shadowed_file_rolls_back() {
+  // Codex #297 review (P2): when the target file is invalid on its own but
+  // loaded because the bad value is shadowed by another layer,
+  // `write_and_validate` writes the edit then returns Err (recovery path). The
+  // commit must roll back so a rebind reported as failed never persists.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+  // Global is invalid on its own (non-numeric countdown)…
+  std::fs::write(&global, "[tui]\nconfirm_countdown_secs = \"abc\"\n").unwrap();
+  // …but the repo overrides it with a valid value, so the merged config loads.
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 4\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global; // write the invalid file
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "failure surfaced: {}", app.status);
+  let raw = std::fs::read_to_string(&global).unwrap();
+  assert!(
+    !raw.contains("quit"),
+    "a failed write must be rolled back, not persisted: {raw}"
+  );
+}
+
+#[test]
+fn modal_capture_reserves_enter_and_backspace_as_controls() {
+  // Codex #297 review (P2): Enter / Backspace must stay reserved capture
+  // controls even for a single-stroke modal target — they can't be captured
+  // as a binding (hand-edit for those), matching the documented controls.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  // Enter and Backspace are ignored — the capture stays armed, nothing bound.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "Enter must not capture a modal verb"
+  );
+  app.handle_capture_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "Backspace must not capture a modal verb"
+  );
+  let enter = KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE);
+  assert_ne!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &enter),
+    Some(ModalAction::ConfirmConfirm),
+    "Enter must not have become the binding"
+  );
+
+  // A real key auto-commits the single-stroke modal capture.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+  assert!(app.config_panel.capture.is_none(), "a real key commits the capture");
+  let o = KeyStroke::new(KeyCode::Char('o'), KeyModifiers::NONE);
+  assert_eq!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &o),
+    Some(ModalAction::ConfirmConfirm)
+  );
+}
+
+#[test]
+fn global_capture_commits_on_enter_and_pops_on_backspace() {
+  // The global (multi-stroke) path: real keys accumulate, Backspace drops the
+  // last, Enter commits — all through the testable handler.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "global chord accumulates, no auto-commit"
+  );
+  app.handle_capture_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)); // drop 'z'
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit "x"
+
+  assert!(app.config_panel.capture.is_none(), "Enter commits the global chord");
+  let x = KeyStroke::new(KeyCode::Char('x'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[x]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn an_unbind_shadowed_by_another_layer_warns() {
+  // Codex #297 review (P2): an empty capture (unbind) on a low-precedence
+  // layer is shadowed when a higher layer still binds the action — warn rather
+  // than report a clean `unbound`.
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  set_array_at(&repo.path().join(".gwm.toml"), "tui.keys.quit", &["x".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  // Empty capture → unbind written to the global layer.
+  app.config_panel.begin_capture();
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("unbound"),
+    "status reports the unbind: {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("shadowed"),
+    "a shadowed unbind must warn: {}",
+    app.status
+  );
+}
+
+#[test]
+fn a_cross_layer_alias_shadow_is_detected_and_warned() {
+  // Codex #297 review (P2, cross-layer): the legacy alias lives in the OTHER
+  // layer (global `open_menu`) while the canonical `browse_links` is rebound in
+  // the project layer. We don't edit the global file, so the alias survives the
+  // merge and shadows the new key — the commit must detect the ineffective
+  // rebind and warn rather than report a clean success.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  set_array_at(&global, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::BrowseLinks))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("shadowed"),
+    "a cross-layer alias shadow must warn: {}",
+    app.status
+  );
+  // The new key really doesn't fire — the global alias `B` still wins.
+  let z = KeyStroke::new(KeyCode::Char('z'), KeyModifiers::NONE);
+  assert_ne!(app.keymap.lookup(&[z]), ChordResolution::Matched(Action::BrowseLinks));
+}
+
+#[test]
+fn rebinding_an_aliased_action_strips_the_legacy_alias() {
+  // Codex #297 review (P2): a pre-#290 config carrying `tui.keys.open_menu`
+  // (alias for `browse_links`) would, after a rebind writes the canonical
+  // `browse_links`, re-apply the alias last in the sorted override walk and
+  // silently shadow the new key. The commit must strip the alias so the new
+  // binding actually wins.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let toml = repo.path().join(".gwm.toml");
+  set_array_at(&toml, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::BrowseLinks))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  let raw = std::fs::read_to_string(&toml).unwrap();
+  assert!(!raw.contains("open_menu"), "the legacy alias was stripped: {raw}");
+  // The new key actually wins — the alias can no longer shadow it on reload.
+  let z = KeyStroke::new(KeyCode::Char('z'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[z]), ChordResolution::Matched(Action::BrowseLinks));
+}
+
 #[test]
 fn hint_context_follows_focus() {
   // Issue #217: the statusbar chip + help subtitle read the live focus. The

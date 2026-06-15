@@ -245,10 +245,13 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # [tui]
 # sidebar_position = "left"
 
-# --- TUI keymap: `[tui.keys]` (issues #87 / #219) ----------------------------
+# --- TUI keymap: `[tui.keys]` (issues #87 / #219 / #294) ---------------------
 # Remap any TUI key. An override REPLACES the default for that verb; an empty
 # array unbinds it. Run `gwm tui keys` for the full list of actions, contexts,
-# and verbs, and `gwm doctor` to validate overrides.
+# and verbs, and `gwm doctor` to validate overrides. You can also edit every
+# binding live from inside the TUI: open the Settings panel (`4`), tab to
+# `Keys`, select a binding and press the activate key to capture a new key —
+# it writes the same TOML shown below to the layer the panel targets (#294).
 #
 # Global list-view verbs are arrays keyed by action slug (multi-key chords
 # like "g g" allowed here):

@@ -3,7 +3,7 @@ use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
-use super::state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer};
+use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -1416,8 +1416,233 @@ impl App {
         self.status = format!("error: {}", e);
       }
     }
+    self.refresh_key_rows();
     self.config_panel.reset();
     self.view = View::Config;
+  }
+
+  /// Rebuild the Keys-tab rows (issue #294) from the live keymaps, attributing
+  /// each binding's source via the resolved-row snapshot (the same layer
+  /// attribution the `All` tab shows). Called on panel open and after a
+  /// successful rebind so the displayed key(s) + badge track the edit.
+  fn refresh_key_rows(&mut self) {
+    let rows = self.config_panel.rows.clone();
+    let key_rows = super::state::config_panel::build_key_rows(&self.keymap, &self.modal_keymap, |key| {
+      rows
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.source)
+        .unwrap_or(crate::config::ConfigSource::Default)
+    });
+    self.config_panel.key_rows = key_rows;
+  }
+
+  /// Feed a raw key event into the in-progress Keys-tab capture (issue #294),
+  /// normalising it to a [`KeyStroke`] first. No-op when no capture is armed.
+  pub fn push_key_capture(&mut self, key: KeyEvent) {
+    self.config_panel.capture_push(KeyStroke::from_event(&key));
+  }
+
+  /// Drive a key through an armed Keys-tab capture (issue #294). The event loop
+  /// owns no logic — it just routes here when a capture is armed, mirroring
+  /// `handle_create_key` / `handle_link_prompt_key`. Controls (resolved through
+  /// the `config.edit` context so a rebind shows through):
+  ///
+  /// - `cancel` (def Esc) aborts the capture;
+  /// - `submit` (def Enter) commits a **multi-stroke global chord**;
+  /// - `Backspace` drops the last stroke of a global chord;
+  /// - any other key is captured — a **single-stroke modal** verb auto-commits
+  ///   on the first one, a global chord accumulates until `submit`.
+  ///
+  /// `Esc` / `Enter` / `Backspace` stay reserved controls in **both** modes and
+  /// are never themselves captured (a modal verb can't be bound to them via the
+  /// UI — hand-edit `.gwm.toml`), matching the documented capture controls and
+  /// the hard-coded escape-hatch policy.
+  pub fn handle_capture_key(&mut self, key: KeyEvent) {
+    let single = self
+      .config_panel
+      .capture
+      .as_ref()
+      .map(|c| c.single_only)
+      .unwrap_or(false);
+    // Reserved capture controls. The *physical* Esc / Enter / Backspace are
+    // always controls (never captured) regardless of any `config.edit` rebind,
+    // so a custom `submit = ["Ctrl+s"]` can't make Enter assignable (Codex #297
+    // review). The resolved `config.edit` verbs are honoured *in addition*, so a
+    // custom key also cancels / commits.
+    let resolved = self.resolve_modal(KeyContext::ConfigEdit, key);
+    let is_cancel = key.code == KeyCode::Esc || resolved == Some(ModalAction::ConfigEditCancel);
+    let is_submit = key.code == KeyCode::Enter || resolved == Some(ModalAction::ConfigEditSubmit);
+    if is_cancel {
+      self.config_panel.cancel_capture();
+    } else if is_submit {
+      // Enter commits an accumulated global chord; a reserved control (ignored)
+      // for a single-stroke modal capture.
+      if !single {
+        self.commit_key_capture();
+      }
+    } else if key.code == KeyCode::Backspace {
+      // Backspace edits a global chord; reserved (ignored) for a modal capture.
+      if !single {
+        self.config_panel.capture_pop();
+      }
+    } else {
+      self.push_key_capture(key);
+      if single {
+        self.commit_key_capture();
+      }
+    }
+  }
+
+  /// Commit the in-progress Keys-tab capture (issue #294): write the captured
+  /// chord as a TOML array to the selected target's `[tui.keys]` /
+  /// `[tui.keys.modal.<context>]` key in the active layer, then reload the
+  /// config + both keymaps so the rebind is live immediately. An empty capture
+  /// writes `[]` (unbind). Validation (conflict / prefix-collision) happens in
+  /// the writer's validate-before-write gate; on failure the file and the live
+  /// keymaps are left untouched and the error is surfaced on the statusbar.
+  pub fn commit_key_capture(&mut self) {
+    let Some(cap) = self.config_panel.take_capture() else {
+      return;
+    };
+    let target = match self.config_panel.key_rows.get(cap.row) {
+      Some(row) => row.target,
+      None => return,
+    };
+    let config_key = target.config_key();
+    let items = cap.as_config_items();
+
+    let path = match self.config_panel.layer {
+      SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
+      SettingsLayer::Global => match self.global_path.clone() {
+        Some(p) => p,
+        None => {
+          self.status = "keys: no global config path (set $XDG_CONFIG_HOME or $HOME)".into();
+          return;
+        }
+      },
+    };
+
+    // Snapshot the target file first: `set_array_at` only validates the file
+    // it writes, not the layered merge, so a rebind that is valid in this file
+    // alone but collides with the *other* layer once merged (e.g. a prefix
+    // collision the global layer reveals) would slip past and brick the
+    // config for the next launch. Keep the prior bytes so we can roll back
+    // (Codex #297 review P2).
+    let prior = std::fs::read(&path).ok();
+
+    if let Err(e) = crate::config_cli::set_array_at(&path, &config_key, &items) {
+      // `write_and_validate` writes the edit *before* erroring when the file
+      // was already invalid on its own (the recovery path for #281 — here the
+      // target value can be shadowed by another layer so the app still
+      // loaded). Roll back so a rebind reported as failed never persists or
+      // takes effect on the next launch (Codex #297 review P2).
+      Self::restore_file(&path, prior);
+      self.status = format!("keys: {}", e);
+      return;
+    }
+
+    // Strip any pre-#290 alias of this action from the same file: a legacy
+    // config that still carries e.g. `tui.keys.open_menu` would, on reload,
+    // re-apply the alias after the canonical `browse_links` in the sorted
+    // override walk and silently shadow the new binding (Codex #297 review).
+    // Best-effort: the canonical key is already written, so a cleanup error
+    // is surfaced but does not abort the rebind.
+    for alias_key in target.compat_alias_keys() {
+      if let Err(e) = crate::config_cli::unset_at(&path, &alias_key) {
+        self.status = format!("keys: {}", e);
+      }
+    }
+
+    // Reload the merged config and rebuild both keymaps so the new binding
+    // fires without a restart.
+    match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
+      Ok(cfg) => self.config = cfg,
+      Err(e) => {
+        // The single-file write validated but the layered merge is invalid —
+        // roll the file back to its prior state so the config is never left
+        // broken on disk, and keep the previous live keymaps.
+        Self::restore_file(&path, prior);
+        self.status = format!("keys: rebind rejected — would break the merged config: {}", e);
+        return;
+      }
+    }
+    match self.config.tui.keys.resolved_keymap() {
+      Ok(km) => self.keymap = km,
+      Err(e) => {
+        self.status = format!("keys: {}", e);
+        return;
+      }
+    }
+    match self.config.tui.keys.resolved_modal_keymap() {
+      Ok(mk) => self.modal_keymap = mk,
+      Err(e) => {
+        self.status = format!("keys: {}", e);
+        return;
+      }
+    }
+    if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      self.config_panel.rows = rows;
+    }
+    self.refresh_key_rows();
+
+    let desc = if items.is_empty() {
+      "unbound".to_string()
+    } else {
+      items.join(" ")
+    };
+    let mut status = format!("set {} = {} ({})", config_key, desc, self.config_panel.layer.label());
+    // Verify the capture actually took effect in the *merged* keymap: a
+    // higher-precedence layer, or a pre-#290 alias still declared in another
+    // layer (which we deliberately don't edit), can shadow the write so the new
+    // key never fires — or, for an unbind, keeps the action bound — even though
+    // it persisted. Warn instead of reporting a clean success (Codex #297
+    // review).
+    if !self.capture_took_effect(target, &cap.pending) {
+      status.push_str(" — shadowed (a higher layer or legacy alias still binds it)");
+    }
+    self.status = status;
+  }
+
+  /// Restore a config file to a snapshot taken before a rebind write: rewrite
+  /// the prior bytes, or remove the file if it did not exist before. Used to
+  /// roll back a failed / merge-invalid Keys-tab write (issue #294).
+  fn restore_file(path: &std::path::Path, prior: Option<Vec<u8>>) {
+    match prior {
+      Some(bytes) => {
+        let _ = std::fs::write(path, bytes);
+      }
+      None => {
+        let _ = std::fs::remove_file(path);
+      }
+    }
+  }
+
+  /// Whether the just-committed capture is the *effective* state in the live
+  /// (merged) keymap, i.e. not shadowed by another layer / a lingering legacy
+  /// alias. For a rebind (`strokes` non-empty) the captured chord must resolve
+  /// to the target's action; for an unbind (`strokes` empty) the action must
+  /// have no remaining binding. Issue #294 (Codex #297 review).
+  fn capture_took_effect(&self, target: KeyTarget, strokes: &[KeyStroke]) -> bool {
+    match target {
+      KeyTarget::Global(action) => {
+        if strokes.is_empty() {
+          self.keymap.keys_display(action).is_empty()
+        } else {
+          matches!(self.keymap.lookup(strokes), ChordResolution::Matched(a) if a == action)
+        }
+      }
+      KeyTarget::Modal(action) => {
+        if strokes.is_empty() {
+          self.modal_keymap.keys_display(action).is_empty()
+        } else {
+          strokes
+            .first()
+            .map(|s| self.modal_keymap.resolve(action.context(), s) == Some(action))
+            .unwrap_or(false)
+        }
+      }
+    }
   }
 
   // ── PTY overlay (issue #35) ────────────────────────────────────────────
