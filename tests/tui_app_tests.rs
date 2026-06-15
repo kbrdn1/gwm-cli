@@ -358,6 +358,91 @@ fn a_shadowed_global_key_rebind_warns() {
 }
 
 #[test]
+fn physical_enter_stays_reserved_even_with_a_custom_config_edit_submit() {
+  // Codex #297 review (P2): rebinding `config.edit.submit` to e.g. Ctrl+s must
+  // not make the *physical* Enter assignable in capture — it stays a reserved
+  // control regardless of the config.edit lookup.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{App, KeyTarget, SettingsTab};
+
+  let (repo, _) = init_repo();
+  set_array_at(
+    &repo.path().join(".gwm.toml"),
+    "tui.keys.modal.config.edit.submit",
+    &["Ctrl+s".to_string()],
+  )
+  .unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  // Physical Enter is reserved: ignored, not captured — capture stays armed.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  assert!(app.config_panel.capture.is_some(), "physical Enter must stay reserved");
+  let enter = KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE);
+  assert_ne!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &enter),
+    Some(ModalAction::ConfirmConfirm),
+    "Enter must not have become the binding"
+  );
+}
+
+#[test]
+fn a_failed_write_to_an_already_invalid_shadowed_file_rolls_back() {
+  // Codex #297 review (P2): when the target file is invalid on its own but
+  // loaded because the bad value is shadowed by another layer,
+  // `write_and_validate` writes the edit then returns Err (recovery path). The
+  // commit must roll back so a rebind reported as failed never persists.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+  // Global is invalid on its own (non-numeric countdown)…
+  std::fs::write(&global, "[tui]\nconfirm_countdown_secs = \"abc\"\n").unwrap();
+  // …but the repo overrides it with a valid value, so the merged config loads.
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 4\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global; // write the invalid file
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "failure surfaced: {}", app.status);
+  let raw = std::fs::read_to_string(&global).unwrap();
+  assert!(
+    !raw.contains("quit"),
+    "a failed write must be rolled back, not persisted: {raw}"
+  );
+}
+
+#[test]
 fn modal_capture_reserves_enter_and_backspace_as_controls() {
   // Codex #297 review (P2): Enter / Backspace must stay reserved capture
   // controls even for a single-stroke modal target — they can't be captured

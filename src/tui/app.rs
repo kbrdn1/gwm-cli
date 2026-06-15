@@ -1465,27 +1465,31 @@ impl App {
       .as_ref()
       .map(|c| c.single_only)
       .unwrap_or(false);
-    match self.resolve_modal(KeyContext::ConfigEdit, key) {
-      Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_capture(),
-      Some(ModalAction::ConfigEditSubmit) => {
-        // Enter commits an accumulated global chord; for a single-stroke modal
-        // capture it is a reserved control (ignored, not captured).
-        if !single {
-          self.commit_key_capture();
-        }
+    // Reserved capture controls. The *physical* Esc / Enter / Backspace are
+    // always controls (never captured) regardless of any `config.edit` rebind,
+    // so a custom `submit = ["Ctrl+s"]` can't make Enter assignable (Codex #297
+    // review). The resolved `config.edit` verbs are honoured *in addition*, so a
+    // custom key also cancels / commits.
+    let resolved = self.resolve_modal(KeyContext::ConfigEdit, key);
+    let is_cancel = key.code == KeyCode::Esc || resolved == Some(ModalAction::ConfigEditCancel);
+    let is_submit = key.code == KeyCode::Enter || resolved == Some(ModalAction::ConfigEditSubmit);
+    if is_cancel {
+      self.config_panel.cancel_capture();
+    } else if is_submit {
+      // Enter commits an accumulated global chord; a reserved control (ignored)
+      // for a single-stroke modal capture.
+      if !single {
+        self.commit_key_capture();
       }
-      _ if key.code == KeyCode::Backspace => {
-        // Backspace edits a global chord; reserved (ignored) while a
-        // single-stroke modal capture is armed.
-        if !single {
-          self.config_panel.capture_pop();
-        }
+    } else if key.code == KeyCode::Backspace {
+      // Backspace edits a global chord; reserved (ignored) for a modal capture.
+      if !single {
+        self.config_panel.capture_pop();
       }
-      _ => {
-        self.push_key_capture(key);
-        if single {
-          self.commit_key_capture();
-        }
+    } else {
+      self.push_key_capture(key);
+      if single {
+        self.commit_key_capture();
       }
     }
   }
@@ -1528,6 +1532,12 @@ impl App {
     let prior = std::fs::read(&path).ok();
 
     if let Err(e) = crate::config_cli::set_array_at(&path, &config_key, &items) {
+      // `write_and_validate` writes the edit *before* erroring when the file
+      // was already invalid on its own (the recovery path for #281 — here the
+      // target value can be shadowed by another layer so the app still
+      // loaded). Roll back so a rebind reported as failed never persists or
+      // takes effect on the next launch (Codex #297 review P2).
+      Self::restore_file(&path, prior);
       self.status = format!("keys: {}", e);
       return;
     }
@@ -1552,14 +1562,7 @@ impl App {
         // The single-file write validated but the layered merge is invalid —
         // roll the file back to its prior state so the config is never left
         // broken on disk, and keep the previous live keymaps.
-        match prior {
-          Some(bytes) => {
-            let _ = std::fs::write(&path, bytes);
-          }
-          None => {
-            let _ = std::fs::remove_file(&path);
-          }
-        }
+        Self::restore_file(&path, prior);
         self.status = format!("keys: rebind rejected — would break the merged config: {}", e);
         return;
       }
@@ -1599,6 +1602,20 @@ impl App {
       status.push_str(" — shadowed (a higher layer or legacy alias still binds it)");
     }
     self.status = status;
+  }
+
+  /// Restore a config file to a snapshot taken before a rebind write: rewrite
+  /// the prior bytes, or remove the file if it did not exist before. Used to
+  /// roll back a failed / merge-invalid Keys-tab write (issue #294).
+  fn restore_file(path: &std::path::Path, prior: Option<Vec<u8>>) {
+    match prior {
+      Some(bytes) => {
+        let _ = std::fs::write(path, bytes);
+      }
+      None => {
+        let _ = std::fs::remove_file(path);
+      }
+    }
   }
 
   /// Whether the just-committed capture is the *effective* state in the live
