@@ -12,7 +12,7 @@ use super::theme::Theme;
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
 use crate::config::ConfigSource;
-use crate::github::{IssueState, LinkSource, PrState};
+use crate::github::{CiState, IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
   buffer::Buffer,
@@ -4270,6 +4270,12 @@ pub const ISSUE_ICON: &str = "\u{f41b}";
 /// `nf-oct-git_pull_request`.
 pub const PR_ICON: &str = "\u{f407}";
 
+/// Nerdfont glyphs for the per-PR CI indicator (issue #299):
+/// `nf-oct-check` (passing), `nf-oct-x` (failing), `nf-oct-sync` (running).
+pub const CI_PASSING_ICON: &str = "\u{f42e}";
+pub const CI_FAILING_ICON: &str = "\u{f467}";
+pub const CI_RUNNING_ICON: &str = "\u{f46a}";
+
 /// The pane's source chip (issue #283): `auto` for a branch-name inference,
 /// `detected` for a live GitHub match. Explicit / none carry no chip — the
 /// number already speaks for an explicit link. Rendered version-badge style
@@ -4340,6 +4346,9 @@ enum SummaryState<'a> {
     badge: &'a str,
     badge_color: Color,
     trailing: String,
+    /// Colour for the `trailing` segment, e.g. the CI indicator
+    /// (issue #299). `None` paints it with the default foreground.
+    trailing_color: Option<Color>,
     title: &'a str,
   },
   Loading,
@@ -4347,6 +4356,8 @@ enum SummaryState<'a> {
     badge: &'a str,
     badge_color: Color,
     trailing: String,
+    /// See [`SummaryState::CachedStatus::trailing_color`].
+    trailing_color: Option<Color>,
     title: &'a str,
   },
   Error(&'a str),
@@ -4363,6 +4374,16 @@ enum SummaryState<'a> {
 /// → renders ` badge  title`; PR passes ` · checks 1/2` → renders
 /// ` badge · checks 1/2 title`. Widths are counted in display columns (the
 /// `·` is U+00B7: 1 column) so the budget arithmetic holds.
+/// Render a `trailing` segment, styling it with `color` when present
+/// (the CI indicator, issue #299) and falling back to the default
+/// foreground otherwise (the legacy uncoloured `· checks N/M`).
+fn trailing_span(trailing: String, color: Option<Color>) -> Span<'static> {
+  match color {
+    Some(c) => Span::styled(trailing, Style::default().fg(c)),
+    None => Span::raw(trailing),
+  }
+}
+
 fn summary_line(
   icon: &str,
   head: String,
@@ -4426,6 +4447,7 @@ fn summary_line(
       badge,
       badge_color,
       trailing,
+      trailing_color,
       title,
     } => {
       let badge_seg_w = 1 + badge.chars().count() + 2;
@@ -4434,7 +4456,7 @@ fn summary_line(
         let mut spans = build_prefix(true);
         spans.push(Span::raw(" "));
         spans.push(Span::raw(format!(" {} ", badge)));
-        spans.push(Span::raw(trailing));
+        spans.push(trailing_span(trailing, trailing_color));
         flatten_if_overflow(&mut spans, max_width);
         return Line::from(spans);
       }
@@ -4442,7 +4464,7 @@ fn summary_line(
       let mut spans = build_prefix(true);
       spans.push(Span::raw(" "));
       spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
-      spans.push(Span::raw(trailing));
+      spans.push(trailing_span(trailing, trailing_color));
       spans.push(Span::raw(" "));
       spans.push(Span::raw(trunc(title, budget)));
       Line::from(spans)
@@ -4458,6 +4480,7 @@ fn summary_line(
       badge,
       badge_color,
       trailing,
+      trailing_color,
       title,
     } => {
       // Tail fixed cost past the prefix = " " + " <badge> " + trailing + " ".
@@ -4469,7 +4492,7 @@ fn summary_line(
         let mut spans = build_prefix(true);
         spans.push(Span::raw(" "));
         spans.push(Span::raw(format!(" {} ", badge)));
-        spans.push(Span::raw(trailing));
+        spans.push(trailing_span(trailing, trailing_color));
         flatten_if_overflow(&mut spans, max_width);
         return Line::from(spans);
       }
@@ -4477,7 +4500,7 @@ fn summary_line(
       let mut spans = build_prefix(true);
       spans.push(Span::raw(" "));
       spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
-      spans.push(Span::raw(trailing));
+      spans.push(trailing_span(trailing, trailing_color));
       spans.push(Span::raw(" "));
       spans.push(Span::raw(trunc(title, budget)));
       Line::from(spans)
@@ -4518,6 +4541,7 @@ fn issue_summary_line_with_spinner(
           badge,
           badge_color: issue_badge_color(state, theme),
           trailing: String::new(),
+          trailing_color: None,
           title: persisted.title.unwrap_or(""),
         }
       }
@@ -4536,6 +4560,7 @@ fn issue_summary_line_with_spinner(
           badge,
           badge_color: issue_badge_color(state, theme),
           trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          trailing_color: None,
           title: persisted.title.unwrap_or(""),
         }
       }
@@ -4555,6 +4580,7 @@ fn issue_summary_line_with_spinner(
         badge,
         badge_color: issue_badge_color(s.state, theme),
         trailing: String::new(),
+        trailing_color: None,
         title: &s.title,
       }
     }
@@ -4565,8 +4591,9 @@ fn issue_summary_line_with_spinner(
 
 /// Render the Loaded / Idle / Loading / Error variants for a PR link
 /// row in the sidebar. See [`issue_summary_line`] for the `max_width`
-/// contract — same idea, with a `checks N/M` segment squeezed in between
-/// badge and title when the rollup is non-zero.
+/// contract — same idea, with a coloured CI indicator ([`ci_indicator`],
+/// issue #299) squeezed in between badge and title when the rollup is
+/// non-empty.
 pub fn pr_summary_line(
   n: u64,
   src: LinkSource,
@@ -4600,6 +4627,7 @@ fn pr_summary_line_with_spinner(
           badge,
           badge_color: pr_badge_color(state, theme),
           trailing: String::new(),
+          trailing_color: None,
           title: persisted.title.unwrap_or(""),
         }
       }
@@ -4620,6 +4648,7 @@ fn pr_summary_line_with_spinner(
           badge,
           badge_color: pr_badge_color(state, theme),
           trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          trailing_color: None,
           title: persisted.title.unwrap_or(""),
         }
       }
@@ -4637,15 +4666,18 @@ fn pr_summary_line_with_spinner(
         PrState::Closed => "closed",
         PrState::Merged => "merged",
       };
-      let trailing = if s.checks_total > 0 {
-        format!(" · checks {}/{}", s.checks_passed, s.checks_total)
-      } else {
-        String::new()
+      // Issue #299: surface the derived CI state (icon + label + N/M, coloured)
+      // instead of the bare ` · checks N/M`, so pass / fail / running reads at a
+      // glance. `ci_indicator` returns `None` when the PR has no checks.
+      let (trailing, trailing_color) = match ci_indicator(s.ci, s.checks_passed, s.checks_total, theme) {
+        Some((text, color)) => (text, Some(color)),
+        None => (String::new(), None),
       };
       SummaryState::Loaded {
         badge,
         badge_color: pr_badge_color(s.state, theme),
         trailing,
+        trailing_color,
         title: &s.title,
       }
     }
@@ -4714,6 +4746,23 @@ pub fn pr_badge_color(state: PrState, theme: &Theme) -> Color {
     PrState::Merged => theme.locked,
     PrState::Closed => theme.prunable,
   }
+}
+
+/// Build the CI indicator segment for a loaded PR (issue #299): a nerd-font
+/// glyph + short label + `passed/total` count, plus the theme colour it
+/// paints with. Returns `None` for [`CiState::None`] so a PR with no checks
+/// renders nothing. Colours reuse the status-dot roles already used elsewhere
+/// in the sidebar: passing → `clean` (green), failing → `prunable` (red),
+/// running → `dirty` (yellow). The leading space keeps it flush against the
+/// preceding badge, mirroring the old ` · checks N/M` trailing.
+pub fn ci_indicator(ci: CiState, passed: u32, total: u32, theme: &Theme) -> Option<(String, Color)> {
+  let (icon, label, color) = match ci {
+    CiState::None => return None,
+    CiState::Passing => (CI_PASSING_ICON, "passing", theme.clean),
+    CiState::Failing => (CI_FAILING_ICON, "failing", theme.prunable),
+    CiState::Running => (CI_RUNNING_ICON, "running", theme.dirty),
+  };
+  Some((format!(" {} CI {} {}/{}", icon, label, passed, total), color))
 }
 
 /// Same idea as [`pr_badge_color`] but for a linked issue. Closed maps

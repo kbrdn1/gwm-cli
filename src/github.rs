@@ -516,6 +516,24 @@ pub enum PrState {
   Merged,
 }
 
+/// Overall CI outcome derived from a PR's `statusCheckRollup` (issue #299).
+/// A single ordered signal so the sidebar can render pass/fail/running at a
+/// glance instead of a bare `N/M` count. Priority is **failing > running >
+/// passing**: the most actionable state always wins, so a red check is never
+/// hidden behind an in-flight one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+  /// The PR has no checks at all — render nothing.
+  None,
+  /// Every check completed successfully (counting `NEUTRAL` / `SKIPPED`).
+  Passing,
+  /// At least one check is still in flight and none has failed.
+  Running,
+  /// At least one check completed with a failing conclusion
+  /// (`FAILURE` / `CANCELLED` / `TIMED_OUT` / `ACTION_REQUIRED`).
+  Failing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrStatus {
   pub number: u64,
@@ -525,6 +543,9 @@ pub struct PrStatus {
   pub updated_at: String,
   pub checks_passed: u32,
   pub checks_total: u32,
+  /// Overall CI state derived from the same rollup that feeds
+  /// `checks_passed` / `checks_total` — no extra GitHub request.
+  pub ci: CiState,
 }
 
 #[derive(Deserialize)]
@@ -607,6 +628,7 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
           .is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
     })
     .count() as u32;
+  let ci = derive_ci_state(&raw.status_check_rollup);
   Ok(PrStatus {
     number: raw.number,
     title: raw.title,
@@ -615,7 +637,44 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     updated_at: raw.updated_at,
     checks_passed,
     checks_total,
+    ci,
   })
+}
+
+/// Collapse a `statusCheckRollup` into a single [`CiState`] with the
+/// priority **failing > running > passing** (issue #299). A completed check
+/// whose conclusion is one of the failing terminals wins immediately; any
+/// still-pending check downgrades an otherwise-green rollup to `Running`;
+/// an empty rollup is `None`.
+fn derive_ci_state(checks: &[RawCheck]) -> CiState {
+  if checks.is_empty() {
+    return CiState::None;
+  }
+  let mut any_running = false;
+  for c in checks {
+    if c.status.eq_ignore_ascii_case("COMPLETED") {
+      if c.conclusion.as_deref().is_some_and(is_failing_conclusion) {
+        // Failing outranks everything — short-circuit so a red check is
+        // never masked by a later in-flight one.
+        return CiState::Failing;
+      }
+    } else {
+      any_running = true;
+    }
+  }
+  if any_running {
+    CiState::Running
+  } else {
+    CiState::Passing
+  }
+}
+
+/// GitHub check conclusions that read as a failure for CI-state purposes.
+fn is_failing_conclusion(conclusion: &str) -> bool {
+  matches!(
+    conclusion.to_ascii_uppercase().as_str(),
+    "FAILURE" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+  )
 }
 
 // ---- gh CLI invocation ---------------------------------------------------
