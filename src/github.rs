@@ -516,6 +516,24 @@ pub enum PrState {
   Merged,
 }
 
+/// Overall CI outcome derived from a PR's `statusCheckRollup` (issue #299).
+/// A single ordered signal so the sidebar can render pass/fail/running at a
+/// glance instead of a bare `N/M` count. Priority is **failing > running >
+/// passing**: the most actionable state always wins, so a red check is never
+/// hidden behind an in-flight one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+  /// The PR has no checks at all — render nothing.
+  None,
+  /// Every check completed successfully (counting `NEUTRAL` / `SKIPPED`).
+  Passing,
+  /// At least one check is still in flight and none has failed.
+  Running,
+  /// At least one check completed with a failing conclusion
+  /// (`FAILURE` / `CANCELLED` / `TIMED_OUT` / `ACTION_REQUIRED`).
+  Failing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrStatus {
   pub number: u64,
@@ -525,6 +543,9 @@ pub struct PrStatus {
   pub updated_at: String,
   pub checks_passed: u32,
   pub checks_total: u32,
+  /// Overall CI state derived from the same rollup that feeds
+  /// `checks_passed` / `checks_total` — no extra GitHub request.
+  pub ci: CiState,
 }
 
 #[derive(Deserialize)]
@@ -558,12 +579,18 @@ struct RawPr {
   status_check_rollup: Vec<RawCheck>,
 }
 
+/// One `statusCheckRollup` entry. GitHub returns two shapes here: a
+/// `CheckRun` (the Checks API — carries `status` + `conclusion`) and a
+/// legacy `StatusContext` (the commit-status API — carries `state`). We
+/// deserialize all three so both shapes classify correctly.
 #[derive(Deserialize)]
 struct RawCheck {
   #[serde(default)]
   status: String,
   #[serde(default)]
   conclusion: Option<String>,
+  #[serde(default)]
+  state: String,
 }
 
 pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
@@ -596,17 +623,16 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     (other, _) => return Err(GwmError::Other(format!("unknown PR state '{}'", other))),
   };
   let checks_total = raw.status_check_rollup.len() as u32;
+  // Count the same "accepted" terminals the CI state treats as green, so the
+  // `N/M` shown next to the indicator stays consistent with its label — a
+  // rollup of SUCCESS + NEUTRAL + SKIPPED reads "passing 3/3", not "1/3"
+  // (Codex review #302).
   let checks_passed = raw
     .status_check_rollup
     .iter()
-    .filter(|c| {
-      c.status.eq_ignore_ascii_case("COMPLETED")
-        && c
-          .conclusion
-          .as_deref()
-          .is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
-    })
+    .filter(|c| matches!(classify_check(c), CheckOutcome::Passing))
     .count() as u32;
+  let ci = derive_ci_state(&raw.status_check_rollup);
   Ok(PrStatus {
     number: raw.number,
     title: raw.title,
@@ -615,7 +641,79 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     updated_at: raw.updated_at,
     checks_passed,
     checks_total,
+    ci,
   })
+}
+
+/// The outcome of a single rollup entry, before the per-PR aggregation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckOutcome {
+  Passing,
+  Running,
+  Failing,
+}
+
+/// Classify one rollup entry, handling both the `CheckRun` shape
+/// (`status` + `conclusion`) and the legacy `StatusContext` shape
+/// (`state`). A `CheckRun` is only green for an *accepted* terminal
+/// conclusion (SUCCESS / NEUTRAL / SKIPPED, or a completed check with no
+/// conclusion); every other terminal conclusion — FAILURE, CANCELLED,
+/// TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE, STALE, … — reads as failing
+/// rather than silently falling through to green (Codex review #302).
+fn classify_check(c: &RawCheck) -> CheckOutcome {
+  // `CheckRun`: `status` is populated (QUEUED / IN_PROGRESS / COMPLETED).
+  if !c.status.is_empty() {
+    if !c.status.eq_ignore_ascii_case("COMPLETED") {
+      return CheckOutcome::Running;
+    }
+    return match c.conclusion.as_deref() {
+      Some(s) if is_accepted_conclusion(s) => CheckOutcome::Passing,
+      // A completed check with no conclusion is treated leniently (green) so
+      // missing data never paints a false red.
+      None => CheckOutcome::Passing,
+      Some(_) => CheckOutcome::Failing,
+    };
+  }
+  // Legacy `StatusContext`: classify by `state`.
+  match c.state.to_ascii_uppercase().as_str() {
+    "SUCCESS" => CheckOutcome::Passing,
+    "FAILURE" | "ERROR" => CheckOutcome::Failing,
+    // PENDING / EXPECTED / unknown — not yet conclusive.
+    _ => CheckOutcome::Running,
+  }
+}
+
+/// Terminal `CheckRun` conclusions that count as green.
+fn is_accepted_conclusion(conclusion: &str) -> bool {
+  matches!(
+    conclusion.to_ascii_uppercase().as_str(),
+    "SUCCESS" | "NEUTRAL" | "SKIPPED"
+  )
+}
+
+/// Collapse a `statusCheckRollup` into a single [`CiState`] with the
+/// priority **failing > running > passing** (issue #299). A failing check
+/// wins immediately; any still-pending check downgrades an otherwise-green
+/// rollup to `Running`; an empty rollup is `None`.
+fn derive_ci_state(checks: &[RawCheck]) -> CiState {
+  if checks.is_empty() {
+    return CiState::None;
+  }
+  let mut any_running = false;
+  for c in checks {
+    match classify_check(c) {
+      // Failing outranks everything — short-circuit so a red check is never
+      // masked by a later in-flight one.
+      CheckOutcome::Failing => return CiState::Failing,
+      CheckOutcome::Running => any_running = true,
+      CheckOutcome::Passing => {}
+    }
+  }
+  if any_running {
+    CiState::Running
+  } else {
+    CiState::Passing
+  }
 }
 
 // ---- gh CLI invocation ---------------------------------------------------

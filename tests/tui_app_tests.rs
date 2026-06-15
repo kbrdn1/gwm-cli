@@ -1783,7 +1783,7 @@ fn filled_cells_floors_partial_progress() {
 
 // ---- Issue / PR linking (issue #67) -------------------------------------
 
-use gwm::github::{IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use gwm::github::{CiState, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use gwm::tui::{GitHubFetchState, LinkPromptStage, LinkTarget};
 
 fn make_app_on_branch(name: &str) -> (tempfile::TempDir, git2::Repository, App) {
@@ -2113,6 +2113,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     updated_at: "2026-05-19T00:00:00Z".into(),
     checks_passed: 2,
     checks_total: 3,
+    ci: CiState::Running,
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -2161,6 +2162,7 @@ fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
     updated_at: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2182,6 +2184,7 @@ fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
     updated_at: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2730,6 +2733,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     updated_at: "".into(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -3634,6 +3638,7 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     updated_at: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
   }));
 
   let theme = Theme::default();
@@ -4306,6 +4311,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     url: String::new(),
     checks_passed: 3,
     checks_total: 3,
+    ci: CiState::Passing,
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4459,6 +4465,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     url: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4500,6 +4507,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     url: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
     updated_at: String::new(),
   };
   let theme = Theme::default();
@@ -4518,6 +4526,85 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
 }
 
 #[test]
+fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
+  // Issue #299: a PR with a failing rollup must surface a coloured CI
+  // indicator (icon + label + N/M), not just the bare count.
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 1,
+    checks_total: 2,
+    ci: gwm::github::CiState::Failing,
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &theme,
+  );
+  let ci = span_with(&line, "CI").expect("a CI indicator span");
+  assert!(
+    ci.content.contains("failing") && ci.content.contains("1/2"),
+    "CI indicator must carry the failing label and count, got {:?}",
+    ci.content
+  );
+  assert_eq!(
+    ci.style.fg,
+    Some(theme.prunable),
+    "a failing CI indicator must paint with the prunable (red) role"
+  );
+}
+
+#[test]
+fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: gwm::github::CiState::None,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    !joined.contains("CI"),
+    "a PR with no checks must not render any CI indicator: {}",
+    joined
+  );
+}
+
+#[test]
+fn ci_indicator_maps_states_to_status_roles() {
+  let theme = Theme::default();
+  // None renders nothing.
+  assert!(gwm::tui::ci_indicator(gwm::github::CiState::None, 0, 0, &theme).is_none());
+  // Passing → clean (green), failing → prunable (red), running → dirty (yellow).
+  let (txt, col) = gwm::tui::ci_indicator(gwm::github::CiState::Passing, 9, 9, &theme).unwrap();
+  assert!(txt.contains("passing") && txt.contains("9/9"));
+  assert_eq!(col, theme.clean);
+  let (txt, col) = gwm::tui::ci_indicator(gwm::github::CiState::Failing, 7, 9, &theme).unwrap();
+  assert!(txt.contains("failing") && txt.contains("7/9"));
+  assert_eq!(col, theme.prunable);
+  let (txt, col) = gwm::tui::ci_indicator(gwm::github::CiState::Running, 8, 9, &theme).unwrap();
+  assert!(txt.contains("running") && txt.contains("8/9"));
+  assert_eq!(col, theme.dirty);
+}
+
+#[test]
 fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
   use ratatui::style::Modifier;
   let status = gwm::github::PrStatus {
@@ -4527,6 +4614,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     url: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
     updated_at: String::new(),
   };
   let line = pr_summary_line(

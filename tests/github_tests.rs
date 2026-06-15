@@ -5,7 +5,7 @@
 mod common;
 
 use common::init_repo;
-use gwm::github::{self, parse_issue_json, parse_pr_json, BranchLink, IssueState, LinkSource, PrState};
+use gwm::github::{self, parse_issue_json, parse_pr_json, BranchLink, CiState, IssueState, LinkSource, PrState};
 
 fn make_branch(repo: &git2::Repository, name: &str) {
   let head = repo.head().unwrap().peel_to_commit().unwrap();
@@ -543,6 +543,156 @@ fn parse_pr_json_handles_missing_status_check_rollup() {
   assert_eq!(pr.checks_total, 0);
   assert_eq!(pr.checks_passed, 0);
   assert_eq!(pr.state, PrState::Open);
+}
+
+// --- CI state derivation (issue #299) -----------------------------------
+
+/// Build a minimal PR JSON body with the given `statusCheckRollup` array
+/// literal so the CI-state tests stay focused on the rollup.
+fn pr_json_with_rollup(rollup: &str) -> String {
+  format!(
+    r#"{{
+      "number": 7,
+      "title": "x",
+      "state": "OPEN",
+      "isDraft": false,
+      "url": "https://github.com/x/y/pull/7",
+      "statusCheckRollup": {rollup},
+      "updatedAt": "2026-06-15T10:00:00Z"
+    }}"#
+  )
+}
+
+#[test]
+fn ci_state_is_passing_when_all_checks_succeed() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Passing);
+}
+
+#[test]
+fn ci_state_treats_neutral_and_skipped_as_passing() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "optional", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+      {"name": "deploy", "status": "COMPLETED", "conclusion": "SKIPPED"}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Passing);
+}
+
+#[test]
+fn ci_state_is_running_when_a_check_is_in_flight() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "fmt", "status": "IN_PROGRESS", "conclusion": null}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Running);
+}
+
+#[test]
+fn ci_state_treats_queued_and_pending_as_running() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "queued", "status": "QUEUED", "conclusion": null},
+      {"name": "pending", "status": "PENDING", "conclusion": null}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Running);
+}
+
+#[test]
+fn ci_state_is_failing_on_any_failed_conclusion() {
+  for conclusion in ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"] {
+    let json = pr_json_with_rollup(&format!(
+      r#"[
+        {{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}},
+        {{"name": "broken", "status": "COMPLETED", "conclusion": "{conclusion}"}}
+      ]"#
+    ));
+    assert_eq!(
+      parse_pr_json(&json).unwrap().ci,
+      CiState::Failing,
+      "conclusion {conclusion} must read as Failing"
+    );
+  }
+}
+
+#[test]
+fn ci_state_failing_outranks_running() {
+  // A red check must never hide behind a still-running one.
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "still-going", "status": "IN_PROGRESS", "conclusion": null},
+      {"name": "broken", "status": "COMPLETED", "conclusion": "FAILURE"}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Failing);
+}
+
+#[test]
+fn ci_state_is_none_when_there_are_no_checks() {
+  let json = pr_json_with_rollup("[]");
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::None);
+}
+
+#[test]
+fn ci_state_classifies_legacy_status_context_state() {
+  // A `StatusContext` (legacy commit-status API) carries `state`, not
+  // `status` / `conclusion`. A failed external CI status must read red, not
+  // be mistaken for a still-running check (Codex review #302).
+  let failing = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "FAILURE"}]"#);
+  assert_eq!(parse_pr_json(&failing).unwrap().ci, CiState::Failing);
+
+  let error = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "ERROR"}]"#);
+  assert_eq!(parse_pr_json(&error).unwrap().ci, CiState::Failing);
+
+  let success = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "SUCCESS"}]"#);
+  assert_eq!(parse_pr_json(&success).unwrap().ci, CiState::Passing);
+
+  let pending = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "PENDING"}]"#);
+  assert_eq!(parse_pr_json(&pending).unwrap().ci, CiState::Running);
+}
+
+#[test]
+fn ci_state_treats_non_success_terminal_conclusions_as_failing() {
+  // A completed check whose conclusion is a terminal failure GitHub doesn't
+  // list among the "common" four (e.g. STARTUP_FAILURE, STALE) must still
+  // read red rather than fall through to green (Codex review #302).
+  for conclusion in ["STARTUP_FAILURE", "STALE"] {
+    let json = pr_json_with_rollup(&format!(
+      r#"[{{"name": "broken", "status": "COMPLETED", "conclusion": "{conclusion}"}}]"#
+    ));
+    assert_eq!(
+      parse_pr_json(&json).unwrap().ci,
+      CiState::Failing,
+      "conclusion {conclusion} must read as Failing"
+    );
+  }
+}
+
+#[test]
+fn checks_passed_counts_accepted_terminals_so_count_matches_ci_label() {
+  // The N/M shown next to the CI label must use the same accepted terminals
+  // as the state, else a green rollup renders "passing 1/3" (Codex review #302).
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "optional", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+      {"name": "deploy", "status": "COMPLETED", "conclusion": "SKIPPED"}
+    ]"#,
+  );
+  let pr = parse_pr_json(&json).unwrap();
+  assert_eq!(pr.ci, CiState::Passing);
+  assert_eq!(pr.checks_passed, 3);
+  assert_eq!(pr.checks_total, 3);
 }
 
 // --- Labels: gh label list --json contract (issue #81) ------------------

@@ -61,11 +61,11 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
-  build_sidebar_sections, centered_abs, chip_style, command_logs_footer_hints, config_capture_footer_hints,
-  config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line,
-  confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle, field_input_line,
-  filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines, header_line,
-  help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
+  build_sidebar_sections, centered_abs, chip_style, ci_indicator, command_logs_footer_hints,
+  config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line,
+  confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle,
+  field_input_line, filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines,
+  header_line, help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
   hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
   link_prompt_modal_width, link_target_keys, link_target_line, modal_hint_line, palette_name_style, pane_counter,
   panel_border_color, pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title,
