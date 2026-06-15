@@ -1136,10 +1136,127 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
-/// Shell out to `git status --short` inside `path` and return raw stdout.
-/// Used by the TUI sidebar to preview the working-tree state.
-pub fn git_status_short(path: &Path) -> Result<String> {
-  run_git(path, &["status", "--short"])
+/// Hard cap on the number of NUL-terminated `git status -z` records read
+/// before the scan is abandoned (issue #300). `--untracked-files=all` makes
+/// git recurse into unignored generated/vendor directories; streaming the
+/// output and stopping here bounds **both** git's directory walk (the child
+/// is killed once the cap is hit) and our own parse / allocation, so a
+/// pathological worktree can't stall the TUI. Set well above any realistic
+/// change set; the file tree itself renders at most
+/// [`crate::tui::wt_tree::WT_TREE_MAX_FILES`].
+pub const STATUS_SCAN_CAP: usize = 5000;
+
+/// Stream `git status --porcelain -z --untracked-files=all` inside `path`
+/// and return raw stdout, capped at [`STATUS_SCAN_CAP`] records. Used by the
+/// TUI sidebar to preview the working-tree state.
+///
+/// Two flags matter for the Working Tree file-explorer (issue #300):
+///
+/// - `--untracked-files=all` expands an entirely-untracked directory into
+///   its individual files (`src/app/mod.rs`) instead of git's default
+///   collapsed `src/` row, so the tree can nest them. Git-ignored paths
+///   (e.g. `target/`) stay excluded, so the pane never floods with build
+///   artefacts.
+/// - `--porcelain -z` emits paths **verbatim**, NUL-terminated — no double-
+///   quoting of non-ASCII / special-character names, and renames carry the
+///   source path as a separate NUL field instead of an ambiguous
+///   `old -> new` text join. This lets [`crate::tui::wt_tree::parse_status_z`]
+///   parse filenames containing spaces, arrows, quotes, or UTF-8 bytes
+///   without guesswork. The footer counts (issue #287) parse the same
+///   stream.
+pub fn git_status_short(path: &Path) -> Result<(String, bool)> {
+  git_status_short_capped(path, STATUS_SCAN_CAP)
+}
+
+/// Cap-injectable core of [`git_status_short`]. Spawns git with a piped
+/// stdout, reads NUL-terminated records until `cap` is reached (then kills
+/// the child so git stops walking the tree), and returns `(bytes, truncated)`
+/// — the raw stdout gathered so far plus whether the cap was hit (so the
+/// caller reports a lower bound rather than an exact total). Exposed so
+/// integration tests can exercise truncation with a small `cap` instead of
+/// creating thousands of files.
+pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<(String, bool)> {
+  use std::io::{BufRead, BufReader};
+  use std::process::{Command, Stdio};
+
+  // `--no-optional-locks` keeps git from taking the index lock for its
+  // opportunistic stat-cache refresh (the flag git ships for status pollers
+  // like IDEs / watchman). Without it, killing the child at the cap could
+  // leave a stale `.git/index.lock` behind and break the next git command in
+  // that worktree.
+  let mut child = Command::new("git")
+    .arg("--no-optional-locks")
+    .arg("-C")
+    .arg(path)
+    .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
+
+  let stdout = child
+    .stdout
+    .take()
+    .ok_or_else(|| GwmError::CommandFailed("git status: stdout pipe missing".to_string()))?;
+  // Drain stderr on its own thread so a chatty git (advisory warnings under
+  // `-uall`) can't fill the stderr pipe and deadlock against our stdout read.
+  let stderr_reader = child.stderr.take().map(|mut stderr| {
+    std::thread::spawn(move || {
+      use std::io::Read;
+      let mut buf = String::new();
+      let _ = stderr.read_to_string(&mut buf);
+      buf
+    })
+  });
+
+  let mut reader = BufReader::new(stdout);
+  let mut collected: Vec<u8> = Vec::new();
+  let mut segment: Vec<u8> = Vec::new();
+  let mut records = 0usize;
+  let mut truncated = false;
+  loop {
+    if records >= cap {
+      truncated = true;
+      break;
+    }
+    segment.clear();
+    let n = reader
+      .read_until(0u8, &mut segment)
+      .map_err(|e| GwmError::CommandFailed(format!("git status: read failed: {}", e)))?;
+    if n == 0 {
+      break; // EOF — git produced fewer than `cap` records.
+    }
+    collected.extend_from_slice(&segment);
+    // A trailing NUL marks a complete record; a final unterminated chunk
+    // (only at true EOF) is kept verbatim and just isn't counted.
+    if segment.last() == Some(&0) {
+      records += 1;
+    }
+  }
+
+  if truncated {
+    // We have enough to render — stop git's directory walk. The kill is
+    // best-effort: the child may have already exited on a small tree.
+    let _ = child.kill();
+  }
+  let status = child
+    .wait()
+    .map_err(|e| GwmError::CommandFailed(format!("git status: wait failed: {}", e)))?;
+  // Joining the drainer also closes our end of the stderr pipe.
+  let stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+
+  // A non-truncated, unsuccessful run is a real failure (e.g. not a repo) —
+  // surface git's stderr. A truncated run was killed on purpose, so its
+  // non-zero status is expected and ignored.
+  if !truncated && !status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git status exited {}: {}",
+      status,
+      stderr.trim()
+    )));
+  }
+
+  Ok((String::from_utf8_lossy(&collected).into_owned(), truncated))
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a

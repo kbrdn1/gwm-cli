@@ -297,24 +297,70 @@ fn git_log_oneline_respects_limit() {
 #[test]
 fn git_status_short_empty_on_clean_repo() {
   let (dir, _) = init_repo();
-  let out = worktree::git_status_short(dir.path()).unwrap();
+  let (out, truncated) = worktree::git_status_short(dir.path()).unwrap();
   assert!(
     out.trim().is_empty(),
     "clean repo should produce empty status, got: {:?}",
     out
   );
+  assert!(!truncated, "a clean repo is never truncated");
 }
 
 #[test]
 fn git_status_short_lists_untracked_file() {
   let (dir, _) = init_repo();
   std::fs::write(dir.path().join("new.txt"), "hello").unwrap();
-  let out = worktree::git_status_short(dir.path()).unwrap();
+  let (out, _) = worktree::git_status_short(dir.path()).unwrap();
   assert!(
     out.contains("new.txt"),
     "expected untracked new.txt in status, got: {:?}",
     out
   );
+}
+
+#[test]
+fn git_status_short_expands_untracked_directory_into_files() {
+  // For the Working Tree file-explorer (issue #300) the porcelain must list
+  // individual files inside an untracked directory rather than collapsing
+  // it to a single `src/` row, so the tree builder can nest them.
+  let (dir, _) = init_repo();
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+  let (out, _) = worktree::git_status_short(dir.path()).unwrap();
+  assert!(
+    out.contains("src/app/mod.rs"),
+    "untracked dir must be expanded to its files, got: {:?}",
+    out
+  );
+}
+
+#[test]
+fn git_status_short_caps_the_scan() {
+  // The streaming scan must stop after `cap` NUL-terminated records (issue
+  // #300) so an unignored directory with thousands of untracked files can't
+  // stall the TUI — git is killed once the cap is hit, and the truncation is
+  // reported so the caller doesn't claim an exact total.
+  let (dir, _) = init_repo();
+  for i in 0..6 {
+    std::fs::write(dir.path().join(format!("f{i}.txt")), "x").unwrap();
+  }
+  let (out, truncated) = worktree::git_status_short_capped(dir.path(), 3).unwrap();
+  let tokens = out.matches('\0').count();
+  assert!(tokens <= 3, "scan capped at 3 records, got {tokens}: {out:?}");
+  assert!(!out.is_empty(), "the first records are still returned: {out:?}");
+  assert!(truncated, "hitting the cap must report truncation");
+}
+
+#[test]
+fn git_status_short_returns_full_output_below_the_cap() {
+  // A normal change set (well under the cap) comes back in full, untruncated.
+  let (dir, _) = init_repo();
+  for i in 0..4 {
+    std::fs::write(dir.path().join(format!("g{i}.txt")), "x").unwrap();
+  }
+  let (out, truncated) = worktree::git_status_short_capped(dir.path(), 1000).unwrap();
+  assert_eq!(out.matches('\0').count(), 4, "all 4 records returned: {out:?}");
+  assert!(!truncated, "below the cap → not truncated");
 }
 
 #[test]

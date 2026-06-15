@@ -895,16 +895,11 @@ fn centered_abs_caps_height_taller_than_the_area() {
 
 #[test]
 fn working_tree_status_counts_buckets_each_file_once() {
-  // One line per porcelain family; created wins over deleted wins over
-  // modified so every line increments exactly one counter.
-  let status = "\
-?? new.rs
- M mod.rs
- D del.rs
-A  added.rs
-AM both.rs
-R  renamed.rs
-";
+  // One NUL-delimited (`-z`) record per porcelain family; created wins over
+  // deleted wins over modified so every record increments exactly one
+  // counter. The rename (`R`) carries a trailing source field (`orig.rs`)
+  // that the shared parser drops, so it still counts once.
+  let status = "?? new.rs\0 M mod.rs\0 D del.rs\0A  added.rs\0AM both.rs\0R  renamed.rs\0orig.rs\0";
   let c = working_tree_status_counts(status);
   assert_eq!(c.created, 3, "?? + A + AM → created: {c:?}");
   assert_eq!(c.modified, 2, " M + R → modified: {c:?}");

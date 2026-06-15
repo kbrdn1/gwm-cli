@@ -106,6 +106,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Working Tree pane as a file-explorer tree** (issue #300): the Status
+  pane's Working Tree section (`2`) now renders `git status` as a nested,
+  nerd-font file tree instead of a flat `XY PATH` list. Directories sort
+  before files (alphabetical within a level) and single-child directory
+  chains collapse (`src/tui/` then `ui.rs`); each file row carries an
+  extension-driven file-type icon plus its `M` / `A` / `D` / `?` status
+  badge, all painted in the file's change-category colour (so a row matches
+  the footer count it belongs to). The counts footer is unchanged. The tree
+  builder (flat status → tree model) is a pure, ratatui-free function with
+  unit tests.
+  - **Tree connector lines** (`├─` / `└─` / `│`) draw the hierarchy like
+    `tree(1)`, in the muted role.
+  - **Directory rows are coloured retroactively by git**: a folder takes the
+    aggregate change-category of its subtree — only-modified → yellow,
+    only-new → green, only-deleted → red, mixed → neutral accent.
+  - An **extra space** pads each nerd-font glyph (most render double-width in
+    a single cell) so the following name isn't clipped.
+  - A pathological untracked directory is bounded at **two levels**: the
+    `git status` scan is streamed and **stopped after 5000 records** (git is
+    killed once the cap is hit, so its directory walk can't run away), and the
+    tree then renders at most **500 file leaves** with the remainder shown as
+    a single `… N more` row (`… N+ more` when the scan itself was truncated,
+    since the true total is then unknown) — selecting such a worktree can
+    neither stall the scan nor flood the non-scrollable section. The scan
+    runs under `--no-optional-locks` so killing it at the cap can't leave a
+    stale `.git/index.lock`, and stderr is drained off-thread to avoid a pipe
+    deadlock.
+  - File and directory names are **sanitised** before rendering (control
+    characters → `?`), so a verbatim `-z` filename can't corrupt the sidebar
+    layout or inject terminal escape sequences.
+  - `git_status_short` now reads `git status --porcelain -z
+    --untracked-files=all`: `-uall` expands an untracked directory into its
+    individual files (git-ignored paths stay excluded), and `--porcelain -z`
+    emits paths verbatim and NUL-delimited — so filenames with spaces,
+    arrows, quotes, or non-ASCII bytes (and rename source/destination) parse
+    unambiguously. The footer counts share the same `-z` parser, so a rename
+    counts once and the total always matches the rows rendered.
 - **Worktree table: label the issue/PR badge column** (issue #294): the second
   table column (the `●` / `●` issue / PR pastilles) now carries an `I/P` header
   so the badges read self-explanatory next to the `Worktree` / `Branch` columns.

@@ -9,6 +9,7 @@ use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
+use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_OPEN_ICON};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
 use crate::config::ConfigSource;
@@ -1102,16 +1103,33 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
 
 fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
-    Ok(s) if s.trim().is_empty() => (
+    Ok((s, _)) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
       ))],
       WorkingTreeCounts::default(),
     ),
-    Ok(s) => {
+    Ok((s, scan_truncated)) => {
       let counts = working_tree_status_counts(&s);
-      let lines: Vec<Line<'static>> = s.lines().map(|line| working_tree_status_line(line, theme)).collect();
+      let records = wt_tree::parse_status_z(&s);
+      // Cap the explorer for a pathological untracked-dir explosion (issue
+      // #300): build at most WT_TREE_MAX_FILES leaves and surface the
+      // remainder as a single muted `… N more` row, so the non-scrollable
+      // section can't be sized from tens of thousands of files.
+      let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
+      let mut lines = working_tree_tree_lines(&tree, theme);
+      if overflow > 0 {
+        // After a scan truncation the real remainder is unknown (git was
+        // killed at the cap), so `overflow` is only a lower bound — render
+        // `… N+ more` rather than claiming an exact count.
+        let label = if scan_truncated {
+          format!("… {}+ more", overflow)
+        } else {
+          format!("… {} more", overflow)
+        };
+        lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
+      }
       (lines, counts)
     }
     Err(e) => (
@@ -1121,6 +1139,77 @@ fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, W
       ))],
       WorkingTreeCounts::default(),
     ),
+  }
+}
+
+/// Render the Working Tree file-explorer model (issue #300) into styled
+/// sidebar rows.
+///
+/// - **Connector lines**: each row is prefixed with box-drawing branches
+///   (`├─ ` / `└─ ` with `│  ` / `   ` carried down from ancestors) in the
+///   muted role, so the hierarchy reads like `tree(1)`.
+/// - **Directory colour is retroactive**: a folder is painted by the
+///   aggregate git category of its subtree — only-modified → yellow,
+///   only-new → green, only-deleted → red, mixed (or none) → neutral
+///   `accent`.
+/// - **Files** carry a category-coloured status badge + a nerd-font
+///   file-type icon + the leaf name, painted in the file's change-category
+///   colour so a row's colour matches the footer count it belongs to (the
+///   #287 invariant, preserved).
+/// - An **extra space** follows each nerd-font glyph: most glyphs render
+///   double-width but occupy a single terminal cell, so the pad keeps the
+///   following text from being clipped.
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> Vec<Line<'static>> {
+  let mut out = Vec::new();
+  push_wt_nodes(&mut out, nodes, String::new(), theme);
+  out
+}
+
+/// Depth-first walk used by [`working_tree_tree_lines`]. `prefix` is the
+/// accumulated ancestor connector string; each child appends `├─ `/`└─ `
+/// for its own row and `│  `/`   ` for its descendants.
+fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String, theme: &Theme) {
+  let last = nodes.len().saturating_sub(1);
+  for (i, node) in nodes.iter().enumerate() {
+    let is_last = i == last;
+    let connector = format!("{}{}", prefix, if is_last { "└─ " } else { "├─ " });
+    match node {
+      WtNode::Dir {
+        name,
+        children,
+        category,
+      } => {
+        let color = match category {
+          Some(c) => working_tree_category_color(*c, theme),
+          None => theme.accent,
+        };
+        out.push(Line::from(vec![
+          Span::styled(connector, Style::default().fg(theme.muted)),
+          Span::styled(
+            format!("{}  {}", WT_DIR_OPEN_ICON, wt_tree::sanitize_name(name)),
+            Style::default().fg(color),
+          ),
+        ]));
+        let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
+        push_wt_nodes(out, children, child_prefix, theme);
+      }
+      WtNode::File {
+        name,
+        icon,
+        badge,
+        category,
+      } => {
+        let color = working_tree_category_color(*category, theme);
+        out.push(Line::from(vec![
+          Span::styled(connector, Style::default().fg(theme.muted)),
+          Span::styled(format!("{} ", badge), Style::default().fg(color)),
+          Span::styled(
+            format!("{}  {}", icon, wt_tree::sanitize_name(name)),
+            Style::default().fg(color),
+          ),
+        ]));
+      }
+    }
   }
 }
 
@@ -1153,34 +1242,6 @@ pub const WT_CREATED_ICON: &str = "\u{eadc}";
 pub const WT_MODIFIED_ICON: &str = "\u{eadd}";
 pub const WT_DELETED_ICON: &str = "\u{eade}";
 
-/// The single change-category a `git status --short` `XY` pair falls into
-/// (issue #287). Shared by the Working-Tree footer counts and the per-row
-/// colouring so a file's row colour always equals the footer segment it's
-/// counted in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WtCategory {
-  Created,
-  Modified,
-  Deleted,
-}
-
-/// Classify a porcelain `XY` status pair into its dominant
-/// [`WtCategory`], with a deterministic precedence (created > deleted >
-/// modified) so each file maps to exactly one bucket:
-///
-/// - `??` (untracked) or an `A` in either column → **created**,
-/// - else a `D` in either column → **deleted**,
-/// - else anything changed (`M`, `R`, `C`, `T`, `U`, …) → **modified**.
-fn working_tree_category(x: char, y: char) -> WtCategory {
-  if (x == '?' && y == '?') || x == 'A' || y == 'A' {
-    WtCategory::Created
-  } else if x == 'D' || y == 'D' {
-    WtCategory::Deleted
-  } else {
-    WtCategory::Modified
-  }
-}
-
 /// Theme colour for a change category (issue #287): created → `untracked`
 /// (green), modified → `modified` (yellow), deleted → `prunable` (red).
 fn working_tree_category_color(cat: WtCategory, theme: &Theme) -> Color {
@@ -1191,27 +1252,15 @@ fn working_tree_category_color(cat: WtCategory, theme: &Theme) -> Color {
   }
 }
 
-/// Tally `git status --short` porcelain output into per-category
-/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Lines
-/// too short to carry an `XY` pair, or an all-blank pair, are skipped —
-/// real porcelain output never produces them, but the helper is `pub` so a
-/// non-git caller could.
-pub fn working_tree_status_counts(status_short: &str) -> WorkingTreeCounts {
+/// Tally `git status --porcelain -z` output into per-category
+/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Shares
+/// the NUL-delimited parser ([`wt_tree::parse_status_z`]) with the file
+/// tree, so a rename counts once (its source token is dropped) and the
+/// footer total always matches the number of rows the tree renders.
+pub fn working_tree_status_counts(status_z: &str) -> WorkingTreeCounts {
   let mut c = WorkingTreeCounts::default();
-  for line in status_short.lines() {
-    let mut chars = line.chars();
-    let x = match chars.next() {
-      Some(ch) => ch,
-      None => continue,
-    };
-    let y = match chars.next() {
-      Some(ch) => ch,
-      None => continue,
-    };
-    if x == ' ' && y == ' ' {
-      continue;
-    }
-    match working_tree_category(x, y) {
+  for rec in wt_tree::parse_status_z(status_z) {
+    match working_tree_category(rec.x, rec.y) {
       WtCategory::Created => c.created += 1,
       WtCategory::Modified => c.modified += 1,
       WtCategory::Deleted => c.deleted += 1,
