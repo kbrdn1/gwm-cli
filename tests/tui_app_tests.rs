@@ -358,6 +358,49 @@ fn a_shadowed_global_key_rebind_warns() {
 }
 
 #[test]
+fn a_cross_layer_alias_shadow_is_detected_and_warned() {
+  // Codex #297 review (P2, cross-layer): the legacy alias lives in the OTHER
+  // layer (global `open_menu`) while the canonical `browse_links` is rebound in
+  // the project layer. We don't edit the global file, so the alias survives the
+  // merge and shadows the new key — the commit must detect the ineffective
+  // rebind and warn rather than report a clean success.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  set_array_at(&global, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::BrowseLinks))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("shadowed"),
+    "a cross-layer alias shadow must warn: {}",
+    app.status
+  );
+  // The new key really doesn't fire — the global alias `B` still wins.
+  let z = KeyStroke::new(KeyCode::Char('z'), KeyModifiers::NONE);
+  assert_ne!(app.keymap.lookup(&[z]), ChordResolution::Matched(Action::BrowseLinks));
+}
+
+#[test]
 fn rebinding_an_aliased_action_strips_the_legacy_alias() {
   // Codex #297 review (P2): a pre-#290 config carrying `tui.keys.open_menu`
   // (alias for `browse_links`) would, after a rebind writes the canonical

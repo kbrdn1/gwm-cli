@@ -3,7 +3,7 @@ use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 use super::state::command_logs::CommandLogs;
-use super::state::config_panel::{ConfigPanel, FieldKind, SettingField, SettingsLayer};
+use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
 use super::state::filter::{fuzzy_match_indices, FilterState};
@@ -1542,21 +1542,31 @@ impl App {
       items.join(" ")
     };
     let mut status = format!("set {} = {} ({})", config_key, desc, self.config_panel.layer.label());
-    // Surface a shadowed edit: a global rebind for a key the repo overrides
-    // leaves the effective binding unchanged (repo wins), so the new key won't
-    // fire. Mirror `apply_setting`'s guidance (Codex #297 review P3).
-    if self.config_panel.layer == SettingsLayer::Global
-      && self
-        .config_panel
-        .key_rows
-        .iter()
-        .find(|r| r.target.config_key() == config_key)
-        .map(|r| r.source == crate::config::ConfigSource::Repo)
-        .unwrap_or(false)
-    {
-      status.push_str(" — shadowed by .gwm.toml");
+    // Verify the capture actually took effect in the *merged* keymap: a
+    // higher-precedence layer, or a pre-#290 alias still declared in another
+    // layer (which we deliberately don't edit), can shadow the write so the new
+    // key never fires even though it persisted. Warn instead of reporting a
+    // clean success (Codex #297 review). An unbind has nothing to verify.
+    if !items.is_empty() && !self.capture_took_effect(target, &cap.pending) {
+      status.push_str(" — shadowed (a higher layer or legacy alias still binds it)");
     }
     self.status = status;
+  }
+
+  /// Whether `strokes` resolve to `target`'s action in the live (merged)
+  /// keymap — i.e. the just-committed rebind is the *effective* binding and not
+  /// shadowed by another layer / a lingering legacy alias. Issue #294 (Codex
+  /// #297 review).
+  fn capture_took_effect(&self, target: KeyTarget, strokes: &[KeyStroke]) -> bool {
+    match target {
+      KeyTarget::Global(action) => {
+        matches!(self.keymap.lookup(strokes), ChordResolution::Matched(a) if a == action)
+      }
+      KeyTarget::Modal(action) => strokes
+        .first()
+        .map(|s| self.modal_keymap.resolve(action.context(), s) == Some(action))
+        .unwrap_or(false),
+    }
   }
 
   // ── PTY overlay (issue #35) ────────────────────────────────────────────
