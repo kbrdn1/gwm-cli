@@ -122,6 +122,18 @@ fn assert_present(buf: &Buffer, needle: &str, what: &str) {
 }
 
 #[test]
+fn worktrees_table_header_labels_the_issue_pr_badge_column() {
+  // The worktree table's badge column (the `●/●` issue/PR pastilles) now
+  // carries an `I/P` caption alongside the NAME / BRANCH / STATUS / PATH
+  // headers. Render the default list view (no modal) and assert it.
+  let (_dir, mut app) = make_app();
+  let buf = render(&mut app);
+  assert_present(&buf, "I/P", "issue/PR badge column header");
+  assert_present(&buf, "NAME", "name column header");
+  assert_present(&buf, "BRANCH", "branch column header");
+}
+
+#[test]
 fn help_modal_renders_title_and_close_hint() {
   let (_dir, mut app) = make_app();
   app.enter_help();

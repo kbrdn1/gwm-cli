@@ -463,7 +463,8 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     // caption; the glyphs (`2d`, `3w`, `1M`, `5y`, `-`) are self-evident
     // and a header would steal space from BRANCH on narrow terminals.
     Cell::from(""),
-    Cell::from(""),
+    // Issue / PR badge column (the `●/●` pastilles) — `I/P` fits its 3 cells.
+    Cell::from("I/P"),
     Cell::from("NAME"),
     Cell::from("BRANCH"),
     Cell::from("STATUS"),
