@@ -752,6 +752,16 @@ pub fn run(cli: Cli) -> Result<()> {
   // sites (`submit_create`, `bootstrap_selected`) take the same
   // trust decision as `gwm create` / `gwm bootstrap`.
   let Some(cmd) = cli.command else {
+    // Explicit workspace mode (issue #36): `gwm --workspace <root>` opens the
+    // TUI across every child repo.
+    if let Some(root) = cli.workspace {
+      return crate::tui::run_workspace(&root, mode);
+    }
+    // Auto-detect: bare `gwm` in a repo-free directory that holds child repos
+    // offers to open it as a workspace.
+    if let Some(root) = autodetect_workspace_prompt()? {
+      return crate::tui::run_workspace(&root, mode);
+    }
     return crate::tui::run(mode);
   };
 
@@ -834,6 +844,39 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
     Command::Tui { action } => cmd_tui(action),
     Command::Theme { action } => cmd_theme(action),
+  }
+}
+
+/// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a
+/// git repo but holds direct-child repos, ask whether to open it as a
+/// workspace. Returns the chosen root on a yes (`Enter` / `y`), else `None` so
+/// the caller falls through to single-repo discovery (which then surfaces
+/// `NotInGitRepo`). Declines silently when stdin is not a terminal (pipes / CI)
+/// so non-interactive `gwm` behaves exactly as before — never blocking on a
+/// prompt nobody can answer.
+fn autodetect_workspace_prompt() -> Result<Option<PathBuf>> {
+  use std::io::{IsTerminal, Write};
+
+  let cwd = std::env::current_dir()?;
+  let Some(ws) = workspace::autodetect(&cwd) else {
+    return Ok(None);
+  };
+  if !io::stdin().is_terminal() {
+    return Ok(None);
+  }
+  eprint!(
+    "No git repo here. Open {} as a workspace ({} repos)? [Y/n] ",
+    cwd.display(),
+    ws.repos.len()
+  );
+  io::stderr().flush().ok();
+  let mut answer = String::new();
+  io::stdin().read_line(&mut answer)?;
+  let a = answer.trim().to_ascii_lowercase();
+  if a.is_empty() || a == "y" || a == "yes" {
+    Ok(Some(ws.root))
+  } else {
+    Ok(None)
   }
 }
 
@@ -1368,6 +1411,12 @@ fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<Pa
     .ok_or(GwmError::WorkspaceRepoNotFound { name, available })
 }
 
+// `cmd_create` mirrors the `Create` subcommand's independent CLI args 1:1
+// (three positionals + three flags + the resolved trust mode), and #36 adds
+// the workspace `start` path. Bundling them into a struct would only add an
+// indirection that obscures the direct subcommand → handler mapping the rest
+// of this dispatcher follows, so the arg count is deliberate here.
+#[allow(clippy::too_many_arguments)]
 fn cmd_create(
   branch_type: String,
   issue: String,

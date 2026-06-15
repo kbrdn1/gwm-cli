@@ -154,6 +154,21 @@ fn create_in_workspace_with_unknown_repo_lists_available() {
 }
 
 #[test]
+fn bare_gwm_in_workspace_root_declines_autodetect_without_a_tty() {
+  // assert_cmd pipes stdin (not a tty), so the auto-detect prompt must decline
+  // silently and fall through to single-repo discovery — which then fails with
+  // NotInGitRepo because the workspace root is not itself a repo. This proves
+  // bare `gwm` never blocks on an unanswerable prompt in a pipe / CI.
+  let root = workspace_root();
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(root.path())
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+#[test]
 fn list_workspace_names_format_lists_worktrees_per_repo() {
   // `--format names` in workspace mode qualifies each worktree with its repo
   // (`<repo>/<name>`) so a shell-completion candidate is unambiguous.

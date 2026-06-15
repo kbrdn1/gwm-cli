@@ -160,11 +160,46 @@ pub enum OpenTarget {
 /// learning the new module path.
 pub use super::state::link_prompt::LinkPromptStage;
 
+/// One repo's session-stable metadata in workspace mode (issue #36). The live
+/// `git2::Repository` is *not* stored here (it isn't `Send`/`Clone` and would
+/// duplicate `App.repo`); it is re-opened from `workdir` when this repo
+/// becomes the active one. `config` is cloned into `App.config` on activation
+/// so per-row actions (`create`, bootstrap, hooks) read the right repo's
+/// `.gwm.toml` — matching the issue's "each row inherits its own repo's
+/// config" contract. Keymap/theme stay session-level (resolved once from the
+/// first repo), the same "resolved once, relaunch to change" contract as
+/// single-repo mode.
+#[derive(Debug, Clone)]
+pub struct RepoMeta {
+  pub name: String,
+  pub workdir: PathBuf,
+  pub config: Config,
+}
+
+/// Workspace-mode state (issue #36). `None` in single-repo mode (the default).
+/// The *active* repo lives in `App`'s core fields (`repo`/`repo_name`/
+/// `workdir`/`config`); this holds everything needed to swap a different repo
+/// into those fields as the selection moves between repos.
+#[derive(Debug, Clone)]
+pub struct WorkspaceState {
+  /// The root `--workspace` pointed at.
+  pub root: PathBuf,
+  /// Session-stable repo metadata, in discovery (alphabetical) order.
+  pub repos: Vec<RepoMeta>,
+  /// The owning repo index for each `App.worktrees[i]` row, parallel to that
+  /// vec. Rebuilt by every workspace refresh so it never drifts.
+  pub row_repo: Vec<usize>,
+  /// Index into `repos` of the currently active repo (mirrors `App.repo*`).
+  pub active: usize,
+}
+
 pub struct App {
   pub repo: Repository,
   pub repo_name: String,
   pub workdir: PathBuf,
   pub config: Config,
+  /// Workspace-mode state (issue #36); `None` in single-repo mode.
+  pub workspace: Option<WorkspaceState>,
   pub worktrees: Vec<WorktreeInfo>,
   pub list_state: TableState,
   pub view: View,
@@ -431,6 +466,7 @@ impl App {
       repo_name,
       workdir,
       config,
+      workspace: None,
       worktrees,
       list_state: state,
       view: View::List,
@@ -485,6 +521,169 @@ impl App {
       out.status = String::from("fetching GitHub status…");
     }
     Ok(out)
+  }
+
+  /// Workspace-mode constructor (issue #36): open the TUI over every git repo
+  /// one level below `root`, merging their worktree listings into one
+  /// repo-tagged table. Anchors the session on the first repo (alphabetical)
+  /// for keymap/theme resolution and the event-loop channels, then swaps the
+  /// merged list and per-row repo map in. Errors with [`GwmError::EmptyWorkspace`]
+  /// when no repo sits directly under `root`.
+  pub fn new_workspace_at_layered(root: &Path, global_path: Option<&Path>) -> Result<Self> {
+    let ws = crate::workspace::discover(root)?;
+    if ws.is_empty() {
+      return Err(GwmError::EmptyWorkspace {
+        root: root.display().to_string(),
+      });
+    }
+
+    // Load each repo's `.gwm.toml` once — session-stable metadata swapped into
+    // the active slot on navigation.
+    let mut repos: Vec<RepoMeta> = Vec::with_capacity(ws.repos.len());
+    for r in &ws.repos {
+      let config = Config::load_layered(&r.path, global_path)?;
+      repos.push(RepoMeta {
+        name: r.name.clone(),
+        workdir: r.path.clone(),
+        config,
+      });
+    }
+
+    // Anchor the session on the first repo: this resolves the keymap, theme,
+    // branch types, and sets up the task channels exactly as single-repo mode.
+    let mut app = Self::new_at_layered(Some(&repos[0].workdir), global_path)?;
+
+    // Replace the single-repo list with the merged, repo-tagged one.
+    let name_to_idx: HashMap<&str, usize> = repos.iter().enumerate().map(|(i, m)| (m.name.as_str(), i)).collect();
+    let rows = crate::workspace::merge_worktrees(&ws)?;
+    let mut worktrees = Vec::with_capacity(rows.len());
+    let mut row_repo = Vec::with_capacity(rows.len());
+    for row in &rows {
+      let idx = name_to_idx.get(row.repo_name.as_str()).copied().unwrap_or(0);
+      worktrees.push(row.info.clone());
+      row_repo.push(idx);
+    }
+
+    let repo_count = repos.len();
+    let wt_count = worktrees.len();
+    app.worktrees = worktrees;
+    app.workspace = Some(WorkspaceState {
+      root: root.to_path_buf(),
+      repos,
+      row_repo,
+      active: 0,
+    });
+    app.filter.invalidate();
+    app.list_state.select(if wt_count == 0 { None } else { Some(0) });
+    // Resolve GitHub statuses across the full merged set (construction only
+    // refreshed the anchor repo's rows).
+    app.refresh_linked_github_statuses_for_worktrees();
+    app.status = format!(
+      "workspace {} — {} repo(s), {} worktree(s) · press ? for help",
+      root.display(),
+      repo_count,
+      wt_count
+    );
+    Ok(app)
+  }
+
+  /// True when the TUI is in workspace mode (issue #36).
+  pub fn is_workspace(&self) -> bool {
+    self.workspace.is_some()
+  }
+
+  /// Display name of the repo owning raw worktree row `raw_index` (the index
+  /// into [`Self::worktrees`], not the filtered view). `None` in single-repo
+  /// mode or for an out-of-range index. Drives the TUI `REPO` column.
+  pub fn row_repo_name(&self, raw_index: usize) -> Option<&str> {
+    let ws = self.workspace.as_ref()?;
+    let idx = *ws.row_repo.get(raw_index)?;
+    ws.repos.get(idx).map(|m| m.name.as_str())
+  }
+
+  /// Raw `worktrees` index of the current selection, hopping through the fuzzy
+  /// filter map (the selection indexes the filtered view, not the raw vec).
+  fn selected_raw_index(&self) -> Option<usize> {
+    let i = self.list_state.selected()?;
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    filtered.get(i).copied()
+  }
+
+  /// Align the active repo (`repo`/`repo_name`/`workdir`/`config`) with the
+  /// selected worktree's repo (issue #36). A no-op in single-repo mode and
+  /// when the selection still belongs to the active repo, so the event loop
+  /// can call it every frame cheaply. On the repo actually changing it
+  /// re-opens the `git2::Repository` from the target workdir and invalidates
+  /// the sidebar preview; an open failure keeps the current repo and reports
+  /// on the status bar rather than panicking mid-render.
+  pub fn sync_active_repo(&mut self) {
+    let Some(ws) = self.workspace.as_ref() else {
+      return;
+    };
+    let Some(raw) = self.selected_raw_index() else {
+      return;
+    };
+    let Some(&target) = ws.row_repo.get(raw) else {
+      return;
+    };
+    if target == ws.active {
+      return;
+    }
+    let Some(meta) = ws.repos.get(target).cloned() else {
+      return;
+    };
+    match Repository::open(&meta.workdir) {
+      Ok(repo) => {
+        self.repo = repo;
+        self.repo_name = meta.name;
+        self.workdir = meta.workdir;
+        self.config = meta.config;
+        if let Some(ws) = self.workspace.as_mut() {
+          ws.active = target;
+        }
+        self.invalidate_sidebar_cache();
+      }
+      Err(e) => {
+        self.status = format!("workspace: failed to open repo '{}': {}", meta.name, e);
+      }
+    }
+  }
+
+  /// Re-list every repo in the workspace and rebuild the merged table +
+  /// row→repo map (issue #36). The single-repo async refresh would clobber the
+  /// merged list with one repo's worktrees, so workspace refresh runs
+  /// synchronously across all repos instead. Repos are fixed for the session
+  /// (a new repo under the root needs a relaunch, matching the config "resolved
+  /// once" contract), so this re-lists the stored metas rather than re-walking
+  /// the root.
+  fn refresh_workspace(&mut self) {
+    let Some(ws) = self.workspace.as_ref() else {
+      return;
+    };
+    let targets: Vec<(usize, PathBuf)> = ws
+      .repos
+      .iter()
+      .enumerate()
+      .map(|(i, m)| (i, m.workdir.clone()))
+      .collect();
+    let mut worktrees = Vec::new();
+    let mut row_repo = Vec::new();
+    for (idx, workdir) in &targets {
+      if let Ok(repo) = Repository::open(workdir) {
+        if let Ok(trees) = worktree::list(&repo) {
+          for t in trees {
+            worktrees.push(t);
+            row_repo.push(*idx);
+          }
+        }
+      }
+    }
+    if let Some(ws) = self.workspace.as_mut() {
+      ws.row_repo = row_repo;
+    }
+    self.apply_refreshed_worktrees(worktrees);
+    // The selection may now land on a different repo's row — re-align.
+    self.sync_active_repo();
   }
 
   /// Builder-style setter for `trust_mode`. The TUI entrypoint
@@ -570,6 +769,11 @@ impl App {
     // `apply_refreshed_worktrees` so the async drain, which shares that
     // tail, does not re-invalidate the run it just applied.
     self.tasks.invalidate(TaskKind::RefreshWorktrees);
+    if self.is_workspace() {
+      // Workspace mode re-lists every repo, not just the active one (#36).
+      self.refresh_workspace();
+      return Ok(());
+    }
     let worktrees = worktree::list(&self.repo)?;
     self.apply_refreshed_worktrees(worktrees);
     Ok(())
@@ -631,6 +835,12 @@ impl App {
   /// while loading is a no-op) and seeds the loader label + spinner. The
   /// result is applied by [`Self::drain_task_results`].
   pub fn request_refresh(&mut self) {
+    if self.is_workspace() {
+      // No single-repo async worker in workspace mode — it would clobber the
+      // merged list with one repo's worktrees (#36). Refresh synchronously.
+      let _ = self.refresh();
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
       // A refresh is already in flight — coalesce onto it.
       return;
@@ -654,6 +864,11 @@ impl App {
       return false;
     }
     self.last_auto_refresh_at = now;
+    if self.is_workspace() {
+      // Synchronous merged refresh in workspace mode (#36) — see `refresh`.
+      let _ = self.refresh();
+      return true;
+    }
     let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
       return false;
     };

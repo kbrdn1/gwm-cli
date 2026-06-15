@@ -24,7 +24,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
@@ -103,6 +103,23 @@ pub fn run(trust_mode: crate::trust::TrustMode) -> Result<()> {
   leave_terminal(&mut terminal)?;
   // #290: ExitToWorktree prints the selected path to stdout so a shell
   // wrapper (`cd "$(gwm)"`) can change directory.
+  if let Some(path) = result? {
+    println!("{}", path.display());
+  }
+  Ok(())
+}
+
+/// Workspace-mode entry point (issue #36): open the TUI over every git repo
+/// one level below `root`. Same teardown-safety contract as [`run`] — App
+/// construction (discovery + per-repo config load) happens before the
+/// terminal is touched, so a failure (no repos, bad config) leaves the
+/// terminal cooked.
+pub fn run_workspace(root: &Path, trust_mode: crate::trust::TrustMode) -> Result<()> {
+  let app =
+    App::new_workspace_at_layered(root, crate::config::global_config_path().as_deref())?.with_trust_mode(trust_mode);
+  let mut terminal = enter_terminal()?;
+  let result = run_app(&mut terminal, app);
+  leave_terminal(&mut terminal)?;
   if let Some(path) = result? {
     println!("{}", path.display());
   }
@@ -213,6 +230,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         app.close_pty_overlay();
       }
     }
+
+    // Issue #36: in workspace mode keep the active repo aligned with the
+    // selected worktree's repo before drawing (so the sidebar preview reads
+    // the right repo) and before the next key fires an action against it. A
+    // no-op in single-repo mode and when the selection hasn't crossed repos.
+    app.sync_active_repo();
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
