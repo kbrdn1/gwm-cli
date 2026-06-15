@@ -138,6 +138,134 @@ fn enter_config_panel_opens_resolves_rows_and_resets_scroll() {
   assert_eq!(base.source, ConfigSource::Default);
 }
 
+// ── Keys tab: in-TUI keymap editor (issue #294) ────────────────────────────
+
+#[test]
+fn enter_config_panel_builds_the_keys_tab_rows() {
+  use gwm::tui::keymap::Action;
+  use gwm::tui::modal_keymap::ModalAction;
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+
+  let expected = Action::all().count() + ModalAction::all().count();
+  assert_eq!(
+    app.config_panel.key_rows.len(),
+    expected,
+    "opening the panel enumerates every global + modal binding"
+  );
+}
+
+#[test]
+fn capturing_a_global_chord_rebinds_it_live_and_writes_the_file() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .expect("quit row present");
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  // The live keymap reflects the rebind without a restart.
+  let q = KeyStroke::new(KeyCode::Char('Q'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[q]), ChordResolution::Matched(Action::Quit));
+
+  // …and it round-trips to disk under `[tui.keys]`.
+  let raw = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(raw.contains("quit = [\"Q\"]"), "binding persisted: {raw}");
+}
+
+#[test]
+fn capturing_a_modal_verb_rebinds_it_live() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .expect("confirm row present");
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  let o = KeyStroke::new(KeyCode::Char('o'), KeyModifiers::NONE);
+  assert_eq!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &o),
+    Some(ModalAction::ConfirmConfirm),
+    "the modal verb fires on its new key immediately"
+  );
+}
+
+#[test]
+fn an_invalid_rebind_is_rejected_and_leaves_the_binding_live() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .expect("refresh row present");
+  app.config_panel.selected = idx;
+
+  // `g` is a strict prefix of `top`'s default `g g` chord — a prefix
+  // collision the validate-before-write gate must reject.
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "error surfaced: {}", app.status);
+  // The previous binding survives — `f` still refreshes.
+  let f = KeyStroke::new(KeyCode::Char('f'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[f]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn cancelling_a_capture_writes_nothing() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.selected = 0;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.config_panel.cancel_capture();
+
+  assert!(app.config_panel.capture.is_none(), "capture cleared on cancel");
+  assert!(
+    !dir.path().join(".gwm.toml").exists(),
+    "a cancelled capture must not write the file"
+  );
+}
+
 #[test]
 fn hint_context_follows_focus() {
   // Issue #217: the statusbar chip + help subtitle read the live focus. The

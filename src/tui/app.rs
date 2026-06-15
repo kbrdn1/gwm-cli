@@ -1416,8 +1416,101 @@ impl App {
         self.status = format!("error: {}", e);
       }
     }
+    self.refresh_key_rows();
     self.config_panel.reset();
     self.view = View::Config;
+  }
+
+  /// Rebuild the Keys-tab rows (issue #294) from the live keymaps, attributing
+  /// each binding's source via the resolved-row snapshot (the same layer
+  /// attribution the `All` tab shows). Called on panel open and after a
+  /// successful rebind so the displayed key(s) + badge track the edit.
+  fn refresh_key_rows(&mut self) {
+    let rows = self.config_panel.rows.clone();
+    let key_rows = super::state::config_panel::build_key_rows(&self.keymap, &self.modal_keymap, |key| {
+      rows
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.source)
+        .unwrap_or(crate::config::ConfigSource::Default)
+    });
+    self.config_panel.key_rows = key_rows;
+  }
+
+  /// Feed a raw key event into the in-progress Keys-tab capture (issue #294),
+  /// normalising it to a [`KeyStroke`] first. No-op when no capture is armed.
+  pub fn push_key_capture(&mut self, key: KeyEvent) {
+    self.config_panel.capture_push(KeyStroke::from_event(&key));
+  }
+
+  /// Commit the in-progress Keys-tab capture (issue #294): write the captured
+  /// chord as a TOML array to the selected target's `[tui.keys]` /
+  /// `[tui.keys.modal.<context>]` key in the active layer, then reload the
+  /// config + both keymaps so the rebind is live immediately. An empty capture
+  /// writes `[]` (unbind). Validation (conflict / prefix-collision) happens in
+  /// the writer's validate-before-write gate; on failure the file and the live
+  /// keymaps are left untouched and the error is surfaced on the statusbar.
+  pub fn commit_key_capture(&mut self) {
+    let Some(cap) = self.config_panel.take_capture() else {
+      return;
+    };
+    let config_key = match self.config_panel.key_rows.get(cap.row) {
+      Some(row) => row.target.config_key(),
+      None => return,
+    };
+    let items = cap.as_config_items();
+
+    let path = match self.config_panel.layer {
+      SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
+      SettingsLayer::Global => match self.global_path.clone() {
+        Some(p) => p,
+        None => {
+          self.status = "keys: no global config path (set $XDG_CONFIG_HOME or $HOME)".into();
+          return;
+        }
+      },
+    };
+
+    if let Err(e) = crate::config_cli::set_array_at(&path, &config_key, &items) {
+      self.status = format!("keys: {}", e);
+      return;
+    }
+
+    // Reload the merged config and rebuild both keymaps so the new binding
+    // fires without a restart. The write already validated, so these resolve;
+    // route any error to the statusbar rather than panicking.
+    match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
+      Ok(cfg) => self.config = cfg,
+      Err(e) => {
+        self.status = format!("keys saved, but reload failed: {}", e);
+        return;
+      }
+    }
+    match self.config.tui.keys.resolved_keymap() {
+      Ok(km) => self.keymap = km,
+      Err(e) => {
+        self.status = format!("keys: {}", e);
+        return;
+      }
+    }
+    match self.config.tui.keys.resolved_modal_keymap() {
+      Ok(mk) => self.modal_keymap = mk,
+      Err(e) => {
+        self.status = format!("keys: {}", e);
+        return;
+      }
+    }
+    if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      self.config_panel.rows = rows;
+    }
+    self.refresh_key_rows();
+
+    let desc = if items.is_empty() {
+      "unbound".to_string()
+    } else {
+      items.join(" ")
+    };
+    self.status = format!("set {} = {} ({})", config_key, desc, self.config_panel.layer.label());
   }
 
   // ── PTY overlay (issue #35) ────────────────────────────────────────────

@@ -388,6 +388,38 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Esc / `q` / the bound `config_panel` key (default `4`) close.
       // #219: edit sub-mode keys resolve through the `config.edit` context;
       // anything else is literal input into the numeric edit buffer.
+      // Keys tab live capture (issue #294). While a capture is armed every
+      // keystroke is recorded into the binding rather than navigating: `cancel`
+      // (def Esc) aborts, and for a multi-stroke global chord `submit` (def
+      // Enter) commits while Backspace drops the last stroke. A modal verb is
+      // single-stroke, so the first non-cancel key is captured and committed
+      // immediately. Esc / Enter / Backspace therefore can't themselves be
+      // assigned via capture (hand-edit `.gwm.toml` for those rare cases) —
+      // the same hard-coded-escape-hatch trade-off as the rest of the keymap.
+      // The commit/cancel verbs resolve through `config.edit` so a rebind of
+      // `[tui.keys.modal.config.edit]` carries through here too (#219 review).
+      View::Config if app.config_panel.capture.is_some() => {
+        let single = app
+          .config_panel
+          .capture
+          .as_ref()
+          .map(|c| c.single_only)
+          .unwrap_or(false);
+        match app.resolve_modal(KeyContext::ConfigEdit, key) {
+          Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_capture(),
+          Some(ModalAction::ConfigEditSubmit) if !single => app.commit_key_capture(),
+          _ => {
+            if single {
+              app.push_key_capture(key);
+              app.commit_key_capture();
+            } else if key.code == KeyCode::Backspace {
+              app.config_panel.capture_pop();
+            } else {
+              app.push_key_capture(key);
+            }
+          }
+        }
+      }
       View::Config if app.config_panel.editing.is_some() => match app.resolve_modal(KeyContext::ConfigEdit, key) {
         Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
         Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
@@ -408,7 +440,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           Some(ModalAction::ConfigNextTab) => app.config_panel.next_tab(),
           Some(ModalAction::ConfigPrevTab) => app.config_panel.prev_tab(),
           Some(ModalAction::ConfigToggleLayer) => app.config_panel.toggle_layer(),
-          Some(ModalAction::ConfigActivate) => app.activate_selected_setting(),
+          // On the Keys tab `activate` arms a live keystroke capture for the
+          // selected binding (issue #294); elsewhere it cycles a choice or
+          // opens the numeric/text edit buffer.
+          Some(ModalAction::ConfigActivate) => {
+            if app.config_panel.tab == SettingsTab::Keys {
+              app.config_panel.begin_capture();
+            } else {
+              app.activate_selected_setting();
+            }
+          }
           Some(ModalAction::ConfigSelectNext) => {
             if on_all {
               app.config_panel.scroll_down();
