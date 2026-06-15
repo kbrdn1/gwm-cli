@@ -81,6 +81,15 @@ pub fn discover(root: &Path) -> Result<Workspace> {
     if repo.is_worktree() {
       continue;
     }
+    // The opened repo's workdir must BE this child dir. When `--workspace`
+    // points at a directory that is itself a repo, `read_dir` surfaces the
+    // root's own `.git/`, and `Repository::open` on it succeeds but resolves
+    // to the *parent* repo (workdir = root, not `root/.git`). Admitting it
+    // would add a bogus `.git` repo aimed at the parent (Codex review #303 P2).
+    let workdir_is_child = repo.workdir().is_some_and(|w| paths_equal(w, &path));
+    if !workdir_is_child {
+      continue;
+    }
     let name = path
       .file_name()
       .map(|n| n.to_string_lossy().to_string())
@@ -93,6 +102,17 @@ pub fn discover(root: &Path) -> Result<Workspace> {
     root: root.to_path_buf(),
     repos,
   })
+}
+
+/// Compare two paths for the same on-disk location, canonicalizing first so a
+/// trailing separator (libgit2 workdirs carry one) or a `/var`↔`/private/var`
+/// symlink (macOS tempdirs) doesn't make equal paths compare unequal. Falls
+/// back to the raw path when canonicalization fails (e.g. a not-yet-created
+/// path), which is the conservative "compare as-is" behaviour.
+fn paths_equal(a: &Path, b: &Path) -> bool {
+  let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+  let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+  ca == cb
 }
 
 /// Heuristic trigger for the auto-detect prompt (issue #36): when bare `gwm`

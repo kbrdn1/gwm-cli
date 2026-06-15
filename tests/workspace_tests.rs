@@ -90,6 +90,21 @@ fn discover_skips_a_linked_worktree_sibling() {
 }
 
 #[test]
+fn discover_skips_the_root_repos_own_git_dir() {
+  // When the root is itself a git repo, `read_dir` surfaces its `.git/`, which
+  // `Repository::open` resolves back to the root repo. That must NOT appear as
+  // a bogus `.git` child — only the genuine child repo does (Codex review
+  // #303 P2).
+  let root = TempDir::new().unwrap();
+  init_repo_at(root.path()); // the root is itself a repo
+  init_repo_at(&root.path().join("kid"));
+
+  let ws = workspace::discover(root.path()).unwrap();
+  let names: Vec<&str> = ws.repos.iter().map(|r| r.name.as_str()).collect();
+  assert_eq!(names, vec!["kid"], "only the real child repo, no `.git`, got {names:?}");
+}
+
+#[test]
 fn discover_empty_root_yields_no_repos() {
   let root = TempDir::new().unwrap();
   fs::create_dir_all(root.path().join("plain")).unwrap();
