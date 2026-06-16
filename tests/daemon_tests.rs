@@ -7,7 +7,10 @@
 mod common;
 
 use common::init_repo;
-use gwm::daemon::{handle_line, worktrees_differ, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR};
+use gwm::daemon::{
+  error as rpc_error, handle_line, parse_list_result, parse_worktrees_changed, success, worktrees_changed_notification,
+  worktrees_differ, INTERNAL_ERROR, INVALID_PARAMS, LIST_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, SUBSCRIBE_REQUEST,
+};
 use gwm::json_api::{JsonStatus, JsonWorktree};
 use serde_json::Value;
 
@@ -174,4 +177,62 @@ fn worktrees_differ_detects_real_changes() {
 
   // Identical (age equal too) -> no change.
   assert!(!worktrees_differ(from_ref(&base), from_ref(&base)));
+}
+
+// --- Client-side parsers (issue #309) --------------------------------------
+
+#[test]
+fn parse_list_result_round_trips_a_success_envelope() {
+  // Exactly what the server writes for `list`: a success envelope whose
+  // `result` is the worktree array. The client must recover the vec.
+  let wts = vec![sample("a"), sample("b")];
+  let envelope = success(&serde_json::json!(1), serde_json::to_value(&wts).unwrap());
+  let line = envelope.to_string();
+
+  let parsed = parse_list_result(&line).expect("a success envelope must parse");
+  assert_eq!(parsed, wts, "the decoded list must equal what the server sent");
+}
+
+#[test]
+fn parse_list_result_surfaces_a_server_error_envelope() {
+  let envelope = rpc_error(&serde_json::json!(1), INTERNAL_ERROR, "boom");
+  let err = parse_list_result(&envelope.to_string()).expect_err("an error envelope must not yield an empty list");
+  assert!(
+    err.to_string().contains("boom"),
+    "the server message must surface: {err}"
+  );
+}
+
+#[test]
+fn parse_list_result_rejects_a_malformed_line() {
+  assert!(parse_list_result("not json").is_err());
+  // A well-formed object with no `result` and no `error` is still invalid.
+  assert!(parse_list_result(r#"{"jsonrpc":"2.0","id":1}"#).is_err());
+}
+
+#[test]
+fn parse_worktrees_changed_round_trips_a_notification() {
+  // Built by the server's own helper, so the test pins the exact wire shape.
+  let wts = vec![sample("x")];
+  let note = worktrees_changed_notification(&wts);
+  let line = note.to_string();
+
+  let parsed = parse_worktrees_changed(&line).expect("a notification must parse");
+  assert_eq!(parsed, wts);
+}
+
+#[test]
+fn parse_worktrees_changed_rejects_a_line_without_params() {
+  assert!(parse_worktrees_changed("nonsense").is_err());
+  assert!(parse_worktrees_changed(r#"{"method":"worktrees.changed"}"#).is_err());
+}
+
+#[test]
+fn client_request_lines_are_valid_rpc_for_their_methods() {
+  // The canonical request constants must parse as the methods they name —
+  // a typo here would silently break every client.
+  let list: Value = serde_json::from_str(LIST_REQUEST).unwrap();
+  assert_eq!(list["method"], serde_json::json!("list"));
+  let sub: Value = serde_json::from_str(SUBSCRIBE_REQUEST).unwrap();
+  assert_eq!(sub["method"], serde_json::json!("subscribe"));
 }

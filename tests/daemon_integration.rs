@@ -245,3 +245,69 @@ fn subscribe_reaps_an_idle_client_that_disconnects() {
     .expect("server must close the idle subscription (not time out)");
   assert_eq!(n, 0, "idle subscriber must be reaped on disconnect");
 }
+
+// --- Statusline consumer client (issue #309) -------------------------------
+// The first real consumer: `gwm::daemon::client` connects, runs `list`
+// once, or rides the `subscribe` stream. These drive it against a live
+// daemon thread — the end-to-end proof that the wire protocol is usable.
+
+#[test]
+fn client_list_once_returns_the_current_worktrees() {
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(50));
+  let _probe = daemon.connect(); // blocks until the serve thread has bound
+
+  let wts = gwm::daemon::client::list_once(&daemon.socket).expect("list_once must succeed");
+  assert_eq!(wts.len(), 1, "fresh repo has exactly the main worktree");
+  assert!(wts[0].is_main, "the sole worktree is the main one");
+}
+
+#[test]
+fn client_list_once_errors_when_no_daemon_is_listening() {
+  // No daemon bound here: the connect must fail so the CLI can fall back to
+  // its graceful empty line (asserted at the CLI level).
+  let sock_dir = TempDir::new().unwrap();
+  let missing = sock_dir.path().join("nope");
+  assert!(
+    gwm::daemon::client::list_once(&missing).is_err(),
+    "a missing socket must surface a connect error"
+  );
+}
+
+#[test]
+fn client_subscribe_streams_snapshot_then_pushes_on_change() {
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  // Fast poll so the created worktree is noticed promptly.
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(30));
+  let _probe = daemon.connect(); // ensure the socket is bound before we subscribe
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-309-pushed");
+  let repo_path = dir.path().to_path_buf();
+
+  let mut counts: Vec<usize> = Vec::new();
+  let mut created = false;
+  gwm::daemon::client::subscribe(&daemon.socket, |worktrees| {
+    counts.push(worktrees.len());
+    if !created {
+      // First callback is the initial snapshot. Mutate the worktree set
+      // out-of-band; the daemon's poll loop must push a fresh notification.
+      created = true;
+      let repo = worktree::discover_repo(Some(&repo_path)).unwrap();
+      worktree::add(&repo, "feat-309-pushed", &target, "feat/#309-pushed", false).unwrap();
+      true // keep listening for the change push
+    } else {
+      // Second callback is the change push: it must name the new worktree.
+      assert!(
+        worktrees.iter().any(|w| w.name == "feat-309-pushed"),
+        "the change push must include the newly created worktree"
+      );
+      false // stop the stream
+    }
+  })
+  .expect("subscribe must run cleanly");
+
+  assert_eq!(counts, vec![1, 2], "initial snapshot (1) then the change push (2)");
+}

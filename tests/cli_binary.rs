@@ -67,7 +67,9 @@ fn help_prints_subcommands() {
     // Issue #38: long-running JSON-RPC daemon over a unix socket. The
     // subcommand is always listed (help is identical cross-platform); the
     // socket impl is `cfg(unix)`-gated and returns a clean error elsewhere.
-    .stdout(predicate::str::contains("  daemon "));
+    .stdout(predicate::str::contains("  daemon "))
+    // Issue #309: first daemon consumer — compact statusline for prompts.
+    .stdout(predicate::str::contains("  statusline "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -1113,6 +1115,34 @@ fn daemon_rejects_zero_poll_ms() {
     .stderr(
       predicate::str::contains("0").and(predicate::str::contains("not in").or(predicate::str::contains("invalid"))),
     );
+}
+
+#[test]
+fn statusline_without_a_daemon_prints_blank_and_exits_zero() {
+  // No daemon is listening at the given socket. A prompt substitution must
+  // not break: the command exits 0 and emits no worktree summary, just a
+  // blank line (issue #309 graceful-degradation contract).
+  let sock_dir = tempfile::TempDir::new().unwrap();
+  let missing = sock_dir.path().join("no-daemon.sock");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .arg("statusline")
+    .arg("--socket")
+    .arg(&missing)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(" wt").not());
+}
+
+#[test]
+fn statusline_help_documents_watch_and_socket() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["statusline", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--watch"))
+    .stdout(predicate::str::contains("--socket"));
 }
 
 #[test]

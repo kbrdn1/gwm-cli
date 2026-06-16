@@ -147,3 +147,50 @@ fn json_doctor_report_failed_wins_exit_two() {
   assert_eq!(v["severity"], serde_json::json!("failed"));
   assert_eq!(v["exit_code"], serde_json::json!(2));
 }
+
+// --- Deserialize round-trip (issue #309) -----------------------------------
+// `JsonWorktree` / `JsonStatus` gained `Deserialize` so a daemon *client*
+// (the statusline consumer) can decode the very lines the server serialises.
+// This pins that the derive is present and the round-trip is lossless.
+
+#[test]
+fn json_worktree_serialize_deserialize_round_trips() {
+  let wt = JsonWorktree {
+    name: "feat-309".into(),
+    id: "feat-309".into(),
+    path: "/wt/feat-309".into(),
+    branch: Some("feat/#309-daemon-consumer".into()),
+    head: Some("a".repeat(40)),
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: JsonStatus {
+      is_dirty: true,
+      has_upstream: true,
+      ahead: 2,
+      behind: 1,
+      unknown: false,
+    },
+    age_seconds: Some(42),
+    issue: Some(309),
+    pr: Some(310),
+  };
+  let line = serde_json::to_string(&wt).unwrap();
+  let back: JsonWorktree = serde_json::from_str(&line).unwrap();
+  assert_eq!(back, wt, "a serialised worktree must decode back identically");
+}
+
+#[test]
+fn json_worktree_vec_decodes_from_a_daemon_list_result() {
+  // The shape a client pulls out of a `list` response's `result` array.
+  let json = r#"[
+    {"name":"main","id":"main","path":"/repo","branch":"main","head":null,
+     "is_main":true,"is_locked":false,"is_prunable":false,
+     "status":{"is_dirty":false,"has_upstream":false,"ahead":0,"behind":0,"unknown":true},
+     "age_seconds":null,"issue":null,"pr":null}
+  ]"#;
+  let wts: Vec<JsonWorktree> = serde_json::from_str(json).unwrap();
+  assert_eq!(wts.len(), 1);
+  assert!(wts[0].is_main);
+  assert!(wts[0].status.unknown);
+}
