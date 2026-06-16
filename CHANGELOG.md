@@ -10,7 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet — the v0.10.0-rc.2 delta moved to [`changelogs/pre-releases/0.10.0-rc.2.md`](changelogs/pre-releases/0.10.0-rc.2.md).
+### Added
+
+- **`gwm review <PR#>` — materialise an existing PR into a worktree** (#308).
+  The inbound counterpart to `gwm create`: resolves the PR head via `gh` and
+  fetches origin's universal `refs/pull/<N>/head` ref — cross-fork aware, and
+  valid for PRs in any state (open / draft / closed / merged) — into a local
+  `review/pr-<N>-<author>-<slug>` branch, attaches a worktree, links the PR so
+  the sidebar / CI indicator light up immediately, and points the diff base at
+  the PR's base ref. Runs the same bootstrap + lifecycle-hook sequence as
+  `gwm create`; tear down with `gwm remove <dir> --delete-branch` like any
+  worktree. `--name` overrides the branch, `--no-bootstrap` / `--skip-hooks`
+  mirror `create`. This closes the loop the v0.10.0-rc.2 CI indicator opened —
+  a failing PR can now be pulled into a worktree to act on. (The branch-level
+  `gwm checkout <remote-branch>` / `gwm create --from` primitives noted in #308
+  are deferred to a follow-up.)
 
 ## Past releases
 
