@@ -7,8 +7,32 @@
 mod common;
 
 use common::init_repo;
-use gwm::daemon::{handle_line, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR};
+use gwm::daemon::{handle_line, worktrees_differ, INVALID_PARAMS, METHOD_NOT_FOUND, PARSE_ERROR};
+use gwm::json_api::{JsonStatus, JsonWorktree};
 use serde_json::Value;
+
+fn sample(name: &str) -> JsonWorktree {
+  JsonWorktree {
+    name: name.into(),
+    id: name.into(),
+    path: format!("/wt/{name}"),
+    branch: Some(format!("feat/{name}")),
+    head: Some("abc1234".into()),
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: JsonStatus {
+      is_dirty: false,
+      has_upstream: true,
+      ahead: 0,
+      behind: 0,
+      unknown: false,
+    },
+    age_seconds: Some(10),
+    issue: None,
+    pr: None,
+  }
+}
 
 fn call(workdir: &std::path::Path, line: &str) -> Value {
   serde_json::from_str(&handle_line(workdir, line)).expect("response must be valid JSON")
@@ -86,4 +110,46 @@ fn malformed_line_is_parse_error_with_null_id() {
   let v = call(dir.path(), "this is not json {");
   assert_eq!(v["error"]["code"], serde_json::json!(PARSE_ERROR));
   assert_eq!(v["id"], Value::Null, "a parse error can't know the id");
+}
+
+// --- subscribe change detection (issue #38 review) --------------------
+
+#[test]
+fn worktrees_differ_ignores_age_seconds() {
+  // The core of the spurious-notification fix: age ticks every poll for a
+  // non-trunk branch, so a change on age ALONE must not register.
+  use std::slice::from_ref;
+  let a = sample("x");
+  let mut b = a.clone();
+  b.age_seconds = Some(a.age_seconds.unwrap() + 5);
+  assert!(
+    !worktrees_differ(from_ref(&a), from_ref(&b)),
+    "age-only delta is not a change"
+  );
+}
+
+#[test]
+fn worktrees_differ_detects_real_changes() {
+  use std::slice::from_ref;
+  let base = sample("x");
+
+  // Different length.
+  assert!(worktrees_differ(from_ref(&base), &[]));
+
+  // A new linked PR.
+  let mut pr = base.clone();
+  pr.pr = Some(7);
+  assert!(worktrees_differ(from_ref(&base), from_ref(&pr)));
+
+  // A dirty-state flip.
+  let mut dirty = base.clone();
+  dirty.status.is_dirty = true;
+  assert!(worktrees_differ(from_ref(&base), from_ref(&dirty)));
+
+  // A renamed worktree.
+  let renamed = sample("y");
+  assert!(worktrees_differ(from_ref(&base), from_ref(&renamed)));
+
+  // Identical (age equal too) -> no change.
+  assert!(!worktrees_differ(from_ref(&base), from_ref(&base)));
 }

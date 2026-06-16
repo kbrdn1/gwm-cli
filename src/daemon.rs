@@ -168,6 +168,33 @@ pub fn worktrees_changed_notification(worktrees: &[JsonWorktree]) -> Value {
   })
 }
 
+/// True when two worktree snapshots differ in a way a `subscribe` client
+/// should be notified about.
+///
+/// Deliberately **excludes `age_seconds`**: it is recomputed from the
+/// current time on every poll, so for any non-trunk branch it ticks up
+/// each second. Comparing it (a naive `old != new`) would fire a spurious
+/// `worktrees.changed` on every poll, breaking the documented "one per
+/// detected change" contract. Every other field is compared.
+pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
+  if old.len() != new.len() {
+    return true;
+  }
+  old.iter().zip(new).any(|(a, b)| {
+    a.name != b.name
+      || a.id != b.id
+      || a.path != b.path
+      || a.branch != b.branch
+      || a.head != b.head
+      || a.is_main != b.is_main
+      || a.is_locked != b.is_locked
+      || a.is_prunable != b.is_prunable
+      || a.status != b.status
+      || a.issue != b.issue
+      || a.pr != b.pr
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Socket server — unix only, behind the `daemon` feature.
 // ---------------------------------------------------------------------------
@@ -177,6 +204,7 @@ mod server {
   use super::*;
   use crate::error::GwmError;
   use std::io::{BufRead, BufReader, Write};
+  use std::os::unix::fs::FileTypeExt;
   use std::os::unix::net::{UnixListener, UnixStream};
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, Ordering};
@@ -216,22 +244,37 @@ mod server {
   /// unlink it so `bind` can succeed (a stale socket otherwise fails
   /// `bind` with `EADDRINUSE`).
   fn clear_stale_socket(path: &Path) -> Result<()> {
-    if path.exists() {
-      if UnixStream::connect(path).is_ok() {
-        return Err(GwmError::Other(format!(
-          "daemon: socket {} is already in use by a live daemon",
-          path.display()
-        )));
-      }
-      let _ = std::fs::remove_file(path);
+    // `symlink_metadata` (not `metadata`) so a symlink is seen as a
+    // symlink, not followed to its target.
+    let meta = match std::fs::symlink_metadata(path) {
+      Ok(m) => m,
+      Err(_) => return Ok(()), // nothing there — bind will create it
+    };
+    // Refuse to touch anything that isn't a unix socket. A regular file or
+    // symlink at `--socket <path>` would otherwise be deleted as if it were
+    // a stale socket — a data-loss footgun (issue #38 review).
+    if !meta.file_type().is_socket() {
+      return Err(GwmError::Other(format!(
+        "daemon: refusing to use {}: exists and is not a unix socket",
+        path.display()
+      )));
     }
+    if UnixStream::connect(path).is_ok() {
+      return Err(GwmError::Other(format!(
+        "daemon: socket {} is already in use by a live daemon",
+        path.display()
+      )));
+    }
+    // A socket that no one is listening on — left by a crashed daemon.
+    // Unlink it so `bind` can succeed (it otherwise fails `EADDRINUSE`).
+    let _ = std::fs::remove_file(path);
     Ok(())
   }
 
   /// Bind the socket and serve connections until `shutdown` flips. Each
-  /// connection is handled on its own thread. In production the flag never
-  /// flips (the process runs until killed); tests pass a flag they flip on
-  /// teardown.
+  /// connection is handled on its own detached thread. In production the
+  /// flag never flips (the process runs until killed); tests pass a flag
+  /// they flip on teardown.
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
     clear_stale_socket(&opts.socket)?;
     let listener = UnixListener::bind(&opts.socket)
@@ -240,7 +283,6 @@ mod server {
       .set_nonblocking(true)
       .map_err(|e| GwmError::Other(format!("daemon: set_nonblocking failed: {e}")))?;
 
-    let mut handles = Vec::new();
     loop {
       if shutdown.load(Ordering::Relaxed) {
         break;
@@ -260,9 +302,13 @@ mod server {
           let workdir = opts.repo_workdir.clone();
           let poll = opts.poll_interval;
           let shutdown = Arc::clone(&shutdown);
-          handles.push(std::thread::spawn(move || {
+          // Detached: a long-running daemon must not accumulate JoinHandles
+          // for every short-lived client (`nc`, reconnecting integrations).
+          // Each connection thread observes the shared `shutdown` flag and
+          // exits on its own (issue #38 review).
+          std::thread::spawn(move || {
             handle_connection(stream, &workdir, poll, &shutdown);
-          }));
+          });
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
           std::thread::sleep(ACCEPT_TICK);
@@ -319,9 +365,10 @@ mod server {
   }
 
   /// Push `worktrees.changed` notifications: an immediate snapshot, then
-  /// one per detected change. Detection is a full-list equality check
-  /// (`JsonWorktree: PartialEq`) against the previous poll. Ends when the
-  /// client disconnects (write fails) or `shutdown` flips.
+  /// one per detected change. Change detection uses [`worktrees_differ`],
+  /// which ignores the always-ticking `age_seconds` so a non-trunk branch
+  /// doesn't spam a notification every poll. Ends when the client
+  /// disconnects (write fails) or `shutdown` flips.
   fn stream_subscription(writer: &mut UnixStream, workdir: &Path, poll: Duration, shutdown: &AtomicBool) {
     let mut last = run_list(workdir).unwrap_or_default();
     if send_notification(writer, &last).is_err() {
@@ -333,7 +380,7 @@ mod server {
       }
       std::thread::sleep(poll);
       let now = run_list(workdir).unwrap_or_default();
-      if now != last {
+      if worktrees_differ(&last, &now) {
         if send_notification(writer, &now).is_err() {
           return;
         }

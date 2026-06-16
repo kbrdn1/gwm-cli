@@ -137,6 +137,30 @@ fn unknown_method_over_socket_keeps_connection_alive() {
 }
 
 #[test]
+fn serve_refuses_to_unlink_a_non_socket_path() {
+  // A regular file at --socket must NOT be deleted as if it were a stale
+  // socket (data-loss footgun). serve returns Err before binding and
+  // leaves the file untouched.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let path = sock_dir.path().join("s");
+  std::fs::write(&path, b"precious user data").unwrap();
+
+  let opts = ServeOptions {
+    socket: path.clone(),
+    repo_workdir: dir.path().to_path_buf(),
+    poll_interval: Duration::from_millis(50),
+  };
+  let err = serve(&opts, Arc::new(AtomicBool::new(false))).unwrap_err();
+  assert!(
+    err.to_string().contains("not a unix socket"),
+    "must refuse a non-socket path, got: {err}"
+  );
+  assert!(path.exists(), "the regular file must be left intact");
+  assert_eq!(std::fs::read(&path).unwrap(), b"precious user data");
+}
+
+#[test]
 fn subscribe_streams_snapshot_then_pushes_on_worktree_change() {
   let (dir, _repo) = init_repo();
   let sock_dir = TempDir::new().unwrap();
