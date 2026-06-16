@@ -1225,17 +1225,26 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   // Computed before the JSON branch so `--format=json --detect-pr` agrees
   // with the table (issue #38 review): the JSON `pr` field uses the same
   // detected number rather than only the persisted link.
-  let detected_prs: Vec<Option<u64>> = if detect_pr {
-    let slug = github::repo_slug(&repo).ok();
-    trees
-      .iter()
-      .map(|w| {
-        let (branch, slug) = (w.branch.as_deref()?, slug.as_deref()?);
-        github::read_link_with_pr_detection(&repo, branch, slug)
-          .ok()
-          .and_then(|l| l.pr)
-      })
-      .collect()
+  // `None` = detection did not run for that row (no GitHub slug / no
+  // branch); `Some(inner)` = it ran and `inner` is the authoritative
+  // result (`None` meaning "no PR", which clears a stale persisted one).
+  // The distinction lets the JSON keep an explicit link when detection
+  // can't run, yet clear a stale PR when it ran and found none (issue #38
+  // review — resolves the round-4/round-5 tension on a plain `Option`).
+  let detected_prs: Vec<Option<Option<u64>>> = if detect_pr {
+    match github::repo_slug(&repo).ok() {
+      None => vec![None; trees.len()],
+      Some(slug) => trees
+        .iter()
+        .map(|w| {
+          w.branch.as_deref().map(|branch| {
+            github::read_link_with_pr_detection(&repo, branch, &slug)
+              .ok()
+              .and_then(|l| l.pr)
+          })
+        })
+        .collect(),
+    }
   } else {
     Vec::new()
   };
@@ -1246,14 +1255,11 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     // (an editor statusbar resolves the active worktree from the set).
     let mut dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
     if detect_pr {
-      // Override with the freshly detected number so the JSON matches
-      // `gwm list --detect-pr` (the table) — but ONLY when detection
-      // actually produced a value. A `None` here can mean "detection
-      // couldn't run" (e.g. no GitHub slug), in which case overwriting
-      // would drop the explicit/persisted link `JsonWorktree::from`
-      // already set (issue #38 review).
-      for (d, pr) in dto.iter_mut().zip(&detected_prs) {
-        if pr.is_some() {
+      // When detection RAN for a row its result is authoritative — apply
+      // it even when `None` (clears a stale persisted PR). When it did NOT
+      // run, keep the explicit/persisted link `JsonWorktree::from` set.
+      for (d, outcome) in dto.iter_mut().zip(&detected_prs) {
+        if let Some(pr) = outcome {
           d.pr = *pr;
         }
       }
@@ -1301,7 +1307,9 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     let branch = w.branch.clone().unwrap_or_else(|| "-".into());
     let status = format_status_text(w);
     if detect_pr {
-      let pr = detected_prs.get(i).copied().flatten();
+      // Outer `Option` = detection ran?; inner = the PR number. Flatten
+      // both for display (didn't-run and ran-without-PR both render `-`).
+      let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
         "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
@@ -1356,18 +1364,23 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
   }
 
   // PR auto-detection (issue #181) resolved per row against its own repo.
-  // Computed before the JSON branch so `--format=json --detect-pr` agrees
-  // with the table (issue #38 review).
-  let detected_prs: Vec<Option<u64>> = if detect_pr {
+  // `None` = detection did not run for that row (repo unopenable / no
+  // branch / no slug); `Some(inner)` = it ran (`inner` is the result,
+  // `None` clearing a stale PR). Same ran-vs-not distinction as the
+  // single-repo path (issue #38 review). Computed before the JSON branch
+  // so `--format=json --detect-pr` agrees with the table.
+  let detected_prs: Vec<Option<Option<u64>>> = if detect_pr {
     rows
       .iter()
       .map(|row| {
         let repo = Repository::open(&row.repo_path).ok()?;
         let branch = row.info.branch.as_deref()?;
         let slug = github::repo_slug(&repo).ok()?;
-        github::read_link_with_pr_detection(&repo, branch, &slug)
-          .ok()
-          .and_then(|l| l.pr)
+        Some(
+          github::read_link_with_pr_detection(&repo, branch, &slug)
+            .ok()
+            .and_then(|l| l.pr),
+        )
       })
       .collect()
   } else {
@@ -1388,12 +1401,11 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       .enumerate()
       .map(|(i, row)| {
         let mut worktree = json_api::JsonWorktree::from(&row.info);
-        // Match the table: use the freshly detected number, but only when
-        // detection actually produced one — a `None` may mean detection
-        // couldn't run, and overwriting would drop the link already set by
-        // `JsonWorktree::from` (issue #38 review).
+        // When detection ran for this row its result is authoritative
+        // (applied even when `None`, clearing a stale PR); when it did not
+        // run, keep the link `JsonWorktree::from` set (issue #38 review).
         if let Some(pr) = detected_prs.get(i).copied().flatten() {
-          worktree.pr = Some(pr);
+          worktree.pr = pr;
         }
         WorkspaceJsonWorktree {
           repo: &row.repo_name,
@@ -1449,7 +1461,8 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     let branch = w.branch.clone().unwrap_or_else(|| "-".into());
     let status = format_status_text(w);
     if detect_pr {
-      let pr = detected_prs.get(i).copied().flatten();
+      // Flatten both the ran?-Option and the PR-Option for display.
+      let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
         "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",

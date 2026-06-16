@@ -1000,6 +1000,44 @@ fn list_format_json_detect_pr_keeps_explicit_link_when_detection_cannot_run() {
 }
 
 #[test]
+fn list_format_json_detect_pr_clears_a_stale_persisted_pr() {
+  // The flip side (issue #38 review): when detection DOES run (GitHub slug
+  // present) and `gh pr list` returns no PR for a branch that had a
+  // persisted detected PR, the JSON must clear it to null — matching the
+  // table — not leave the stale number.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap();
+  let branch = head.shorthand().unwrap().to_string();
+  // A persisted (now stale) detected PR in branch config.
+  repo
+    .config()
+    .unwrap()
+    .set_i64(&format!("branch.{branch}.gwm-pr-detected"), 99)
+    .unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  // `gh pr list --head` returns no PR → detection clears the cache.
+  let fake_gh = write_dispatch_gh(fake_bin.path(), "[]", "{}");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  assert!(
+    arr.iter().all(|w| w["pr"] != serde_json::json!(99)),
+    "a stale persisted PR must be cleared once detection runs, got: {v}"
+  );
+}
+
+#[test]
 fn doctor_format_json_emits_checks_severity_and_exit_code() {
   let (dir, _repo) = init_repo();
   let out = Command::cargo_bin("gwm")
