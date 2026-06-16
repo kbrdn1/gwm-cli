@@ -118,6 +118,30 @@ pub enum GwmError {
   #[error("no {kind} linked to branch '{branch}'")]
   LinkMissing { kind: LinkKind, branch: String },
 
+  /// Issue #36: `--workspace <dir>` pointed at a directory that holds no
+  /// git repos directly below it. Surfaced rather than opening an empty
+  /// table / TUI so the user can tell a wrong path from an empty root.
+  #[error("no git repos found directly under workspace root '{root}'")]
+  EmptyWorkspace { root: String },
+
+  /// Issue #36: `gwm create` in workspace mode is ambiguous without an
+  /// explicit target repo — list the candidates so the user can pick one.
+  #[error("workspace mode: `gwm create` requires --repo <name> (one of: {available})")]
+  WorkspaceRepoRequired { available: String },
+
+  /// Issue #36: `--repo <name>` named a repo that is not present directly
+  /// under the workspace root.
+  #[error("repo '{name}' not found in workspace (available: {available})")]
+  WorkspaceRepoNotFound { name: String, available: String },
+
+  /// Issue #36: `--workspace` is a global flag, so clap accepts it for every
+  /// subcommand, but only `list`, `create` and bare `gwm` (the TUI) implement
+  /// it. Reject it elsewhere rather than silently ignoring it and acting on
+  /// the current single repo — a wrong-target footgun for destructive
+  /// commands like `gwm remove` (Codex review #303 P2).
+  #[error("--workspace is only supported with `gwm list`, `gwm create`, or bare `gwm` (the TUI) — refusing to run this subcommand against a single repo")]
+  WorkspaceUnsupportedCommand,
+
   #[error("{0}")]
   Other(String),
 }

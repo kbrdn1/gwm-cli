@@ -103,6 +103,7 @@ A second post-rc.1 train has since landed on `dev`, queued for the next release 
 - [#290](https://github.com/kbrdn1/gwm-cli/issues/290) — TUI keymap redesign (unified list-view bindings, `[tui.macro1]` / `[tui.macro2]`).
 - [#219](https://github.com/kbrdn1/gwm-cli/issues/219) — rebindable modal keys with contextual `[tui.keys.modal.<context>]` actions.
 - [#294](https://github.com/kbrdn1/gwm-cli/issues/294) — edit every keymap from the Settings panel (Keys tab, live keystroke capture, validated write-back).
+- [#36](https://github.com/kbrdn1/gwm-cli/issues/36) — **Multi-repo workspace mode** — `gwm --workspace ~/Projects` (and bare-`gwm` auto-detect) opens the TUI across every child repo with a REPO column; `gwm list --workspace` prints the merged table; `gwm create --repo <name>` disambiguates the target.
 
 Queued near-term follow-up:
 
@@ -112,7 +113,6 @@ Queued near-term follow-up:
 
 Larger investments with strategic payoff. Gated by user demand or a concrete first consumer.
 
-- [#36](https://github.com/kbrdn1/gwm-cli/issues/36) — **Multi-repo workspace mode** — `gwm --workspace ~/Projects` shows worktrees across every child repo in one TUI.
 - [#37](https://github.com/kbrdn1/gwm-cli/issues/37) — **Configuration presets** — `gwm init --preset laravel / nuxt / rust / go / python-uv` seeds an opinionated `.gwm.toml` for known stacks instead of the generic default.
 - [#38](https://github.com/kbrdn1/gwm-cli/issues/38) — **JSON-RPC / gRPC API + daemon mode** — `--format=json` on key commands, then a long-running daemon over `$XDG_RUNTIME_DIR/gwm.sock` for editor / statusbar integration.
 

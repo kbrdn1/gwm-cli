@@ -40,6 +40,7 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 
 - **Native worktree ops** via vendored `libgit2` — `git worktree add/list/remove/prune` without shelling out.
 - **CLI + ratatui TUI** — `gwm <subcommand>` for scripts, bare `gwm` opens the interactive interface.
+- **Multi-repo workspace mode** ([#36](https://github.com/kbrdn1/gwm-cli/issues/36)) — `gwm --workspace ~/Projects` opens the TUI across every git repo one level below a root (a REPO column tags each row; the active repo follows the selection); `gwm list --workspace ~/Projects` prints the merged table; `gwm create --repo <name>` picks the target. Bare `gwm` in a repo-free dir that holds child repos offers to open it as a workspace.
 - **Per-repo `.gwm.toml` + user-level global config** — branch / path conventions, file copies, regex guards, no-symlink invariants. A `~/.config/gwm/config.toml` deep-merges underneath each repo's `.gwm.toml`. Edit it git-config-style with `gwm config get / set / list / validate`.
 - **Lifecycle hooks `[hooks.*]`** — `pre_create` / `post_create` / `pre_bootstrap` / `post_bootstrap` / `pre_remove` / `post_remove` phases, each with `when:` predicates and per-step `on_fail = abort|warn|ignore`.
 - **CLI aliases + Gitmoji convention** — `[aliases]` expand `gwm <alias>` to argv before parsing; `gwm commit-prefix`, `gwm types --gitmoji`, and an opt-in `gwm hooks install commit-msg` hook enforce the repo's Gitmoji + Conventional Commits style.

@@ -164,6 +164,29 @@ impl Action {
     COMPAT_ALIASES.iter().find(|(slug, _)| *slug == s).map(|(_, a)| *a)
   }
 
+  /// Whether this action mutates a repo through the *active* repo context
+  /// (`App.repo`/`workdir`/`config`) rather than only the selected worktree's
+  /// path. In workspace mode (#304) these are blocked while the selected row's
+  /// repo can't be activated, since they would otherwise target the previously
+  /// active repo. Navigation, yanks and read-only launchers are absent on
+  /// purpose — they don't write through the active repo handle.
+  pub fn is_repo_mutating(self) -> bool {
+    matches!(
+      self,
+      Action::Create
+        | Action::DeleteConfirm
+        | Action::Bootstrap
+        | Action::Sync
+        | Action::Pull
+        | Action::Push
+        | Action::EditWorktree
+        | Action::LinkPrompt
+        // FetchGithub persists detected PR/issue titles + states into the
+        // active repo's git config, so it writes through `App.repo` too (#304).
+        | Action::FetchGithub
+    )
+  }
+
   /// The pre-#290 alias slug(s) that resolve to this action, if any. Used by
   /// the in-TUI keymap editor (issue #294) to strip a stale alias from a
   /// legacy config when the canonical slug is (re)written — otherwise the

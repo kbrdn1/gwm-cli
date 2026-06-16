@@ -18,6 +18,7 @@ use crate::naming::{parse_branch, BranchSpec};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
+use crate::workspace;
 use crate::worktree;
 use clap::{CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{generate, Shell};
@@ -44,6 +45,18 @@ pub struct Cli {
   /// execution path even if the ledger says trusted.
   #[arg(long, global = true, conflicts_with = "allow_bootstrap")]
   pub deny_bootstrap: bool,
+
+  /// Operate across every git repo one level below <DIR> (issue #36).
+  ///
+  /// Workspace mode is an orthogonal dimension on top of single-repo
+  /// mode: `gwm --workspace ~/Projects` opens the TUI over every
+  /// direct-child repo, and `gwm list --workspace ~/Projects` prints
+  /// the merged worktree table with a leading `REPO` column.
+  /// `.gwm.toml` stays per-repo — there is no workspace-level config.
+  /// `global = true` so the flag is accepted before or after the
+  /// subcommand.
+  #[arg(long, global = true, value_name = "DIR")]
+  pub workspace: Option<PathBuf>,
 
   #[command(subcommand)]
   pub command: Option<Command>,
@@ -113,6 +126,12 @@ pub enum Command {
     /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
+    /// In workspace mode (`--workspace <dir>`), which child repo gets the
+    /// new worktree (issue #36). Required there to disambiguate; ignored
+    /// in single-repo mode, where the worktree always lands in the
+    /// discovered repo.
+    #[arg(long, value_name = "NAME")]
+    repo: Option<String>,
   },
   /// Render the PR body from `[pr_template]` (issue #84), then
   /// `gh pr create` unless `--render` is passed.
@@ -733,12 +752,33 @@ pub fn run(cli: Cli) -> Result<()> {
   // sites (`submit_create`, `bootstrap_selected`) take the same
   // trust decision as `gwm create` / `gwm bootstrap`.
   let Some(cmd) = cli.command else {
+    // Explicit workspace mode (issue #36): `gwm --workspace <root>` opens the
+    // TUI across every child repo.
+    if let Some(root) = cli.workspace {
+      return crate::tui::run_workspace(&root, mode);
+    }
+    // Auto-detect: bare `gwm` in a repo-free directory that holds child repos
+    // offers to open it as a workspace.
+    if let Some(root) = autodetect_workspace_prompt()? {
+      return crate::tui::run_workspace(&root, mode);
+    }
     return crate::tui::run(mode);
   };
 
+  // `--workspace` is global (clap accepts it everywhere) but only `list`,
+  // `create` and the bare TUI implement it. Reject it on any other subcommand
+  // rather than silently ignoring it and acting on the current single repo — a
+  // wrong-target footgun for destructive commands (Codex review #303 P2).
+  if cli.workspace.is_some() && !matches!(cmd, Command::List { .. } | Command::Create { .. }) {
+    return Err(GwmError::WorkspaceUnsupportedCommand);
+  }
+
   match cmd {
     Command::Init => cmd_init(),
-    Command::List { format, detect_pr } => cmd_list(format, detect_pr),
+    Command::List { format, detect_pr } => match cli.workspace {
+      Some(root) => cmd_list_workspace(&root, format, detect_pr),
+      None => cmd_list(format, detect_pr),
+    },
     Command::Create {
       branch_type,
       issue,
@@ -746,7 +786,23 @@ pub fn run(cli: Cli) -> Result<()> {
       no_bootstrap,
       reuse_branch,
       skip_hooks,
-    } => cmd_create(branch_type, issue, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
+      repo,
+    } => {
+      let start = match &cli.workspace {
+        Some(root) => Some(resolve_workspace_create_repo(root, repo)?),
+        None => None,
+      };
+      cmd_create(
+        branch_type,
+        issue,
+        desc,
+        no_bootstrap,
+        reuse_branch,
+        skip_hooks,
+        mode,
+        start.as_deref(),
+      )
+    }
     Command::New {
       branch_type,
       desc,
@@ -796,6 +852,39 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
     Command::Tui { action } => cmd_tui(action),
     Command::Theme { action } => cmd_theme(action),
+  }
+}
+
+/// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a
+/// git repo but holds direct-child repos, ask whether to open it as a
+/// workspace. Returns the chosen root on a yes (`Enter` / `y`), else `None` so
+/// the caller falls through to single-repo discovery (which then surfaces
+/// `NotInGitRepo`). Declines silently when stdin is not a terminal (pipes / CI)
+/// so non-interactive `gwm` behaves exactly as before — never blocking on a
+/// prompt nobody can answer.
+fn autodetect_workspace_prompt() -> Result<Option<PathBuf>> {
+  use std::io::{IsTerminal, Write};
+
+  let cwd = std::env::current_dir()?;
+  let Some(ws) = workspace::autodetect(&cwd) else {
+    return Ok(None);
+  };
+  if !io::stdin().is_terminal() {
+    return Ok(None);
+  }
+  eprint!(
+    "No git repo here. Open {} as a workspace ({} repos)? [Y/n] ",
+    cwd.display(),
+    ws.repos.len()
+  );
+  io::stderr().flush().ok();
+  let mut answer = String::new();
+  io::stdin().read_line(&mut answer)?;
+  let a = answer.trim().to_ascii_lowercase();
+  if a.is_empty() || a == "y" || a == "yes" {
+    Ok(Some(ws.root))
+  } else {
+    Ok(None)
   }
 }
 
@@ -1119,6 +1208,125 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   Ok(())
 }
 
+/// `gwm list --workspace <root>`: the merged, repo-tagged table across every
+/// git repo one level below `root` (issue #36). Mirrors [`cmd_list`]'s columns
+/// but prepends a `REPO` column; `--detect-pr` is honoured per row against the
+/// owning repo. `--format names` qualifies each worktree as `<repo>/<name>`
+/// (including the main worktree, which in workspace mode is the primary `cd`
+/// target) so a completion candidate is unambiguous across repos.
+fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Result<()> {
+  let ws = workspace::discover(root)?;
+  if ws.is_empty() {
+    return Err(GwmError::EmptyWorkspace {
+      root: root.display().to_string(),
+    });
+  }
+  let rows = workspace::merge_worktrees(&ws)?;
+
+  if format == ListFormat::Names {
+    for row in &rows {
+      println!("{}/{}", row.repo_name, row.info.name);
+    }
+    return Ok(());
+  }
+
+  // PR auto-detection (issue #181) resolved per row against its own repo.
+  let detected_prs: Vec<Option<u64>> = if detect_pr {
+    rows
+      .iter()
+      .map(|row| {
+        let repo = Repository::open(&row.repo_path).ok()?;
+        let branch = row.info.branch.as_deref()?;
+        let slug = github::repo_slug(&repo).ok()?;
+        github::read_link_with_pr_detection(&repo, branch, &slug)
+          .ok()
+          .and_then(|l| l.pr)
+      })
+      .collect()
+  } else {
+    Vec::new()
+  };
+
+  let repo_w = rows.iter().map(|r| r.repo_name.len()).max().unwrap_or(4).clamp(4, 30);
+  let name_w = rows.iter().map(|r| r.info.name.len()).max().unwrap_or(4).clamp(4, 40);
+  let branch_w = rows
+    .iter()
+    .map(|r| r.info.branch.as_deref().unwrap_or("-").len())
+    .max()
+    .unwrap_or(6)
+    .clamp(6, 40);
+  let status_w = 14;
+  let pr_w = 6;
+
+  if detect_pr {
+    println!(
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "REPO",
+      "NAME",
+      "BRANCH",
+      "STATUS",
+      "PR",
+      rw = repo_w,
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
+      pw = pr_w,
+    );
+  } else {
+    println!(
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "REPO",
+      "NAME",
+      "BRANCH",
+      "STATUS",
+      rw = repo_w,
+      nw = name_w,
+      bw = branch_w,
+      sw = status_w,
+    );
+  }
+  for (i, row) in rows.iter().enumerate() {
+    let w = &row.info;
+    let mark = if w.is_main { "*" } else { " " };
+    let branch = w.branch.clone().unwrap_or_else(|| "-".into());
+    let status = format_status_text(w);
+    if detect_pr {
+      let pr = detected_prs.get(i).copied().flatten();
+      let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
+      println!(
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        mark,
+        row.repo_name,
+        w.name,
+        branch,
+        status,
+        pr_cell,
+        w.path.display(),
+        rw = repo_w,
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+        pw = pr_w,
+      );
+    } else {
+      println!(
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        mark,
+        row.repo_name,
+        w.name,
+        branch,
+        status,
+        w.path.display(),
+        rw = repo_w,
+        nw = name_w,
+        bw = branch_w,
+        sw = status_w,
+      );
+    }
+  }
+  Ok(())
+}
+
 fn format_status_text(w: &worktree::WorktreeInfo) -> String {
   if w.is_prunable {
     return "prunable".into();
@@ -1189,6 +1397,34 @@ pub fn repo_context_lenient(start: Option<&Path>) -> Result<RepoContext> {
   Ok(RepoContext { repo, workdir, config })
 }
 
+/// Resolve which child repo a workspace-mode `gwm create` targets (issue #36).
+/// `--repo` is required there to disambiguate; an absent flag lists the
+/// candidates, an unknown name lists them too. Returns the chosen repo's path
+/// so [`cmd_create`] can discover from it instead of the current directory.
+fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<PathBuf> {
+  let ws = workspace::discover(root)?;
+  if ws.is_empty() {
+    return Err(GwmError::EmptyWorkspace {
+      root: root.display().to_string(),
+    });
+  }
+  let available = ws.repos.iter().map(|r| r.name.as_str()).collect::<Vec<_>>().join(", ");
+  let name = repo.ok_or_else(|| GwmError::WorkspaceRepoRequired {
+    available: available.clone(),
+  })?;
+  ws.repos
+    .iter()
+    .find(|r| r.name == name)
+    .map(|r| r.path.clone())
+    .ok_or(GwmError::WorkspaceRepoNotFound { name, available })
+}
+
+// `cmd_create` mirrors the `Create` subcommand's independent CLI args 1:1
+// (three positionals + three flags + the resolved trust mode), and #36 adds
+// the workspace `start` path. Bundling them into a struct would only add an
+// indirection that obscures the direct subcommand → handler mapping the rest
+// of this dispatcher follows, so the arg count is deliberate here.
+#[allow(clippy::too_many_arguments)]
 fn cmd_create(
   branch_type: String,
   issue: String,
@@ -1197,8 +1433,9 @@ fn cmd_create(
   reuse_branch: bool,
   skip_hooks: Option<String>,
   trust_mode: TrustMode,
+  start: Option<&Path>,
 ) -> Result<()> {
-  let RepoContext { repo, workdir, config } = repo_context(None)?;
+  let RepoContext { repo, workdir, config } = repo_context(start)?;
   let repo_name = worktree::repo_name(&repo);
 
   let resolved_types = config.resolved_branch_types();
@@ -1304,6 +1541,7 @@ fn cmd_new(
     reuse_branch,
     skip_hooks,
     trust_mode,
+    None,
   )
 }
 

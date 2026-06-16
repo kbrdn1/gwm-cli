@@ -452,6 +452,24 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // borrow handed to `render_stateful_widget`.
   let theme = app.theme;
 
+  // Workspace mode (issue #36): a leading REPO column naming each row's repo.
+  // Names are resolved per visible row up front so the immutable `app` reads
+  // don't clash with the mutable `list_state` borrow at render time.
+  let is_workspace = app.is_workspace();
+  let repo_names: Vec<String> = if is_workspace {
+    filtered
+      .iter()
+      .map(|&raw| app.row_repo_name(raw).unwrap_or("?").to_string())
+      .collect()
+  } else {
+    Vec::new()
+  };
+  let repo_w = if is_workspace {
+    column_width(repo_names.iter().map(|s| s.as_str()), 6, 24)
+  } else {
+    0
+  };
+
   // Dynamic column widths derived from the visible subset so columns fit the
   // rows actually on screen. The path column is always last and absorbs the
   // remaining width.
@@ -459,23 +477,26 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let branch_w = column_width(visible.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
   let status_w: u16 = 16;
 
-  let header = Row::new(vec![
-    // Age column lives at column 0 — recency-first, lazygit-style. No
-    // caption; the glyphs (`2d`, `3w`, `1M`, `5y`, `-`) are self-evident
-    // and a header would steal space from BRANCH on narrow terminals.
-    Cell::from(""),
-    // Issue / PR badge column (the `●/●` pastilles) — `I/P` fits its 3 cells.
-    Cell::from("I/P"),
-    Cell::from("NAME"),
-    Cell::from("BRANCH"),
-    Cell::from("STATUS"),
-    Cell::from("PATH"),
-  ])
-  .style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
+  // Header cells, with an optional REPO column after the (caption-less) age
+  // column in workspace mode.
+  let mut header_cells = vec![Cell::from("")];
+  if is_workspace {
+    header_cells.push(Cell::from("REPO"));
+  }
+  header_cells.push(Cell::from("I/P"));
+  header_cells.push(Cell::from("NAME"));
+  header_cells.push(Cell::from("BRANCH"));
+  header_cells.push(Cell::from("STATUS"));
+  header_cells.push(Cell::from("PATH"));
+  let header = Row::new(header_cells).style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
 
   let rows: Vec<Row> = visible
     .iter()
-    .map(|w| build_row(w, name_w, branch_w, status_w, &theme))
+    .enumerate()
+    .map(|(vi, w)| {
+      let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
+      build_row(w, repo, name_w, branch_w, status_w, &theme)
+    })
     .collect();
 
   // ratatui's Layout solver squeezes the FIRST `Length` column to
@@ -491,14 +512,19 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   //   - `Fill(1)` for path: takes whatever's left, vanishes last.
   // Verified by standalone probe down to 40-cell terminals: col 0
   // stays at 4 cells across every size.
-  let widths = [
-    Constraint::Length(4),
+  let mut widths = vec![Constraint::Length(4)];
+  if is_workspace {
+    // REPO column sits between age and the I/P marker; a hard length so the
+    // solver doesn't starve it on narrow terminals.
+    widths.push(Constraint::Length(repo_w));
+  }
+  widths.extend([
     Constraint::Length(3),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
     Constraint::Fill(1),
-  ];
+  ]);
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
@@ -1610,7 +1636,18 @@ pub fn help_label_style(theme: &Theme) -> Style {
   Style::default().fg(theme.name)
 }
 
-fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
+/// Build one worktree table row. In workspace mode (issue #36) `repo` is
+/// `Some((name, width))` and a leading `REPO` cell is inserted after the age
+/// column, painted in the `accent` role; in single-repo mode it is `None` and
+/// the row keeps its historical shape.
+fn build_row(
+  w: &WorktreeInfo,
+  repo: Option<(&str, u16)>,
+  name_w: u16,
+  branch_w: u16,
+  status_w: u16,
+  theme: &Theme,
+) -> Row<'static> {
   let marker = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
@@ -1641,14 +1678,19 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme:
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(worktree_path_style(theme));
 
-  Row::new(vec![
-    age_cell,
-    Cell::from(marker),
-    name_cell,
-    branch_cell,
-    status_cell,
-    path_cell,
-  ])
+  let mut cells = vec![age_cell];
+  if let Some((repo_name, repo_w)) = repo {
+    cells.push(
+      Cell::from(trunc(repo_name, repo_w as usize))
+        .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+    );
+  }
+  cells.push(Cell::from(marker));
+  cells.push(name_cell);
+  cells.push(branch_cell);
+  cells.push(status_cell);
+  cells.push(path_cell);
+  Row::new(cells)
 }
 
 /// Owned-String wrapper around `worktree::format_relative_duration` so

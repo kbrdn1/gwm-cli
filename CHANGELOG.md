@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Multi-repo workspace mode** (issue #36): operate across every git repo one
+  level below a root directory instead of a single repo. Two entry points:
+  - `gwm --workspace ~/Projects` opens the TUI over every direct-child repo,
+    and `gwm list --workspace ~/Projects` prints the merged worktree table.
+    Both accept the flag before or after the subcommand (`global = true`).
+  - Bare `gwm` in a directory that is *not* itself a git repo but holds
+    child repos prompts `No git repo here. Open <dir> as a workspace? [Y/n]`
+    (declined silently when stdin is not a terminal, so pipes / CI keep the
+    old single-repo behaviour).
+  - The CLI table and the TUI list gain a leading **REPO** column naming each
+    row's repo. In the TUI the active repo follows the selection, so every
+    selection-driven action (lazygit, terminal, sync, delete, link, open, …)
+    operates on the highlighted worktree's own repo.
+  - `gwm create` in workspace mode requires `--repo <name>` to disambiguate
+    which child repo gets the new worktree; an absent or unknown name lists
+    the candidates.
+  - `.gwm.toml` stays per-repo — each row inherits its own repo's config.
+    There is no workspace-level config in this version; the keymap and theme
+    resolve once from the first repo, matching the single-repo "resolved once,
+    relaunch to change" contract.
 - **Current-PR CI status indicator in the Status pane** (issue #299): the
   Issue / PR section (`2`) now renders an overall CI state for the linked PR
   instead of a bare ` · checks N/M`. A coloured nerd-font indicator
