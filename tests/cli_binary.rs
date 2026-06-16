@@ -1682,7 +1682,7 @@ fn review_resolves_pr_metadata_and_names_branch_end_to_end() {
     .env("GWM_GH", &fake_gh)
     .env("PATH", prepend_path(fake_bin.path()))
     .env("GIT_ALLOW_PROTOCOL", "file") // reject the https fetch instantly, no network
-    .args(["review", "1", "--no-bootstrap"])
+    .args(["review", "1"])
     .assert()
     .failure()
     .stdout(predicate::str::contains("PR     : #1 by alice (feat/spike-x → main)"))

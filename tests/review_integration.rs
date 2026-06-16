@@ -5,7 +5,10 @@
 //! ref exactly as GitHub does.
 
 use git2::Repository;
+use gwm::config::{Config, HookStep};
+use gwm::lifecycle::{HookContext, HookSkips};
 use gwm::{github, review};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use tempfile::TempDir;
@@ -125,6 +128,76 @@ fn materialize_attaches_worktree_links_pr_and_records_base() {
     .get_string("branch.review/pr-1-alice-x.gwm-base")
     .unwrap();
   assert_eq!(base, "main");
+}
+
+/// A `HookContext` whose cwd/path point at the (pretend) review worktree.
+/// Public fields, so no `git2` fixture is needed.
+fn review_ctx(worktree: &Path) -> HookContext {
+  HookContext {
+    main_repo: worktree.to_path_buf(),
+    cwd: worktree.to_path_buf(),
+    path: worktree.to_path_buf(),
+    branch: "review/pr-1-alice-x".into(),
+    branch_type: "review".into(),
+    issue: "1".into(),
+    desc: "x".into(),
+    user: "tester".into(),
+    owner: "kbrdn1".into(),
+    repo: "gwm-cli".into(),
+  }
+}
+
+fn config_with_post_create(sentinel: &str) -> Config {
+  let mut cfg = Config::default();
+  cfg.hooks.post_create.push(HookStep {
+    name: "sentinel".into(),
+    run: format!("echo {sentinel}"),
+    when: None,
+    env: HashMap::new(),
+    on_fail: gwm::config::HookOnFail::default(),
+  });
+  cfg
+}
+
+#[test]
+fn run_post_setup_skips_all_execution_without_bootstrap_flag() {
+  // SECURITY (issue #308): a review worktree holds a contributor's possibly
+  // untrusted code. Without `--bootstrap`, `run_post_setup` must execute
+  // NOTHING — no bootstrap commands, no `post_create` hook — so a fork PR
+  // can't run code on `gwm review`. Unique sentinel ⇒ absence is meaningful.
+  let sentinel = "gwm-review-nobootstrap-9f3c";
+  let wt = TempDir::new().unwrap();
+  let cfg = config_with_post_create(sentinel);
+  let ctx = review_ctx(wt.path());
+
+  let out = review::run_post_setup(&cfg, &ctx, wt.path(), wt.path(), &HookSkips::default(), false).unwrap();
+
+  assert!(out.is_none(), "no setup runs without --bootstrap");
+  let recorded = gwm::command_log::snapshot();
+  assert!(
+    !recorded.iter().any(|e| e.command.contains(sentinel)),
+    "the post_create hook must NOT execute when bootstrap is off"
+  );
+}
+
+#[test]
+fn run_post_setup_runs_hooks_with_bootstrap_flag() {
+  // The opt-in path: `--bootstrap` runs the full create-parity sequence, so
+  // the configured `post_create` hook executes against the worktree.
+  let sentinel = "gwm-review-bootstrap-7a21";
+  let wt = TempDir::new().unwrap();
+  let cfg = config_with_post_create(sentinel);
+  let ctx = review_ctx(wt.path());
+
+  let out = review::run_post_setup(&cfg, &ctx, wt.path(), wt.path(), &HookSkips::default(), true).unwrap();
+
+  assert!(out.is_some(), "setup runs and reports back with --bootstrap");
+  let recorded = gwm::command_log::snapshot();
+  let mine = recorded
+    .iter()
+    .find(|e| e.command.contains(sentinel))
+    .expect("the post_create hook executes when bootstrap is on");
+  assert!(mine.is_success(), "the sentinel hook exits cleanly");
 }
 
 #[test]

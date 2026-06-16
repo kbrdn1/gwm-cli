@@ -18,13 +18,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   valid for PRs in any state (open / draft / closed / merged) — into a local
   `review/pr-<N>-<author>-<slug>` branch, attaches a worktree, links the PR so
   the sidebar / CI indicator light up immediately, and points the diff base at
-  the PR's base ref. Runs the same bootstrap + lifecycle-hook sequence as
-  `gwm create`; tear down with `gwm remove <dir> --delete-branch` like any
-  worktree. `--name` overrides the branch, `--no-bootstrap` / `--skip-hooks`
-  mirror `create`. This closes the loop the v0.10.0-rc.2 CI indicator opened —
-  a failing PR can now be pulled into a worktree to act on. (The branch-level
-  `gwm checkout <remote-branch>` / `gwm create --from` primitives noted in #308
-  are deferred to a follow-up.)
+  the PR's base ref (`origin/<base>`). Tear down with
+  `gwm remove <dir> --delete-branch` like any worktree. `--name` overrides the
+  branch. **Safe-by-default**: bootstrap and lifecycle hooks are *not* run,
+  because a review worktree holds a contributor's (possibly fork) code and
+  those steps execute commands against it (`npm install`, `composer install`,
+  `direnv allow`, `post_create` hooks …) — i.e. arbitrary code; pass
+  `--bootstrap` to opt in once you trust the PR. This closes the loop the
+  v0.10.0-rc.2 CI indicator opened — a failing PR can now be pulled into a
+  worktree to act on. (The branch-level `gwm checkout <remote-branch>` /
+  `gwm create --from` primitives noted in #308 are deferred to a follow-up.)
 
 ## Past releases
 

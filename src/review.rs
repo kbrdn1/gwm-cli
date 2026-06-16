@@ -15,7 +15,10 @@
 //! [`crate::sync`] does; everything else (branch existence, worktree
 //! attach, PR link) goes through libgit2.
 
+use crate::bootstrap::{self, BootstrapCtx, BootstrapReport};
+use crate::config::Config;
 use crate::error::{GwmError, Result};
+use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::naming::kebab;
 use crate::{github, launcher, worktree};
 use git2::Repository;
@@ -147,4 +150,64 @@ pub fn materialize(repo: &Repository, workdir: &Path, spec: &ReviewSpec) -> Resu
   }
 
   Ok(created)
+}
+
+/// The ordered reports produced when `gwm review` runs setup against a
+/// materialised worktree, mirroring `gwm create`'s bootstrap sequence.
+#[derive(Debug)]
+pub struct ReviewSetupReports {
+  pub pre_bootstrap: BootstrapReport,
+  pub bootstrap: BootstrapReport,
+  pub post_bootstrap: BootstrapReport,
+  pub post_create: BootstrapReport,
+}
+
+/// Run the post-materialise bootstrap + lifecycle-hook sequence — the steps
+/// `gwm review` shares with `gwm create` — **only when `bootstrap` is true**.
+///
+/// This gate is a security boundary, not a convenience toggle. Unlike
+/// `gwm create` (which sets up a branch off *your* HEAD), `gwm review`
+/// materialises a worktree full of a contributor's PR code, possibly from an
+/// untrusted fork. The bootstrap commands and the `pre_bootstrap` /
+/// `post_bootstrap` / `post_create` hooks all run with their cwd inside that
+/// worktree, so `npm install` (preinstall scripts), `composer install`,
+/// `direnv allow` (the PR's `.envrc`), a `Makefile` target, etc. would
+/// execute attacker-controlled code. The repo's own `.gwm.toml` being trusted
+/// (the TOFU ledger) does not cover the PR-controlled files those commands
+/// evaluate — so review is **safe-by-default**, and this whole sequence is
+/// opt-in via `gwm review --bootstrap`. Returns `None` (nothing executed)
+/// when `bootstrap` is false.
+///
+/// `ctx` must already point its cwd at the materialised worktree (build it
+/// with `HookContext::with_cwd`).
+pub fn run_post_setup(
+  config: &Config,
+  ctx: &HookContext,
+  main_repo: &Path,
+  worktree: &Path,
+  skips: &HookSkips,
+  bootstrap: bool,
+) -> Result<Option<ReviewSetupReports>> {
+  if !bootstrap {
+    return Ok(None);
+  }
+
+  let pre_bootstrap = lifecycle::run_phase(config, HookPhase::PreBootstrap, ctx, skips, false)?;
+  let bctx = BootstrapCtx {
+    main_repo,
+    worktree,
+    config,
+  };
+  let bootstrap = bootstrap::run_core(&bctx)?;
+  let post_bootstrap = lifecycle::run_phase(config, HookPhase::PostBootstrap, ctx, skips, false)?;
+  // `true`: legacy `[[bootstrap.command]]` is folded into post_create when no
+  // explicit hook block exists — matches `cmd_create`'s bootstrapped path.
+  let post_create = lifecycle::run_phase(config, HookPhase::PostCreate, ctx, skips, true)?;
+
+  Ok(Some(ReviewSetupReports {
+    pre_bootstrap,
+    bootstrap,
+    post_bootstrap,
+    post_create,
+  }))
 }

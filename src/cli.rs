@@ -197,10 +197,15 @@ pub enum Command {
   /// Resolves the PR head via `gh` and fetches origin's universal
   /// `refs/pull/<N>/head` ref — cross-fork aware, and valid for PRs in any
   /// state (open / draft / closed / merged) — into a local
-  /// `review/pr-<N>-<author>-<slug>` branch, attaches a worktree, links the
-  /// PR so the sidebar / CI indicator light up immediately, and runs the
-  /// same bootstrap + lifecycle hooks as `gwm create`. Tear down with
-  /// `gwm remove <dir> --delete-branch` like any worktree.
+  /// `review/pr-<N>-<author>-<slug>` branch, attaches a worktree, and links
+  /// the PR so the sidebar / CI indicator light up immediately. Tear down
+  /// with `gwm remove <dir> --delete-branch` like any worktree.
+  ///
+  /// Safe-by-default: bootstrap and lifecycle hooks are NOT run, because a
+  /// review worktree holds a contributor's (possibly fork) code and those
+  /// steps execute commands against it (`npm install`, `composer install`,
+  /// `direnv allow`, `post_create` hooks …) — i.e. arbitrary code. Pass
+  /// `--bootstrap` to opt in once you trust the PR enough to set it up.
   Review {
     /// PR number to review (digits only).
     #[arg()]
@@ -210,9 +215,11 @@ pub enum Command {
     /// from this name (slashes become dashes).
     #[arg(long, value_name = "BRANCH")]
     name: Option<String>,
-    /// Skip bootstrap after creation.
+    /// Run bootstrap + lifecycle hooks against the PR's code after creation.
+    /// Off by default — these execute commands the PR can influence, so it's
+    /// opt-in (see the command help for the security rationale).
     #[arg(long)]
-    no_bootstrap: bool,
+    bootstrap: bool,
     /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
     #[arg(long, value_name = "PHASES")]
     skip_hooks: Option<String>,
@@ -910,9 +917,9 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Review {
       number,
       name,
-      no_bootstrap,
+      bootstrap,
       skip_hooks,
-    } => cmd_review(number, name, no_bootstrap, skip_hooks, mode),
+    } => cmd_review(number, name, bootstrap, skip_hooks, mode),
     Command::Remove {
       pattern,
       delete_branch,
@@ -1700,13 +1707,15 @@ fn cmd_create(
 
 /// `gwm review <PR#>` (issue #308) — the inbound counterpart to
 /// `cmd_create`. Resolves the PR head via `gh`, materialises a worktree on
-/// origin's `refs/pull/<N>/head` ref (see [`crate::review`]), links the PR,
-/// then runs the identical bootstrap + lifecycle-hook sequence so a review
-/// worktree is set up exactly like one we authored.
+/// origin's `refs/pull/<N>/head` ref (see [`crate::review`]), and links the
+/// PR. Setup (bootstrap + lifecycle hooks) is **opt-in** via `--bootstrap`:
+/// the worktree holds a contributor's possibly-untrusted code and those
+/// steps run commands against it, so review is safe-by-default (see
+/// [`review::run_post_setup`] for the threat model).
 fn cmd_review(
   number: u64,
   name: Option<String>,
-  no_bootstrap: bool,
+  bootstrap: bool,
   skip_hooks: Option<String>,
   trust_mode: TrustMode,
 ) -> Result<()> {
@@ -1742,26 +1751,23 @@ fn cmd_review(
 
   // A `review/…` branch carries no BranchSpec of its own; synthesize one
   // (bypassing the type validation that would reject `review`) purely to
-  // drive the hook placeholders, so `pre_create` / `post_create` see the
-  // same `{type}`/`{issue}`/`{desc}` surface they do under `gwm create`.
+  // drive the hook placeholders, so the hooks see the same
+  // `{type}`/`{issue}`/`{desc}` surface they do under `gwm create`.
   let spec = BranchSpec {
     type_: "review".to_string(),
     issue: number.to_string(),
     desc: slug.clone(),
   };
-
-  // Gate the bootstrap / hook RCE primitives on the TOFU ledger BEFORE
-  // touching disk — identical to `cmd_create`.
-  let create_hooks_present = !config.hooks.pre_create.is_empty()
-    || !config.hooks.post_create.is_empty()
-    || (!no_bootstrap && !config.bootstrap.command.is_empty());
-  if !no_bootstrap || create_hooks_present {
-    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
-  }
-
   let pre_ctx = HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, &spec);
-  let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
-  print_lifecycle_report(&report);
+
+  // Setup runs arbitrary commands against the PR's code, so it is opt-in.
+  // Only when `--bootstrap` is passed do we gate the RCE primitives on the
+  // TOFU ledger and run `pre_create` before materialising.
+  if bootstrap {
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+    let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
+  }
 
   println!("creating review worktree:");
   println!(
@@ -1799,30 +1805,20 @@ fn cmd_review(
   println!("✓ linked to PR #{number}");
 
   let post_ctx = pre_ctx.with_cwd(&created);
-
-  if no_bootstrap {
-    println!("(skipped bootstrap)");
-  } else {
-    let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &post_ctx, &skips, false)?;
-    print_lifecycle_report(&report);
-
-    let ctx = BootstrapCtx {
-      main_repo: &workdir,
-      worktree: &created,
-      config: &config,
-    };
-    let report = bootstrap::run_core(&ctx)?;
-    print_report(&report);
-
-    let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &post_ctx, &skips, false)?;
-    print_lifecycle_report(&report);
+  match review::run_post_setup(&config, &post_ctx, &workdir, &created, &skips, bootstrap)? {
+    Some(reports) => {
+      print_lifecycle_report(&reports.pre_bootstrap);
+      print_report(&reports.bootstrap);
+      print_lifecycle_report(&reports.post_bootstrap);
+      if config.hooks.has_any() && !config.bootstrap.command.is_empty() {
+        eprintln!("warning: [[bootstrap.command]] is deprecated as a post_create hook when [hooks.*] is present");
+      }
+      print_lifecycle_report(&reports.post_create);
+    }
+    None => {
+      println!("(skipped bootstrap + hooks — pass --bootstrap to run setup against the PR's code)");
+    }
   }
-
-  if config.hooks.has_any() && !config.bootstrap.command.is_empty() {
-    eprintln!("warning: [[bootstrap.command]] is deprecated as a post_create hook when [hooks.*] is present");
-  }
-  let report = lifecycle::run_phase(&config, HookPhase::PostCreate, &post_ctx, &skips, !no_bootstrap)?;
-  print_lifecycle_report(&report);
   Ok(())
 }
 
