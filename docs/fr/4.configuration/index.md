@@ -15,5 +15,6 @@ gwm lit `.gwm.toml` depuis la racine du dépôt. Sans configuration, il revient 
 - **[Guards regex](/fr/configuration/guards)** — patterns de deny-list sur les fichiers copiés (l'incident d'origine « pas d'AWS RDS dans `.env` »).
 - **[Prédicats `when`](/fr/configuration/when-predicates)** — `file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`, avec composition `!`, `&&`, `||`.
 - **[Trust ledger TOFU](/fr/configuration/trust-ledger)** — la barrière qui se déclenche avant le pipeline de bootstrap (issue #95). Modèle de menace, surface CLI (`gwm trust list / revoke / show`), comportement de la TUI, format du ledger, bypass CI.
+- **[Presets de configuration](/fr/configuration/presets)** — `gwm init --preset <stack>` génère un `.gwm.toml` clé en main pour une stack connue (`laravel`, `node`/`nuxt`, `rust`, `go`, `python-uv`, `generic`) au lieu du template générique ; `--list-presets` et `--show`.
 
 Exécutez `gwm init` dans un dépôt vierge pour écrire un `.gwm.toml` par défaut. Pour l'exemple annoté complet avec chaque champ commenté, voir [`examples/gwm.toml.example`](https://github.com/kbrdn1/gwm-cli/blob/main/examples/gwm.toml.example) dans le dépôt.
