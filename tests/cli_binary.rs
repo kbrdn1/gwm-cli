@@ -1630,6 +1630,98 @@ fn init_outside_git_repo_fails() {
     .stderr(predicate::str::contains("not inside a git repository"));
 }
 
+// --- init --preset (issue #37) ------------------------------------------
+
+#[test]
+fn init_list_presets_enumerates_builtins() {
+  // `--list-presets` is a pure stdout enumeration — it must work without a
+  // git repo (it returns before `discover_repo`) and name every built-in.
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--list-presets"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("generic"))
+    .stdout(predicate::str::contains("laravel"))
+    .stdout(predicate::str::contains("node"))
+    .stdout(predicate::str::contains("rust"))
+    .stdout(predicate::str::contains("python-uv"));
+}
+
+#[test]
+fn init_preset_show_prints_without_writing() {
+  // `--show` prints the resolved preset to stdout and writes nothing — so a
+  // user can diff a preset against an existing config.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "rust", "--show"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[[bootstrap.no_symlink]]"))
+    .stdout(predicate::str::contains("target"));
+
+  assert!(!cfg_path.exists(), "--show must not write .gwm.toml to disk");
+}
+
+#[test]
+fn init_preset_writes_stack_config() {
+  // `--preset laravel` seeds the opinionated stack config: the AWS-RDS guard
+  // and the vendor/ no-symlink are the markers that distinguish it from the
+  // generic template.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "laravel"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(".gwm.toml"));
+
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(body.contains("no-aws-rds"), "laravel preset missing the AWS-RDS guard");
+  assert!(body.contains("vendor"), "laravel preset missing the vendor no-symlink");
+}
+
+#[test]
+fn init_unknown_preset_fails() {
+  // An unknown preset name must fail loudly and point the user at
+  // `--list-presets` rather than silently writing the generic template.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "cobol"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cobol"))
+    .stderr(predicate::str::contains("list-presets"));
+}
+
+#[test]
+fn init_preset_nuxt_alias_writes_node_body() {
+  // `nuxt` is an alias of `node`: it must seed the node_modules no-symlink.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "nuxt"])
+    .assert()
+    .success();
+
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(body.contains("node_modules"), "nuxt alias must seed the node preset");
+}
+
 // --- create -------------------------------------------------------------
 
 /// Write a `.gwm.toml` that redirects `[worktree].base` into the test's
