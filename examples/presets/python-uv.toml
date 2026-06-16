@@ -1,0 +1,22 @@
+# gwm preset: python-uv
+#
+# Opinionated .gwm.toml for a Python project managed with uv:
+#   - refuses to inherit the `.venv/` symlink (each worktree gets its own)
+#   - runs `uv sync` after the worktree is created
+#
+# Preview with `gwm init --preset python-uv --show`. See
+# examples/gwm.toml.example for the full schema.
+
+[worktree]
+base = "{home}/cc-worktree/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+
+[[bootstrap.no_symlink]]
+path = ".venv"
+
+[[hooks.post_create]]
+name = "uv sync"
+run = "uv sync"
+when = "file_exists:pyproject.toml"
+on_fail = "warn"
