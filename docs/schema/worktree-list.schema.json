@@ -46,7 +46,7 @@
         },
         "head": {
           "type": ["string", "null"],
-          "description": "Short HEAD oid, or null."
+          "description": "Full HEAD commit oid (40-char hex), or null when unresolvable."
         },
         "is_main": { "type": "boolean" },
         "is_locked": { "type": "boolean" },

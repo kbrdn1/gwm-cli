@@ -57,7 +57,9 @@ pub struct JsonWorktree {
   /// Absolute path to the worktree working directory.
   pub path: String,
   pub branch: Option<String>,
-  /// Short HEAD oid, when resolvable.
+  /// Full HEAD commit oid (40-char hex), when resolvable. A machine
+  /// consumer gets the exact oid for comparison; truncate client-side if a
+  /// short form is wanted.
   pub head: Option<String>,
   pub is_main: bool,
   pub is_locked: bool,
