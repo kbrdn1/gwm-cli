@@ -63,7 +63,11 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  undo "))
     .stdout(predicate::str::contains("  history "))
     // Issue #87: configurable TUI keymap (`gwm tui keys`).
-    .stdout(predicate::str::contains("  tui "));
+    .stdout(predicate::str::contains("  tui "))
+    // Issue #38: long-running JSON-RPC daemon over a unix socket. The
+    // subcommand is always listed (help is identical cross-platform); the
+    // socket impl is `cfg(unix)`-gated and returns a clean error elsewhere.
+    .stdout(predicate::str::contains("  daemon "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -905,6 +909,210 @@ fn list_format_names_emits_one_name_per_line() {
     // accepts (path/remove/bootstrap skip the main workdir). A fresh repo
     // therefore prints nothing.
     .stdout(predicate::str::is_empty());
+}
+
+// --- JSON output flags (issue #38, phase 1) ----------------------------
+
+#[test]
+fn list_format_json_emits_a_parseable_worktree_array() {
+  // Unlike `--format names`, the JSON array includes the main worktree:
+  // an editor / statusbar consumer wants the full set, and resolves the
+  // active worktree from it. A fresh repo has exactly the main worktree.
+  let (dir, _repo) = init_repo();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "list --format=json must exit 0");
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+  let arr = v.as_array().expect("top level must be a JSON array");
+  assert_eq!(arr.len(), 1, "a fresh repo has exactly the main worktree");
+  let main = &arr[0];
+  assert_eq!(main["is_main"], serde_json::json!(true));
+  // Stable schema keys present.
+  assert!(main.get("name").is_some());
+  assert!(main.get("path").is_some());
+  assert!(main.get("status").is_some());
+  assert!(main["status"].get("is_dirty").is_some());
+  // Optional link fields are present and null on a fresh repo.
+  assert_eq!(main["pr"], serde_json::Value::Null);
+}
+
+#[test]
+fn list_format_json_with_detect_pr_populates_the_pr_field() {
+  // `--format=json --detect-pr` must agree with the table: the JSON `pr`
+  // field carries the freshly detected number, not just the persisted
+  // link (issue #38 review).
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  // The main worktree's branch gets the detected PR #128.
+  assert!(
+    arr.iter().any(|w| w["pr"] == serde_json::json!(128)),
+    "detected PR number must surface in the JSON `pr` field, got: {v}"
+  );
+}
+
+#[test]
+fn list_format_json_detect_pr_keeps_explicit_link_when_detection_cannot_run() {
+  // Regression (issue #38 review): with `--detect-pr` in a repo that has
+  // no GitHub slug, live detection can't run, so it must NOT clobber an
+  // explicit/persisted local PR link that the plain listing already shows.
+  let (dir, repo) = init_repo();
+  // No remote → repo_slug fails → detection yields None for every row.
+  let head = repo.head().unwrap();
+  let branch = head.shorthand().unwrap().to_string();
+  // Explicit PR link in branch config (`branch.<name>.gwm-pr`).
+  repo
+    .config()
+    .unwrap()
+    .set_i64(&format!("branch.{branch}.gwm-pr"), 77)
+    .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  assert!(
+    arr.iter().any(|w| w["pr"] == serde_json::json!(77)),
+    "explicit PR link must be preserved when detection can't run, got: {v}"
+  );
+}
+
+#[test]
+fn list_format_json_detect_pr_clears_a_stale_persisted_pr() {
+  // The flip side (issue #38 review): when detection DOES run (GitHub slug
+  // present) and `gh pr list` returns no PR for a branch that had a
+  // persisted detected PR, the JSON must clear it to null — matching the
+  // table — not leave the stale number.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap();
+  let branch = head.shorthand().unwrap().to_string();
+  // A persisted (now stale) detected PR in branch config.
+  repo
+    .config()
+    .unwrap()
+    .set_i64(&format!("branch.{branch}.gwm-pr-detected"), 99)
+    .unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  // `gh pr list --head` returns no PR → detection clears the cache.
+  let fake_gh = write_dispatch_gh(fake_bin.path(), "[]", "{}");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  assert!(
+    arr.iter().all(|w| w["pr"] != serde_json::json!(99)),
+    "a stale persisted PR must be cleared once detection runs, got: {v}"
+  );
+}
+
+#[test]
+fn doctor_format_json_emits_checks_severity_and_exit_code() {
+  let (dir, _repo) = init_repo();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor", "--format=json"])
+    .output()
+    .unwrap();
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("doctor json must parse");
+  assert!(v["checks"].is_array(), "checks must be an array");
+  assert!(
+    !v["checks"].as_array().unwrap().is_empty(),
+    "doctor runs at least one check"
+  );
+  let sev = v["severity"].as_str().expect("severity must be a string");
+  assert!(
+    matches!(sev, "ok" | "warning" | "failed"),
+    "severity stable enum, got {sev}"
+  );
+  // The JSON exit_code mirrors the process exit code.
+  let json_code = v["exit_code"].as_i64().expect("exit_code is an integer");
+  let proc_code = out.status.code().unwrap_or(-1) as i64;
+  assert_eq!(json_code, proc_code, "json exit_code must equal the process exit code");
+  // Per-check shape.
+  let first = &v["checks"][0];
+  assert!(first.get("name").is_some());
+  let cs = first["status"].as_str().unwrap();
+  assert!(matches!(cs, "ok" | "warning" | "failed"));
+}
+
+#[test]
+fn path_format_json_emits_name_path_branch() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "38", "json-path"])
+    .assert()
+    .success();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["path", "json-path", "--format=json"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "path --format=json must exit 0");
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("path json must parse");
+  let obj = v.as_object().expect("path json must be an object");
+  assert_eq!(obj.len(), 3, "exactly {{name, path, branch}}");
+  assert_eq!(v["name"], serde_json::json!("feat-38-json-path"));
+  assert_eq!(v["branch"], serde_json::json!("feat/#38-json-path"));
+  assert!(
+    v["path"].as_str().unwrap().ends_with("feat-38-json-path"),
+    "path points at the worktree dir"
+  );
+}
+
+#[test]
+fn daemon_rejects_zero_poll_ms() {
+  // `--poll-ms 0` would spin a subscribe loop with no wait; clap rejects
+  // it at parse time (range 1..) so the daemon never starts (issue #38
+  // review). No repo / socket needed — validation fails first.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["daemon", "--poll-ms", "0"])
+    .assert()
+    .failure()
+    .stderr(
+      predicate::str::contains("0").and(predicate::str::contains("not in").or(predicate::str::contains("invalid"))),
+    );
 }
 
 #[test]

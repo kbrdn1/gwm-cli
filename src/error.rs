@@ -111,6 +111,13 @@ pub enum GwmError {
     source: serde_json::Error,
   },
 
+  /// Issue #38: failed to serialize a `--format=json` / daemon JSON-RPC
+  /// payload. The output DTOs in `json_api` are plain structs so this is
+  /// effectively unreachable, but surfacing it as a typed error keeps the
+  /// JSON output paths off `unwrap`/`expect` (CLAUDE.md house rule).
+  #[error("failed to serialize json output: {0}")]
+  JsonSerialize(#[from] serde_json::Error),
+
   /// Issue #105: `gwm open` / `gwm link` was asked for an issue or PR
   /// linked to a branch but no such link is recorded in git-config.
   /// `kind` names which side (issue vs PR) is missing; `branch` is
