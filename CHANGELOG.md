@@ -12,6 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Config presets for `gwm init`** (issue #37): `gwm init --preset <name>`
+  seeds an opinionated `.gwm.toml` for a known stack instead of the generic
+  template. Built-ins: `laravel` (env copies + AWS-RDS guard + `vendor/`
+  no-symlink + composer install), `node` / `nuxt` (`node_modules/`
+  no-symlink + bun-or-npm install), `rust` (`target/` no-symlink + cargo
+  fetch), `go` (`bin/` no-symlink + `go mod download`), `python-uv`
+  (`.venv/` no-symlink + `uv sync`), and `generic` (the documented default).
+  `gwm init --list-presets` enumerates them with one-line descriptions, and
+  `gwm init --preset <name> --show` prints the resolved TOML to stdout
+  without writing (handy for diffing against an existing config). Preset
+  bodies are embedded in the binary and kept in sync with
+  `examples/presets/<name>.toml`. `gwm init` with no flag stays byte-for-byte
+  the generic template.
 - **Multi-repo workspace mode** (issue #36): operate across every git repo one
   level below a root directory instead of a single repo. Two entry points:
   - `gwm --workspace ~/Projects` opens the TUI over every direct-child repo,

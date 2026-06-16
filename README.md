@@ -28,6 +28,8 @@ Full install matrix and verification steps: [`docs/getting-started/install.md`](
 ```bash
 cd /path/to/your/repo
 gwm init                                          # write a default .gwm.toml
+gwm init --preset laravel                          # …or seed a stack preset (laravel/node/rust/go/python-uv)
+gwm init --list-presets                            # list the built-in presets
 gwm create feat 42 user-authentication            # → ~/cc-worktree/<repo>/feat-42-user-authentication
                                                   # → branch feat/#42-user-authentication
 gwm                                               # opens the TUI on the current repo
