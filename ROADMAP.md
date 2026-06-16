@@ -4,9 +4,22 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v0.9.0
+## Current state — v0.9.0 stable, v0.10.0-rc.2 in progress on `dev`
 
-The 0.9.x line ships:
+The current **stable** line is **v0.9.0**. Two pre-release trains have since
+landed on `dev` and are queued for the next release: the
+**v0.10.0-rc.1** Settings-editability + TUI enrichment cycle (2026-06-10), and
+a **second post-rc.1 train** targeting **v0.10.0-rc.2** that adds the embedded
+PTY overlays, the TUI keymap redesign, rebindable contextual modal keys + the
+Settings Keys tab, multi-repo workspace mode, config presets for `gwm init`,
+the JSON API + daemon, the current-PR CI indicator, and the file-explorer
+Working Tree pane. Both are pre-releases — no stable cut yet. See the
+[Shipped highlights](#shipped-highlights) table for the per-issue breakdown and
+[`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` for the full rc.2 delta. The MSRV
+is now **1.86** (raised by the PTY overlay's `portable-pty` / `tui-term`
+dependencies).
+
+The 0.9.x stable line ships:
 
 - **Native worktree ops via libgit2 (vendored)** — single binary, no `gwq` / `git` CLI dependency.
 - **CLI + ratatui TUI** — `gwm <subcommand>` for scripts, `gwm` alone opens the interactive interface.
@@ -88,33 +101,35 @@ For reference (each linked to its closing PR):
 | [#231](https://github.com/kbrdn1/gwm-cli/issues/231) / [#226](https://github.com/kbrdn1/gwm-cli/issues/226) / [#232](https://github.com/kbrdn1/gwm-cli/issues/232) / [#255](https://github.com/kbrdn1/gwm-cli/issues/255) / [#258](https://github.com/kbrdn1/gwm-cli/issues/258) / [#262](https://github.com/kbrdn1/gwm-cli/issues/262) | v0.9.0-rc.3 | Async-task spine: generic off-thread worker (coalescing + late-result drop), off-thread worktree refresh (`f` / `r`) and GitHub `F` fetch (per-key generation fixes a stale-data race) on the shared spine; in-TUI Command Logs overlay (`3`), Configuration panel (`4`, per-row source attribution), and `sync` action (`S`, off-thread rebase) completing the `1`/`2`/`3`/`4` pane-key family; fuzzy-filter-in-pane-title + command-palette input polish; internal refactor / perf sweep (#235–#244, per-frame sidebar clone dropped) |
 | [#256](https://github.com/kbrdn1/gwm-cli/issues/256) / [#233](https://github.com/kbrdn1/gwm-cli/issues/233) / [#248](https://github.com/kbrdn1/gwm-cli/issues/248) | v0.9.0 | Stable delta: off-thread bootstrap (`b`) on the spine (trust gate stays synchronous; Report on completion), open the docs in the browser (`.`, rebindable `open_docs`), and a CI-flaky GitHub-detect test fixed at the root (distinct write-once fake-`gh` scripts) |
 | [#279](https://github.com/kbrdn1/gwm-cli/issues/279) / [#257](https://github.com/kbrdn1/gwm-cli/issues/257) / [#276](https://github.com/kbrdn1/gwm-cli/issues/276) / [#267](https://github.com/kbrdn1/gwm-cli/issues/267) / [#283](https://github.com/kbrdn1/gwm-cli/issues/283) / [#285](https://github.com/kbrdn1/gwm-cli/issues/285) / [#281](https://github.com/kbrdn1/gwm-cli/issues/281) / [#287](https://github.com/kbrdn1/gwm-cli/issues/287) | v0.10.0-rc.1 | Settings-editability + TUI enrichment: editable Settings panel (`4`) with category tabs (Theme / Worktree / TUI / All), per-layer selector (`L`), live-persist TOML; reusable `LoaderWidget` (delete modal consumer); async create-worktree and quit-wait on the spine; Working Tree colour-coded nerdfont counts + row recolouring; Status pane `Diff +ins -del` vs base (three-dot); Issue/PR `●/●` pastilles + nerdfont state-chip badges; cached GitHub state (titles + states survive restarts), initial startup refresh, periodic `[tui].auto_refresh_secs` auto-refresh; herdr-style scrollbars on scrollable modals; flat which-key hints |
+| [#35](https://github.com/kbrdn1/gwm-cli/issues/35) ([PR #289](https://github.com/kbrdn1/gwm-cli/pull/289)) / [#290](https://github.com/kbrdn1/gwm-cli/issues/290) ([PR #292](https://github.com/kbrdn1/gwm-cli/pull/292)) / [#219](https://github.com/kbrdn1/gwm-cli/issues/219) ([PR #293](https://github.com/kbrdn1/gwm-cli/pull/293)) / [#294](https://github.com/kbrdn1/gwm-cli/issues/294) ([PR #297](https://github.com/kbrdn1/gwm-cli/pull/297)) / [#300](https://github.com/kbrdn1/gwm-cli/issues/300) ([PR #301](https://github.com/kbrdn1/gwm-cli/pull/301)) / [#299](https://github.com/kbrdn1/gwm-cli/issues/299) ([PR #302](https://github.com/kbrdn1/gwm-cli/pull/302)) / [#36](https://github.com/kbrdn1/gwm-cli/issues/36) ([PR #303](https://github.com/kbrdn1/gwm-cli/pull/303)) / [#37](https://github.com/kbrdn1/gwm-cli/issues/37) ([PR #305](https://github.com/kbrdn1/gwm-cli/pull/305)) / [#38](https://github.com/kbrdn1/gwm-cli/issues/38) ([PR #306](https://github.com/kbrdn1/gwm-cli/pull/306)) | v0.10.0-rc.2 | PTY + power-user + integration train: embedded PTY overlays for lazygit (`l` / `L`) and a native `$SHELL` (`o` / `O`) via `portable-pty` + `tui-term` (MSRV → 1.86); TUI keymap redesign (unified list-view bindings — `p`/`P` pull/push, `c` edit-worktree, `e` exit-to-worktree, `y`/`w` yank, `t` mux pane, `h`/`H` macros — plus `[tui.macro1]` / `[tui.macro2]`); rebindable contextual modal keys under `[tui.keys.modal.<context>]`; edit every keymap live from the Settings Keys tab (keystroke capture + validated write-back); Working Tree pane as a nerd-font file-explorer tree (git-coloured rows, bounded scan); current-PR CI indicator in the Status pane; multi-repo workspace mode (`--workspace`, REPO column, `gwm create --repo`); config presets for `gwm init` (`--preset` / `--list-presets` / `--show`); JSON API (`--format=json` on `list` / `doctor` / `path`) + `gwm daemon` (JSON-RPC 2.0 over a unix socket with `subscribe`) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
 ## Next up
 
-Near-term TUI work, listed in **rough implementation order** — each item builds on the one above it. This is a dependency ordering, not a date commitment.
+Both v0.10.0 pre-release trains have shipped to `dev` and are queued for
+**v0.10.0-rc.2** — see the [Shipped highlights](#shipped-highlights) table
+above, [`changelogs/pre-releases/0.10.0-rc.1.md`](changelogs/pre-releases/0.10.0-rc.1.md)
+for the rc.1 delta, and [`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` for the
+post-rc.1 delta. That includes everything that previously sat under "Next up"
+and "Ambitious": the PTY overlays (#35), the keymap redesign (#290), the
+contextual modal keys (#219) and the Settings Keys tab (#294), multi-repo
+workspace mode (#36), config presets (#37), and the JSON API + daemon (#38) —
+plus the former #298 umbrella, now landed as the current-PR CI indicator (#299)
+and the file-explorer Working Tree pane (#300).
 
-The 0.10.0-rc.1 Settings-editability + TUI enrichment train has shipped to `dev` — see the Shipped highlights table above and [`changelogs/pre-releases/0.10.0-rc.1.md`](changelogs/pre-releases/0.10.0-rc.1.md) for the full delta.
+Genuinely-remaining near-term work:
 
-A second post-rc.1 train has since landed on `dev`, queued for the next release (see [`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` for the delta):
-
-- [#35](https://github.com/kbrdn1/gwm-cli/issues/35) — embedded PTY overlay for lazygit / native terminal (`l` / `L` / `o` / `O`).
-- [#290](https://github.com/kbrdn1/gwm-cli/issues/290) — TUI keymap redesign (unified list-view bindings, `[tui.macro1]` / `[tui.macro2]`).
-- [#219](https://github.com/kbrdn1/gwm-cli/issues/219) — rebindable modal keys with contextual `[tui.keys.modal.<context>]` actions.
-- [#294](https://github.com/kbrdn1/gwm-cli/issues/294) — edit every keymap from the Settings panel (Keys tab, live keystroke capture, validated write-back).
-- [#36](https://github.com/kbrdn1/gwm-cli/issues/36) — **Multi-repo workspace mode** — `gwm --workspace ~/Projects` (and bare-`gwm` auto-detect) opens the TUI across every child repo with a REPO column; `gwm list --workspace` prints the merged table; `gwm create --repo <name>` disambiguates the target.
-
-Queued near-term follow-up:
-
-- [#298](https://github.com/kbrdn1/gwm-cli/issues/298) — **Status-pane CI indicator + Working Tree file-explorer view** — surface the current PR's CI status in the Status pane when present (the `statusCheckRollup` is already fetched), and render the Working Tree pane as a true nerd-font file-explorer tree. Two independent surfaces → two PRs.
+- [#304](https://github.com/kbrdn1/gwm-cli/issues/304) — **Workspace follow-up** — the nuanced review items left open after the multi-repo workspace PR (#303) landed.
+- [#206](https://github.com/kbrdn1/gwm-cli/issues/206) — **Docs screenshots** — replace the provisional placeholders with real TUI captures across the doc tree.
 
 ## Ambitious
 
-Larger investments with strategic payoff. Gated by user demand or a concrete first consumer.
-
-- [#37](https://github.com/kbrdn1/gwm-cli/issues/37) — **Configuration presets** — `gwm init --preset laravel / nuxt / rust / go / python-uv` seeds an opinionated `.gwm.toml` for known stacks instead of the generic default.
-- [#38](https://github.com/kbrdn1/gwm-cli/issues/38) — **JSON-RPC / gRPC API + daemon mode** — `--format=json` on key commands, then a long-running daemon over `$XDG_RUNTIME_DIR/gwm.sock` for editor / statusbar integration.
+Larger investments with strategic payoff. Gated by user demand or a concrete
+first consumer. Nothing is queued here right now — the previous "Ambitious"
+items (config presets #37, JSON-RPC API + daemon #38) shipped in the rc.2 train
+above. New large bets land here once an issue with a concrete first consumer is
+filed.
 
 ## How to contribute
 

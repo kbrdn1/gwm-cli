@@ -9,10 +9,13 @@ Rust CLI + ratatui TUI to manage git worktrees across projects.
 
 - Worktree operations run on vendored `libgit2` — no `gwq` dependency; only a few features (`gwm sync`, the review-diff launcher, the sidebar's `git status` / `git log`) shell out to your own `git`.
 - `gwm <subcommand>` for scripts and hooks; bare `gwm` opens a ratatui interface.
-- Per-repo `.gwm.toml`: branch / path conventions, file copies, regex guards, `[hooks.*]` lifecycle commands, no-symlink invariants — plus a user-level global config at `~/.config/gwm/config.toml` merged underneath it so a preference set once applies to every repo.
+- Per-repo `.gwm.toml`: branch / path conventions, file copies, regex guards, `[hooks.*]` lifecycle commands, no-symlink invariants — plus a user-level global config at `~/.config/gwm/config.toml` merged underneath it so a preference set once applies to every repo. `gwm init --preset <name>` seeds an opinionated config for a known stack (`laravel` / `node` / `nuxt` / `rust` / `go` / `python-uv` / `generic`).
+- Multi-repo workspace mode: `gwm --workspace ~/Projects` (and bare `gwm` auto-detect) opens the TUI across every git repo one level below a root with a REPO column; `gwm list --workspace` prints the merged table; `gwm create --repo <name>` picks the target.
+- JSON API + daemon: `--format=json` on `gwm list` / `doctor` / `path` (stable schemas), and `gwm daemon`, a JSON-RPC 2.0 server over a unix socket with a `subscribe` push stream, for editor / statusbar integration.
 - Branch convention `<type>/#<issue>-<description>` by default; overridable per repo. `[aliases]` mirror `git config` aliases; `gwm commit-prefix` + an opt-in `commit-msg` hook drive the Gitmoji + Conventional Commits convention.
-- Configurable launchers for the `l` (git TUI) and `R` (review) keybindings.
-- TUI personalisation: role-based `[theme]` presets (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`), a remappable `[tui.keys]` keymap with multi-key chords, a `:` command palette, a responsive sidebar, and a single-line statusline.
+- Configurable launchers for the `l` (git TUI) and `r` / `R` (review) keybindings.
+- TUI personalisation: role-based `[theme]` presets (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`), a remappable `[tui.keys]` keymap with multi-key chords and rebindable per-context modal keys (all editable live from the Settings panel's Keys tab), a `:` command palette, a responsive sidebar, and a single-line statusline.
+- Embedded PTY overlays: `l` / `L` open lazygit and `o` / `O` open a native `$SHELL` session inside the TUI; the Working Tree pane renders `git status` as a nerd-font file tree, and the Issue/PR section surfaces the linked PR's overall CI state.
 - Safety nets: `--dry-run` on `gwm remove` / `gwm prune`, plus `gwm undo` / `gwm history` backed by an operation journal.
 - First-class GitHub issue / PR linking — branches matching the naming convention auto-link to their issue; PRs are auto-detected from `gh` when not explicitly linked. Declarative `[[labels]]` / `[[milestones]]`, `gwm new` (issue → worktree), and `gwm pr` (templated PR body).
 - `gwm sync` fetches a worktree's upstream and rebases (or merges) onto it, conflict-safe.

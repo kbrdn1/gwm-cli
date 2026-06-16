@@ -10,11 +10,11 @@ navigation:
 Bare `gwm` (no arguments) opens the ratatui interface on the current repo. From there you can create, delete, bootstrap, and jump between worktrees without leaving the terminal.
 
 - **[Keybindings](/tui/keybindings)** — the full key map, including the v0.6 additions (`R`, `F`, `O`, `L`, `f`, `y`). The keymap is now fully configurable via `[tui.keys]`.
-- **[Details sidebar](/tui/sidebar)** — the four-bordered subsections on the right pane, the responsive orientation, the lazygit-style commit graph, the live Issue / PR block, and the `s` stashes mode.
+- **[Details sidebar](/tui/sidebar)** — the four-bordered subsections on the right pane, the responsive orientation, the lazygit-style commit graph, the live Issue / PR block (with the CI status indicator), the `git status` file-explorer tree, and the `S` stashes mode.
 - **[Fuzzy filter](/tui/filter)** — `/` opens the inline filter bar; nucleo-matcher under the hood.
 - **[Confirm-overlay countdown](/tui/confirm-countdown)** — the safety countdown that prevents accidental branch deletions when `p` is armed.
-- **[Configurable launchers](/tui/launchers)** — `[git_tui]` (`l`) and `[review]` (`R`), with `{base} {head} {path} {diff}` placeholders.
-- **[Open dispatch](/tui/open-dispatch)** — `[tui.open]` controls what `o` does (`shell` / `editor` / `finder`).
+- **[Configurable launchers](/tui/launchers)** — `[git_tui]` (`l` overlay / `L` fullscreen) and `[review]` (`r` overlay / `R` fullscreen), with `{base} {head} {path} {diff}` placeholders and the embedded PTY overlay.
+- **[Open dispatch](/tui/open-dispatch)** — `o` opens a terminal in an embedded PTY overlay; `O` runs the `[tui.open]` dispatch (`shell` / `editor` / `finder`).
 - **[Themes](/tui/themes)** — role-based `[theme]` colours and the built-in presets (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`).
 - **[Keymap & command palette](/tui/keymap-and-palette)** — remap any binding via `[tui.keys]` (with chord support), or fire an action by name from the `:` palette.
 
