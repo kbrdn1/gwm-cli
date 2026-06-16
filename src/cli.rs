@@ -8,6 +8,7 @@ use crate::gitmoji;
 use crate::history::{self, OpEntry};
 use crate::hooks;
 use crate::issue_templates;
+use crate::json_api;
 use crate::labels::{self, LabelDiff};
 use crate::lifecycle::{self, HookContext, HookPhase, HookSkips};
 use crate::milestones::{self, MilestoneDiff};
@@ -69,6 +70,20 @@ pub enum ListFormat {
   Table,
   /// One worktree name per line — suitable for shell completion.
   Names,
+  /// Machine-readable JSON array of worktrees (issue #38). Stable schema
+  /// documented under `docs/schema/worktree-list.schema.json`.
+  Json,
+}
+
+/// Output format for commands that have only a human-readable text form
+/// and a machine-readable JSON form (`gwm path`, `gwm doctor` — issue #38).
+/// Distinct from [`ListFormat`], which also carries the `names` variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+  /// Human-readable text (default).
+  Text,
+  /// Machine-readable JSON. Stable schema documented under `docs/schema/`.
+  Json,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -219,7 +234,13 @@ pub enum Command {
   /// Also available as `gwm cd <pattern>` — same semantics, framed for the
   /// cd flow. Pair with `gwm shell-init <shell>` for a one-line wrapper.
   #[command(visible_alias = "cd")]
-  Path { pattern: String },
+  Path {
+    pattern: String,
+    /// Output format. `json` emits `{ name, path, branch }` (issue #38);
+    /// the default `text` prints the bare path for shell consumption.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+  },
   /// Re-run bootstrap on an existing worktree.
   Bootstrap {
     /// Worktree path or name; defaults to CWD.
@@ -260,7 +281,35 @@ pub enum Command {
   ///
   /// Exit code 0 if all green, 1 if any warning, 2 if any failure —
   /// suitable for CI / pre-commit hooks.
-  Doctor,
+  Doctor {
+    /// Output format. `json` emits the checks array plus aggregate
+    /// `severity` / `exit_code` (issue #38); the default `text` prints
+    /// the sigil-prefixed report. The process exit code is identical
+    /// either way.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    format: OutputFormat,
+  },
+  /// Run a long-running JSON-RPC 2.0 daemon over a unix domain socket.
+  ///
+  /// Editors, statusbars, and tooling connect once and call `list` /
+  /// `doctor` / `path`, or `subscribe` for pushed `worktrees.changed`
+  /// notifications — instead of spawning `gwm` per query (issue #38).
+  /// Newline-delimited JSON, one request and one response per line.
+  ///
+  /// Unix-only and built behind the default-on `daemon` feature; on other
+  /// platforms / `--no-default-features` builds the command exits with an
+  /// explanatory error.
+  Daemon {
+    /// Socket path to bind. Defaults to `$XDG_RUNTIME_DIR/gwm.sock`,
+    /// falling back to `$TMPDIR`, then `/tmp`.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+    /// Worktree-state poll interval in milliseconds for `subscribe` push
+    /// notifications. Lower = faster updates, more git scans. This MVP
+    /// polls rather than watching the filesystem (no `notify` dep).
+    #[arg(long, value_name = "MS", default_value_t = 1000)]
+    poll_ms: u64,
+  },
   /// List the supported branch types.
   ///
   /// Pass `--gitmoji` to extend the output with two more columns: the
@@ -837,11 +886,12 @@ pub fn run(cli: Cli) -> Result<()> {
       force,
       skip_hooks,
     } => cmd_remove(pattern, delete_branch, dry_run, force, skip_hooks, mode),
-    Command::Path { pattern } => cmd_path(pattern),
+    Command::Path { pattern, format } => cmd_path(pattern, format),
     Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
     Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
     Command::Prune { dry_run } => cmd_prune(dry_run),
-    Command::Doctor => cmd_doctor(),
+    Command::Doctor { format } => cmd_doctor(format),
+    Command::Daemon { socket, poll_ms } => cmd_daemon(socket, poll_ms),
     Command::Types { gitmoji } => cmd_types(gitmoji),
     Command::CommitPrefix { branch, unicode } => cmd_commit_prefix(branch, unicode),
     Command::Hooks { action } => cmd_hooks(action),
@@ -1165,6 +1215,15 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     return Ok(());
   }
 
+  if format == ListFormat::Json {
+    // Stable machine-readable array (issue #38). Includes the main
+    // worktree — unlike `names`, a JSON consumer wants the full picture
+    // (an editor statusbar resolves the active worktree from the set).
+    let dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
+    println!("{}", serde_json::to_string_pretty(&dto)?);
+    return Ok(());
+  }
+
   // PR auto-detection (issue #181): off by default to keep the listing
   // network-free. When `--detect-pr` is set and a GitHub remote resolves,
   // detect each branch's PR via `gh pr list --head <branch>` — one `gh`
@@ -1275,6 +1334,26 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     for row in &rows {
       println!("{}/{}", row.repo_name, row.info.name);
     }
+    return Ok(());
+  }
+
+  if format == ListFormat::Json {
+    // Workspace JSON tags each worktree with its owning `repo` so a
+    // cross-repo consumer can disambiguate (issue #36 + #38).
+    #[derive(serde::Serialize)]
+    struct WorkspaceJsonWorktree<'a> {
+      repo: &'a str,
+      #[serde(flatten)]
+      worktree: json_api::JsonWorktree,
+    }
+    let dto: Vec<WorkspaceJsonWorktree> = rows
+      .iter()
+      .map(|row| WorkspaceJsonWorktree {
+        repo: &row.repo_name,
+        worktree: json_api::JsonWorktree::from(&row.info),
+      })
+      .collect();
+    println!("{}", serde_json::to_string_pretty(&dto)?);
     return Ok(());
   }
 
@@ -1871,10 +1950,16 @@ fn cmd_remove(
   Ok(())
 }
 
-fn cmd_path(pattern: String) -> Result<()> {
+fn cmd_path(pattern: String, format: OutputFormat) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let found = worktree::find_fuzzy(&repo, &pattern)?;
-  println!("{}", found.path.display());
+  match format {
+    OutputFormat::Text => println!("{}", found.path.display()),
+    OutputFormat::Json => {
+      let dto = json_api::JsonPath::from(&found);
+      println!("{}", serde_json::to_string_pretty(&dto)?);
+    }
+  }
   Ok(())
 }
 
@@ -1996,7 +2081,7 @@ fn cmd_prune(dry_run: bool) -> Result<()> {
   Ok(())
 }
 
-fn cmd_doctor() -> Result<()> {
+fn cmd_doctor(format: OutputFormat) -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context_lenient(None)?;
 
   // Thread the real global layer so the keymap check re-reads exactly what the
@@ -2010,13 +2095,54 @@ fn cmd_doctor() -> Result<()> {
     global_config_path: global.as_deref(),
   };
   let report = doctor::run(&ctx)?;
-  print_doctor_report(&report);
+  match format {
+    OutputFormat::Text => print_doctor_report(&report),
+    OutputFormat::Json => {
+      let dto = json_api::JsonDoctorReport::from(&report);
+      println!("{}", serde_json::to_string_pretty(&dto)?);
+    }
+  }
 
+  // The process exit code is identical in both formats: the JSON payload
+  // also carries `exit_code`, but a `gwm doctor --format json` in a CI
+  // `if`-guard must still see the conventional 0/1/2.
   let code = report.exit_code();
   if code != 0 {
     std::process::exit(code);
   }
   Ok(())
+}
+
+/// `gwm daemon` (issue #38, phase 2). Discovers the repo from the CWD,
+/// binds the JSON-RPC socket, and serves until killed. The serving path
+/// is unix + `daemon`-feature only; elsewhere it returns a clean error so
+/// the subcommand stays present (and help identical) on every platform.
+#[cfg(all(unix, feature = "daemon"))]
+fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
+  use std::sync::atomic::AtomicBool;
+  use std::sync::Arc;
+
+  let repo = worktree::discover_repo(None)?;
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+  let socket = socket.unwrap_or_else(crate::daemon::socket_path);
+  let opts = crate::daemon::ServeOptions {
+    socket: socket.clone(),
+    repo_workdir: workdir,
+    poll_interval: std::time::Duration::from_millis(poll_ms),
+  };
+  // The one runtime line on stderr is intentional: stdout stays clean for
+  // any future `--print-socket` consumer, and a daemon that says nothing
+  // on launch is hard to tell from one that silently failed to bind.
+  eprintln!("gwm daemon listening on {}", socket.display());
+  crate::daemon::serve(&opts, Arc::new(AtomicBool::new(false)))
+}
+
+#[cfg(not(all(unix, feature = "daemon")))]
+fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
+  let _ = (socket, poll_ms);
+  Err(GwmError::Other(
+    "daemon mode is unavailable in this build (requires a Unix platform and the `daemon` feature)".into(),
+  ))
 }
 
 fn print_doctor_report(report: &doctor::DoctorReport) {
