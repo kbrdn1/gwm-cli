@@ -4,8 +4,8 @@
 //! `daemon_integration.rs`; the NDJSON parsers in `daemon_tests.rs`.
 
 use gwm::json_api::{JsonStatus, JsonWorktree};
-use gwm::statusline::{active_index, render, render_for_cwd};
-use std::path::Path;
+use gwm::statusline::{active_index, active_index_with, render, render_for_cwd};
+use std::path::{Path, PathBuf};
 
 /// Build a worktree with the given path / name / branch and a clean,
 /// upstream-tracking status. Tests tweak the fields they care about.
@@ -129,6 +129,49 @@ fn active_index_picks_the_enclosing_worktree() {
   assert_eq!(active_index(&wts, Path::new("/repo/docs")), Some(0));
   // cwd outside every worktree resolves to None.
   assert_eq!(active_index(&wts, Path::new("/elsewhere")), None);
+}
+
+#[test]
+fn active_index_with_canonicalizes_both_sides() {
+  // The daemon reports a raw `/var/...` path (libgit2 keeps it as stored);
+  // the shell's cwd resolves through the symlink to `/private/var/...`.
+  // A naive `starts_with` that canonicalizes only one side misses the
+  // match — the prompt would collapse to `N wt` from inside the worktree
+  // (Codex review #311). Canonicalizing BOTH sides recovers it.
+  let wts = vec![wt("/var/wt/feat", "feat", Some("feat/#9-f"))];
+
+  // Simulate macOS `/var` -> `/private/var`.
+  let canon = |p: &Path| -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix("/var/") {
+      Some(rest) => PathBuf::from(format!("/private/var/{rest}")),
+      None => p.to_path_buf(),
+    }
+  };
+
+  // Identity matching (the old behaviour) misses the symlinked path.
+  assert_eq!(active_index(&wts, Path::new("/private/var/wt/feat/src")), None);
+  // Canonicalizing both the cwd and the worktree path makes it match.
+  assert_eq!(
+    active_index_with(&wts, Path::new("/private/var/wt/feat/src"), canon),
+    Some(0)
+  );
+}
+
+#[test]
+fn active_index_with_identity_matches_active_index() {
+  // `active_index` is just `active_index_with` under the identity
+  // canonicaliser; the longest-enclosing-path rule must be preserved.
+  let wts = vec![
+    wt("/repo", "repo", Some("main")),
+    wt("/repo/nested", "nested", Some("feat/#3-n")),
+  ];
+  let id = |p: &Path| p.to_path_buf();
+  assert_eq!(
+    active_index_with(&wts, Path::new("/repo/nested/src"), id),
+    active_index(&wts, Path::new("/repo/nested/src"))
+  );
+  assert_eq!(active_index_with(&wts, Path::new("/repo/nested/src"), id), Some(1));
 }
 
 #[test]

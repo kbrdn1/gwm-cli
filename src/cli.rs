@@ -2218,17 +2218,22 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
 /// the consumer's line count stays predictable.
 fn print_statusline(worktrees: &[crate::json_api::JsonWorktree], cwd: &Path) {
   use std::io::Write;
-  println!("{}", crate::statusline::render_for_cwd(worktrees, cwd));
+  // Canonicalise both the cwd and each worktree path so a symlinked path
+  // (macOS /var ↔ /private/var, or a worktree under a symlink) still
+  // matches — the daemon hands back raw libgit2 paths (Codex review #311).
+  let active = crate::statusline::active_index_with(worktrees, cwd, |p| {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+  });
+  println!("{}", crate::statusline::render(worktrees, active));
   let _ = io::stdout().flush();
 }
 
 #[cfg(all(unix, feature = "daemon"))]
 fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   let socket = socket.unwrap_or_else(crate::daemon::socket_path);
-  // Resolve once, canonicalised so a macOS `/var` ↔ `/private/var` symlink
-  // doesn't defeat the prefix match against the daemon's absolute paths.
+  // `print_statusline` canonicalises both the cwd and each worktree path,
+  // so the raw cwd is fine here.
   let cwd = std::env::current_dir().unwrap_or_default();
-  let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
 
   if watch {
     // Stream forever (the callback never asks to stop); a dropped daemon

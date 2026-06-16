@@ -19,25 +19,44 @@
 //! moves a `--watch` stream.
 
 use crate::json_api::JsonWorktree;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Resolve which worktree in `worktrees` owns `cwd`.
+/// Resolve which worktree in `worktrees` owns `cwd`, passing every path
+/// (the `cwd` and each worktree `path`) through `canonicalize` first.
 ///
-/// A worktree owns `cwd` when its `path` is an ancestor of (or equal to)
-/// `cwd`. When several match — a worktree nested inside another — the one
-/// with the longest `path` wins (the most specific enclosing worktree).
-/// Returns `None` when `cwd` is outside every worktree.
+/// A worktree owns `cwd` when its canonicalised `path` is an ancestor of
+/// (or equal to) the canonicalised `cwd`. When several match — a worktree
+/// nested inside another — the one with the longest canonical path wins
+/// (the most specific enclosing worktree). Returns `None` when `cwd` is
+/// outside every worktree.
 ///
-/// Pure string comparison (`Path::starts_with`): no filesystem access, so
-/// the caller is responsible for handing in canonicalised paths when
-/// symlink equivalence matters (e.g. macOS `/var` ↔ `/private/var`).
-pub fn active_index(worktrees: &[JsonWorktree], cwd: &Path) -> Option<usize> {
+/// The canonicaliser is injected so the core stays free of filesystem
+/// access (and unit-testable): callers that need symlink equivalence
+/// (e.g. macOS `/var` ↔ `/private/var`, or a worktree added under a
+/// symlink) pass `std::fs::canonicalize`; tests pass a deterministic stub.
+/// Canonicalising **both** sides is the point — resolving only the `cwd`
+/// while the daemon's paths stay raw would defeat the match.
+pub fn active_index_with<F>(worktrees: &[JsonWorktree], cwd: &Path, canonicalize: F) -> Option<usize>
+where
+  F: Fn(&Path) -> PathBuf,
+{
+  let cwd = canonicalize(cwd);
   worktrees
     .iter()
     .enumerate()
-    .filter(|(_, w)| cwd.starts_with(&w.path))
-    .max_by_key(|(_, w)| w.path.len())
+    .filter_map(|(i, w)| {
+      let wp = canonicalize(Path::new(&w.path));
+      cwd.starts_with(&wp).then_some((i, wp))
+    })
+    .max_by_key(|(_, wp)| wp.as_os_str().len())
     .map(|(i, _)| i)
+}
+
+/// Resolve the enclosing worktree by raw path comparison — [`active_index_with`]
+/// under the identity canonicaliser. No filesystem access, so symlink
+/// equivalence is the caller's responsibility (see [`active_index_with`]).
+pub fn active_index(worktrees: &[JsonWorktree], cwd: &Path) -> Option<usize> {
+  active_index_with(worktrees, cwd, |p| p.to_path_buf())
 }
 
 /// Render the compact statusline for `worktrees`, highlighting the
