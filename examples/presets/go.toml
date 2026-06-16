@@ -1,0 +1,22 @@
+# gwm preset: go
+#
+# Opinionated .gwm.toml for a Go module:
+#   - refuses to inherit the `bin/` symlink (build output stays per-worktree)
+#   - runs `go mod download` after the worktree is created
+#
+# Preview with `gwm init --preset go --show`. See
+# examples/gwm.toml.example for the full schema.
+
+[worktree]
+base = "{home}/cc-worktree/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+
+[[bootstrap.no_symlink]]
+path = "bin"
+
+[[hooks.post_create]]
+name = "go mod download"
+run = "go mod download"
+when = "file_exists:go.mod"
+on_fail = "warn"

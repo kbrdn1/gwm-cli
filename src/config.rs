@@ -1324,11 +1324,18 @@ impl Config {
 
   /// Write a default config to the given repo root.
   pub fn write_default(repo_root: &Path) -> Result<PathBuf> {
+    Self::write_preset(repo_root, crate::presets::GENERIC_BODY)
+  }
+
+  /// Write a `.gwm.toml` body (a built-in preset, see [`crate::presets`])
+  /// to the repo root, refusing to clobber an existing file. Factored out
+  /// of [`Self::write_default`] so `gwm init --preset <name>` seeds a
+  /// stack-specific template through the same idempotency guard.
+  pub fn write_preset(repo_root: &Path, body: &str) -> Result<PathBuf> {
     let target = repo_root.join(CONFIG_FILE);
     if target.exists() {
       return Err(GwmError::Config(format!("{} already exists", target.display())));
     }
-    let body = include_str!("../examples/gwm.toml.example");
     std::fs::write(&target, body)?;
     Ok(target)
   }

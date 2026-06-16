@@ -1,0 +1,47 @@
+# gwm preset: node / nuxt
+#
+# Opinionated .gwm.toml for a Node / Nuxt app:
+#   - copies `.env` and `.env.local`
+#   - refuses to inherit the `node_modules/` symlink
+#   - package-manager-aware install: `bun install` when bun is on PATH,
+#     otherwise `npm ci`
+#
+# `nuxt` is an alias of this preset. Preview with
+# `gwm init --preset node --show`. See examples/gwm.toml.example for the
+# full schema.
+
+[worktree]
+base = "{home}/cc-worktree/{repo}"
+path_pattern = "{type}-{issue}-{desc}"
+branch_pattern = "{type}/#{issue}-{desc}"
+
+[[bootstrap.copy]]
+from = ".env"
+to = ".env"
+required = false
+
+[[bootstrap.copy]]
+from = ".env.local"
+to = ".env.local"
+required = false
+
+[[bootstrap.no_symlink]]
+path = "node_modules"
+
+[[hooks.post_create]]
+name = "install (bun if available)"
+run = "bun install"
+when = "file_exists:package.json && cmd_exists:bun"
+on_fail = "warn"
+
+[[hooks.post_create]]
+name = "install (npm fallback)"
+run = "npm ci"
+when = "file_exists:package.json && !cmd_exists:bun"
+on_fail = "warn"
+
+[[hooks.post_create]]
+name = "direnv allow"
+run = "direnv allow ."
+when = "file_exists:.envrc"
+on_fail = "ignore"

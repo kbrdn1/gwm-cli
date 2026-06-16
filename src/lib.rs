@@ -23,6 +23,7 @@ pub mod milestones;
 pub mod multiplexer;
 pub mod naming;
 pub mod pr_templates;
+pub mod presets;
 pub mod sync;
 pub mod templating;
 pub mod trust;
