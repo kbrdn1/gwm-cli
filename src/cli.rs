@@ -16,6 +16,7 @@ use crate::multiplexer::{
 };
 use crate::naming::{parse_branch, BranchSpec};
 use crate::pr_templates::{self, PrTemplateContext};
+use crate::presets;
 use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::workspace;
@@ -89,8 +90,22 @@ pub enum LinkTarget {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-  /// Write a default .gwm.toml to the current repo.
-  Init,
+  /// Write a .gwm.toml to the current repo, optionally from a stack preset.
+  Init {
+    /// Seed an opinionated .gwm.toml for a known stack (e.g. `laravel`,
+    /// `node`/`nuxt`, `rust`, `go`, `python-uv`). Omit for the generic
+    /// documented template. Run `gwm init --list-presets` to see them all.
+    #[arg(long, value_name = "NAME")]
+    preset: Option<String>,
+    /// List the built-in presets with one-line descriptions and exit
+    /// (writes nothing, needs no git repo).
+    #[arg(long)]
+    list_presets: bool,
+    /// Print the resolved preset to stdout instead of writing .gwm.toml —
+    /// handy for diffing a preset against an existing config.
+    #[arg(long)]
+    show: bool,
+  },
   /// List worktrees in the current repo.
   List {
     /// Output format. `names` prints one worktree name per line (for shell completion).
@@ -774,7 +789,11 @@ pub fn run(cli: Cli) -> Result<()> {
   }
 
   match cmd {
-    Command::Init => cmd_init(),
+    Command::Init {
+      preset,
+      list_presets,
+      show,
+    } => cmd_init(preset, list_presets, show),
     Command::List { format, detect_pr } => match cli.workspace {
       Some(root) => cmd_list_workspace(&root, format, detect_pr),
       None => cmd_list(format, detect_pr),
@@ -1095,11 +1114,40 @@ fn cmd_tui_keys() -> Result<()> {
   Ok(())
 }
 
-fn cmd_init() -> Result<()> {
+fn cmd_init(preset: Option<String>, list_presets: bool, show: bool) -> Result<()> {
+  // `--list-presets` is a pure enumeration: it wins over everything and
+  // returns before touching the filesystem or resolving a git repo.
+  if list_presets {
+    let name_w = presets::all().iter().map(|p| p.name.len()).max().unwrap_or(0);
+    for p in presets::all() {
+      let aliases = if p.aliases.is_empty() {
+        String::new()
+      } else {
+        format!(" (alias: {})", p.aliases.join(", "))
+      };
+      println!("  {:<w$}  {}{}", p.name, p.description, aliases, w = name_w);
+    }
+    return Ok(());
+  }
+
+  // Resolve the preset (default `generic` = the documented example).
+  let name = preset.as_deref().unwrap_or("generic");
+  let resolved = presets::lookup(name).ok_or_else(|| {
+    GwmError::Config(format!(
+      "unknown preset {name:?} — run `gwm init --list-presets` to see the built-ins"
+    ))
+  })?;
+
+  // `--show` prints the body and writes nothing, so it needs no git repo.
+  if show {
+    print!("{}", resolved.body);
+    return Ok(());
+  }
+
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-  let path = Config::write_default(workdir)?;
-  println!("wrote {}", path.display());
+  let path = Config::write_preset(workdir, resolved.body)?;
+  println!("wrote {} (preset: {})", path.display(), resolved.name);
   Ok(())
 }
 
