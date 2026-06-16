@@ -1246,10 +1246,16 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     // (an editor statusbar resolves the active worktree from the set).
     let mut dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
     if detect_pr {
-      // Override the persisted `pr` with the freshly detected number so
-      // the JSON output matches `gwm list --detect-pr` (the table).
+      // Override with the freshly detected number so the JSON matches
+      // `gwm list --detect-pr` (the table) — but ONLY when detection
+      // actually produced a value. A `None` here can mean "detection
+      // couldn't run" (e.g. no GitHub slug), in which case overwriting
+      // would drop the explicit/persisted link `JsonWorktree::from`
+      // already set (issue #38 review).
       for (d, pr) in dto.iter_mut().zip(&detected_prs) {
-        d.pr = *pr;
+        if pr.is_some() {
+          d.pr = *pr;
+        }
       }
     }
     println!("{}", serde_json::to_string_pretty(&dto)?);
@@ -1382,9 +1388,12 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       .enumerate()
       .map(|(i, row)| {
         let mut worktree = json_api::JsonWorktree::from(&row.info);
-        if detect_pr {
-          // Match the table: use the freshly detected PR number.
-          worktree.pr = detected_prs.get(i).copied().flatten();
+        // Match the table: use the freshly detected number, but only when
+        // detection actually produced one — a `None` may mean detection
+        // couldn't run, and overwriting would drop the link already set by
+        // `JsonWorktree::from` (issue #38 review).
+        if let Some(pr) = detected_prs.get(i).copied().flatten() {
+          worktree.pr = Some(pr);
         }
         WorkspaceJsonWorktree {
           repo: &row.repo_name,
@@ -2148,14 +2157,13 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let socket = socket.unwrap_or_else(crate::daemon::socket_path);
   let opts = crate::daemon::ServeOptions {
-    socket: socket.clone(),
+    socket,
     repo_workdir: workdir,
     poll_interval: std::time::Duration::from_millis(poll_ms),
   };
-  // The one runtime line on stderr is intentional: stdout stays clean for
-  // any future `--print-socket` consumer, and a daemon that says nothing
-  // on launch is hard to tell from one that silently failed to bind.
-  eprintln!("gwm daemon listening on {}", socket.display());
+  // `serve` prints the "listening" line itself, but only after the socket
+  // is actually bound — so the message can't precede a bind failure (issue
+  // #38 review). `socket` is kept by `opts`; nothing more to do here.
   crate::daemon::serve(&opts, Arc::new(AtomicBool::new(false)))
 }
 

@@ -969,6 +969,37 @@ fn list_format_json_with_detect_pr_populates_the_pr_field() {
 }
 
 #[test]
+fn list_format_json_detect_pr_keeps_explicit_link_when_detection_cannot_run() {
+  // Regression (issue #38 review): with `--detect-pr` in a repo that has
+  // no GitHub slug, live detection can't run, so it must NOT clobber an
+  // explicit/persisted local PR link that the plain listing already shows.
+  let (dir, repo) = init_repo();
+  // No remote → repo_slug fails → detection yields None for every row.
+  let head = repo.head().unwrap();
+  let branch = head.shorthand().unwrap().to_string();
+  // Explicit PR link in branch config (`branch.<name>.gwm-pr`).
+  repo
+    .config()
+    .unwrap()
+    .set_i64(&format!("branch.{branch}.gwm-pr"), 77)
+    .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  assert!(
+    arr.iter().any(|w| w["pr"] == serde_json::json!(77)),
+    "explicit PR link must be preserved when detection can't run, got: {v}"
+  );
+}
+
+#[test]
 fn doctor_format_json_emits_checks_severity_and_exit_code() {
   let (dir, _repo) = init_repo();
   let out = Command::cargo_bin("gwm")
