@@ -304,6 +304,11 @@ mod server {
       .set_nonblocking(true)
       .map_err(|e| GwmError::Other(format!("daemon: set_nonblocking failed: {e}")))?;
 
+    // Announce readiness ONLY now that the socket is bound, so the line
+    // can't precede a bind failure and mislead a wrapper that treats it as
+    // a readiness signal (issue #38 review). stderr keeps stdout clean.
+    eprintln!("gwm daemon listening on {}", opts.socket.display());
+
     loop {
       if shutdown.load(Ordering::Relaxed) {
         break;
