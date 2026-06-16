@@ -18,6 +18,7 @@ use crate::multiplexer::{
 use crate::naming::{parse_branch, BranchSpec};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
+use crate::review;
 use crate::sync::{self, SyncAction, SyncReport, SyncStrategy};
 use crate::trust::{self, TrustLedger, TrustMode, TrustOutcome};
 use crate::workspace;
@@ -190,6 +191,31 @@ pub enum Command {
     /// resolved trunk from `[doctor].trunks`, then `main`).
     #[arg(long, value_name = "REF")]
     base: Option<String>,
+  },
+  /// Materialise an existing GitHub PR into an isolated worktree (issue #308).
+  ///
+  /// Resolves the PR head via `gh` and fetches origin's universal
+  /// `refs/pull/<N>/head` ref — cross-fork aware, and valid for PRs in any
+  /// state (open / draft / closed / merged) — into a local
+  /// `review/pr-<N>-<author>-<slug>` branch, attaches a worktree, links the
+  /// PR so the sidebar / CI indicator light up immediately, and runs the
+  /// same bootstrap + lifecycle hooks as `gwm create`. Tear down with
+  /// `gwm remove <dir> --delete-branch` like any worktree.
+  Review {
+    /// PR number to review (digits only).
+    #[arg()]
+    number: u64,
+    /// Override the local review branch name (defaults to
+    /// `review/pr-<N>-<author>-<slug>`). The worktree directory is derived
+    /// from this name (slashes become dashes).
+    #[arg(long, value_name = "BRANCH")]
+    name: Option<String>,
+    /// Skip bootstrap after creation.
+    #[arg(long)]
+    no_bootstrap: bool,
+    /// Skip lifecycle hooks for comma-separated phases (e.g. pre_create,post_create).
+    #[arg(long, value_name = "PHASES")]
+    skip_hooks: Option<String>,
   },
   /// Create a GitHub issue from templates, then create its worktree.
   New {
@@ -881,6 +907,12 @@ pub fn run(cli: Cli) -> Result<()> {
       skip_hooks,
     } => cmd_new(branch_type, desc, no_bootstrap, reuse_branch, skip_hooks, mode),
     Command::Pr { render, draft, base } => cmd_pr(render, draft, base),
+    Command::Review {
+      number,
+      name,
+      no_bootstrap,
+      skip_hooks,
+    } => cmd_review(number, name, no_bootstrap, skip_hooks, mode),
     Command::Remove {
       pattern,
       delete_branch,
@@ -1637,6 +1669,119 @@ fn cmd_create(
 
   let created = worktree::add(&repo, &dirname, &target, &branch, reuse_branch)?;
   println!("✓ worktree created at {}", created.display());
+
+  let post_ctx = pre_ctx.with_cwd(&created);
+
+  if no_bootstrap {
+    println!("(skipped bootstrap)");
+  } else {
+    let report = lifecycle::run_phase(&config, HookPhase::PreBootstrap, &post_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
+
+    let ctx = BootstrapCtx {
+      main_repo: &workdir,
+      worktree: &created,
+      config: &config,
+    };
+    let report = bootstrap::run_core(&ctx)?;
+    print_report(&report);
+
+    let report = lifecycle::run_phase(&config, HookPhase::PostBootstrap, &post_ctx, &skips, false)?;
+    print_lifecycle_report(&report);
+  }
+
+  if config.hooks.has_any() && !config.bootstrap.command.is_empty() {
+    eprintln!("warning: [[bootstrap.command]] is deprecated as a post_create hook when [hooks.*] is present");
+  }
+  let report = lifecycle::run_phase(&config, HookPhase::PostCreate, &post_ctx, &skips, !no_bootstrap)?;
+  print_lifecycle_report(&report);
+  Ok(())
+}
+
+/// `gwm review <PR#>` (issue #308) — the inbound counterpart to
+/// `cmd_create`. Resolves the PR head via `gh`, materialises a worktree on
+/// origin's `refs/pull/<N>/head` ref (see [`crate::review`]), links the PR,
+/// then runs the identical bootstrap + lifecycle-hook sequence so a review
+/// worktree is set up exactly like one we authored.
+fn cmd_review(
+  number: u64,
+  name: Option<String>,
+  no_bootstrap: bool,
+  skip_hooks: Option<String>,
+  trust_mode: TrustMode,
+) -> Result<()> {
+  let RepoContext { repo, workdir, config } = repo_context(None)?;
+  let repo_name = worktree::repo_name(&repo);
+  let repo_slug = github::repo_slug(&repo)?;
+
+  println!("resolving PR #{number} on {repo_slug} …");
+  let head = github::fetch_pr_head(&repo_slug, number)?;
+  let slug = review::head_slug(&head.head_ref_name);
+
+  let branch = name
+    .clone()
+    .unwrap_or_else(|| review::review_branch_name(number, &head.author, &slug));
+  let dirname = match &name {
+    Some(n) => review::dirname_from_branch(n),
+    None => review::review_dirname(number, &head.author, &slug),
+  };
+  // Land the review worktree under the same `base` as every other
+  // worktree so `gwm list` / the TUI pick it up. The synthetic
+  // type/issue/desc feed any `{type}`/`{issue}`/`{desc}` placeholders a
+  // custom base might carry.
+  let base = crate::config::expand_placeholders(
+    &config.worktree.base,
+    &repo_name,
+    Some("review"),
+    Some(&number.to_string()),
+    Some(&slug),
+    Some(&workdir),
+  )?;
+  let target = PathBuf::from(base).join(&dirname);
+  let skips = HookSkips::parse(skip_hooks.as_deref())?;
+
+  // A `review/…` branch carries no BranchSpec of its own; synthesize one
+  // (bypassing the type validation that would reject `review`) purely to
+  // drive the hook placeholders, so `pre_create` / `post_create` see the
+  // same `{type}`/`{issue}`/`{desc}` surface they do under `gwm create`.
+  let spec = BranchSpec {
+    type_: "review".to_string(),
+    issue: number.to_string(),
+    desc: slug.clone(),
+  };
+
+  // Gate the bootstrap / hook RCE primitives on the TOFU ledger BEFORE
+  // touching disk — identical to `cmd_create`.
+  let create_hooks_present = !config.hooks.pre_create.is_empty()
+    || !config.hooks.post_create.is_empty()
+    || (!no_bootstrap && !config.bootstrap.command.is_empty());
+  if !no_bootstrap || create_hooks_present {
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
+  }
+
+  let pre_ctx = HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, &spec);
+  let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
+  print_lifecycle_report(&report);
+
+  println!("creating review worktree:");
+  println!(
+    "  PR     : #{number} by {} ({} → {})",
+    head.author, head.head_ref_name, head.base_ref_name
+  );
+  println!("  branch : {branch}");
+  println!("  dir    : {dirname}");
+  println!("  path   : {}", target.display());
+
+  let rspec = review::ReviewSpec {
+    number,
+    branch: &branch,
+    dirname: &dirname,
+    target: &target,
+    base_ref: (!head.base_ref_name.is_empty()).then_some(head.base_ref_name.as_str()),
+  };
+  let created = review::materialize(&repo, &workdir, &rspec)?;
+  println!("✓ review worktree created at {}", created.display());
+  println!("✓ linked to PR #{number}");
 
   let post_ctx = pre_ctx.with_cwd(&created);
 

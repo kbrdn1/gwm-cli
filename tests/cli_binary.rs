@@ -30,6 +30,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  new "))
     // Issue #84: render the PR body from `[pr_template]` and shell out to `gh pr create`.
     .stdout(predicate::str::contains("  pr "))
+    // Issue #308: materialise an existing PR into a worktree (inbound review).
+    .stdout(predicate::str::contains("  review "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
