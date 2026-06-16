@@ -307,7 +307,9 @@ pub enum Command {
     /// Worktree-state poll interval in milliseconds for `subscribe` push
     /// notifications. Lower = faster updates, more git scans. This MVP
     /// polls rather than watching the filesystem (no `notify` dep).
-    #[arg(long, value_name = "MS", default_value_t = 1000)]
+    /// Must be ≥ 1: `0` would spin a `subscribe` loop with no wait,
+    /// re-scanning git as fast as the CPU allows (issue #38 review).
+    #[arg(long, value_name = "MS", default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
     poll_ms: u64,
   },
   /// List the supported branch types.

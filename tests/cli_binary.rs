@@ -1032,6 +1032,21 @@ fn path_format_json_emits_name_path_branch() {
 }
 
 #[test]
+fn daemon_rejects_zero_poll_ms() {
+  // `--poll-ms 0` would spin a subscribe loop with no wait; clap rejects
+  // it at parse time (range 1..) so the daemon never starts (issue #38
+  // review). No repo / socket needed — validation fails first.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["daemon", "--poll-ms", "0"])
+    .assert()
+    .failure()
+    .stderr(
+      predicate::str::contains("0").and(predicate::str::contains("not in").or(predicate::str::contains("invalid"))),
+    );
+}
+
+#[test]
 fn cd_unknown_pattern_fails_with_not_found() {
   let (dir, _repo) = init_repo();
   let mut cmd = Command::cargo_bin("gwm").unwrap();
