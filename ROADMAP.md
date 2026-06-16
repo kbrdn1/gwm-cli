@@ -118,7 +118,12 @@ workspace mode (#36), config presets (#37), and the JSON API + daemon (#38) —
 plus the former #298 umbrella, now landed as the current-PR CI indicator (#299)
 and the file-explorer Working Tree pane (#300).
 
-Genuinely-remaining near-term work:
+New direction — closing the GitHub loop (post-rc.2 product-gap review):
+
+- [#308](https://github.com/kbrdn1/gwm-cli/issues/308) — **`gwm review <PR#>` — inbound PR / remote branch → worktree.** Every worktree⇄GitHub feature today is *outbound-only* (`create` mints a new branch to the naming convention; `pr` only creates an outbound PR). The canonical worktree use case — check out a teammate's PR in isolation to review / test / fix it — is impossible. This is the missing half of the loop the rest of the app presupposes: it turns the rc.2 CI indicator (#299) from a passive display into a complete review workflow.
+- [#309](https://github.com/kbrdn1/gwm-cli/issues/309) — **A first daemon consumer.** `gwm daemon` (#38) shipped as "editor / statusbar integration" with zero consumers. Ship a thin statusline one-liner (driven by the `subscribe` stream) plus an editor recipe so the wire protocol is exercised by a real client.
+
+Housekeeping:
 
 - [#304](https://github.com/kbrdn1/gwm-cli/issues/304) — **Workspace follow-up** — the nuanced review items left open after the multi-repo workspace PR (#303) landed.
 - [#206](https://github.com/kbrdn1/gwm-cli/issues/206) — **Docs screenshots** — replace the provisional placeholders with real TUI captures across the doc tree.
@@ -126,10 +131,21 @@ Genuinely-remaining near-term work:
 ## Ambitious
 
 Larger investments with strategic payoff. Gated by user demand or a concrete
-first consumer. Nothing is queued here right now — the previous "Ambitious"
-items (config presets #37, JSON-RPC API + daemon #38) shipped in the rc.2 train
-above. New large bets land here once an issue with a concrete first consumer is
-filed.
+first consumer. The previous "Ambitious" items (config presets #37, JSON-RPC API
++ daemon #38) shipped in the rc.2 train above; the daemon's missing "concrete
+first consumer" is now tracked as [#309](https://github.com/kbrdn1/gwm-cli/issues/309)
+under [Next up](#next-up). No new large bets are queued here yet — they land
+once an issue with a concrete first consumer is filed.
+
+Candidate directions from the post-rc.2 gap review, not yet scoped into issues:
+
+- **Fan-out across worktrees** — a `gwm exec <cmd>` to run a command across all
+  (or a filtered subset of) worktrees / workspace repos (`test` all, `fetch`
+  all, `status` all). Multi-repo workspace mode (#36) makes batch operations a
+  natural next step.
+- **Disk hygiene** — a `gwm clean` / disk-usage report for the `target/` /
+  `node_modules/` that worktrees accumulate (the kind of cleanup currently
+  hand-wired as a `[tui.macro1]` shortcut).
 
 ## How to contribute
 
