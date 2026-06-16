@@ -63,7 +63,11 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  undo "))
     .stdout(predicate::str::contains("  history "))
     // Issue #87: configurable TUI keymap (`gwm tui keys`).
-    .stdout(predicate::str::contains("  tui "));
+    .stdout(predicate::str::contains("  tui "))
+    // Issue #38: long-running JSON-RPC daemon over a unix socket. The
+    // subcommand is always listed (help is identical cross-platform); the
+    // socket impl is `cfg(unix)`-gated and returns a clean error elsewhere.
+    .stdout(predicate::str::contains("  daemon "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -905,6 +909,98 @@ fn list_format_names_emits_one_name_per_line() {
     // accepts (path/remove/bootstrap skip the main workdir). A fresh repo
     // therefore prints nothing.
     .stdout(predicate::str::is_empty());
+}
+
+// --- JSON output flags (issue #38, phase 1) ----------------------------
+
+#[test]
+fn list_format_json_emits_a_parseable_worktree_array() {
+  // Unlike `--format names`, the JSON array includes the main worktree:
+  // an editor / statusbar consumer wants the full set, and resolves the
+  // active worktree from it. A fresh repo has exactly the main worktree.
+  let (dir, _repo) = init_repo();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "list --format=json must exit 0");
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+  let arr = v.as_array().expect("top level must be a JSON array");
+  assert_eq!(arr.len(), 1, "a fresh repo has exactly the main worktree");
+  let main = &arr[0];
+  assert_eq!(main["is_main"], serde_json::json!(true));
+  // Stable schema keys present.
+  assert!(main.get("name").is_some());
+  assert!(main.get("path").is_some());
+  assert!(main.get("status").is_some());
+  assert!(main["status"].get("is_dirty").is_some());
+  // Optional link fields are present and null on a fresh repo.
+  assert_eq!(main["pr"], serde_json::Value::Null);
+}
+
+#[test]
+fn doctor_format_json_emits_checks_severity_and_exit_code() {
+  let (dir, _repo) = init_repo();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor", "--format=json"])
+    .output()
+    .unwrap();
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("doctor json must parse");
+  assert!(v["checks"].is_array(), "checks must be an array");
+  assert!(
+    !v["checks"].as_array().unwrap().is_empty(),
+    "doctor runs at least one check"
+  );
+  let sev = v["severity"].as_str().expect("severity must be a string");
+  assert!(
+    matches!(sev, "ok" | "warning" | "failed"),
+    "severity stable enum, got {sev}"
+  );
+  // The JSON exit_code mirrors the process exit code.
+  let json_code = v["exit_code"].as_i64().expect("exit_code is an integer");
+  let proc_code = out.status.code().unwrap_or(-1) as i64;
+  assert_eq!(json_code, proc_code, "json exit_code must equal the process exit code");
+  // Per-check shape.
+  let first = &v["checks"][0];
+  assert!(first.get("name").is_some());
+  let cs = first["status"].as_str().unwrap();
+  assert!(matches!(cs, "ok" | "warning" | "failed"));
+}
+
+#[test]
+fn path_format_json_emits_name_path_branch() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "38", "json-path"])
+    .assert()
+    .success();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["path", "json-path", "--format=json"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "path --format=json must exit 0");
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("path json must parse");
+  let obj = v.as_object().expect("path json must be an object");
+  assert_eq!(obj.len(), 3, "exactly {{name, path, branch}}");
+  assert_eq!(v["name"], serde_json::json!("feat-38-json-path"));
+  assert_eq!(v["branch"], serde_json::json!("feat/#38-json-path"));
+  assert!(
+    v["path"].as_str().unwrap().ends_with("feat-38-json-path"),
+    "path points at the worktree dir"
+  );
 }
 
 #[test]
