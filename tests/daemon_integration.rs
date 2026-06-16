@@ -207,3 +207,41 @@ fn subscribe_streams_snapshot_then_pushes_on_worktree_change() {
     "the pushed list names the new worktree"
   );
 }
+
+#[test]
+fn subscribe_reaps_an_idle_client_that_disconnects() {
+  // A subscriber that closes the connection during a no-change period must
+  // be detected and reaped — otherwise the detached thread polls git
+  // forever (issue #38 review). We half-close the client write side
+  // (signalling disconnect WITHOUT any worktree change); the server reads
+  // EOF, returns, and drops its socket, so our subsequent read sees EOF
+  // too. With the bug the server would never notice (no change ever
+  // happens) and this read would block until the connect() timeout.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(30));
+
+  let stream = daemon.connect();
+  let mut writer = stream.try_clone().unwrap();
+  let mut reader = BufReader::new(stream);
+
+  writeln!(writer, r#"{{"method":"subscribe","id":1}}"#).unwrap();
+  writer.flush().unwrap();
+
+  let mut snapshot = String::new();
+  reader
+    .read_line(&mut snapshot)
+    .expect("must receive the initial snapshot");
+  assert!(snapshot.contains("worktrees.changed"));
+
+  // Disconnect without triggering any worktree change.
+  writer.shutdown(std::net::Shutdown::Write).unwrap();
+
+  // The server must reap the subscription and close its end promptly. EOF
+  // (0 bytes) proves it; a timeout error means the leak regressed.
+  let mut tail = String::new();
+  let n = reader
+    .read_line(&mut tail)
+    .expect("server must close the idle subscription (not time out)");
+  assert_eq!(n, 0, "idle subscriber must be reaped on disconnect");
+}

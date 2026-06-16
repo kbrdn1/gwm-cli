@@ -224,7 +224,7 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
 mod server {
   use super::*;
   use crate::error::GwmError;
-  use std::io::{BufRead, BufReader, Write};
+  use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
   use std::os::unix::fs::FileTypeExt;
   use std::os::unix::net::{UnixListener, UnixStream};
   use std::path::PathBuf;
@@ -390,21 +390,38 @@ mod server {
   /// Push `worktrees.changed` notifications: an immediate snapshot, then
   /// one per detected change. Change detection uses [`worktrees_differ`],
   /// which ignores the always-ticking `age_seconds` so a non-trunk branch
-  /// doesn't spam a notification every poll. Ends when the client
-  /// disconnects (write fails) or `shutdown` flips.
-  fn stream_subscription(writer: &mut UnixStream, workdir: &Path, poll: Duration, shutdown: &AtomicBool) {
-    let mut last = run_list(workdir).unwrap_or_default();
-    if send_notification(writer, &last).is_err() {
+  /// doesn't spam a notification every poll.
+  ///
+  /// The read timeout doubles as the poll cadence AND the disconnect
+  /// detector: a closed peer makes `read` return `Ok(0)` promptly. Without
+  /// it, the loop only ever *writes* (on change), so a subscriber that
+  /// disconnects during a no-change period would never be observed and the
+  /// detached thread would keep scanning git forever (issue #38 review).
+  fn stream_subscription(stream: &mut UnixStream, workdir: &Path, poll: Duration, shutdown: &AtomicBool) {
+    if stream.set_read_timeout(Some(poll)).is_err() {
       return;
     }
+    let mut last = run_list(workdir).unwrap_or_default();
+    if send_notification(stream, &last).is_err() {
+      return;
+    }
+    let mut buf = [0u8; 64];
     loop {
       if shutdown.load(Ordering::Relaxed) {
         return;
       }
-      std::thread::sleep(poll);
+      // Blocks up to `poll` waiting for client input — this read IS the
+      // poll wait. A timeout (`WouldBlock`/`TimedOut`) is the normal idle
+      // tick; `Ok(0)` is the peer closing; other errors are a dead link.
+      match stream.read(&mut buf) {
+        Ok(0) => return,
+        Ok(_) => {} // unexpected client chatter on a push stream — ignore
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
+        Err(_) => return,
+      }
       let now = run_list(workdir).unwrap_or_default();
       if worktrees_differ(&last, &now) {
-        if send_notification(writer, &now).is_err() {
+        if send_notification(stream, &now).is_err() {
           return;
         }
         last = now;
