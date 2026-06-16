@@ -10,7 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet — the v0.10.0-rc.2 delta moved to [`changelogs/pre-releases/0.10.0-rc.2.md`](changelogs/pre-releases/0.10.0-rc.2.md).
+### Added
+
+- **First daemon consumer — `gwm statusline`** ([#309](https://github.com/kbrdn1/gwm-cli/issues/309)): the first real consumer of the `gwm daemon` JSON-RPC surface (#38). A thin, dependency-free client that connects to the daemon socket and renders a compact one-line worktree summary for tmux / starship / zsh prompts — active branch, worktree count, dirty / ahead / behind, linked issue / PR. `--watch` rides the `subscribe` stream and reprints on every `worktrees.changed` push; without it, a single `list` round-trip prints once and exits. When no daemon is reachable it prints an empty line and exits `0`, so a prompt substitution degrades to nothing. A CI rollup is intentionally omitted (not part of the daemon's stable schema). New `docs/5.integrations/4.daemon-consumers.md` (EN + FR) documents the statusline, the raw `socat` / `nc` protocol one-liner, and an editor recipe (Zed / VS Code). `JsonWorktree` / `JsonStatus` gained `Deserialize` so a client can decode the lines the server serialises.
 
 ## Past releases
 
