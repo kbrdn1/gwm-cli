@@ -850,6 +850,74 @@ pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatu
   parse_pr_json(&stdout)
 }
 
+/// The slice of PR metadata `gwm review` needs to materialise a worktree:
+/// the head ref name (slug source), the author login (path component), and
+/// the base ref (diff base). Distinct from [`PrStatus`] so the TUI's
+/// status/CI path stays untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrHead {
+  pub number: u64,
+  /// Author login, e.g. `alice` (`dependabot[bot]` for bot PRs).
+  pub author: String,
+  /// The PR's head branch name, e.g. `feat/spike-x`.
+  pub head_ref_name: String,
+  /// The PR's base branch name, e.g. `main`.
+  pub base_ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct RawPrHead {
+  number: u64,
+  // `Option` (not just `#[serde(default)]`) so an explicit `"author": null`
+  // — a deleted GitHub account — deserialises to `None` instead of erroring;
+  // `default` alone only covers a *missing* key.
+  #[serde(default)]
+  author: Option<RawAuthor>,
+  #[serde(rename = "headRefName", default)]
+  head_ref_name: String,
+  #[serde(rename = "baseRefName", default)]
+  base_ref_name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawAuthor {
+  #[serde(default)]
+  login: String,
+}
+
+const PR_HEAD_JSON_FIELDS: &str = "number,author,headRefName,baseRefName";
+
+/// Parse the JSON from `gh pr view <n> --json number,author,headRefName,baseRefName`.
+/// Kept pure + `pub` so its shape is unit-testable without spawning `gh`.
+pub fn parse_pr_head_json(s: &str) -> Result<PrHead> {
+  let raw: RawPrHead = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "pr head",
+    source: e,
+  })?;
+  Ok(PrHead {
+    number: raw.number,
+    author: raw.author.unwrap_or_default().login,
+    head_ref_name: raw.head_ref_name,
+    base_ref_name: raw.base_ref_name,
+  })
+}
+
+/// Run `gh pr view <n> --repo <slug> --json …` and parse the head metadata
+/// `gwm review` needs (author / head ref / base ref). Works for PRs in any
+/// state — open, draft, closed, or merged.
+pub fn fetch_pr_head(slug: &str, number: u64) -> Result<PrHead> {
+  let stdout = run_gh([
+    "pr",
+    "view",
+    &number.to_string(),
+    "--repo",
+    slug,
+    "--json",
+    PR_HEAD_JSON_FIELDS,
+  ])?;
+  parse_pr_head_json(&stdout)
+}
+
 /// Find the most recent PR opened from `branch` (head ref) on the given
 /// repo, regardless of state. Returns `Ok(Some(N))` if at least one PR
 /// exists (open, draft, closed, or merged — `gh pr list --state all`),

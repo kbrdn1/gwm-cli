@@ -5,7 +5,9 @@
 mod common;
 
 use common::init_repo;
-use gwm::github::{self, parse_issue_json, parse_pr_json, BranchLink, CiState, IssueState, LinkSource, PrState};
+use gwm::github::{
+  self, parse_issue_json, parse_pr_head_json, parse_pr_json, BranchLink, CiState, IssueState, LinkSource, PrState,
+};
 
 fn make_branch(repo: &git2::Repository, name: &str) {
   let head = repo.head().unwrap().peel_to_commit().unwrap();
@@ -1160,6 +1162,33 @@ fn parse_pr_list_number_returns_none_for_empty_array() {
 #[test]
 fn parse_pr_list_number_errors_on_malformed_json() {
   assert!(github::parse_pr_list_number("not json").is_err());
+}
+
+#[test]
+fn parse_pr_head_json_extracts_author_head_and_base() {
+  // Issue #308: `gwm review` keys off the PR head ref (slug), the author
+  // login (path component), and the base ref (diff base).
+  let json = r#"{
+    "number": 312,
+    "author": { "login": "alice" },
+    "headRefName": "feat/spike-x",
+    "baseRefName": "main"
+  }"#;
+  let head = parse_pr_head_json(json).unwrap();
+  assert_eq!(head.number, 312);
+  assert_eq!(head.author, "alice");
+  assert_eq!(head.head_ref_name, "feat/spike-x");
+  assert_eq!(head.base_ref_name, "main");
+}
+
+#[test]
+fn parse_pr_head_json_tolerates_a_null_author() {
+  // A deleted GitHub account surfaces as `"author": null`; the default
+  // keeps parsing from blowing up (the slug/branch fall back to empty).
+  let json = r#"{ "number": 7, "author": null, "headRefName": "x", "baseRefName": "dev" }"#;
+  let head = parse_pr_head_json(json).unwrap();
+  assert_eq!(head.author, "");
+  assert_eq!(head.base_ref_name, "dev");
 }
 
 #[test]
