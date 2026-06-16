@@ -36,14 +36,17 @@ use std::path::Path;
 
 /// JSON-RPC 2.0 standard error codes (subset we emit).
 pub const PARSE_ERROR: i64 = -32700;
+pub const INVALID_REQUEST: i64 = -32600;
 pub const METHOD_NOT_FOUND: i64 = -32601;
 pub const INVALID_PARAMS: i64 = -32602;
 pub const INTERNAL_ERROR: i64 = -32603;
 
 /// A parsed JSON-RPC 2.0 request. `params` and `id` default so a minimal
-/// `{"method":"list"}` line still parses (id becomes `null` → the
-/// response echoes `null`, which is valid per the spec for a request that
-/// omitted its id).
+/// `{"method":"list"}` line still parses. When the `id` member is absent
+/// the request is a **notification** (no response is sent — see
+/// [`handle_line`]); an explicit `"id": null` is a request and is echoed
+/// back as `null`. The two are distinguished at parse time in
+/// [`handle_line`], not here.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RpcRequest {
   #[serde(default)]
@@ -147,14 +150,32 @@ pub fn dispatch(workdir: &Path, req: &RpcRequest) -> Value {
   }
 }
 
-/// Parse one NDJSON request line and return the serialized response line.
-/// A malformed line yields a JSON-RPC parse error with a `null` id rather
-/// than crashing the connection.
-pub fn handle_line(workdir: &Path, line: &str) -> String {
-  match serde_json::from_str::<RpcRequest>(line) {
-    Ok(req) => dispatch(workdir, &req).to_string(),
-    Err(e) => error(&Value::Null, PARSE_ERROR, &format!("parse error: {e}")).to_string(),
-  }
+/// Parse one NDJSON request line and return the serialized response line,
+/// or `None` when no response must be sent.
+///
+/// JSON-RPC 2.0 notification handling: a request object with **no `id`
+/// member** is a notification — it is processed but MUST NOT be answered
+/// (returns `None`). An explicit `"id": null` is a normal request and is
+/// answered with `"id": null`. The absent-vs-null distinction is made on
+/// the raw value here (serde would collapse both to `Value::Null`).
+///
+/// A malformed line yields a JSON-RPC parse error (`null` id) rather than
+/// crashing the connection; a well-formed object that isn't a valid
+/// request yields an invalid-request error.
+pub fn handle_line(workdir: &Path, line: &str) -> Option<String> {
+  let value: Value = match serde_json::from_str(line) {
+    Ok(v) => v,
+    Err(e) => return Some(error(&Value::Null, PARSE_ERROR, &format!("parse error: {e}")).to_string()),
+  };
+  let req: RpcRequest = match serde_json::from_value(value.clone()) {
+    Ok(r) => r,
+    Err(e) => return Some(error(&Value::Null, INVALID_REQUEST, &format!("invalid request: {e}")).to_string()),
+  };
+  // Absent `id` ⇒ notification: process for side effects (none for our
+  // read-only methods) but send nothing back. The `?` short-circuits to
+  // `None` (no response) when the `id` member is missing.
+  value.get("id")?;
+  Some(dispatch(workdir, &req).to_string())
 }
 
 /// Build the `worktrees.changed` notification payload (no `id` — it's a
@@ -357,9 +378,11 @@ mod server {
         return;
       }
 
-      let response = handle_line(workdir, &line);
-      if writeln!(writer, "{response}").is_err() || writer.flush().is_err() {
-        break;
+      // A notification (no `id`) returns None — process, send nothing.
+      if let Some(response) = handle_line(workdir, &line) {
+        if writeln!(writer, "{response}").is_err() || writer.flush().is_err() {
+          break;
+        }
       }
     }
   }

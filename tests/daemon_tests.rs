@@ -35,7 +35,8 @@ fn sample(name: &str) -> JsonWorktree {
 }
 
 fn call(workdir: &std::path::Path, line: &str) -> Value {
-  serde_json::from_str(&handle_line(workdir, line)).expect("response must be valid JSON")
+  let resp = handle_line(workdir, line).expect("a request with an id must get a response");
+  serde_json::from_str(&resp).expect("response must be valid JSON")
 }
 
 #[test]
@@ -110,6 +111,27 @@ fn malformed_line_is_parse_error_with_null_id() {
   let v = call(dir.path(), "this is not json {");
   assert_eq!(v["error"]["code"], serde_json::json!(PARSE_ERROR));
   assert_eq!(v["id"], Value::Null, "a parse error can't know the id");
+}
+
+#[test]
+fn notification_without_id_gets_no_response() {
+  // JSON-RPC 2.0: a request object with no `id` member is a notification
+  // and MUST NOT be answered (issue #38 review).
+  let (dir, _repo) = init_repo();
+  assert!(
+    handle_line(dir.path(), r#"{"jsonrpc":"2.0","method":"list"}"#).is_none(),
+    "a notification (no id) must produce no response"
+  );
+}
+
+#[test]
+fn explicit_null_id_is_a_request_and_is_answered() {
+  // An explicit `"id": null` is a request (not a notification) and is
+  // answered, echoing null.
+  let (dir, _repo) = init_repo();
+  let v = call(dir.path(), r#"{"jsonrpc":"2.0","method":"list","id":null}"#);
+  assert_eq!(v["id"], Value::Null);
+  assert!(v["result"].is_array());
 }
 
 // --- subscribe change detection (issue #38 review) --------------------
