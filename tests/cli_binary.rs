@@ -1651,6 +1651,46 @@ fn status_persists_detected_pr_title_after_fetch() {
 }
 
 #[test]
+fn review_resolves_pr_metadata_and_names_branch_end_to_end() {
+  // E2E (issue #308): drive `gwm review <PR#>` through the clap entry point.
+  // A fake `gh` resolves the PR head metadata and `repo_slug` parses the
+  // GitHub origin; `GIT_ALLOW_PROTOCOL=file` then makes the subsequent
+  // `git fetch` over https fail instantly (no network) right after the
+  // resolution block is printed — so the assertion stays hermetic and fast.
+  //
+  // This pins the clap surface + gh metadata resolution + review naming +
+  // `[worktree].base` expansion that the unit / integration tests bypass. The
+  // full fetch→worktree→link→base path is covered hermetically by
+  // tests/review_integration.rs (which drives `review::materialize` directly
+  // against a local origin and needs no GitHub URL — the slug/fetch coupling
+  // makes that step un-mockable through the binary without a network call).
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    "[]",
+    r#"{"number":1,"author":{"login":"alice"},"headRefName":"feat/spike-x","baseRefName":"main"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .env("GIT_ALLOW_PROTOCOL", "file") // reject the https fetch instantly, no network
+    .args(["review", "1", "--no-bootstrap"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("PR     : #1 by alice (feat/spike-x → main)"))
+    .stdout(predicate::str::contains("branch : review/pr-1-alice-spike-x"))
+    .stdout(predicate::str::contains("review-pr-1-alice-spike-x"));
+}
+
+#[test]
 fn status_explicit_pr_link_wins_over_detection() {
   // An explicit `gwm link --pr` must not be clobbered by detection: the
   // reported source stays "explicit" even though `gh pr list` would

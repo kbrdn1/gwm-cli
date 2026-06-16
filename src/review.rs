@@ -89,9 +89,11 @@ pub struct ReviewSpec<'a> {
   pub dirname: &'a str,
   /// Absolute worktree path on disk.
   pub target: &'a Path,
-  /// The PR's base ref (e.g. `main`) so the launcher's `{base}`/`{diff}`
-  /// placeholders compare against the right point. `None` falls back to
-  /// the parent ref `worktree::add` records.
+  /// The diff base recorded as `branch.<name>.gwm-base` so the launcher's
+  /// `{base}`/`{diff}` placeholders compare against the PR's merge target.
+  /// Callers should pass a reliably resolvable ref — a remote-tracking
+  /// `origin/<base>` rather than a bare local `<base>` that may be stale or
+  /// absent. `None` falls back to the parent ref `worktree::add` records.
   pub base_ref: Option<&'a str>,
 }
 

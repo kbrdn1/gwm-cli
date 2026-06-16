@@ -1772,12 +1772,23 @@ fn cmd_review(
   println!("  dir    : {dirname}");
   println!("  path   : {}", target.display());
 
+  // Record `origin/<base>` (a remote-tracking ref) as the diff base, not the
+  // bare local `<base>` — a review-only checkout may have a stale or absent
+  // local base branch, and the `R` launcher passes the recorded value
+  // straight to `git diff`/`git rev-list`, where a missing ref reads as zero
+  // commits ("no changes" against a stale base). Refresh it here so the ref
+  // exists and is current; best-effort, since the head fetch in
+  // `materialize` is the load-bearing one.
+  let base_ref = (!head.base_ref_name.is_empty()).then(|| {
+    let _ = worktree::run_git_logged(&workdir, &["fetch", "origin", &head.base_ref_name]);
+    format!("origin/{}", head.base_ref_name)
+  });
   let rspec = review::ReviewSpec {
     number,
     branch: &branch,
     dirname: &dirname,
     target: &target,
-    base_ref: (!head.base_ref_name.is_empty()).then_some(head.base_ref_name.as_str()),
+    base_ref: base_ref.as_deref(),
   };
   let created = review::materialize(&repo, &workdir, &rspec)?;
   println!("✓ review worktree created at {}", created.display());
