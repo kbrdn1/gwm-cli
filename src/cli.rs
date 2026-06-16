@@ -1215,20 +1215,14 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     return Ok(());
   }
 
-  if format == ListFormat::Json {
-    // Stable machine-readable array (issue #38). Includes the main
-    // worktree — unlike `names`, a JSON consumer wants the full picture
-    // (an editor statusbar resolves the active worktree from the set).
-    let dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
-    println!("{}", serde_json::to_string_pretty(&dto)?);
-    return Ok(());
-  }
-
   // PR auto-detection (issue #181): off by default to keep the listing
   // network-free. When `--detect-pr` is set and a GitHub remote resolves,
   // detect each branch's PR via `gh pr list --head <branch>` — one `gh`
   // call per worktree. The detected number is rendered in an extra
   // column; an explicit `gwm link --pr` still wins via `read_link`.
+  // Computed before the JSON branch so `--format=json --detect-pr` agrees
+  // with the table (issue #38 review): the JSON `pr` field uses the same
+  // detected number rather than only the persisted link.
   let detected_prs: Vec<Option<u64>> = if detect_pr {
     let slug = github::repo_slug(&repo).ok();
     trees
@@ -1243,6 +1237,22 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   } else {
     Vec::new()
   };
+
+  if format == ListFormat::Json {
+    // Stable machine-readable array (issue #38). Includes the main
+    // worktree — unlike `names`, a JSON consumer wants the full picture
+    // (an editor statusbar resolves the active worktree from the set).
+    let mut dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
+    if detect_pr {
+      // Override the persisted `pr` with the freshly detected number so
+      // the JSON output matches `gwm list --detect-pr` (the table).
+      for (d, pr) in dto.iter_mut().zip(&detected_prs) {
+        d.pr = *pr;
+      }
+    }
+    println!("{}", serde_json::to_string_pretty(&dto)?);
+    return Ok(());
+  }
 
   // Dynamic widths based on observed content.
   let name_w = trees.iter().map(|w| w.name.len()).max().unwrap_or(4).clamp(4, 40);
@@ -1337,27 +1347,9 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     return Ok(());
   }
 
-  if format == ListFormat::Json {
-    // Workspace JSON tags each worktree with its owning `repo` so a
-    // cross-repo consumer can disambiguate (issue #36 + #38).
-    #[derive(serde::Serialize)]
-    struct WorkspaceJsonWorktree<'a> {
-      repo: &'a str,
-      #[serde(flatten)]
-      worktree: json_api::JsonWorktree,
-    }
-    let dto: Vec<WorkspaceJsonWorktree> = rows
-      .iter()
-      .map(|row| WorkspaceJsonWorktree {
-        repo: &row.repo_name,
-        worktree: json_api::JsonWorktree::from(&row.info),
-      })
-      .collect();
-    println!("{}", serde_json::to_string_pretty(&dto)?);
-    return Ok(());
-  }
-
   // PR auto-detection (issue #181) resolved per row against its own repo.
+  // Computed before the JSON branch so `--format=json --detect-pr` agrees
+  // with the table (issue #38 review).
   let detected_prs: Vec<Option<u64>> = if detect_pr {
     rows
       .iter()
@@ -1373,6 +1365,34 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
   } else {
     Vec::new()
   };
+
+  if format == ListFormat::Json {
+    // Workspace JSON tags each worktree with its owning `repo` so a
+    // cross-repo consumer can disambiguate (issue #36 + #38).
+    #[derive(serde::Serialize)]
+    struct WorkspaceJsonWorktree<'a> {
+      repo: &'a str,
+      #[serde(flatten)]
+      worktree: json_api::JsonWorktree,
+    }
+    let dto: Vec<WorkspaceJsonWorktree> = rows
+      .iter()
+      .enumerate()
+      .map(|(i, row)| {
+        let mut worktree = json_api::JsonWorktree::from(&row.info);
+        if detect_pr {
+          // Match the table: use the freshly detected PR number.
+          worktree.pr = detected_prs.get(i).copied().flatten();
+        }
+        WorkspaceJsonWorktree {
+          repo: &row.repo_name,
+          worktree,
+        }
+      })
+      .collect();
+    println!("{}", serde_json::to_string_pretty(&dto)?);
+    return Ok(());
+  }
 
   let repo_w = rows.iter().map(|r| r.repo_name.len()).max().unwrap_or(4).clamp(4, 30);
   let name_w = rows.iter().map(|r| r.info.name.len()).max().unwrap_or(4).clamp(4, 40);

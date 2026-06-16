@@ -941,6 +941,34 @@ fn list_format_json_emits_a_parseable_worktree_array() {
 }
 
 #[test]
+fn list_format_json_with_detect_pr_populates_the_pr_field() {
+  // `--format=json --detect-pr` must agree with the table: the JSON `pr`
+  // field carries the freshly detected number, not just the persisted
+  // link (issue #38 review).
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  // The main worktree's branch gets the detected PR #128.
+  assert!(
+    arr.iter().any(|w| w["pr"] == serde_json::json!(128)),
+    "detected PR number must surface in the JSON `pr` field, got: {v}"
+  );
+}
+
+#[test]
 fn doctor_format_json_emits_checks_severity_and_exit_code() {
   let (dir, _repo) = init_repo();
   let out = Command::cargo_bin("gwm")
