@@ -32,11 +32,13 @@ path = "node_modules"
 name = "install (bun if available)"
 run = "bun install"
 when = "file_exists:package.json && cmd_exists:bun"
+on_fail = "warn"
 
 [[hooks.post_create]]
 name = "install (npm fallback)"
 run = "npm ci"
 when = "file_exists:package.json && !cmd_exists:bun"
+on_fail = "warn"
 
 [[hooks.post_create]]
 name = "direnv allow"
