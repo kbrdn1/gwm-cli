@@ -1776,11 +1776,15 @@ fn cmd_review(
   // bare local `<base>` — a review-only checkout may have a stale or absent
   // local base branch, and the `R` launcher passes the recorded value
   // straight to `git diff`/`git rev-list`, where a missing ref reads as zero
-  // commits ("no changes" against a stale base). Refresh it here so the ref
-  // exists and is current; best-effort, since the head fetch in
-  // `materialize` is the load-bearing one.
+  // commits ("no changes" against a stale base). Fetch with an *explicit*
+  // `refs/heads/<base>:refs/remotes/origin/<base>` refspec so the tracking
+  // ref is actually written — a bare `git fetch origin <base>` only updates
+  // `FETCH_HEAD` unless the remote's configured refspec happens to cover it,
+  // which would leave `origin/<base>` stale. Best-effort, since the head
+  // fetch in `materialize` is the load-bearing one.
   let base_ref = (!head.base_ref_name.is_empty()).then(|| {
-    let _ = worktree::run_git_logged(&workdir, &["fetch", "origin", &head.base_ref_name]);
+    let refspec = format!("refs/heads/{0}:refs/remotes/origin/{0}", head.base_ref_name);
+    let _ = worktree::run_git_logged(&workdir, &["fetch", "origin", &refspec]);
     format!("origin/{}", head.base_ref_name)
   });
   let rspec = review::ReviewSpec {
