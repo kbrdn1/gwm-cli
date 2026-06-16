@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kbrdn1/gwm-cli/docs/schema/doctor.schema.json",
+  "title": "gwm doctor report",
+  "description": "Output of `gwm doctor --format=json` and the daemon's `doctor` JSON-RPC method (issue #38).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["checks", "severity", "exit_code"],
+  "properties": {
+    "checks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/check" }
+    },
+    "severity": {
+      "$ref": "#/$defs/status",
+      "description": "Highest severity present across all checks."
+    },
+    "exit_code": {
+      "type": "integer",
+      "enum": [0, 1, 2],
+      "description": "Process exit code: 0 all-ok, 1 a warning present, 2 a failure present."
+    }
+  },
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": ["ok", "warning", "failed"]
+    },
+    "check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "detail", "fix_hint"],
+      "properties": {
+        "name": { "type": "string" },
+        "status": { "$ref": "#/$defs/status" },
+        "detail": { "type": "string" },
+        "fix_hint": {
+          "type": ["string", "null"],
+          "description": "One-line remediation, or null when none applies."
+        }
+      }
+    }
+  }
+}

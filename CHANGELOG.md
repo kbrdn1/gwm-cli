@@ -12,6 +12,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **JSON API + daemon mode** (issue #38): a structured, machine-readable
+  surface for editor / statusbar / tooling integration, so consumers no
+  longer shell out to `gwm` and parse human output.
+  - **`--format=json`** on `gwm list`, `gwm doctor`, and `gwm path`
+    (`gwm path` / `gwm doctor` also accept `--format=text`, the default).
+    Each emits a stable, documented schema decoupled from gwm's internal
+    types — JSON Schema files live under [`docs/schema/`](docs/schema/)
+    (`worktree-list`, `doctor`, `path`). `gwm list --format=json` includes
+    the main worktree (unlike `names`); `gwm doctor --format=json` keeps
+    the conventional `0/1/2` process exit code and also carries it as a
+    field. Additive — the default output stays human-readable text.
+  - **`gwm daemon`**: a long-running JSON-RPC 2.0 server over a unix domain
+    socket (`$XDG_RUNTIME_DIR/gwm.sock`, falling back to `$TMPDIR` then
+    `/tmp`; override with `--socket`). Exposes `list` / `doctor` / `path`
+    request/response methods plus `subscribe`, which streams
+    `worktrees.changed` notifications (initial snapshot then one per
+    change). Newline-delimited JSON. Change detection is interval polling
+    (`--poll-ms`, default `1000`) rather than a filesystem watch — a
+    deliberate MVP choice (no extra dependency, deterministic, MSRV-safe;
+    latency bounded by the interval). Unix-only, behind the default-on
+    `daemon` Cargo feature; on other platforms / `--no-default-features`
+    builds the subcommand exits with an explanatory error (it stays listed
+    so `--help` is identical everywhere). No new runtime dependencies — the
+    socket uses `std::os::unix::net`.
 - **Config presets for `gwm init`** (issue #37): `gwm init --preset <name>`
   seeds an opinionated `.gwm.toml` for a known stack instead of the generic
   template. Built-ins: `laravel` (env copies + AWS-RDS guard + `vendor/`
