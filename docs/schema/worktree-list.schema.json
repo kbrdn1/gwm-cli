@@ -24,6 +24,10 @@
         "pr"
       ],
       "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Owning repo name. Present ONLY in workspace mode (`gwm --workspace <root> list --format=json`); absent for a single-repo listing."
+        },
         "name": {
           "type": "string",
           "description": "Display name — basename of the worktree directory."
