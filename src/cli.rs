@@ -312,6 +312,29 @@ pub enum Command {
     #[arg(long, value_name = "MS", default_value_t = 1000, value_parser = clap::value_parser!(u64).range(1..))]
     poll_ms: u64,
   },
+  /// Print a compact one-line worktree summary for shell prompts (issue #309).
+  ///
+  /// The first real consumer of `gwm daemon`: it connects to the daemon's
+  /// unix socket, asks for the worktree set, and renders a single line —
+  /// active branch, worktree count, dirty / ahead / behind, linked issue /
+  /// PR — suitable for a tmux / starship / zsh statusline. With `--watch`
+  /// it subscribes to the daemon's `worktrees.changed` stream and reprints
+  /// on every change (one line per update).
+  ///
+  /// Needs a running `gwm daemon` (one per repo). When none is reachable it
+  /// prints an empty line and exits 0, so a prompt substitution degrades to
+  /// nothing instead of erroring. A CI rollup is intentionally not shown —
+  /// it is not part of the daemon's stable schema.
+  Statusline {
+    /// Daemon socket path. Defaults to the same resolution as
+    /// `gwm daemon`: `$XDG_RUNTIME_DIR/gwm.sock`, then `$TMPDIR`, then `/tmp`.
+    #[arg(long, value_name = "PATH")]
+    socket: Option<PathBuf>,
+    /// Stream live updates: subscribe to `worktrees.changed` and reprint
+    /// the line on every change instead of printing once and exiting.
+    #[arg(long)]
+    watch: bool,
+  },
   /// List the supported branch types.
   ///
   /// Pass `--gitmoji` to extend the output with two more columns: the
@@ -894,6 +917,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Prune { dry_run } => cmd_prune(dry_run),
     Command::Doctor { format } => cmd_doctor(format),
     Command::Daemon { socket, poll_ms } => cmd_daemon(socket, poll_ms),
+    Command::Statusline { socket, watch } => cmd_statusline(socket, watch),
     Command::Types { gitmoji } => cmd_types(gitmoji),
     Command::CommitPrefix { branch, unicode } => cmd_commit_prefix(branch, unicode),
     Command::Hooks { action } => cmd_hooks(action),
@@ -2186,6 +2210,57 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   Err(GwmError::Other(
     "daemon mode is unavailable in this build (requires a Unix platform and the `daemon` feature)".into(),
   ))
+}
+
+/// Print one rendered statusline for the current cwd. Flushes immediately
+/// so a `--watch` consumer (tmux / prompt) sees each update without buffer
+/// lag. An empty render (no daemon, empty set) still prints a blank line so
+/// the consumer's line count stays predictable.
+fn print_statusline(worktrees: &[crate::json_api::JsonWorktree], cwd: &Path) {
+  use std::io::Write;
+  println!("{}", crate::statusline::render_for_cwd(worktrees, cwd));
+  let _ = io::stdout().flush();
+}
+
+#[cfg(all(unix, feature = "daemon"))]
+fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
+  let socket = socket.unwrap_or_else(crate::daemon::socket_path);
+  // Resolve once, canonicalised so a macOS `/var` ↔ `/private/var` symlink
+  // doesn't defeat the prefix match against the daemon's absolute paths.
+  let cwd = std::env::current_dir().unwrap_or_default();
+  let cwd = std::fs::canonicalize(&cwd).unwrap_or(cwd);
+
+  if watch {
+    // Stream forever (the callback never asks to stop); a dropped daemon
+    // ends the stream and we fall through to the graceful empty line.
+    let streamed = crate::daemon::client::subscribe(&socket, |worktrees| {
+      print_statusline(worktrees, &cwd);
+      true
+    });
+    if streamed.is_err() {
+      // Daemon unreachable or stream died before any output: emit a blank
+      // line and exit 0 so a prompt doesn't show an error (issue #309).
+      print_statusline(&[], &cwd);
+    }
+    return Ok(());
+  }
+
+  match crate::daemon::client::list_once(&socket) {
+    Ok(worktrees) => print_statusline(&worktrees, &cwd),
+    // No daemon (or a transport error): graceful blank line, exit 0.
+    Err(_) => print_statusline(&[], &cwd),
+  }
+  Ok(())
+}
+
+#[cfg(not(all(unix, feature = "daemon")))]
+fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
+  // No daemon transport in this build: the statusline has no source, so it
+  // degrades to the documented empty line (exit 0) rather than erroring.
+  let _ = (socket, watch);
+  let cwd = std::env::current_dir().unwrap_or_default();
+  print_statusline(&[], &cwd);
+  Ok(())
 }
 
 fn print_doctor_report(report: &doctor::DoctorReport) {

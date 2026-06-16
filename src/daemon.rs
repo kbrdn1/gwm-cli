@@ -217,6 +217,116 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Client side — request lines + response/notification parsers (issue #309).
+// Cross-platform and pure: the statusline consumer and any other client
+// reuse these to talk to a running daemon. The socket transport that wraps
+// them lives in the `client` submodule below (unix + `daemon` feature).
+// ---------------------------------------------------------------------------
+
+/// Canonical `list` request line a client writes to the socket.
+pub const LIST_REQUEST: &str = r#"{"jsonrpc":"2.0","method":"list","id":1}"#;
+
+/// Canonical `subscribe` request line a client writes to upgrade the
+/// connection into a one-way `worktrees.changed` stream.
+pub const SUBSCRIBE_REQUEST: &str = r#"{"jsonrpc":"2.0","method":"subscribe","id":1}"#;
+
+/// Parse a `list` JSON-RPC **response** line into its worktree vec — the
+/// client counterpart to [`dispatch`]'s `list` arm. A server-sent `error`
+/// envelope is surfaced as a [`GwmError`] rather than silently yielding an
+/// empty list.
+pub fn parse_list_result(line: &str) -> Result<Vec<JsonWorktree>> {
+  let v: Value = serde_json::from_str(line)
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: malformed list response: {e}")))?;
+  if let Some(err) = v.get("error") {
+    let msg = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+    return Err(crate::error::GwmError::Other(format!("daemon list error: {msg}")));
+  }
+  let result = v
+    .get("result")
+    .ok_or_else(|| crate::error::GwmError::Other("daemon list response missing 'result'".into()))?;
+  serde_json::from_value(result.clone())
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: cannot decode worktree list: {e}")))
+}
+
+/// Parse a `worktrees.changed` **notification** line into its worktree vec
+/// (the `params.worktrees` array). The client counterpart to
+/// [`worktrees_changed_notification`]; consumed by a `subscribe` stream.
+pub fn parse_worktrees_changed(line: &str) -> Result<Vec<JsonWorktree>> {
+  let v: Value = serde_json::from_str(line)
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: malformed notification: {e}")))?;
+  let arr = v
+    .get("params")
+    .and_then(|p| p.get("worktrees"))
+    .ok_or_else(|| crate::error::GwmError::Other("daemon notification missing 'params.worktrees'".into()))?;
+  serde_json::from_value(arr.clone())
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: cannot decode notification worktrees: {e}")))
+}
+
+/// Daemon **client** transport — connect / one-shot `list` / `subscribe`
+/// stream. Unix + `daemon` feature, mirroring the server gate: the pure
+/// parsers above stay cross-platform, only the socket I/O is gated.
+#[cfg(all(unix, feature = "daemon"))]
+pub mod client {
+  use super::*;
+  use crate::error::GwmError;
+  use std::io::{BufRead, BufReader, Write};
+  use std::os::unix::net::UnixStream;
+
+  fn connect(socket: &Path) -> Result<UnixStream> {
+    UnixStream::connect(socket)
+      .map_err(|e| GwmError::Other(format!("daemon: cannot connect to {}: {e}", socket.display())))
+  }
+
+  /// One-shot `list`: connect, send the request, read and parse the single
+  /// response line. Powers a non-`--watch` statusline render.
+  pub fn list_once(socket: &Path) -> Result<Vec<JsonWorktree>> {
+    let stream = connect(socket)?;
+    let mut writer = stream
+      .try_clone()
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writeln!(writer, "{LIST_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writer.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+      .read_line(&mut line)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    parse_list_result(line.trim())
+  }
+
+  /// Subscribe to `worktrees.changed`: connect, send `subscribe`, then
+  /// invoke `on_snapshot` once per notification — the initial snapshot plus
+  /// every detected change. The loop ends when `on_snapshot` returns
+  /// `false` or the stream closes. Generic over the callback so a `--watch`
+  /// CLI loops forever while a test stops after a fixed number of updates.
+  pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
+    let stream = connect(socket)?;
+    let mut writer = stream
+      .try_clone()
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writeln!(writer, "{SUBSCRIBE_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writer.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+
+    let reader = BufReader::new(stream);
+    for line in reader.lines() {
+      let line = match line {
+        Ok(l) => l,
+        Err(_) => break, // peer closed / dead link — end the stream
+      };
+      if line.trim().is_empty() {
+        continue;
+      }
+      let worktrees = parse_worktrees_changed(line.trim())?;
+      if !on_snapshot(&worktrees) {
+        break;
+      }
+    }
+    Ok(())
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Socket server — unix only, behind the `daemon` feature.
 // ---------------------------------------------------------------------------
 
