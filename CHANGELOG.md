@@ -10,7 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Nothing yet — the v0.10.0-rc.4 delta moved to [`changelogs/pre-releases/0.10.0-rc.4.md`](changelogs/pre-releases/0.10.0-rc.4.md).
+### Added
+
+- **Frozen, versioned machine contracts for 1.0** (issue #317). The three
+  machine-readable surfaces — the `--format=json` outputs, the daemon
+  JSON-RPC protocol, and the `.gwm.toml` section set — are now pinned by
+  contract tests (`tests/contract_tests.rs`) so a rename or removal of a
+  stable field fails CI rather than slipping out as an accidental break. A
+  new `gwm::contract` module is the single source of truth for
+  `SCHEMA_VERSION` (the 1.0 baseline, `1`), the frozen daemon method/
+  notification names, and the config section set. The daemon's
+  `worktrees.changed` notification now carries `params.schema_version` so a
+  long-lived `subscribe` client can detect a contract drift; the field is
+  additive and ignorable. Each `docs/schema/*.json` declares its `version`,
+  and a new [`docs/schema/README.md`](docs/schema/README.md) documents the
+  versioning policy and the stable-vs-experimental tier of every field. No
+  behaviour change to any existing output.
 
 ## Past releases
 
