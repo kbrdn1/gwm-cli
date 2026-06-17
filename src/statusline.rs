@@ -69,9 +69,16 @@ pub fn render(worktrees: &[JsonWorktree], active: Option<usize>) -> String {
 
   let mut parts: Vec<String> = Vec::new();
 
-  // Active branch (or worktree name when detached) leads the line.
+  // Active branch (or worktree name when detached) leads the line. A
+  // detached HEAD surfaces either as `None` or as the literal `Some("HEAD")`
+  // (libgit2's `shorthand()` on a detached checkout), so both fall back to
+  // the worktree name rather than printing the useless "HEAD".
   if let Some(w) = active.and_then(|i| worktrees.get(i)) {
-    parts.push(w.branch.clone().unwrap_or_else(|| w.name.clone()));
+    let label = match w.branch.as_deref() {
+      None | Some("HEAD") => w.name.clone(),
+      Some(branch) => branch.to_string(),
+    };
+    parts.push(label);
   }
 
   parts.push(format!("{} wt", worktrees.len()));
@@ -113,4 +120,29 @@ pub fn render(worktrees: &[JsonWorktree], active: Option<usize>) -> String {
 /// Convenience: resolve the active worktree from `cwd`, then [`render`].
 pub fn render_for_cwd(worktrees: &[JsonWorktree], cwd: &Path) -> String {
   render(worktrees, active_index(worktrees, cwd))
+}
+
+/// Drive a `--watch` render loop: hand each pushed snapshot to `emit`, then
+/// emit exactly **one** final empty render once the stream ends — for any
+/// reason. A `subscribe` stream ends only when the daemon goes away (it was
+/// unreachable, or stopped / restarted after pushing snapshots). Emitting a
+/// trailing blank then clears the now-stale line so a long-running consumer
+/// (a tmux tail) doesn't freeze on the last render instead of degrading to
+/// nothing (issue #309).
+///
+/// Generic over the subscribe transport so it stays socket-free and
+/// unit-testable: callers pass a closure that wires the real
+/// `daemon::client::subscribe` to the supplied snapshot callback. The
+/// stream's `Result` is intentionally ignored — both the error path (never
+/// connected) and the clean-close path (daemon stopped after ≥1 snapshot)
+/// degrade identically to the trailing blank.
+pub fn watch<S>(subscribe: S, mut emit: impl FnMut(&[JsonWorktree]))
+where
+  S: FnOnce(&mut dyn FnMut(&[JsonWorktree]) -> bool) -> crate::error::Result<()>,
+{
+  let _ = subscribe(&mut |worktrees| {
+    emit(worktrees);
+    true
+  });
+  emit(&[]);
 }

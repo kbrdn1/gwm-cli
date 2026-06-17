@@ -78,6 +78,45 @@ fn detached_head_falls_back_to_name() {
 }
 
 #[test]
+fn detached_head_literal_branch_falls_back_to_name() {
+  // Real daemon data for a detached checkout carries branch: Some("HEAD")
+  // (libgit2 `shorthand()` yields the literal "HEAD"), not None. The render
+  // must treat it like the detached case and fall back to the worktree name
+  // instead of printing the useless literal "HEAD · 1 wt".
+  let wts = vec![wt("/wt/x", "detached-wt", Some("HEAD"))];
+  assert_eq!(render(&wts, Some(0)), "detached-wt · 1 wt");
+}
+
+#[test]
+fn watch_emits_a_trailing_blank_when_the_stream_ends() {
+  // A --watch consumer must see a final blank render once the daemon stream
+  // ends after pushing snapshots (daemon stopped / restarted), so a tail
+  // clears the stale line instead of freezing on the last render (#309).
+  let wts = vec![wt("/repo", "repo", Some("main"))];
+  let mut emitted: Vec<usize> = Vec::new();
+  gwm::statusline::watch(
+    |cb| {
+      cb(&wts); // one snapshot, then the stream ends cleanly (Ok)
+      Ok(())
+    },
+    |worktrees| emitted.push(worktrees.len()),
+  );
+  assert_eq!(emitted, vec![1, 0], "one real snapshot (1) then the trailing blank (0)");
+}
+
+#[test]
+fn watch_emits_a_blank_even_when_the_stream_never_connects() {
+  // The error path (daemon unreachable, no snapshot ever) must also land on
+  // the trailing blank — same graceful degradation as a clean close.
+  let mut emitted: Vec<usize> = Vec::new();
+  gwm::statusline::watch(
+    |_cb| Err(gwm::error::GwmError::Other("no daemon".into())),
+    |worktrees| emitted.push(worktrees.len()),
+  );
+  assert_eq!(emitted, vec![0], "only the trailing blank when nothing streamed");
+}
+
+#[test]
 fn no_active_worktree_shows_count_only() {
   let wts = vec![
     wt("/repo", "repo", Some("main")),
