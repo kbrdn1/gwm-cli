@@ -1,8 +1,10 @@
 use crate::bootstrap::{self, BootstrapCtx};
+use crate::clean;
 use crate::config::Config;
 use crate::config_cli;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
+use crate::exec;
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::gitmoji;
 use crate::history::{self, OpEntry};
@@ -634,6 +636,39 @@ pub enum Command {
     #[command(subcommand)]
     action: ThemeAction,
   },
+  /// Run a shell command in each worktree, sequentially (issue #313).
+  ///
+  /// `gwm exec -- git fetch` runs in every non-main worktree; pass slugs
+  /// before `--` to scope it: `gwm exec feat-1 fix-2 -- cargo check`.
+  /// Prints a per-worktree ✓ / ✗ rollup and exits non-zero if any
+  /// worktree's command failed. Everything after `--` is forwarded
+  /// verbatim (flags and all). This is the user's own command against
+  /// their own worktrees — no bootstrap trust gate applies (#95).
+  Exec {
+    /// Worktree slugs to target (fuzzy match, before `--`). Empty = all
+    /// non-main worktrees.
+    #[arg(value_name = "SLUG")]
+    slugs: Vec<String>,
+    /// Command to run, after `--`. Everything past `--` is forwarded
+    /// verbatim, e.g. `gwm exec -- git log --oneline`.
+    #[arg(last = true, required = true, allow_hyphen_values = true, value_name = "CMD")]
+    command: Vec<String>,
+  },
+  /// Report (and optionally reclaim) heavy build artifacts across worktrees (issue #313).
+  ///
+  /// Scans each worktree for `target/`, `node_modules/`, `dist/`, `build/`
+  /// and prints the reclaimable size per worktree. Report-only by default;
+  /// pass `--yes` to actually delete. Scope to a subset with slug
+  /// positionals: `gwm clean feat-1`. Deliberately not journaled into
+  /// `gwm history` (#29) — the artifacts are regenerable.
+  Clean {
+    /// Worktree slugs to target (fuzzy match). Empty = all non-main worktrees.
+    #[arg(value_name = "SLUG")]
+    slugs: Vec<String>,
+    /// Delete the listed artifacts instead of only reporting them.
+    #[arg(long)]
+    yes: bool,
+  },
 }
 
 /// Subcommands of `gwm theme` (issue #33).
@@ -986,7 +1021,99 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
     Command::Tui { action } => cmd_tui(action),
     Command::Theme { action } => cmd_theme(action),
+    Command::Exec { slugs, command } => cmd_exec(slugs, command),
+    Command::Clean { slugs, yes } => cmd_clean(slugs, yes),
   }
+}
+
+/// Resolve which worktrees `gwm exec` / `gwm clean` act on. With no slugs,
+/// the target set is every non-main worktree (the main checkout is excluded
+/// — running a fan-out command or deleting its `target/` is rarely intended
+/// and matches `gwm list --format names` / `find_fuzzy`). With slugs, each is
+/// fuzzy-resolved, surfacing the same ambiguity error as `path` / `remove`.
+fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::WorktreeInfo>> {
+  if slugs.is_empty() {
+    Ok(worktree::list(repo)?.into_iter().filter(|w| !w.is_main).collect())
+  } else {
+    slugs.iter().map(|s| worktree::find_fuzzy(repo, s)).collect()
+  }
+}
+
+/// `gwm exec [<slug>...] -- <cmd>` (issue #313). Runs the command in each
+/// target worktree sequentially, prints a ✓ / ✗ rollup, and exits with the
+/// aggregate code (non-zero if any worktree failed).
+fn cmd_exec(slugs: Vec<String>, command: Vec<String>) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let targets = resolve_targets(&repo, &slugs)?;
+  if targets.is_empty() {
+    println!("no worktrees to run in");
+    return Ok(());
+  }
+
+  // clap guarantees a non-empty command (`required = true`), but split
+  // defensively rather than indexing — a panic here would be on a
+  // user-facing path.
+  let (program, args) = command
+    .split_first()
+    .ok_or_else(|| GwmError::Other("exec: no command given after `--`".into()))?;
+  let args = args.to_vec();
+
+  let mut outcomes = Vec::with_capacity(targets.len());
+  for w in &targets {
+    println!("\n━━ {} ({})", w.name, w.path.display());
+    let status = exec::exec_in_dir(&w.path, program, &args);
+    outcomes.push(exec::ExecOutcome {
+      name: w.name.clone(),
+      status,
+    });
+  }
+
+  println!("\nrollup:");
+  for o in &outcomes {
+    println!("  {}", exec::format_outcome(o));
+  }
+
+  let code = exec::rollup_exit_code(&outcomes);
+  if code != 0 {
+    std::process::exit(code);
+  }
+  Ok(())
+}
+
+/// `gwm clean [<slug>...] [--yes]` (issue #313). Reports reclaimable build
+/// artifacts per worktree; deletes them only when `--yes` is passed.
+fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let targets = resolve_targets(&repo, &slugs)?;
+  if targets.is_empty() {
+    println!("no worktrees to clean");
+    return Ok(());
+  }
+
+  let patterns = clean::default_patterns();
+  let reclaims: Vec<clean::WorktreeReclaim> = targets
+    .iter()
+    .map(|w| clean::scan_worktree(&w.name, &w.path, &patterns))
+    .collect();
+
+  print!("{}", clean::format_report(&reclaims));
+
+  let grand: u64 = reclaims.iter().map(|r| r.total_bytes).sum();
+  if grand == 0 {
+    println!("nothing to reclaim");
+    return Ok(());
+  }
+  if !yes {
+    println!("re-run with --yes to delete the listed artifacts");
+    return Ok(());
+  }
+
+  let mut freed = 0u64;
+  for r in &reclaims {
+    freed = freed.saturating_add(clean::delete_reclaim(r)?);
+  }
+  println!("reclaimed {}", clean::human_size(freed));
+  Ok(())
 }
 
 /// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a
