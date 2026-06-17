@@ -4,11 +4,16 @@
 //! of a *stable* field fails CI and becomes a conscious breaking decision
 //! (a `contract::SCHEMA_VERSION` bump) rather than an accident:
 //!
-//! 1. **JSON output schemas** — `docs/schema/*.json` vs the
-//!    [`gwm::json_api`] DTOs they document.
+//! 1. **JSON output schemas** — `docs/schema/*.json` vs the live output: the
+//!    [`gwm::json_api`] DTOs (`list`/`doctor`/`path`) and the hand-built
+//!    `gwm status --json` payload ([`build_status_json`]).
 //! 2. **Daemon JSON-RPC protocol** — method/notification names, error
 //!    codes, and the `schema_version` carried in `worktrees.changed`.
 //! 3. **`.gwm.toml` config schema** — the top-level section set.
+//!
+//! Sections 5–7 add baselines independent of both DTO and schema so a
+//! *coordinated* rename, a type drift, or a re-tightened `additionalProperties`
+//! is caught too — not just a one-sided DTO-vs-schema divergence.
 //!
 //! Anchor choice: the committed `docs/schema/*.json` files are the source
 //! of truth (they are what external consumers fetch), so the parity tests
@@ -22,7 +27,9 @@
 //! a `required` entry from a schema file, turns the relevant parity test
 //! red (verified during development of #317).
 
+use gwm::cli::build_status_json;
 use gwm::contract;
+use gwm::github::{BranchLink, CiState, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use gwm::json_api::{JsonCheck, JsonDoctorReport, JsonPath, JsonStatus, JsonWorktree};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -218,7 +225,12 @@ fn schema_version_baseline_is_one() {
 
 #[test]
 fn every_schema_file_declares_the_contract_version() {
-  for file in ["worktree-list.schema.json", "doctor.schema.json", "path.schema.json"] {
+  for file in [
+    "worktree-list.schema.json",
+    "doctor.schema.json",
+    "path.schema.json",
+    "status.schema.json",
+  ] {
     let schema = read_schema(file);
     let v = schema
       .get("version")
@@ -606,6 +618,7 @@ fn output_schemas_tolerate_additive_fields() {
     ("worktree-list.schema.json", &["/$defs/worktree", "/$defs/status"]),
     ("doctor.schema.json", &["", "/$defs/check"]),
     ("path.schema.json", &[""]),
+    ("status.schema.json", &["", "/$defs/issue_link", "/$defs/pr_link"]),
   ];
   for (file, pointers) in cases {
     let schema = read_schema(file);
@@ -620,4 +633,182 @@ fn output_schemas_tolerate_additive_fields() {
       );
     }
   }
+}
+
+// --- 7. `gwm status --json` freeze -----------------------------------------
+//
+// The fourth JSON output surface (#317 review): a hand-built, nested payload
+// documented as "a stable schema for scripting" (cli.rs). It's not a serde
+// DTO, so `build_status_json` was made pure (returns the value) to pin it
+// here without spawning the binary or hitting GitHub. Frozen against
+// `docs/schema/status.schema.json`.
+
+/// A fully-populated status value: a remote slug, a linked issue and PR with
+/// live `gh` state. Exercises every optional nested field so the freeze
+/// covers the widest shape the surface emits.
+fn populated_status() -> Value {
+  let mut link = BranchLink::empty();
+  link.issue = Some(317);
+  link.pr = Some(322);
+  link.issue_source = LinkSource::Explicit;
+  link.pr_source = LinkSource::Detected;
+  let issue = Some(IssueStatus {
+    number: 317,
+    title: "freeze the contracts".into(),
+    state: IssueState::Open,
+    url: "https://example/317".into(),
+    labels: vec!["enhancement".into()],
+    updated_at: "2026-06-17T00:00:00Z".into(),
+  });
+  let pr = Some(PrStatus {
+    number: 322,
+    title: "freeze & version".into(),
+    state: PrState::Open,
+    url: "https://example/322".into(),
+    updated_at: "2026-06-17T00:00:00Z".into(),
+    checks_passed: 3,
+    checks_total: 4,
+    ci: CiState::Running,
+  });
+  build_status_json(
+    "feat/#317-freeze-machine-contracts",
+    Some("kbrdn1/gwm-cli"),
+    &link,
+    &issue,
+    &pr,
+  )
+}
+
+#[test]
+fn status_json_matches_the_schema() {
+  let schema = read_schema("status.schema.json");
+  let top_required = required_set(&schema, "/required");
+  let top_props = object_keys(&schema, "/properties");
+  let v = populated_status();
+
+  let top: BTreeSet<String> = v.as_object().unwrap().keys().cloned().collect();
+  assert_field_contract("status result", &top_required, &top, &top_props);
+
+  let issue_required = required_set(&schema, "/$defs/issue_link/required");
+  let issue_props = object_keys(&schema, "/$defs/issue_link/properties");
+  let issue: BTreeSet<String> = v["issue"].as_object().unwrap().keys().cloned().collect();
+  assert_field_contract("status issue link", &issue_required, &issue, &issue_props);
+
+  let pr_required = required_set(&schema, "/$defs/pr_link/required");
+  let pr_props = object_keys(&schema, "/$defs/pr_link/properties");
+  let pr: BTreeSet<String> = v["pr"].as_object().unwrap().keys().cloned().collect();
+  assert_field_contract("status pr link", &pr_required, &pr, &pr_props);
+}
+
+#[test]
+fn status_json_null_link_still_carries_required_keys() {
+  // No remote, no link: `branch` plus explicit `issue:null` / `pr:null`. The
+  // required keys must be present so a scripting consumer can always read
+  // them; `repo` is absent (it's optional, only with a slug).
+  let v = build_status_json("dev", None, &BranchLink::empty(), &None, &None);
+  let obj = v.as_object().unwrap();
+  assert_eq!(obj["branch"], Value::String("dev".into()));
+  assert_eq!(obj["issue"], Value::Null);
+  assert_eq!(obj["pr"], Value::Null);
+  assert!(!obj.contains_key("repo"), "repo must be absent without a remote slug");
+}
+
+#[test]
+fn status_json_field_types_are_frozen() {
+  let v = populated_status();
+  assert_type_baseline(
+    "status result",
+    &v,
+    &[
+      ("branch", "string"),
+      ("repo", "string"),
+      ("issue", "object"),
+      ("pr", "object"),
+    ],
+  );
+  assert_type_baseline(
+    "status issue link",
+    &v["issue"],
+    &[
+      ("number", "integer"),
+      ("source", "string"),
+      ("state", "string"),
+      ("title", "string"),
+      ("labels", "array"),
+      ("url", "string"),
+    ],
+  );
+  assert_type_baseline(
+    "status pr link",
+    &v["pr"],
+    &[
+      ("number", "integer"),
+      ("source", "string"),
+      ("state", "string"),
+      ("title", "string"),
+      ("checks_passed", "integer"),
+      ("checks_total", "integer"),
+      ("url", "string"),
+    ],
+  );
+}
+
+#[test]
+fn status_schema_required_and_types_are_frozen() {
+  let schema = read_schema("status.schema.json");
+
+  // Top object: `branch`/`repo` are plain types; `issue`/`pr` are
+  // `oneOf[null, $ref]`, asserted structurally below.
+  assert_eq!(
+    required_set(&schema, "/required"),
+    ["branch", "issue", "pr"]
+      .iter()
+      .map(|s| s.to_string())
+      .collect::<BTreeSet<_>>(),
+    "status top-level required set drifted"
+  );
+  assert_eq!(schema_type_descriptor(&schema["properties"]["branch"]), "string");
+  assert_eq!(schema_type_descriptor(&schema["properties"]["repo"]), "string");
+  for field in ["issue", "pr"] {
+    let one_of = schema["properties"][field]["oneOf"]
+      .as_array()
+      .unwrap_or_else(|| panic!("status `{field}` must be a oneOf[null, link]"));
+    let descriptors: BTreeSet<String> = one_of.iter().map(schema_type_descriptor).collect();
+    let expected_ref = format!("$ref:#/$defs/{}_link", field);
+    assert!(descriptors.contains("null"), "status `{field}` must permit null");
+    assert!(
+      descriptors.contains(&expected_ref),
+      "status `{field}` must reference its link definition"
+    );
+  }
+
+  assert_schema_baseline(
+    "status issue link",
+    &schema,
+    "/$defs/issue_link",
+    &["number", "source"],
+    &[
+      ("number", "integer"),
+      ("source", "$ref:#/$defs/link_source"),
+      ("state", "string"),
+      ("title", "string"),
+      ("labels", "array"),
+      ("url", "string"),
+    ],
+  );
+  assert_schema_baseline(
+    "status pr link",
+    &schema,
+    "/$defs/pr_link",
+    &["number", "source"],
+    &[
+      ("number", "integer"),
+      ("source", "$ref:#/$defs/link_source"),
+      ("state", "string"),
+      ("title", "string"),
+      ("checks_passed", "integer"),
+      ("checks_total", "integer"),
+      ("url", "string"),
+    ],
+  );
 }

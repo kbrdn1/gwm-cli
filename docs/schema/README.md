@@ -13,7 +13,7 @@ truth for the version and the section/method sets is
 
 | Surface | Where | Documented by |
 |---------|-------|---------------|
-| **JSON output** | `gwm {list,doctor,path} --format=json` | the `*.schema.json` files here |
+| **JSON output** | `gwm {list,doctor,path} --format=json` and `gwm status --json` | the `*.schema.json` files here |
 | **Daemon JSON-RPC 2.0** | `gwm daemon` over a unix socket | [`src/daemon.rs`](../../src/daemon.rs) |
 | **`.gwm.toml` config** | per-repo config file | [`docs/4.configuration`](../4.configuration/) |
 
@@ -75,6 +75,14 @@ Stable: `name`, `id`, `path`, `branch`, `head`, `is_main`, `is_locked`,
 
 `doctor.schema.json` (`checks[]`, `severity`, `exit_code`) and
 `path.schema.json` (`name`, `path`, `branch`) are entirely **stable**.
+
+`status.schema.json` (`gwm status --json`) is **stable**: top-level `branch`,
+`issue` (`null` or `{number, source, …}`), `pr` (`null` or
+`{number, source, …}`). Like the workspace `repo`, the top-level `repo`
+(GitHub slug, present only with a remote) is **experimental**. The nested live
+fields (`state`, `title`, `labels`, `url`, `checks_passed`, `checks_total`)
+appear only when `gh` resolved the link; their names/types are stable when
+present.
 
 ### Daemon JSON-RPC
 

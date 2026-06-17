@@ -5,8 +5,9 @@
 //! this repo — editor plugins, status bars, CI scripts:
 //!
 //! 1. **JSON output schemas** — the `--format=json` payloads of `list`,
-//!    `doctor` and `path`, documented in `docs/schema/*.json` and built
-//!    from the [`crate::json_api`] DTOs.
+//!    `doctor` and `path` (built from the [`crate::json_api`] DTOs) plus the
+//!    hand-built `gwm status --json` payload, all documented in
+//!    `docs/schema/*.json`.
 //! 2. **Daemon JSON-RPC 2.0 protocol** — the `list` / `doctor` / `path` /
 //!    `subscribe` methods and the `worktrees.changed` notification
 //!    ([`crate::daemon`]).
