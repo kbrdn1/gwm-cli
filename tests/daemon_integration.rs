@@ -349,3 +349,45 @@ fn client_subscribe_errors_on_eof_before_first_snapshot() {
     "EOF before the first snapshot must surface as an error, not Ok(())"
   );
 }
+
+#[test]
+fn client_list_once_times_out_on_a_silent_socket() {
+  // Contract (Codex P2): a wedged or foreign process can accept the connection
+  // then hold it open without ever writing a response line. Without a read
+  // deadline the blocking read hangs the caller — e.g. a shell prompt that
+  // shells out to `gwm statusline` would freeze. `list_once` must instead
+  // surface an error within the bounded timeout so the CLI degrades to its
+  // documented blank line.
+  let sock_dir = TempDir::new().unwrap();
+  let socket = sock_dir.path().join("s");
+  let listener = UnixListener::bind(&socket).unwrap();
+
+  // Server: accept and keep the connection open, silent, until the test
+  // releases it. Never writes a byte.
+  let keep = Arc::new(AtomicBool::new(true));
+  let keep_srv = Arc::clone(&keep);
+  let server = thread::spawn(move || {
+    if let Ok((stream, _)) = listener.accept() {
+      while keep_srv.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(20));
+      }
+      drop(stream);
+    }
+  });
+
+  let start = std::time::Instant::now();
+  let result = gwm::daemon::client::list_once_with_timeout(&socket, Some(Duration::from_millis(300)));
+  let elapsed = start.elapsed();
+
+  keep.store(false, Ordering::Relaxed);
+  server.join().unwrap();
+
+  assert!(
+    result.is_err(),
+    "a silent socket must surface a timeout error, not hang"
+  );
+  assert!(
+    elapsed < Duration::from_secs(2),
+    "list_once must give up near the timeout, not block (took {elapsed:?})"
+  );
+}

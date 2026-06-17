@@ -271,16 +271,42 @@ pub mod client {
   use crate::error::GwmError;
   use std::io::{BufRead, BufReader, Write};
   use std::os::unix::net::UnixStream;
+  use std::time::Duration;
 
-  fn connect(socket: &Path) -> Result<UnixStream> {
-    UnixStream::connect(socket)
-      .map_err(|e| GwmError::Other(format!("daemon: cannot connect to {}: {e}", socket.display())))
+  /// Bounded wait for the daemon's first response. A wedged or foreign process
+  /// can accept the connection and then stay silent; without a deadline the
+  /// blocking read would hang the caller — e.g. a shell prompt that shells out
+  /// to `gwm statusline` would freeze instead of degrading. On timeout the read
+  /// errors, which the CLI treats as the documented blank-line degradation.
+  /// Generous enough not to false-trip a slow `run_list` git scan on a large
+  /// repo. `subscribe` drops it once the first snapshot arrives so a long-lived
+  /// `--watch` stream can wait indefinitely between change pushes.
+  const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+  fn connect(socket: &Path, timeout: Option<Duration>) -> Result<UnixStream> {
+    let stream = UnixStream::connect(socket)
+      .map_err(|e| GwmError::Other(format!("daemon: cannot connect to {}: {e}", socket.display())))?;
+    stream
+      .set_read_timeout(timeout)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    stream
+      .set_write_timeout(timeout)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    Ok(stream)
   }
 
   /// One-shot `list`: connect, send the request, read and parse the single
   /// response line. Powers a non-`--watch` statusline render.
   pub fn list_once(socket: &Path) -> Result<Vec<JsonWorktree>> {
-    let stream = connect(socket)?;
+    list_once_with_timeout(socket, Some(CLIENT_TIMEOUT))
+  }
+
+  /// [`list_once`] with an explicit read/write deadline. Public so tests can
+  /// drive the timeout path quickly; production callers use [`list_once`],
+  /// which applies [`CLIENT_TIMEOUT`].
+  #[doc(hidden)]
+  pub fn list_once_with_timeout(socket: &Path, timeout: Option<Duration>) -> Result<Vec<JsonWorktree>> {
+    let stream = connect(socket, timeout)?;
     let mut writer = stream
       .try_clone()
       .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
@@ -301,24 +327,33 @@ pub mod client {
   /// `false` or the stream closes. Generic over the callback so a `--watch`
   /// CLI loops forever while a test stops after a fixed number of updates.
   pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
-    let stream = connect(socket)?;
+    let stream = connect(socket, Some(CLIENT_TIMEOUT))?;
     let mut writer = stream
       .try_clone()
       .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
     writeln!(writer, "{SUBSCRIBE_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
     writer.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
 
-    let reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream);
     let mut delivered_any = false;
-    for line in reader.lines() {
-      let line = match line {
-        Ok(l) => l,
-        Err(_) => break, // peer closed / dead link — end the stream
-      };
-      if line.trim().is_empty() {
+    let mut line = String::new();
+    loop {
+      line.clear();
+      match reader.read_line(&mut line) {
+        Ok(0) => break, // EOF — peer closed
+        Ok(_) => {}
+        Err(_) => break, // timeout / dead link — end the stream
+      }
+      let trimmed = line.trim();
+      if trimmed.is_empty() {
         continue;
       }
-      let worktrees = parse_worktrees_changed(line.trim())?;
+      let worktrees = parse_worktrees_changed(trimmed)?;
+      if !delivered_any {
+        // First snapshot arrived: drop the handshake deadline so the
+        // long-lived stream can wait indefinitely between change pushes.
+        let _ = reader.get_ref().set_read_timeout(None);
+      }
       delivered_any = true;
       if !on_snapshot(&worktrees) {
         break;
