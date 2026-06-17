@@ -71,7 +71,11 @@ fn help_prints_subcommands() {
     // socket impl is `cfg(unix)`-gated and returns a clean error elsewhere.
     .stdout(predicate::str::contains("  daemon "))
     // Issue #309: first daemon consumer — compact statusline for prompts.
-    .stdout(predicate::str::contains("  statusline "));
+    .stdout(predicate::str::contains("  statusline "))
+    // Issue #313: run a command in each worktree.
+    .stdout(predicate::str::contains("  exec "))
+    // Issue #313: report / reclaim heavy build artifacts across worktrees.
+    .stdout(predicate::str::contains("  clean "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
