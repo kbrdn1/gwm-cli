@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy and the stable-vs-experimental tier of every field. No behaviour
   change to any existing output.
 
+### Docs
+
+- **Stability & compatibility policy for 1.0** (issue #318). A new
+  [Stability](docs/6.development/3.stability.md) page (EN + `docs/fr/`) is the
+  explicit, published SemVer contract behind the `1.0` line: which surfaces
+  are covered (CLI subcommands/flags, exit codes, the `--format=json` schemas,
+  the daemon JSON-RPC protocol, the `.gwm.toml` section set), which are free
+  to change in a minor/patch (TUI layout & colours, human-readable strings,
+  the internal Rust API), the MSRV policy (currently 1.86, bumps ride a
+  minor), and the deprecation process. It distinguishes surfaces *frozen by
+  `tests/contract_tests.rs`* from those *covered by the written promise*, and
+  defers the per-field stable/experimental tiers to
+  [`docs/schema/README.md`](docs/schema/README.md). Linked from the README and
+  `CONTRIBUTING.md`.
+
 ## Past releases
 
 In reverse chronological order:
