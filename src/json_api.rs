@@ -18,11 +18,11 @@
 use crate::doctor::{CheckStatus, DoctorReport};
 use crate::error::Result;
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Working-tree + upstream status, the stable projection of
 /// [`BranchStatus`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonStatus {
   pub is_dirty: bool,
   pub has_upstream: bool,
@@ -47,7 +47,7 @@ impl From<&BranchStatus> for JsonStatus {
 /// One worktree as exposed to scripting / editor integrations. Mirrors
 /// the columns of `gwm list` plus the machine-only fields a consumer
 /// needs (absolute `path`, raw `age_seconds`, linked issue/PR numbers).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JsonWorktree {
   /// Display name — the basename of the worktree directory.
   pub name: String,

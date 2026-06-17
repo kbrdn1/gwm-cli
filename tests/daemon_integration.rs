@@ -11,7 +11,7 @@ use common::init_repo;
 use gwm::daemon::{serve, ServeOptions};
 use gwm::worktree;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -244,4 +244,150 @@ fn subscribe_reaps_an_idle_client_that_disconnects() {
     .read_line(&mut tail)
     .expect("server must close the idle subscription (not time out)");
   assert_eq!(n, 0, "idle subscriber must be reaped on disconnect");
+}
+
+// --- Statusline consumer client (issue #309) -------------------------------
+// The first real consumer: `gwm::daemon::client` connects, runs `list`
+// once, or rides the `subscribe` stream. These drive it against a live
+// daemon thread — the end-to-end proof that the wire protocol is usable.
+
+#[test]
+fn client_list_once_returns_the_current_worktrees() {
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(50));
+  let _probe = daemon.connect(); // blocks until the serve thread has bound
+
+  let wts = gwm::daemon::client::list_once(&daemon.socket).expect("list_once must succeed");
+  assert_eq!(wts.len(), 1, "fresh repo has exactly the main worktree");
+  assert!(wts[0].is_main, "the sole worktree is the main one");
+}
+
+#[test]
+fn client_list_once_errors_when_no_daemon_is_listening() {
+  // No daemon bound here: the connect must fail so the CLI can fall back to
+  // its graceful empty line (asserted at the CLI level).
+  let sock_dir = TempDir::new().unwrap();
+  let missing = sock_dir.path().join("nope");
+  assert!(
+    gwm::daemon::client::list_once(&missing).is_err(),
+    "a missing socket must surface a connect error"
+  );
+}
+
+#[test]
+fn client_subscribe_streams_snapshot_then_pushes_on_change() {
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  // Fast poll so the created worktree is noticed promptly.
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(30));
+  let _probe = daemon.connect(); // ensure the socket is bound before we subscribe
+
+  let wt_root = TempDir::new().unwrap();
+  let target = wt_root.path().join("feat-309-pushed");
+  let repo_path = dir.path().to_path_buf();
+
+  let mut counts: Vec<usize> = Vec::new();
+  let mut created = false;
+  gwm::daemon::client::subscribe(&daemon.socket, |worktrees| {
+    counts.push(worktrees.len());
+    if !created {
+      // First callback is the initial snapshot. Mutate the worktree set
+      // out-of-band; the daemon's poll loop must push a fresh notification.
+      created = true;
+      let repo = worktree::discover_repo(Some(&repo_path)).unwrap();
+      worktree::add(&repo, "feat-309-pushed", &target, "feat/#309-pushed", false).unwrap();
+      true // keep listening for the change push
+    } else {
+      // Second callback is the change push: it must name the new worktree.
+      assert!(
+        worktrees.iter().any(|w| w.name == "feat-309-pushed"),
+        "the change push must include the newly created worktree"
+      );
+      false // stop the stream
+    }
+  })
+  .expect("subscribe must run cleanly");
+
+  assert_eq!(counts, vec![1, 2], "initial snapshot (1) then the change push (2)");
+}
+
+#[test]
+fn client_subscribe_errors_on_eof_before_first_snapshot() {
+  // Contract (issue #312): if the daemon accepts the subscribe connection but
+  // closes before pushing the first snapshot (it crashes right after accept,
+  // or a foreign process owns the path), `subscribe` must NOT report a clean
+  // `Ok(())`. cmd_statusline --watch emits its graceful empty line from the
+  // error branch; a false Ok would skip it and break the documented contract.
+  // The stream delivered nothing, so it must surface an error.
+  let sock_dir = TempDir::new().unwrap();
+  let socket = sock_dir.path().join("s");
+  let listener = UnixListener::bind(&socket).unwrap();
+
+  // Server: accept one client, consume its subscribe request line (so the
+  // client's write succeeds and we exercise the read-side EOF, not a broken
+  // pipe), then drop the connection without ever pushing a snapshot.
+  let server = thread::spawn(move || {
+    if let Ok((stream, _)) = listener.accept() {
+      let mut reader = BufReader::new(stream);
+      let mut line = String::new();
+      let _ = reader.read_line(&mut line);
+      // reader dropped here -> connection closed -> client sees EOF
+    }
+  });
+
+  let mut calls = 0usize;
+  let result = gwm::daemon::client::subscribe(&socket, |_worktrees| {
+    calls += 1;
+    true
+  });
+
+  server.join().unwrap();
+  assert_eq!(calls, 0, "no snapshot was sent, so the callback must never fire");
+  assert!(
+    result.is_err(),
+    "EOF before the first snapshot must surface as an error, not Ok(())"
+  );
+}
+
+#[test]
+fn client_list_once_times_out_on_a_silent_socket() {
+  // Contract (Codex P2): a wedged or foreign process can accept the connection
+  // then hold it open without ever writing a response line. Without a read
+  // deadline the blocking read hangs the caller — e.g. a shell prompt that
+  // shells out to `gwm statusline` would freeze. `list_once` must instead
+  // surface an error within the bounded timeout so the CLI degrades to its
+  // documented blank line.
+  let sock_dir = TempDir::new().unwrap();
+  let socket = sock_dir.path().join("s");
+  let listener = UnixListener::bind(&socket).unwrap();
+
+  // Server: accept and keep the connection open, silent, until the test
+  // releases it. Never writes a byte.
+  let keep = Arc::new(AtomicBool::new(true));
+  let keep_srv = Arc::clone(&keep);
+  let server = thread::spawn(move || {
+    if let Ok((stream, _)) = listener.accept() {
+      while keep_srv.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(20));
+      }
+      drop(stream);
+    }
+  });
+
+  let start = std::time::Instant::now();
+  let result = gwm::daemon::client::list_once_with_timeout(&socket, Some(Duration::from_millis(300)));
+  let elapsed = start.elapsed();
+
+  keep.store(false, Ordering::Relaxed);
+  server.join().unwrap();
+
+  assert!(
+    result.is_err(),
+    "a silent socket must surface a timeout error, not hang"
+  );
+  assert!(
+    elapsed < Duration::from_secs(2),
+    "list_once must give up near the timeout, not block (took {elapsed:?})"
+  );
 }

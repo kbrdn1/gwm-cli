@@ -12,6 +12,7 @@ gwm is small on purpose — it shells out to the tools you already use rather th
 - **[GitHub issue / PR linking](/integrations/github-linking)** — auto-link branches matching `<type>/#<N>-<slug>` to their issue, fetch live state via `gh`, surface in the TUI sidebar.
 - **[`gwm doctor`](/integrations/doctor)** — the 8 health checks, exit-code semantics (`0 / 1 / 2`), the launcher-binary probe added in v0.6, and the `[tui.keys]` keymap check added in v0.8.
 - **[Homebrew & Nix](/integrations/homebrew-nix)** — the packaging surface: the Homebrew tap, the Nix flake, `cargo binstall`, and the prebuilt release archives.
+- **[Daemon consumers](/integrations/daemon-consumers)** — the first consumers of `gwm daemon`: the bundled `gwm statusline` for shell prompts, the raw JSON-RPC one-liner, and an editor recipe (Zed / VS Code).
 
 For CI runners that spin up worktrees via `gwm create`, set `GWM_ALLOW_BOOTSTRAP=1` (or pass `--allow-bootstrap` on the gwm invocation) so the [TOFU trust gate](/configuration/trust-ledger) bypasses the interactive prompt — required since the gate's default-deny policy aborts on non-tty stdin to prevent silent execution of attacker-controlled bootstrap lines.
 

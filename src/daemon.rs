@@ -217,6 +217,163 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Client side — request lines + response/notification parsers (issue #309).
+// Cross-platform and pure: the statusline consumer and any other client
+// reuse these to talk to a running daemon. The socket transport that wraps
+// them lives in the `client` submodule below (unix + `daemon` feature).
+// ---------------------------------------------------------------------------
+
+/// Canonical `list` request line a client writes to the socket.
+pub const LIST_REQUEST: &str = r#"{"jsonrpc":"2.0","method":"list","id":1}"#;
+
+/// Canonical `subscribe` request line a client writes to upgrade the
+/// connection into a one-way `worktrees.changed` stream.
+pub const SUBSCRIBE_REQUEST: &str = r#"{"jsonrpc":"2.0","method":"subscribe","id":1}"#;
+
+/// Parse a `list` JSON-RPC **response** line into its worktree vec — the
+/// client counterpart to [`dispatch`]'s `list` arm. A server-sent `error`
+/// envelope is surfaced as a [`GwmError`] rather than silently yielding an
+/// empty list.
+pub fn parse_list_result(line: &str) -> Result<Vec<JsonWorktree>> {
+  let v: Value = serde_json::from_str(line)
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: malformed list response: {e}")))?;
+  if let Some(err) = v.get("error") {
+    let msg = err.get("message").and_then(Value::as_str).unwrap_or("unknown error");
+    return Err(crate::error::GwmError::Other(format!("daemon list error: {msg}")));
+  }
+  let result = v
+    .get("result")
+    .ok_or_else(|| crate::error::GwmError::Other("daemon list response missing 'result'".into()))?;
+  serde_json::from_value(result.clone())
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: cannot decode worktree list: {e}")))
+}
+
+/// Parse a `worktrees.changed` **notification** line into its worktree vec
+/// (the `params.worktrees` array). The client counterpart to
+/// [`worktrees_changed_notification`]; consumed by a `subscribe` stream.
+pub fn parse_worktrees_changed(line: &str) -> Result<Vec<JsonWorktree>> {
+  let v: Value = serde_json::from_str(line)
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: malformed notification: {e}")))?;
+  let arr = v
+    .get("params")
+    .and_then(|p| p.get("worktrees"))
+    .ok_or_else(|| crate::error::GwmError::Other("daemon notification missing 'params.worktrees'".into()))?;
+  serde_json::from_value(arr.clone())
+    .map_err(|e| crate::error::GwmError::Other(format!("daemon: cannot decode notification worktrees: {e}")))
+}
+
+/// Daemon **client** transport — connect / one-shot `list` / `subscribe`
+/// stream. Unix + `daemon` feature, mirroring the server gate: the pure
+/// parsers above stay cross-platform, only the socket I/O is gated.
+#[cfg(all(unix, feature = "daemon"))]
+pub mod client {
+  use super::*;
+  use crate::error::GwmError;
+  use std::io::{BufRead, BufReader, Write};
+  use std::os::unix::net::UnixStream;
+  use std::time::Duration;
+
+  /// Bounded wait for the daemon's first response. A wedged or foreign process
+  /// can accept the connection and then stay silent; without a deadline the
+  /// blocking read would hang the caller — e.g. a shell prompt that shells out
+  /// to `gwm statusline` would freeze instead of degrading. On timeout the read
+  /// errors, which the CLI treats as the documented blank-line degradation.
+  /// Generous enough not to false-trip a slow `run_list` git scan on a large
+  /// repo. `subscribe` drops it once the first snapshot arrives so a long-lived
+  /// `--watch` stream can wait indefinitely between change pushes.
+  const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+  fn connect(socket: &Path, timeout: Option<Duration>) -> Result<UnixStream> {
+    let stream = UnixStream::connect(socket)
+      .map_err(|e| GwmError::Other(format!("daemon: cannot connect to {}: {e}", socket.display())))?;
+    stream
+      .set_read_timeout(timeout)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    stream
+      .set_write_timeout(timeout)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    Ok(stream)
+  }
+
+  /// One-shot `list`: connect, send the request, read and parse the single
+  /// response line. Powers a non-`--watch` statusline render.
+  pub fn list_once(socket: &Path) -> Result<Vec<JsonWorktree>> {
+    list_once_with_timeout(socket, Some(CLIENT_TIMEOUT))
+  }
+
+  /// [`list_once`] with an explicit read/write deadline. Public so tests can
+  /// drive the timeout path quickly; production callers use [`list_once`],
+  /// which applies [`CLIENT_TIMEOUT`].
+  #[doc(hidden)]
+  pub fn list_once_with_timeout(socket: &Path, timeout: Option<Duration>) -> Result<Vec<JsonWorktree>> {
+    let stream = connect(socket, timeout)?;
+    let mut writer = stream
+      .try_clone()
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writeln!(writer, "{LIST_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writer.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader
+      .read_line(&mut line)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    parse_list_result(line.trim())
+  }
+
+  /// Subscribe to `worktrees.changed`: connect, send `subscribe`, then
+  /// invoke `on_snapshot` once per notification — the initial snapshot plus
+  /// every detected change. The loop ends when `on_snapshot` returns
+  /// `false` or the stream closes. Generic over the callback so a `--watch`
+  /// CLI loops forever while a test stops after a fixed number of updates.
+  pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
+    let stream = connect(socket, Some(CLIENT_TIMEOUT))?;
+    let mut writer = stream
+      .try_clone()
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writeln!(writer, "{SUBSCRIBE_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    writer.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+
+    let mut reader = BufReader::new(stream);
+    let mut delivered_any = false;
+    let mut line = String::new();
+    loop {
+      line.clear();
+      match reader.read_line(&mut line) {
+        Ok(0) => break, // EOF — peer closed
+        Ok(_) => {}
+        Err(_) => break, // timeout / dead link — end the stream
+      }
+      let trimmed = line.trim();
+      if trimmed.is_empty() {
+        continue;
+      }
+      let worktrees = parse_worktrees_changed(trimmed)?;
+      if !delivered_any {
+        // First snapshot arrived: drop the handshake deadline so the
+        // long-lived stream can wait indefinitely between change pushes.
+        let _ = reader.get_ref().set_read_timeout(None);
+      }
+      delivered_any = true;
+      if !on_snapshot(&worktrees) {
+        break;
+      }
+    }
+    // The stream ended without ever yielding a snapshot: the daemon accepted
+    // then closed before its first push (crash right after `accept`, or a
+    // foreign process on the path). Surface this as an error so the caller's
+    // graceful-degradation branch fires — e.g. `statusline --watch` still
+    // emits its promised empty line instead of nothing (issue #312).
+    if !delivered_any {
+      return Err(GwmError::Other(
+        "daemon: stream closed before the first snapshot".to_string(),
+      ));
+    }
+    Ok(())
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Socket server — unix only, behind the `daemon` feature.
 // ---------------------------------------------------------------------------
 
