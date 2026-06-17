@@ -10,6 +10,7 @@ pub mod cli;
 pub mod command_log;
 pub mod config;
 pub mod config_cli;
+pub mod contract;
 pub mod daemon;
 pub mod doctor;
 pub mod error;

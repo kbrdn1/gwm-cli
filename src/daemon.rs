@@ -181,11 +181,19 @@ pub fn handle_line(workdir: &Path, line: &str) -> Option<String> {
 /// Build the `worktrees.changed` notification payload (no `id` — it's a
 /// JSON-RPC notification, not a response). Used for the initial
 /// `subscribe` snapshot and every subsequent change.
+///
+/// `params.schema_version` carries [`crate::contract::SCHEMA_VERSION`] so a
+/// long-lived `subscribe` client can detect a contract drift it was not
+/// built for (issue #317). It is an additive, ignorable field — older
+/// clients that only read `params.worktrees` are unaffected.
 pub fn worktrees_changed_notification(worktrees: &[JsonWorktree]) -> Value {
   json!({
     "jsonrpc": "2.0",
     "method": "worktrees.changed",
-    "params": { "worktrees": worktrees },
+    "params": {
+      "schema_version": crate::contract::SCHEMA_VERSION,
+      "worktrees": worktrees,
+    },
   })
 }
 

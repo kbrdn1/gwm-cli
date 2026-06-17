@@ -3019,7 +3019,10 @@ fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
   let (issue_status, pr_status) = fetch_link_status(&repo, &branch, &link, slug.as_deref());
 
   if json {
-    print_status_json(&branch, slug.as_deref(), &link, &issue_status, &pr_status);
+    println!(
+      "{}",
+      build_status_json(&branch, slug.as_deref(), &link, &issue_status, &pr_status)
+    );
   } else {
     print_status_human(&branch, slug.as_deref(), &link, &issue_status, &pr_status);
   }
@@ -3115,13 +3118,18 @@ fn print_status_human(
   }
 }
 
-fn print_status_json(
+/// Build the `gwm status --json` payload — a stable, hand-built schema for
+/// scripting (frozen by `tests/contract_tests.rs`, documented in
+/// `docs/schema/status.schema.json`, issue #317). Pure: returns the value so
+/// the contract test can pin its shape without spawning the binary or hitting
+/// GitHub. `print`-ing is the caller's job.
+pub fn build_status_json(
   branch: &str,
   slug: Option<&str>,
   link: &BranchLink,
   issue: &Option<IssueStatus>,
   pr: &Option<PrStatus>,
-) {
+) -> serde_json::Value {
   let mut obj = serde_json::Map::new();
   obj.insert("branch".into(), serde_json::Value::String(branch.into()));
   if let Some(s) = slug {
@@ -3179,7 +3187,7 @@ fn print_status_json(
       None => serde_json::Value::Null,
     },
   );
-  println!("{}", serde_json::Value::Object(obj));
+  serde_json::Value::Object(obj)
 }
 
 // ---- Labels commands (issue #81) ----------------------------------------

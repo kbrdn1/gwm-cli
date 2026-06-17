@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kbrdn1/gwm-cli/docs/schema/worktree-list.schema.json",
+  "version": 1,
   "title": "gwm worktree list",
   "description": "Output of `gwm list --format=json` and the daemon's `list` JSON-RPC method (issue #38). A stable array of worktrees, decoupled from gwm's internal types.",
   "type": "array",
@@ -8,7 +9,7 @@
   "$defs": {
     "worktree": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": [
         "name",
         "id",
@@ -71,7 +72,7 @@
     },
     "status": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": ["is_dirty", "has_upstream", "ahead", "behind", "unknown"],
       "properties": {
         "is_dirty": { "type": "boolean" },
