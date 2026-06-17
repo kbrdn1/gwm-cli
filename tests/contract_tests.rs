@@ -303,3 +303,131 @@ fn a_config_with_every_frozen_section_round_trips() {
   // Array-of-table and list sections default to empty without a block.
   let _ = serde_json::to_value(&cfg).unwrap();
 }
+
+// --- 5. Frozen field + type baseline ---------------------------------------
+//
+// The parity tests above compare the live DTO to the live schema file, so
+// they catch a DTO field renamed *without* the schema following. They do NOT
+// catch two cases the 1.0 pledge cares about (raised in #317 review):
+//
+//   1. a coordinated rename — DTO field AND its schema entry renamed in the
+//      same commit — leaves `required ⊆ serialized ⊆ properties` still true;
+//   2. a *type* change with the same name (e.g. `head: String` -> `head: u64`)
+//      is invisible to a name-only set comparison.
+//
+// This baseline is a third, independent anchor: a hardcoded `(field, type)`
+// map per surface. A rename now needs THREE coordinated edits (DTO, schema,
+// baseline) and a type change is caught outright — turning an accidental
+// break into a deliberate one that must also bump `SCHEMA_VERSION`. Editing
+// the maps below is the conscious act the freeze exists to force.
+
+/// Coarse JSON type tag of a value, with integers split out from floats so a
+/// `u64 -> f64` drift is caught. A `null` reports `"null"`, but the baseline
+/// is asserted against samples whose nullable fields are populated, so the
+/// *non-null* type is what gets pinned (null is always permitted on a
+/// nullable field).
+fn json_type(v: &Value) -> &'static str {
+  match v {
+    Value::Null => "null",
+    Value::Bool(_) => "bool",
+    Value::Number(n) if n.is_i64() || n.is_u64() => "integer",
+    Value::Number(_) => "number",
+    Value::String(_) => "string",
+    Value::Array(_) => "array",
+    Value::Object(_) => "object",
+  }
+}
+
+/// Assert every `(field, expected_type)` in `baseline` is present in the
+/// serialized object with the matching JSON type. `what` labels failures.
+fn assert_type_baseline<T: serde::Serialize>(what: &str, value: &T, baseline: &[(&str, &str)]) {
+  let v = serde_json::to_value(value).expect("serialize");
+  let obj = v.as_object().expect("DTO must serialize to an object");
+  for (field, expected) in baseline {
+    let actual = obj
+      .get(*field)
+      .unwrap_or_else(|| panic!("{what}: stable field `{field}` is gone from the serialized output (rename/removal?)"));
+    assert_eq!(
+      json_type(actual),
+      *expected,
+      "{what}: stable field `{field}` changed type — was `{expected}`, now `{}`",
+      json_type(actual)
+    );
+  }
+}
+
+#[test]
+fn worktree_field_types_are_frozen() {
+  assert_type_baseline(
+    "worktree-list row",
+    &sample_worktree(),
+    &[
+      ("name", "string"),
+      ("id", "string"),
+      ("path", "string"),
+      ("branch", "string"),
+      ("head", "string"),
+      ("is_main", "bool"),
+      ("is_locked", "bool"),
+      ("is_prunable", "bool"),
+      ("status", "object"),
+      ("age_seconds", "integer"),
+      ("issue", "integer"),
+      ("pr", "integer"),
+    ],
+  );
+  assert_type_baseline(
+    "worktree status",
+    &sample_worktree().status,
+    &[
+      ("is_dirty", "bool"),
+      ("has_upstream", "bool"),
+      ("ahead", "integer"),
+      ("behind", "integer"),
+      ("unknown", "bool"),
+    ],
+  );
+}
+
+#[test]
+fn path_field_types_are_frozen() {
+  let dto = JsonPath {
+    name: "feat-317".into(),
+    path: "/wt/feat-317".into(),
+    branch: Some("feat/#317-freeze-machine-contracts".into()),
+  };
+  assert_type_baseline(
+    "path result",
+    &dto,
+    &[("name", "string"), ("path", "string"), ("branch", "string")],
+  );
+}
+
+#[test]
+fn doctor_field_types_are_frozen() {
+  let report = JsonDoctorReport {
+    checks: vec![JsonCheck {
+      name: "config".into(),
+      status: "ok".into(),
+      detail: "found .gwm.toml".into(),
+      fix_hint: Some("run gwm init".into()),
+    }],
+    severity: "ok".into(),
+    exit_code: 0,
+  };
+  assert_type_baseline(
+    "doctor report",
+    &report,
+    &[("checks", "array"), ("severity", "string"), ("exit_code", "integer")],
+  );
+  assert_type_baseline(
+    "doctor check",
+    &report.checks[0],
+    &[
+      ("name", "string"),
+      ("status", "string"),
+      ("detail", "string"),
+      ("fix_hint", "string"),
+    ],
+  );
+}
