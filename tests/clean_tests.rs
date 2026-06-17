@@ -88,6 +88,28 @@ fn scan_does_not_follow_symlinks_inside_artifacts() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn scan_skips_a_symlinked_artifact_root() {
+  use std::os::unix::fs::symlink;
+  let dir = TempDir::new().unwrap();
+  let wt = dir.path();
+  // An external dir the symlinked root would wrongly pull in if followed.
+  let outside = TempDir::new().unwrap();
+  make_artifact(outside.path(), "heavy", 100_000);
+  // `target` itself is a symlink to the external dir.
+  symlink(outside.path(), wt.join("target")).unwrap();
+
+  let r = scan_worktree("wt", wt, &default_patterns());
+
+  assert!(
+    r.artifacts.is_empty(),
+    "a symlinked artifact root must not be scanned: {:?}",
+    r.artifacts
+  );
+  assert_eq!(r.total_bytes, 0);
+}
+
 #[test]
 fn scan_counts_nested_files_recursively() {
   let dir = TempDir::new().unwrap();

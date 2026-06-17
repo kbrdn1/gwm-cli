@@ -80,7 +80,16 @@ pub fn scan_worktree(name: &str, path: &Path, patterns: &[String]) -> WorktreeRe
   let mut total = 0u64;
   for pat in patterns {
     let candidate = path.join(pat);
-    if candidate.is_dir() {
+    // Skip a symlinked artifact *root*: `Path::is_dir` follows the link, so
+    // `dir_size` would walk (and `clean --yes` could reach) a tree outside
+    // the worktree. `symlink_metadata` reports on the link itself.
+    let Ok(meta) = std::fs::symlink_metadata(&candidate) else {
+      continue;
+    };
+    if meta.file_type().is_symlink() {
+      continue;
+    }
+    if meta.is_dir() {
       let bytes = dir_size(&candidate);
       total = total.saturating_add(bytes);
       artifacts.push(Artifact {

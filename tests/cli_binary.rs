@@ -4718,3 +4718,34 @@ fn clean_yes_refuses_to_delete_non_ignored_artifacts() {
     "hand-authored content under a non-ignored dir must survive --yes"
   );
 }
+
+#[test]
+fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
+  // git tracks files, not directories: a `dist/` ignore rule can coexist with
+  // a force-added, committed `dist/index.html`. `check-ignore dist` succeeds,
+  // but the dir holds tracked work — the gate must still skip it.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  fs::write(wt.join(".gitignore"), "/dist\n").unwrap();
+  fs::create_dir_all(wt.join("dist")).unwrap();
+  fs::write(wt.join("dist").join("index.html"), b"tracked output").unwrap();
+  // Force-track the file despite the ignore rule.
+  std::process::Command::new("git")
+    .current_dir(&wt)
+    .args(["add", "-f", "dist/index.html"])
+    .status()
+    .expect("git add -f");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--yes"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped"))
+    .stdout(predicate::str::contains("dist"));
+
+  assert!(
+    wt.join("dist").join("index.html").exists(),
+    "a tracked file under an ignored dir must survive --yes"
+  );
+}

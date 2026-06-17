@@ -1123,10 +1123,13 @@ fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
       .artifacts
       .iter()
       .filter(|a| {
-        if dir_is_git_ignored(&r.path, &a.rel) {
+        if dir_is_safe_to_clean(&r.path, &a.rel) {
           true
         } else {
-          println!("skipped {}/{}: not git-ignored (may hold tracked work)", r.name, a.rel);
+          println!(
+            "skipped {}/{}: not safe to delete (not git-ignored, or holds tracked files)",
+            r.name, a.rel
+          );
           false
         }
       })
@@ -1144,11 +1147,19 @@ fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
   Ok(())
 }
 
-/// Whether git considers `rel` (a directory name relative to `worktree`)
-/// ignored — the safety gate for `gwm clean --yes`. Shells out to
+/// The safety gate for `gwm clean --yes`: a directory is safe to delete only
+/// when git treats it as ignored AND it holds no tracked files. The ignore
+/// check alone is not enough — git tracks files, not directories, so a force
+/// added `dist/index.html` can survive under a `dist/` ignore rule, and
+/// `remove_dir_all` would otherwise destroy that tracked (possibly edited)
+/// file. Every failure path resolves conservatively to "not safe" (preserve).
+fn dir_is_safe_to_clean(worktree: &Path, rel: &str) -> bool {
+  dir_is_git_ignored(worktree, rel) && !dir_has_tracked_files(worktree, rel)
+}
+
+/// Whether git considers `rel` (relative to `worktree`) ignored. Shells out to
 /// `git check-ignore -q <rel>` (exit 0 = ignored). Any failure (git missing,
-/// not a repo) is treated as "not ignored" so the conservative default is to
-/// preserve, never to delete.
+/// not a repo) is treated as "not ignored" so the default is to preserve.
 fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
   std::process::Command::new("git")
     .arg("-C")
@@ -1157,6 +1168,20 @@ fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
     .status()
     .map(|s| s.success())
     .unwrap_or(false)
+}
+
+/// Whether any tracked file lives under `rel`. `git ls-files -- <rel>` prints
+/// one line per tracked path; non-empty stdout ⇒ tracked content present. On
+/// any error we assume `true` (tracked) so the safety gate errs toward
+/// preserving the directory.
+fn dir_has_tracked_files(worktree: &Path, rel: &str) -> bool {
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(worktree)
+    .args(["ls-files", "--", rel])
+    .output()
+    .map(|o| !o.status.success() || !o.stdout.is_empty())
+    .unwrap_or(true)
 }
 
 /// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a
