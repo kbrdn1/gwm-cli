@@ -1,6 +1,6 @@
 ---
 name: gwm
-description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, diagnose with `gwm doctor`, drive tmux/zellij from a worktree, or wire `gcd` via `gwm shell-init`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `gwm create`, `gwm list`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
+description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
@@ -8,12 +8,16 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: `0.7.0`; `0.8.0-rc.5` on `dev` (user-level global config, CLI aliases + gitmoji, config CLI + lifecycle hooks, issue/PR templates, `gwm sync`, `cargo-binstall`, TUI personalisation: remappable keymap, command palette, `[theme]` presets incl. `claude-dark`, responsive sidebar).
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: `0.9.0`; `0.10.0-rc.4` on `dev` (MSRV 1.86). The v0.10 train adds: `gwm exec` / `gwm clean` (fleet command fan-out + build-artifact reclaim, #313), `gwm review <PR#>` (materialise a PR into a worktree, #308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` stack templates (#37), multi-repo `--workspace` mode (#36), embedded PTY overlays for lazygit / shell (#35), a redesigned & fully-rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree file-explorer pane and a current-PR CI indicator (#300 / #299).
 
 ## When to use this skill
 
-- User runs or asks about any `gwm <subcommand>`: `init`, `list`, `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`.
+- User runs or asks about any `gwm <subcommand>`: `init` (incl. `--preset`), `list` (incl. `--format json`), `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`, `exec`, `clean`, `review`, `daemon`, `statusline`, `new`, `pr`, `config`, `history`, `undo`, `trust`, `labels`, `milestones`, `hooks`, `commit-prefix`, `aliases`, `theme`, `tui keys`.
+- User wants to **fan a command out across worktrees** (`gwm exec -- <cmd>`) or **reclaim build artifacts** (`gwm clean`).
+- User wants to **materialise a GitHub PR into a worktree** to review/test it (`gwm review <PR#>`, cross-fork, safe-by-default).
+- User wants a **multi-repo workspace** (`gwm --workspace <dir>`), the **JSON API / daemon** (`--format=json`, `gwm daemon`, `gwm statusline` for shell prompts), or **stack presets** (`gwm init --preset laravel|node|rust|go|python-uv|generic`).
 - User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
+- User asks about the redesigned TUI: PTY overlays (`l`/`L` lazygit, `r`/`R` review, `o`/`O` shell, #35), the Settings panel (`4`) and its live-editable Keys tab (#294), the Command Logs modal (`3`), the Working Tree file-explorer pane (#300), the current-PR CI indicator (#299), `[tui.keys.modal.<context>]` rebindable overlay keys (#219), and `[tui.macro1]`/`[tui.macro2]` (`h`/`H`).
 - User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[tui.open]`, `[git_tui]`, `[review]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
 - User asks about composable `when` predicates (`file_exists:`, `cmd_exists:`, `env_set:`, `env_eq:`, `glob_exists:`) and the `!` / `&&` / `||` operators.
 - User wants to migrate a `tools/worktree-manager.sh` or `gwq`-based workflow to `gwm`.
@@ -29,7 +33,7 @@ Source: https://github.com/kbrdn1/gwm-cli — latest stable: `0.7.0`; `0.8.0-rc.
 
 ```bash
 command -v gwm           # required — installed by `cargo install --path .` from the gwm-cli repo
-command -v cargo         # required at install time (1.82+ — the crate MSRV)
+command -v cargo         # required at install time (1.86+ — the crate MSRV)
 command -v git           # required at runtime
 command -v gh            # OPTIONAL — needed for live `gwm status` / TUI GitHub state / `R: review` preset
 command -v tmux          # OPTIONAL — needed by `gwm tmux`
@@ -70,45 +74,74 @@ Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): ht
 
 Branch types: `feat`, `fix`, `hotfix`, `docs`, `test`, `refactor`, `chore`, `perf`, `ci`, `build`.
 
-Placeholders in patterns: `{home}`, `{repo}`, `{type}`, `{issue}`, `{desc}`.
+Placeholders in patterns: `{home}`, `{repo}` (repo name), `{repo_path}` (main repo's absolute workdir), `{repo_parent}` (its parent dir), `{type}`, `{issue}`, `{desc}`. Tilde (`~/…`) is also expanded.
 
 ## CLI reference
 
 ```bash
 gwm                          # opens the TUI in the current repo
-gwm init                     # write .gwm.toml in the repo root (refuses overwrite)
+gwm --workspace <dir>        # TUI / list / create across every git repo one level under <dir> (#36)
+gwm init [--preset <stack>]  # write .gwm.toml (refuses overwrite); seed from a stack preset (#37)
+gwm init --list-presets      # built-in presets: laravel, node/nuxt, rust, go, python-uv, generic
 gwm types                    # list supported branch types
 
 gwm create <type> <issue> <desc>          # create branch + worktree + bootstrap
 gwm create feat 123 "user-authentication"
 gwm create feat 123 foo --no-bootstrap    # skip the .gwm.toml stages
+gwm create feat 123 foo --reuse-branch    # attach to an existing local branch instead of erroring
+gwm create feat 123 foo --repo <name>     # workspace mode: which child repo gets the worktree
 
-gwm list                                  # list worktrees of the current repo
-gwm path <pattern>                        # print path (fuzzy match) → use $(gwm path auth)
+gwm list [--format table|names|json] [--detect-pr]   # `json` = stable schema (#38); names = completion
+gwm path <pattern> [--format text|json]   # print path (fuzzy match) → use $(gwm path auth)
 gwm cd   <pattern>                        # alias of `gwm path`
 gwm bootstrap                             # re-run bootstrap on cwd worktree
 gwm bootstrap <pattern>                   # ...or on a named worktree
 gwm sync                                  # fetch + rebase the cwd worktree onto its upstream
 gwm sync <pattern>                        # ...or a fuzzy-matched worktree
 gwm sync <pattern> --merge                # merge the upstream instead of rebasing
-gwm remove <pattern>                      # remove (fuzzy). Keeps the branch.
-gwm remove <pattern> --delete-branch      # also drop the local branch
-gwm prune                                 # clean stale .git/worktrees entries
+gwm remove <pattern> [--delete-branch] [--dry-run] [--force]   # remove (fuzzy); -b drops the branch
+gwm prune [--dry-run]                     # clean stale .git/worktrees entries
 
-gwm doctor                                # diagnose setup. Exit: 0=green, 1=warn, 2=fail
+gwm doctor [--format text|json]           # diagnose setup. Exit: 0=green, 1=warn, 2=fail
 gwm completions <bash|elvish|fish|powershell|zsh>   # emit a shell-completion script on stdout
 gwm shell-init  <bash|fish|powershell|zsh>          # emit a `gcd <pattern>` wrapper to eval/source
 
-gwm switch                                # interactive picker → prints chosen path to stdout
-gwm s                                     # alias of `gwm switch`
+gwm switch                                # interactive picker → prints chosen path to stdout (alias: s)
 
 gwm tmux   <pattern> [-p|--split]         # open matched worktree in new tmux window (or split)
 gwm zellij <pattern> [-p|--split]         # open matched worktree in new zellij tab (or pane)
 
+# --- fan-out & disk hygiene (#313) ---
+gwm exec [<slug>...] -- <cmd>             # run <cmd> in each worktree (sequential); ✓/✗ rollup, non-zero on any fail
+                                          #   default = all non-main worktrees; slugs before `--`; cmd verbatim after `--`
+gwm clean [<slug>...] [--yes]             # report (or with --yes reclaim) target/ node_modules/ dist/ build/
+                                          #   --yes deletes ONLY git-ignored dirs holding no tracked files; never follows symlinks
+
+# --- GitHub (needs `gh`) ---
+gwm new <type> <desc>                     # create issue from a repo template, then its worktree
+gwm pr [--draft] [--base <b>] [--render]  # render [pr_template] body, then `gh pr create`
+gwm review <PR#> [--name <b>] [--bootstrap]   # materialise a PR into a worktree (cross-fork; safe-by-default) (#308)
 gwm link   issue|pr <N> [--worktree PAT]  # bind a worktree to a GitHub issue or PR
 gwm unlink issue|pr      [--worktree PAT] # remove the explicit link
 gwm open   [issue|pr]    [--worktree PAT] # open the linked URL in $BROWSER
 gwm status [--worktree PAT] [--json]      # show link + live GitHub state (needs `gh`)
+gwm labels   list|push [--dry-run] [--prune]      # sync the declarative [[labels]] set to origin
+gwm milestones list|push [--dry-run] [--prune]    # sync the declarative [[milestones]] set to origin
+
+# --- daemon & shell consumers (#38 / #309) ---
+gwm daemon [--socket <path>] [--poll-ms <n>]   # long-running JSON-RPC 2.0 over a unix socket (list/doctor/path/subscribe)
+gwm statusline [--socket <path>] [--watch]     # one-line prompt summary off the daemon (degrades to blank when none)
+
+# --- config / convention / introspection ---
+gwm config get|set|unset|list|validate|path|edit   # git-config-style editing of .gwm.toml (comment-preserving)
+gwm history [--all]                       # recent destructive ops journal (newest first)
+gwm undo [--bootstrap]                    # reverse the last destructive op for this repo
+gwm trust list|show|revoke                # TOFU trust ledger for .gwm.toml bootstrap
+gwm aliases                               # resolved CLI aliases (built-in + repo + user)
+gwm commit-prefix [<branch>] [--unicode]  # Gitmoji + Conventional commit prefix for the branch
+gwm hooks install commit-msg [--force]    # opt-in git hook that auto-prepends the commit prefix
+gwm theme list|show [<name>]              # role-based [theme] presets
+gwm tui keys                              # resolved keymap (defaults + [tui.keys[.modal.*]] overrides)
 ```
 
 ### `gwm doctor`
@@ -176,34 +209,44 @@ The TUI table and `gwm list` both expose a `STATUS` column:
 
 ## TUI key map
 
-| Key         | Action                                                                          |
-|:------------|:--------------------------------------------------------------------------------|
-| `↑` / `k`   | previous worktree (scrolls the sidebar when it has focus)                       |
-| `↓` / `j`   | next worktree (scrolls the sidebar when it has focus)                           |
-| `gg`        | jump to the first worktree                                                      |
-| `G`         | jump to the last worktree                                                       |
-| `/`         | enter fuzzy filter mode (live narrowing as you type; `Esc` to clear)            |
-| `n`         | new worktree form (type ↑/↓, Tab between fields, Enter on desc submits)         |
-| `d`         | delete (confirm `y`; under the safety countdown, `y` again cancels)             |
-| `p`         | toggle "delete branch on remove" (arms the safety countdown when ON)            |
-| `b`         | re-run bootstrap on selected                                                    |
-| `o`         | open worktree per `[tui.open]` (default `shell`, else `editor` / `finder`)      |
-| `y`         | yank the selected worktree's path to the system clipboard (issue #73)           |
-| `l`         | run the configured `[git_tui]` launcher (default `lazygit -p <selected-worktree>` fullscreen) |
-| `R`         | run the configured `[review]` launcher against the resolved base (issue #75)    |
-| `O`         | open menu — pick issue or PR URL to open in `$BROWSER`                          |
-| `L`         | link prompt — bind selected worktree to a GitHub issue or PR number             |
-| `v`         | toggle the git details sidebar (narrow terminal: stacks under the table instead of hiding) |
-| `V`         | cycle the sidebar layout — `auto` (width-driven) → `side-by-side` → `stacked` → `auto` |
-| `H`         | toggle the sidebar position left ↔ right (side-by-side layout only)             |
-| `Tab`       | swap focus between the worktree list and the sidebar                            |
-| `f`         | refresh worktree list (also accepts `r` for muscle memory)                      |
-| `F`         | refresh GitHub issue/PR status via `gh` (was `R` pre-#75)                       |
-| `p`         | toggle "delete branch on remove"                                                |
-| `Enter`     | show path in status bar (in picker mode: print path to stdout + exit)           |
-| `?`         | help overlay                                                                    |
-| `q` / `Esc` | quit (Esc also exits filter / overlays without quitting)                        |
-| `Ctrl-C`    | force quit                                                                      |
+Built-in defaults after the **v0.10 keymap redesign (#290)**. Every binding is
+rebindable via `[tui.keys]` (list view) and `[tui.keys.modal.<context>]`
+(overlays, #219). Run `gwm tui keys` for the full resolved map incl. every modal
+context.
+
+| Key             | Action                                                                      |
+|:----------------|:----------------------------------------------------------------------------|
+| `j`/`↓` `k`/`↑` | move selection (scrolls the focused pane)                                    |
+| `gg` / `G`·End  | jump to first / last worktree                                               |
+| `Tab`           | swap focus between the worktree list and the Status sidebar                  |
+| `1` / `2`       | focus the worktrees pane / the Status pane                                  |
+| `3` / `4`       | open the Command Logs modal / the Settings (config) panel (#290 / #294)     |
+| `n` / `d` / `b` | new worktree modal / delete selected / re-run bootstrap (TOFU gate)         |
+| `D`             | toggle "delete branch on remove" (arms the safety countdown when ON)        |
+| `p` / `P`       | pull / push the selected worktree's branch                                  |
+| `s` / `f`       | sync (fetch + rebase) / refresh the worktree list                           |
+| `c` / `e`       | edit-worktree / exit-to-worktree (sets the picker's cd target)             |
+| `l` / `L`       | lazygit — PTY overlay / fullscreen `[git_tui]` (#35)                        |
+| `r` / `R`       | `[review]` launcher — PTY overlay / fullscreen (#35 / #75)                  |
+| `o` / `O`       | terminal (`$SHELL`) — PTY overlay / fullscreen honouring `[tui.open]` (#35) |
+| `t`             | open the worktree in a tmux/zellij pane (mux)                              |
+| `h` / `H`       | run `[tui.macro1]` / `[tui.macro2]` (#290)                                  |
+| `y` / `w` / `Y` | yank branch name / worktree name / absolute path to the clipboard           |
+| `i` / `B`       | link prompt (issue/PR) / browse-links menu (open linked issue·PR in browser)|
+| `F`             | refresh GitHub issue/PR status via `gh` (off-thread; statusbar spinner)     |
+| `V` / `v`       | toggle the sidebar / flip its position left ↔ right                         |
+| `S` / `Space`   | sidebar Details mode (commits ↔ stashes) / cycle layout (auto→side→stacked) |
+| `.` / `?`       | open the docs in `$BROWSER` / help overlay                                  |
+| `:` / `/`       | command palette (fuzzy-fire any action) / fuzzy filter bar (`Esc` clears)   |
+| `Enter`         | show path in status bar (picker mode: print path to stdout + exit)          |
+| `q` / `Esc`     | quit (`Esc` closes an overlay / clears a sticky filter first)               |
+| `Ctrl-C`        | force quit                                                                  |
+
+PTY overlays (`l`/`r`/`o`) run the tool **inside** the TUI (no alt-screen swap;
+`Esc` closes); the uppercase variants (`L`/`R`/`O`) suspend the TUI for a
+fullscreen takeover. The Settings panel (`4`) edits `.gwm.toml` live across
+category tabs (Theme / Worktree / TUI / Keys / All) with a per-layer selector
+(`L`); the **Keys** tab captures a keystroke and writes it back validated (#294).
 
 ## Picker mode (`gwm switch` / `gcd`)
 
@@ -247,15 +290,18 @@ GitHub fetch state machine per worktree: `Idle → Loading → Loaded(T) | Error
 
 `Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the Recent Commits block when the sidebar is focused — the small blocks above stay pinned. The focused panel's border turns cyan.
 
-## `o: open` dispatch — issue #73
+## Terminal open: `o` (PTY overlay) / `O` (fullscreen) — issues #73 / #35
 
-The `o` key in the TUI is controlled by `[tui.open]`. Three modes:
+Since the keymap redesign, `o` opens an **embedded PTY terminal overlay** inside
+the TUI (no alt-screen swap; `Esc` closes), while `O` is the **fullscreen**
+variant that suspends the TUI and honours the `[tui.open]` dispatch below. Three
+fullscreen modes:
 
 | `mode = ` | Behaviour                                                                                  |
 |:----------|:-------------------------------------------------------------------------------------------|
 | `"shell"` _(default)_ | Suspend the TUI and spawn `$SHELL` with `cwd = <worktree>` — lazygit-style. Exiting the shell restores the TUI. |
 | `"editor"` | Suspend the TUI and run `$EDITOR <worktree-path>`.                                        |
-| `"finder"` | Pre-#73 behaviour: hand off to the OS file manager (`open` / `xdg-open` / `explorer`).    |
+| `"finder"` | Hand off to the OS file manager (`open` / `xdg-open` / `explorer`).                       |
 
 ```toml
 [tui.open]
@@ -266,9 +312,11 @@ editor_cmd = "hx"        # override $EDITOR when set ("" = read $EDITOR)
 
 `shell_cmd` and `editor_cmd` win over the env var when non-empty. An unknown `mode` is a hard config-load error.
 
-## `y: yank` — issue #73
+## Yank: `y` branch · `w` worktree name · `Y` path — issues #73 / #290
 
-The `y` key copies the selected worktree's absolute path to the system clipboard. Probe order (first hit wins on `$PATH`):
+The yank keys copy to the system clipboard: `y` = the branch name, `w` = the
+worktree (dir) name, `Y` = the selected worktree's absolute path. Probe order
+(first hit wins on `$PATH`):
 
 | OS         | Candidates (in order)                                                              |
 |:-----------|:-----------------------------------------------------------------------------------|
@@ -278,14 +326,14 @@ The `y` key copies the selected worktree's absolute path to the system clipboard
 
 Missing tool surfaces a status-bar hint, never a panic. No config knob — the probe list is built per-platform.
 
-## Configurable launchers (`l` git_tui · `R` review) — issue #75
+## Configurable launchers (`l`/`L` git_tui · `r`/`R` review) — issues #75 / #35
 
-Two TUI keybindings share the same mini-API: take a `command` template from `.gwm.toml`, substitute placeholders, split with `shell-words`, and exec it with `cwd = <selected-worktree>`.
+Two configurable launchers share the same mini-API: take a `command` template from `.gwm.toml`, substitute placeholders, split with `shell-words`, and exec it with `cwd = <selected-worktree>`. Each has a **PTY-overlay** binding (lowercase — runs inside the TUI, no alt-screen swap, `Esc` closes) and a **fullscreen** binding (uppercase — suspends the TUI):
 
-| Key | Section     | Default                       | Placeholders                          | Default `fullscreen` |
-|:----|:------------|:------------------------------|:--------------------------------------|:---------------------|
-| `l` | `[git_tui]` | `lazygit -p {path}`           | `{path}`                              | `true`               |
-| `R` | `[review]`  | _(inert until configured)_    | `{base} {head} {path} {diff}`         | `false`              |
+| Keys (PTY / full) | Section     | Default                       | Placeholders                          | Default `fullscreen` |
+|:------------------|:------------|:------------------------------|:--------------------------------------|:---------------------|
+| `l` / `L`         | `[git_tui]` | `lazygit -p {path}`           | `{path}`                              | `true`               |
+| `r` / `R`         | `[review]`  | _(inert until configured)_    | `{base} {head} {path} {diff}`         | `false`              |
 
 `fullscreen = true` suspends the gwm TUI for a TUI-style takeover (same recipe as the pre-issue-#75 `l` → lazygit flow); `fullscreen = false` runs the command **synchronously in-place** — gwm stays in the alt-screen, `Command::output()` blocks the TUI until the child exits, and the first line of stderr lands on the status bar. Fine for quick print-only tools (`claude --print`, `gh pr view --web`); pick `fullscreen = true` for anything long-running so the TUI is properly suspended and restored. The `{diff}` placeholder is **lazy** — gwm only shells out to `git diff {base}..{head}` (into a tempfile) when the template references it.
 
@@ -611,32 +659,44 @@ git commit --no-verify        # bypass for one commit, sparingly
 ```
 src/
 ├── lib.rs               # public re-exports — tests import these
-├── main.rs              # bin entry, dispatches to cli::run
+├── main.rs              # bin entry, alias expansion, dispatches to cli::run
 ├── error.rs             # GwmError (thiserror) + Result alias
-├── config.rs            # serde TOML → Config (worktree, bootstrap, doctor, tui, tui.open, git_tui, review)
+├── config.rs            # serde TOML → Config (worktree, bootstrap, hooks, doctor, tui, tui.open,
+│                        #   tui.keys[.modal], tui.macro1/2, git_tui, review, theme, gitmoji, aliases…)
+├── config_cli.rs        # `gwm config get/set/…` (comment-preserving toml_edit)
 ├── naming.rs            # BranchSpec, kebab(), parse_branch()
-├── worktree.rs          # discover_repo, list, add, remove, prune, find_fuzzy, branch_age,
-│                        # format_relative_duration, git_log_with_author (libgit2 + shell-out)
+├── worktree.rs          # discover_repo, list, add, remove, prune, find_fuzzy, sync helpers (libgit2 + shell-out)
 ├── bootstrap.rs         # run(BootstrapCtx) → BootstrapReport (copies / guards / commands / when DSL)
-├── doctor.rs            # `gwm doctor` checks (config, env, orphan branches, prunable wts, launcher PATH probes)
+├── lifecycle.rs         # [hooks.*] phases (pre/post create·bootstrap·remove)
+├── sync.rs              # fetch + rebase/merge onto upstream
+├── review.rs            # `gwm review <PR#>` — materialise a PR into a worktree (#308)
+├── workspace.rs         # multi-repo `--workspace` discovery (#36)
+├── presets.rs           # `gwm init --preset` stack templates (#37)
+├── history.rs / trust.rs   # destructive-op journal (undo) · TOFU trust ledger for .gwm.toml
 ├── github.rs            # issue / PR link storage in git config + `gh` shell-out, BranchLink
-├── multiplexer.rs       # tmux / zellij hand-off (window/tab/split)
-├── launcher.rs          # shared `l` / `R` launcher pipeline — placeholder expansion
-│                        # ({base}/{head}/{path}/{diff} with lazy tempfile), shell-words split,
-│                        # base-resolution chain, count_commits_ahead, which::which probing
-├── cli.rs               # clap subcommands + handlers
+├── issue_templates.rs / pr_templates.rs / templating.rs   # gwm new / gwm pr
+├── labels.rs / milestones.rs / gitmoji.rs / aliases.rs    # declarative GitHub sets, commit-prefix, CLI aliases
+├── launcher.rs / multiplexer.rs   # [git_tui]/[review] launcher pipeline · tmux/zellij hand-off
+├── daemon.rs / json_api.rs        # JSON-RPC 2.0 daemon + `--format=json` DTOs/schemas (#38)
+├── statusline.rs        # `gwm statusline` prompt one-liner off the daemon (#309)
+├── command_log.rs       # process-global command log (Command Logs modal, #290)
+├── doctor.rs            # `gwm doctor` checks (config, env, orphan branches, prunable wts, launcher PATH probes)
+├── cli.rs               # clap subcommands + handlers (incl. exec / clean, #313)
 └── tui/
-    ├── mod.rs           # crossterm event loop (filter, link prompt, open menu, refresh,
-    │                    # clipboard_candidates, run_launcher, yank_selected_path_to_clipboard)
-    ├── app.rs           # App state, transitions, GitHubFetchState<T>, ConfirmKeyAction,
-    │                    # LauncherPlan, OpenTarget, resolve_open_target, prepare_review, prepare_git_tui
-    ├── commit_graph.rs  # lazygit-style topology renderer (Rust port of pkg/gui/presentation/graph/)
-    └── ui.rs            # ratatui drawing — 4-section bordered sidebar, sidebar_header_line,
-                         # build_sidebar_sections, worktree_identity_lines, badges_line,
-                         # recent_commits_lines, branch_name_color, freshness_color, etc.
+    ├── mod.rs           # crossterm event loop (filter, overlays, launchers, clipboard, PTY)
+    ├── app.rs           # App state, transitions, Action dispatcher, GitHubFetchState<T>, workspace
+    ├── ui.rs            # ratatui drawing — panes, bordered sidebar, modals, CI indicator (#299)
+    ├── keymap.rs        # [tui.keys] remappable list-view bindings + chords (#290)
+    ├── modal_keymap.rs  # [tui.keys.modal.<context>] overlay bindings (#219)
+    ├── palette.rs       # `:` command palette
+    ├── theme.rs         # role-based colours + presets
+    ├── wt_tree.rs       # Working Tree file-explorer tree (#300)
+    ├── commit_graph.rs  # Recent Commits lazygit-style topology renderer
+    └── state/           # create_form, filter, confirm, link_prompt, sidebar, github_fetch, spinner,
+                         #   async_task, command_logs, config_panel, pty_overlay — one slice per overlay
 ```
 
-Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.rs`, `bootstrap_when_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `error_tests.rs`, `flake_tests.rs`, `github_tests.rs`, `homebrew_formula_tests.rs`, `launcher_tests.rs`, `multiplexer_tests.rs`, `naming_tests.rs`, `precommit_hook_tests.rs`, `tui_app_tests.rs`, `worktree_integration.rs` (+ `tests/common/` helpers). **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
+Tests under `tests/` mirror this layout — ~73 integration test files, one (or more) per module: e.g. `bootstrap_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `daemon_tests.rs`/`daemon_integration.rs`, `json_api_tests.rs`, `review_tests.rs`/`review_integration.rs`, `statusline_tests.rs`, `workspace_tests.rs`, `presets_tests.rs`, `exec_tests.rs`, `clean_tests.rs`, `worktree_integration.rs`, plus the `tui_*` state-machine suites and `tests/common/` helpers. **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
 
 ## Differences vs. the bash + gwq stack
 
@@ -651,7 +711,7 @@ Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.
 | GitHub linking              | none                  | issue / PR per-branch git config + `gh` live status      |
 | diagnostics                 | none                  | `gwm doctor` (exit 0/1/2, CI-ready)                      |
 | anti-RDS guard              | hardcoded `grep`      | configurable regex deny-list                             |
-| tests                       | 0                     | 430+ across 15 test files (config / bootstrap / when DSL / doctor / github / multiplexer / TUI + commit graph / launcher / CLI / homebrew / flake / pre-commit hook) |
+| tests                       | 0                     | large suite across ~73 test files (config / bootstrap / when DSL / doctor / github / daemon + JSON API / review / statusline / workspace / presets / exec / clean / multiplexer / TUI state machines + commit graph / launcher / CLI / homebrew / flake / pre-commit hook) |
 | install                     | `chmod +x` per repo   | `cargo install --path .` (or Homebrew / Nix / prebuilts) |
 
 ## Troubleshooting
@@ -680,7 +740,7 @@ Tests under `tests/` mirror this layout (one file per module): `bootstrap_tests.
 
 **`gcd` says command not found** — the shell-init wrapper isn't sourced. Re-run `eval "$(gwm shell-init <shell>)"` in your current shell and add it to your shell's rc file.
 
-**Pressing `R` in the TUI does nothing / shows a status hint** — `[review]` is opt-in. Either no `[review]` section exists in `.gwm.toml`, the resolved binary isn't on `$PATH` (`gwm doctor` flags it as Warning), or `skip_when_no_changes = true` (default) found 0 commits between `{base}..{head}`. Add a `[review] tool = "lumen"` (or another preset) to enable it.
+**Pressing `r` / `R` in the TUI does nothing / shows a status hint** — `[review]` is opt-in. Either no `[review]` section exists in `.gwm.toml`, the resolved binary isn't on `$PATH` (`gwm doctor` flags it as Warning), or `skip_when_no_changes = true` (default) found 0 commits between `{base}..{head}`. Add a `[review] tool = "lumen"` (or another preset) to enable it. (`r` = PTY overlay, `R` = fullscreen.)
 
 **`R: review` resolves the wrong `{base}`** — the chain is upstream → `branch.<n>.gwm-base` → `[review].default_base` → `"dev"` → `"main"`. Pin it explicitly with `[review] default_base = "<branch>"` or set the per-branch override with `git config branch.<name>.gwm-base <ref>`.
 
@@ -698,18 +758,27 @@ fullscreen = true
 ## Quick reference card
 
 ```
-gwm                          # TUI
-gwm init                     # scaffold .gwm.toml
+gwm                          # TUI  (gwm --workspace <dir> = multi-repo)
+gwm init [--preset <stack>]  # scaffold .gwm.toml (optionally from a preset)
 gwm create <t> <#> <desc>    # create + bootstrap
-gwm list                     # list worktrees
+gwm list [--format json]     # list worktrees (json = stable schema)
 gwm path|cd <pat>            # print path
 gwm switch | gwm s | gcd     # interactive picker (cd via shell wrapper)
 gwm bootstrap [pat]          # re-run bootstrap
 gwm sync [pat] [--merge]     # fetch + rebase (or merge) onto upstream
 gwm remove <pat> [-b]        # remove (-b drops branch)
 gwm prune                    # clean stale refs
+gwm exec [slug...] -- <cmd>  # run <cmd> in each worktree (✓/✗ rollup)
+gwm clean [slug...] [--yes]  # report / reclaim build artifacts
+gwm review <PR#>             # materialise a PR into a worktree
+gwm new <t> <desc>           # create issue from template, then its worktree
+gwm pr [--draft] [--render]  # render [pr_template], then gh pr create
+gwm daemon                   # JSON-RPC 2.0 over a unix socket
+gwm statusline [--watch]     # one-line prompt summary off the daemon
 gwm types                    # show branch types
-gwm doctor                   # diagnose setup (exit 0/1/2)
+gwm doctor [--format json]   # diagnose setup (exit 0/1/2)
+gwm config get|set|list      # edit .gwm.toml (comment-preserving)
+gwm history | gwm undo       # destructive-op journal / undo
 gwm completions <shell>      # emit shell completion script (bash/elvish/fish/powershell/zsh)
 gwm shell-init  <shell>      # emit gcd wrapper to eval (bash/fish/powershell/zsh)
 gwm tmux   <pat> [-p]        # tmux window / split hand-off
