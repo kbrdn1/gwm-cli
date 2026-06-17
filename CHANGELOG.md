@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   policy and the stable-vs-experimental tier of every field. No behaviour
   change to any existing output.
 
+- **Frozen 1.0 surface decision for `exec` / `clean`** (issue #319). The
+  deliberate MVP cuts in `gwm exec` / `gwm clean` (#313) are confirmed as
+  *deferred, additive* features for the 1.0 pledge: `exec` stays sequential by
+  default (bounded `--jobs` parallelism is a future opt-in), `clean` keeps its
+  built-in `target` / `node_modules` / `dist` / `build` set (a `[clean]` /
+  `[exec]` profile config is a future additive section), and `--workspace`
+  fan-out across repos stays refused on both commands until it lands. The one
+  previously-untested frozen behaviour — the `--workspace` refusal on `exec` /
+  `clean`, whose exit code is now under the SemVer pledge — is pinned by two
+  regression tests in `tests/cli_binary.rs`, so a future change that silently
+  accepts the flag (or changes the exit code) breaks CI loudly. No behaviour
+  change.
+
 ### Docs
 
 - **Stability & compatibility policy for 1.0** (issue #318). A new
