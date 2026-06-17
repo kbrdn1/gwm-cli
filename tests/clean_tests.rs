@@ -67,6 +67,27 @@ fn scan_returns_empty_when_no_artifacts_present() {
   assert_eq!(r.total_bytes, 0);
 }
 
+#[cfg(unix)]
+#[test]
+fn scan_does_not_follow_symlinks_inside_artifacts() {
+  use std::os::unix::fs::symlink;
+  let dir = TempDir::new().unwrap();
+  let wt = dir.path();
+  // Heavy content that a followed symlink would wrongly pull into the total.
+  let outside = TempDir::new().unwrap();
+  make_artifact(outside.path(), "heavy", 100_000);
+
+  make_artifact(wt, "target", 100);
+  symlink(outside.path(), wt.join("target").join("link_out")).unwrap();
+
+  let r = scan_worktree("wt", wt, &default_patterns());
+
+  assert_eq!(
+    r.total_bytes, 100,
+    "a symlink inside target/ must not be followed or counted (only the real 100-byte file)"
+  );
+}
+
 #[test]
 fn scan_counts_nested_files_recursively() {
   let dir = TempDir::new().unwrap();

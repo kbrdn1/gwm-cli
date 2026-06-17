@@ -44,22 +44,29 @@ pub fn default_patterns() -> Vec<String> {
 
 /// Sum the logical length of every regular file under `dir`, recursively.
 ///
-/// Symlinks are not followed: `DirEntry::metadata()` reports on the link
-/// itself, so a symlink is neither recursed into nor counted — its target may
-/// live outside the worktree and must not be attributed to it (nor deleted).
+/// Symlinks are not followed: the entry type is read via `DirEntry::file_type`
+/// (which, unlike `DirEntry::metadata`, does *not* traverse the link), so a
+/// symlink is skipped outright rather than recursed into or counted. Its
+/// target may live outside the worktree — or form a loop — and must not be
+/// attributed to it (nor, on delete, reached through it).
 fn dir_size(dir: &Path) -> u64 {
   let mut total = 0u64;
   let Ok(entries) = std::fs::read_dir(dir) else {
     return 0;
   };
   for entry in entries.flatten() {
-    let Ok(meta) = entry.metadata() else {
+    let Ok(ft) = entry.file_type() else {
       continue;
     };
-    if meta.is_dir() {
+    if ft.is_symlink() {
+      continue;
+    }
+    if ft.is_dir() {
       total = total.saturating_add(dir_size(&entry.path()));
-    } else if meta.is_file() {
-      total = total.saturating_add(meta.len());
+    } else if ft.is_file() {
+      if let Ok(meta) = entry.metadata() {
+        total = total.saturating_add(meta.len());
+      }
     }
   }
   total

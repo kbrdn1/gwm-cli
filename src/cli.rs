@@ -661,6 +661,10 @@ pub enum Command {
   /// pass `--yes` to actually delete. Scope to a subset with slug
   /// positionals: `gwm clean feat-1`. Deliberately not journaled into
   /// `gwm history` (#29) — the artifacts are regenerable.
+  ///
+  /// Safety: `--yes` only deletes directories git treats as ignored. A
+  /// non-ignored `dist/` / `build/` (tracked or hand-authored, hence
+  /// non-regenerable) is reported as skipped, never removed.
   Clean {
     /// Worktree slugs to target (fuzzy match). Empty = all non-main worktrees.
     #[arg(value_name = "SLUG")]
@@ -1110,10 +1114,49 @@ fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
 
   let mut freed = 0u64;
   for r in &reclaims {
-    freed = freed.saturating_add(clean::delete_reclaim(r)?);
+    // Safety gate: only delete directories git treats as ignored (i.e.
+    // generated). A default name like `dist/` or `build/` can hold tracked
+    // or hand-authored, non-regenerable files; deleting those would be
+    // unrecoverable (clean is not journaled). Refuse any non-ignored dir and
+    // tell the user, rather than destroy work.
+    let deletable: Vec<clean::Artifact> = r
+      .artifacts
+      .iter()
+      .filter(|a| {
+        if dir_is_git_ignored(&r.path, &a.rel) {
+          true
+        } else {
+          println!("skipped {}/{}: not git-ignored (may hold tracked work)", r.name, a.rel);
+          false
+        }
+      })
+      .cloned()
+      .collect();
+    let filtered = clean::WorktreeReclaim {
+      name: r.name.clone(),
+      path: r.path.clone(),
+      artifacts: deletable,
+      total_bytes: 0,
+    };
+    freed = freed.saturating_add(clean::delete_reclaim(&filtered)?);
   }
   println!("reclaimed {}", clean::human_size(freed));
   Ok(())
+}
+
+/// Whether git considers `rel` (a directory name relative to `worktree`)
+/// ignored — the safety gate for `gwm clean --yes`. Shells out to
+/// `git check-ignore -q <rel>` (exit 0 = ignored). Any failure (git missing,
+/// not a repo) is treated as "not ignored" so the conservative default is to
+/// preserve, never to delete.
+fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(worktree)
+    .args(["check-ignore", "-q", rel])
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
 }
 
 /// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a

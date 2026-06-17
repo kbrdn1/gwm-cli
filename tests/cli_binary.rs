@@ -4591,3 +4591,130 @@ fn tui_keys_lists_modal_contexts() {
     .stdout(predicate::str::contains("focus_confirm"))
     .stdout(predicate::str::contains("[tui.keys.modal.link.choose_target]"));
 }
+
+// --- exec / clean (issue #313) ------------------------------------------
+
+/// Spin up a repo plus one non-main worktree via the real binary, so the
+/// `exec` / `clean` tests exercise the actual worktree-discovery and
+/// target-selection path (not just the pure helpers). Returns the main repo
+/// tempdir, the worktree-base tempdir (kept alive), and the worktree path.
+fn repo_with_one_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = base.path().display()
+  );
+  fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "1", "wt"])
+    .assert()
+    .success();
+  let wt = base.path().join("feat-1-wt");
+  assert!(wt.exists(), "worktree must exist for the exec/clean tests");
+  (dir, base, wt)
+}
+
+#[test]
+fn exec_runs_the_command_inside_each_worktree() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // The command's CWD is the worktree, so the marker lands there — proving
+  // discovery + per-worktree execution, not just a parse.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--", "sh", "-c", "echo hi > exec_marker.txt"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓"))
+    .stdout(predicate::str::contains("feat-1-wt"));
+  assert!(
+    wt.join("exec_marker.txt").exists(),
+    "the command must run with the worktree as its working directory"
+  );
+}
+
+#[test]
+fn exec_exits_nonzero_when_a_worktree_command_fails() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--", "sh", "-c", "exit 5"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗"))
+    .stdout(predicate::str::contains("exit 5"));
+}
+
+#[test]
+fn clean_reports_artifacts_without_deleting_by_default() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  fs::create_dir_all(wt.join("target")).unwrap();
+  fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("target"))
+    .stdout(predicate::str::contains("re-run with --yes"));
+
+  assert!(wt.join("target").exists(), "report-only mode must not delete anything");
+}
+
+#[test]
+fn clean_yes_deletes_gitignored_artifacts() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // target/ is ignored ⇒ safe to reclaim.
+  fs::write(wt.join(".gitignore"), "/target\n").unwrap();
+  fs::create_dir_all(wt.join("target")).unwrap();
+  fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--yes"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("reclaimed"));
+
+  assert!(
+    !wt.join("target").exists(),
+    "a git-ignored target/ should be deleted with --yes"
+  );
+}
+
+#[test]
+fn clean_yes_refuses_to_delete_non_ignored_artifacts() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // dist/ is NOT ignored (no matching rule) and holds hand-authored content;
+  // the safety gate must skip it rather than destroy it.
+  fs::create_dir_all(wt.join("dist")).unwrap();
+  fs::write(wt.join("dist").join("keep.txt"), b"non-regenerable work").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--yes"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped"))
+    .stdout(predicate::str::contains("dist"));
+
+  assert!(wt.join("dist").exists(), "a non-ignored dist/ must be preserved");
+  assert!(
+    wt.join("dist").join("keep.txt").exists(),
+    "hand-authored content under a non-ignored dir must survive --yes"
+  );
+}

@@ -22,8 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`gwm clean [<slug>...] [--yes]`** ([#313](https://github.com/kbrdn1/gwm-cli/issues/313)) —
   report (and optionally reclaim) heavy build artifacts (`target/`,
   `node_modules/`, `dist/`, `build/`) across worktrees. Report-only by
-  default; `--yes` deletes the listed directories. Deliberately not
-  journaled into `gwm history` — the artifacts are regenerable.
+  default; `--yes` deletes the listed directories — but only those git
+  treats as ignored, so a tracked/hand-authored `dist/` or `build/` is
+  skipped rather than destroyed. Symlinks inside artifact trees are not
+  followed (size accounting and deletion stay bounded to the worktree).
+  Deliberately not journaled into `gwm history` — the artifacts are
+  regenerable.
 
 ## Past releases
 
