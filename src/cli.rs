@@ -2394,17 +2394,15 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   let cwd = std::env::current_dir().unwrap_or_default();
 
   if watch {
-    // Stream forever (the callback never asks to stop); a dropped daemon
-    // ends the stream and we fall through to the graceful empty line.
-    let streamed = crate::daemon::client::subscribe(&socket, |worktrees| {
-      print_statusline(worktrees, &cwd);
-      true
-    });
-    if streamed.is_err() {
-      // Daemon unreachable or stream died before any output: emit a blank
-      // line and exit 0 so a prompt doesn't show an error (issue #309).
-      print_statusline(&[], &cwd);
-    }
+    // Stream until the daemon goes away; the callback never asks to stop, so
+    // `subscribe` returns only when the stream ends — unreachable, or the
+    // daemon stopped / restarted after pushing snapshots. `statusline::watch`
+    // renders each push and then emits a trailing blank so a long-running
+    // consumer clears the now-stale line instead of freezing on it (#309).
+    crate::statusline::watch(
+      |cb| crate::daemon::client::subscribe(&socket, cb),
+      |worktrees| print_statusline(worktrees, &cwd),
+    );
     return Ok(());
   }
 
