@@ -309,6 +309,7 @@ pub mod client {
     writer.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
 
     let reader = BufReader::new(stream);
+    let mut delivered_any = false;
     for line in reader.lines() {
       let line = match line {
         Ok(l) => l,
@@ -318,9 +319,20 @@ pub mod client {
         continue;
       }
       let worktrees = parse_worktrees_changed(line.trim())?;
+      delivered_any = true;
       if !on_snapshot(&worktrees) {
         break;
       }
+    }
+    // The stream ended without ever yielding a snapshot: the daemon accepted
+    // then closed before its first push (crash right after `accept`, or a
+    // foreign process on the path). Surface this as an error so the caller's
+    // graceful-degradation branch fires — e.g. `statusline --watch` still
+    // emits its promised empty line instead of nothing (issue #312).
+    if !delivered_any {
+      return Err(GwmError::Other(
+        "daemon: stream closed before the first snapshot".to_string(),
+      ));
     }
     Ok(())
   }

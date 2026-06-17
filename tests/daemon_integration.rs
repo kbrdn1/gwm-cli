@@ -11,7 +11,7 @@ use common::init_repo;
 use gwm::daemon::{serve, ServeOptions};
 use gwm::worktree;
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -310,4 +310,42 @@ fn client_subscribe_streams_snapshot_then_pushes_on_change() {
   .expect("subscribe must run cleanly");
 
   assert_eq!(counts, vec![1, 2], "initial snapshot (1) then the change push (2)");
+}
+
+#[test]
+fn client_subscribe_errors_on_eof_before_first_snapshot() {
+  // Contract (issue #312): if the daemon accepts the subscribe connection but
+  // closes before pushing the first snapshot (it crashes right after accept,
+  // or a foreign process owns the path), `subscribe` must NOT report a clean
+  // `Ok(())`. cmd_statusline --watch emits its graceful empty line from the
+  // error branch; a false Ok would skip it and break the documented contract.
+  // The stream delivered nothing, so it must surface an error.
+  let sock_dir = TempDir::new().unwrap();
+  let socket = sock_dir.path().join("s");
+  let listener = UnixListener::bind(&socket).unwrap();
+
+  // Server: accept one client, consume its subscribe request line (so the
+  // client's write succeeds and we exercise the read-side EOF, not a broken
+  // pipe), then drop the connection without ever pushing a snapshot.
+  let server = thread::spawn(move || {
+    if let Ok((stream, _)) = listener.accept() {
+      let mut reader = BufReader::new(stream);
+      let mut line = String::new();
+      let _ = reader.read_line(&mut line);
+      // reader dropped here -> connection closed -> client sees EOF
+    }
+  });
+
+  let mut calls = 0usize;
+  let result = gwm::daemon::client::subscribe(&socket, |_worktrees| {
+    calls += 1;
+    true
+  });
+
+  server.join().unwrap();
+  assert_eq!(calls, 0, "no snapshot was sent, so the callback must never fire");
+  assert!(
+    result.is_err(),
+    "EOF before the first snapshot must surface as an error, not Ok(())"
+  );
 }
