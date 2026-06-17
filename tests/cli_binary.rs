@@ -4651,6 +4651,9 @@ fn exec_exits_nonzero_when_a_worktree_command_fails() {
 #[test]
 fn clean_reports_artifacts_without_deleting_by_default() {
   let (dir, _base, wt) = repo_with_one_worktree();
+  // target/ is git-ignored ⇒ deletable, so the dry-run preview counts it and
+  // prompts to re-run — but report-only must not actually delete it.
+  fs::write(wt.join(".gitignore"), "/target\n").unwrap();
   fs::create_dir_all(wt.join("target")).unwrap();
   fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
 
@@ -4664,6 +4667,26 @@ fn clean_reports_artifacts_without_deleting_by_default() {
     .stdout(predicate::str::contains("re-run with --yes"));
 
   assert!(wt.join("target").exists(), "report-only mode must not delete anything");
+}
+
+#[test]
+fn clean_preview_excludes_non_deletable_dirs_from_total() {
+  // A non-ignored dist/ must not be counted as reclaimable nor trigger the
+  // "re-run with --yes" promise — the preview must match what --yes would do.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  fs::create_dir_all(wt.join("dist")).unwrap();
+  fs::write(wt.join("dist").join("keep.txt"), b"hand-authored").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped"))
+    .stdout(predicate::str::contains("dist"))
+    .stdout(predicate::str::contains("nothing to reclaim"))
+    .stdout(predicate::str::contains("re-run with --yes").not());
 }
 
 #[test]

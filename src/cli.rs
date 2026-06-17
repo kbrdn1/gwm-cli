@@ -1095,12 +1095,37 @@ fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
   }
 
   let patterns = clean::default_patterns();
-  let reclaims: Vec<clean::WorktreeReclaim> = targets
-    .iter()
-    .map(|w| clean::scan_worktree(&w.name, &w.path, &patterns))
-    .collect();
+
+  // Classify every found artifact through the SAME safety gate the deletion
+  // uses, BEFORE reporting — so the dry-run preview's total and promise match
+  // what `--yes` would actually remove. A default name like `dist/` / `build/`
+  // that is not git-ignored or holds tracked files is unrecoverable (clean is
+  // not journaled), so it is reported as skipped rather than counted.
+  let mut reclaims: Vec<clean::WorktreeReclaim> = Vec::with_capacity(targets.len());
+  let mut skipped: Vec<(String, String)> = Vec::new();
+  for w in &targets {
+    let scan = clean::scan_worktree(&w.name, &w.path, &patterns);
+    let mut deletable = Vec::new();
+    for a in scan.artifacts {
+      if dir_is_safe_to_clean(&w.path, &a.rel) {
+        deletable.push(a);
+      } else {
+        skipped.push((w.name.clone(), a.rel));
+      }
+    }
+    let total_bytes = deletable.iter().map(|a| a.bytes).sum();
+    reclaims.push(clean::WorktreeReclaim {
+      name: w.name.clone(),
+      path: w.path.clone(),
+      artifacts: deletable,
+      total_bytes,
+    });
+  }
 
   print!("{}", clean::format_report(&reclaims));
+  for (name, rel) in &skipped {
+    println!("skipped {}/{}: not git-ignored, or holds tracked files", name, rel);
+  }
 
   let grand: u64 = reclaims.iter().map(|r| r.total_bytes).sum();
   if grand == 0 {
@@ -1114,34 +1139,7 @@ fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
 
   let mut freed = 0u64;
   for r in &reclaims {
-    // Safety gate: only delete directories git treats as ignored (i.e.
-    // generated). A default name like `dist/` or `build/` can hold tracked
-    // or hand-authored, non-regenerable files; deleting those would be
-    // unrecoverable (clean is not journaled). Refuse any non-ignored dir and
-    // tell the user, rather than destroy work.
-    let deletable: Vec<clean::Artifact> = r
-      .artifacts
-      .iter()
-      .filter(|a| {
-        if dir_is_safe_to_clean(&r.path, &a.rel) {
-          true
-        } else {
-          println!(
-            "skipped {}/{}: not safe to delete (not git-ignored, or holds tracked files)",
-            r.name, a.rel
-          );
-          false
-        }
-      })
-      .cloned()
-      .collect();
-    let filtered = clean::WorktreeReclaim {
-      name: r.name.clone(),
-      path: r.path.clone(),
-      artifacts: deletable,
-      total_bytes: 0,
-    };
-    freed = freed.saturating_add(clean::delete_reclaim(&filtered)?);
+    freed = freed.saturating_add(clean::delete_reclaim(r)?);
   }
   println!("reclaimed {}", clean::human_size(freed));
   Ok(())
