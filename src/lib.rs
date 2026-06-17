@@ -26,6 +26,7 @@ pub mod multiplexer;
 pub mod naming;
 pub mod pr_templates;
 pub mod presets;
+pub mod review;
 pub mod statusline;
 pub mod sync;
 pub mod templating;
