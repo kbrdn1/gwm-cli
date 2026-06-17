@@ -431,3 +431,163 @@ fn doctor_field_types_are_frozen() {
     ],
   );
 }
+
+// --- 6. Frozen *schema-side* baseline --------------------------------------
+//
+// Section 5 freezes the DTO side (what gwm emits). The committed schema
+// files are themselves a published artifact external validators consume, so
+// they need the symmetric freeze (raised in #317 review):
+//
+//   1. a schema edit that DROPS a stable field from `required` (makes it
+//      optional) while the DTO still emits it leaves the parity check green
+//      (`required` only shrinks, `serialized ⊆ properties` still holds) —
+//      silently weakening the published contract;
+//   2. a schema-only TYPE drift (e.g. `head`'s declared type flipped to
+//      `integer` while the output stays a string) is invisible to a baseline
+//      that only inspects the serialized DTO.
+//
+// So pin the schema's own `required` set and per-field declared `type`/`$ref`
+// against an explicit frozen baseline, independent of the DTO. Experimental
+// fields (`repo`) are deliberately excluded — they may move without a bump.
+
+/// Normalized descriptor of a schema property's declared type: the `$ref`
+/// target verbatim (prefixed), or the `type` keyword with a multi-type
+/// array sorted+joined so `["string","null"]` is stable regardless of order.
+fn schema_type_descriptor(prop: &Value) -> String {
+  if let Some(r) = prop.get("$ref").and_then(|v| v.as_str()) {
+    return format!("$ref:{r}");
+  }
+  match prop.get("type") {
+    Some(Value::String(s)) => s.clone(),
+    Some(Value::Array(a)) => {
+      let mut parts: Vec<String> = a.iter().filter_map(|x| x.as_str().map(String::from)).collect();
+      parts.sort();
+      parts.join("|")
+    }
+    _ => panic!("schema property has neither `$ref` nor `type`"),
+  }
+}
+
+/// Assert the schema object at `base_ptr` has exactly `frozen_required` as
+/// its stable required set (experimental fields excluded by construction),
+/// and that each `(field, descriptor)` in `frozen_types` matches the
+/// property's declared `type`/`$ref`.
+fn assert_schema_baseline(
+  what: &str,
+  schema: &Value,
+  base_ptr: &str,
+  frozen_required: &[&str],
+  frozen_types: &[(&str, &str)],
+) {
+  let required = required_set(schema, &format!("{base_ptr}/required"));
+  let frozen: BTreeSet<String> = frozen_required.iter().map(|s| s.to_string()).collect();
+  assert_eq!(
+    required, frozen,
+    "{what}: schema `required` set drifted from the frozen stable baseline — a dropped/added required field is a contract change"
+  );
+  let props = schema
+    .pointer(&format!("{base_ptr}/properties"))
+    .unwrap_or_else(|| panic!("{what}: no properties at {base_ptr}"));
+  for (field, expected) in frozen_types {
+    let prop = props
+      .get(*field)
+      .unwrap_or_else(|| panic!("{what}: stable field `{field}` missing from schema properties"));
+    assert_eq!(
+      &schema_type_descriptor(prop),
+      expected,
+      "{what}: schema-declared type of `{field}` drifted from the frozen contract"
+    );
+  }
+}
+
+#[test]
+fn worktree_schema_required_and_types_are_frozen() {
+  let schema = read_schema("worktree-list.schema.json");
+  assert_schema_baseline(
+    "worktree-list row",
+    &schema,
+    "/$defs/worktree",
+    // `repo` is experimental — intentionally NOT in the frozen required set.
+    &[
+      "name",
+      "id",
+      "path",
+      "branch",
+      "head",
+      "is_main",
+      "is_locked",
+      "is_prunable",
+      "status",
+      "age_seconds",
+      "issue",
+      "pr",
+    ],
+    &[
+      ("name", "string"),
+      ("id", "string"),
+      ("path", "string"),
+      ("branch", "null|string"),
+      ("head", "null|string"),
+      ("is_main", "boolean"),
+      ("is_locked", "boolean"),
+      ("is_prunable", "boolean"),
+      ("status", "$ref:#/$defs/status"),
+      ("age_seconds", "integer|null"),
+      ("issue", "integer|null"),
+      ("pr", "integer|null"),
+    ],
+  );
+  assert_schema_baseline(
+    "worktree status",
+    &schema,
+    "/$defs/status",
+    &["is_dirty", "has_upstream", "ahead", "behind", "unknown"],
+    &[
+      ("is_dirty", "boolean"),
+      ("has_upstream", "boolean"),
+      ("ahead", "integer"),
+      ("behind", "integer"),
+      ("unknown", "boolean"),
+    ],
+  );
+}
+
+#[test]
+fn doctor_schema_required_and_types_are_frozen() {
+  let schema = read_schema("doctor.schema.json");
+  assert_schema_baseline(
+    "doctor report",
+    &schema,
+    "",
+    &["checks", "severity", "exit_code"],
+    &[
+      ("checks", "array"),
+      ("severity", "$ref:#/$defs/status"),
+      ("exit_code", "integer"),
+    ],
+  );
+  assert_schema_baseline(
+    "doctor check",
+    &schema,
+    "/$defs/check",
+    &["name", "status", "detail", "fix_hint"],
+    &[
+      ("name", "string"),
+      ("status", "$ref:#/$defs/status"),
+      ("detail", "string"),
+      ("fix_hint", "null|string"),
+    ],
+  );
+}
+
+#[test]
+fn path_schema_required_and_types_are_frozen() {
+  let schema = read_schema("path.schema.json");
+  assert_schema_baseline(
+    "path result",
+    &schema,
+    "",
+    &["name", "path", "branch"],
+    &[("name", "string"), ("path", "string"), ("branch", "null|string")],
+  );
+}
