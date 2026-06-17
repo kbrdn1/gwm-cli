@@ -4765,3 +4765,41 @@ fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
     "a tracked file under an ignored dir must survive --yes"
   );
 }
+
+// regression: the v1.0 surface decision for `gwm exec` / `gwm clean` (issue
+// #319) is that workspace fan-out is a *deferred, additive* feature — until it
+// lands, `--workspace` against either command is refused, not silently run
+// against the single repo. The refusal is part of the frozen 1.0 contract:
+// the exit code is under the SemVer pledge (see docs/6.development/stability),
+// so a future change that makes either command silently accept `--workspace`
+// (or change its exit code) must break loudly here. Adding real fan-out later
+// is additive — a refusal turning into a success is not a breaking change.
+
+#[test]
+fn exec_refuses_the_workspace_flag() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  let ws = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--workspace", ws.path().to_str().unwrap(), "--", "echo", "hi"])
+    .assert()
+    .failure()
+    // Exact exit code is frozen: every GwmError maps to 1 (src/main.rs).
+    .code(1)
+    .stderr(predicate::str::contains("--workspace is only supported"));
+}
+
+#[test]
+fn clean_refuses_the_workspace_flag() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  let ws = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--workspace", ws.path().to_str().unwrap()])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("--workspace is only supported"));
+}
