@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/kbrdn1/gwm-cli/docs/schema/doctor.schema.json",
+  "version": 1,
   "title": "gwm doctor report",
   "description": "Output of `gwm doctor --format=json` and the daemon's `doctor` JSON-RPC method (issue #38).",
   "type": "object",
