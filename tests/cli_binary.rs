@@ -4601,16 +4601,9 @@ fn tui_keys_lists_modal_contexts() {
 fn repo_with_one_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
   let (dir, _repo) = init_repo();
   let base = tempfile::TempDir::new().unwrap();
-  let body = format!(
-    r#"
-[worktree]
-base = "{base}"
-path_pattern = "{{type}}-{{issue}}-{{desc}}"
-branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
-"#,
-    base = base.path().display()
-  );
-  fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+  // Reuse the shared writer so the tempdir path is TOML-escaped (backslashes
+  // on Windows CI would otherwise make `.gwm.toml` invalid).
+  write_test_config(dir.path(), base.path());
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
