@@ -9,14 +9,14 @@ navigation:
 
 gwm est une petite crate Rust (binaire unique). Les workflows de build, de test et de publication sont documentés ici.
 
-- **[Tests](/fr/development/testing)** — les fichiers de tests d'intégration (~990 tests sur la matrice ubuntu / macos / windows à partir de la v0.8.0), la boucle TDD obligatoire red → green → refactor, comment exécuter un sous-ensemble et la convention de test-sentinelle `// regression:`.
+- **[Tests](/fr/development/testing)** — les fichiers de tests d'intégration (~1700+ tests répartis sur 74 fichiers de tests, exécutés sur la matrice ubuntu / macos / windows), la boucle TDD obligatoire red → green → refactor, comment exécuter un sous-ensemble et la convention de test-sentinelle `// regression:`.
 - **[Contribuer](/fr/development/contributing)** — le format Gitmoji + Conventional Commits, le nommage des branches, la checklist de PR et les règles autour de la séparation `CHANGELOG.md` / `changelogs/<version>.md`.
 
 ## référence rapide
 
 ```bash
 cargo build              # debug build
-cargo test               # ~990 tests across the integration files + unit tests
+cargo test               # ~1700+ tests across the integration files + unit tests
 cargo fmt && cargo clippy -- -D warnings
 cargo run                # opens TUI in the current repo
 cargo install --path .   # install locally
