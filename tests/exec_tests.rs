@@ -8,7 +8,8 @@
 
 use clap::Parser;
 use gwm::cli::{Cli, Command};
-use gwm::exec::{exec_in_dir, format_outcome, rollup_exit_code, ExecOutcome, ExecStatus};
+use gwm::exec::{exec_in_dir, format_outcome, resolve_program, rollup_exit_code, ExecOutcome, ExecStatus};
+use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 #[test]
@@ -77,6 +78,43 @@ fn exec_in_dir_captures_nonzero_exit_code() {
   let dir = TempDir::new().unwrap();
   let status = exec_in_dir(dir.path(), "sh", &["-c".into(), "exit 7".into()]);
   assert_eq!(status, ExecStatus::Failed(7));
+}
+
+#[test]
+fn resolve_program_leaves_bare_names_as_path_lookups() {
+  // No separator ⇒ PATH lookup, untouched (must not become `dir/git`).
+  let dir = Path::new("/some/worktree");
+  assert_eq!(resolve_program(dir, "git"), PathBuf::from("git"));
+}
+
+#[test]
+fn resolve_program_joins_relative_paths_onto_the_worktree() {
+  let dir = Path::new("/some/worktree");
+  assert_eq!(resolve_program(dir, "./build.sh"), dir.join("./build.sh"));
+  assert_eq!(resolve_program(dir, "scripts/run"), dir.join("scripts/run"));
+}
+
+#[test]
+fn resolve_program_leaves_absolute_paths_unchanged() {
+  let dir = Path::new("/some/worktree");
+  assert_eq!(resolve_program(dir, "/usr/bin/env"), PathBuf::from("/usr/bin/env"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_in_dir_runs_a_relative_script_from_the_worktree() {
+  use std::os::unix::fs::PermissionsExt;
+  let dir = TempDir::new().unwrap();
+  let script = dir.path().join("run.sh");
+  std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+  std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+  // `./run.sh` only resolves if it is anchored to the worktree dir.
+  let status = exec_in_dir(dir.path(), "./run.sh", &[]);
+  assert_eq!(
+    status,
+    ExecStatus::Ok,
+    "a worktree-relative script must resolve against dir"
+  );
 }
 
 #[test]

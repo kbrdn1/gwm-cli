@@ -8,7 +8,7 @@
 //! — deterministic, readable output for the MVP; parallel fan-out is a
 //! deliberate follow-up.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Outcome of running the command inside one worktree.
@@ -39,7 +39,8 @@ pub struct ExecOutcome {
 /// binary, permission denied) maps to [`ExecStatus::SpawnError`] rather than
 /// aborting the whole fan-out.
 pub fn exec_in_dir(dir: &Path, program: &str, args: &[String]) -> ExecStatus {
-  match Command::new(program).args(args).current_dir(dir).status() {
+  let resolved = resolve_program(dir, program);
+  match Command::new(&resolved).args(args).current_dir(dir).status() {
     Ok(status) => match status.code() {
       Some(0) => ExecStatus::Ok,
       Some(code) => ExecStatus::Failed(code),
@@ -47,6 +48,30 @@ pub fn exec_in_dir(dir: &Path, program: &str, args: &[String]) -> ExecStatus {
     },
     Err(e) => ExecStatus::SpawnError(e.to_string()),
   }
+}
+
+/// Resolve `program` for execution inside `dir`.
+///
+/// A relative program that contains a path separator (e.g. `./build.sh`,
+/// `scripts/run`) is a *path*, and the command's contract is "run in each
+/// worktree" — so it is joined onto `dir`. This pins the resolution to the
+/// target worktree regardless of whether the platform resolves a relative
+/// executable against the parent's or the child's cwd (the order differs
+/// across OSes for `std::process::Command` + `current_dir`). Bare names
+/// (no separator) stay `PATH` lookups, and absolute paths are left as-is.
+pub fn resolve_program(dir: &Path, program: &str) -> PathBuf {
+  let p = Path::new(program);
+  if p.is_relative() && has_path_separator(program) {
+    dir.join(p)
+  } else {
+    p.to_path_buf()
+  }
+}
+
+/// Whether `program` contains a path separator — `/` everywhere, plus `\` on
+/// Windows. Such a token is a path, not a `PATH`-resolved command name.
+fn has_path_separator(program: &str) -> bool {
+  program.contains('/') || (cfg!(windows) && program.contains('\\'))
 }
 
 /// Aggregate exit code for the whole fan-out: `0` only when every worktree
