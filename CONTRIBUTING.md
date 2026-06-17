@@ -324,6 +324,11 @@ Versioning is SemVer (`MAJOR.MINOR.PATCH`), with `-rc.N` / `-alpha.N` / `-beta.N
 - `PATCH` → bug fix
 - `-rc.N` / `-alpha.N` / `-beta.N` → release candidate / alpha / beta cut from `dev` before promotion to `main`
 
+What a "breaking change" actually covers — the published 1.0 compatibility
+contract (which surfaces are covered by this SemVer promise, which are free to
+change in a minor/patch, the MSRV policy, and the deprecation process) — lives
+in [Stability & compatibility](docs/6.development/3.stability.md).
+
 ### Step 0 — Reconcile open PRs (applies to every tag)
 
 Before any RC or stable cut, run:

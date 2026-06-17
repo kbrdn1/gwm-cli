@@ -87,6 +87,7 @@ MIT — see [LICENSE.md](LICENSE.md).
 
 - [`CHANGELOG.md`](CHANGELOG.md) — release index (root = `[Unreleased]`; per-version archives under [`changelogs/`](changelogs/))
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — branch / commit / PR conventions
+- [Stability & compatibility](docs/6.development/3.stability.md) — the 1.0 SemVer contract: what's covered, what's free to change, MSRV, deprecations
 - [`ROADMAP.md`](ROADMAP.md) — long-form roadmap with grouped categories
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md)
 - [`.github/LABELS.md`](.github/LABELS.md)
