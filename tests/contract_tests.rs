@@ -591,3 +591,33 @@ fn path_schema_required_and_types_are_frozen() {
     &[("name", "string"), ("path", "string"), ("branch", "null|string")],
   );
 }
+
+#[test]
+fn output_schemas_tolerate_additive_fields() {
+  // The versioning policy promises additive fields are backward-compatible
+  // and consumers ignore unknowns (#317 review). For a schema-validating
+  // consumer that's only true if the object schemas don't set
+  // `additionalProperties: false` — otherwise a v1 validator would reject
+  // an output carrying a new optional field. Freeze that: nobody may
+  // re-tighten these without consciously breaking the documented policy.
+  // (The producer-side guard `serialized ⊆ properties` still catches an
+  // accidental leaked field at our own CI.)
+  let cases: &[(&str, &[&str])] = &[
+    ("worktree-list.schema.json", &["/$defs/worktree", "/$defs/status"]),
+    ("doctor.schema.json", &["", "/$defs/check"]),
+    ("path.schema.json", &[""]),
+  ];
+  for (file, pointers) in cases {
+    let schema = read_schema(file);
+    for ptr in *pointers {
+      let obj = schema
+        .pointer(ptr)
+        .unwrap_or_else(|| panic!("{file}: no object at '{ptr}'"));
+      assert_ne!(
+        obj.get("additionalProperties"),
+        Some(&Value::Bool(false)),
+        "{file} at '{ptr}': additionalProperties:false breaks the additive-compatibility policy"
+      );
+    }
+  }
+}

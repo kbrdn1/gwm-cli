@@ -9,7 +9,7 @@
   "$defs": {
     "worktree": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": [
         "name",
         "id",
@@ -72,7 +72,7 @@
     },
     "status": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": true,
       "required": ["is_dirty", "has_upstream", "ahead", "behind", "unknown"],
       "properties": {
         "is_dirty": { "type": "boolean" },

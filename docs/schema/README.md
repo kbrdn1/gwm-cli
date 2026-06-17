@@ -31,7 +31,17 @@ backward-incompatible change to a stable field:
 - changing its type or its documented meaning.
 
 Adding a new optional field is **backward-compatible** and does NOT bump the
-version — consumers MUST ignore unknown fields.
+version — consumers MUST ignore unknown fields. To keep that promise true
+even for consumers that strict-validate against these files, the object
+schemas use `additionalProperties: true` (the JSON Schema default): an output
+carrying a field added after a consumer pulled its schema copy still
+validates. A contract test pins this so the constraint can't be silently
+re-tightened. (gwm's own CI still rejects an *undocumented* field via the
+`serialized ⊆ properties` parity test, so the producer side stays honest.)
+
+`.gwm.toml` is the mirror image: it is *input*, so it keeps
+`deny_unknown_fields` — an unknown section is a user typo to reject, not a
+forward-compatible addition to ignore.
 
 ### How a consumer detects drift
 

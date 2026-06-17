@@ -5,7 +5,7 @@
   "title": "gwm path result",
   "description": "Output of `gwm path <pattern> --format=json` and the daemon's `path` JSON-RPC method (issue #38).",
   "type": "object",
-  "additionalProperties": false,
+  "additionalProperties": true,
   "required": ["name", "path", "branch"],
   "properties": {
     "name": {
