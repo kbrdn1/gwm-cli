@@ -1,8 +1,10 @@
 use crate::bootstrap::{self, BootstrapCtx};
+use crate::clean;
 use crate::config::Config;
 use crate::config_cli;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
+use crate::exec;
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::gitmoji;
 use crate::history::{self, OpEntry};
@@ -634,6 +636,43 @@ pub enum Command {
     #[command(subcommand)]
     action: ThemeAction,
   },
+  /// Run a shell command in each worktree, sequentially (issue #313).
+  ///
+  /// `gwm exec -- git fetch` runs in every non-main worktree; pass slugs
+  /// before `--` to scope it: `gwm exec feat-1 fix-2 -- cargo check`.
+  /// Prints a per-worktree ✓ / ✗ rollup and exits non-zero if any
+  /// worktree's command failed. Everything after `--` is forwarded
+  /// verbatim (flags and all). This is the user's own command against
+  /// their own worktrees — no bootstrap trust gate applies (#95).
+  Exec {
+    /// Worktree slugs to target (fuzzy match, before `--`). Empty = all
+    /// non-main worktrees.
+    #[arg(value_name = "SLUG")]
+    slugs: Vec<String>,
+    /// Command to run, after `--`. Everything past `--` is forwarded
+    /// verbatim, e.g. `gwm exec -- git log --oneline`.
+    #[arg(last = true, required = true, allow_hyphen_values = true, value_name = "CMD")]
+    command: Vec<String>,
+  },
+  /// Report (and optionally reclaim) heavy build artifacts across worktrees (issue #313).
+  ///
+  /// Scans each worktree for `target/`, `node_modules/`, `dist/`, `build/`
+  /// and prints the reclaimable size per worktree. Report-only by default;
+  /// pass `--yes` to actually delete. Scope to a subset with slug
+  /// positionals: `gwm clean feat-1`. Deliberately not journaled into
+  /// `gwm history` (#29) — the artifacts are regenerable.
+  ///
+  /// Safety: `--yes` only deletes directories git treats as ignored. A
+  /// non-ignored `dist/` / `build/` (tracked or hand-authored, hence
+  /// non-regenerable) is reported as skipped, never removed.
+  Clean {
+    /// Worktree slugs to target (fuzzy match). Empty = all non-main worktrees.
+    #[arg(value_name = "SLUG")]
+    slugs: Vec<String>,
+    /// Delete the listed artifacts instead of only reporting them.
+    #[arg(long)]
+    yes: bool,
+  },
 }
 
 /// Subcommands of `gwm theme` (issue #33).
@@ -986,7 +1025,161 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
     Command::Tui { action } => cmd_tui(action),
     Command::Theme { action } => cmd_theme(action),
+    Command::Exec { slugs, command } => cmd_exec(slugs, command),
+    Command::Clean { slugs, yes } => cmd_clean(slugs, yes),
   }
+}
+
+/// Resolve which worktrees `gwm exec` / `gwm clean` act on. With no slugs,
+/// the target set is every non-main worktree (the main checkout is excluded
+/// — running a fan-out command or deleting its `target/` is rarely intended
+/// and matches `gwm list --format names` / `find_fuzzy`). With slugs, each is
+/// fuzzy-resolved, surfacing the same ambiguity error as `path` / `remove`.
+fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::WorktreeInfo>> {
+  if slugs.is_empty() {
+    Ok(worktree::list(repo)?.into_iter().filter(|w| !w.is_main).collect())
+  } else {
+    slugs.iter().map(|s| worktree::find_fuzzy(repo, s)).collect()
+  }
+}
+
+/// `gwm exec [<slug>...] -- <cmd>` (issue #313). Runs the command in each
+/// target worktree sequentially, prints a ✓ / ✗ rollup, and exits with the
+/// aggregate code (non-zero if any worktree failed).
+fn cmd_exec(slugs: Vec<String>, command: Vec<String>) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let targets = resolve_targets(&repo, &slugs)?;
+  if targets.is_empty() {
+    println!("no worktrees to run in");
+    return Ok(());
+  }
+
+  // clap guarantees a non-empty command (`required = true`), but split
+  // defensively rather than indexing — a panic here would be on a
+  // user-facing path.
+  let (program, args) = command
+    .split_first()
+    .ok_or_else(|| GwmError::Other("exec: no command given after `--`".into()))?;
+  let args = args.to_vec();
+
+  let mut outcomes = Vec::with_capacity(targets.len());
+  for w in &targets {
+    println!("\n━━ {} ({})", w.name, w.path.display());
+    let status = exec::exec_in_dir(&w.path, program, &args);
+    outcomes.push(exec::ExecOutcome {
+      name: w.name.clone(),
+      status,
+    });
+  }
+
+  println!("\nrollup:");
+  for o in &outcomes {
+    println!("  {}", exec::format_outcome(o));
+  }
+
+  let code = exec::rollup_exit_code(&outcomes);
+  if code != 0 {
+    std::process::exit(code);
+  }
+  Ok(())
+}
+
+/// `gwm clean [<slug>...] [--yes]` (issue #313). Reports reclaimable build
+/// artifacts per worktree; deletes them only when `--yes` is passed.
+fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let targets = resolve_targets(&repo, &slugs)?;
+  if targets.is_empty() {
+    println!("no worktrees to clean");
+    return Ok(());
+  }
+
+  let patterns = clean::default_patterns();
+
+  // Classify every found artifact through the SAME safety gate the deletion
+  // uses, BEFORE reporting — so the dry-run preview's total and promise match
+  // what `--yes` would actually remove. A default name like `dist/` / `build/`
+  // that is not git-ignored or holds tracked files is unrecoverable (clean is
+  // not journaled), so it is reported as skipped rather than counted.
+  let mut reclaims: Vec<clean::WorktreeReclaim> = Vec::with_capacity(targets.len());
+  let mut skipped: Vec<(String, String)> = Vec::new();
+  for w in &targets {
+    let scan = clean::scan_worktree(&w.name, &w.path, &patterns);
+    let mut deletable = Vec::new();
+    for a in scan.artifacts {
+      if dir_is_safe_to_clean(&w.path, &a.rel) {
+        deletable.push(a);
+      } else {
+        skipped.push((w.name.clone(), a.rel));
+      }
+    }
+    let total_bytes = deletable.iter().map(|a| a.bytes).sum();
+    reclaims.push(clean::WorktreeReclaim {
+      name: w.name.clone(),
+      path: w.path.clone(),
+      artifacts: deletable,
+      total_bytes,
+    });
+  }
+
+  print!("{}", clean::format_report(&reclaims));
+  for (name, rel) in &skipped {
+    println!("skipped {}/{}: not git-ignored, or holds tracked files", name, rel);
+  }
+
+  let grand: u64 = reclaims.iter().map(|r| r.total_bytes).sum();
+  if grand == 0 {
+    println!("nothing to reclaim");
+    return Ok(());
+  }
+  if !yes {
+    println!("re-run with --yes to delete the listed artifacts");
+    return Ok(());
+  }
+
+  let mut freed = 0u64;
+  for r in &reclaims {
+    freed = freed.saturating_add(clean::delete_reclaim(r)?);
+  }
+  println!("reclaimed {}", clean::human_size(freed));
+  Ok(())
+}
+
+/// The safety gate for `gwm clean --yes`: a directory is safe to delete only
+/// when git treats it as ignored AND it holds no tracked files. The ignore
+/// check alone is not enough — git tracks files, not directories, so a force
+/// added `dist/index.html` can survive under a `dist/` ignore rule, and
+/// `remove_dir_all` would otherwise destroy that tracked (possibly edited)
+/// file. Every failure path resolves conservatively to "not safe" (preserve).
+fn dir_is_safe_to_clean(worktree: &Path, rel: &str) -> bool {
+  dir_is_git_ignored(worktree, rel) && !dir_has_tracked_files(worktree, rel)
+}
+
+/// Whether git considers `rel` (relative to `worktree`) ignored. Shells out to
+/// `git check-ignore -q <rel>` (exit 0 = ignored). Any failure (git missing,
+/// not a repo) is treated as "not ignored" so the default is to preserve.
+fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(worktree)
+    .args(["check-ignore", "-q", rel])
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+/// Whether any tracked file lives under `rel`. `git ls-files -- <rel>` prints
+/// one line per tracked path; non-empty stdout ⇒ tracked content present. On
+/// any error we assume `true` (tracked) so the safety gate errs toward
+/// preserving the directory.
+fn dir_has_tracked_files(worktree: &Path, rel: &str) -> bool {
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(worktree)
+    .args(["ls-files", "--", rel])
+    .output()
+    .map(|o| !o.status.success() || !o.stdout.is_empty())
+    .unwrap_or(true)
 }
 
 /// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a

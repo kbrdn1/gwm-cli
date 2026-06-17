@@ -5,6 +5,7 @@
 
 pub mod aliases;
 pub mod bootstrap;
+pub mod clean;
 pub mod cli;
 pub mod command_log;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod config_cli;
 pub mod daemon;
 pub mod doctor;
 pub mod error;
+pub mod exec;
 pub mod github;
 pub mod gitmoji;
 pub mod history;
