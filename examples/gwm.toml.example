@@ -359,11 +359,21 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # `--profile` and an inline `-- <cmd>` are mutually exclusive (exit 1), and an
 # unknown profile name exits 1.
 #
+# `jobs` is bounded parallelism: `[exec] jobs` is the global default, a
+# profile's `jobs` overrides it, and the `--jobs <n>` flag wins over both
+# (precedence: --jobs > profile.jobs > [exec] jobs > 1). `1`/absent runs
+# sequentially with live output; `> 1` runs up to N worktrees at once and
+# prints each one's captured output as a block at the end.
+#
+# [exec]
+# jobs = 1
+#
 # [exec.profiles.test]
 # command = ["cargo", "test"]
 #
 # [exec.profiles.fmt]
 # command = ["cargo", "fmt", "--all"]
+# jobs = 4
 
 # --- `gwm clean` profiles (issue #324) ---------------------------------------
 # Saved directory sets for `gwm clean --profile <name>`. A profile's `dirs` is
