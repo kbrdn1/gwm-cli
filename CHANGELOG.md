@@ -12,6 +12,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Named `[exec]` / `[clean]` config profiles** (issue #324). `.gwm.toml`
+  gains two opt-in sections so common fan-out invocations can be saved per
+  repo instead of retyped. `[exec.profiles.<name>]` carries a `command`
+  argv **array** run via `gwm exec --profile <name>`; `[clean.profiles.<name>]`
+  carries a `dirs` set reclaimed via `gwm clean --profile <name>`. Both are
+  now part of the frozen 1.0 contract (`contract::CONFIG_SECTIONS` gains
+  `exec` / `clean`), realizing the additive profile config anticipated by
+  #319. Frozen rules: an exec profile's `command` is an argv array run with
+  **no shell** (a deliberate divergence from the string-shell `command` of
+  `[git_tui]` / `[review]`); a clean profile's `dirs` is a **complete** set
+  that **replaces** — never adds to — the built-in `target`/`node_modules`/
+  `dist`/`build`; `gwm clean` without `--profile` uses
+  `[clean.profiles.default]` when present, else the built-ins; for `exec`,
+  `--profile` and an inline `-- <cmd>` are mutually exclusive (exit 1) and an
+  unknown profile name exits 1. The safety gate (git-ignored + no tracked
+  files + skip symlinks) still applies to every directory a clean profile
+  lists. Bounded `--jobs` parallelism for `exec` profiles is a follow-up
+  (#324b); the inline `gwm exec -- <cmd>` and built-in `gwm clean` surfaces
+  are unchanged.
+
 - **Frozen, versioned machine contracts for 1.0** (issue #317). The
   machine-readable surfaces — the `--format=json` outputs (`list`/`doctor`/
   `path`), `gwm status --json`, the daemon JSON-RPC protocol, and the
@@ -38,9 +58,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   deliberate MVP cuts in `gwm exec` / `gwm clean` (#313) are confirmed as
   *deferred, additive* features for the 1.0 pledge: `exec` stays sequential by
   default (bounded `--jobs` parallelism is a future opt-in), `clean` keeps its
-  built-in `target` / `node_modules` / `dist` / `build` set (a `[clean]` /
-  `[exec]` profile config is a future additive section), and `--workspace`
-  fan-out across repos stays refused on both commands until it lands. The one
+  built-in `target` / `node_modules` / `dist` / `build` set (the `[clean]` /
+  `[exec]` profile config anticipated here now lands additively under #324,
+  above), and `--workspace` fan-out across repos stays refused on both
+  commands until it lands. The one
   previously-untested frozen behaviour — the `--workspace` refusal on `exec` /
   `clean`, whose exit code is now under the SemVer pledge — is pinned by two
   regression tests in `tests/cli_binary.rs`, so a future change that silently

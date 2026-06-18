@@ -332,6 +332,27 @@ fn config_validate_rejects_malformed_keymap() {
 }
 
 #[test]
+fn config_validate_rejects_semantically_invalid_profiles() {
+  // #324 review (P2): `[exec.profiles].command` / `[clean.profiles].dirs`
+  // parse cleanly even when semantically invalid, so the validate path must
+  // run the same profile checks `load_for_repo` and the commands do.
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    "[clean.profiles.default]\ndirs = [\"..\"]\n",
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["config", "validate"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains(".."));
+}
+
+#[test]
 fn config_edit_opens_editor_on_config_path() {
   let (dir, _repo) = init_repo();
   fs::write(dir.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();

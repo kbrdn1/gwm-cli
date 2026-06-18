@@ -96,7 +96,8 @@ Stable methods: `list`, `doctor`, `path`, `subscribe`. Stable notification:
 The top-level section set is **stable** and pinned by
 `contract::CONFIG_SECTIONS`: `worktree`, `bootstrap`, `hooks`, `doctor`,
 `tui`, `theme`, `git_tui`, `review`, `labels`, `milestones`, `branch_types`,
-`aliases`, `gitmoji`, `issue_template`, `pr_template`. Individual keys
+`aliases`, `gitmoji`, `issue_template`, `pr_template`, `exec`, `clean`.
+Individual keys
 within a section follow the same stable-by-default rule; experimental keys
 are called out in the configuration docs. `deny_unknown_fields` means an
 unknown section is a hard error, so a renamed section can't pass silently.

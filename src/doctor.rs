@@ -253,10 +253,21 @@ fn check_config_parses(ctx: &DoctorCtx<'_>) -> Check {
     }
   };
 
-  match toml::from_str::<Config>(&raw) {
-    Ok(_) => Check::ok(name, format!("{} parses cleanly", path.display())),
-    Err(e) => Check::failed(name, format!("invalid TOML in {}: {}", path.display(), e))
-      .with_hint("fix the syntax or back it up and re-run `gwm init`"),
+  let cfg = match toml::from_str::<Config>(&raw) {
+    Ok(cfg) => cfg,
+    Err(e) => {
+      return Check::failed(name, format!("invalid TOML in {}: {}", path.display(), e))
+        .with_hint("fix the syntax or back it up and re-run `gwm init`");
+    }
+  };
+  // `[exec.profiles]` / `[clean.profiles]` semantics (non-empty command, a
+  // worktree-relative single-name `dirs`) parse cleanly, so check them here
+  // too — otherwise doctor reports green on a profile the loader and the
+  // `gwm exec`/`gwm clean` commands reject (issue #324 review).
+  match cfg.validate_profiles() {
+    Ok(()) => Check::ok(name, format!("{} parses cleanly", path.display())),
+    Err(e) => Check::failed(name, format!("invalid profile in {}: {}", path.display(), e))
+      .with_hint("fix the `[exec.profiles]` / `[clean.profiles]` entry it names"),
   }
 }
 

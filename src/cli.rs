@@ -649,9 +649,15 @@ pub enum Command {
     /// non-main worktrees.
     #[arg(value_name = "SLUG")]
     slugs: Vec<String>,
+    /// Run a saved `[exec.profiles.<name>]` command instead of an inline
+    /// `-- <cmd>` (issue #324). Mutually exclusive with an inline command;
+    /// an unknown name exits 1.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
     /// Command to run, after `--`. Everything past `--` is forwarded
-    /// verbatim, e.g. `gwm exec -- git log --oneline`.
-    #[arg(last = true, required = true, allow_hyphen_values = true, value_name = "CMD")]
+    /// verbatim, e.g. `gwm exec -- git log --oneline`. Provide either this
+    /// or `--profile`, never both, and at least one.
+    #[arg(last = true, allow_hyphen_values = true, value_name = "CMD")]
     command: Vec<String>,
   },
   /// Report (and optionally reclaim) heavy build artifacts across worktrees (issue #313).
@@ -669,6 +675,12 @@ pub enum Command {
     /// Worktree slugs to target (fuzzy match). Empty = all non-main worktrees.
     #[arg(value_name = "SLUG")]
     slugs: Vec<String>,
+    /// Reclaim a saved `[clean.profiles.<name>]` directory set (a COMPLETE
+    /// set that replaces the built-ins) instead of `target`/`node_modules`/
+    /// `dist`/`build` (issue #324). An unknown name exits 1. Without it,
+    /// `[clean.profiles.default]` is used when present, else the built-ins.
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
     /// Delete the listed artifacts instead of only reporting them.
     #[arg(long)]
     yes: bool,
@@ -1025,8 +1037,12 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Undo { bootstrap } => cmd_undo(bootstrap),
     Command::Tui { action } => cmd_tui(action),
     Command::Theme { action } => cmd_theme(action),
-    Command::Exec { slugs, command } => cmd_exec(slugs, command),
-    Command::Clean { slugs, yes } => cmd_clean(slugs, yes),
+    Command::Exec {
+      slugs,
+      profile,
+      command,
+    } => cmd_exec(slugs, profile, command),
+    Command::Clean { slugs, profile, yes } => cmd_clean(slugs, profile, yes),
   }
 }
 
@@ -1046,20 +1062,37 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// `gwm exec [<slug>...] -- <cmd>` (issue #313). Runs the command in each
 /// target worktree sequentially, prints a ✓ / ✗ rollup, and exits with the
 /// aggregate code (non-zero if any worktree failed).
-fn cmd_exec(slugs: Vec<String>, command: Vec<String>) -> Result<()> {
+fn cmd_exec(slugs: Vec<String>, profile: Option<String>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+
+  // Resolve the argv up-front, from exactly one of `--profile` / inline
+  // `-- <cmd>`. A usage error (both, neither, or an unknown profile) must
+  // surface before we touch any worktree, hence before target discovery.
+  //
+  // Only the `--profile` lookup needs `.gwm.toml`; the inline `gwm exec --
+  // <cmd>` surface is promised unchanged, so it must NOT read config — an
+  // unrelated config error there would break a command that never used it.
+  let argv = match profile.as_deref() {
+    Some(name) => {
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+      // Tolerant of unrelated config errors, strict on `[exec]` itself.
+      let exec_cfg = Config::load_exec_config(workdir)?;
+      exec::resolve_exec_command(Some(name), &command, &exec_cfg)?
+    }
+    None => exec::resolve_exec_command(None, &command, &crate::config::ExecConfig::default())?,
+  };
+
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {
     println!("no worktrees to run in");
     return Ok(());
   }
 
-  // clap guarantees a non-empty command (`required = true`), but split
-  // defensively rather than indexing — a panic here would be on a
-  // user-facing path.
-  let (program, args) = command
+  // `resolve_exec_command` guarantees a non-empty argv, but split defensively
+  // rather than indexing — a panic here would be on a user-facing path.
+  let (program, args) = argv
     .split_first()
-    .ok_or_else(|| GwmError::Other("exec: no command given after `--`".into()))?;
+    .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
   let args = args.to_vec();
 
   let mut outcomes = Vec::with_capacity(targets.len());
@@ -1084,17 +1117,30 @@ fn cmd_exec(slugs: Vec<String>, command: Vec<String>) -> Result<()> {
   Ok(())
 }
 
-/// `gwm clean [<slug>...] [--yes]` (issue #313). Reports reclaimable build
-/// artifacts per worktree; deletes them only when `--yes` is passed.
-fn cmd_clean(slugs: Vec<String>, yes: bool) -> Result<()> {
+/// `gwm clean [<slug>...] [--profile <name>] [--yes]` (issues #313, #324).
+/// Reports reclaimable build artifacts per worktree; deletes them only when
+/// `--yes` is passed. The directory set comes from `--profile`, else the
+/// `default` profile, else the built-ins (see [`clean::resolve_clean_dirs`]).
+fn cmd_clean(slugs: Vec<String>, profile: Option<String>, yes: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+
+  // Resolve the directory set up-front so an unknown `--profile` errors
+  // (exit 1) before target discovery.
+  //
+  // The profile blocks are opt-in, so an UNRELATED config error (a `[tui.keys]`
+  // typo, a stray key, another section) must not block `gwm clean`. We load
+  // ONLY the `[clean]` section, tolerant of the rest — but strict on `[clean]`
+  // itself: a malformed `[clean.profiles.default]` still errors rather than
+  // silently reverting to the built-in set before a destructive `--yes`.
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+  let clean_cfg = Config::load_clean_config(workdir)?;
+  let patterns = clean::resolve_clean_dirs(profile.as_deref(), &clean_cfg)?;
+
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {
     println!("no worktrees to clean");
     return Ok(());
   }
-
-  let patterns = clean::default_patterns();
 
   // Classify every found artifact through the SAME safety gate the deletion
   // uses, BEFORE reporting — so the dry-run preview's total and promise match
@@ -1156,13 +1202,18 @@ fn dir_is_safe_to_clean(worktree: &Path, rel: &str) -> bool {
 }
 
 /// Whether git considers `rel` (relative to `worktree`) ignored. Shells out to
-/// `git check-ignore -q <rel>` (exit 0 = ignored). Any failure (git missing,
+/// `git check-ignore -q -- <rel>` (exit 0 = ignored). Any failure (git missing,
 /// not a repo) is treated as "not ignored" so the default is to preserve.
+///
+/// The `--` delimiter is required: with a config-supplied `[clean.profiles]`
+/// dir, a name like `-cache` would otherwise be parsed by git as an option and
+/// the directory would always read as "not ignored" (skipped). `ls-files`
+/// below already passes `--` for the same reason.
 fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
   std::process::Command::new("git")
     .arg("-C")
     .arg(worktree)
-    .args(["check-ignore", "-q", rel])
+    .args(["check-ignore", "-q", "--", rel])
     .status()
     .map(|s| s.success())
     .unwrap_or(false)

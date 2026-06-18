@@ -10,7 +10,8 @@
 //! Deliberately **not** journaled into `gwm history` / `gwm undo` (#29): the
 //! artifacts are regenerable, so a resurrection entry would be meaningless.
 
-use crate::error::Result;
+use crate::config::CleanConfig;
+use crate::error::{GwmError, Result};
 use std::path::{Path, PathBuf};
 
 /// One reclaimable artifact directory inside a worktree.
@@ -40,6 +41,139 @@ pub fn default_patterns() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+/// Validate a profile `dirs` entry: it must be a single worktree-relative
+/// directory **name** — exactly one `Normal` path component.
+///
+/// Profile-supplied dirs are user-controlled and later fed to
+/// [`scan_worktree`], which does `worktree.join(entry)` and a recursive
+/// `dir_size` *before* the git safety gate runs. Anything other than a single
+/// plain name can escape the worktree:
+/// - absolute (`"/"`, a drive prefix) — `Path::join` resolves to the FS root;
+/// - a `..` traversal — climbs out of the worktree;
+/// - empty or a bare `.` / `./.` — resolves to the worktree root itself;
+/// - a **nested** path (`a/b`) — an intermediate component (`a`) could be a
+///   symlink that `scan_worktree` / `remove_dir_all` follow outside the tree
+///   (the symlink skip only covers the artifact root, not its ancestors).
+///
+/// Restricting to a single name eliminates every one of these by construction
+/// and matches the built-in [`default_patterns`] (which are trusted and bypass
+/// this check). Nesting is a deliberate, additive post-1.0 extension (it would
+/// need an explicit symlinked-ancestor guard). Anything else is a config error
+/// (exit 1) at resolution time.
+///
+/// Each accepted entry is returned **normalized** to its bare component name
+/// (`"target/"` and `"./target"` both become `"target"`) so syntactic aliases
+/// of the same directory collapse under the exact-match [`dedup_dirs`] — a
+/// raw-string dedup would otherwise keep `["target", "target/"]` and
+/// double-scan / double-delete it.
+fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>> {
+  use std::path::Component;
+  let mut out = Vec::with_capacity(dirs.len());
+  for d in dirs {
+    if d.is_empty() {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` has an empty `dirs` entry — list single worktree-relative directory names"
+      )));
+    }
+    let mut comps = Path::new(d).components().filter(|c| !matches!(c, Component::CurDir));
+    let name = match (comps.next(), comps.next()) {
+      // Exactly one plain directory name — the only safe shape.
+      (Some(Component::Normal(n)), None) => n.to_string_lossy().into_owned(),
+      (Some(Component::ParentDir), _) => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
+        )));
+      }
+      (Some(Component::RootDir | Component::Prefix(_)), _) => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` must be relative to the worktree, not absolute"
+        )));
+      }
+      // `.` / `./.` collapse to nothing — they resolve to the worktree root.
+      (None, _) => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` resolves to the worktree root — name a real subdirectory"
+        )));
+      }
+      // Two or more components — a nested path like `a/b`.
+      _ => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` must be a single directory name (no `/`); nested paths are not supported"
+        )));
+      }
+    };
+    // Reject git pathspec magic. The safety gate feeds this name to
+    // `git ls-files -- <name>` / `git check-ignore -- <name>`, which treat it
+    // as a PATHSPEC, not a literal path: a glob char (`* ? [ ]`) or a leading
+    // `:` (magic prefix) would make git match something other than the literal
+    // directory `std::fs` deletes — e.g. `ls-files -- "foo[bar]"` misses a
+    // force-tracked file inside a literal `foo[bar]/`, so the tracked-file
+    // guard wrongly passes and `--yes` deletes tracked data. `check-ignore`
+    // can't be made literal (it rejects `:(literal)` magic), so reject these
+    // names up-front rather than silently mishandling them. A leading `-` is
+    // fine — the `--` delimiter in the git calls already neutralises it.
+    if name.starts_with(':') || name.contains(['*', '?', '[', ']']) {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` dir `{d}` contains git pathspec metacharacters (`* ? [ ]` or a leading `:`) — name a literal directory"
+      )));
+    }
+    out.push(name);
+  }
+  Ok(out)
+}
+
+/// Validate a `[clean.profiles.<name>]` entry's `dirs` without resolving them
+/// — same rules as [`normalized_profile_dirs`], surfaced for the config
+/// validation path so `gwm config validate` / `gwm doctor` reject what
+/// `gwm clean` would (issue #324 review).
+pub fn validate_clean_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
+  normalized_profile_dirs(profile, dirs).map(|_| ())
+}
+
+/// Drop exact duplicate entries (declared order kept), so a directory listed
+/// twice isn't scanned and reclaimed twice. Inputs come from
+/// [`normalized_profile_dirs`], so syntactic aliases (`target` vs `target/`)
+/// have already been folded to the same string — exact equality is the only
+/// overlap left.
+fn dedup_dirs(dirs: &[String]) -> Vec<String> {
+  let mut kept: Vec<String> = Vec::new();
+  for d in dirs {
+    if !kept.contains(d) {
+      kept.push(d.clone());
+    }
+  }
+  kept
+}
+
+/// Resolve the directory set `gwm clean` should scan and reclaim (issue #324).
+///
+/// - `--profile <name>` selects `[clean.profiles.<name>].dirs`, a **complete**
+///   set that replaces the built-ins. A name absent from `[clean.profiles]`
+///   is an error (exit 1).
+/// - **No** `--profile` uses `[clean.profiles.default].dirs` when that profile
+///   exists, else falls back to the built-in [`default_patterns`].
+///
+/// Profile-supplied dirs are validated and normalized to single worktree-
+/// relative names (absolute, `..`, `.`/root, nested, or empty → exit 1), then
+/// exact-deduped. Whatever set is returned, the caller still runs every
+/// directory through the safety gate (git-ignored + no tracked files + skip
+/// symlinks) before delete.
+pub fn resolve_clean_dirs(profile: Option<&str>, cfg: &CleanConfig) -> Result<Vec<String>> {
+  match profile {
+    Some(name) => {
+      let p = cfg
+        .profiles
+        .get(name)
+        .ok_or_else(|| GwmError::Config(format!("clean: no profile named `{name}` in [clean.profiles]")))?;
+      Ok(dedup_dirs(&normalized_profile_dirs(name, &p.dirs)?))
+    }
+    None => match cfg.profiles.get("default") {
+      Some(p) => Ok(dedup_dirs(&normalized_profile_dirs("default", &p.dirs)?)),
+      None => Ok(default_patterns()),
+    },
+  }
 }
 
 /// Sum the logical length of every regular file under `dir`, recursively.

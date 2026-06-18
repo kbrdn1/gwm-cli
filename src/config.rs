@@ -66,6 +66,76 @@ pub struct Config {
   pub issue_template: IssueTemplateConfig,
   #[serde(default)]
   pub pr_template: PrTemplateConfig,
+  /// `[exec]` — named command profiles for `gwm exec --profile <name>`
+  /// (issue #324). Absent block resolves to no profiles, so the inline
+  /// `gwm exec -- <cmd>` surface is unchanged. Frozen for 1.0: a profile's
+  /// `command` is an argv **array** (no shell), diverging from the
+  /// string-shell `command` of `[git_tui]` / `[review]`.
+  #[serde(default)]
+  pub exec: ExecConfig,
+  /// `[clean]` — named directory-set profiles for `gwm clean --profile
+  /// <name>` (issue #324). Absent block resolves to no profiles, so
+  /// `gwm clean` keeps cleaning the built-in `target`/`node_modules`/
+  /// `dist`/`build` set. A profile's `dirs` is a COMPLETE set that
+  /// replaces the built-ins, never adds to them.
+  #[serde(default)]
+  pub clean: CleanConfig,
+}
+
+/// `[exec]` — named command profiles for `gwm exec` (issue #324).
+///
+/// Each `[exec.profiles.<name>]` carries the argv to run via
+/// `gwm exec --profile <name>`. The block is opt-in: an absent `[exec]`
+/// resolves to an empty profile map, leaving the inline `gwm exec -- <cmd>`
+/// surface untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecConfig {
+  /// `[exec.profiles.<name>]` sub-tables. `BTreeMap` for a deterministic
+  /// ordering when surfaced.
+  #[serde(default)]
+  pub profiles: BTreeMap<String, ExecProfile>,
+}
+
+/// One `[exec.profiles.<name>]` entry.
+///
+/// `command` is an argv **array** (`["cargo", "test"]`) executed with **no
+/// shell** — the same contract as the inline `gwm exec -- <cmd>`. This
+/// diverges from `[git_tui]` / `[review]`, whose `command` is a single
+/// shell line; the divergence is intentional and frozen for 1.0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecProfile {
+  /// argv to run in each worktree. Required — a profile with no command is
+  /// a config error at load time (`deny_unknown_fields` + no `serde(default)`).
+  pub command: Vec<String>,
+}
+
+/// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).
+///
+/// Opt-in like [`ExecConfig`]: an absent `[clean]` resolves to an empty
+/// profile map, so `gwm clean` keeps using the built-in directory set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanConfig {
+  /// `[clean.profiles.<name>]` sub-tables. The `default` profile, when
+  /// present, is what `gwm clean` uses **without** `--profile`.
+  #[serde(default)]
+  pub profiles: BTreeMap<String, CleanProfile>,
+}
+
+/// One `[clean.profiles.<name>]` entry.
+///
+/// `dirs` is a **complete** directory set that **replaces** the built-in
+/// `target`/`node_modules`/`dist`/`build` — it never adds to them. The
+/// safety gate (git-ignored + no tracked files + skip symlinks) still
+/// applies to every listed directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanProfile {
+  /// Complete set of directory names to reclaim. Required — a profile with
+  /// no `dirs` is a config error at load time.
+  pub dirs: Vec<String>,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -917,6 +987,51 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
   }
 }
 
+/// Load a single top-level config section (e.g. `[exec]` / `[clean]`) from the
+/// layered config (global `~/.config/gwm/config.toml` then repo `.gwm.toml`),
+/// **tolerant of errors elsewhere** in the file but **strict on the section
+/// itself**.
+///
+/// `gwm exec --profile` / `gwm clean` each consult exactly one section. An
+/// unrelated problem — a stray top-level key, a semantic `[tui.keys]` error,
+/// another section's shape — must not block them, so only the requested
+/// subtree is deserialized; the rest is never validated. But the requested
+/// section IS deserialized with its `deny_unknown_fields` / required-field
+/// rules, so its OWN error still surfaces. That distinction matters for the
+/// destructive `gwm clean`: a malformed `[clean.profiles.default]` must error
+/// rather than silently revert to the built-in directory set (#324 review).
+///
+/// A missing section yields `T::default()`. A TOML *syntax* error (an
+/// unreadable file) still surfaces — there is no section to read.
+fn load_config_section<T>(repo_root: &Path, key: &str) -> Result<T>
+where
+  T: serde::de::DeserializeOwned + Default,
+{
+  let global_val = match global_config_path() {
+    Some(p) if p.exists() => Some(read_config_value(&p)?),
+    _ => None,
+  };
+  let repo_path = repo_root.join(CONFIG_FILE);
+  let repo_val = if repo_path.exists() {
+    Some(read_config_value(&repo_path)?)
+  } else {
+    None
+  };
+  let merged = match (global_val, repo_val) {
+    (None, None) => return Ok(T::default()),
+    (Some(g), None) => g,
+    (None, Some(r)) => r,
+    (Some(g), Some(r)) => merge_toml(g, r),
+  };
+  match merged.get(key) {
+    Some(section) => section
+      .clone()
+      .try_into()
+      .map_err(|e| GwmError::Config(format!("invalid `[{key}]` config: {e}"))),
+    None => Ok(T::default()),
+  }
+}
+
 /// Flatten a (possibly nested) TOML value into `key = display` rows,
 /// dotted for tables and `name[i]` for arrays-of-tables, leaving scalar
 /// leaves as-is. Shared by `gwm config list` (the CLI surface) and the
@@ -1089,6 +1204,41 @@ impl Config {
     Self::load_layered(repo_root, global_config_path().as_deref())
   }
 
+  /// Load just the `[exec]` section (layered global → repo), tolerant of
+  /// errors elsewhere in the config but strict on `[exec]` itself. Used by
+  /// `gwm exec --profile` so an unrelated `.gwm.toml` problem doesn't block
+  /// it. See [`load_config_section`].
+  ///
+  /// "Strict on itself" means EVERY `[exec.profiles.*]` is validated (not just
+  /// the one the command selects), so `gwm exec --profile good` rejects the
+  /// same file `Config::load_for_repo` / `gwm config validate` / doctor reject
+  /// — a sibling profile's semantic error can't pass on the command path only.
+  pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
+    let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
+    for (name, p) in &cfg.profiles {
+      crate::exec::validate_exec_profile_command(name, &p.command)?;
+    }
+    Ok(cfg)
+  }
+
+  /// Load just the `[clean]` section (layered global → repo), tolerant of
+  /// errors elsewhere but strict on `[clean]` itself. Used by `gwm clean` so
+  /// an unrelated `.gwm.toml` problem doesn't block the built-in clean, while
+  /// a malformed `[clean.profiles.default]` still errors rather than silently
+  /// reverting to the built-in set before a destructive `--yes`. See
+  /// [`load_config_section`].
+  ///
+  /// As with [`Self::load_exec_config`], EVERY `[clean.profiles.*]` is
+  /// validated — a sibling profile that escapes the worktree can't slip
+  /// through `gwm clean --profile good` while `gwm config validate` rejects it.
+  pub fn load_clean_config(repo_root: &Path) -> Result<CleanConfig> {
+    let cfg: CleanConfig = load_config_section(repo_root, "clean")?;
+    for (name, p) in &cfg.profiles {
+      crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
+    }
+    Ok(cfg)
+  }
+
   /// Load the effective config by deep-merging the user-level global
   /// config (`global_path`, the base) under the repo's `.gwm.toml`
   /// (the override). Issue #190.
@@ -1112,7 +1262,24 @@ impl Config {
     cfg.validate_aliases()?;
     cfg.validate_tui_keys()?;
     cfg.validate_theme()?;
+    cfg.validate_profiles()?;
     Ok(cfg)
+  }
+
+  /// Reject semantically invalid `[exec.profiles.*]` / `[clean.profiles.*]`
+  /// entries — an empty exec `command`, or a clean `dirs` entry that escapes
+  /// the worktree (absolute, `..`, `.`/root, nested) — at config-load time, so
+  /// `gwm config validate` / `gwm doctor` reject exactly what `gwm exec
+  /// --profile` / `gwm clean` would (issue #324 review). The per-command
+  /// resolvers share the same validators, so the two paths can't drift.
+  pub(crate) fn validate_profiles(&self) -> Result<()> {
+    for (name, p) in &self.exec.profiles {
+      crate::exec::validate_exec_profile_command(name, &p.command)?;
+    }
+    for (name, p) in &self.clean.profiles {
+      crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
+    }
+    Ok(())
   }
 
   /// Build the effective (deep-merged) config from disk **without** running

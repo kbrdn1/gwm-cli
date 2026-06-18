@@ -5,7 +5,11 @@
 //! are summed from the logical length of regular files written by the test,
 //! which is deterministic across filesystems (CLAUDE.md env-independence).
 
-use gwm::clean::{default_patterns, delete_reclaim, format_report, human_size, scan_worktree, WorktreeReclaim};
+use gwm::clean::{
+  default_patterns, delete_reclaim, format_report, human_size, resolve_clean_dirs, scan_worktree, WorktreeReclaim,
+};
+use gwm::config::{CleanConfig, CleanProfile};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -15,6 +19,20 @@ fn make_artifact(root: &Path, rel: &str, bytes: usize) {
   let d = root.join(rel);
   fs::create_dir_all(&d).unwrap();
   fs::write(d.join("blob.bin"), vec![0u8; bytes]).unwrap();
+}
+
+/// Build a [`CleanConfig`] with the given `[clean.profiles.*]` entries.
+fn clean_cfg(profiles: &[(&str, &[&str])]) -> CleanConfig {
+  let mut map = BTreeMap::new();
+  for (name, dirs) in profiles {
+    map.insert(
+      (*name).to_string(),
+      CleanProfile {
+        dirs: dirs.iter().map(|s| s.to_string()).collect(),
+      },
+    );
+  }
+  CleanConfig { profiles: map }
 }
 
 #[test]
@@ -164,4 +182,160 @@ fn format_report_lists_each_worktree_and_a_grand_total() {
   assert!(report.contains("1.0 MiB"), "report should render human sizes");
   // Grand total of reclaimable space across all worktrees.
   assert!(report.contains("1.0 MiB"), "report should carry a grand total");
+}
+
+// --- profile resolution (issue #324) ----------------------------------------
+
+#[test]
+fn resolve_dirs_falls_back_to_builtins_without_profile_or_default() {
+  // No `--profile` and no `[clean.profiles.default]` ⇒ the built-in set.
+  let cfg = clean_cfg(&[]);
+  let dirs = resolve_clean_dirs(None, &cfg).expect("builtin fallback");
+  assert_eq!(dirs, default_patterns());
+}
+
+#[test]
+fn resolve_dirs_uses_the_default_profile_when_present() {
+  // `gwm clean` without `--profile` prefers `[clean.profiles.default]`.
+  let cfg = clean_cfg(&[("default", &["target", "node_modules", "coverage", ".turbo"])]);
+  let dirs = resolve_clean_dirs(None, &cfg).expect("default profile");
+  assert_eq!(dirs, vec!["target", "node_modules", "coverage", ".turbo"]);
+  assert_ne!(dirs, default_patterns(), "the default profile overrides the built-ins");
+}
+
+#[test]
+fn resolve_dirs_uses_a_named_profile() {
+  let cfg = clean_cfg(&[("deep", &["target", ".cache", ".venv"])]);
+  let dirs = resolve_clean_dirs(Some("deep"), &cfg).expect("named profile");
+  assert_eq!(dirs, vec!["target", ".cache", ".venv"]);
+}
+
+#[test]
+fn resolve_dirs_named_profile_is_a_complete_set_not_additive() {
+  // A profile's `dirs` REPLACES the built-ins — `build`/`dist` are absent
+  // from the resolved set unless the profile lists them.
+  let cfg = clean_cfg(&[("rust", &["target"])]);
+  let dirs = resolve_clean_dirs(Some("rust"), &cfg).expect("named profile");
+  assert_eq!(dirs, vec!["target"]);
+  assert!(!dirs.contains(&"node_modules".to_string()), "built-ins are not added");
+  assert!(!dirs.contains(&"build".to_string()), "built-ins are not added");
+}
+
+#[test]
+fn resolve_dirs_rejects_an_unknown_profile() {
+  let cfg = clean_cfg(&[("deep", &["target"])]);
+  let err = resolve_clean_dirs(Some("nope"), &cfg).expect_err("unknown profile must error");
+  assert!(
+    err.to_string().contains("nope") && err.to_string().contains("profile"),
+    "error should name the missing profile: {err}"
+  );
+}
+
+#[test]
+fn resolve_dirs_rejects_an_absolute_profile_dir() {
+  // `worktree.join("/")` resolves to the FS root — a dry-run scan would walk
+  // the whole filesystem. Reject absolute entries at resolution (exit 1).
+  let cfg = clean_cfg(&[("evil", &["/"])]);
+  let err = resolve_clean_dirs(Some("evil"), &cfg).expect_err("absolute dir must error");
+  assert!(
+    err.to_string().contains("absolute"),
+    "error should flag the absolute path: {err}"
+  );
+}
+
+#[test]
+fn resolve_dirs_rejects_a_parent_traversal_profile_dir() {
+  let cfg = clean_cfg(&[("evil", &["../sibling"])]);
+  let err = resolve_clean_dirs(Some("evil"), &cfg).expect_err("`..` dir must error");
+  assert!(err.to_string().contains(".."), "error should flag the traversal: {err}");
+}
+
+#[test]
+fn resolve_dirs_rejects_an_empty_profile_dir() {
+  let cfg = clean_cfg(&[("evil", &[""])]);
+  let err = resolve_clean_dirs(Some("evil"), &cfg).expect_err("empty dir must error");
+  assert!(
+    err.to_string().contains("empty"),
+    "error should flag the empty entry: {err}"
+  );
+}
+
+#[test]
+fn resolve_dirs_validates_the_default_profile_too() {
+  // The escape guard also covers the implicit `default` profile (no --profile).
+  let cfg = clean_cfg(&[("default", &[".."])]);
+  let err = resolve_clean_dirs(None, &cfg).expect_err("default profile is validated");
+  assert!(err.to_string().contains(".."), "error should flag the traversal: {err}");
+}
+
+#[test]
+fn resolve_dirs_rejects_git_pathspec_metacharacters() {
+  // A name with glob magic (`* ? [ ]`) or a leading `:` would be misread as a
+  // pathspec by the git safety checks — reject it up-front. A leading `-` is
+  // fine (the `--` delimiter handles it).
+  for evil in ["foo[bar]", "a*", "b?", ":magic"] {
+    let cfg = clean_cfg(&[("evil", &[evil])]);
+    let err = resolve_clean_dirs(Some("evil"), &cfg).unwrap_err();
+    assert!(
+      err.to_string().contains("pathspec metacharacters"),
+      "`{evil}` should be rejected: {err}"
+    );
+  }
+  // A leading-dash name is allowed (not pathspec magic).
+  let ok = clean_cfg(&[("dash", &["-cache"])]);
+  assert_eq!(resolve_clean_dirs(Some("dash"), &ok).unwrap(), vec!["-cache"]);
+}
+
+#[test]
+fn resolve_dirs_rejects_a_nested_path() {
+  // A nested path is refused for 1.0: an intermediate component could be a
+  // symlink that scan/delete would follow out of the worktree. Dirs are
+  // restricted to single directory names.
+  for nested in ["packages/app/node_modules", "target/debug"] {
+    let cfg = clean_cfg(&[("nested", &[nested])]);
+    let err = resolve_clean_dirs(Some("nested"), &cfg).unwrap_err();
+    assert!(
+      err.to_string().contains("single directory name"),
+      "`{nested}` should be rejected as nested: {err}"
+    );
+  }
+}
+
+#[test]
+fn resolve_dirs_rejects_a_dot_profile_dir() {
+  // `"."` / `"./."` resolve to the worktree root (no Normal component) —
+  // scanning the root is as dangerous as an empty entry.
+  for evil in [".", "./."] {
+    let cfg = clean_cfg(&[("evil", &[evil])]);
+    let err = resolve_clean_dirs(Some("evil"), &cfg).unwrap_err();
+    assert!(
+      err.to_string().contains("worktree root"),
+      "`{evil}` should be rejected as the worktree root: {err}"
+    );
+  }
+}
+
+#[test]
+fn resolve_dirs_dedups_exact_duplicate_entries() {
+  let cfg = clean_cfg(&[("dup", &["target", "node_modules", "target"])]);
+  let dirs = resolve_clean_dirs(Some("dup"), &cfg).expect("duplicates collapse");
+  assert_eq!(dirs, vec!["target", "node_modules"], "an exact duplicate is dropped");
+}
+
+#[test]
+fn resolve_dirs_normalizes_syntactic_aliases_before_dedup() {
+  // `target`, `target/`, and `./target` are the same directory — normalize to
+  // the bare component name so dedup folds them to one (no double scan/delete).
+  let cfg = clean_cfg(&[("alias", &["target", "target/", "./target", "node_modules"])]);
+  let dirs = resolve_clean_dirs(Some("alias"), &cfg).expect("aliases normalize and dedup");
+  assert_eq!(dirs, vec!["target", "node_modules"]);
+}
+
+#[test]
+fn resolve_dirs_keeps_distinct_single_names_in_declared_order() {
+  // With dirs pinned to single names, distinct entries pass through in order
+  // (only exact duplicates are dropped — covered above).
+  let cfg = clean_cfg(&[("multi", &["target", "node_modules", "dist"])]);
+  let dirs = resolve_clean_dirs(Some("multi"), &cfg).expect("distinct names");
+  assert_eq!(dirs, vec!["target", "node_modules", "dist"]);
 }

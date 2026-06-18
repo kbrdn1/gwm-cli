@@ -258,6 +258,11 @@ fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
   // loader will later reject.
   cfg.validate_tui_keys()?;
   cfg.validate_theme()?;
+  // `[exec.profiles]` / `[clean.profiles]` semantics (non-empty command, a
+  // worktree-relative single-name `dirs`) parse cleanly too, so run the same
+  // check `load_for_repo` does — otherwise `gwm config validate` greenlights a
+  // profile the loader and the new commands reject (issue #324 review).
+  cfg.validate_profiles()?;
   Ok(())
 }
 

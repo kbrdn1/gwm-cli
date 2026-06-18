@@ -4624,6 +4624,7 @@ fn exec_runs_the_command_inside_each_worktree() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "sh", "-c", "echo hi > exec_marker.txt"])
     .assert()
     .success()
@@ -4641,11 +4642,298 @@ fn exec_exits_nonzero_when_a_worktree_command_fails() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--", "sh", "-c", "exit 5"])
     .assert()
     .failure()
     .stdout(predicate::str::contains("✗"))
     .stdout(predicate::str::contains("exit 5"));
+}
+
+/// Append a TOML snippet to the repo's `.gwm.toml` (the writer created by
+/// `repo_with_one_worktree`), so a test can add `[exec.profiles.*]` /
+/// `[clean.profiles.*]` entries on top of the base config.
+fn append_config(repo_root: &Path, snippet: &str) {
+  use std::io::Write;
+  let mut f = std::fs::OpenOptions::new()
+    .append(true)
+    .open(repo_root.join(".gwm.toml"))
+    .unwrap();
+  writeln!(f, "{snippet}").unwrap();
+}
+
+// --- exec/clean named profiles (issue #324) ---------------------------------
+
+#[test]
+fn exec_runs_a_named_profile_command() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[exec.profiles.greet]\ncommand = [\"sh\", \"-c\", \"echo hi > prof_marker.txt\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "greet"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓"));
+  assert!(
+    wt.join("prof_marker.txt").exists(),
+    "the profile's command must run in the worktree"
+  );
+}
+
+#[test]
+fn exec_inline_command_ignores_a_broken_gwm_toml() {
+  // The inline `gwm exec -- <cmd>` surface is promised config-free: an
+  // unrelated `.gwm.toml` error must NOT break it (it only reads config for
+  // a `--profile` lookup). Here a stray top-level key would fail a config
+  // load, yet the inline command still runs.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "sh", "-c", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_profile_tolerates_an_unrelated_config_error() {
+  // The `--profile` path reads only the `[exec]` section, so an UNRELATED
+  // top-level typo is tolerated — the failure is the unknown profile, not the
+  // typo (exit 1 either way, but for the right reason).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "whatever"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `whatever`"));
+}
+
+#[test]
+fn exec_profile_surfaces_a_malformed_exec_section() {
+  // A shape error in the `[exec]` section ITSELF still surfaces (exit 1):
+  // an unknown field in a profile is rejected by `deny_unknown_fields`.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.bad]\ncommand = [\"true\"]\nbogus = 1\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "bad"])
+    .assert()
+    .failure()
+    .code(1);
+}
+
+#[test]
+fn exec_profile_and_inline_command_are_mutually_exclusive() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.t]\ncommand = [\"true\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "t", "--", "echo", "hi"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("mutually exclusive"));
+}
+
+#[test]
+fn exec_unknown_profile_exits_one() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn clean_unknown_profile_exits_one() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn clean_builtin_ignores_a_broken_gwm_toml() {
+  // The built-in `gwm clean` (no `--profile`) is opt-in/config-tolerant: an
+  // unrelated `.gwm.toml` error (a stray top-level key) must NOT block it —
+  // only the `[clean]` section is read, so it falls back to the built-in dirs.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn clean_honors_default_profile_despite_an_unrelated_config_error() {
+  // A configured `[clean.profiles.default]` must NOT be silently dropped
+  // (reverting to the built-in set) just because an unrelated key is wrong —
+  // that would make a destructive `--yes` delete the wrong set. The default
+  // profile's `coverage` (only reclaimable under that profile) is reported.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  std::fs::create_dir_all(wt.join("coverage")).unwrap();
+  std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
+  append_config(
+    dir.path(),
+    "nonsense_key = true\n[clean.profiles.default]\ndirs = [\"coverage\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("coverage"));
+}
+
+#[test]
+fn clean_surfaces_a_malformed_clean_section() {
+  // A shape error in the `[clean]` section ITSELF still surfaces (exit 1),
+  // even without `--profile` — a profile missing its required `dirs` must not
+  // be silently ignored before a destructive clean.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[clean.profiles.broken]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .failure()
+    .code(1);
+}
+
+#[test]
+fn clean_rejects_a_sibling_invalid_profile() {
+  // The `[clean]` loader validates EVERY profile, not just the selected one:
+  // a sibling `bad` that escapes the worktree fails `--profile good` too, so
+  // the command path matches `gwm config validate` / doctor (#324 review).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[clean.profiles.good]\ndirs = [\"target\"]\n[clean.profiles.bad]\ndirs = [\"..\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "good"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains(".."));
+}
+
+#[test]
+fn exec_rejects_a_sibling_invalid_profile() {
+  // Same for `[exec]`: a sibling `bad` with an empty command fails
+  // `--profile good`.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[exec.profiles.good]\ncommand = [\"true\"]\n[exec.profiles.bad]\ncommand = []\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "good"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("empty `command`"));
+}
+
+#[test]
+fn clean_profile_with_an_unsafe_dir_exits_one() {
+  // A `dirs` entry that could escape the worktree (here `..`) is refused at
+  // resolution, before any filesystem scan — exit 1, nothing walked.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[clean.profiles.evil]\ndirs = [\"..\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "evil"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("escape the worktree"));
+}
+
+#[test]
+fn clean_named_profile_scopes_the_reclaim_to_its_dirs() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // `coverage/` is only reclaimable under a profile that lists it; the
+  // built-in set (target/node_modules/dist/build) would ignore it.
+  std::fs::create_dir_all(wt.join("coverage")).unwrap();
+  std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
+  append_config(dir.path(), "[clean.profiles.cov]\ndirs = [\"coverage\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "cov"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("coverage"));
+}
+
+#[test]
+fn clean_reclaims_a_leading_dash_profile_dir() {
+  // A profile dir whose name starts with `-` (e.g. `-cache`) must flow through
+  // the git-ignored safety check correctly — the check passes `--` so git
+  // doesn't parse the name as an option and wrongly skip it (#324 review P3).
+  let (dir, _base, wt) = repo_with_one_worktree();
+  std::fs::create_dir_all(wt.join("-cache")).unwrap();
+  std::fs::write(wt.join("-cache/blob.bin"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "/-cache/\n").unwrap();
+  append_config(dir.path(), "[clean.profiles.dash]\ndirs = [\"-cache\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "dash", "--yes"])
+    .assert()
+    .success();
+  assert!(
+    !wt.join("-cache").exists(),
+    "a git-ignored `-cache` profile dir must be reclaimed, not skipped"
+  );
 }
 
 #[test]
@@ -4660,6 +4948,7 @@ fn clean_reports_artifacts_without_deleting_by_default() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
     .assert()
     .success()
@@ -4680,6 +4969,7 @@ fn clean_preview_excludes_non_deletable_dirs_from_total() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean"])
     .assert()
     .success()
@@ -4700,6 +4990,7 @@ fn clean_yes_deletes_gitignored_artifacts() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--yes"])
     .assert()
     .success()
@@ -4722,6 +5013,7 @@ fn clean_yes_refuses_to_delete_non_ignored_artifacts() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--yes"])
     .assert()
     .success()
@@ -4754,6 +5046,7 @@ fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--yes"])
     .assert()
     .success()
@@ -4782,6 +5075,7 @@ fn exec_refuses_the_workspace_flag() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["exec", "--workspace", ws.path().to_str().unwrap(), "--", "echo", "hi"])
     .assert()
     .failure()
@@ -4797,6 +5091,7 @@ fn clean_refuses_the_workspace_flag() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["clean", "--workspace", ws.path().to_str().unwrap()])
     .assert()
     .failure()

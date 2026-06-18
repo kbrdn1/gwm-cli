@@ -8,9 +8,27 @@
 
 use clap::Parser;
 use gwm::cli::{Cli, Command};
-use gwm::exec::{exec_in_dir, format_outcome, resolve_program, rollup_exit_code, ExecOutcome, ExecStatus};
+use gwm::config::{ExecConfig, ExecProfile};
+use gwm::exec::{
+  exec_in_dir, format_outcome, resolve_exec_command, resolve_program, rollup_exit_code, ExecOutcome, ExecStatus,
+};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+
+/// Build an [`ExecConfig`] with the given `[exec.profiles.*]` entries.
+fn exec_cfg(profiles: &[(&str, &[&str])]) -> ExecConfig {
+  let mut map = BTreeMap::new();
+  for (name, argv) in profiles {
+    map.insert(
+      (*name).to_string(),
+      ExecProfile {
+        command: argv.iter().map(|s| s.to_string()).collect(),
+      },
+    );
+  }
+  ExecConfig { profiles: map }
+}
 
 #[test]
 fn rollup_is_zero_when_all_ok() {
@@ -156,8 +174,13 @@ fn format_outcome_marks_failure_with_exit_code() {
 fn parses_command_after_double_dash_with_no_slugs() {
   let cli = Cli::try_parse_from(["gwm", "exec", "--", "git", "fetch"]).expect("should parse");
   match cli.command {
-    Some(Command::Exec { slugs, command }) => {
+    Some(Command::Exec {
+      slugs,
+      profile,
+      command,
+    }) => {
       assert!(slugs.is_empty(), "no slugs before `--`");
+      assert!(profile.is_none(), "no --profile given");
       assert_eq!(command, vec!["git".to_string(), "fetch".to_string()]);
     }
     other => panic!("expected Exec, got {other:?}"),
@@ -168,7 +191,7 @@ fn parses_command_after_double_dash_with_no_slugs() {
 fn parses_slugs_before_double_dash_and_command_after() {
   let cli = Cli::try_parse_from(["gwm", "exec", "feat-1", "fix-2", "--", "cargo", "check"]).expect("should parse");
   match cli.command {
-    Some(Command::Exec { slugs, command }) => {
+    Some(Command::Exec { slugs, command, .. }) => {
       assert_eq!(slugs, vec!["feat-1".to_string(), "fix-2".to_string()]);
       assert_eq!(command, vec!["cargo".to_string(), "check".to_string()]);
     }
@@ -191,7 +214,86 @@ fn keeps_hyphenated_flags_in_the_command_intact() {
 }
 
 #[test]
-fn rejects_exec_with_no_command() {
-  // `--` is required: `gwm exec` alone (or with only slugs) must error.
-  assert!(Cli::try_parse_from(["gwm", "exec"]).is_err());
+fn parses_profile_flag_with_no_inline_command() {
+  // `--profile` no longer needs an inline `-- <cmd>`; the profile carries it.
+  let cli = Cli::try_parse_from(["gwm", "exec", "--profile", "test"]).expect("should parse");
+  match cli.command {
+    Some(Command::Exec { profile, command, .. }) => {
+      assert_eq!(profile.as_deref(), Some("test"));
+      assert!(command.is_empty(), "no inline command alongside --profile");
+    }
+    other => panic!("expected Exec, got {other:?}"),
+  }
+}
+
+#[test]
+fn exec_with_no_command_and_no_profile_parses_but_resolves_to_an_error() {
+  // `command` is no longer `required` at the clap layer (a `--profile` can
+  // stand in), so `gwm exec` alone now *parses*. The "nothing to run"
+  // rejection moved to runtime resolution (exit 1) — pinned below.
+  let cli = Cli::try_parse_from(["gwm", "exec"]).expect("parses with neither source");
+  match cli.command {
+    Some(Command::Exec { profile, command, .. }) => {
+      assert!(profile.is_none());
+      assert!(command.is_empty());
+    }
+    other => panic!("expected Exec, got {other:?}"),
+  }
+}
+
+// --- profile/inline resolution (issue #324) ---------------------------------
+
+#[test]
+fn resolve_uses_the_inline_command_when_no_profile() {
+  let cfg = exec_cfg(&[]);
+  let argv = resolve_exec_command(None, &["git".into(), "fetch".into()], &cfg).expect("inline resolves");
+  assert_eq!(argv, vec!["git".to_string(), "fetch".to_string()]);
+}
+
+#[test]
+fn resolve_uses_the_profile_command_array() {
+  let cfg = exec_cfg(&[("test", &["cargo", "test"])]);
+  let argv = resolve_exec_command(Some("test"), &[], &cfg).expect("profile resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+}
+
+#[test]
+fn resolve_rejects_profile_and_inline_together() {
+  let cfg = exec_cfg(&[("test", &["cargo", "test"])]);
+  let err =
+    resolve_exec_command(Some("test"), &["echo".into(), "hi".into()], &cfg).expect_err("both sources must be rejected");
+  assert!(
+    err.to_string().contains("mutually exclusive"),
+    "error should explain the exclusivity: {err}"
+  );
+}
+
+#[test]
+fn resolve_rejects_an_unknown_profile() {
+  let cfg = exec_cfg(&[("test", &["cargo", "test"])]);
+  let err = resolve_exec_command(Some("nope"), &[], &cfg).expect_err("unknown profile must error");
+  assert!(
+    err.to_string().contains("nope") && err.to_string().contains("profile"),
+    "error should name the missing profile: {err}"
+  );
+}
+
+#[test]
+fn resolve_rejects_neither_profile_nor_inline() {
+  let cfg = exec_cfg(&[]);
+  let err = resolve_exec_command(None, &[], &cfg).expect_err("nothing to run must error");
+  assert!(
+    err.to_string().contains("--profile") || err.to_string().contains("command"),
+    "error should hint at the two sources: {err}"
+  );
+}
+
+#[test]
+fn resolve_rejects_a_profile_with_an_empty_command() {
+  let cfg = exec_cfg(&[("empty", &[])]);
+  let err = resolve_exec_command(Some("empty"), &[], &cfg).expect_err("empty command must error");
+  assert!(
+    err.to_string().contains("empty"),
+    "error should flag the empty command: {err}"
+  );
 }

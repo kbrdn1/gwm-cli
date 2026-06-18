@@ -2185,3 +2185,138 @@ issue = ["i"]
   let err = Config::load_layered(dir.path(), None).expect_err("link needs a stage");
   assert!(err.to_string().contains("context group"), "{err}");
 }
+
+// --- [exec] / [clean] profiles (issue #324) ---------------------------------
+
+fn load_toml(body: &str) -> gwm::error::Result<Config> {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), body).unwrap();
+  Config::load_layered(dir.path(), None)
+}
+
+#[test]
+fn exec_and_clean_default_to_no_profiles() {
+  // Absent `[exec]` / `[clean]` blocks resolve to empty profile maps — the
+  // inline `gwm exec -- <cmd>` and built-in `gwm clean` surfaces are unchanged.
+  let cfg = Config::default();
+  assert!(cfg.exec.profiles.is_empty());
+  assert!(cfg.clean.profiles.is_empty());
+}
+
+#[test]
+fn exec_profiles_parse_command_as_an_argv_array() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+[exec.profiles.fmt]
+command = ["cargo", "fmt", "--all"]
+"#,
+  )
+  .expect("exec profiles parse");
+  assert_eq!(
+    cfg.exec.profiles["test"].command,
+    vec!["cargo".to_string(), "test".to_string()]
+  );
+  assert_eq!(
+    cfg.exec.profiles["fmt"].command,
+    vec!["cargo".to_string(), "fmt".to_string(), "--all".to_string()]
+  );
+}
+
+#[test]
+fn clean_profiles_parse_dirs_as_a_complete_set() {
+  let cfg = load_toml(
+    r#"
+[clean.profiles.default]
+dirs = ["target", "node_modules", "dist", "build", "coverage", ".turbo"]
+
+[clean.profiles.deep]
+dirs = ["target", ".cache", ".venv"]
+"#,
+  )
+  .expect("clean profiles parse");
+  assert_eq!(
+    cfg.clean.profiles["default"].dirs,
+    vec!["target", "node_modules", "dist", "build", "coverage", ".turbo"]
+  );
+  assert_eq!(cfg.clean.profiles["deep"].dirs, vec!["target", ".cache", ".venv"]);
+}
+
+#[test]
+fn exec_profile_without_command_is_a_load_error() {
+  // `command` is required within a profile — an empty `[exec.profiles.x]`
+  // table is a config error, surfaced at load time.
+  let err = load_toml(
+    r#"
+[exec.profiles.broken]
+"#,
+  )
+  .expect_err("missing command must error");
+  assert!(
+    err.to_string().contains("command"),
+    "error should name the missing field: {err}"
+  );
+}
+
+#[test]
+fn clean_profile_without_dirs_is_a_load_error() {
+  let err = load_toml(
+    r#"
+[clean.profiles.broken]
+"#,
+  )
+  .expect_err("missing dirs must error");
+  assert!(
+    err.to_string().contains("dirs"),
+    "error should name the missing field: {err}"
+  );
+}
+
+#[test]
+fn exec_profile_rejects_unknown_fields() {
+  // `deny_unknown_fields` guards the frozen schema — a stray key is refused
+  // rather than silently ignored.
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+nonsense = true
+"#,
+  )
+  .expect_err("unknown field must error");
+  assert!(
+    err.to_string().contains("nonsense") || err.to_string().contains("unknown"),
+    "{err}"
+  );
+}
+
+#[test]
+fn exec_profile_with_an_empty_command_fails_validation() {
+  // `command = []` parses (it's a valid array) but is semantically invalid —
+  // caught at config-load time so `gwm config validate` rejects what
+  // `gwm exec --profile` would.
+  let err = load_toml(
+    r#"
+[exec.profiles.empty]
+command = []
+"#,
+  )
+  .expect_err("empty command must fail validation");
+  assert!(err.to_string().contains("empty `command`"), "{err}");
+}
+
+#[test]
+fn clean_profile_with_an_escaping_dir_fails_validation() {
+  // `dirs = [".."]` parses but escapes the worktree — caught at config-load
+  // time, not only later in `gwm clean`.
+  let err = load_toml(
+    r#"
+[clean.profiles.default]
+dirs = [".."]
+"#,
+  )
+  .expect_err("escaping dir must fail validation");
+  assert!(err.to_string().contains(".."), "{err}");
+}
