@@ -78,6 +78,28 @@ branch_pattern = "{type}/#{issue}-{desc}"
   assert_eq!(cfg.status, CheckStatus::Ok);
 }
 
+#[test]
+fn semantically_invalid_profile_marks_config_check_failed() {
+  // #324 review (P2): a profile that parses but is semantically invalid
+  // (`dirs = [".."]` escapes the worktree) must fail the `.gwm.toml` check,
+  // not be reported green — doctor mirrors what the loader/commands reject.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[clean.profiles.default]\ndirs = [\"..\"]\n",
+  )
+  .unwrap();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let cfg = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains(".gwm.toml"))
+    .expect("expected a `.gwm.toml` check");
+  assert_eq!(cfg.status, CheckStatus::Failed);
+}
+
 // Severity/exit-code arithmetic is asserted on hand-built reports so the
 // test is independent of the environment (whether `lazygit` happens to be
 // on PATH, whether `~/cc-worktree/` already exists, etc.). The end-to-end
