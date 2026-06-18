@@ -91,6 +91,12 @@ pub struct Config {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecConfig {
+  /// `[exec] jobs` — the global default parallelism for `gwm exec` (issue
+  /// #324). `1` or absent ⇒ sequential (live, inherited stdio — the MVP
+  /// behaviour); `> 1` ⇒ bounded parallel with per-worktree captured output.
+  /// Precedence: `--jobs` flag > `[exec.profiles.<name>].jobs` > this > `1`.
+  #[serde(default)]
+  pub jobs: Option<u32>,
   /// `[exec.profiles.<name>]` sub-tables. `BTreeMap` for a deterministic
   /// ordering when surfaced.
   #[serde(default)]
@@ -109,6 +115,10 @@ pub struct ExecProfile {
   /// argv to run in each worktree. Required — a profile with no command is
   /// a config error at load time (`deny_unknown_fields` + no `serde(default)`).
   pub command: Vec<String>,
+  /// Per-profile parallelism override (issue #324). Overrides `[exec] jobs`
+  /// when this profile runs; the `--jobs` flag still wins over it.
+  #[serde(default)]
+  pub jobs: Option<u32>,
 }
 
 /// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).

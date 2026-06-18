@@ -2226,6 +2226,36 @@ command = ["cargo", "fmt", "--all"]
 }
 
 #[test]
+fn exec_jobs_parse_global_and_per_profile() {
+  let cfg = load_toml(
+    r#"
+[exec]
+jobs = 4
+
+[exec.profiles.fmt]
+command = ["cargo", "fmt"]
+jobs = 2
+"#,
+  )
+  .expect("jobs parse");
+  assert_eq!(cfg.exec.jobs, Some(4), "global [exec] jobs");
+  assert_eq!(cfg.exec.profiles["fmt"].jobs, Some(2), "per-profile jobs");
+}
+
+#[test]
+fn exec_jobs_default_to_none() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+"#,
+  )
+  .expect("parse");
+  assert!(cfg.exec.jobs.is_none(), "no [exec] jobs ⇒ None (sequential)");
+  assert!(cfg.exec.profiles["test"].jobs.is_none());
+}
+
+#[test]
 fn clean_profiles_parse_dirs_as_a_complete_set() {
   let cfg = load_toml(
     r#"

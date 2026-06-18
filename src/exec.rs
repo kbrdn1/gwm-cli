@@ -12,6 +12,8 @@ use crate::config::ExecConfig;
 use crate::error::{GwmError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 /// Outcome of running the command inside one worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +34,10 @@ pub struct ExecOutcome {
   pub name: String,
   pub status: ExecStatus,
 }
+
+/// One parallel worktree run: its [`ExecOutcome`] plus the captured
+/// stdout+stderr bytes printed as a block by the caller.
+pub type CapturedRun = (ExecOutcome, Vec<u8>);
 
 /// Resolve the argv `gwm exec` should run, from exactly one source: an
 /// inline `-- <cmd>` or a `--profile <name>` (issue #324).
@@ -93,6 +99,84 @@ pub fn exec_in_dir(dir: &Path, program: &str, args: &[String]) -> ExecStatus {
     },
     Err(e) => ExecStatus::SpawnError(e.to_string()),
   }
+}
+
+/// Resolve the effective parallelism for `gwm exec` (issue #324): the `--jobs`
+/// flag wins, then the selected profile's `jobs`, then the global `[exec]
+/// jobs`, else `1`. A resolved `0` (or absent) means sequential. Always
+/// returns a worker count `>= 1`.
+pub fn resolve_jobs(flag: Option<u32>, profile: Option<&str>, cfg: &ExecConfig) -> usize {
+  let n = flag
+    .or_else(|| profile.and_then(|p| cfg.profiles.get(p)).and_then(|p| p.jobs))
+    .or(cfg.jobs)
+    .unwrap_or(1);
+  n.max(1) as usize
+}
+
+/// Like [`exec_in_dir`], but CAPTURE stdout+stderr (stdout then stderr)
+/// instead of inheriting the parent's stdio. Used by [`run_in_dirs_parallel`]
+/// so concurrent worktrees don't interleave their output — each block is
+/// printed whole, in worktree order, after the fan-out completes.
+pub fn exec_capture_in_dir(dir: &Path, program: &str, args: &[String]) -> (ExecStatus, Vec<u8>) {
+  let resolved = resolve_program(dir, program);
+  match Command::new(&resolved).args(args).current_dir(dir).output() {
+    Ok(out) => {
+      let mut buf = out.stdout;
+      buf.extend_from_slice(&out.stderr);
+      let status = match out.status.code() {
+        Some(0) => ExecStatus::Ok,
+        Some(code) => ExecStatus::Failed(code),
+        None => ExecStatus::Signal,
+      };
+      (status, buf)
+    }
+    Err(e) => (ExecStatus::SpawnError(e.to_string()), Vec::new()),
+  }
+}
+
+/// Run `program args…` in each `(name, dir)` of `items` with up to `jobs`
+/// concurrent workers, capturing each one's output. Returns one
+/// `(ExecOutcome, captured_output)` per item **in input order** (not
+/// completion order), so the caller prints deterministic per-worktree blocks
+/// regardless of which finished first. `jobs` is clamped to `[1, items.len()]`.
+pub fn run_in_dirs_parallel(
+  jobs: usize,
+  items: &[(String, PathBuf)],
+  program: &str,
+  args: &[String],
+) -> Vec<CapturedRun> {
+  if items.is_empty() {
+    return Vec::new();
+  }
+  let workers = jobs.clamp(1, items.len());
+  let next = AtomicUsize::new(0);
+  let slots: Vec<Mutex<Option<CapturedRun>>> = (0..items.len()).map(|_| Mutex::new(None)).collect();
+  std::thread::scope(|s| {
+    for _ in 0..workers {
+      s.spawn(|| loop {
+        let i = next.fetch_add(1, Ordering::Relaxed);
+        if i >= items.len() {
+          break;
+        }
+        let (name, path) = &items[i];
+        let (status, output) = exec_capture_in_dir(path, program, args);
+        // `.lock()` never poisons: the worker body cannot panic (the spawn
+        // primitive returns `SpawnError` instead of unwinding).
+        *slots[i].lock().expect("exec worker mutex never poisoned") = Some((
+          ExecOutcome {
+            name: name.clone(),
+            status,
+          },
+          output,
+        ));
+      });
+    }
+  });
+  slots
+    .into_iter()
+    .map(|m| m.into_inner().expect("exec worker mutex never poisoned"))
+    .map(|slot| slot.expect("every worktree slot filled by a worker"))
+    .collect()
 }
 
 /// Resolve `program` for execution inside `dir`.

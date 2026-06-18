@@ -4686,6 +4686,51 @@ fn exec_runs_a_named_profile_command() {
 }
 
 #[test]
+fn exec_jobs_runs_the_parallel_capture_path() {
+  // `--jobs > 1` runs the bounded-parallel path: each worktree's output is
+  // captured and printed as a block (after its header), and the command still
+  // runs and rolls up ✓.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args([
+      "exec",
+      "--jobs",
+      "2",
+      "--",
+      "sh",
+      "-c",
+      "echo blockline; echo hi > exec_jobs_marker.txt",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("blockline")) // captured stdout printed as a block
+    .stdout(predicate::str::contains("feat-1-wt"))
+    .stdout(predicate::str::contains("✓"));
+  assert!(
+    wt.join("exec_jobs_marker.txt").exists(),
+    "the command must still run under --jobs"
+  );
+}
+
+#[test]
+fn exec_jobs_flag_parses_and_propagates_failure() {
+  // The parallel path propagates a non-zero rollup just like sequential.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "3", "--", "sh", "-c", "exit 4"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗"))
+    .stdout(predicate::str::contains("exit 4"));
+}
+
+#[test]
 fn exec_inline_command_ignores_a_broken_gwm_toml() {
   // The inline `gwm exec -- <cmd>` surface is promised config-free: an
   // unrelated `.gwm.toml` error must NOT break it (it only reads config for
