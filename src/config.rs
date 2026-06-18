@@ -1208,8 +1208,17 @@ impl Config {
   /// errors elsewhere in the config but strict on `[exec]` itself. Used by
   /// `gwm exec --profile` so an unrelated `.gwm.toml` problem doesn't block
   /// it. See [`load_config_section`].
+  ///
+  /// "Strict on itself" means EVERY `[exec.profiles.*]` is validated (not just
+  /// the one the command selects), so `gwm exec --profile good` rejects the
+  /// same file `Config::load_for_repo` / `gwm config validate` / doctor reject
+  /// — a sibling profile's semantic error can't pass on the command path only.
   pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
-    load_config_section(repo_root, "exec")
+    let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
+    for (name, p) in &cfg.profiles {
+      crate::exec::validate_exec_profile_command(name, &p.command)?;
+    }
+    Ok(cfg)
   }
 
   /// Load just the `[clean]` section (layered global → repo), tolerant of
@@ -1218,8 +1227,16 @@ impl Config {
   /// a malformed `[clean.profiles.default]` still errors rather than silently
   /// reverting to the built-in set before a destructive `--yes`. See
   /// [`load_config_section`].
+  ///
+  /// As with [`Self::load_exec_config`], EVERY `[clean.profiles.*]` is
+  /// validated — a sibling profile that escapes the worktree can't slip
+  /// through `gwm clean --profile good` while `gwm config validate` rejects it.
   pub fn load_clean_config(repo_root: &Path) -> Result<CleanConfig> {
-    load_config_section(repo_root, "clean")
+    let cfg: CleanConfig = load_config_section(repo_root, "clean")?;
+    for (name, p) in &cfg.profiles {
+      crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
+    }
+    Ok(cfg)
   }
 
   /// Load the effective config by deep-merging the user-level global

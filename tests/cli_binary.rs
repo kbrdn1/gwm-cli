@@ -4837,6 +4837,47 @@ fn clean_surfaces_a_malformed_clean_section() {
 }
 
 #[test]
+fn clean_rejects_a_sibling_invalid_profile() {
+  // The `[clean]` loader validates EVERY profile, not just the selected one:
+  // a sibling `bad` that escapes the worktree fails `--profile good` too, so
+  // the command path matches `gwm config validate` / doctor (#324 review).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[clean.profiles.good]\ndirs = [\"target\"]\n[clean.profiles.bad]\ndirs = [\"..\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "good"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains(".."));
+}
+
+#[test]
+fn exec_rejects_a_sibling_invalid_profile() {
+  // Same for `[exec]`: a sibling `bad` with an empty command fails
+  // `--profile good`.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[exec.profiles.good]\ncommand = [\"true\"]\n[exec.profiles.bad]\ncommand = []\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "good"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("empty `command`"));
+}
+
+#[test]
 fn clean_profile_with_an_unsafe_dir_exits_one() {
   // A `dirs` entry that could escape the worktree (here `..`) is refused at
   // resolution, before any filesystem scan — exit 1, nothing walked.
