@@ -310,6 +310,8 @@ fn a_config_with_every_frozen_section_round_trips() {
 [pr_template]
 [aliases]
 [gitmoji]
+[exec]
+[clean]
 ";
   let cfg: gwm::config::Config = toml::from_str(toml).expect("frozen sections must parse");
   // Array-of-table and list sections default to empty without a block.

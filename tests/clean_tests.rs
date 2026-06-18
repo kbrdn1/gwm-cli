@@ -5,7 +5,11 @@
 //! are summed from the logical length of regular files written by the test,
 //! which is deterministic across filesystems (CLAUDE.md env-independence).
 
-use gwm::clean::{default_patterns, delete_reclaim, format_report, human_size, scan_worktree, WorktreeReclaim};
+use gwm::clean::{
+  default_patterns, delete_reclaim, format_report, human_size, resolve_clean_dirs, scan_worktree, WorktreeReclaim,
+};
+use gwm::config::{CleanConfig, CleanProfile};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use tempfile::TempDir;
@@ -15,6 +19,20 @@ fn make_artifact(root: &Path, rel: &str, bytes: usize) {
   let d = root.join(rel);
   fs::create_dir_all(&d).unwrap();
   fs::write(d.join("blob.bin"), vec![0u8; bytes]).unwrap();
+}
+
+/// Build a [`CleanConfig`] with the given `[clean.profiles.*]` entries.
+fn clean_cfg(profiles: &[(&str, &[&str])]) -> CleanConfig {
+  let mut map = BTreeMap::new();
+  for (name, dirs) in profiles {
+    map.insert(
+      (*name).to_string(),
+      CleanProfile {
+        dirs: dirs.iter().map(|s| s.to_string()).collect(),
+      },
+    );
+  }
+  CleanConfig { profiles: map }
 }
 
 #[test]
@@ -164,4 +182,51 @@ fn format_report_lists_each_worktree_and_a_grand_total() {
   assert!(report.contains("1.0 MiB"), "report should render human sizes");
   // Grand total of reclaimable space across all worktrees.
   assert!(report.contains("1.0 MiB"), "report should carry a grand total");
+}
+
+// --- profile resolution (issue #324) ----------------------------------------
+
+#[test]
+fn resolve_dirs_falls_back_to_builtins_without_profile_or_default() {
+  // No `--profile` and no `[clean.profiles.default]` ⇒ the built-in set.
+  let cfg = clean_cfg(&[]);
+  let dirs = resolve_clean_dirs(None, &cfg).expect("builtin fallback");
+  assert_eq!(dirs, default_patterns());
+}
+
+#[test]
+fn resolve_dirs_uses_the_default_profile_when_present() {
+  // `gwm clean` without `--profile` prefers `[clean.profiles.default]`.
+  let cfg = clean_cfg(&[("default", &["target", "node_modules", "coverage", ".turbo"])]);
+  let dirs = resolve_clean_dirs(None, &cfg).expect("default profile");
+  assert_eq!(dirs, vec!["target", "node_modules", "coverage", ".turbo"]);
+  assert_ne!(dirs, default_patterns(), "the default profile overrides the built-ins");
+}
+
+#[test]
+fn resolve_dirs_uses_a_named_profile() {
+  let cfg = clean_cfg(&[("deep", &["target", ".cache", ".venv"])]);
+  let dirs = resolve_clean_dirs(Some("deep"), &cfg).expect("named profile");
+  assert_eq!(dirs, vec!["target", ".cache", ".venv"]);
+}
+
+#[test]
+fn resolve_dirs_named_profile_is_a_complete_set_not_additive() {
+  // A profile's `dirs` REPLACES the built-ins — `build`/`dist` are absent
+  // from the resolved set unless the profile lists them.
+  let cfg = clean_cfg(&[("rust", &["target"])]);
+  let dirs = resolve_clean_dirs(Some("rust"), &cfg).expect("named profile");
+  assert_eq!(dirs, vec!["target"]);
+  assert!(!dirs.contains(&"node_modules".to_string()), "built-ins are not added");
+  assert!(!dirs.contains(&"build".to_string()), "built-ins are not added");
+}
+
+#[test]
+fn resolve_dirs_rejects_an_unknown_profile() {
+  let cfg = clean_cfg(&[("deep", &["target"])]);
+  let err = resolve_clean_dirs(Some("nope"), &cfg).expect_err("unknown profile must error");
+  assert!(
+    err.to_string().contains("nope") && err.to_string().contains("profile"),
+    "error should name the missing profile: {err}"
+  );
 }

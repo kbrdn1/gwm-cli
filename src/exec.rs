@@ -8,6 +8,8 @@
 //! — deterministic, readable output for the MVP; parallel fan-out is a
 //! deliberate follow-up.
 
+use crate::config::ExecConfig;
+use crate::error::{GwmError, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,6 +31,40 @@ pub enum ExecStatus {
 pub struct ExecOutcome {
   pub name: String,
   pub status: ExecStatus,
+}
+
+/// Resolve the argv `gwm exec` should run, from exactly one source: an
+/// inline `-- <cmd>` or a `--profile <name>` (issue #324).
+///
+/// The two are mutually exclusive and exactly one is required:
+/// - both given → error (the profile *carries* the command);
+/// - a `--profile` naming an entry absent from `[exec.profiles]` → error;
+/// - a profile whose `command` is empty → error (degenerate config);
+/// - neither given → error (nothing to run).
+///
+/// Every error path is a user-facing [`GwmError`] (exit 1), never a panic.
+pub fn resolve_exec_command(profile: Option<&str>, inline: &[String], cfg: &ExecConfig) -> Result<Vec<String>> {
+  match (profile, inline.is_empty()) {
+    (Some(_), false) => Err(GwmError::Other(
+      "exec: --profile and an inline `-- <cmd>` are mutually exclusive — the profile carries the command".into(),
+    )),
+    (Some(name), true) => {
+      let p = cfg
+        .profiles
+        .get(name)
+        .ok_or_else(|| GwmError::Config(format!("exec: no profile named `{name}` in [exec.profiles]")))?;
+      if p.command.is_empty() {
+        return Err(GwmError::Config(format!(
+          "exec: profile `{name}` has an empty `command` — give it an argv array like `command = [\"cargo\", \"test\"]`"
+        )));
+      }
+      Ok(p.command.clone())
+    }
+    (None, false) => Ok(inline.to_vec()),
+    (None, true) => Err(GwmError::Other(
+      "exec: provide a command after `--` (e.g. `gwm exec -- cargo test`) or pass `--profile <name>`".into(),
+    )),
+  }
 }
 
 /// Run `program args…` with the working directory set to `dir`.

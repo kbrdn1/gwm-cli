@@ -10,7 +10,8 @@
 //! Deliberately **not** journaled into `gwm history` / `gwm undo` (#29): the
 //! artifacts are regenerable, so a resurrection entry would be meaningless.
 
-use crate::error::Result;
+use crate::config::CleanConfig;
+use crate::error::{GwmError, Result};
 use std::path::{Path, PathBuf};
 
 /// One reclaimable artifact directory inside a worktree.
@@ -40,6 +41,33 @@ pub fn default_patterns() -> Vec<String> {
     .iter()
     .map(|s| s.to_string())
     .collect()
+}
+
+/// Resolve the directory set `gwm clean` should scan and reclaim (issue #324).
+///
+/// - `--profile <name>` selects `[clean.profiles.<name>].dirs`, a **complete**
+///   set that replaces the built-ins. A name absent from `[clean.profiles]`
+///   is an error (exit 1).
+/// - **No** `--profile` uses `[clean.profiles.default].dirs` when that profile
+///   exists, else falls back to the built-in [`default_patterns`].
+///
+/// Whatever set is returned, the caller still runs every directory through the
+/// safety gate (git-ignored + no tracked files + skip symlinks) before delete.
+pub fn resolve_clean_dirs(profile: Option<&str>, cfg: &CleanConfig) -> Result<Vec<String>> {
+  match profile {
+    Some(name) => cfg
+      .profiles
+      .get(name)
+      .map(|p| p.dirs.clone())
+      .ok_or_else(|| GwmError::Config(format!("clean: no profile named `{name}` in [clean.profiles]"))),
+    None => Ok(
+      cfg
+        .profiles
+        .get("default")
+        .map(|p| p.dirs.clone())
+        .unwrap_or_else(default_patterns),
+    ),
+  }
 }
 
 /// Sum the logical length of every regular file under `dir`, recursively.

@@ -4648,6 +4648,98 @@ fn exec_exits_nonzero_when_a_worktree_command_fails() {
     .stdout(predicate::str::contains("exit 5"));
 }
 
+/// Append a TOML snippet to the repo's `.gwm.toml` (the writer created by
+/// `repo_with_one_worktree`), so a test can add `[exec.profiles.*]` /
+/// `[clean.profiles.*]` entries on top of the base config.
+fn append_config(repo_root: &Path, snippet: &str) {
+  use std::io::Write;
+  let mut f = std::fs::OpenOptions::new()
+    .append(true)
+    .open(repo_root.join(".gwm.toml"))
+    .unwrap();
+  writeln!(f, "{snippet}").unwrap();
+}
+
+// --- exec/clean named profiles (issue #324) ---------------------------------
+
+#[test]
+fn exec_runs_a_named_profile_command() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[exec.profiles.greet]\ncommand = [\"sh\", \"-c\", \"echo hi > prof_marker.txt\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--profile", "greet"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓"));
+  assert!(
+    wt.join("prof_marker.txt").exists(),
+    "the profile's command must run in the worktree"
+  );
+}
+
+#[test]
+fn exec_profile_and_inline_command_are_mutually_exclusive() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.t]\ncommand = [\"true\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--profile", "t", "--", "echo", "hi"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("mutually exclusive"));
+}
+
+#[test]
+fn exec_unknown_profile_exits_one() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn clean_unknown_profile_exits_one() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn clean_named_profile_scopes_the_reclaim_to_its_dirs() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // `coverage/` is only reclaimable under a profile that lists it; the
+  // built-in set (target/node_modules/dist/build) would ignore it.
+  std::fs::create_dir_all(wt.join("coverage")).unwrap();
+  std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
+  append_config(dir.path(), "[clean.profiles.cov]\ndirs = [\"coverage\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--profile", "cov"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("coverage"));
+}
+
 #[test]
 fn clean_reports_artifacts_without_deleting_by_default() {
   let (dir, _base, wt) = repo_with_one_worktree();

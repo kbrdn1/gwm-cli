@@ -66,6 +66,76 @@ pub struct Config {
   pub issue_template: IssueTemplateConfig,
   #[serde(default)]
   pub pr_template: PrTemplateConfig,
+  /// `[exec]` — named command profiles for `gwm exec --profile <name>`
+  /// (issue #324). Absent block resolves to no profiles, so the inline
+  /// `gwm exec -- <cmd>` surface is unchanged. Frozen for 1.0: a profile's
+  /// `command` is an argv **array** (no shell), diverging from the
+  /// string-shell `command` of `[git_tui]` / `[review]`.
+  #[serde(default)]
+  pub exec: ExecConfig,
+  /// `[clean]` — named directory-set profiles for `gwm clean --profile
+  /// <name>` (issue #324). Absent block resolves to no profiles, so
+  /// `gwm clean` keeps cleaning the built-in `target`/`node_modules`/
+  /// `dist`/`build` set. A profile's `dirs` is a COMPLETE set that
+  /// replaces the built-ins, never adds to them.
+  #[serde(default)]
+  pub clean: CleanConfig,
+}
+
+/// `[exec]` — named command profiles for `gwm exec` (issue #324).
+///
+/// Each `[exec.profiles.<name>]` carries the argv to run via
+/// `gwm exec --profile <name>`. The block is opt-in: an absent `[exec]`
+/// resolves to an empty profile map, leaving the inline `gwm exec -- <cmd>`
+/// surface untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecConfig {
+  /// `[exec.profiles.<name>]` sub-tables. `BTreeMap` for a deterministic
+  /// ordering when surfaced.
+  #[serde(default)]
+  pub profiles: BTreeMap<String, ExecProfile>,
+}
+
+/// One `[exec.profiles.<name>]` entry.
+///
+/// `command` is an argv **array** (`["cargo", "test"]`) executed with **no
+/// shell** — the same contract as the inline `gwm exec -- <cmd>`. This
+/// diverges from `[git_tui]` / `[review]`, whose `command` is a single
+/// shell line; the divergence is intentional and frozen for 1.0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecProfile {
+  /// argv to run in each worktree. Required — a profile with no command is
+  /// a config error at load time (`deny_unknown_fields` + no `serde(default)`).
+  pub command: Vec<String>,
+}
+
+/// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).
+///
+/// Opt-in like [`ExecConfig`]: an absent `[clean]` resolves to an empty
+/// profile map, so `gwm clean` keeps using the built-in directory set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanConfig {
+  /// `[clean.profiles.<name>]` sub-tables. The `default` profile, when
+  /// present, is what `gwm clean` uses **without** `--profile`.
+  #[serde(default)]
+  pub profiles: BTreeMap<String, CleanProfile>,
+}
+
+/// One `[clean.profiles.<name>]` entry.
+///
+/// `dirs` is a **complete** directory set that **replaces** the built-in
+/// `target`/`node_modules`/`dist`/`build` — it never adds to them. The
+/// safety gate (git-ignored + no tracked files + skip symlinks) still
+/// applies to every listed directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanProfile {
+  /// Complete set of directory names to reclaim. Required — a profile with
+  /// no `dirs` is a config error at load time.
+  pub dirs: Vec<String>,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);

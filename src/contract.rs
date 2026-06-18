@@ -79,4 +79,6 @@ pub const CONFIG_SECTIONS: &[&str] = &[
   "gitmoji",
   "issue_template",
   "pr_template",
+  "exec",
+  "clean",
 ];
