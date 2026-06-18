@@ -4736,6 +4736,38 @@ fn exec_jobs_preserves_raw_binary_output() {
 }
 
 #[test]
+fn exec_jobs_flag_skips_config_when_inline() {
+  // Inline + `--jobs`: the flag is authoritative and the command is on the
+  // CLI, so `[exec]` is never read — a malformed sibling profile can't block
+  // `gwm exec --jobs N -- <cmd>` (#324 review).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.bad]\ncommand = []\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "2", "--", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_inline_jobs_default_tolerates_a_semantic_sibling_profile() {
+  // Inline + no `--jobs`: the `[exec] jobs` default IS read, but sibling
+  // profiles are NOT semantically validated (inline uses none of them), so a
+  // `command = []` sibling doesn't block the inline run.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec]\njobs = 1\n[exec.profiles.bad]\ncommand = []\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
 fn exec_jobs_flag_parses_and_propagates_failure() {
   // The parallel path propagates a non-zero rollup just like sequential.
   let (dir, _base, _wt) = repo_with_one_worktree();

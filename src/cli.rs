@@ -1073,12 +1073,24 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, comm
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
 
-  // Load the `[exec]` section (tolerant of unrelated config errors, strict on
-  // `[exec]` itself — issue #324) for BOTH the `--profile` lookup AND the
-  // `jobs` default. The inline `gwm exec -- <cmd>` surface stays effectively
-  // unchanged: with no `[exec]` block `jobs` resolves to 1 (sequential, live
-  // stdio), exactly the pre-#324 behaviour.
-  let exec_cfg = Config::load_exec_config(workdir)?;
+  // Read `[exec]` from disk only when a value from it is actually needed, and
+  // only as strictly as that need requires (issue #324):
+  //   - `--profile <name>` → full `load_exec_config` (resolve the command +
+  //     validate every profile, matching `gwm config validate` / doctor).
+  //   - inline + no `--jobs` → only the `[exec] jobs` default is needed; read
+  //     it WITHOUT validating sibling profiles (inline uses none of them).
+  //   - inline + `--jobs` → the flag is authoritative and the command is on
+  //     the CLI, so nothing from `[exec]` is needed — don't touch config.
+  let exec_cfg = if profile.is_some() {
+    Config::load_exec_config(workdir)?
+  } else if jobs.is_none() {
+    crate::config::ExecConfig {
+      jobs: Config::load_exec_jobs_default(workdir)?,
+      ..Default::default()
+    }
+  } else {
+    crate::config::ExecConfig::default()
+  };
 
   // Resolve the argv up-front, from exactly one of `--profile` / inline
   // `-- <cmd>`. A usage error (both, neither, or an unknown profile) must

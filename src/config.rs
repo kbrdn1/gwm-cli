@@ -1231,6 +1231,16 @@ impl Config {
     Ok(cfg)
   }
 
+  /// Read ONLY the `[exec] jobs` default (issue #324), without validating the
+  /// `[exec.profiles.*]` semantics. Used by inline `gwm exec -- <cmd>` (no
+  /// `--profile`, no `--jobs`) which needs the parallelism default but uses no
+  /// profile — so a sibling profile's *semantic* issue must not block it. A
+  /// shape error in `[exec]` (unknown field, wrong type) still surfaces.
+  pub fn load_exec_jobs_default(repo_root: &Path) -> Result<Option<u32>> {
+    let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
+    Ok(cfg.jobs)
+  }
+
   /// Load just the `[clean]` section (layered global → repo), tolerant of
   /// errors elsewhere but strict on `[clean]` itself. Used by `gwm clean` so
   /// an unrelated `.gwm.toml` problem doesn't block the built-in clean, while
