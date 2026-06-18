@@ -945,10 +945,16 @@ pub fn run(cli: Cli) -> Result<()> {
   };
 
   // `--workspace` is global (clap accepts it everywhere) but only `list`,
-  // `create` and the bare TUI implement it. Reject it on any other subcommand
-  // rather than silently ignoring it and acting on the current single repo — a
-  // wrong-target footgun for destructive commands (Codex review #303 P2).
-  if cli.workspace.is_some() && !matches!(cmd, Command::List { .. } | Command::Create { .. }) {
+  // `create`, `exec`, `clean` and the bare TUI implement it. Reject it on any
+  // other subcommand rather than silently ignoring it and acting on the current
+  // single repo — a wrong-target footgun for destructive commands (Codex review
+  // #303 P2). `exec` / `clean` fan out across child repos (issue #326).
+  if cli.workspace.is_some()
+    && !matches!(
+      cmd,
+      Command::List { .. } | Command::Create { .. } | Command::Exec { .. } | Command::Clean { .. }
+    )
+  {
     return Err(GwmError::WorkspaceUnsupportedCommand);
   }
 
@@ -1048,8 +1054,14 @@ pub fn run(cli: Cli) -> Result<()> {
       profile,
       jobs,
       command,
-    } => cmd_exec(slugs, profile, jobs, command),
-    Command::Clean { slugs, profile, yes } => cmd_clean(slugs, profile, yes),
+    } => match cli.workspace {
+      Some(root) => cmd_exec_workspace(&root, slugs, profile, jobs, command),
+      None => cmd_exec(slugs, profile, jobs, command),
+    },
+    Command::Clean { slugs, profile, yes } => match cli.workspace {
+      Some(root) => cmd_clean_workspace(&root, slugs, profile, yes),
+      None => cmd_clean(slugs, profile, yes),
+    },
   }
 }
 
@@ -1071,20 +1083,148 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// aggregate code (non-zero if any worktree failed).
 fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+  let (argv, job_count) = exec_plan(&repo, profile.as_deref(), jobs, &command)?;
+  let targets = resolve_targets(&repo, &slugs)?;
+  if targets.is_empty() {
+    println!("no worktrees to run in");
+    return Ok(());
+  }
+  let outcomes = exec_run(&targets, &argv, job_count, None)?;
+  print_exec_rollup_and_exit(&outcomes)
+}
 
-  // Read `[exec]` from disk only when a value from it is actually needed, and
-  // only as strictly as that need requires (issue #324). The workdir lookup
-  // lives INSIDE the config-reading branches: a bare repo with linked
-  // worktrees has no workdir, but inline `gwm exec` must still run there (it
-  // enumerates worktrees via `worktree::list`, not `.gwm.toml`).
-  //   - `--profile <name>` → full `load_exec_config` (resolve the command +
-  //     validate every profile, matching `gwm config validate` / doctor);
-  //     needs a workdir to locate `.gwm.toml`.
-  //   - inline + no `--jobs` → only the `[exec] jobs` default is needed; read
-  //     it WITHOUT validating sibling profiles. A bare repo (no workdir) skips
-  //     the repo `.gwm.toml` but still honours the GLOBAL `[exec] jobs`.
-  //   - inline + `--jobs` → the flag is authoritative and the command is on
-  //     the CLI, so nothing from `[exec]` is needed — don't touch config.
+/// `gwm exec --workspace <root> ...` — fan out exec across the workspace's
+/// child repos (issue #326). Every repo's argv + parallelism + targets are
+/// resolved UPFRONT, so a missing `--profile` (or a config error) in any repo
+/// surfaces before a single command runs. Repos then run SEQUENTIALLY
+/// (parallelism stays bounded WITHIN a repo to avoid cross-repo output
+/// interleaving), under a `══ <repo>` header, with a `<repo>/<worktree>`
+/// repo-tagged rollup and an aggregated exit code.
+fn cmd_exec_workspace(
+  root: &Path,
+  slugs: Vec<String>,
+  profile: Option<String>,
+  jobs: Option<u32>,
+  command: Vec<String>,
+) -> Result<()> {
+  let opened = open_workspace_repos(root)?;
+  let repos: Vec<&Repository> = opened.iter().map(|(_, r)| r).collect();
+  // Resolve targets (ambiguity/typo errors surface here) AND each repo's argv +
+  // jobs UPFRONT — before a single command runs.
+  let targets_per_repo = resolve_workspace_targets(&repos, &slugs)?;
+  // Resolve config/argv ONLY for repos that have targets. A repo a scoped slug
+  // doesn't touch contributes nothing, so its `[exec]` / `--profile` must not
+  // be resolved — an unrelated repo lacking the profile or with a bad `[exec]`
+  // can't break a run scoped elsewhere (#326 review).
+  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, Vec<String>, usize)> = Vec::new();
+  for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
+    if targets.is_empty() {
+      continue;
+    }
+    let (argv, job_count) = exec_plan(repo, profile.as_deref(), jobs, &command)?;
+    plans.push((name, targets, argv, job_count));
+  }
+
+  if plans.is_empty() {
+    // Nothing participates (every repo is main-only, or the slug scoped them all
+    // out). No run follows, so it's safe to validate the command/profile against
+    // the repos — a usage error (no command) or a typo'd `--profile` must still
+    // surface instead of a silent exit 0. Accept if ANY repo resolves.
+    let opened_repos = opened.iter().map(|(_, r)| r);
+    if let Some(err) = first_exec_plan_error(opened_repos, profile.as_deref(), jobs, &command) {
+      return Err(err);
+    }
+    println!("no worktrees to run in");
+    return Ok(());
+  }
+
+  // Run sequentially per repo, aggregating the repo-tagged outcomes.
+  let mut all = Vec::new();
+  for (name, targets, argv, job_count) in &plans {
+    println!("\n══ {}", name);
+    all.extend(exec_run(targets, argv, *job_count, Some(name))?);
+  }
+  print_exec_rollup_and_exit(&all)
+}
+
+/// Validate the exec command/profile when NO workspace repo has targets:
+/// returns `None` if [`exec_plan`] resolves against any repo (the source is
+/// usable — there's just nothing to run), or the last error if it fails for
+/// every repo (a usage error / unknown profile that must surface).
+fn first_exec_plan_error<'a>(
+  repos: impl Iterator<Item = &'a Repository>,
+  profile: Option<&str>,
+  jobs: Option<u32>,
+  command: &[String],
+) -> Option<GwmError> {
+  let mut last = None;
+  for repo in repos {
+    match exec_plan(repo, profile, jobs, command) {
+      Ok(_) => return None,
+      Err(e) => last = Some(e),
+    }
+  }
+  last
+}
+
+/// Discover the workspace under `root` and open every child repo (erroring on
+/// an empty workspace or an unopenable child — before any command runs).
+/// Returns `(repo_name, Repository)` pairs in `discover` order.
+fn open_workspace_repos(root: &Path) -> Result<Vec<(String, Repository)>> {
+  // `workspace::discover` silently skips a child whose `Repository::open`
+  // fails (fine for `list` / `create`), but `exec` / `clean` are destructive
+  // and contract for upfront resolution: a child that LOOKS like a repo (has a
+  // `.git`) but won't open must fail the whole fan-out before any side effect,
+  // not be quietly dropped while the valid repos run (#326 review).
+  //
+  // Use `try_exists` and propagate read_dir / stat errors (e.g. a `.git` that
+  // can't be statted because of permissions) rather than masking them as
+  // "absent" — an UNREADABLE child must surface too, not be skipped (review).
+  for entry in std::fs::read_dir(root)? {
+    let path = entry?.path();
+    if path.is_dir() && path.join(".git").try_exists()? && Repository::open(&path).is_err() {
+      let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+      return Err(GwmError::Other(format!(
+        "workspace: child repo `{name}` has a `.git` but cannot be opened (corrupt or unreadable)"
+      )));
+    }
+  }
+
+  let ws = workspace::discover(root)?;
+  if ws.is_empty() {
+    return Err(GwmError::EmptyWorkspace {
+      root: root.display().to_string(),
+    });
+  }
+  ws.repos
+    .iter()
+    .map(|r| {
+      Repository::open(&r.path)
+        .map(|repo| (r.name.clone(), repo))
+        .map_err(|e| GwmError::Other(format!("workspace: cannot open repo `{}`: {e}", r.name)))
+    })
+    .collect()
+}
+
+/// Resolve the argv to run and the parallelism for `gwm exec` against `repo`
+/// (config load + profile/inline resolution + jobs precedence). No side
+/// effects — shared by the single-repo and workspace paths so every repo can
+/// be resolved upfront. See the precedence/config-loading notes inline.
+fn exec_plan(
+  repo: &Repository,
+  profile: Option<&str>,
+  jobs: Option<u32>,
+  command: &[String],
+) -> Result<(Vec<String>, usize)> {
+  // Read `[exec]` only as strictly as the invocation needs (issue #324):
+  //   - `--profile` → full `load_exec_config` (resolve + validate every
+  //     profile); needs a workdir to locate `.gwm.toml`.
+  //   - inline + no `--jobs` → only the `[exec] jobs` default; a bare repo (no
+  //     workdir) skips the repo file but still honours the GLOBAL default.
+  //   - inline + `--jobs` → the flag wins and the command is inline → no config.
   let exec_cfg = if profile.is_some() {
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
     Config::load_exec_config(workdir)?
@@ -1096,43 +1236,49 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, comm
   } else {
     crate::config::ExecConfig::default()
   };
+  let argv = exec::resolve_exec_command(profile, command, &exec_cfg)?;
+  let job_count = exec::resolve_jobs(jobs, profile, &exec_cfg);
+  Ok((argv, job_count))
+}
 
-  // Resolve the argv up-front, from exactly one of `--profile` / inline
-  // `-- <cmd>`. A usage error (both, neither, or an unknown profile) must
-  // surface before we touch any worktree, hence before target discovery.
-  let argv = exec::resolve_exec_command(profile.as_deref(), &command, &exec_cfg)?;
-  // Precedence: `--jobs` > `[exec.profiles.<name>].jobs` > `[exec] jobs` > 1.
-  let job_count = exec::resolve_jobs(jobs, profile.as_deref(), &exec_cfg);
-
-  let targets = resolve_targets(&repo, &slugs)?;
-  if targets.is_empty() {
-    println!("no worktrees to run in");
-    return Ok(());
-  }
-
-  // `resolve_exec_command` guarantees a non-empty argv, but split defensively
-  // rather than indexing — a panic here would be on a user-facing path.
+/// Run `argv` across one repo's `targets`: sequential (live inherited stdio)
+/// when `job_count <= 1`, else bounded-parallel with per-worktree captured
+/// blocks. `tag` (the workspace repo name) prefixes each outcome's display
+/// name with `<repo>/` for the aggregated rollup; the per-worktree header
+/// stays plain (it sits under the `══ <repo>` header). Returns the outcomes.
+fn exec_run(
+  targets: &[worktree::WorktreeInfo],
+  argv: &[String],
+  job_count: usize,
+  tag: Option<&str>,
+) -> Result<Vec<exec::ExecOutcome>> {
+  // `exec_plan` (via `resolve_exec_command`) guarantees a non-empty argv, but
+  // split defensively rather than indexing — a panic would be user-facing.
   let (program, args) = argv
     .split_first()
     .ok_or_else(|| GwmError::Other("exec: no command resolved".into()))?;
   let args = args.to_vec();
+  let display = |name: &str| match tag {
+    Some(t) => format!("{t}/{name}"),
+    None => name.to_string(),
+  };
 
   let mut outcomes = Vec::with_capacity(targets.len());
   if job_count <= 1 {
     // Sequential: inherit the parent's stdio so output streams live, in order.
-    for w in &targets {
+    for w in targets {
       println!("\n━━ {} ({})", w.name, w.path.display());
       let status = exec::exec_in_dir(&w.path, program, &args);
       outcomes.push(exec::ExecOutcome {
-        name: w.name.clone(),
+        name: display(&w.name),
         status,
       });
     }
   } else {
     // Parallel (bounded by `job_count`): capture each worktree's output so
     // concurrent runs don't interleave, then print one block per worktree in
-    // worktree order once the fan-out completes. Write the captured bytes
-    // RAW (not via `String::from_utf8_lossy`) so binary / non-UTF-8 output is
+    // worktree order once the fan-out completes. Write the captured bytes RAW
+    // (not via `String::from_utf8_lossy`) so binary / non-UTF-8 output is
     // re-emitted byte-for-byte, matching the sequential path's inherited stdio.
     use std::io::Write;
     let items: Vec<(String, std::path::PathBuf)> = targets.iter().map(|w| (w.name.clone(), w.path.clone())).collect();
@@ -1144,21 +1290,75 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, comm
       // the whole fan-out, and the rollup/exit code still report the result.
       let _ = writeln!(lock, "\n━━ {} ({})", name, path.display());
       let _ = lock.write_all(&output);
-      outcomes.push(outcome);
+      outcomes.push(exec::ExecOutcome {
+        name: display(name),
+        status: outcome.status,
+      });
     }
     let _ = lock.flush();
   }
+  Ok(outcomes)
+}
 
+/// Print the `✓ / ✗` rollup for the collected outcomes and exit with the
+/// aggregate code (non-zero if any worktree, in any repo, failed). Shared by
+/// the single-repo and workspace exec paths.
+fn print_exec_rollup_and_exit(outcomes: &[exec::ExecOutcome]) -> Result<()> {
   println!("\nrollup:");
-  for o in &outcomes {
+  for o in outcomes {
     println!("  {}", exec::format_outcome(o));
   }
-
-  let code = exec::rollup_exit_code(&outcomes);
+  let code = exec::rollup_exit_code(outcomes);
   if code != 0 {
     std::process::exit(code);
   }
   Ok(())
+}
+
+/// Resolve `slugs` against the workspace's opened `repos` for a fan-out,
+/// returning the per-repo target lists in `repos` order.
+///
+/// Empty slugs ⇒ all non-main worktrees per repo. With slugs, a slug naming a
+/// worktree in one child repo is naturally absent from the others, so a
+/// per-repo `WorktreeNotFound` just contributes nothing THERE — but the error
+/// distinctions the single-repo path makes are preserved: an **ambiguous**
+/// match in any repo surfaces (propagated), and a slug that matches in **no**
+/// repo at all is an error (a typo must not silently run/clean nothing).
+fn resolve_workspace_targets(repos: &[&Repository], slugs: &[String]) -> Result<Vec<Vec<worktree::WorktreeInfo>>> {
+  if slugs.is_empty() {
+    // Propagate a per-repo listing failure (corrupt / unreadable worktree
+    // metadata) rather than silently skipping that repo — the single-repo path
+    // surfaces it too, and the upfront-resolution contract must not let a
+    // destructive `clean --yes` proceed in the other repos while one is broken.
+    return repos
+      .iter()
+      .map(|repo| Ok(worktree::list(repo)?.into_iter().filter(|w| !w.is_main).collect()))
+      .collect();
+  }
+
+  let mut per_repo: Vec<Vec<worktree::WorktreeInfo>> = (0..repos.len()).map(|_| Vec::new()).collect();
+  let mut matched = vec![false; slugs.len()];
+  for (ri, repo) in repos.iter().enumerate() {
+    for (si, slug) in slugs.iter().enumerate() {
+      match worktree::find_fuzzy(repo, slug) {
+        Ok(wt) => {
+          per_repo[ri].push(wt);
+          matched[si] = true;
+        }
+        // Absent from THIS repo is normal in a fan-out — skip it.
+        Err(GwmError::WorktreeNotFound(_)) => {}
+        // Ambiguity (or any other resolution failure) must surface.
+        Err(e) => return Err(e),
+      }
+    }
+  }
+  if let Some(si) = matched.iter().position(|m| !m) {
+    return Err(GwmError::WorktreeNotFound(format!(
+      "{} (no worktree matches it in any workspace repo)",
+      slugs[si]
+    )));
+  }
+  Ok(per_repo)
 }
 
 /// `gwm clean [<slug>...] [--profile <name>] [--yes]` (issues #313, #324).
@@ -1167,53 +1367,131 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, comm
 /// `default` profile, else the built-ins (see [`clean::resolve_clean_dirs`]).
 fn cmd_clean(slugs: Vec<String>, profile: Option<String>, yes: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-
-  // Resolve the directory set up-front so an unknown `--profile` errors
-  // (exit 1) before target discovery.
-  //
-  // The profile blocks are opt-in, so an UNRELATED config error (a `[tui.keys]`
-  // typo, a stray key, another section) must not block `gwm clean`. We load
-  // ONLY the `[clean]` section, tolerant of the rest — but strict on `[clean]`
-  // itself: a malformed `[clean.profiles.default]` still errors rather than
-  // silently reverting to the built-in set before a destructive `--yes`.
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-  let clean_cfg = Config::load_clean_config(workdir)?;
-  let patterns = clean::resolve_clean_dirs(profile.as_deref(), &clean_cfg)?;
-
   let targets = resolve_targets(&repo, &slugs)?;
+  // Scan even when empty so an unknown `--profile` / malformed `[clean]` errors
+  // before the "no worktrees" message (it loads/validates the dir set).
+  let (reclaims, skipped) = clean_scan_repo(&repo, &targets, profile.as_deref(), None)?;
   if targets.is_empty() {
     println!("no worktrees to clean");
     return Ok(());
   }
+  clean_finish(&reclaims, &skipped, yes)
+}
+
+/// `gwm clean --workspace <root> ...` — fan out the reclaim across the
+/// workspace's child repos (issue #326). Every repo is opened, its targets
+/// resolved (ambiguity/typo errors surface), and its worktrees scanned UPFRONT
+/// (so a missing `--profile` or a malformed `[clean]` in any repo errors before
+/// a single `remove_dir_all`), then one aggregated `<repo>/<worktree>`-tagged
+/// report drives a single `--yes` decision; a delete failure in one worktree is
+/// reported but does not abort the rest (it surfaces in the exit code).
+fn cmd_clean_workspace(root: &Path, slugs: Vec<String>, profile: Option<String>, yes: bool) -> Result<()> {
+  let opened = open_workspace_repos(root)?;
+  let repos: Vec<&Repository> = opened.iter().map(|(_, r)| r).collect();
+  let targets_per_repo = resolve_workspace_targets(&repos, &slugs)?;
+
+  // Scan every repo with targets upfront — resolution (config/profile) errors
+  // surface here, before any deletion. A repo a scoped slug doesn't touch
+  // contributes nothing, so its `[clean]` / `--profile` is NOT resolved (an
+  // unrelated repo's bad config can't break a run scoped elsewhere — #326
+  // review).
+  let mut reclaims: Vec<clean::WorktreeReclaim> = Vec::new();
+  let mut skipped: Vec<(String, String)> = Vec::new();
+  let mut participated = false;
+  for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
+    if targets.is_empty() {
+      continue;
+    }
+    participated = true;
+    let (mut rec, mut skip) = clean_scan_repo(repo, targets, profile.as_deref(), Some(name))?;
+    reclaims.append(&mut rec);
+    skipped.append(&mut skip);
+  }
+
+  if !participated {
+    // Nothing participates — no deletion follows, so validate the `--profile`
+    // (a typo / malformed `[clean]`) against the repos instead of silently
+    // reporting "nothing to reclaim". Accept if it resolves against any repo.
+    let mut last_err = None;
+    let mut valid = false;
+    for (_, repo) in &opened {
+      match clean_scan_repo(repo, &[], profile.as_deref(), None) {
+        Ok(_) => {
+          valid = true;
+          break;
+        }
+        Err(e) => last_err = Some(e),
+      }
+    }
+    if !valid {
+      return Err(last_err.expect("open_workspace_repos guarantees a non-empty workspace"));
+    }
+  }
+  clean_finish(&reclaims, &skipped, yes)
+}
+
+/// One repo's clean scan: the per-worktree reclaims plus the skipped
+/// `(display-name, rel-dir)` pairs (not git-ignored / holds tracked files).
+type CleanScan = (Vec<clean::WorktreeReclaim>, Vec<(String, String)>);
+
+/// Scan `targets` (a repo's worktrees, resolved by the caller) for reclaimable
+/// artifacts, classifying each through the safety gate. The dir-set resolution
+/// (config load + `--profile`) happens here, so an error surfaces before the
+/// caller deletes anything. `tag` (the workspace repo name) prefixes worktree
+/// display names with `<repo>/` for the aggregated report. Returns the
+/// per-worktree reclaims and the skipped `(name, rel)`s.
+fn clean_scan_repo(
+  repo: &Repository,
+  targets: &[worktree::WorktreeInfo],
+  profile: Option<&str>,
+  tag: Option<&str>,
+) -> Result<CleanScan> {
+  // Load ONLY `[clean]` (tolerant of unrelated config errors, strict on
+  // `[clean]` itself — issue #324); `None` workdir (bare repo) reads the global
+  // section and falls back to the built-in set.
+  let clean_cfg = Config::load_clean_config(repo.workdir())?;
+  let patterns = clean::resolve_clean_dirs(profile, &clean_cfg)?;
+
+  let display = |name: &str| match tag {
+    Some(t) => format!("{t}/{name}"),
+    None => name.to_string(),
+  };
 
   // Classify every found artifact through the SAME safety gate the deletion
   // uses, BEFORE reporting — so the dry-run preview's total and promise match
-  // what `--yes` would actually remove. A default name like `dist/` / `build/`
-  // that is not git-ignored or holds tracked files is unrecoverable (clean is
-  // not journaled), so it is reported as skipped rather than counted.
-  let mut reclaims: Vec<clean::WorktreeReclaim> = Vec::with_capacity(targets.len());
-  let mut skipped: Vec<(String, String)> = Vec::new();
-  for w in &targets {
+  // what `--yes` would actually remove. A name that is not git-ignored or holds
+  // tracked files is unrecoverable (clean is not journaled), so it is reported
+  // as skipped rather than counted.
+  let mut reclaims = Vec::with_capacity(targets.len());
+  let mut skipped = Vec::new();
+  for w in targets {
     let scan = clean::scan_worktree(&w.name, &w.path, &patterns);
     let mut deletable = Vec::new();
     for a in scan.artifacts {
       if dir_is_safe_to_clean(&w.path, &a.rel) {
         deletable.push(a);
       } else {
-        skipped.push((w.name.clone(), a.rel));
+        skipped.push((display(&w.name), a.rel));
       }
     }
     let total_bytes = deletable.iter().map(|a| a.bytes).sum();
     reclaims.push(clean::WorktreeReclaim {
-      name: w.name.clone(),
+      name: display(&w.name),
       path: w.path.clone(),
       artifacts: deletable,
       total_bytes,
     });
   }
+  Ok((reclaims, skipped))
+}
 
-  print!("{}", clean::format_report(&reclaims));
-  for (name, rel) in &skipped {
+/// Render the aggregated reclaim report and, when `yes`, delete the artifacts.
+/// Shared by the single-repo and workspace clean paths. A delete failure in
+/// one worktree is reported and counted but does not abort the rest; if any
+/// failed, the process exits non-zero.
+fn clean_finish(reclaims: &[clean::WorktreeReclaim], skipped: &[(String, String)], yes: bool) -> Result<()> {
+  print!("{}", clean::format_report(reclaims));
+  for (name, rel) in skipped {
     println!("skipped {}/{}: not git-ignored, or holds tracked files", name, rel);
   }
 
@@ -1228,10 +1506,20 @@ fn cmd_clean(slugs: Vec<String>, profile: Option<String>, yes: bool) -> Result<(
   }
 
   let mut freed = 0u64;
-  for r in &reclaims {
-    freed = freed.saturating_add(clean::delete_reclaim(r)?);
+  let mut failures = 0usize;
+  for r in reclaims {
+    match clean::delete_reclaim(r) {
+      Ok(b) => freed = freed.saturating_add(b),
+      Err(e) => {
+        eprintln!("failed to reclaim {}: {e}", r.name);
+        failures += 1;
+      }
+    }
   }
   println!("reclaimed {}", clean::human_size(freed));
+  if failures > 0 {
+    std::process::exit(1);
+  }
   Ok(())
 }
 

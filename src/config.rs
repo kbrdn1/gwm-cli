@@ -1282,8 +1282,12 @@ impl Config {
   /// As with [`Self::load_exec_config`], EVERY `[clean.profiles.*]` is
   /// validated — a sibling profile that escapes the worktree can't slip
   /// through `gwm clean --profile good` while `gwm config validate` rejects it.
-  pub fn load_clean_config(repo_root: &Path) -> Result<CleanConfig> {
-    let cfg: CleanConfig = load_config_section(Some(repo_root), "clean")?;
+  ///
+  /// `repo_root` is `None` for a bare repo (no workdir): the repo `.gwm.toml`
+  /// is skipped but the GLOBAL `[clean]` section still applies (the built-ins
+  /// are used when no `default` profile is defined).
+  pub fn load_clean_config(repo_root: Option<&Path>) -> Result<CleanConfig> {
+    let cfg: CleanConfig = load_config_section(repo_root, "clean")?;
     for (name, p) in &cfg.profiles {
       crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
     }

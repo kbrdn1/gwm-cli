@@ -5174,40 +5174,317 @@ fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
   );
 }
 
-// regression: the v1.0 surface decision for `gwm exec` / `gwm clean` (issue
-// #319) is that workspace fan-out is a *deferred, additive* feature — until it
-// lands, `--workspace` against either command is refused, not silently run
-// against the single repo. The refusal is part of the frozen 1.0 contract:
-// the exit code is under the SemVer pledge (see docs/6.development/stability),
-// so a future change that makes either command silently accept `--workspace`
-// (or change its exit code) must break loudly here. Adding real fan-out later
-// is additive — a refusal turning into a success is not a breaking change.
+/// Run `git <args>` in `dir`, asserting success — fixture setup helper.
+fn git_at(dir: &Path, args: &[&str]) {
+  // Pin signing off so a developer with `commit.gpgsign=true` (or a missing
+  // signing key) in their ambient git config doesn't make these fixtures fail
+  // before `gwm` is even exercised (#326 review).
+  let ok = std::process::Command::new("git")
+    .current_dir(dir)
+    .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+    .args(args)
+    .status()
+    .unwrap()
+    .success();
+  assert!(ok, "git {args:?} in {} failed", dir.display());
+}
+
+/// A workspace root with two child repos (`alpha`, `beta`), each carrying one
+/// non-main linked worktree at `<root>/alpha-wt` / `<root>/beta-wt`. `discover`
+/// collapses each worktree onto its owning repo, so the workspace has exactly
+/// the two repos and `exec`/`clean` fan out over their worktrees.
+fn workspace_with_worktrees() -> tempfile::TempDir {
+  let root = tempfile::TempDir::new().unwrap();
+  for (repo, wt) in [("alpha", "alpha-wt"), ("beta", "beta-wt")] {
+    let repo_dir = root.path().join(repo);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git_at(&repo_dir, &["init", "-b", "main"]);
+    git_at(&repo_dir, &["config", "user.email", "t@t.t"]);
+    git_at(&repo_dir, &["config", "user.name", "t"]);
+    std::fs::write(repo_dir.join("README.md"), "x").unwrap();
+    git_at(&repo_dir, &["add", "."]);
+    git_at(&repo_dir, &["commit", "-m", "init"]);
+    let wt_path = root.path().join(wt);
+    git_at(
+      &repo_dir,
+      &["worktree", "add", "-b", "feat/x", wt_path.to_str().unwrap()],
+    );
+  }
+  root
+}
+
+/// A workspace root with two child repos that have ONLY their main checkout
+/// (no linked worktrees) — so exec/clean fan-out finds no targets anywhere.
+fn workspace_main_only() -> tempfile::TempDir {
+  let root = tempfile::TempDir::new().unwrap();
+  for repo in ["alpha", "beta"] {
+    let repo_dir = root.path().join(repo);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git_at(&repo_dir, &["init", "-b", "main"]);
+    git_at(&repo_dir, &["config", "user.email", "t@t.t"]);
+    git_at(&repo_dir, &["config", "user.name", "t"]);
+    std::fs::write(repo_dir.join("README.md"), "x").unwrap();
+    git_at(&repo_dir, &["add", "."]);
+    git_at(&repo_dir, &["commit", "-m", "init"]);
+  }
+  root
+}
+
+// `gwm exec` / `gwm clean` now FAN OUT across a workspace's child repos under
+// `--workspace <root>` (issue #326), reversing the #319 deferral. This is an
+// additive transition — a previous refusal turning into a success is not a
+// breaking change. These tests pin the fan-out: a repo-tagged rollup/report
+// across every child repo, with an aggregated exit code. The `--workspace`
+// refusal now only applies to commands that still don't implement it (covered
+// by `workspace_refuses_unsupported_subcommand` below).
 
 #[test]
-fn exec_refuses_the_workspace_flag() {
-  let (dir, _base, _wt) = repo_with_one_worktree();
-  let ws = tempfile::TempDir::new().unwrap();
+fn exec_fans_out_across_workspace_child_repos() {
+  let root = workspace_with_worktrees();
   Command::cargo_bin("gwm")
     .unwrap()
-    .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
-    .args(["exec", "--workspace", ws.path().to_str().unwrap(), "--", "echo", "hi"])
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "sh", "-c", "echo ran > ws_exec_marker.txt"])
     .assert()
-    .failure()
-    // Exact exit code is frozen: every GwmError maps to 1 (src/main.rs).
-    .code(1)
-    .stderr(predicate::str::contains("--workspace is only supported"));
+    .success()
+    // A `══ <repo>` header per child repo, and a repo-tagged rollup.
+    .stdout(predicate::str::contains("══ alpha"))
+    .stdout(predicate::str::contains("══ beta"))
+    .stdout(predicate::str::contains("✓ alpha/"))
+    .stdout(predicate::str::contains("✓ beta/"));
+  // The command actually ran in each child repo's worktree.
+  assert!(root.path().join("alpha-wt/ws_exec_marker.txt").exists());
+  assert!(root.path().join("beta-wt/ws_exec_marker.txt").exists());
 }
 
 #[test]
-fn clean_refuses_the_workspace_flag() {
+fn exec_workspace_scopes_to_a_matching_slug() {
+  // A slug matching a worktree in only one child repo scopes the fan-out to
+  // that repo (the others contribute nothing — not an error).
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["alpha-wt", "--", "sh", "-c", "echo hi > scoped.txt"])
+    .assert()
+    .success();
+  assert!(root.path().join("alpha-wt/scoped.txt").exists(), "alpha matched");
+  assert!(
+    !root.path().join("beta-wt/scoped.txt").exists(),
+    "beta did not match the slug"
+  );
+}
+
+#[test]
+fn exec_workspace_scoped_slug_ignores_an_unrelated_repos_missing_profile() {
+  // Only `alpha` defines `[exec.profiles.fmt]`; `beta` has none. Scoping to
+  // `alpha-wt` must not resolve `beta`'s config (it contributes no target), so
+  // the run succeeds despite `beta` lacking the profile (#326 review).
+  let root = workspace_with_worktrees();
+  std::fs::write(
+    root.path().join("alpha/.gwm.toml"),
+    "[exec.profiles.fmt]\ncommand = [\"sh\", \"-c\", \"echo hi > prof.txt\"]\n",
+  )
+  .unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["alpha-wt", "--profile", "fmt"])
+    .assert()
+    .success();
+  assert!(root.path().join("alpha-wt/prof.txt").exists(), "alpha's profile ran");
+}
+
+#[test]
+fn exec_workspace_errors_on_a_slug_matching_no_child_repo() {
+  // A typo that matches nothing in ANY child repo is an error, not a silent
+  // exit-0 having run nothing (#326 review).
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["ghost-typo", "--", "true"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("ghost-typo"));
+}
+
+#[test]
+fn exec_workspace_aggregates_a_nonzero_exit() {
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "sh", "-c", "exit 3"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗ alpha/"))
+    .stdout(predicate::str::contains("✗ beta/"));
+}
+
+#[test]
+fn clean_fans_out_across_workspace_child_repos() {
+  let root = workspace_with_worktrees();
+  // A git-ignored `target/` in each child repo's worktree is reclaimable.
+  for (repo, wt) in [("alpha", "alpha-wt"), ("beta", "beta-wt")] {
+    let _ = repo;
+    let wtdir = root.path().join(wt);
+    std::fs::create_dir_all(wtdir.join("target")).unwrap();
+    std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+    std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  }
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .success()
+    // Report is repo-tagged; report-only must not delete.
+    .stdout(predicate::str::contains("alpha/"))
+    .stdout(predicate::str::contains("beta/"))
+    .stdout(predicate::str::contains("re-run with --yes"));
+  assert!(
+    root.path().join("alpha-wt/target").exists(),
+    "report-only keeps target/"
+  );
+}
+
+#[test]
+fn clean_workspace_yes_deletes_in_every_child_repo() {
+  let root = workspace_with_worktrees();
+  for wt in ["alpha-wt", "beta-wt"] {
+    let wtdir = root.path().join(wt);
+    std::fs::create_dir_all(wtdir.join("target")).unwrap();
+    std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+    std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  }
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .arg("--yes")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("reclaimed"));
+  assert!(!root.path().join("alpha-wt/target").exists());
+  assert!(!root.path().join("beta-wt/target").exists());
+}
+
+#[test]
+fn clean_workspace_errors_before_deleting_on_a_corrupt_child_repo() {
+  // A child that looks like a repo (.git present) but won't open must fail the
+  // whole fan-out BEFORE any deletion — not be silently skipped while the valid
+  // repos get cleaned (#326 review).
+  let root = workspace_with_worktrees();
+  let wtdir = root.path().join("alpha-wt");
+  std::fs::create_dir_all(wtdir.join("target")).unwrap();
+  std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+  std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  let corrupt = root.path().join("corrupt");
+  std::fs::create_dir_all(&corrupt).unwrap();
+  std::fs::write(corrupt.join(".git"), "gitdir: /nonexistent-gitdir\n").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .arg("--yes")
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("corrupt"));
+  // The valid repo's reclaimable target/ survives — nothing was deleted.
+  assert!(wtdir.join("target").exists(), "fan-out must fail before any deletion");
+}
+
+#[test]
+fn exec_workspace_all_empty_errors_on_a_missing_command() {
+  // Every repo is main-only (no targets), but a usage error (neither inline
+  // command nor --profile) must still surface, not a silent exit 0 (#326 rev).
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("provide a command"));
+}
+
+#[test]
+fn exec_workspace_all_empty_errors_on_an_unknown_profile() {
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn exec_workspace_all_empty_inline_command_exits_zero() {
+  // A valid inline command with no targets anywhere is "nothing to do", exit 0.
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "true"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no worktrees to run in"));
+}
+
+#[test]
+fn clean_workspace_all_empty_errors_on_an_unknown_profile() {
+  // A typo'd `--profile` with no targets anywhere must surface, not silently
+  // report "nothing to reclaim" (#326 review).
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ghost", "--yes"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn workspace_refuses_a_still_unsupported_subcommand() {
+  // `--workspace` is still refused on commands that don't implement it (only
+  // list/create/exec/clean and the bare TUI do).
   let (dir, _base, _wt) = repo_with_one_worktree();
   let ws = tempfile::TempDir::new().unwrap();
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .env("GWM_NO_GLOBAL_CONFIG", "1")
-    .args(["clean", "--workspace", ws.path().to_str().unwrap()])
+    .args(["sync", "--workspace", ws.path().to_str().unwrap()])
     .assert()
     .failure()
     .code(1)
