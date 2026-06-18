@@ -5510,7 +5510,11 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
   );
   assert_eq!(app.status, TaskKind::CreateWorktree.loading_label());
 
-  for _ in 0..50 {
+  // A real async worktree create + bootstrap drains in well under 100ms on a
+  // dev box, but a loaded Windows CI runner can take longer. The old 500ms
+  // budget (50 × 10ms) was too tight and flaked (#328); 3s is generous enough
+  // to absorb a slow runner while still bailing fast if the task truly hangs.
+  for _ in 0..300 {
     if app.drain_task_results() {
       break;
     }
