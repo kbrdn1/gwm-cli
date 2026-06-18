@@ -1064,13 +1064,22 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// aggregate code (non-zero if any worktree failed).
 fn cmd_exec(slugs: Vec<String>, profile: Option<String>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-  let cfg = Config::load_for_repo(workdir)?;
 
   // Resolve the argv up-front, from exactly one of `--profile` / inline
   // `-- <cmd>`. A usage error (both, neither, or an unknown profile) must
   // surface before we touch any worktree, hence before target discovery.
-  let argv = exec::resolve_exec_command(profile.as_deref(), &command, &cfg.exec)?;
+  //
+  // Only the `--profile` lookup needs `.gwm.toml`; the inline `gwm exec --
+  // <cmd>` surface is promised unchanged, so it must NOT read config — an
+  // unrelated config error there would break a command that never used it.
+  let argv = match profile.as_deref() {
+    Some(name) => {
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+      let cfg = Config::load_for_repo(workdir)?;
+      exec::resolve_exec_command(Some(name), &command, &cfg.exec)?
+    }
+    None => exec::resolve_exec_command(None, &command, &crate::config::ExecConfig::default())?,
+  };
 
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {

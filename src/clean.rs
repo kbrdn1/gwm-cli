@@ -67,9 +67,11 @@ fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
     // which needs a drive prefix), yet `worktree.join("/")` escapes the
     // worktree on *both*. A safe entry is purely `Normal`/`CurDir`; a root
     // (`/`, `\`, `C:\`), a drive prefix, or a `..` traversal all escape.
+    let mut has_normal = false;
     for comp in Path::new(d).components() {
       match comp {
-        Component::Normal(_) | Component::CurDir => {}
+        Component::Normal(_) => has_normal = true,
+        Component::CurDir => {}
         Component::ParentDir => {
           return Err(GwmError::Config(format!(
             "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
@@ -82,8 +84,37 @@ fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
         }
       }
     }
+    // A path of only `.` / `./.` (no `Normal` component) resolves to the
+    // worktree root — scanning it would walk the whole tree and `--yes`
+    // could target the root itself. Require a real subdirectory.
+    if !has_normal {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` dir `{d}` resolves to the worktree root — name a real subdirectory"
+      )));
+    }
   }
   Ok(())
+}
+
+/// Collapse exact duplicates and nested overlaps in a profile's `dirs` so a
+/// directory is scanned and reclaimed at most once (declared order kept).
+///
+/// Without this, `dirs = ["target", "target"]` double-counts bytes and makes
+/// `delete_reclaim` fail on the second `remove_dir_all` (already gone), and
+/// `["target", "target/debug"]` deletes the parent then errors on the child.
+/// An entry equal to or nested under a kept one is dropped; an entry that is
+/// an ancestor of kept ones replaces those descendants.
+fn dedup_dirs(dirs: &[String]) -> Vec<String> {
+  let mut kept: Vec<String> = Vec::new();
+  for d in dirs {
+    let dp = Path::new(d);
+    if kept.iter().any(|k| dp.starts_with(Path::new(k))) {
+      continue; // equal to or nested under something already kept
+    }
+    kept.retain(|k| !Path::new(k).starts_with(dp)); // drop kept descendants of d
+    kept.push(d.clone());
+  }
+  kept
 }
 
 /// Resolve the directory set `gwm clean` should scan and reclaim (issue #324).
@@ -106,12 +137,12 @@ pub fn resolve_clean_dirs(profile: Option<&str>, cfg: &CleanConfig) -> Result<Ve
         .get(name)
         .ok_or_else(|| GwmError::Config(format!("clean: no profile named `{name}` in [clean.profiles]")))?;
       validate_profile_dirs(name, &p.dirs)?;
-      Ok(p.dirs.clone())
+      Ok(dedup_dirs(&p.dirs))
     }
     None => match cfg.profiles.get("default") {
       Some(p) => {
         validate_profile_dirs("default", &p.dirs)?;
-        Ok(p.dirs.clone())
+        Ok(dedup_dirs(&p.dirs))
       }
       None => Ok(default_patterns()),
     },

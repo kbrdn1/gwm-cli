@@ -275,3 +275,39 @@ fn resolve_dirs_allows_a_nested_relative_subpath() {
   let dirs = resolve_clean_dirs(Some("nested"), &cfg).expect("nested relative path is allowed");
   assert_eq!(dirs, vec!["packages/app/node_modules"]);
 }
+
+#[test]
+fn resolve_dirs_rejects_a_dot_profile_dir() {
+  // `"."` / `"./."` resolve to the worktree root (no Normal component) —
+  // scanning the root is as dangerous as an empty entry.
+  for evil in [".", "./."] {
+    let cfg = clean_cfg(&[("evil", &[evil])]);
+    let err = resolve_clean_dirs(Some("evil"), &cfg).unwrap_err();
+    assert!(
+      err.to_string().contains("worktree root"),
+      "`{evil}` should be rejected as the worktree root: {err}"
+    );
+  }
+}
+
+#[test]
+fn resolve_dirs_dedups_exact_duplicate_entries() {
+  let cfg = clean_cfg(&[("dup", &["target", "node_modules", "target"])]);
+  let dirs = resolve_clean_dirs(Some("dup"), &cfg).expect("duplicates collapse");
+  assert_eq!(dirs, vec!["target", "node_modules"], "an exact duplicate is dropped");
+}
+
+#[test]
+fn resolve_dirs_collapses_a_nested_overlap_to_the_ancestor() {
+  // `target/debug` is already covered by deleting `target` — keep only the
+  // ancestor so the scan/delete touches each tree once.
+  let cfg = clean_cfg(&[("overlap", &["target", "target/debug"])]);
+  let dirs = resolve_clean_dirs(Some("overlap"), &cfg).expect("overlap collapses");
+  assert_eq!(dirs, vec!["target"]);
+
+  // Order-independent: a child declared before its ancestor still collapses
+  // to the ancestor.
+  let cfg2 = clean_cfg(&[("overlap2", &["target/debug", "target"])]);
+  let dirs2 = resolve_clean_dirs(Some("overlap2"), &cfg2).expect("overlap collapses");
+  assert_eq!(dirs2, vec!["target"]);
+}

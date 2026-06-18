@@ -4683,6 +4683,37 @@ fn exec_runs_a_named_profile_command() {
 }
 
 #[test]
+fn exec_inline_command_ignores_a_broken_gwm_toml() {
+  // The inline `gwm exec -- <cmd>` surface is promised config-free: an
+  // unrelated `.gwm.toml` error must NOT break it (it only reads config for
+  // a `--profile` lookup). Here a stray top-level key would fail a config
+  // load, yet the inline command still runs.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--", "sh", "-c", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_profile_surfaces_a_broken_gwm_toml() {
+  // The `--profile` path DOES read config, so a broken `.gwm.toml` surfaces
+  // as a load error (exit 1) — the counterpart to the inline test above.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--profile", "whatever"])
+    .assert()
+    .failure()
+    .code(1);
+}
+
+#[test]
 fn exec_profile_and_inline_command_are_mutually_exclusive() {
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "[exec.profiles.t]\ncommand = [\"true\"]\n");
