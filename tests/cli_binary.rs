@@ -5176,8 +5176,12 @@ fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
 
 /// Run `git <args>` in `dir`, asserting success — fixture setup helper.
 fn git_at(dir: &Path, args: &[&str]) {
+  // Pin signing off so a developer with `commit.gpgsign=true` (or a missing
+  // signing key) in their ambient git config doesn't make these fixtures fail
+  // before `gwm` is even exercised (#326 review).
   let ok = std::process::Command::new("git")
     .current_dir(dir)
+    .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
     .args(args)
     .status()
     .unwrap()
