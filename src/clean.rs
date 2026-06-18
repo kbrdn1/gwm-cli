@@ -62,8 +62,15 @@ pub fn default_patterns() -> Vec<String> {
 /// this check). Nesting is a deliberate, additive post-1.0 extension (it would
 /// need an explicit symlinked-ancestor guard). Anything else is a config error
 /// (exit 1) at resolution time.
-fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
+///
+/// Each accepted entry is returned **normalized** to its bare component name
+/// (`"target/"` and `"./target"` both become `"target"`) so syntactic aliases
+/// of the same directory collapse under the exact-match [`dedup_dirs`] — a
+/// raw-string dedup would otherwise keep `["target", "target/"]` and
+/// double-scan / double-delete it.
+fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>> {
   use std::path::Component;
+  let mut out = Vec::with_capacity(dirs.len());
   for d in dirs {
     if d.is_empty() {
       return Err(GwmError::Config(format!(
@@ -71,9 +78,9 @@ fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
       )));
     }
     let mut comps = Path::new(d).components().filter(|c| !matches!(c, Component::CurDir));
-    match (comps.next(), comps.next()) {
+    let name = match (comps.next(), comps.next()) {
       // Exactly one plain directory name — the only safe shape.
-      (Some(Component::Normal(_)), None) => {}
+      (Some(Component::Normal(n)), None) => n.to_string_lossy().into_owned(),
       (Some(Component::ParentDir), _) => {
         return Err(GwmError::Config(format!(
           "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
@@ -96,15 +103,17 @@ fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
           "clean: profile `{profile}` dir `{d}` must be a single directory name (no `/`); nested paths are not supported"
         )));
       }
-    }
+    };
+    out.push(name);
   }
-  Ok(())
+  Ok(out)
 }
 
-/// Drop exact duplicate entries from a profile's `dirs` (declared order kept),
-/// so a directory listed twice isn't scanned and reclaimed twice. With dirs
-/// pinned to single names by [`validate_profile_dirs`], exact equality is the
-/// only overlap that can occur (no parent/child nesting).
+/// Drop exact duplicate entries (declared order kept), so a directory listed
+/// twice isn't scanned and reclaimed twice. Inputs come from
+/// [`normalized_profile_dirs`], so syntactic aliases (`target` vs `target/`)
+/// have already been folded to the same string — exact equality is the only
+/// overlap left.
 fn dedup_dirs(dirs: &[String]) -> Vec<String> {
   let mut kept: Vec<String> = Vec::new();
   for d in dirs {
@@ -123,10 +132,11 @@ fn dedup_dirs(dirs: &[String]) -> Vec<String> {
 /// - **No** `--profile` uses `[clean.profiles.default].dirs` when that profile
 ///   exists, else falls back to the built-in [`default_patterns`].
 ///
-/// Profile-supplied dirs are validated against worktree escape (absolute,
-/// `..`, or empty → exit 1). Whatever set is returned, the caller still runs
-/// every directory through the safety gate (git-ignored + no tracked files +
-/// skip symlinks) before delete.
+/// Profile-supplied dirs are validated and normalized to single worktree-
+/// relative names (absolute, `..`, `.`/root, nested, or empty → exit 1), then
+/// exact-deduped. Whatever set is returned, the caller still runs every
+/// directory through the safety gate (git-ignored + no tracked files + skip
+/// symlinks) before delete.
 pub fn resolve_clean_dirs(profile: Option<&str>, cfg: &CleanConfig) -> Result<Vec<String>> {
   match profile {
     Some(name) => {
@@ -134,14 +144,10 @@ pub fn resolve_clean_dirs(profile: Option<&str>, cfg: &CleanConfig) -> Result<Ve
         .profiles
         .get(name)
         .ok_or_else(|| GwmError::Config(format!("clean: no profile named `{name}` in [clean.profiles]")))?;
-      validate_profile_dirs(name, &p.dirs)?;
-      Ok(dedup_dirs(&p.dirs))
+      Ok(dedup_dirs(&normalized_profile_dirs(name, &p.dirs)?))
     }
     None => match cfg.profiles.get("default") {
-      Some(p) => {
-        validate_profile_dirs("default", &p.dirs)?;
-        Ok(dedup_dirs(&p.dirs))
-      }
+      Some(p) => Ok(dedup_dirs(&normalized_profile_dirs("default", &p.dirs)?)),
       None => Ok(default_patterns()),
     },
   }

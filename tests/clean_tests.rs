@@ -305,6 +305,15 @@ fn resolve_dirs_dedups_exact_duplicate_entries() {
 }
 
 #[test]
+fn resolve_dirs_normalizes_syntactic_aliases_before_dedup() {
+  // `target`, `target/`, and `./target` are the same directory — normalize to
+  // the bare component name so dedup folds them to one (no double scan/delete).
+  let cfg = clean_cfg(&[("alias", &["target", "target/", "./target", "node_modules"])]);
+  let dirs = resolve_clean_dirs(Some("alias"), &cfg).expect("aliases normalize and dedup");
+  assert_eq!(dirs, vec!["target", "node_modules"]);
+}
+
+#[test]
 fn resolve_dirs_keeps_distinct_single_names_in_declared_order() {
   // With dirs pinned to single names, distinct entries pass through in order
   // (only exact duplicates are dropped — covered above).
