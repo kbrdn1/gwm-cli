@@ -5209,6 +5209,23 @@ fn workspace_with_worktrees() -> tempfile::TempDir {
   root
 }
 
+/// A workspace root with two child repos that have ONLY their main checkout
+/// (no linked worktrees) — so exec/clean fan-out finds no targets anywhere.
+fn workspace_main_only() -> tempfile::TempDir {
+  let root = tempfile::TempDir::new().unwrap();
+  for repo in ["alpha", "beta"] {
+    let repo_dir = root.path().join(repo);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git_at(&repo_dir, &["init", "-b", "main"]);
+    git_at(&repo_dir, &["config", "user.email", "t@t.t"]);
+    git_at(&repo_dir, &["config", "user.name", "t"]);
+    std::fs::write(repo_dir.join("README.md"), "x").unwrap();
+    git_at(&repo_dir, &["add", "."]);
+    git_at(&repo_dir, &["commit", "-m", "init"]);
+  }
+  root
+}
+
 // `gwm exec` / `gwm clean` now FAN OUT across a workspace's child repos under
 // `--workspace <root>` (issue #326), reversing the #319 deferral. This is an
 // additive transition — a previous refusal turning into a success is not a
@@ -5388,6 +5405,69 @@ fn clean_workspace_errors_before_deleting_on_a_corrupt_child_repo() {
     .stderr(predicate::str::contains("corrupt"));
   // The valid repo's reclaimable target/ survives — nothing was deleted.
   assert!(wtdir.join("target").exists(), "fan-out must fail before any deletion");
+}
+
+#[test]
+fn exec_workspace_all_empty_errors_on_a_missing_command() {
+  // Every repo is main-only (no targets), but a usage error (neither inline
+  // command nor --profile) must still surface, not a silent exit 0 (#326 rev).
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("provide a command"));
+}
+
+#[test]
+fn exec_workspace_all_empty_errors_on_an_unknown_profile() {
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn exec_workspace_all_empty_inline_command_exits_zero() {
+  // A valid inline command with no targets anywhere is "nothing to do", exit 0.
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "true"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no worktrees to run in"));
+}
+
+#[test]
+fn clean_workspace_all_empty_errors_on_an_unknown_profile() {
+  // A typo'd `--profile` with no targets anywhere must surface, not silently
+  // report "nothing to reclaim" (#326 review).
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ghost", "--yes"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
 }
 
 #[test]

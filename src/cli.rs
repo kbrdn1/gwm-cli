@@ -1125,6 +1125,19 @@ fn cmd_exec_workspace(
     plans.push((name, targets, argv, job_count));
   }
 
+  if plans.is_empty() {
+    // Nothing participates (every repo is main-only, or the slug scoped them all
+    // out). No run follows, so it's safe to validate the command/profile against
+    // the repos — a usage error (no command) or a typo'd `--profile` must still
+    // surface instead of a silent exit 0. Accept if ANY repo resolves.
+    let opened_repos = opened.iter().map(|(_, r)| r);
+    if let Some(err) = first_exec_plan_error(opened_repos, profile.as_deref(), jobs, &command) {
+      return Err(err);
+    }
+    println!("no worktrees to run in");
+    return Ok(());
+  }
+
   // Run sequentially per repo, aggregating the repo-tagged outcomes.
   let mut all = Vec::new();
   for (name, targets, argv, job_count) in &plans {
@@ -1132,6 +1145,26 @@ fn cmd_exec_workspace(
     all.extend(exec_run(targets, argv, *job_count, Some(name))?);
   }
   print_exec_rollup_and_exit(&all)
+}
+
+/// Validate the exec command/profile when NO workspace repo has targets:
+/// returns `None` if [`exec_plan`] resolves against any repo (the source is
+/// usable — there's just nothing to run), or the last error if it fails for
+/// every repo (a usage error / unknown profile that must surface).
+fn first_exec_plan_error<'a>(
+  repos: impl Iterator<Item = &'a Repository>,
+  profile: Option<&str>,
+  jobs: Option<u32>,
+  command: &[String],
+) -> Option<GwmError> {
+  let mut last = None;
+  for repo in repos {
+    match exec_plan(repo, profile, jobs, command) {
+      Ok(_) => return None,
+      Err(e) => last = Some(e),
+    }
+  }
+  last
 }
 
 /// Discover the workspace under `root` and open every child repo (erroring on
@@ -1360,13 +1393,35 @@ fn cmd_clean_workspace(root: &Path, slugs: Vec<String>, profile: Option<String>,
   // review).
   let mut reclaims: Vec<clean::WorktreeReclaim> = Vec::new();
   let mut skipped: Vec<(String, String)> = Vec::new();
+  let mut participated = false;
   for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
     if targets.is_empty() {
       continue;
     }
+    participated = true;
     let (mut rec, mut skip) = clean_scan_repo(repo, targets, profile.as_deref(), Some(name))?;
     reclaims.append(&mut rec);
     skipped.append(&mut skip);
+  }
+
+  if !participated {
+    // Nothing participates — no deletion follows, so validate the `--profile`
+    // (a typo / malformed `[clean]`) against the repos instead of silently
+    // reporting "nothing to reclaim". Accept if it resolves against any repo.
+    let mut last_err = None;
+    let mut valid = false;
+    for (_, repo) in &opened {
+      match clean_scan_repo(repo, &[], profile.as_deref(), None) {
+        Ok(_) => {
+          valid = true;
+          break;
+        }
+        Err(e) => last_err = Some(e),
+      }
+    }
+    if !valid {
+      return Err(last_err.expect("open_workspace_repos guarantees a non-empty workspace"));
+    }
   }
   clean_finish(&reclaims, &skipped, yes)
 }
