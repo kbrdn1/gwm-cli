@@ -43,76 +43,74 @@ pub fn default_patterns() -> Vec<String> {
     .collect()
 }
 
-/// Reject a profile `dirs` entry that could escape the worktree.
+/// Validate a profile `dirs` entry: it must be a single worktree-relative
+/// directory **name** — exactly one `Normal` path component.
 ///
 /// Profile-supplied dirs are user-controlled and later fed to
 /// [`scan_worktree`], which does `worktree.join(entry)` and a recursive
-/// `dir_size` *before* the git safety gate runs. A path that escapes the
-/// worktree — absolute (`"/"`, which `Path::join` resolves to the FS root),
-/// a `..` traversal, or empty (joins to the worktree root itself) — would
-/// make even a dry-run `gwm clean --profile …` walk outside the tree. Pin
-/// the set to plain worktree-relative subpaths and surface anything else as
-/// a config error (exit 1) at resolution time. The built-in
-/// [`default_patterns`] are trusted and bypass this check.
+/// `dir_size` *before* the git safety gate runs. Anything other than a single
+/// plain name can escape the worktree:
+/// - absolute (`"/"`, a drive prefix) — `Path::join` resolves to the FS root;
+/// - a `..` traversal — climbs out of the worktree;
+/// - empty or a bare `.` / `./.` — resolves to the worktree root itself;
+/// - a **nested** path (`a/b`) — an intermediate component (`a`) could be a
+///   symlink that `scan_worktree` / `remove_dir_all` follow outside the tree
+///   (the symlink skip only covers the artifact root, not its ancestors).
+///
+/// Restricting to a single name eliminates every one of these by construction
+/// and matches the built-in [`default_patterns`] (which are trusted and bypass
+/// this check). Nesting is a deliberate, additive post-1.0 extension (it would
+/// need an explicit symlinked-ancestor guard). Anything else is a config error
+/// (exit 1) at resolution time.
 fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
   use std::path::Component;
   for d in dirs {
     if d.is_empty() {
       return Err(GwmError::Config(format!(
-        "clean: profile `{profile}` has an empty `dirs` entry — list worktree-relative directory names"
+        "clean: profile `{profile}` has an empty `dirs` entry — list single worktree-relative directory names"
       )));
     }
-    // Inspect components rather than `Path::is_absolute()`: the latter is
-    // platform-dependent (`"/"` is absolute on Unix but NOT on Windows,
-    // which needs a drive prefix), yet `worktree.join("/")` escapes the
-    // worktree on *both*. A safe entry is purely `Normal`/`CurDir`; a root
-    // (`/`, `\`, `C:\`), a drive prefix, or a `..` traversal all escape.
-    let mut has_normal = false;
-    for comp in Path::new(d).components() {
-      match comp {
-        Component::Normal(_) => has_normal = true,
-        Component::CurDir => {}
-        Component::ParentDir => {
-          return Err(GwmError::Config(format!(
-            "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
-          )));
-        }
-        Component::RootDir | Component::Prefix(_) => {
-          return Err(GwmError::Config(format!(
-            "clean: profile `{profile}` dir `{d}` must be relative to the worktree, not absolute"
-          )));
-        }
+    let mut comps = Path::new(d).components().filter(|c| !matches!(c, Component::CurDir));
+    match (comps.next(), comps.next()) {
+      // Exactly one plain directory name — the only safe shape.
+      (Some(Component::Normal(_)), None) => {}
+      (Some(Component::ParentDir), _) => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
+        )));
       }
-    }
-    // A path of only `.` / `./.` (no `Normal` component) resolves to the
-    // worktree root — scanning it would walk the whole tree and `--yes`
-    // could target the root itself. Require a real subdirectory.
-    if !has_normal {
-      return Err(GwmError::Config(format!(
-        "clean: profile `{profile}` dir `{d}` resolves to the worktree root — name a real subdirectory"
-      )));
+      (Some(Component::RootDir | Component::Prefix(_)), _) => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` must be relative to the worktree, not absolute"
+        )));
+      }
+      // `.` / `./.` collapse to nothing — they resolve to the worktree root.
+      (None, _) => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` resolves to the worktree root — name a real subdirectory"
+        )));
+      }
+      // Two or more components — a nested path like `a/b`.
+      _ => {
+        return Err(GwmError::Config(format!(
+          "clean: profile `{profile}` dir `{d}` must be a single directory name (no `/`); nested paths are not supported"
+        )));
+      }
     }
   }
   Ok(())
 }
 
-/// Collapse exact duplicates and nested overlaps in a profile's `dirs` so a
-/// directory is scanned and reclaimed at most once (declared order kept).
-///
-/// Without this, `dirs = ["target", "target"]` double-counts bytes and makes
-/// `delete_reclaim` fail on the second `remove_dir_all` (already gone), and
-/// `["target", "target/debug"]` deletes the parent then errors on the child.
-/// An entry equal to or nested under a kept one is dropped; an entry that is
-/// an ancestor of kept ones replaces those descendants.
+/// Drop exact duplicate entries from a profile's `dirs` (declared order kept),
+/// so a directory listed twice isn't scanned and reclaimed twice. With dirs
+/// pinned to single names by [`validate_profile_dirs`], exact equality is the
+/// only overlap that can occur (no parent/child nesting).
 fn dedup_dirs(dirs: &[String]) -> Vec<String> {
   let mut kept: Vec<String> = Vec::new();
   for d in dirs {
-    let dp = Path::new(d);
-    if kept.iter().any(|k| dp.starts_with(Path::new(k))) {
-      continue; // equal to or nested under something already kept
+    if !kept.contains(d) {
+      kept.push(d.clone());
     }
-    kept.retain(|k| !Path::new(k).starts_with(dp)); // drop kept descendants of d
-    kept.push(d.clone());
   }
   kept
 }

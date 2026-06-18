@@ -269,11 +269,18 @@ fn resolve_dirs_validates_the_default_profile_too() {
 }
 
 #[test]
-fn resolve_dirs_allows_a_nested_relative_subpath() {
-  // A relative subpath that stays inside the worktree (no `..`) is fine.
-  let cfg = clean_cfg(&[("nested", &["packages/app/node_modules"])]);
-  let dirs = resolve_clean_dirs(Some("nested"), &cfg).expect("nested relative path is allowed");
-  assert_eq!(dirs, vec!["packages/app/node_modules"]);
+fn resolve_dirs_rejects_a_nested_path() {
+  // A nested path is refused for 1.0: an intermediate component could be a
+  // symlink that scan/delete would follow out of the worktree. Dirs are
+  // restricted to single directory names.
+  for nested in ["packages/app/node_modules", "target/debug"] {
+    let cfg = clean_cfg(&[("nested", &[nested])]);
+    let err = resolve_clean_dirs(Some("nested"), &cfg).unwrap_err();
+    assert!(
+      err.to_string().contains("single directory name"),
+      "`{nested}` should be rejected as nested: {err}"
+    );
+  }
 }
 
 #[test]
@@ -298,16 +305,10 @@ fn resolve_dirs_dedups_exact_duplicate_entries() {
 }
 
 #[test]
-fn resolve_dirs_collapses_a_nested_overlap_to_the_ancestor() {
-  // `target/debug` is already covered by deleting `target` — keep only the
-  // ancestor so the scan/delete touches each tree once.
-  let cfg = clean_cfg(&[("overlap", &["target", "target/debug"])]);
-  let dirs = resolve_clean_dirs(Some("overlap"), &cfg).expect("overlap collapses");
-  assert_eq!(dirs, vec!["target"]);
-
-  // Order-independent: a child declared before its ancestor still collapses
-  // to the ancestor.
-  let cfg2 = clean_cfg(&[("overlap2", &["target/debug", "target"])]);
-  let dirs2 = resolve_clean_dirs(Some("overlap2"), &cfg2).expect("overlap collapses");
-  assert_eq!(dirs2, vec!["target"]);
+fn resolve_dirs_keeps_distinct_single_names_in_declared_order() {
+  // With dirs pinned to single names, distinct entries pass through in order
+  // (only exact duplicates are dropped — covered above).
+  let cfg = clean_cfg(&[("multi", &["target", "node_modules", "dist"])]);
+  let dirs = resolve_clean_dirs(Some("multi"), &cfg).expect("distinct names");
+  assert_eq!(dirs, vec!["target", "node_modules", "dist"]);
 }
