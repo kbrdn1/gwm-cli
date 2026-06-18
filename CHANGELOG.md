@@ -12,6 +12,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--workspace` fan-out for `gwm exec` / `gwm clean`** (issue #326). Both
+  commands now accept the global `--workspace <root>` flag and fan out across
+  the workspace's child repos, **reversing the #319 deferral** (the refusal
+  is gone). Each repo's command/dir-set is resolved UPFRONT — a missing
+  `--profile`, a malformed `[exec]`/`[clean]`, or an unopenable child repo
+  errors before anything runs (or, for `clean --yes`, before any
+  `remove_dir_all`). Repos then run **sequentially** (parallelism stays
+  bounded *within* a repo, so output never interleaves across repos) under a
+  `══ <repo>` header, with a `<repo>/<worktree>`-tagged rollup / report and an
+  aggregated exit code (non-zero if any worktree in any repo failed; for
+  clean, a delete failure in one worktree is reported but doesn't abort the
+  rest). `--profile` resolves per child repo against that repo's `.gwm.toml`;
+  a slug that matches nothing in a given repo contributes nothing there rather
+  than aborting the fan-out; a bare child repo is tolerated. This is an
+  **additive** transition (a former refusal turning into a success is not
+  breaking). The `--workspace` refusal remains for commands that still don't
+  implement it.
+
 - **Bounded `--jobs` parallelism for `gwm exec`** (issue #324). `gwm exec`
   gains a `--jobs <n>` flag and an `[exec] jobs` config default (with a
   per-profile `[exec.profiles.<name>].jobs` override). Precedence: `--jobs`
@@ -72,13 +90,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default (bounded `--jobs` parallelism is a future opt-in), `clean` keeps its
   built-in `target` / `node_modules` / `dist` / `build` set (the `[clean]` /
   `[exec]` profile config anticipated here now lands additively under #324,
-  above), and `--workspace` fan-out across repos stays refused on both
-  commands until it lands. The one
-  previously-untested frozen behaviour — the `--workspace` refusal on `exec` /
-  `clean`, whose exit code is now under the SemVer pledge — is pinned by two
-  regression tests in `tests/cli_binary.rs`, so a future change that silently
-  accepts the flag (or changes the exit code) breaks CI loudly. No behaviour
-  change.
+  above), and `--workspace` fan-out across repos was refused on both commands
+  pending implementation — which now lands additively under #326 (below). The
+  transition is additive: a previous refusal becoming a success is not a
+  breaking change. No behaviour change at the time of this decision.
 
 ### Docs
 
