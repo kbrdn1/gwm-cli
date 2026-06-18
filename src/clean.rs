@@ -55,22 +55,32 @@ pub fn default_patterns() -> Vec<String> {
 /// a config error (exit 1) at resolution time. The built-in
 /// [`default_patterns`] are trusted and bypass this check.
 fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
+  use std::path::Component;
   for d in dirs {
     if d.is_empty() {
       return Err(GwmError::Config(format!(
         "clean: profile `{profile}` has an empty `dirs` entry — list worktree-relative directory names"
       )));
     }
-    let p = Path::new(d);
-    if p.is_absolute() {
-      return Err(GwmError::Config(format!(
-        "clean: profile `{profile}` dir `{d}` must be relative to the worktree, not absolute"
-      )));
-    }
-    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-      return Err(GwmError::Config(format!(
-        "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
-      )));
+    // Inspect components rather than `Path::is_absolute()`: the latter is
+    // platform-dependent (`"/"` is absolute on Unix but NOT on Windows,
+    // which needs a drive prefix), yet `worktree.join("/")` escapes the
+    // worktree on *both*. A safe entry is purely `Normal`/`CurDir`; a root
+    // (`/`, `\`, `C:\`), a drive prefix, or a `..` traversal all escape.
+    for comp in Path::new(d).components() {
+      match comp {
+        Component::Normal(_) | Component::CurDir => {}
+        Component::ParentDir => {
+          return Err(GwmError::Config(format!(
+            "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
+          )));
+        }
+        Component::RootDir | Component::Prefix(_) => {
+          return Err(GwmError::Config(format!(
+            "clean: profile `{profile}` dir `{d}` must be relative to the worktree, not absolute"
+          )));
+        }
+      }
     }
   }
   Ok(())
