@@ -5259,6 +5259,28 @@ fn exec_workspace_scopes_to_a_matching_slug() {
 }
 
 #[test]
+fn exec_workspace_scoped_slug_ignores_an_unrelated_repos_missing_profile() {
+  // Only `alpha` defines `[exec.profiles.fmt]`; `beta` has none. Scoping to
+  // `alpha-wt` must not resolve `beta`'s config (it contributes no target), so
+  // the run succeeds despite `beta` lacking the profile (#326 review).
+  let root = workspace_with_worktrees();
+  std::fs::write(
+    root.path().join("alpha/.gwm.toml"),
+    "[exec.profiles.fmt]\ncommand = [\"sh\", \"-c\", \"echo hi > prof.txt\"]\n",
+  )
+  .unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["alpha-wt", "--profile", "fmt"])
+    .assert()
+    .success();
+  assert!(root.path().join("alpha-wt/prof.txt").exists(), "alpha's profile ran");
+}
+
+#[test]
 fn exec_workspace_errors_on_a_slug_matching_no_child_repo() {
   // A typo that matches nothing in ANY child repo is an error, not a silent
   // exit-0 having run nothing (#326 review).

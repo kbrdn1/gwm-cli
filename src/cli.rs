@@ -1112,8 +1112,15 @@ fn cmd_exec_workspace(
   // Resolve targets (ambiguity/typo errors surface here) AND each repo's argv +
   // jobs UPFRONT — before a single command runs.
   let targets_per_repo = resolve_workspace_targets(&repos, &slugs)?;
-  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, Vec<String>, usize)> = Vec::with_capacity(opened.len());
+  // Resolve config/argv ONLY for repos that have targets. A repo a scoped slug
+  // doesn't touch contributes nothing, so its `[exec]` / `--profile` must not
+  // be resolved — an unrelated repo lacking the profile or with a bad `[exec]`
+  // can't break a run scoped elsewhere (#326 review).
+  let mut plans: Vec<(&str, &Vec<worktree::WorktreeInfo>, Vec<String>, usize)> = Vec::new();
   for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
+    if targets.is_empty() {
+      continue;
+    }
     let (argv, job_count) = exec_plan(repo, profile.as_deref(), jobs, &command)?;
     plans.push((name, targets, argv, job_count));
   }
@@ -1122,10 +1129,6 @@ fn cmd_exec_workspace(
   let mut all = Vec::new();
   for (name, targets, argv, job_count) in &plans {
     println!("\n══ {}", name);
-    if targets.is_empty() {
-      println!("no worktrees to run in");
-      continue;
-    }
     all.extend(exec_run(targets, argv, *job_count, Some(name))?);
   }
   print_exec_rollup_and_exit(&all)
@@ -1350,11 +1353,17 @@ fn cmd_clean_workspace(root: &Path, slugs: Vec<String>, profile: Option<String>,
   let repos: Vec<&Repository> = opened.iter().map(|(_, r)| r).collect();
   let targets_per_repo = resolve_workspace_targets(&repos, &slugs)?;
 
-  // Scan every repo upfront — resolution (config/profile) errors surface here,
-  // before any deletion.
+  // Scan every repo with targets upfront — resolution (config/profile) errors
+  // surface here, before any deletion. A repo a scoped slug doesn't touch
+  // contributes nothing, so its `[clean]` / `--profile` is NOT resolved (an
+  // unrelated repo's bad config can't break a run scoped elsewhere — #326
+  // review).
   let mut reclaims: Vec<clean::WorktreeReclaim> = Vec::new();
   let mut skipped: Vec<(String, String)> = Vec::new();
   for ((name, repo), targets) in opened.iter().zip(&targets_per_repo) {
+    if targets.is_empty() {
+      continue;
+    }
     let (mut rec, mut skip) = clean_scan_repo(repo, targets, profile.as_deref(), Some(name))?;
     reclaims.append(&mut rec);
     skipped.append(&mut skip);
