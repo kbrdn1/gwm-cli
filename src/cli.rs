@@ -1176,9 +1176,13 @@ fn open_workspace_repos(root: &Path) -> Result<Vec<(String, Repository)>> {
   // and contract for upfront resolution: a child that LOOKS like a repo (has a
   // `.git`) but won't open must fail the whole fan-out before any side effect,
   // not be quietly dropped while the valid repos run (#326 review).
-  for entry in std::fs::read_dir(root)?.flatten() {
-    let path = entry.path();
-    if path.is_dir() && path.join(".git").exists() && Repository::open(&path).is_err() {
+  //
+  // Use `try_exists` and propagate read_dir / stat errors (e.g. a `.git` that
+  // can't be statted because of permissions) rather than masking them as
+  // "absent" — an UNREADABLE child must surface too, not be skipped (review).
+  for entry in std::fs::read_dir(root)? {
+    let path = entry?.path();
+    if path.is_dir() && path.join(".git").try_exists()? && Repository::open(&path).is_err() {
       let name = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
