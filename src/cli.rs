@@ -1268,16 +1268,14 @@ fn print_exec_rollup_and_exit(outcomes: &[exec::ExecOutcome]) -> Result<()> {
 /// repo at all is an error (a typo must not silently run/clean nothing).
 fn resolve_workspace_targets(repos: &[&Repository], slugs: &[String]) -> Result<Vec<Vec<worktree::WorktreeInfo>>> {
   if slugs.is_empty() {
-    return Ok(
-      repos
-        .iter()
-        .map(|repo| {
-          worktree::list(repo)
-            .map(|ws| ws.into_iter().filter(|w| !w.is_main).collect())
-            .unwrap_or_default()
-        })
-        .collect(),
-    );
+    // Propagate a per-repo listing failure (corrupt / unreadable worktree
+    // metadata) rather than silently skipping that repo — the single-repo path
+    // surfaces it too, and the upfront-resolution contract must not let a
+    // destructive `clean --yes` proceed in the other repos while one is broken.
+    return repos
+      .iter()
+      .map(|repo| Ok(worktree::list(repo)?.into_iter().filter(|w| !w.is_main).collect()))
+      .collect();
   }
 
   let mut per_repo: Vec<Vec<worktree::WorktreeInfo>> = (0..repos.len()).map(|_| Vec::new()).collect();
