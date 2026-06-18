@@ -146,7 +146,7 @@ pub enum GwmError {
   /// it. Reject it elsewhere rather than silently ignoring it and acting on
   /// the current single repo — a wrong-target footgun for destructive
   /// commands like `gwm remove` (Codex review #303 P2).
-  #[error("--workspace is only supported with `gwm list`, `gwm create`, or bare `gwm` (the TUI) — refusing to run this subcommand against a single repo")]
+  #[error("--workspace is only supported with `gwm list`, `gwm create`, `gwm exec`, `gwm clean`, or bare `gwm` (the TUI) — refusing to run this subcommand against a single repo")]
   WorkspaceUnsupportedCommand,
 
   #[error("{0}")]
