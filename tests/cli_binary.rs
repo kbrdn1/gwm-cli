@@ -4716,6 +4716,26 @@ fn exec_jobs_runs_the_parallel_capture_path() {
 }
 
 #[test]
+fn exec_jobs_preserves_raw_binary_output() {
+  // The parallel path captures bytes, but must re-emit them RAW — a
+  // `String::from_utf8_lossy` would mangle a non-UTF-8 byte (0xFF) into the
+  // U+FFFD replacement char. `printf '\377'` emits a literal 0xFF.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "2", "--", "printf", "\\377"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "exec should succeed: {out:?}");
+  assert!(
+    out.stdout.contains(&0xFFu8),
+    "the raw 0xFF byte must survive the capture, not be UTF-8-mangled"
+  );
+}
+
+#[test]
 fn exec_jobs_flag_parses_and_propagates_failure() {
   // The parallel path propagates a non-zero rollup just like sequential.
   let (dir, _base, _wt) = repo_with_one_worktree();

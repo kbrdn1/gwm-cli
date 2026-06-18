@@ -1114,14 +1114,22 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, comm
   } else {
     // Parallel (bounded by `job_count`): capture each worktree's output so
     // concurrent runs don't interleave, then print one block per worktree in
-    // worktree order once the fan-out completes.
+    // worktree order once the fan-out completes. Write the captured bytes
+    // RAW (not via `String::from_utf8_lossy`) so binary / non-UTF-8 output is
+    // re-emitted byte-for-byte, matching the sequential path's inherited stdio.
+    use std::io::Write;
     let items: Vec<(String, std::path::PathBuf)> = targets.iter().map(|w| (w.name.clone(), w.path.clone())).collect();
     let results = exec::run_in_dirs_parallel(job_count, &items, program, &args);
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
     for ((name, path), (outcome, output)) in items.iter().zip(results) {
-      println!("\n━━ {} ({})", name, path.display());
-      print!("{}", String::from_utf8_lossy(&output));
+      // Ignore write errors: a closed stdout (e.g. `| head`) shouldn't panic
+      // the whole fan-out, and the rollup/exit code still report the result.
+      let _ = writeln!(lock, "\n━━ {} ({})", name, path.display());
+      let _ = lock.write_all(&output);
       outcomes.push(outcome);
     }
+    let _ = lock.flush();
   }
 
   println!("\nrollup:");
