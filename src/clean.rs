@@ -43,6 +43,39 @@ pub fn default_patterns() -> Vec<String> {
     .collect()
 }
 
+/// Reject a profile `dirs` entry that could escape the worktree.
+///
+/// Profile-supplied dirs are user-controlled and later fed to
+/// [`scan_worktree`], which does `worktree.join(entry)` and a recursive
+/// `dir_size` *before* the git safety gate runs. A path that escapes the
+/// worktree — absolute (`"/"`, which `Path::join` resolves to the FS root),
+/// a `..` traversal, or empty (joins to the worktree root itself) — would
+/// make even a dry-run `gwm clean --profile …` walk outside the tree. Pin
+/// the set to plain worktree-relative subpaths and surface anything else as
+/// a config error (exit 1) at resolution time. The built-in
+/// [`default_patterns`] are trusted and bypass this check.
+fn validate_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
+  for d in dirs {
+    if d.is_empty() {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` has an empty `dirs` entry — list worktree-relative directory names"
+      )));
+    }
+    let p = Path::new(d);
+    if p.is_absolute() {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` dir `{d}` must be relative to the worktree, not absolute"
+      )));
+    }
+    if p.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` dir `{d}` must not escape the worktree with `..`"
+      )));
+    }
+  }
+  Ok(())
+}
+
 /// Resolve the directory set `gwm clean` should scan and reclaim (issue #324).
 ///
 /// - `--profile <name>` selects `[clean.profiles.<name>].dirs`, a **complete**
@@ -51,22 +84,27 @@ pub fn default_patterns() -> Vec<String> {
 /// - **No** `--profile` uses `[clean.profiles.default].dirs` when that profile
 ///   exists, else falls back to the built-in [`default_patterns`].
 ///
-/// Whatever set is returned, the caller still runs every directory through the
-/// safety gate (git-ignored + no tracked files + skip symlinks) before delete.
+/// Profile-supplied dirs are validated against worktree escape (absolute,
+/// `..`, or empty → exit 1). Whatever set is returned, the caller still runs
+/// every directory through the safety gate (git-ignored + no tracked files +
+/// skip symlinks) before delete.
 pub fn resolve_clean_dirs(profile: Option<&str>, cfg: &CleanConfig) -> Result<Vec<String>> {
   match profile {
-    Some(name) => cfg
-      .profiles
-      .get(name)
-      .map(|p| p.dirs.clone())
-      .ok_or_else(|| GwmError::Config(format!("clean: no profile named `{name}` in [clean.profiles]"))),
-    None => Ok(
-      cfg
+    Some(name) => {
+      let p = cfg
         .profiles
-        .get("default")
-        .map(|p| p.dirs.clone())
-        .unwrap_or_else(default_patterns),
-    ),
+        .get(name)
+        .ok_or_else(|| GwmError::Config(format!("clean: no profile named `{name}` in [clean.profiles]")))?;
+      validate_profile_dirs(name, &p.dirs)?;
+      Ok(p.dirs.clone())
+    }
+    None => match cfg.profiles.get("default") {
+      Some(p) => {
+        validate_profile_dirs("default", &p.dirs)?;
+        Ok(p.dirs.clone())
+      }
+      None => Ok(default_patterns()),
+    },
   }
 }
 

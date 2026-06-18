@@ -4723,6 +4723,22 @@ fn clean_unknown_profile_exits_one() {
 }
 
 #[test]
+fn clean_profile_with_an_unsafe_dir_exits_one() {
+  // A `dirs` entry that could escape the worktree (here `..`) is refused at
+  // resolution, before any filesystem scan — exit 1, nothing walked.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[clean.profiles.evil]\ndirs = [\"..\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--profile", "evil"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("escape the worktree"));
+}
+
+#[test]
 fn clean_named_profile_scopes_the_reclaim_to_its_dirs() {
   let (dir, _base, wt) = repo_with_one_worktree();
   // `coverage/` is only reclaimable under a profile that lists it; the

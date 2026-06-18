@@ -230,3 +230,48 @@ fn resolve_dirs_rejects_an_unknown_profile() {
     "error should name the missing profile: {err}"
   );
 }
+
+#[test]
+fn resolve_dirs_rejects_an_absolute_profile_dir() {
+  // `worktree.join("/")` resolves to the FS root — a dry-run scan would walk
+  // the whole filesystem. Reject absolute entries at resolution (exit 1).
+  let cfg = clean_cfg(&[("evil", &["/"])]);
+  let err = resolve_clean_dirs(Some("evil"), &cfg).expect_err("absolute dir must error");
+  assert!(
+    err.to_string().contains("absolute"),
+    "error should flag the absolute path: {err}"
+  );
+}
+
+#[test]
+fn resolve_dirs_rejects_a_parent_traversal_profile_dir() {
+  let cfg = clean_cfg(&[("evil", &["../sibling"])]);
+  let err = resolve_clean_dirs(Some("evil"), &cfg).expect_err("`..` dir must error");
+  assert!(err.to_string().contains(".."), "error should flag the traversal: {err}");
+}
+
+#[test]
+fn resolve_dirs_rejects_an_empty_profile_dir() {
+  let cfg = clean_cfg(&[("evil", &[""])]);
+  let err = resolve_clean_dirs(Some("evil"), &cfg).expect_err("empty dir must error");
+  assert!(
+    err.to_string().contains("empty"),
+    "error should flag the empty entry: {err}"
+  );
+}
+
+#[test]
+fn resolve_dirs_validates_the_default_profile_too() {
+  // The escape guard also covers the implicit `default` profile (no --profile).
+  let cfg = clean_cfg(&[("default", &[".."])]);
+  let err = resolve_clean_dirs(None, &cfg).expect_err("default profile is validated");
+  assert!(err.to_string().contains(".."), "error should flag the traversal: {err}");
+}
+
+#[test]
+fn resolve_dirs_allows_a_nested_relative_subpath() {
+  // A relative subpath that stays inside the worktree (no `..`) is fine.
+  let cfg = clean_cfg(&[("nested", &["packages/app/node_modules"])]);
+  let dirs = resolve_clean_dirs(Some("nested"), &cfg).expect("nested relative path is allowed");
+  assert_eq!(dirs, vec!["packages/app/node_modules"]);
+}
