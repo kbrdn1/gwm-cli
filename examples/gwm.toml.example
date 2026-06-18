@@ -346,6 +346,41 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # fullscreen           = true
 # skip_when_no_changes = true
 
+# --- `gwm exec` profiles (issue #324) ----------------------------------------
+# Saved commands for `gwm exec --profile <name>`. Each profile carries an
+# argv ARRAY — run with NO shell, exactly like the inline `gwm exec -- <cmd>`.
+#
+# ⚠️ Divergence to note: `[exec.profiles.*].command` is an argv ARRAY
+# (`["cargo", "test"]`), whereas the `command` of `[git_tui]` / `[review]`
+# above is a single SHELL line (`"lazygit -p {path}"`). exec deliberately
+# avoids a shell — no word-splitting, no globbing, no `{path}` placeholders;
+# the program is run verbatim in each worktree. This is frozen for 1.0.
+#
+# `--profile` and an inline `-- <cmd>` are mutually exclusive (exit 1), and an
+# unknown profile name exits 1.
+#
+# [exec.profiles.test]
+# command = ["cargo", "test"]
+#
+# [exec.profiles.fmt]
+# command = ["cargo", "fmt", "--all"]
+
+# --- `gwm clean` profiles (issue #324) ---------------------------------------
+# Saved directory sets for `gwm clean --profile <name>`. A profile's `dirs` is
+# a COMPLETE set that REPLACES the built-in target/node_modules/dist/build —
+# it never adds to them. The safety gate (git-ignored + no tracked files +
+# skip symlinks) still applies to every listed directory.
+#
+# The `default` profile is special: `gwm clean` WITHOUT `--profile` uses it
+# when present, else falls back to the built-in four. An unknown `--profile`
+# name exits 1.
+#
+# [clean.profiles.default]
+# dirs = ["target", "node_modules", "dist", "build", "coverage", ".turbo"]
+#
+# [clean.profiles.deep]
+# dirs = ["target", "node_modules", "dist", "build", ".cache", ".venv"]
+
 # --- `o: open` dispatch (issue #73) -----------------------------------------
 # How the `o` key behaves on the highlighted worktree. Three modes:
 #   "shell"  — suspend the TUI and spawn $SHELL with cwd = worktree.
