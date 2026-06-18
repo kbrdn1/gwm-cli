@@ -1075,8 +1075,9 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, command: Vec<String>) -
   let argv = match profile.as_deref() {
     Some(name) => {
       let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-      let cfg = Config::load_for_repo(workdir)?;
-      exec::resolve_exec_command(Some(name), &command, &cfg.exec)?
+      // Tolerant of unrelated config errors, strict on `[exec]` itself.
+      let exec_cfg = Config::load_exec_config(workdir)?;
+      exec::resolve_exec_command(Some(name), &command, &exec_cfg)?
     }
     None => exec::resolve_exec_command(None, &command, &crate::config::ExecConfig::default())?,
   };
@@ -1126,28 +1127,14 @@ fn cmd_clean(slugs: Vec<String>, profile: Option<String>, yes: bool) -> Result<(
   // Resolve the directory set up-front so an unknown `--profile` errors
   // (exit 1) before target discovery.
   //
-  // The profile blocks are opt-in, so the built-in `gwm clean` (no
-  // `--profile`) must stay tolerant of an UNRELATED config error — a typo in
-  // `[tui.keys]` / `[aliases]` / some other profile shouldn't block a clean
-  // it never reads. So without `--profile` we load config best-effort and
-  // fall back to `Config::default` (no profiles → built-in dirs) on any load
-  // failure; a *valid* `[clean.profiles.default]` is still honoured, and an
-  // error in that default profile itself still surfaces via `resolve`.
-  // `--profile <name>` is an explicit opt-in, so there config must load.
-  let patterns = match profile.as_deref() {
-    Some(name) => {
-      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-      let cfg = Config::load_for_repo(workdir)?;
-      clean::resolve_clean_dirs(Some(name), &cfg.clean)?
-    }
-    None => {
-      let cfg = repo
-        .workdir()
-        .and_then(|wd| Config::load_for_repo(wd).ok())
-        .unwrap_or_default();
-      clean::resolve_clean_dirs(None, &cfg.clean)?
-    }
-  };
+  // The profile blocks are opt-in, so an UNRELATED config error (a `[tui.keys]`
+  // typo, a stray key, another section) must not block `gwm clean`. We load
+  // ONLY the `[clean]` section, tolerant of the rest — but strict on `[clean]`
+  // itself: a malformed `[clean.profiles.default]` still errors rather than
+  // silently reverting to the built-in set before a destructive `--yes`.
+  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+  let clean_cfg = Config::load_clean_config(workdir)?;
+  let patterns = clean::resolve_clean_dirs(profile.as_deref(), &clean_cfg)?;
 
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {

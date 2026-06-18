@@ -4699,15 +4699,32 @@ fn exec_inline_command_ignores_a_broken_gwm_toml() {
 }
 
 #[test]
-fn exec_profile_surfaces_a_broken_gwm_toml() {
-  // The `--profile` path DOES read config, so a broken `.gwm.toml` surfaces
-  // as a load error (exit 1) — the counterpart to the inline test above.
+fn exec_profile_tolerates_an_unrelated_config_error() {
+  // The `--profile` path reads only the `[exec]` section, so an UNRELATED
+  // top-level typo is tolerated — the failure is the unknown profile, not the
+  // typo (exit 1 either way, but for the right reason).
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "nonsense_key = true\n");
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
     .args(["exec", "--profile", "whatever"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `whatever`"));
+}
+
+#[test]
+fn exec_profile_surfaces_a_malformed_exec_section() {
+  // A shape error in the `[exec]` section ITSELF still surfaces (exit 1):
+  // an unknown field in a profile is rejected by `deny_unknown_fields`.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.bad]\ncommand = [\"true\"]\nbogus = 1\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["exec", "--profile", "bad"])
     .assert()
     .failure()
     .code(1);
@@ -4755,9 +4772,9 @@ fn clean_unknown_profile_exits_one() {
 
 #[test]
 fn clean_builtin_ignores_a_broken_gwm_toml() {
-  // The built-in `gwm clean` (no `--profile`) is promised opt-in/config-
-  // tolerant: an unrelated `.gwm.toml` error must NOT block it — it falls
-  // back to the built-in dirs.
+  // The built-in `gwm clean` (no `--profile`) is opt-in/config-tolerant: an
+  // unrelated `.gwm.toml` error (a stray top-level key) must NOT block it —
+  // only the `[clean]` section is read, so it falls back to the built-in dirs.
   let (dir, _base, _wt) = repo_with_one_worktree();
   append_config(dir.path(), "nonsense_key = true\n");
   Command::cargo_bin("gwm")
@@ -4769,15 +4786,39 @@ fn clean_builtin_ignores_a_broken_gwm_toml() {
 }
 
 #[test]
-fn clean_profile_surfaces_a_broken_gwm_toml() {
-  // `--profile` is an explicit opt-in, so a broken `.gwm.toml` surfaces as a
-  // load error (exit 1) — the counterpart to the built-in test above.
-  let (dir, _base, _wt) = repo_with_one_worktree();
-  append_config(dir.path(), "nonsense_key = true\n");
+fn clean_honors_default_profile_despite_an_unrelated_config_error() {
+  // A configured `[clean.profiles.default]` must NOT be silently dropped
+  // (reverting to the built-in set) just because an unrelated key is wrong —
+  // that would make a destructive `--yes` delete the wrong set. The default
+  // profile's `coverage` (only reclaimable under that profile) is reported.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  std::fs::create_dir_all(wt.join("coverage")).unwrap();
+  std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
+  append_config(
+    dir.path(),
+    "nonsense_key = true\n[clean.profiles.default]\ndirs = [\"coverage\"]\n",
+  );
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
-    .args(["clean", "--profile", "whatever"])
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("coverage"));
+}
+
+#[test]
+fn clean_surfaces_a_malformed_clean_section() {
+  // A shape error in the `[clean]` section ITSELF still surfaces (exit 1),
+  // even without `--profile` — a profile missing its required `dirs` must not
+  // be silently ignored before a destructive clean.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[clean.profiles.broken]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean"])
     .assert()
     .failure()
     .code(1);

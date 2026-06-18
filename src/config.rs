@@ -987,6 +987,51 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
   }
 }
 
+/// Load a single top-level config section (e.g. `[exec]` / `[clean]`) from the
+/// layered config (global `~/.config/gwm/config.toml` then repo `.gwm.toml`),
+/// **tolerant of errors elsewhere** in the file but **strict on the section
+/// itself**.
+///
+/// `gwm exec --profile` / `gwm clean` each consult exactly one section. An
+/// unrelated problem — a stray top-level key, a semantic `[tui.keys]` error,
+/// another section's shape — must not block them, so only the requested
+/// subtree is deserialized; the rest is never validated. But the requested
+/// section IS deserialized with its `deny_unknown_fields` / required-field
+/// rules, so its OWN error still surfaces. That distinction matters for the
+/// destructive `gwm clean`: a malformed `[clean.profiles.default]` must error
+/// rather than silently revert to the built-in directory set (#324 review).
+///
+/// A missing section yields `T::default()`. A TOML *syntax* error (an
+/// unreadable file) still surfaces — there is no section to read.
+fn load_config_section<T>(repo_root: &Path, key: &str) -> Result<T>
+where
+  T: serde::de::DeserializeOwned + Default,
+{
+  let global_val = match global_config_path() {
+    Some(p) if p.exists() => Some(read_config_value(&p)?),
+    _ => None,
+  };
+  let repo_path = repo_root.join(CONFIG_FILE);
+  let repo_val = if repo_path.exists() {
+    Some(read_config_value(&repo_path)?)
+  } else {
+    None
+  };
+  let merged = match (global_val, repo_val) {
+    (None, None) => return Ok(T::default()),
+    (Some(g), None) => g,
+    (None, Some(r)) => r,
+    (Some(g), Some(r)) => merge_toml(g, r),
+  };
+  match merged.get(key) {
+    Some(section) => section
+      .clone()
+      .try_into()
+      .map_err(|e| GwmError::Config(format!("invalid `[{key}]` config: {e}"))),
+    None => Ok(T::default()),
+  }
+}
+
 /// Flatten a (possibly nested) TOML value into `key = display` rows,
 /// dotted for tables and `name[i]` for arrays-of-tables, leaving scalar
 /// leaves as-is. Shared by `gwm config list` (the CLI surface) and the
@@ -1157,6 +1202,24 @@ impl Config {
   /// Falls back to defaults when neither exists.
   pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
     Self::load_layered(repo_root, global_config_path().as_deref())
+  }
+
+  /// Load just the `[exec]` section (layered global → repo), tolerant of
+  /// errors elsewhere in the config but strict on `[exec]` itself. Used by
+  /// `gwm exec --profile` so an unrelated `.gwm.toml` problem doesn't block
+  /// it. See [`load_config_section`].
+  pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
+    load_config_section(repo_root, "exec")
+  }
+
+  /// Load just the `[clean]` section (layered global → repo), tolerant of
+  /// errors elsewhere but strict on `[clean]` itself. Used by `gwm clean` so
+  /// an unrelated `.gwm.toml` problem doesn't block the built-in clean, while
+  /// a malformed `[clean.profiles.default]` still errors rather than silently
+  /// reverting to the built-in set before a destructive `--yes`. See
+  /// [`load_config_section`].
+  pub fn load_clean_config(repo_root: &Path) -> Result<CleanConfig> {
+    load_config_section(repo_root, "clean")
   }
 
   /// Load the effective config by deep-merging the user-level global
