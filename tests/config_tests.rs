@@ -2243,6 +2243,34 @@ jobs = 2
 }
 
 #[test]
+fn exec_jobs_default_honors_global_even_without_a_repo() {
+  // A bare repo passes `repo = None`, but the GLOBAL `[exec] jobs` still
+  // applies (#324 review). A repo `[exec] jobs` overrides the global.
+  let global_dir = TempDir::new().unwrap();
+  let global = global_dir.path().join("config.toml");
+  std::fs::write(&global, "[exec]\njobs = 4\n").unwrap();
+
+  // repo = None (bare): only the global is read.
+  assert_eq!(
+    Config::load_exec_jobs_default_layered(Some(&global), None).unwrap(),
+    Some(4),
+    "bare repo still honours the global [exec] jobs"
+  );
+
+  // A repo `.gwm.toml` overrides the global default.
+  let repo_dir = TempDir::new().unwrap();
+  std::fs::write(repo_dir.path().join(CONFIG_FILE), "[exec]\njobs = 2\n").unwrap();
+  assert_eq!(
+    Config::load_exec_jobs_default_layered(Some(&global), Some(repo_dir.path())).unwrap(),
+    Some(2),
+    "repo [exec] jobs overrides the global"
+  );
+
+  // No global, no repo ⇒ None (sequential).
+  assert_eq!(Config::load_exec_jobs_default_layered(None, None).unwrap(), None);
+}
+
+#[test]
 fn exec_jobs_default_to_none() {
   let cfg = load_toml(
     r#"

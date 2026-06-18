@@ -1081,20 +1081,17 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, comm
   //     validate every profile, matching `gwm config validate` / doctor);
   //     needs a workdir to locate `.gwm.toml`.
   //   - inline + no `--jobs` → only the `[exec] jobs` default is needed; read
-  //     it WITHOUT validating sibling profiles when a workdir exists, else
-  //     fall back to the default (bare repo → jobs = 1).
+  //     it WITHOUT validating sibling profiles. A bare repo (no workdir) skips
+  //     the repo `.gwm.toml` but still honours the GLOBAL `[exec] jobs`.
   //   - inline + `--jobs` → the flag is authoritative and the command is on
   //     the CLI, so nothing from `[exec]` is needed — don't touch config.
   let exec_cfg = if profile.is_some() {
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
     Config::load_exec_config(workdir)?
   } else if jobs.is_none() {
-    match repo.workdir() {
-      Some(workdir) => crate::config::ExecConfig {
-        jobs: Config::load_exec_jobs_default(workdir)?,
-        ..Default::default()
-      },
-      None => crate::config::ExecConfig::default(),
+    crate::config::ExecConfig {
+      jobs: Config::load_exec_jobs_default(repo.workdir())?,
+      ..Default::default()
     }
   } else {
     crate::config::ExecConfig::default()

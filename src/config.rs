@@ -1013,19 +1013,39 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
 ///
 /// A missing section yields `T::default()`. A TOML *syntax* error (an
 /// unreadable file) still surfaces — there is no section to read.
-fn load_config_section<T>(repo_root: &Path, key: &str) -> Result<T>
+///
+/// `repo_root` is `None` for a **bare** repo (no workdir, hence no repo
+/// `.gwm.toml`): the repo layer is skipped, but the user-level GLOBAL config
+/// is still read, so a global `[exec] jobs = N` applies even there (#324
+/// review).
+fn load_config_section<T>(repo_root: Option<&Path>, key: &str) -> Result<T>
 where
   T: serde::de::DeserializeOwned + Default,
 {
-  let global_val = match global_config_path() {
-    Some(p) if p.exists() => Some(read_config_value(&p)?),
+  load_config_section_layered(global_config_path().as_deref(), repo_root, key)
+}
+
+/// Core of [`load_config_section`] with the global config path injected, so
+/// the layering can be pinned by a test without touching the runner's real
+/// `$HOME` / `$XDG_CONFIG_HOME`.
+fn load_config_section_layered<T>(global: Option<&Path>, repo_root: Option<&Path>, key: &str) -> Result<T>
+where
+  T: serde::de::DeserializeOwned + Default,
+{
+  let global_val = match global {
+    Some(p) if p.exists() => Some(read_config_value(p)?),
     _ => None,
   };
-  let repo_path = repo_root.join(CONFIG_FILE);
-  let repo_val = if repo_path.exists() {
-    Some(read_config_value(&repo_path)?)
-  } else {
-    None
+  let repo_val = match repo_root {
+    Some(root) => {
+      let repo_path = root.join(CONFIG_FILE);
+      if repo_path.exists() {
+        Some(read_config_value(&repo_path)?)
+      } else {
+        None
+      }
+    }
+    None => None,
   };
   let merged = match (global_val, repo_val) {
     (None, None) => return Ok(T::default()),
@@ -1224,7 +1244,7 @@ impl Config {
   /// same file `Config::load_for_repo` / `gwm config validate` / doctor reject
   /// — a sibling profile's semantic error can't pass on the command path only.
   pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
-    let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
+    let cfg: ExecConfig = load_config_section(Some(repo_root), "exec")?;
     for (name, p) in &cfg.profiles {
       crate::exec::validate_exec_profile_command(name, &p.command)?;
     }
@@ -1236,8 +1256,19 @@ impl Config {
   /// `--profile`, no `--jobs`) which needs the parallelism default but uses no
   /// profile — so a sibling profile's *semantic* issue must not block it. A
   /// shape error in `[exec]` (unknown field, wrong type) still surfaces.
-  pub fn load_exec_jobs_default(repo_root: &Path) -> Result<Option<u32>> {
+  ///
+  /// `repo_root` is `None` for a bare repo (no workdir): the repo `.gwm.toml`
+  /// is skipped but the GLOBAL `[exec] jobs` still applies.
+  pub fn load_exec_jobs_default(repo_root: Option<&Path>) -> Result<Option<u32>> {
     let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
+    Ok(cfg.jobs)
+  }
+
+  /// Like [`Self::load_exec_jobs_default`] but with the global config path
+  /// injected, so the global-vs-repo layering can be pinned by a test without
+  /// touching the runner's real `$HOME` / `$XDG_CONFIG_HOME`.
+  pub fn load_exec_jobs_default_layered(global: Option<&Path>, repo_root: Option<&Path>) -> Result<Option<u32>> {
+    let cfg: ExecConfig = load_config_section_layered(global, repo_root, "exec")?;
     Ok(cfg.jobs)
   }
 
@@ -1252,7 +1283,7 @@ impl Config {
   /// validated — a sibling profile that escapes the worktree can't slip
   /// through `gwm clean --profile good` while `gwm config validate` rejects it.
   pub fn load_clean_config(repo_root: &Path) -> Result<CleanConfig> {
-    let cfg: CleanConfig = load_config_section(repo_root, "clean")?;
+    let cfg: CleanConfig = load_config_section(Some(repo_root), "clean")?;
     for (name, p) in &cfg.profiles {
       crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
     }
