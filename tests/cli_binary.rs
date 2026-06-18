@@ -5239,6 +5239,43 @@ fn exec_fans_out_across_workspace_child_repos() {
 }
 
 #[test]
+fn exec_workspace_scopes_to_a_matching_slug() {
+  // A slug matching a worktree in only one child repo scopes the fan-out to
+  // that repo (the others contribute nothing — not an error).
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["alpha-wt", "--", "sh", "-c", "echo hi > scoped.txt"])
+    .assert()
+    .success();
+  assert!(root.path().join("alpha-wt/scoped.txt").exists(), "alpha matched");
+  assert!(
+    !root.path().join("beta-wt/scoped.txt").exists(),
+    "beta did not match the slug"
+  );
+}
+
+#[test]
+fn exec_workspace_errors_on_a_slug_matching_no_child_repo() {
+  // A typo that matches nothing in ANY child repo is an error, not a silent
+  // exit-0 having run nothing (#326 review).
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["ghost-typo", "--", "true"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("ghost-typo"));
+}
+
+#[test]
 fn exec_workspace_aggregates_a_nonzero_exit() {
   let root = workspace_with_worktrees();
   Command::cargo_bin("gwm")
