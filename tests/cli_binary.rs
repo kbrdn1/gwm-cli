@@ -4754,6 +4754,36 @@ fn clean_unknown_profile_exits_one() {
 }
 
 #[test]
+fn clean_builtin_ignores_a_broken_gwm_toml() {
+  // The built-in `gwm clean` (no `--profile`) is promised opt-in/config-
+  // tolerant: an unrelated `.gwm.toml` error must NOT block it — it falls
+  // back to the built-in dirs.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn clean_profile_surfaces_a_broken_gwm_toml() {
+  // `--profile` is an explicit opt-in, so a broken `.gwm.toml` surfaces as a
+  // load error (exit 1) — the counterpart to the built-in test above.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--profile", "whatever"])
+    .assert()
+    .failure()
+    .code(1);
+}
+
+#[test]
 fn clean_profile_with_an_unsafe_dir_exits_one() {
   // A `dirs` entry that could escape the worktree (here `..`) is refused at
   // resolution, before any filesystem scan — exit 1, nothing walked.

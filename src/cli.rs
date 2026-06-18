@@ -1122,12 +1122,32 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, command: Vec<String>) -
 /// `default` profile, else the built-ins (see [`clean::resolve_clean_dirs`]).
 fn cmd_clean(slugs: Vec<String>, profile: Option<String>, yes: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-  let cfg = Config::load_for_repo(workdir)?;
 
   // Resolve the directory set up-front so an unknown `--profile` errors
   // (exit 1) before target discovery.
-  let patterns = clean::resolve_clean_dirs(profile.as_deref(), &cfg.clean)?;
+  //
+  // The profile blocks are opt-in, so the built-in `gwm clean` (no
+  // `--profile`) must stay tolerant of an UNRELATED config error — a typo in
+  // `[tui.keys]` / `[aliases]` / some other profile shouldn't block a clean
+  // it never reads. So without `--profile` we load config best-effort and
+  // fall back to `Config::default` (no profiles → built-in dirs) on any load
+  // failure; a *valid* `[clean.profiles.default]` is still honoured, and an
+  // error in that default profile itself still surfaces via `resolve`.
+  // `--profile <name>` is an explicit opt-in, so there config must load.
+  let patterns = match profile.as_deref() {
+    Some(name) => {
+      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+      let cfg = Config::load_for_repo(workdir)?;
+      clean::resolve_clean_dirs(Some(name), &cfg.clean)?
+    }
+    None => {
+      let cfg = repo
+        .workdir()
+        .and_then(|wd| Config::load_for_repo(wd).ok())
+        .unwrap_or_default();
+      clean::resolve_clean_dirs(None, &cfg.clean)?
+    }
+  };
 
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {
