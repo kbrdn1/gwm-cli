@@ -4736,6 +4736,24 @@ fn exec_jobs_preserves_raw_binary_output() {
 }
 
 #[test]
+fn exec_inline_inside_bare_repo_does_not_require_a_workdir() {
+  // A bare repo has no `workdir()`, so there's no `.gwm.toml` to read — but
+  // inline `gwm exec` must still run (it enumerates worktrees, not config).
+  // Regression: reading the `[exec] jobs` default must fall back gracefully
+  // here instead of failing with `NotInGitRepo` (#324 review).
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init_bare(dir.path()).expect("init bare repo");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "true"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no worktrees to run in"));
+}
+
+#[test]
 fn exec_jobs_flag_skips_config_when_inline() {
   // Inline + `--jobs`: the flag is authoritative and the command is on the
   // CLI, so `[exec]` is never read — a malformed sibling profile can't block

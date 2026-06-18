@@ -1071,22 +1071,30 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// aggregate code (non-zero if any worktree failed).
 fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
-  let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
 
   // Read `[exec]` from disk only when a value from it is actually needed, and
-  // only as strictly as that need requires (issue #324):
+  // only as strictly as that need requires (issue #324). The workdir lookup
+  // lives INSIDE the config-reading branches: a bare repo with linked
+  // worktrees has no workdir, but inline `gwm exec` must still run there (it
+  // enumerates worktrees via `worktree::list`, not `.gwm.toml`).
   //   - `--profile <name>` → full `load_exec_config` (resolve the command +
-  //     validate every profile, matching `gwm config validate` / doctor).
+  //     validate every profile, matching `gwm config validate` / doctor);
+  //     needs a workdir to locate `.gwm.toml`.
   //   - inline + no `--jobs` → only the `[exec] jobs` default is needed; read
-  //     it WITHOUT validating sibling profiles (inline uses none of them).
+  //     it WITHOUT validating sibling profiles when a workdir exists, else
+  //     fall back to the default (bare repo → jobs = 1).
   //   - inline + `--jobs` → the flag is authoritative and the command is on
   //     the CLI, so nothing from `[exec]` is needed — don't touch config.
   let exec_cfg = if profile.is_some() {
+    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
     Config::load_exec_config(workdir)?
   } else if jobs.is_none() {
-    crate::config::ExecConfig {
-      jobs: Config::load_exec_jobs_default(workdir)?,
-      ..Default::default()
+    match repo.workdir() {
+      Some(workdir) => crate::config::ExecConfig {
+        jobs: Config::load_exec_jobs_default(workdir)?,
+        ..Default::default()
+      },
+      None => crate::config::ExecConfig::default(),
     }
   } else {
     crate::config::ExecConfig::default()
