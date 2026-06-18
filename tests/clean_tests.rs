@@ -269,6 +269,24 @@ fn resolve_dirs_validates_the_default_profile_too() {
 }
 
 #[test]
+fn resolve_dirs_rejects_git_pathspec_metacharacters() {
+  // A name with glob magic (`* ? [ ]`) or a leading `:` would be misread as a
+  // pathspec by the git safety checks — reject it up-front. A leading `-` is
+  // fine (the `--` delimiter handles it).
+  for evil in ["foo[bar]", "a*", "b?", ":magic"] {
+    let cfg = clean_cfg(&[("evil", &[evil])]);
+    let err = resolve_clean_dirs(Some("evil"), &cfg).unwrap_err();
+    assert!(
+      err.to_string().contains("pathspec metacharacters"),
+      "`{evil}` should be rejected: {err}"
+    );
+  }
+  // A leading-dash name is allowed (not pathspec magic).
+  let ok = clean_cfg(&[("dash", &["-cache"])]);
+  assert_eq!(resolve_clean_dirs(Some("dash"), &ok).unwrap(), vec!["-cache"]);
+}
+
+#[test]
 fn resolve_dirs_rejects_a_nested_path() {
   // A nested path is refused for 1.0: an intermediate component could be a
   // symlink that scan/delete would follow out of the worktree. Dirs are

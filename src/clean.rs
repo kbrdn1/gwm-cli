@@ -104,6 +104,21 @@ fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>
         )));
       }
     };
+    // Reject git pathspec magic. The safety gate feeds this name to
+    // `git ls-files -- <name>` / `git check-ignore -- <name>`, which treat it
+    // as a PATHSPEC, not a literal path: a glob char (`* ? [ ]`) or a leading
+    // `:` (magic prefix) would make git match something other than the literal
+    // directory `std::fs` deletes — e.g. `ls-files -- "foo[bar]"` misses a
+    // force-tracked file inside a literal `foo[bar]/`, so the tracked-file
+    // guard wrongly passes and `--yes` deletes tracked data. `check-ignore`
+    // can't be made literal (it rejects `:(literal)` magic), so reject these
+    // names up-front rather than silently mishandling them. A leading `-` is
+    // fine — the `--` delimiter in the git calls already neutralises it.
+    if name.starts_with(':') || name.contains(['*', '?', '[', ']']) {
+      return Err(GwmError::Config(format!(
+        "clean: profile `{profile}` dir `{d}` contains git pathspec metacharacters (`* ? [ ]` or a leading `:`) — name a literal directory"
+      )));
+    }
     out.push(name);
   }
   Ok(out)
