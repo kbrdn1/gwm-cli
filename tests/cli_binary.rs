@@ -4859,6 +4859,28 @@ fn clean_named_profile_scopes_the_reclaim_to_its_dirs() {
 }
 
 #[test]
+fn clean_reclaims_a_leading_dash_profile_dir() {
+  // A profile dir whose name starts with `-` (e.g. `-cache`) must flow through
+  // the git-ignored safety check correctly — the check passes `--` so git
+  // doesn't parse the name as an option and wrongly skip it (#324 review P3).
+  let (dir, _base, wt) = repo_with_one_worktree();
+  std::fs::create_dir_all(wt.join("-cache")).unwrap();
+  std::fs::write(wt.join("-cache/blob.bin"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "/-cache/\n").unwrap();
+  append_config(dir.path(), "[clean.profiles.dash]\ndirs = [\"-cache\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["clean", "--profile", "dash", "--yes"])
+    .assert()
+    .success();
+  assert!(
+    !wt.join("-cache").exists(),
+    "a git-ignored `-cache` profile dir must be reclaimed, not skipped"
+  );
+}
+
+#[test]
 fn clean_reports_artifacts_without_deleting_by_default() {
   let (dir, _base, wt) = repo_with_one_worktree();
   // target/ is git-ignored ⇒ deletable, so the dry-run preview counts it and

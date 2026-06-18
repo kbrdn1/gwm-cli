@@ -1202,13 +1202,18 @@ fn dir_is_safe_to_clean(worktree: &Path, rel: &str) -> bool {
 }
 
 /// Whether git considers `rel` (relative to `worktree`) ignored. Shells out to
-/// `git check-ignore -q <rel>` (exit 0 = ignored). Any failure (git missing,
+/// `git check-ignore -q -- <rel>` (exit 0 = ignored). Any failure (git missing,
 /// not a repo) is treated as "not ignored" so the default is to preserve.
+///
+/// The `--` delimiter is required: with a config-supplied `[clean.profiles]`
+/// dir, a name like `-cache` would otherwise be parsed by git as an option and
+/// the directory would always read as "not ignored" (skipped). `ls-files`
+/// below already passes `--` for the same reason.
 fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
   std::process::Command::new("git")
     .arg("-C")
     .arg(worktree)
-    .args(["check-ignore", "-q", rel])
+    .args(["check-ignore", "-q", "--", rel])
     .status()
     .map(|s| s.success())
     .unwrap_or(false)
