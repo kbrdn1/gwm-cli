@@ -4686,6 +4686,121 @@ fn exec_runs_a_named_profile_command() {
 }
 
 #[test]
+fn exec_jobs_runs_the_parallel_capture_path() {
+  // `--jobs > 1` runs the bounded-parallel path: each worktree's output is
+  // captured and printed as a block (after its header), and the command still
+  // runs and rolls up ✓.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args([
+      "exec",
+      "--jobs",
+      "2",
+      "--",
+      "sh",
+      "-c",
+      "echo blockline; echo hi > exec_jobs_marker.txt",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("blockline")) // captured stdout printed as a block
+    .stdout(predicate::str::contains("feat-1-wt"))
+    .stdout(predicate::str::contains("✓"));
+  assert!(
+    wt.join("exec_jobs_marker.txt").exists(),
+    "the command must still run under --jobs"
+  );
+}
+
+#[test]
+fn exec_jobs_preserves_raw_binary_output() {
+  // The parallel path captures bytes, but must re-emit them RAW — a
+  // `String::from_utf8_lossy` would mangle a non-UTF-8 byte (0xFF) into the
+  // U+FFFD replacement char. `printf '\377'` emits a literal 0xFF.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "2", "--", "printf", "\\377"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "exec should succeed: {out:?}");
+  assert!(
+    out.stdout.contains(&0xFFu8),
+    "the raw 0xFF byte must survive the capture, not be UTF-8-mangled"
+  );
+}
+
+#[test]
+fn exec_inline_inside_bare_repo_does_not_require_a_workdir() {
+  // A bare repo has no `workdir()`, so there's no `.gwm.toml` to read — but
+  // inline `gwm exec` must still run (it enumerates worktrees, not config).
+  // Regression: reading the `[exec] jobs` default must fall back gracefully
+  // here instead of failing with `NotInGitRepo` (#324 review).
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init_bare(dir.path()).expect("init bare repo");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "true"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no worktrees to run in"));
+}
+
+#[test]
+fn exec_jobs_flag_skips_config_when_inline() {
+  // Inline + `--jobs`: the flag is authoritative and the command is on the
+  // CLI, so `[exec]` is never read — a malformed sibling profile can't block
+  // `gwm exec --jobs N -- <cmd>` (#324 review).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.bad]\ncommand = []\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "2", "--", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_inline_jobs_default_tolerates_a_semantic_sibling_profile() {
+  // Inline + no `--jobs`: the `[exec] jobs` default IS read, but sibling
+  // profiles are NOT semantically validated (inline uses none of them), so a
+  // `command = []` sibling doesn't block the inline run.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec]\njobs = 1\n[exec.profiles.bad]\ncommand = []\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_jobs_flag_parses_and_propagates_failure() {
+  // The parallel path propagates a non-zero rollup just like sequential.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "3", "--", "sh", "-c", "exit 4"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗"))
+    .stdout(predicate::str::contains("exit 4"));
+}
+
+#[test]
 fn exec_inline_command_ignores_a_broken_gwm_toml() {
   // The inline `gwm exec -- <cmd>` surface is promised config-free: an
   // unrelated `.gwm.toml` error must NOT break it (it only reads config for

@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Bounded `--jobs` parallelism for `gwm exec`** (issue #324). `gwm exec`
+  gains a `--jobs <n>` flag and an `[exec] jobs` config default (with a
+  per-profile `[exec.profiles.<name>].jobs` override). Precedence: `--jobs`
+  > `profile.jobs` > `[exec] jobs` > `1`. `1` (or absent) keeps the unchanged
+  sequential behaviour with live, inherited output; `> 1` runs up to N
+  worktrees at once, capturing each one's stdout+stderr and printing it as a
+  per-worktree block in worktree order once the fan-out completes (so
+  concurrent runs don't interleave). The aggregate exit code is unchanged
+  (non-zero if any worktree failed). The runner uses a bounded `std::thread`
+  pool — no new dependency. `jobs` is a sub-field of the already-frozen
+  `[exec]` section, so the 1.0 section set is unchanged.
+
 - **Named `[exec]` / `[clean]` config profiles** (issue #324). `.gwm.toml`
   gains two opt-in sections so common fan-out invocations can be saved per
   repo instead of retyped. `[exec.profiles.<name>]` carries a `command`

@@ -10,13 +10,15 @@ use clap::Parser;
 use gwm::cli::{Cli, Command};
 use gwm::config::{ExecConfig, ExecProfile};
 use gwm::exec::{
-  exec_in_dir, format_outcome, resolve_exec_command, resolve_program, rollup_exit_code, ExecOutcome, ExecStatus,
+  exec_capture_in_dir, exec_in_dir, format_outcome, resolve_exec_command, resolve_jobs, resolve_program,
+  rollup_exit_code, run_in_dirs_parallel, ExecOutcome, ExecStatus,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
-/// Build an [`ExecConfig`] with the given `[exec.profiles.*]` entries.
+/// Build an [`ExecConfig`] with the given `[exec.profiles.*]` entries (no
+/// `jobs` set anywhere).
 fn exec_cfg(profiles: &[(&str, &[&str])]) -> ExecConfig {
   let mut map = BTreeMap::new();
   for (name, argv) in profiles {
@@ -24,10 +26,14 @@ fn exec_cfg(profiles: &[(&str, &[&str])]) -> ExecConfig {
       (*name).to_string(),
       ExecProfile {
         command: argv.iter().map(|s| s.to_string()).collect(),
+        jobs: None,
       },
     );
   }
-  ExecConfig { profiles: map }
+  ExecConfig {
+    jobs: None,
+    profiles: map,
+  }
 }
 
 #[test]
@@ -177,14 +183,146 @@ fn parses_command_after_double_dash_with_no_slugs() {
     Some(Command::Exec {
       slugs,
       profile,
+      jobs,
       command,
     }) => {
       assert!(slugs.is_empty(), "no slugs before `--`");
       assert!(profile.is_none(), "no --profile given");
+      assert!(jobs.is_none(), "no --jobs given");
       assert_eq!(command, vec!["git".to_string(), "fetch".to_string()]);
     }
     other => panic!("expected Exec, got {other:?}"),
   }
+}
+
+#[test]
+fn parses_jobs_flag() {
+  let cli = Cli::try_parse_from(["gwm", "exec", "--jobs", "4", "--", "echo", "hi"]).expect("should parse");
+  match cli.command {
+    Some(Command::Exec { jobs, command, .. }) => {
+      assert_eq!(jobs, Some(4));
+      assert_eq!(command, vec!["echo".to_string(), "hi".to_string()]);
+    }
+    other => panic!("expected Exec, got {other:?}"),
+  }
+}
+
+// --- jobs precedence + parallel runner (issue #324) ------------------------
+
+/// ExecConfig with an explicit global `jobs` and per-profile `(name, argv, jobs)`.
+fn exec_cfg_jobs(global: Option<u32>, profiles: &[(&str, &[&str], Option<u32>)]) -> ExecConfig {
+  let mut map = BTreeMap::new();
+  for (name, argv, jobs) in profiles {
+    map.insert(
+      (*name).to_string(),
+      ExecProfile {
+        command: argv.iter().map(|s| s.to_string()).collect(),
+        jobs: *jobs,
+      },
+    );
+  }
+  ExecConfig {
+    jobs: global,
+    profiles: map,
+  }
+}
+
+#[test]
+fn resolve_jobs_defaults_to_one() {
+  assert_eq!(resolve_jobs(None, None, &exec_cfg(&[])), 1);
+}
+
+#[test]
+fn resolve_jobs_flag_wins_over_profile_and_global() {
+  let cfg = exec_cfg_jobs(Some(2), &[("p", &["true"], Some(3))]);
+  assert_eq!(resolve_jobs(Some(8), Some("p"), &cfg), 8);
+}
+
+#[test]
+fn resolve_jobs_profile_overrides_global() {
+  let cfg = exec_cfg_jobs(Some(2), &[("p", &["true"], Some(4))]);
+  assert_eq!(resolve_jobs(None, Some("p"), &cfg), 4);
+}
+
+#[test]
+fn resolve_jobs_falls_back_global_then_one() {
+  let cfg = exec_cfg_jobs(Some(5), &[("p", &["true"], None)]);
+  assert_eq!(resolve_jobs(None, Some("p"), &cfg), 5, "profile without jobs → global");
+  assert_eq!(resolve_jobs(None, None, &cfg), 5, "inline → global");
+  assert_eq!(resolve_jobs(None, None, &exec_cfg_jobs(None, &[])), 1, "nothing → 1");
+}
+
+#[test]
+fn resolve_jobs_clamps_zero_to_one() {
+  let cfg = exec_cfg_jobs(Some(0), &[]);
+  assert_eq!(resolve_jobs(Some(0), None, &cfg), 1);
+  assert_eq!(resolve_jobs(None, None, &cfg), 1);
+}
+
+#[test]
+fn exec_capture_captures_stdout() {
+  let dir = TempDir::new().unwrap();
+  let (status, out) = exec_capture_in_dir(dir.path(), "sh", &["-c".into(), "echo captured".into()]);
+  assert_eq!(status, ExecStatus::Ok);
+  assert!(
+    String::from_utf8_lossy(&out).contains("captured"),
+    "stdout should be captured: {out:?}"
+  );
+}
+
+#[test]
+fn exec_capture_reports_exit_code_and_stderr() {
+  let dir = TempDir::new().unwrap();
+  let (status, out) = exec_capture_in_dir(dir.path(), "sh", &["-c".into(), "echo oops 1>&2; exit 3".into()]);
+  assert_eq!(status, ExecStatus::Failed(3));
+  assert!(
+    String::from_utf8_lossy(&out).contains("oops"),
+    "stderr should be captured too: {out:?}"
+  );
+}
+
+#[test]
+fn run_parallel_captures_each_dirs_output_in_input_order() {
+  // Each dir holds an `id.txt`; running `cat id.txt` in each (cwd = the dir)
+  // proves per-worktree capture, and the results must come back in INPUT
+  // order regardless of completion order (bounded at 2 workers).
+  let dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
+  let items: Vec<(String, PathBuf)> = dirs
+    .iter()
+    .enumerate()
+    .map(|(i, d)| {
+      std::fs::write(d.path().join("id.txt"), format!("dir-{i}")).unwrap();
+      (format!("wt{i}"), d.path().to_path_buf())
+    })
+    .collect();
+
+  let results = run_in_dirs_parallel(2, &items, "sh", &["-c".into(), "cat id.txt".into()]);
+
+  assert_eq!(results.len(), 3);
+  for (i, (outcome, output)) in results.iter().enumerate() {
+    assert_eq!(outcome.name, format!("wt{i}"), "results stay in input order");
+    assert_eq!(outcome.status, ExecStatus::Ok);
+    assert!(
+      String::from_utf8_lossy(output).contains(&format!("dir-{i}")),
+      "block {i} must carry its own dir's output"
+    );
+  }
+}
+
+#[test]
+fn run_parallel_clamps_jobs_above_item_count() {
+  let dir = TempDir::new().unwrap();
+  let items = vec![("only".to_string(), dir.path().to_path_buf())];
+  // jobs far exceeds the single item — must not panic, returns the one result.
+  let results = run_in_dirs_parallel(64, &items, "sh", &["-c".into(), "true".into()]);
+  assert_eq!(results.len(), 1);
+  assert_eq!(results[0].0.status, ExecStatus::Ok);
+}
+
+#[test]
+fn run_parallel_on_empty_items_returns_empty() {
+  let results = run_in_dirs_parallel(4, &[], "true", &[]);
+  assert!(results.is_empty());
 }
 
 #[test]

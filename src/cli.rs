@@ -654,6 +654,12 @@ pub enum Command {
     /// an unknown name exits 1.
     #[arg(long, value_name = "NAME")]
     profile: Option<String>,
+    /// Bounded parallelism (issue #324). `1` (default) runs sequentially with
+    /// live, inherited output; `> 1` runs up to N worktrees at once, capturing
+    /// each one's output and printing it as a block at the end. Wins over a
+    /// profile's / `[exec]`'s `jobs`.
+    #[arg(long, value_name = "N")]
+    jobs: Option<u32>,
     /// Command to run, after `--`. Everything past `--` is forwarded
     /// verbatim, e.g. `gwm exec -- git log --oneline`. Provide either this
     /// or `--profile`, never both, and at least one.
@@ -1040,8 +1046,9 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Exec {
       slugs,
       profile,
+      jobs,
       command,
-    } => cmd_exec(slugs, profile, command),
+    } => cmd_exec(slugs, profile, jobs, command),
     Command::Clean { slugs, profile, yes } => cmd_clean(slugs, profile, yes),
   }
 }
@@ -1062,25 +1069,40 @@ fn resolve_targets(repo: &Repository, slugs: &[String]) -> Result<Vec<worktree::
 /// `gwm exec [<slug>...] -- <cmd>` (issue #313). Runs the command in each
 /// target worktree sequentially, prints a ✓ / ✗ rollup, and exits with the
 /// aggregate code (non-zero if any worktree failed).
-fn cmd_exec(slugs: Vec<String>, profile: Option<String>, command: Vec<String>) -> Result<()> {
+fn cmd_exec(slugs: Vec<String>, profile: Option<String>, jobs: Option<u32>, command: Vec<String>) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
+
+  // Read `[exec]` from disk only when a value from it is actually needed, and
+  // only as strictly as that need requires (issue #324). The workdir lookup
+  // lives INSIDE the config-reading branches: a bare repo with linked
+  // worktrees has no workdir, but inline `gwm exec` must still run there (it
+  // enumerates worktrees via `worktree::list`, not `.gwm.toml`).
+  //   - `--profile <name>` → full `load_exec_config` (resolve the command +
+  //     validate every profile, matching `gwm config validate` / doctor);
+  //     needs a workdir to locate `.gwm.toml`.
+  //   - inline + no `--jobs` → only the `[exec] jobs` default is needed; read
+  //     it WITHOUT validating sibling profiles. A bare repo (no workdir) skips
+  //     the repo `.gwm.toml` but still honours the GLOBAL `[exec] jobs`.
+  //   - inline + `--jobs` → the flag is authoritative and the command is on
+  //     the CLI, so nothing from `[exec]` is needed — don't touch config.
+  let exec_cfg = if profile.is_some() {
+    let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
+    Config::load_exec_config(workdir)?
+  } else if jobs.is_none() {
+    crate::config::ExecConfig {
+      jobs: Config::load_exec_jobs_default(repo.workdir())?,
+      ..Default::default()
+    }
+  } else {
+    crate::config::ExecConfig::default()
+  };
 
   // Resolve the argv up-front, from exactly one of `--profile` / inline
   // `-- <cmd>`. A usage error (both, neither, or an unknown profile) must
   // surface before we touch any worktree, hence before target discovery.
-  //
-  // Only the `--profile` lookup needs `.gwm.toml`; the inline `gwm exec --
-  // <cmd>` surface is promised unchanged, so it must NOT read config — an
-  // unrelated config error there would break a command that never used it.
-  let argv = match profile.as_deref() {
-    Some(name) => {
-      let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?;
-      // Tolerant of unrelated config errors, strict on `[exec]` itself.
-      let exec_cfg = Config::load_exec_config(workdir)?;
-      exec::resolve_exec_command(Some(name), &command, &exec_cfg)?
-    }
-    None => exec::resolve_exec_command(None, &command, &crate::config::ExecConfig::default())?,
-  };
+  let argv = exec::resolve_exec_command(profile.as_deref(), &command, &exec_cfg)?;
+  // Precedence: `--jobs` > `[exec.profiles.<name>].jobs` > `[exec] jobs` > 1.
+  let job_count = exec::resolve_jobs(jobs, profile.as_deref(), &exec_cfg);
 
   let targets = resolve_targets(&repo, &slugs)?;
   if targets.is_empty() {
@@ -1096,13 +1118,35 @@ fn cmd_exec(slugs: Vec<String>, profile: Option<String>, command: Vec<String>) -
   let args = args.to_vec();
 
   let mut outcomes = Vec::with_capacity(targets.len());
-  for w in &targets {
-    println!("\n━━ {} ({})", w.name, w.path.display());
-    let status = exec::exec_in_dir(&w.path, program, &args);
-    outcomes.push(exec::ExecOutcome {
-      name: w.name.clone(),
-      status,
-    });
+  if job_count <= 1 {
+    // Sequential: inherit the parent's stdio so output streams live, in order.
+    for w in &targets {
+      println!("\n━━ {} ({})", w.name, w.path.display());
+      let status = exec::exec_in_dir(&w.path, program, &args);
+      outcomes.push(exec::ExecOutcome {
+        name: w.name.clone(),
+        status,
+      });
+    }
+  } else {
+    // Parallel (bounded by `job_count`): capture each worktree's output so
+    // concurrent runs don't interleave, then print one block per worktree in
+    // worktree order once the fan-out completes. Write the captured bytes
+    // RAW (not via `String::from_utf8_lossy`) so binary / non-UTF-8 output is
+    // re-emitted byte-for-byte, matching the sequential path's inherited stdio.
+    use std::io::Write;
+    let items: Vec<(String, std::path::PathBuf)> = targets.iter().map(|w| (w.name.clone(), w.path.clone())).collect();
+    let results = exec::run_in_dirs_parallel(job_count, &items, program, &args);
+    let stdout = std::io::stdout();
+    let mut lock = stdout.lock();
+    for ((name, path), (outcome, output)) in items.iter().zip(results) {
+      // Ignore write errors: a closed stdout (e.g. `| head`) shouldn't panic
+      // the whole fan-out, and the rollup/exit code still report the result.
+      let _ = writeln!(lock, "\n━━ {} ({})", name, path.display());
+      let _ = lock.write_all(&output);
+      outcomes.push(outcome);
+    }
+    let _ = lock.flush();
   }
 
   println!("\nrollup:");
