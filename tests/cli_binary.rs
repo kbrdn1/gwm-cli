@@ -5341,6 +5341,34 @@ fn clean_workspace_yes_deletes_in_every_child_repo() {
 }
 
 #[test]
+fn clean_workspace_errors_before_deleting_on_a_corrupt_child_repo() {
+  // A child that looks like a repo (.git present) but won't open must fail the
+  // whole fan-out BEFORE any deletion — not be silently skipped while the valid
+  // repos get cleaned (#326 review).
+  let root = workspace_with_worktrees();
+  let wtdir = root.path().join("alpha-wt");
+  std::fs::create_dir_all(wtdir.join("target")).unwrap();
+  std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+  std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  let corrupt = root.path().join("corrupt");
+  std::fs::create_dir_all(&corrupt).unwrap();
+  std::fs::write(corrupt.join(".git"), "gitdir: /nonexistent-gitdir\n").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .arg("--yes")
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("corrupt"));
+  // The valid repo's reclaimable target/ survives — nothing was deleted.
+  assert!(wtdir.join("target").exists(), "fan-out must fail before any deletion");
+}
+
+#[test]
 fn workspace_refuses_a_still_unsupported_subcommand() {
   // `--workspace` is still refused on commands that don't implement it (only
   // list/create/exec/clean and the bare TUI do).

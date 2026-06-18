@@ -1135,6 +1135,24 @@ fn cmd_exec_workspace(
 /// an empty workspace or an unopenable child — before any command runs).
 /// Returns `(repo_name, Repository)` pairs in `discover` order.
 fn open_workspace_repos(root: &Path) -> Result<Vec<(String, Repository)>> {
+  // `workspace::discover` silently skips a child whose `Repository::open`
+  // fails (fine for `list` / `create`), but `exec` / `clean` are destructive
+  // and contract for upfront resolution: a child that LOOKS like a repo (has a
+  // `.git`) but won't open must fail the whole fan-out before any side effect,
+  // not be quietly dropped while the valid repos run (#326 review).
+  for entry in std::fs::read_dir(root)?.flatten() {
+    let path = entry.path();
+    if path.is_dir() && path.join(".git").exists() && Repository::open(&path).is_err() {
+      let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+      return Err(GwmError::Other(format!(
+        "workspace: child repo `{name}` has a `.git` but cannot be opened (corrupt or unreadable)"
+      )));
+    }
+  }
+
   let ws = workspace::discover(root)?;
   if ws.is_empty() {
     return Err(GwmError::EmptyWorkspace {
