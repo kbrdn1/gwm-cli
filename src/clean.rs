@@ -109,6 +109,14 @@ fn normalized_profile_dirs(profile: &str, dirs: &[String]) -> Result<Vec<String>
   Ok(out)
 }
 
+/// Validate a `[clean.profiles.<name>]` entry's `dirs` without resolving them
+/// — same rules as [`normalized_profile_dirs`], surfaced for the config
+/// validation path so `gwm config validate` / `gwm doctor` reject what
+/// `gwm clean` would (issue #324 review).
+pub fn validate_clean_profile_dirs(profile: &str, dirs: &[String]) -> Result<()> {
+  normalized_profile_dirs(profile, dirs).map(|_| ())
+}
+
 /// Drop exact duplicate entries (declared order kept), so a directory listed
 /// twice isn't scanned and reclaimed twice. Inputs come from
 /// [`normalized_profile_dirs`], so syntactic aliases (`target` vs `target/`)

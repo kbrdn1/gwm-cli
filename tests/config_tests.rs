@@ -2291,3 +2291,32 @@ nonsense = true
     "{err}"
   );
 }
+
+#[test]
+fn exec_profile_with_an_empty_command_fails_validation() {
+  // `command = []` parses (it's a valid array) but is semantically invalid —
+  // caught at config-load time so `gwm config validate` rejects what
+  // `gwm exec --profile` would.
+  let err = load_toml(
+    r#"
+[exec.profiles.empty]
+command = []
+"#,
+  )
+  .expect_err("empty command must fail validation");
+  assert!(err.to_string().contains("empty `command`"), "{err}");
+}
+
+#[test]
+fn clean_profile_with_an_escaping_dir_fails_validation() {
+  // `dirs = [".."]` parses but escapes the worktree — caught at config-load
+  // time, not only later in `gwm clean`.
+  let err = load_toml(
+    r#"
+[clean.profiles.default]
+dirs = [".."]
+"#,
+  )
+  .expect_err("escaping dir must fail validation");
+  assert!(err.to_string().contains(".."), "{err}");
+}

@@ -1245,7 +1245,24 @@ impl Config {
     cfg.validate_aliases()?;
     cfg.validate_tui_keys()?;
     cfg.validate_theme()?;
+    cfg.validate_profiles()?;
     Ok(cfg)
+  }
+
+  /// Reject semantically invalid `[exec.profiles.*]` / `[clean.profiles.*]`
+  /// entries — an empty exec `command`, or a clean `dirs` entry that escapes
+  /// the worktree (absolute, `..`, `.`/root, nested) — at config-load time, so
+  /// `gwm config validate` / `gwm doctor` reject exactly what `gwm exec
+  /// --profile` / `gwm clean` would (issue #324 review). The per-command
+  /// resolvers share the same validators, so the two paths can't drift.
+  pub(crate) fn validate_profiles(&self) -> Result<()> {
+    for (name, p) in &self.exec.profiles {
+      crate::exec::validate_exec_profile_command(name, &p.command)?;
+    }
+    for (name, p) in &self.clean.profiles {
+      crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
+    }
+    Ok(())
   }
 
   /// Build the effective (deep-merged) config from disk **without** running

@@ -53,11 +53,7 @@ pub fn resolve_exec_command(profile: Option<&str>, inline: &[String], cfg: &Exec
         .profiles
         .get(name)
         .ok_or_else(|| GwmError::Config(format!("exec: no profile named `{name}` in [exec.profiles]")))?;
-      if p.command.is_empty() {
-        return Err(GwmError::Config(format!(
-          "exec: profile `{name}` has an empty `command` — give it an argv array like `command = [\"cargo\", \"test\"]`"
-        )));
-      }
+      validate_exec_profile_command(name, &p.command)?;
       Ok(p.command.clone())
     }
     (None, false) => Ok(inline.to_vec()),
@@ -65,6 +61,19 @@ pub fn resolve_exec_command(profile: Option<&str>, inline: &[String], cfg: &Exec
       "exec: provide a command after `--` (e.g. `gwm exec -- cargo test`) or pass `--profile <name>`".into(),
     )),
   }
+}
+
+/// Validate a `[exec.profiles.<name>]` entry's `command`: it must be a
+/// non-empty argv array. Surfaced for the config validation path so
+/// `gwm config validate` / `gwm doctor` reject what `gwm exec --profile`
+/// would (issue #324 review).
+pub fn validate_exec_profile_command(profile: &str, command: &[String]) -> Result<()> {
+  if command.is_empty() {
+    return Err(GwmError::Config(format!(
+      "exec: profile `{profile}` has an empty `command` — give it an argv array like `command = [\"cargo\", \"test\"]`"
+    )));
+  }
+  Ok(())
 }
 
 /// Run `program args…` with the working directory set to `dir`.
