@@ -219,7 +219,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     if app.view == View::CommandLogs {
       app.command_logs.sync();
     }
-    app.maybe_auto_refresh(now);
+    // #325: don't auto-refresh while a destructive overlay (exec picker /
+    // clean report) is open — a re-list would drift the live selection /
+    // active repo out from under the target the overlay captured at open.
+    if !app.destructive_overlay_open() {
+      app.maybe_auto_refresh(now);
+    }
 
     // Issue #35: drain PTY output and detect process death before drawing.
     // `poll_bytes` feeds pending reader-thread bytes into the vt100 parser
@@ -249,7 +254,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // selected worktree's repo before drawing (so the sidebar preview reads
     // the right repo) and before the next key fires an action against it. A
     // no-op in single-repo mode and when the selection hasn't crossed repos.
-    app.sync_active_repo();
+    // #325: suspended while a destructive overlay is open so the active repo
+    // (and its config) can't swap under the captured exec/clean target.
+    if !app.destructive_overlay_open() {
+      app.sync_active_repo();
+    }
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 

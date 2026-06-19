@@ -7725,3 +7725,23 @@ fn clean_countdown_is_pinned_to_the_open_time_config() {
     "the safety delay captured at open survives a live config swap"
   );
 }
+
+#[test]
+fn destructive_overlay_open_flags_exec_and_clean_views() {
+  // Codex #333: the run loop suspends auto-refresh / active-repo sync while a
+  // destructive overlay is open, gating on this predicate so the captured
+  // exec/clean target can't drift mid-overlay.
+  let (_repo, mut app) = make_app();
+  assert!(
+    !app.destructive_overlay_open(),
+    "list view is not a destructive overlay"
+  );
+  app.view = View::ExecPicker;
+  assert!(app.destructive_overlay_open());
+  app.view = View::CleanReport;
+  assert!(app.destructive_overlay_open());
+  // The delete-confirm modal is not in this class — it has no captured target
+  // to protect and reads the live selection by design.
+  app.view = View::Confirm;
+  assert!(!app.destructive_overlay_open());
+}

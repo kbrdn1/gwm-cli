@@ -2068,6 +2068,17 @@ impl App {
 
   // ── Exec picker overlay (issue #325) ───────────────────────────────────
 
+  /// `true` while a destructive overlay — the exec picker or the clean
+  /// report — is open (issue #325). The run loop suspends `maybe_auto_refresh`
+  /// and `sync_active_repo` while one is up, so the worktree list (and thus
+  /// the live selection / active repo) cannot reshuffle under an armed reclaim
+  /// or a pending exec run. This closes the drift class at its source (Codex
+  /// #333 review); the per-overlay open-time snapshots stay as defence in
+  /// depth against an already-in-flight refresh landing its result.
+  pub fn destructive_overlay_open(&self) -> bool {
+    matches!(self.view, View::ExecPicker | View::CleanReport)
+  }
+
   /// Open the exec profile picker (issue #325). Populates it from
   /// `[exec.profiles.*]` and switches to [`View::ExecPicker`]. Refuses
   /// (status-bar message, no transition) when nothing is selected or no
