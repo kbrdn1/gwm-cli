@@ -15,6 +15,7 @@ Bare `gwm` (no arguments) opens the ratatui interface on the current repo. From 
 - **[Confirm-overlay countdown](/tui/confirm-countdown)** — the safety countdown that prevents accidental branch deletions when `D` is armed.
 - **[Configurable launchers](/tui/launchers)** — `[git_tui]` (`l` overlay / `L` fullscreen) and `[review]` (`r` overlay / `R` fullscreen), with `{base} {head} {path} {diff}` placeholders and the embedded PTY overlay.
 - **[Open dispatch](/tui/open-dispatch)** — `o` opens a terminal in an embedded PTY overlay; `O` runs the `[tui.open]` dispatch (`shell` / `editor` / `finder`).
+- **[Exec / clean overlays](/tui/keybindings#exec-picker-overlay-x)** — `x` picks an `[exec.profiles]` profile and runs it in a PTY overlay; `X` previews and reclaims build artifacts (same git-ignored safety gate as `gwm clean --yes`, behind a confirm countdown).
 - **[Themes](/tui/themes)** — role-based `[theme]` colours and the built-in presets (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`).
 - **[Keymap & command palette](/tui/keymap-and-palette)** — remap any binding via `[tui.keys]` (with chord support), or fire an action by name from the `:` palette.
 

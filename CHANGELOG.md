@@ -12,6 +12,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TUI exec / clean overlays** (issue #325). The ratatui interface gains two
+  overlays over the worktree list: `x` opens an **exec picker** that lists the
+  `[exec.profiles.*]` names and, on `Enter`, runs the highlighted profile's
+  `command` array — with no shell — in the embedded PTY overlay rooted at the
+  selected worktree; `X` opens a **clean overlay** that previews the
+  reclaimable build artifacts (gated by the exact git-ignored + no-tracked-files
+  safety check `gwm clean --yes` uses) and deletes them behind the same safety
+  countdown as the delete confirm. Both overlays' keys are rebindable under
+  `[tui.keys.modal.exec]` / `[tui.keys.modal.clean]`, and `:exec` / `:clean`
+  reach them from the command palette. The exec overlay runs on the single
+  selected worktree (one PTY cannot fan out, unlike the CLI `--workspace`); the
+  clean safety gate (`dir_is_safe_to_clean` / `scan_worktree_safe`) is now
+  shared between the CLI and the overlay so both honour the identical contract.
+  This is a TUI-only surface — the frozen 1.0 machine contract (config
+  sections, CLI flags) is unchanged.
+
 - **`--workspace` fan-out for `gwm exec` / `gwm clean`** (issue #326). Both
   commands now accept the global `--workspace <root>` flag and fan out across
   the workspace's child repos, **reversing the #319 deferral** (the refusal

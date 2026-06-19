@@ -99,6 +99,10 @@ pub enum KeyContext {
   LinkChooseTarget,
   /// Link prompt, stage 2 — type the issue / PR number.
   LinkInputNumber,
+  /// Exec profile picker overlay (issue #325).
+  ExecPicker,
+  /// Clean reclaim overlay (issue #325).
+  Clean,
 }
 
 impl KeyContext {
@@ -116,6 +120,8 @@ impl KeyContext {
       KeyContext::CommandPalette => "palette",
       KeyContext::LinkChooseTarget => "link.choose_target",
       KeyContext::LinkInputNumber => "link.input_number",
+      KeyContext::ExecPicker => "exec",
+      KeyContext::Clean => "clean",
     }
   }
 
@@ -140,6 +146,8 @@ impl KeyContext {
       CommandPalette,
       LinkChooseTarget,
       LinkInputNumber,
+      ExecPicker,
+      Clean,
     ]
   }
 }
@@ -265,6 +273,18 @@ define_modal_actions! {
   LinkInputNumber {
     LinkInputSubmit => "submit" [ "Enter" ],
     LinkInputCancel => "cancel" [ "Esc" ],
+  }
+  ExecPicker {
+    ExecPickerNext   => "next"   [ "j", "Down" ],
+    ExecPickerPrev   => "prev"   [ "k", "Up" ],
+    ExecPickerAccept => "accept" [ "Enter" ],
+    ExecPickerCancel => "cancel" [ "Esc" ],
+  }
+  Clean {
+    CleanNext    => "next"    [ "j", "Down" ],
+    CleanPrev    => "prev"    [ "k", "Up" ],
+    CleanConfirm => "confirm" [ "y", "Enter" ],
+    CleanCancel  => "cancel"  [ "n", "Esc" ],
   }
 }
 

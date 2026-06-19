@@ -27,14 +27,18 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{
+  App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
+};
 pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
 };
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
+pub use state::exec_picker::ExecPicker;
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
@@ -215,19 +219,36 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     if app.view == View::CommandLogs {
       app.command_logs.sync();
     }
-    app.maybe_auto_refresh(now);
+    // #325: don't auto-refresh while a destructive overlay (exec picker /
+    // clean report) is open — a re-list would drift the live selection /
+    // active repo out from under the target the overlay captured at open.
+    if !app.destructive_overlay_open() {
+      app.maybe_auto_refresh(now);
+    }
 
     // Issue #35: drain PTY output and detect process death before drawing.
     // `poll_bytes` feeds pending reader-thread bytes into the vt100 parser
     // so the next frame reflects the freshest output. If the process has
     // already exited, close the overlay so the list view is rendered instead.
     if app.view == View::Pty {
-      let is_dead = app.pty_overlay.as_mut().is_none_or(|p| {
+      let status = app.pty_overlay.as_mut().map(|p| {
         p.poll_bytes();
-        !p.is_alive()
+        (p.kind, p.is_alive())
       });
-      if is_dead {
-        app.close_pty_overlay();
+      match status {
+        // #325: a one-shot exec command exits the instant it finishes — keep
+        // its final output on screen and let any key dismiss it, instead of
+        // the lazygit / shell behaviour of closing the overlay on child death.
+        // `mark_finished` also reaps the process group now (so a backgrounded
+        // descendant is cleaned in the safe window, not after the linger).
+        Some((PtyKind::Exec, false)) => {
+          if let Some(p) = app.pty_overlay.as_mut() {
+            p.mark_finished();
+          }
+        }
+        // Interactive overlays (lazygit / shell / review) close on child exit.
+        Some((_, false)) | None => app.close_pty_overlay(),
+        Some((_, true)) => {}
       }
     }
 
@@ -235,7 +256,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // selected worktree's repo before drawing (so the sidebar preview reads
     // the right repo) and before the next key fires an action against it. A
     // no-op in single-repo mode and when the selection hasn't crossed repos.
-    app.sync_active_repo();
+    // #325: suspended while a destructive overlay is open so the active repo
+    // (and its config) can't swap under the captured exec/clean target.
+    if !app.destructive_overlay_open() {
+      app.sync_active_repo();
+    }
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
 
@@ -259,6 +284,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             app.status = format!("delete failed: {}", e);
           }
         }
+        CountdownTickOutcome::Pending | CountdownTickOutcome::NotArmed => {}
+      }
+    }
+
+    // #325: drive the clean overlay's safety countdown off the same poll
+    // cadence as the delete confirm above, so an armed reclaim auto-fires
+    // after the configured delay even when no key event arrives.
+    if app.view == View::CleanReport {
+      if app.clean_overlay.confirm.is_armed() {
+        app.spinner.tick();
+      }
+      match app.tick_clean_countdown(now) {
+        CountdownTickOutcome::ReadyToFire => app.clean_overlay_delete(),
         CountdownTickOutcome::Pending | CountdownTickOutcome::NotArmed => {}
       }
     }
@@ -564,13 +602,57 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // detach, and routing it through a rebindable context would silently
       // steal a keystroke from the child program. See the `modal_keymap`
       // module note ("What stays hard-coded").
-      View::Pty => match key.code {
-        KeyCode::Esc => app.close_pty_overlay(),
-        _ => {
-          if let Some(ref mut pty) = app.pty_overlay {
-            let _ = pty.write_key(key);
+      View::Pty => {
+        // #325: once a one-shot exec command has finished, the overlay is
+        // just showing its final output — there is no live child to receive
+        // input, so any key dismisses it. Otherwise `Esc` is the emergency
+        // detach and every other key passes through to the child.
+        let exec_finished = app.pty_overlay.as_ref().is_some_and(|p| p.finished);
+        if key.code == KeyCode::Esc || exec_finished {
+          app.close_pty_overlay();
+        } else if let Some(ref mut pty) = app.pty_overlay {
+          let _ = pty.write_key(key);
+        }
+      }
+      // #325: exec profile picker. The testable handler owns the highlight;
+      // `Submit` resolves the profile to an argv and spawns it in a PTY
+      // overlay rooted at the selected worktree (mirrors `LazyGitPty`).
+      View::ExecPicker => match app.handle_exec_picker_key(key) {
+        ExecPickerKey::Submit => {
+          if let Some((argv, cwd)) = app.exec_picker_resolve() {
+            let sz = terminal.size().unwrap_or_default();
+            let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+            let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+            let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match PtyOverlay::spawn(PtyKind::Exec, &argv_refs, &cwd, inner_cols, inner_rows) {
+              Ok(pty) => app.open_pty_overlay(pty),
+              Err(e) => {
+                app.status = format!("exec overlay failed: {}", e);
+                app.close_exec_picker();
+              }
+            }
+          } else {
+            // Resolve failed (status already set) — close back to the list.
+            app.close_exec_picker();
           }
         }
+        ExecPickerKey::Cancel => app.close_exec_picker(),
+        ExecPickerKey::Handled => {}
+      },
+      // #325: clean reclaim overlay. Mirrors the delete-confirm routing —
+      // `confirm` arms / fires the safety countdown, `cancel` aborts, j/k
+      // cycle the `[clean.profiles]` picker (re-scanning each time). The
+      // countdown auto-fire is driven by the tick block above.
+      View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {
+        Some(ModalAction::CleanCancel) => app.close_clean_overlay(),
+        Some(ModalAction::CleanConfirm) => {
+          if app.clean_confirm_press(now) == ConfirmKeyAction::FireNow {
+            app.clean_overlay_delete();
+          }
+        }
+        Some(ModalAction::CleanNext) => app.clean_overlay_next(),
+        Some(ModalAction::CleanPrev) => app.clean_overlay_prev(),
+        _ => {}
       },
       // #290: worktree-rename modal. Reuses the Create form input handler
       // (Type / Issue / Desc), but routes submit to the rename worker. Input
@@ -833,6 +915,13 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // overlay it is read-only and not picker-gated — harmless inside
     // `gwm switch`, opening from any List state.
     Action::ConfigPanel => app.enter_config_panel(),
+    // Issue #325: `x` opens the exec profile picker. Picker-gated —
+    // running a profile in a PTY is a focus-mode action, meaningless in
+    // the stripped-down `gwm switch` picker.
+    Action::ExecOverlay if !app.picker_mode => app.enter_exec_picker(),
+    // Issue #325: `X` opens the clean reclaim overlay. Picker-gated — it
+    // deletes from the selected worktree, a focus-mode action.
+    Action::CleanOverlay if !app.picker_mode => app.enter_clean_overlay(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into

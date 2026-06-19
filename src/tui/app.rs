@@ -2,10 +2,12 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
+use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
@@ -15,7 +17,7 @@ use super::state::spinner::Spinner;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
-use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
+use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
@@ -90,12 +92,42 @@ pub enum View {
   /// kills the child and returns to the list. State lives on
   /// [`App::pty_overlay`].
   Pty,
+  /// Exec profile picker overlay (issue #325). A small centred modal that
+  /// lists the `[exec.profiles.*]` names; `Enter` resolves the highlight
+  /// to an argv and the run loop spawns it in a PTY overlay
+  /// ([`PtyKind::Exec`]) rooted at the selected worktree. State lives on
+  /// [`App::exec_picker`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::ExecPicker`].
+  ExecPicker,
+  /// Clean reclaim overlay (issue #325). A centred modal showing the gated
+  /// `clean::scan_worktree_safe` report for the selected worktree, an
+  /// optional `[clean.profiles.*]` picker, and a safety countdown; the run
+  /// loop fires `clean::delete_reclaim` when the countdown elapses. State
+  /// lives on [`App::clean_overlay`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::Clean`].
+  CleanReport,
   /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
   /// Desc) pre-filled by parsing the current branch; submitting renames the
   /// local + remote branch and moves the worktree directory. State lives on
   /// [`App::create_form`] plus [`App::edit_original_branch`] /
   /// [`App::edit_original_path`].
   Edit,
+}
+
+/// What the run loop must do after [`App::handle_exec_picker_key`]
+/// processes a key in the exec picker overlay (issue #325). Mirrors
+/// [`CreateKey`] / [`LinkPromptKey`]: the testable handler owns the
+/// highlight movement, the loop owns the two side effects (resolve the
+/// argv + spawn the PTY overlay, or close back to the list).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ExecPickerKey {
+  /// The key moved the highlight (or was ignored); stay in the picker.
+  Handled,
+  /// `Enter` — the loop should resolve the highlighted profile and spawn
+  /// the PTY overlay.
+  Submit,
+  /// `Esc` — the loop should close the picker back to the list.
+  Cancel,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -406,6 +438,37 @@ pub struct App {
   /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
   pub pty_overlay: Option<PtyOverlay>,
 
+  /// Exec profile picker overlay state (issue #325). Populated by
+  /// [`Self::enter_exec_picker`] from `[exec.profiles.*]`; on `Enter` the
+  /// run loop resolves the highlight to an argv and spawns a PTY overlay
+  /// ([`PtyKind::Exec`]) in the selected worktree's directory.
+  pub exec_picker: ExecPicker,
+
+  /// The `[exec]` config captured when the exec picker opened (issue #325).
+  /// In workspace mode `sync_active_repo` can swap `self.config` to another
+  /// repo while the overlay is open, so `Enter` resolves the argv against
+  /// this snapshot — the active repo's `[exec]` at open time — not the live
+  /// config (Codex #333 review).
+  exec_picker_cfg: ExecConfig,
+
+  /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
+  /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
+  /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
+  /// fires [`crate::clean::delete_reclaim`] when the countdown elapses.
+  pub clean_overlay: CleanOverlay,
+
+  /// The `[clean]` config captured when the clean overlay opened (issue
+  /// #325) — every re-scan and the delete resolve their dir-set against this
+  /// snapshot, not the live `self.config.clean`, which a workspace
+  /// auto-refresh could swap to another repo's (Codex #333 review).
+  clean_overlay_cfg: CleanConfig,
+
+  /// The safety-countdown duration (seconds) captured when the clean overlay
+  /// opened (issue #325). Pinned alongside [`Self::clean_overlay_cfg`] so a
+  /// workspace config swap can't shorten — or clear to `0` — the delay
+  /// before an armed reclaim fires (Codex #333 review).
+  clean_overlay_countdown_secs: u32,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -514,6 +577,11 @@ impl App {
       config_panel: ConfigPanel::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
+      exec_picker: ExecPicker::new(),
+      exec_picker_cfg: ExecConfig::default(),
+      clean_overlay: CleanOverlay::new(),
+      clean_overlay_cfg: CleanConfig::default(),
+      clean_overlay_countdown_secs: 0,
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -1672,6 +1740,8 @@ impl App {
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
+      View::ExecPicker => HintContext::ExecPicker,
+      View::CleanReport => HintContext::Clean,
       View::Edit => HintContext::Rename,
       View::List => self.pane_hint_context(),
     }
@@ -1992,6 +2062,286 @@ impl App {
     }
     self.pty_overlay = None;
     if self.view == View::Pty {
+      self.view = View::List;
+    }
+  }
+
+  // ── Exec picker overlay (issue #325) ───────────────────────────────────
+
+  /// `true` while a destructive overlay — the exec picker or the clean
+  /// report — is open (issue #325). The run loop suspends `maybe_auto_refresh`
+  /// and `sync_active_repo` while one is up, so the worktree list (and thus
+  /// the live selection / active repo) cannot reshuffle under an armed reclaim
+  /// or a pending exec run. This closes the drift class at its source (Codex
+  /// #333 review); the per-overlay open-time snapshots stay as defence in
+  /// depth against an already-in-flight refresh landing its result.
+  pub fn destructive_overlay_open(&self) -> bool {
+    matches!(self.view, View::ExecPicker | View::CleanReport)
+  }
+
+  /// Open the exec profile picker (issue #325). Populates it from
+  /// `[exec.profiles.*]` and switches to [`View::ExecPicker`]. Refuses
+  /// (status-bar message, no transition) when nothing is selected or no
+  /// exec profiles are configured — there is nothing to pick.
+  pub fn enter_exec_picker(&mut self) {
+    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
+      self.status = "nothing selected".into();
+      return;
+    };
+    let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
+    if names.is_empty() {
+      self.status = "no [exec.profiles] configured — add one to .gwm.toml".into();
+      return;
+    }
+    // Capture the target worktree path AND the active repo's `[exec]` config
+    // now: an auto-refresh can drift the live selection (and, in workspace
+    // mode, the active repo) while the picker is open, so `Enter` must run in
+    // *this* worktree against *this* config — not whatever is live later
+    // (Codex #333 review).
+    self.exec_picker_cfg = self.config.exec.clone();
+    self.exec_picker.open(names, cwd);
+    self.view = View::ExecPicker;
+  }
+
+  /// Handle a key inside the exec picker overlay (issue #325). The
+  /// testable handler owns the highlight movement; the run loop owns the
+  /// two side effects (resolve + spawn, or close). Keys resolve through
+  /// [`KeyContext::ExecPicker`] so they honour `[tui.keys.modal.exec]`.
+  pub fn handle_exec_picker_key(&mut self, key: KeyEvent) -> ExecPickerKey {
+    match self.resolve_modal(KeyContext::ExecPicker, key) {
+      Some(ModalAction::ExecPickerCancel) => ExecPickerKey::Cancel,
+      Some(ModalAction::ExecPickerAccept) => ExecPickerKey::Submit,
+      Some(ModalAction::ExecPickerNext) => {
+        self.exec_picker.next();
+        ExecPickerKey::Handled
+      }
+      Some(ModalAction::ExecPickerPrev) => {
+        self.exec_picker.prev();
+        ExecPickerKey::Handled
+      }
+      _ => ExecPickerKey::Handled,
+    }
+  }
+
+  /// Resolve the highlighted exec profile to an `(argv, cwd)` pair for the
+  /// run loop to spawn in a PTY overlay (issue #325). `None` (with a
+  /// status-bar message) when nothing is selected or the profile fails to
+  /// resolve — e.g. an empty `command` array. The argv is the frozen
+  /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
+  /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
+  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
+    let profile = self.exec_picker.selected_profile()?.to_string();
+    // Resolve against the worktree captured when the picker opened, NOT the
+    // live selection (which an auto-refresh may have drifted) — #333 review.
+    let Some(cwd) = self.exec_picker.cwd().map(Path::to_path_buf) else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    // Resolve against the `[exec]` config captured at open, not the live one.
+    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
+      Ok(mut argv) => {
+        // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
+        // the captured worktree, exactly like the CLI exec path — otherwise
+        // `argv[0]` would resolve against gwm's own cwd (Codex #333 review).
+        // A bare command (`cargo`) or an absolute path is returned unchanged
+        // (PATH lookup / as-is).
+        if let Some(first) = argv.first_mut() {
+          *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
+        }
+        Some((argv, cwd))
+      }
+      Err(e) => {
+        self.status = format!("exec profile {profile:?}: {e}");
+        None
+      }
+    }
+  }
+
+  /// Close the exec picker without running anything (issue #325). Returns
+  /// to [`View::List`].
+  pub fn close_exec_picker(&mut self) {
+    if self.view == View::ExecPicker {
+      self.view = View::List;
+    }
+  }
+
+  // ── Clean overlay (issue #325) ─────────────────────────────────────────
+
+  /// Open the clean overlay (issue #325). Populates the `[clean.profiles]`
+  /// picker, scans the selected worktree through the safety gate
+  /// ([`crate::clean::scan_worktree_safe`]), and switches to
+  /// [`View::CleanReport`]. Refuses (status-bar message, no transition) when
+  /// nothing is selected. A scan that finds nothing safe still opens — the
+  /// report says so.
+  pub fn enter_clean_overlay(&mut self) {
+    let Some(sel) = self.selected() else {
+      self.status = "nothing selected".into();
+      return;
+    };
+    // Capture the target worktree AND the active repo's `[clean]` config now:
+    // an auto-refresh can drift the live selection (and, in workspace mode,
+    // the active repo) while the overlay is open / armed, so every re-scan
+    // and the delete must pin to *this* worktree against *this* config
+    // (Codex #333 review).
+    let name = sel.name.clone();
+    let path = sel.path.clone();
+    self.clean_overlay_cfg = self.config.clean.clone();
+    self.clean_overlay_countdown_secs = self.config.tui.effective_confirm_countdown_secs();
+    let names: Vec<String> = self.clean_overlay_cfg.profiles.keys().cloned().collect();
+    self.clean_overlay.open(names, name, path);
+    if let Err(e) = self.clean_overlay_rescan() {
+      self.status = format!("clean: {e}");
+      return;
+    }
+    self.view = View::CleanReport;
+  }
+
+  /// Re-resolve the highlighted profile's dirs and re-scan the *captured*
+  /// target worktree (not the live selection), storing the gated snapshot.
+  /// Surfaces a profile-resolution error (e.g. an invalid `[clean.profiles]`
+  /// dir) to the caller.
+  fn clean_overlay_rescan(&mut self) -> Result<()> {
+    let Some((name, path)) = self
+      .clean_overlay
+      .target()
+      .map(|(n, p)| (n.to_string(), p.to_path_buf()))
+    else {
+      return Ok(());
+    };
+    let profile = self.clean_overlay.selected_profile().map(str::to_string);
+    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg)?;
+    let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
+    self.clean_overlay.set_scan(reclaim, skipped);
+    Ok(())
+  }
+
+  /// Cycle the clean profile picker forward and re-scan, but ONLY when the
+  /// highlight actually moved (issue #325 / Codex #333). A no-op move (only
+  /// the `(default)` choice) must not re-scan — that would reset the
+  /// `ConfirmModal` and silently disarm a pending reclaim while the status
+  /// bar still reads `armed`.
+  pub fn clean_overlay_next(&mut self) {
+    if self.clean_overlay.select_next() {
+      if let Err(e) = self.clean_overlay_rescan() {
+        self.status = format!("clean: {e}");
+      }
+    }
+  }
+
+  /// Cycle the clean profile picker backward and re-scan, only when the
+  /// highlight actually moved (issue #325 / Codex #333).
+  pub fn clean_overlay_prev(&mut self) {
+    if self.clean_overlay.select_prev() {
+      if let Err(e) = self.clean_overlay_rescan() {
+        self.status = format!("clean: {e}");
+      }
+    }
+  }
+
+  /// Total duration of the clean safety countdown. Unlike the delete-confirm
+  /// modal, clean has no `delete_branch_on_remove` gate — it reads
+  /// `[tui] confirm_countdown_secs` directly. `Duration::ZERO` ⇒ classic
+  /// single-keystroke confirm.
+  pub fn clean_countdown_total(&self) -> Duration {
+    // The value captured at open (Codex #333) — never the live config, which a
+    // workspace refresh could swap (e.g. to `0`, erasing the safety delay).
+    Duration::from_secs(u64::from(self.clean_overlay_countdown_secs))
+  }
+
+  /// Handle the clean confirm key. Arms / disarms / fires the countdown via
+  /// the dedicated [`CleanOverlay`] modal. Nothing-to-reclaim is a no-op
+  /// guard so the user cannot arm a delete that would free zero bytes.
+  pub fn clean_confirm_press(&mut self, now: Instant) -> ConfirmKeyAction {
+    if self.clean_overlay.is_empty_scan() {
+      self.status = "nothing to reclaim".into();
+      return ConfirmKeyAction::Disarmed;
+    }
+    let total = self.clean_countdown_total();
+    let action = self.clean_overlay.confirm.press_y(now, total);
+    match action {
+      ConfirmKeyAction::Armed => {
+        self.status = format!(
+          "armed — reclaiming {} in {}s",
+          crate::clean::human_size(self.clean_overlay.total_bytes()),
+          total.as_secs()
+        );
+      }
+      ConfirmKeyAction::Disarmed => self.status = "clean cancelled".into(),
+      ConfirmKeyAction::FireNow => {}
+    }
+    action
+  }
+
+  /// Tick the clean safety countdown. Called from the event loop on every
+  /// poll-timeout iteration while the overlay is open.
+  pub fn tick_clean_countdown(&mut self, now: Instant) -> CountdownTickOutcome {
+    self.clean_overlay.confirm.tick(now, self.clean_countdown_total())
+  }
+
+  /// Clean countdown progress in `[0.0, 1.0]` for the UI gauge.
+  pub fn clean_countdown_progress(&self, now: Instant) -> f64 {
+    self.clean_overlay.confirm.progress(now, self.clean_countdown_total())
+  }
+
+  /// Seconds remaining (rounded up) on the clean countdown, for the UI label.
+  pub fn clean_countdown_remaining_secs(&self, now: Instant) -> u64 {
+    self
+      .clean_overlay
+      .confirm
+      .remaining_secs(now, self.clean_countdown_total())
+  }
+
+  /// Delete the gated reclaim of the current clean snapshot (issue #325) and
+  /// return to the list. The snapshot was already filtered to the
+  /// git-ignored, untracked artifacts by [`crate::clean::scan_worktree_safe`],
+  /// so this only removes what the CLI `gwm clean --yes` would. Reports the
+  /// freed size (or the failure) on the status bar.
+  pub fn clean_overlay_delete(&mut self) {
+    // Re-scan + re-gate IMMEDIATELY before deleting rather than trusting the
+    // snapshot shown in the overlay (Codex #333 review). That snapshot can be
+    // seconds old — the safety countdown, or just the overlay sitting open —
+    // and a directory may have turned unsafe meanwhile (e.g. `git add -f
+    // target/file` under an ignored `target/`). Deleting a freshly gated
+    // reclaim closes that TOCTOU window, matching the CLI's scan-then-delete.
+    // Pin to the CAPTURED target worktree, not the live selection (an
+    // auto-refresh may have drifted it while the countdown ran) — #333.
+    let Some((name, path)) = self
+      .clean_overlay
+      .target()
+      .map(|(n, p)| (n.to_string(), p.to_path_buf()))
+    else {
+      self.close_clean_overlay();
+      return;
+    };
+    let profile = self.clean_overlay.selected_profile().map(str::to_string);
+    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg) {
+      Ok(d) => d,
+      Err(e) => {
+        self.status = format!("clean: {e}");
+        self.close_clean_overlay();
+        return;
+      }
+    };
+    let (reclaim, _skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
+    if reclaim.artifacts.is_empty() {
+      self.status = "nothing to reclaim".into();
+      self.close_clean_overlay();
+      return;
+    }
+    match crate::clean::delete_reclaim(&reclaim) {
+      Ok(freed) => {
+        self.status = format!("reclaimed {} from {}", crate::clean::human_size(freed), reclaim.name);
+      }
+      Err(e) => self.status = format!("clean failed: {e}"),
+    }
+    self.close_clean_overlay();
+  }
+
+  /// Close the clean overlay, disarming the countdown, and return to
+  /// [`View::List`] (issue #325).
+  pub fn close_clean_overlay(&mut self) {
+    self.clean_overlay.confirm.dismiss();
+    if self.view == View::CleanReport {
       self.view = View::List;
     }
   }

@@ -142,6 +142,8 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  ExecOverlay       => "exec_overlay",
+  CleanOverlay      => "clean_overlay",
   Help              => "help",
   Quit              => "quit",
   // Future surface — bound to ':' by default, picked up by #32.
@@ -184,6 +186,14 @@ impl Action {
         // FetchGithub persists detected PR/issue titles + states into the
         // active repo's git config, so it writes through `App.repo` too (#304).
         | Action::FetchGithub
+        // #325: the exec / clean overlays resolve their command / dir-set from
+        // the *active* repo's `[exec]` / `[clean]` config and act on the
+        // selected worktree's path. With a stale workspace selection both the
+        // config and the path belong to the previously active repo — and exec
+        // runs an arbitrary command while clean deletes directories — so they
+        // must be blocked before the overlay opens (Codex #333 review).
+        | Action::ExecOverlay
+        | Action::CleanOverlay
     )
   }
 
@@ -487,6 +497,10 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #325: `x` opens the exec profile picker overlay.
+      def(Action::ExecOverlay, &["x"]),
+      // #325: `X` opens the clean reclaim overlay.
+      def(Action::CleanOverlay, &["X"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f"]),
       // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.

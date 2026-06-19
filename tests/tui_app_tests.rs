@@ -7304,3 +7304,496 @@ fn link_modal_binding_on_fetch_key_wins_over_fetch_fallback() {
     "a contextual binding on the fetch key must win over the fetch fallback"
   );
 }
+
+// ── Exec picker overlay (issue #325) ──────────────────────────────────────
+
+/// An `App` over a fresh repo whose `.gwm.toml` carries `toml`, so the exec
+/// config is loaded at construction. The selected worktree is the main one
+/// (the repo root) — a valid `cwd` for an exec run.
+fn app_with_gwm_toml(toml: &str) -> (tempfile::TempDir, App) {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gwm.toml"), toml).unwrap();
+  let app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  (repo, app)
+}
+
+#[test]
+fn exec_picker_refuses_to_open_with_no_profiles() {
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::List, "no profiles ⇒ no transition");
+  assert!(
+    app.status.contains("exec.profiles"),
+    "the status explains why nothing opened: {}",
+    app.status
+  );
+}
+
+#[test]
+fn exec_picker_opens_and_lists_profiles_sorted() {
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.test]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.build]\ncommand = [\"cargo\", \"build\"]\n",
+  );
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  // `BTreeMap` key order ⇒ alphabetical: build, then test.
+  assert_eq!(app.exec_picker.profiles(), &["build".to_string(), "test".to_string()]);
+  assert_eq!(app.exec_picker.selected_profile(), Some("build"));
+}
+
+#[test]
+fn exec_picker_navigation_moves_the_highlight() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::ExecPickerKey;
+  let (_repo, mut app) =
+    app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n\n[exec.profiles.b]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  let down = app.handle_exec_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  assert_eq!(down, ExecPickerKey::Handled);
+  assert_eq!(app.exec_picker.selected_profile(), Some("b"));
+  app.handle_exec_picker_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+  assert_eq!(app.exec_picker.selected_profile(), Some("a"));
+}
+
+#[test]
+fn exec_picker_enter_submits_and_esc_cancels() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::ExecPickerKey;
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  assert_eq!(
+    app.handle_exec_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    ExecPickerKey::Submit
+  );
+  assert_eq!(
+    app.handle_exec_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    ExecPickerKey::Cancel
+  );
+}
+
+#[test]
+fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.build]\ncommand = [\"cargo\", \"build\", \"--release\"]\n");
+  app.enter_exec_picker();
+  let expected_cwd = app.selected().unwrap().path.clone();
+  let (argv, cwd) = app.exec_picker_resolve().expect("a valid profile resolves");
+  assert_eq!(
+    argv,
+    vec!["cargo".to_string(), "build".to_string(), "--release".to_string()],
+    "argv is the frozen command array verbatim (no shell)"
+  );
+  assert_eq!(cwd, expected_cwd, "cwd is the selected worktree's path");
+}
+
+#[test]
+fn exec_picker_close_returns_to_the_list() {
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  app.close_exec_picker();
+  assert_eq!(app.view, View::List);
+}
+
+// ── Clean overlay (issue #325) ────────────────────────────────────────────
+
+#[test]
+fn clean_overlay_scans_gitignored_artifacts() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 2048]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  let reclaim = app.clean_overlay.reclaim().expect("the worktree was scanned");
+  assert!(
+    reclaim.artifacts.iter().any(|a| a.rel == "target"),
+    "the git-ignored target/ is counted: {:?}",
+    reclaim.artifacts
+  );
+  assert!(app.clean_overlay.total_bytes() >= 2048);
+}
+
+#[test]
+fn clean_overlay_gate_skips_non_gitignored_artifacts() {
+  let (repo, _) = init_repo();
+  // No `.gitignore` ⇒ `target/` is NOT ignored ⇒ the safety gate preserves it.
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 1024]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  let reclaim = app.clean_overlay.reclaim().expect("scanned");
+  assert!(reclaim.artifacts.is_empty(), "a non-ignored target/ is never counted");
+  assert!(
+    app.clean_overlay.skipped().contains(&"target".to_string()),
+    "and is reported as skipped: {:?}",
+    app.clean_overlay.skipped()
+  );
+  assert_eq!(app.clean_overlay.total_bytes(), 0);
+}
+
+#[test]
+fn clean_overlay_delete_reclaims_only_the_gated_dir() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("out"), vec![0u8; 512]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(repo.path().join("build").exists());
+  app.clean_overlay_delete();
+  assert!(!repo.path().join("build").exists(), "the build dir was reclaimed");
+  assert_eq!(app.view, View::List, "and the overlay closed");
+  assert!(
+    app.status.contains("reclaimed"),
+    "status reports the reclaim: {}",
+    app.status
+  );
+}
+
+#[test]
+fn clean_confirm_arms_then_is_ready_after_the_countdown() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "dist/\n").unwrap();
+  std::fs::create_dir(repo.path().join("dist")).unwrap();
+  std::fs::write(repo.path().join("dist").join("x"), vec![0u8; 100]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  let t0 = Instant::now();
+  assert_eq!(app.clean_confirm_press(t0), ConfirmKeyAction::Armed);
+  assert!(app.clean_overlay.confirm.is_armed());
+  assert_eq!(
+    app.tick_clean_countdown(t0 + Duration::from_secs(1)),
+    CountdownTickOutcome::Pending
+  );
+  assert_eq!(
+    app.tick_clean_countdown(t0 + Duration::from_secs(3)),
+    CountdownTickOutcome::ReadyToFire
+  );
+}
+
+#[test]
+fn clean_confirm_with_zero_countdown_fires_immediately() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "node_modules/\n").unwrap();
+  std::fs::create_dir(repo.path().join("node_modules")).unwrap();
+  std::fs::write(repo.path().join("node_modules").join("y"), vec![0u8; 64]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 0\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::FireNow);
+}
+
+#[test]
+fn clean_confirm_is_a_noop_when_nothing_to_reclaim() {
+  let (repo, _) = init_repo(); // no artifact dirs ⇒ empty scan
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(app.clean_overlay.is_empty_scan());
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Disarmed);
+  assert!(app.status.contains("nothing to reclaim"), "status: {}", app.status);
+}
+
+#[test]
+fn clean_overlay_profile_picker_rescans_per_profile() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "cache/\nout/\n").unwrap();
+  std::fs::create_dir(repo.path().join("cache")).unwrap();
+  std::fs::write(repo.path().join("cache").join("c"), vec![0u8; 100]).unwrap();
+  std::fs::create_dir(repo.path().join("out")).unwrap();
+  std::fs::write(repo.path().join("out").join("o"), vec![0u8; 200]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.a]\ndirs = [\"cache\"]\n\n[clean.profiles.b]\ndirs = [\"out\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Opens on the `(default)` choice (no --profile) — built-in set here, which
+  // doesn't include `cache` / `out`.
+  assert_eq!(app.clean_overlay.selected_profile(), None);
+  // Cycle to profile `a` → re-scans for `cache` only.
+  app.clean_overlay_next();
+  assert_eq!(app.clean_overlay.selected_profile(), Some("a"));
+  let a = app.clean_overlay.reclaim().unwrap();
+  assert!(a.artifacts.iter().any(|x| x.rel == "cache"));
+  assert!(!a.artifacts.iter().any(|x| x.rel == "out"));
+  // Cycle to profile `b` → re-scans for `out`.
+  app.clean_overlay_next();
+  assert_eq!(app.clean_overlay.selected_profile(), Some("b"));
+  let b = app.clean_overlay.reclaim().unwrap();
+  assert!(b.artifacts.iter().any(|x| x.rel == "out"));
+  assert!(!b.artifacts.iter().any(|x| x.rel == "cache"));
+}
+
+#[test]
+fn clean_overlay_close_returns_to_the_list() {
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  app.close_clean_overlay();
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn clean_overlay_opens_on_the_no_profile_default_choice() {
+  // The overlay always opens on the `(default)` / no-`--profile` choice, so
+  // its first preview matches `gwm clean` — even when the repo defines named
+  // profiles that sort before it.
+  let (repo, _) = init_repo();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.aggressive]\ndirs = [\"target\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(
+    app.clean_overlay.selected_profile(),
+    None,
+    "opens on the no-profile choice"
+  );
+  assert_eq!(app.clean_overlay.choice_labels().first().copied(), Some("(default)"));
+  assert!(
+    app.clean_overlay.has_profiles(),
+    "a named profile makes the picker worth showing"
+  );
+}
+
+#[test]
+fn clean_overlay_default_choice_uses_builtins_without_a_default_profile() {
+  // Codex #333 review: a repo with only a non-`default` profile must not make
+  // the built-in set unreachable. The `(default)` choice resolves to the
+  // built-in `target` / … set (matching `gwm clean` with no --profile), NOT
+  // the alphabetically-first profile.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\ncoverage/\n").unwrap();
+  // `target` is a built-in; `coverage` is only reachable via the named profile.
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("t"), vec![0u8; 128]).unwrap();
+  std::fs::create_dir(repo.path().join("coverage")).unwrap();
+  std::fs::write(repo.path().join("coverage").join("c"), vec![0u8; 256]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.coverage]\ndirs = [\"coverage\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // The `(default)` choice scans the built-in set → finds `target`, not `coverage`.
+  let r = app.clean_overlay.reclaim().unwrap();
+  assert!(
+    r.artifacts.iter().any(|a| a.rel == "target"),
+    "built-in target/ is reachable"
+  );
+  assert!(
+    !r.artifacts.iter().any(|a| a.rel == "coverage"),
+    "the named profile is not the default"
+  );
+}
+
+#[test]
+fn clean_overlay_delete_revalidates_the_gate_just_before_removing() {
+  // Codex #333 review (TOCTOU): the overlay scans on open, but the delete can
+  // fire seconds later (countdown / overlay left open). If a dir turned unsafe
+  // meanwhile, the delete must re-gate and preserve it — not destroy the now
+  // tracked file the stale snapshot still lists.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 256]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // The scan saw a safe (ignored, untracked) `target/`.
+  assert!(app
+    .clean_overlay
+    .reclaim()
+    .unwrap()
+    .artifacts
+    .iter()
+    .any(|a| a.rel == "target"));
+  // Now force-track a file under it — the snapshot is stale.
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(repo.path())
+    .args(["add", "-f", "target/blob"])
+    .status()
+    .unwrap();
+  app.clean_overlay_delete();
+  // The re-gate catches the now-tracked dir and refuses to remove it.
+  assert!(
+    repo.path().join("target").exists(),
+    "a directory that became tracked after the scan must not be reclaimed"
+  );
+  assert_eq!(app.view, View::List, "the overlay still closes");
+}
+
+#[test]
+fn exec_picker_runs_in_the_open_time_worktree_and_config_after_a_drift() {
+  // Codex #333: an auto-refresh can drift the live selection AND (workspace)
+  // swap the active config while the picker is open. Resolve must run in the
+  // captured worktree against the captured `[exec]` config — not the live
+  // ones.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"echo\", \"hi\"]\n");
+  let opened = app.selected().unwrap().path.clone();
+  app.enter_exec_picker();
+  // Drift: the list AND the live config moved out from under the overlay.
+  app.worktrees = vec![worktree_fixture("other")];
+  app.config.exec.profiles.clear();
+  let (argv, cwd) = app
+    .exec_picker_resolve()
+    .expect("resolves against the captured cfg + cwd");
+  assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
+  assert_eq!(cwd, opened, "runs in the open-time worktree, not the drifted selection");
+}
+
+#[test]
+fn clean_overlay_deletes_the_open_time_target_and_config_after_a_drift() {
+  // Codex #333: the clean delete must reclaim the previewed worktree using the
+  // captured `[clean]` config, even if the live selection AND config drifted
+  // (workspace refresh) meanwhile.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.x]\ndirs = [\"build\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  app.clean_overlay_next(); // select profile `x` (dirs = build)
+  assert_eq!(app.clean_overlay.selected_profile(), Some("x"));
+  // Drift: replace the list AND drop the live config's profile.
+  app.worktrees = vec![worktree_fixture("other")];
+  app.config.clean.profiles.clear();
+  app.clean_overlay_delete();
+  assert!(
+    !repo.path().join("build").exists(),
+    "reclaimed via the captured target + config despite the drift"
+  );
+}
+
+#[test]
+fn exec_picker_pins_a_worktree_relative_program_to_the_target() {
+  // Codex #333: a `[exec.profiles].command` like `./run.sh` must resolve
+  // against the captured worktree (like the CLI's resolve_program), not gwm's
+  // own cwd.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.run]\ncommand = [\"./run.sh\", \"--ci\"]\n");
+  let wt = app.selected().unwrap().path.clone();
+  app.enter_exec_picker();
+  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  // Same anchoring the CLI exec path applies — an absolute path under the
+  // worktree, not gwm's own cwd.
+  assert_eq!(
+    argv[0],
+    gwm::exec::resolve_program(&wt, "./run.sh").to_string_lossy(),
+    "the relative executable is pinned to the worktree"
+  );
+  assert!(std::path::Path::new(&argv[0]).is_absolute(), "and is absolute");
+  assert_eq!(argv[1], "--ci", "the args are passed through unchanged");
+}
+
+#[test]
+fn exec_picker_leaves_a_bare_command_for_path_lookup() {
+  // A bare command (no path separator) must NOT be anchored — it relies on
+  // PATH resolution inside the worktree.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.t]\ncommand = [\"cargo\", \"test\"]\n");
+  app.enter_exec_picker();
+  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+}
+
+#[test]
+fn clean_countdown_is_pinned_to_the_open_time_config() {
+  // Codex #333: the safety delay is captured at open, so a workspace config
+  // swap (e.g. to a repo with confirm_countdown_secs = 0) can't erase it
+  // while the overlay is armed.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Drift: a refresh swapped in a repo with no safety delay.
+  app.config.tui.confirm_countdown_secs = 0;
+  assert_eq!(
+    app.clean_countdown_total(),
+    Duration::from_secs(3),
+    "the safety delay captured at open survives a live config swap"
+  );
+}
+
+#[test]
+fn destructive_overlay_open_flags_exec_and_clean_views() {
+  // Codex #333: the run loop suspends auto-refresh / active-repo sync while a
+  // destructive overlay is open, gating on this predicate so the captured
+  // exec/clean target can't drift mid-overlay.
+  let (_repo, mut app) = make_app();
+  assert!(
+    !app.destructive_overlay_open(),
+    "list view is not a destructive overlay"
+  );
+  app.view = View::ExecPicker;
+  assert!(app.destructive_overlay_open());
+  app.view = View::CleanReport;
+  assert!(app.destructive_overlay_open());
+  // The delete-confirm modal is not in this class — it has no captured target
+  // to protect and reads the live selection by design.
+  app.view = View::Confirm;
+  assert!(!app.destructive_overlay_open());
+}
+
+#[test]
+fn clean_overlay_noop_profile_move_keeps_the_countdown_armed() {
+  // Codex #333: with only the `(default)` choice, `j`/`k` are no-ops and must
+  // NOT re-scan — a re-scan resets the ConfirmModal, silently disarming a
+  // pending reclaim while the status bar still reads "armed".
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(!app.clean_overlay.has_profiles(), "only the (default) choice exists");
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Armed);
+  app.clean_overlay_next();
+  assert!(app.clean_overlay.confirm.is_armed(), "a no-op move must not disarm");
+  app.clean_overlay_prev();
+  assert!(
+    app.clean_overlay.confirm.is_armed(),
+    "prev no-op must not disarm either"
+  );
+}
+
+#[test]
+fn clean_overlay_real_profile_change_disarms_the_countdown() {
+  // The complement: actually changing the target re-requires confirmation.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "a/\nb/\n").unwrap();
+  for d in ["a", "b"] {
+    std::fs::create_dir(repo.path().join(d)).unwrap();
+    std::fs::write(repo.path().join(d).join("x"), vec![0u8; 64]).unwrap();
+  }
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[tui]\nconfirm_countdown_secs = 3\n\n[clean.profiles.pa]\ndirs = [\"a\"]\n\n[clean.profiles.pb]\ndirs = [\"b\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(app.clean_overlay.has_profiles());
+  // The `(default)` choice scans built-ins (empty here), so move to `pa`
+  // (which reclaims `a`) before arming.
+  app.clean_overlay_next(); // (default) → pa
+  assert_eq!(app.clean_overlay.selected_profile(), Some("pa"));
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Armed);
+  app.clean_overlay_next(); // pa → pb: a real change
+  assert!(
+    !app.clean_overlay.confirm.is_armed(),
+    "changing the target re-requires confirmation"
+  );
+}

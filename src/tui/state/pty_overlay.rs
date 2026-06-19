@@ -27,6 +27,9 @@ pub enum PtyKind {
   Terminal,
   /// The `[review]` launcher (e.g. `codex review --base dev`) in PTY overlay.
   Review,
+  /// An `[exec.profiles.<name>]` profile command, run in the selected
+  /// worktree via the exec picker overlay (issue #325).
+  Exec,
 }
 
 /// Live PTY overlay — one spawned process, one vt100 parser, one mpsc reader
@@ -48,6 +51,32 @@ pub struct PtyOverlay {
   /// Set by the `ReviewOverlay` dispatcher when `[review].command` uses `{diff}`.
   /// Dropped (and thus unlinked) when the overlay closes.
   pub diff_file: Option<tempfile::NamedTempFile>,
+  /// Set by the run loop when a [`PtyKind::Exec`] child has exited and the
+  /// overlay is *lingering* so its final output stays on screen (issue #325).
+  /// Unlike lazygit / a shell — which close the overlay the instant the child
+  /// dies — a one-shot exec command (`cargo test`, `npm run build`) exits as
+  /// soon as it finishes, so the overlay must persist until the user
+  /// dismisses it. While `true`, any keystroke closes the overlay.
+  pub finished: bool,
+  /// `true` once the child leader has been observed exited and reaped (by
+  /// [`Self::is_alive`] or [`Self::kill`]). Guards [`Self::kill`] from blocking
+  /// on a second `wait()` for an already-reaped leader.
+  reaped: bool,
+  /// The child leader's PID, captured at spawn so the process-group SIGKILL
+  /// can target it even after the leader is reaped (its live `process_id()`
+  /// may then be `None`). On Unix the child is a session leader (PGID == PID),
+  /// so `kill(-pid)` reaps the whole pipeline. Read only inside the
+  /// `#[cfg(unix)]` arm of [`Self::signal_group`]; Windows has no process
+  /// groups (termination goes through `Child::kill`), so the field is unused
+  /// there.
+  #[cfg_attr(not(unix), allow(dead_code))]
+  spawn_pid: Option<u32>,
+  /// `true` once the process-group SIGKILL has been sent (issue #325 / Codex
+  /// #333 review). Sent exactly once — promptly when an exec leader exits
+  /// (so backgrounded descendants like `sh -c "sleep 60 &"` are cleaned in
+  /// the safe window, while the PGID is still valid), so the later dismissal
+  /// of a lingering overlay never re-signals a possibly-recycled PGID.
+  signalled: bool,
 }
 
 impl std::fmt::Debug for PtyOverlay {
@@ -90,6 +119,10 @@ impl PtyOverlay {
       .slave
       .spawn_command(cmd)
       .map_err(|e| GwmError::Other(e.to_string()))?;
+    // Capture the leader PID now, while it is valid: after the leader is
+    // reaped, `process_id()` may return `None`, but we still need its PID to
+    // SIGKILL the process group and clean backgrounded descendants (#333).
+    let spawn_pid = child.process_id();
     // Slave fd is no longer needed once the child holds its own copy.
     drop(pair.slave);
 
@@ -129,6 +162,10 @@ impl PtyOverlay {
       cols,
       rows,
       diff_file: None,
+      finished: false,
+      reaped: false,
+      spawn_pid,
+      signalled: false,
     })
   }
 
@@ -173,15 +210,53 @@ impl PtyOverlay {
     });
   }
 
-  /// Returns `true` while the child process is still running.
+  /// Returns `true` while the child leader is still running. Once it has
+  /// exited, records the reap so [`Self::kill`] skips a second blocking
+  /// `wait()`.
   pub fn is_alive(&mut self) -> bool {
-    matches!(self.child.try_wait(), Ok(None))
+    match self.child.try_wait() {
+      Ok(None) => true,
+      _ => {
+        self.reaped = true;
+        false
+      }
+    }
   }
 
-  /// Send SIGKILL (or the platform equivalent) to the child process and
-  /// wait until it is reaped. On Unix the entire process group is killed so
-  /// that sub-processes spawned by the shell (e.g. `yes | head`) are also
-  /// terminated.
+  /// Send `SIGKILL` to the child's process group exactly once, using the PID
+  /// captured at spawn so it works even after the leader was reaped. On Unix
+  /// the child is a session leader (PGID == PID), so this also terminates any
+  /// backgrounded descendants (`sh -c "sleep 60 &"`). No-op on a second call,
+  /// and on non-Unix.
+  fn signal_group(&mut self) {
+    if self.signalled {
+      return;
+    }
+    self.signalled = true;
+    #[cfg(unix)]
+    if let Some(pid) = self.spawn_pid {
+      unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    }
+  }
+
+  /// Mark a finished (exited) exec overlay as lingering and PROMPTLY clean its
+  /// process group while the PGID is still valid (#333 review). Sending the
+  /// group SIGKILL the instant the leader exits — rather than deferring it to
+  /// the dismissal keystroke — both reaps backgrounded descendants and keeps
+  /// the signal out of the long linger window where the kernel could recycle
+  /// the PGID. Called by the run loop when it detects a [`PtyKind::Exec`]
+  /// child has died.
+  pub fn mark_finished(&mut self) {
+    self.signal_group();
+    self.finished = true;
+  }
+
+  /// Send SIGKILL to the child's process group and wait until the leader is
+  /// reaped. On Unix the entire group is killed so sub-processes spawned by
+  /// the shell (e.g. `yes | head`, or a backgrounded `sleep`) are terminated
+  /// too — even if the leader already exited (the group signal goes through
+  /// [`Self::signal_group`], which is a no-op once already sent, e.g. by
+  /// [`Self::mark_finished`] for a lingering exec).
   ///
   /// On macOS a PTY child that is blocked in a kernel write (D-state) will
   /// not react to SIGKILL until the PTY master drains enough data to allow
@@ -190,18 +265,24 @@ impl PtyOverlay {
   /// guards against the unexpected: after that we fall back to a blocking
   /// `wait()`.
   pub fn kill(&mut self) {
-    #[cfg(unix)]
-    if let Some(pid) = self.child.process_id() {
-      // portable-pty calls setsid() in pre_exec so the child is session
-      // leader: PGID == PID.  Killing -PGID terminates the whole pipeline.
-      unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+    // Clean the process group (kills backgrounded descendants). Sent at most
+    // once: for a lingering exec overlay `mark_finished` already sent it when
+    // the leader exited, so this is a no-op here and the long-linger PGID is
+    // never re-signalled (#333 review).
+    self.signal_group();
+    // Leader already reaped (by is_alive / mark_finished): nothing to wait on.
+    if self.reaped {
+      return;
     }
     let _ = self.child.kill();
     // Drain up to 128 buffered chunks per tick so the reader thread can keep
     // consuming from the PTY master fd, preventing a kernel D-state deadlock.
     for _ in 0..100 {
       match self.child.try_wait() {
-        Ok(Some(_)) => return,
+        Ok(Some(_)) => {
+          self.reaped = true;
+          return;
+        }
         _ => {
           for _ in 0..128 {
             if self.rx.try_recv().is_err() {
@@ -213,6 +294,19 @@ impl PtyOverlay {
       }
     }
     let _ = self.child.wait();
+    self.reaped = true;
+  }
+
+  /// `true` once the child leader has been observed exited and reaped.
+  /// Exposed for the state-machine tests (#333 review).
+  pub fn is_reaped(&self) -> bool {
+    self.reaped
+  }
+
+  /// `true` once the process-group SIGKILL has been sent (descendant cleanup).
+  /// Exposed for the state-machine tests (#333 review).
+  pub fn group_signalled(&self) -> bool {
+    self.signalled
   }
 
   /// Poll the exit status without blocking. Exposed for tests that need to

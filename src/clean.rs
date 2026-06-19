@@ -289,3 +289,81 @@ pub fn format_report(reclaims: &[WorktreeReclaim]) -> String {
   out.push_str(&format!("\nTotal reclaimable: {}\n", human_size(grand)));
   out
 }
+
+/// The safety gate for deleting an artifact directory: a directory is safe
+/// to delete only when git treats `rel` (relative to `worktree`) as ignored
+/// AND it holds no tracked files. The ignore check alone is not enough — git
+/// tracks files, not directories, so a force-added `dist/index.html` can
+/// survive under a `dist/` ignore rule, and `remove_dir_all` would otherwise
+/// destroy that tracked (possibly edited) file. Every failure path resolves
+/// conservatively to "not safe" (preserve).
+///
+/// Shared by `gwm clean` (CLI) and the TUI clean overlay (issue #325) so both
+/// honour the identical contract — a raw [`scan_worktree`] + [`delete_reclaim`]
+/// would bypass this gate.
+pub fn dir_is_safe_to_clean(worktree: &Path, rel: &str) -> bool {
+  dir_is_git_ignored(worktree, rel) && !dir_has_tracked_files(worktree, rel)
+}
+
+/// Whether git considers `rel` (relative to `worktree`) ignored. Shells out to
+/// `git check-ignore -q -- <rel>` (exit 0 = ignored). Any failure (git missing,
+/// not a repo) is treated as "not ignored" so the default is to preserve.
+///
+/// The `--` delimiter is required: with a config-supplied `[clean.profiles]`
+/// dir, a name like `-cache` would otherwise be parsed by git as an option and
+/// the directory would always read as "not ignored" (skipped). `ls-files`
+/// below already passes `--` for the same reason.
+fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(worktree)
+    .args(["check-ignore", "-q", "--", rel])
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+/// Whether any tracked file lives under `rel`. `git ls-files -- <rel>` prints
+/// one line per tracked path; non-empty stdout ⇒ tracked content present. On
+/// any error we assume `true` (tracked) so the safety gate errs toward
+/// preserving the directory.
+fn dir_has_tracked_files(worktree: &Path, rel: &str) -> bool {
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(worktree)
+    .args(["ls-files", "--", rel])
+    .output()
+    .map(|o| !o.status.success() || !o.stdout.is_empty())
+    .unwrap_or(true)
+}
+
+/// Scan `path` for `patterns`, then keep only the artifacts that pass
+/// [`dir_is_safe_to_clean`]. Returns the gated [`WorktreeReclaim`] (its
+/// `total_bytes` reflecting only the deletable artifacts) plus the rejected
+/// directory names, so the caller can report what it preserved.
+///
+/// This is the safe entry point both `gwm clean` and the TUI clean overlay
+/// (issue #325) use — a raw [`scan_worktree`] feeding [`delete_reclaim`] would
+/// bypass the gate and could destroy tracked files.
+pub fn scan_worktree_safe(name: &str, path: &Path, patterns: &[String]) -> (WorktreeReclaim, Vec<String>) {
+  let scan = scan_worktree(name, path, patterns);
+  let mut deletable = Vec::new();
+  let mut skipped = Vec::new();
+  for a in scan.artifacts {
+    if dir_is_safe_to_clean(path, &a.rel) {
+      deletable.push(a);
+    } else {
+      skipped.push(a.rel);
+    }
+  }
+  let total_bytes = deletable.iter().map(|a| a.bytes).sum();
+  (
+    WorktreeReclaim {
+      name: name.to_string(),
+      path: path.to_path_buf(),
+      artifacts: deletable,
+      total_bytes,
+    },
+    skipped,
+  )
+}
