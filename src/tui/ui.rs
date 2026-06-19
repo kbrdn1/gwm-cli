@@ -2569,6 +2569,14 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
   rows.push(entry(
+    Action::ExecOverlay,
+    "pick an [exec.profiles] profile and run it in a PTY",
+  ));
+  rows.push(entry(
+    Action::CleanOverlay,
+    "preview and reclaim build artifacts (with confirm)",
+  ));
+  rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
   ));
