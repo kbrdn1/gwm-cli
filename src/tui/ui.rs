@@ -3506,14 +3506,14 @@ pub fn link_prompt_modal_width(term_width: u16) -> u16 {
   width.min(72).min(term_width)
 }
 
-/// Modal width for the exec / clean overlays (issue #334 polish). Wider than
-/// the link-prompt modal so the icon + dir name + size columns of the clean
-/// report have room to breathe on a roomy terminal, while staying readable on
-/// a narrow one. ~70 % of the width (90 % when ≤ 80 cols), clamped to
-/// `[48, 110]`.
+/// Modal width for the exec / clean overlays (issue #334 polish). A bit wider
+/// than the link-prompt modal so the full-width clean report (icon + dir name
+/// pinned left, size pinned right) uses the horizontal space — but capped so
+/// the name↔size gap never stretches absurdly on an ultra-wide terminal.
+/// ~62 % of the width (90 % when ≤ 80 cols), clamped to `[48, 88]`.
 pub fn overlay_modal_width(term_width: u16) -> u16 {
-  let pct = if term_width <= 80 { 90 } else { 70 };
-  (term_width.saturating_mul(pct) / 100).clamp(48, 110).min(term_width)
+  let pct = if term_width <= 80 { 90 } else { 62 };
+  (term_width.saturating_mul(pct) / 100).clamp(48, 88).min(term_width)
 }
 
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
@@ -4159,17 +4159,24 @@ pub fn picker_window(len: usize, selected: usize, max_visible: usize) -> (usize,
   (start, start + max_visible)
 }
 
-/// Build the centred, fixed-width, scrollable rows for an overlay profile
-/// picker (issue #325 polish). Every row is padded to the same width so the
-/// selection highlight reads as a consistent bar and the labels align; the
-/// visible window follows `selected` with `↑ / ↓ N more` markers when the
-/// list overflows `max_visible`.
-fn picker_lines(labels: &[&str], selected: usize, max_visible: usize, theme: &Theme) -> Vec<Line<'static>> {
+/// Build the full-width, scrollable rows for an overlay profile picker (issue
+/// #334 polish). Each row spans the modal's `inner` width — left-aligned so
+/// the labels start at the same column and the selection highlight reads as a
+/// full-width bar — and the visible window follows `selected` with
+/// `↑ / ↓ N more` markers (centred) when the list overflows `max_visible`.
+fn picker_lines(
+  labels: &[&str],
+  selected: usize,
+  max_visible: usize,
+  inner: usize,
+  theme: &Theme,
+) -> Vec<Line<'static>> {
   let mut out = Vec::new();
   if labels.is_empty() {
     return out;
   }
-  let labelw = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+  // Width available for the label text after the ` ▸ ` marker gutter.
+  let textw = inner.saturating_sub(3);
   let (start, end) = picker_window(labels.len(), selected, max_visible);
   if start > 0 {
     out.push(
@@ -4182,7 +4189,8 @@ fn picker_lines(labels: &[&str], selected: usize, max_visible: usize, theme: &Th
   }
   for (i, label) in labels.iter().enumerate().take(end).skip(start) {
     let marker = if i == selected { "▸" } else { " " };
-    let txt = format!("{marker} {label:<labelw$} ");
+    // Pad to the full inner width so the selection bar fills the whole row.
+    let txt = format!(" {marker} {:<textw$}", ellipsize_middle(label, textw));
     let style = if i == selected {
       Style::default()
         .fg(theme.accent)
@@ -4191,7 +4199,7 @@ fn picker_lines(labels: &[&str], selected: usize, max_visible: usize, theme: &Th
     } else {
       Style::default().fg(theme.muted)
     };
-    out.push(Line::from(Span::styled(txt, style)).centered());
+    out.push(Line::from(Span::styled(txt, style)));
   }
   if end < labels.len() {
     out.push(
@@ -4213,6 +4221,8 @@ fn picker_lines(labels: &[&str], selected: usize, max_visible: usize, theme: &Th
 fn draw_exec_picker(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(2) as usize; // inside the borders
   let mut lines = overlay_title_lines("Run an exec profile", accent);
   // Leave room for the title + hint + borders; the picker scrolls past that.
   let max_visible = (term.height as usize).saturating_sub(8).max(3);
@@ -4221,6 +4231,7 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
     &labels,
     app.exec_picker.selected_index(),
     max_visible,
+    inner,
     &app.theme,
   ));
   push_modal_hint(
@@ -4231,7 +4242,6 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
     &app.theme,
   );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-  let width = overlay_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
@@ -4250,11 +4260,13 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let armed = app.clean_overlay.confirm.is_armed();
   let border = if armed { danger } else { accent };
   let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(2) as usize; // inside the borders
 
   let mut lines = overlay_title_lines("Reclaim build artifacts", border);
 
   // Profile picker — the `(default)` choice plus any `[clean.profiles]`.
-  // Aligned, same-width, scrollable; only rendered when named profiles exist.
+  // Full-width, scrollable; only rendered when named profiles exist.
   if app.clean_overlay.has_profiles() {
     let labels = app.clean_overlay.choice_labels();
     let max_visible = (term.height as usize).saturating_sub(14).max(3);
@@ -4262,33 +4274,28 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
       &labels,
       app.clean_overlay.selected_index(),
       max_visible,
+      inner,
       &app.theme,
     ));
     lines.push(Line::from(""));
   }
 
   // The gated reclaim report — only the git-ignored, untracked artifacts.
-  // Two aligned columns (dir left, size right) with a size heatmap; the list
-  // is capped to the modal height with a `… N more` overflow marker.
+  // Each row fills the modal's inner width: a matched nerd-font icon (#334) +
+  // dir name pinned left, the heatmap-coloured size pinned to the right edge,
+  // so the columns use the whole box. Capped to the modal height with a
+  // `… N more` overflow marker.
   match app.clean_overlay.reclaim() {
     Some(reclaim) if !reclaim.artifacts.is_empty() => {
-      // Equal column widths so every row (and the total) lines up.
-      let relw = reclaim
-        .artifacts
-        .iter()
-        .map(|a| a.rel.chars().count())
-        .max()
-        .unwrap_or(0)
-        .clamp(5, 32);
-      // Each row: a matched nerd-font icon (#334), the dir name (left), and
-      // the heatmap-coloured size (right) — all in fixed columns so they align.
+      // Name column = inner width minus the ` icon  ` gutter (4) and the
+      // `<size> ` tail (11), so the size lands flush on the right edge.
+      let namew = inner.saturating_sub(15).max(5);
       let row = |icon: &str, left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
         Line::from(vec![
-          Span::styled(format!("{icon}  "), Style::default().fg(accent)),
-          Span::styled(format!("{:<relw$}  ", ellipsize_middle(left, relw)), left_style),
-          Span::styled(format!("{:>10}", crate::clean::human_size(bytes)), size_style),
+          Span::styled(format!(" {icon}  "), Style::default().fg(accent)),
+          Span::styled(format!("{:<namew$}", ellipsize_middle(left, namew)), left_style),
+          Span::styled(format!("{:>10} ", crate::clean::human_size(bytes)), size_style),
         ])
-        .centered()
       };
       let max_rows = (term.height as usize).saturating_sub(14).max(3);
       let shown = reclaim.artifacts.len().min(max_rows);
@@ -4358,7 +4365,6 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
     &app.theme,
   );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-  let width = overlay_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(border)), area);

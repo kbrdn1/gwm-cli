@@ -1039,8 +1039,8 @@ fn overlay_modal_width_is_wider_but_clamped() {
   // On a wide terminal it is meaningfully wider than the 72-col link modal.
   assert!(overlay_modal_width(160) > link_prompt_modal_width(160));
   assert!(overlay_modal_width(120) >= 72);
-  // Clamped: never wider than the terminal, never past the 110 ceiling.
-  assert!(overlay_modal_width(300) <= 110);
+  // Clamped: never wider than the terminal, never past the 88 ceiling.
+  assert!(overlay_modal_width(300) <= 88);
   assert!(overlay_modal_width(40) <= 40);
   assert!(overlay_modal_width(50) >= 45, "narrow terminals still get a usable box");
 }
