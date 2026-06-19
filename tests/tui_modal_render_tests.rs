@@ -643,4 +643,7 @@ fn clean_modal_renders_title_report_and_hints() {
   assert_present(&buf, "Reclaim build artifacts", "clean overlay title (capitalised)");
   assert_present(&buf, "target", "clean artifact name");
   assert_present(&buf, "total", "clean total line");
+  // #335 review: the right-aligned size column must fit the drawable area
+  // (width − borders − padding), so the unit suffix is never clipped.
+  assert_present(&buf, "KiB", "size unit not clipped on the right edge");
 }

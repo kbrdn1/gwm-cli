@@ -4222,7 +4222,7 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(2) as usize; // inside the borders
+  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
   let mut lines = overlay_title_lines("Run an exec profile", accent);
   // Leave room for the title + hint + borders; the picker scrolls past that.
   let max_visible = (term.height as usize).saturating_sub(8).max(3);
@@ -4261,7 +4261,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let border = if armed { danger } else { accent };
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let inner = width.saturating_sub(2) as usize; // inside the borders
+  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
 
   let mut lines = overlay_title_lines("Reclaim build artifacts", border);
 
