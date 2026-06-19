@@ -4139,14 +4139,15 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
 
   let mut lines = overlay_title_lines("reclaim build artifacts", border);
 
-  // Profile picker (only when `[clean.profiles]` are configured).
+  // Profile picker — the `(default)` choice plus any `[clean.profiles]`.
+  // Only worth rendering when the repo configures named profiles.
   if app.clean_overlay.has_profiles() {
     let selected = app.clean_overlay.selected_index();
-    for (i, name) in app.clean_overlay.profiles().iter().enumerate() {
+    for (i, label) in app.clean_overlay.choice_labels().iter().enumerate() {
       let line = if i == selected {
-        Line::from(format!("▸ {name}")).style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+        Line::from(format!("▸ {label}")).style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
       } else {
-        Line::from(format!("  {name}")).style(Style::default().fg(muted))
+        Line::from(format!("  {label}")).style(Style::default().fg(muted))
       };
       lines.push(line.centered());
     }

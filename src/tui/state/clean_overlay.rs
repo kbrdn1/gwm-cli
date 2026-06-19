@@ -15,18 +15,26 @@
 use super::confirm::ConfirmModal;
 use crate::clean::WorktreeReclaim;
 
+/// The picker label for the no-`--profile` choice — the directory set
+/// `gwm clean` resolves with no profile (`[clean.profiles.default]` when
+/// defined, else the built-in `target` / `node_modules` / `dist` / `build`).
+pub const DEFAULT_CHOICE_LABEL: &str = "(default)";
+
 /// Pure state for the clean overlay. `Default` is a closed overlay (no
-/// profiles, no snapshot, disarmed countdown).
+/// choices, no snapshot, disarmed countdown).
 #[derive(Debug, Default)]
 pub struct CleanOverlay {
-  /// Configured `[clean.profiles.*]` names (sorted). Empty ⇒ the overlay
-  /// scans the built-in default set and the picker has nothing to cycle.
-  profiles: Vec<String>,
-  /// Highlighted profile row (meaningful only while `profiles` is
-  /// non-empty).
+  /// Picker choices: `None` (the no-`--profile` path — `gwm clean` resolves
+  /// the `default` profile when defined, else the built-in set) followed by
+  /// each configured `[clean.profiles.*]` name. The leading `None` is always
+  /// present once [`Self::open`] has run, so the overlay's default matches
+  /// the CLI even when a repo defines only non-`default` profiles — and the
+  /// built-in set stays reachable.
+  choices: Vec<Option<String>>,
+  /// Highlighted choice row.
   selected: usize,
   /// The most recent gated scan snapshot for the selected worktree, filled
-  /// by `App::enter_clean_overlay` and re-filled on a profile change. `None`
+  /// by `App::enter_clean_overlay` and re-filled on a choice change. `None`
   /// before the first scan.
   reclaim: Option<WorktreeReclaim>,
   /// Directory names found but preserved by the safety gate (not
@@ -43,61 +51,70 @@ impl CleanOverlay {
     Self::default()
   }
 
-  /// Populate the picker profile names, seed the highlight, and clear any
-  /// stale snapshot / countdown. The orchestrator follows this with
-  /// [`Self::set_scan`] once the first scan completes.
+  /// Populate the picker from the configured profile names, reset the
+  /// highlight to the `(default)` choice, and clear any stale snapshot /
+  /// countdown. The orchestrator follows this with [`Self::set_scan`] once
+  /// the first scan completes.
   ///
-  /// The highlight opens on the `default` profile when one is configured —
-  /// so the overlay's first preview matches what `gwm clean` with no
-  /// `--profile` would resolve — falling back to the first row otherwise.
+  /// Opens on the no-`--profile` choice so the overlay's first preview always
+  /// matches what `gwm clean` would resolve — the built-in set, or
+  /// `[clean.profiles.default]` when defined — regardless of which optional
+  /// profiles the repo adds.
   pub fn open(&mut self, profiles: Vec<String>) {
-    self.selected = profiles.iter().position(|p| p == "default").unwrap_or(0);
-    self.profiles = profiles;
+    self.choices = std::iter::once(None).chain(profiles.into_iter().map(Some)).collect();
+    self.selected = 0;
     self.reclaim = None;
     self.skipped.clear();
     self.confirm.reset();
   }
 
-  /// The configured profile names, in display order.
-  pub fn profiles(&self) -> &[String] {
-    &self.profiles
+  /// The picker labels, in display order. The no-`--profile` entry renders as
+  /// [`DEFAULT_CHOICE_LABEL`]; named profiles render as themselves.
+  pub fn choice_labels(&self) -> Vec<&str> {
+    self
+      .choices
+      .iter()
+      .map(|c| c.as_deref().unwrap_or(DEFAULT_CHOICE_LABEL))
+      .collect()
   }
 
-  /// `true` when at least one `[clean.profiles]` entry exists (the picker
-  /// can cycle).
+  /// `true` when the repo configures at least one named profile, so the
+  /// picker is worth rendering (otherwise there is only the implicit
+  /// `(default)` choice).
   pub fn has_profiles(&self) -> bool {
-    !self.profiles.is_empty()
+    self.choices.len() > 1
   }
 
-  /// The highlighted profile row.
+  /// The highlighted choice row.
   pub fn selected_index(&self) -> usize {
     self.selected
   }
 
-  /// The highlighted profile name, or `None` when no profiles are
-  /// configured (the overlay scans the built-in default set).
+  /// The highlighted profile name to hand to `resolve_clean_dirs`: `None` for
+  /// the `(default)` choice (no `--profile`), `Some(name)` for a configured
+  /// profile.
   pub fn selected_profile(&self) -> Option<&str> {
-    self.profiles.get(self.selected).map(String::as_str)
+    self.choices.get(self.selected).and_then(|c| c.as_deref())
   }
 
   /// Move the highlight down one row, wrapping. No-op with fewer than two
-  /// profiles (nothing to cycle). Disarms the countdown — changing the
-  /// target must be re-confirmed.
+  /// choices (nothing to cycle). Disarms the countdown — changing the target
+  /// must be re-confirmed.
   pub fn next(&mut self) {
-    if self.profiles.len() < 2 {
+    if self.choices.len() < 2 {
       return;
     }
-    self.selected = (self.selected + 1) % self.profiles.len();
+    self.selected = (self.selected + 1) % self.choices.len();
     self.confirm.reset();
   }
 
   /// Move the highlight up one row, wrapping. No-op with fewer than two
-  /// profiles. Disarms the countdown.
+  /// choices. Disarms the countdown.
   pub fn prev(&mut self) {
-    if self.profiles.len() < 2 {
+    if self.choices.len() < 2 {
       return;
     }
-    self.selected = (self.selected + self.profiles.len() - 1) % self.profiles.len();
+    self.selected = (self.selected + self.choices.len() - 1) % self.choices.len();
     self.confirm.reset();
   }
 

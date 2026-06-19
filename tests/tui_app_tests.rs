@@ -7511,12 +7511,16 @@ fn clean_overlay_profile_picker_rescans_per_profile() {
   .unwrap();
   let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
   app.enter_clean_overlay();
-  // Profile `a` (sorted first) resolves to `cache` only.
+  // Opens on the `(default)` choice (no --profile) — built-in set here, which
+  // doesn't include `cache` / `out`.
+  assert_eq!(app.clean_overlay.selected_profile(), None);
+  // Cycle to profile `a` → re-scans for `cache` only.
+  app.clean_overlay_next();
   assert_eq!(app.clean_overlay.selected_profile(), Some("a"));
   let a = app.clean_overlay.reclaim().unwrap();
   assert!(a.artifacts.iter().any(|x| x.rel == "cache"));
   assert!(!a.artifacts.iter().any(|x| x.rel == "out"));
-  // Cycling to `b` re-scans for `out`.
+  // Cycle to profile `b` → re-scans for `out`.
   app.clean_overlay_next();
   assert_eq!(app.clean_overlay.selected_profile(), Some("b"));
   let b = app.clean_overlay.reclaim().unwrap();
@@ -7535,18 +7539,60 @@ fn clean_overlay_close_returns_to_the_list() {
 }
 
 #[test]
-fn clean_overlay_opens_on_the_default_profile_when_present() {
+fn clean_overlay_opens_on_the_no_profile_default_choice() {
+  // The overlay always opens on the `(default)` / no-`--profile` choice, so
+  // its first preview matches `gwm clean` — even when the repo defines named
+  // profiles that sort before it.
   let (repo, _) = init_repo();
   std::fs::write(
     repo.path().join(".gwm.toml"),
-    "[clean.profiles.aggressive]\ndirs = [\"target\"]\n\n[clean.profiles.default]\ndirs = [\"dist\"]\n",
+    "[clean.profiles.aggressive]\ndirs = [\"target\"]\n",
   )
   .unwrap();
   let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
   app.enter_clean_overlay();
-  // `aggressive` sorts first, but the overlay opens on `default` so the
-  // first preview matches `gwm clean` with no --profile.
-  assert_eq!(app.clean_overlay.selected_profile(), Some("default"));
+  assert_eq!(
+    app.clean_overlay.selected_profile(),
+    None,
+    "opens on the no-profile choice"
+  );
+  assert_eq!(app.clean_overlay.choice_labels().first().copied(), Some("(default)"));
+  assert!(
+    app.clean_overlay.has_profiles(),
+    "a named profile makes the picker worth showing"
+  );
+}
+
+#[test]
+fn clean_overlay_default_choice_uses_builtins_without_a_default_profile() {
+  // Codex #333 review: a repo with only a non-`default` profile must not make
+  // the built-in set unreachable. The `(default)` choice resolves to the
+  // built-in `target` / … set (matching `gwm clean` with no --profile), NOT
+  // the alphabetically-first profile.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\ncoverage/\n").unwrap();
+  // `target` is a built-in; `coverage` is only reachable via the named profile.
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("t"), vec![0u8; 128]).unwrap();
+  std::fs::create_dir(repo.path().join("coverage")).unwrap();
+  std::fs::write(repo.path().join("coverage").join("c"), vec![0u8; 256]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.coverage]\ndirs = [\"coverage\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // The `(default)` choice scans the built-in set → finds `target`, not `coverage`.
+  let r = app.clean_overlay.reclaim().unwrap();
+  assert!(
+    r.artifacts.iter().any(|a| a.rel == "target"),
+    "built-in target/ is reachable"
+  );
+  assert!(
+    !r.artifacts.iter().any(|a| a.rel == "coverage"),
+    "the named profile is not the default"
+  );
 }
 
 #[test]
