@@ -17,7 +17,7 @@ use super::state::spinner::Spinner;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
-use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
+use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
@@ -444,11 +444,24 @@ pub struct App {
   /// ([`PtyKind::Exec`]) in the selected worktree's directory.
   pub exec_picker: ExecPicker,
 
+  /// The `[exec]` config captured when the exec picker opened (issue #325).
+  /// In workspace mode `sync_active_repo` can swap `self.config` to another
+  /// repo while the overlay is open, so `Enter` resolves the argv against
+  /// this snapshot — the active repo's `[exec]` at open time — not the live
+  /// config (Codex #333 review).
+  exec_picker_cfg: ExecConfig,
+
   /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
   /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
   /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
   /// fires [`crate::clean::delete_reclaim`] when the countdown elapses.
   pub clean_overlay: CleanOverlay,
+
+  /// The `[clean]` config captured when the clean overlay opened (issue
+  /// #325) — every re-scan and the delete resolve their dir-set against this
+  /// snapshot, not the live `self.config.clean`, which a workspace
+  /// auto-refresh could swap to another repo's (Codex #333 review).
+  clean_overlay_cfg: CleanConfig,
 
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
@@ -559,7 +572,9 @@ impl App {
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
+      exec_picker_cfg: ExecConfig::default(),
       clean_overlay: CleanOverlay::new(),
+      clean_overlay_cfg: CleanConfig::default(),
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -2060,9 +2075,12 @@ impl App {
       self.status = "no [exec.profiles] configured — add one to .gwm.toml".into();
       return;
     }
-    // Capture the target worktree path now: an auto-refresh can drift the live
-    // selection while the picker is open, so `Enter` must run in *this*
-    // worktree, not whatever is selected later (Codex #333 review).
+    // Capture the target worktree path AND the active repo's `[exec]` config
+    // now: an auto-refresh can drift the live selection (and, in workspace
+    // mode, the active repo) while the picker is open, so `Enter` must run in
+    // *this* worktree against *this* config — not whatever is live later
+    // (Codex #333 review).
+    self.exec_picker_cfg = self.config.exec.clone();
     self.exec_picker.open(names, cwd);
     self.view = View::ExecPicker;
   }
@@ -2101,7 +2119,8 @@ impl App {
       self.status = "nothing selected".into();
       return None;
     };
-    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.config.exec) {
+    // Resolve against the `[exec]` config captured at open, not the live one.
+    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
       Ok(argv) => Some((argv, cwd)),
       Err(e) => {
         self.status = format!("exec profile {profile:?}: {e}");
@@ -2131,12 +2150,15 @@ impl App {
       self.status = "nothing selected".into();
       return;
     };
-    // Capture the target worktree now: an auto-refresh can drift the live
-    // selection while the overlay is open / armed, so every re-scan and the
-    // delete must pin to *this* worktree (Codex #333 review).
+    // Capture the target worktree AND the active repo's `[clean]` config now:
+    // an auto-refresh can drift the live selection (and, in workspace mode,
+    // the active repo) while the overlay is open / armed, so every re-scan
+    // and the delete must pin to *this* worktree against *this* config
+    // (Codex #333 review).
     let name = sel.name.clone();
     let path = sel.path.clone();
-    let names: Vec<String> = self.config.clean.profiles.keys().cloned().collect();
+    self.clean_overlay_cfg = self.config.clean.clone();
+    let names: Vec<String> = self.clean_overlay_cfg.profiles.keys().cloned().collect();
     self.clean_overlay.open(names, name, path);
     if let Err(e) = self.clean_overlay_rescan() {
       self.status = format!("clean: {e}");
@@ -2158,7 +2180,7 @@ impl App {
       return Ok(());
     };
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
-    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.config.clean)?;
+    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg)?;
     let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
     self.clean_overlay.set_scan(reclaim, skipped);
     Ok(())
@@ -2254,7 +2276,7 @@ impl App {
       return;
     };
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
-    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.config.clean) {
+    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg) {
       Ok(d) => d,
       Err(e) => {
         self.status = format!("clean: {e}");

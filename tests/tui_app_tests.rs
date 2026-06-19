@@ -7632,34 +7632,48 @@ fn clean_overlay_delete_revalidates_the_gate_just_before_removing() {
 }
 
 #[test]
-fn exec_picker_runs_in_the_open_time_worktree_after_a_drift() {
-  // Codex #333: an auto-refresh can drift the live selection while the picker
-  // is open. Resolve must run in the worktree the picker was opened for.
+fn exec_picker_runs_in_the_open_time_worktree_and_config_after_a_drift() {
+  // Codex #333: an auto-refresh can drift the live selection AND (workspace)
+  // swap the active config while the picker is open. Resolve must run in the
+  // captured worktree against the captured `[exec]` config — not the live
+  // ones.
   let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"echo\", \"hi\"]\n");
   let opened = app.selected().unwrap().path.clone();
   app.enter_exec_picker();
-  // Drift: a refresh replaced the list with an unrelated worktree.
+  // Drift: the list AND the live config moved out from under the overlay.
   app.worktrees = vec![worktree_fixture("other")];
-  let (argv, cwd) = app.exec_picker_resolve().expect("resolves against the captured cwd");
+  app.config.exec.profiles.clear();
+  let (argv, cwd) = app
+    .exec_picker_resolve()
+    .expect("resolves against the captured cfg + cwd");
   assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
   assert_eq!(cwd, opened, "runs in the open-time worktree, not the drifted selection");
 }
 
 #[test]
-fn clean_overlay_deletes_the_open_time_worktree_after_a_drift() {
-  // Codex #333: the clean delete must reclaim from the worktree whose report
-  // was previewed, even if the live selection drifted (refresh) meanwhile.
+fn clean_overlay_deletes_the_open_time_target_and_config_after_a_drift() {
+  // Codex #333: the clean delete must reclaim the previewed worktree using the
+  // captured `[clean]` config, even if the live selection AND config drifted
+  // (workspace refresh) meanwhile.
   let (repo, _) = init_repo();
   std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
   std::fs::create_dir(repo.path().join("build")).unwrap();
   std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.x]\ndirs = [\"build\"]\n",
+  )
+  .unwrap();
   let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
   app.enter_clean_overlay();
-  // Drift: replace the list with an unrelated (fake-path) row.
+  app.clean_overlay_next(); // select profile `x` (dirs = build)
+  assert_eq!(app.clean_overlay.selected_profile(), Some("x"));
+  // Drift: replace the list AND drop the live config's profile.
   app.worktrees = vec![worktree_fixture("other")];
+  app.config.clean.profiles.clear();
   app.clean_overlay_delete();
   assert!(
     !repo.path().join("build").exists(),
-    "reclaimed from the captured worktree despite the drifted selection"
+    "reclaimed via the captured target + config despite the drift"
   );
 }
