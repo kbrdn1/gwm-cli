@@ -997,3 +997,36 @@ fn reclaim_size_color_is_a_magnitude_heatmap() {
   assert_eq!(reclaim_size_color(500 * MIB, &t), t.prunable, "500 MiB boundary → red");
   assert_eq!(reclaim_size_color(3 * 1024 * MIB, &t), t.prunable, "large → red");
 }
+
+#[test]
+fn clean_dir_icon_matches_the_ecosystem() {
+  // #334 polish: each reclaimable dir gets a nerd-font glyph matched to its
+  // ecosystem; unknown names fall back to the generic folder. Leading dots
+  // are ignored so `.venv` matches like `venv`.
+  use gwm::tui::clean_dir_icon;
+  let folder = clean_dir_icon("some-unknown-dir");
+  assert_ne!(clean_dir_icon("node_modules"), folder, "node_modules has its own icon");
+  assert_ne!(clean_dir_icon("target"), folder, "target (Rust) has its own icon");
+  assert_eq!(
+    clean_dir_icon(".venv"),
+    clean_dir_icon("venv"),
+    "leading dot is ignored"
+  );
+  assert_eq!(clean_dir_icon(".cache"), clean_dir_icon("cache"));
+  // Distinct ecosystems get distinct glyphs.
+  assert_ne!(clean_dir_icon("node_modules"), clean_dir_icon("target"));
+  assert_ne!(clean_dir_icon("vendor"), clean_dir_icon("venv"));
+  // Every glyph is a single non-empty token.
+  for d in [
+    "node_modules",
+    "target",
+    "vendor",
+    ".venv",
+    "dist",
+    ".cache",
+    "coverage",
+    "whatever",
+  ] {
+    assert!(!clean_dir_icon(d).is_empty(), "icon for {d:?} must be non-empty");
+  }
+}

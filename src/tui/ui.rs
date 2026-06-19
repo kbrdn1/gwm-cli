@@ -2568,14 +2568,18 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
-  rows.push(entry(
-    Action::ExecOverlay,
-    "pick an [exec.profiles] profile and run it in a PTY",
-  ));
-  rows.push(entry(
-    Action::CleanOverlay,
-    "preview and reclaim build artifacts (with confirm)",
-  ));
+  // #334 review: the exec / clean overlays are picker-gated (`run_action`
+  // no-ops them in `gwm switch`), so only advertise them outside picker mode.
+  if !picker_mode {
+    rows.push(entry(
+      Action::ExecOverlay,
+      "pick an [exec.profiles] profile and run it in a PTY",
+    ));
+    rows.push(entry(
+      Action::CleanOverlay,
+      "preview and reclaim build artifacts (with confirm)",
+    ));
+  }
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
@@ -4114,6 +4118,25 @@ pub fn reclaim_size_color(bytes: u64, theme: &Theme) -> Color {
   }
 }
 
+/// A nerd-font glyph matched to a reclaimable directory name (issue #334
+/// polish) — the ecosystem the artifact belongs to (`node_modules` → node,
+/// `target` → Rust, `vendor` → PHP, `.venv` → Python, `dist`/`build` →
+/// package, `.cache` → archive…), falling back to a generic folder. Leading
+/// dots are stripped so `.venv` / `.nuxt` match like `venv` / `nuxt`.
+pub fn clean_dir_icon(rel: &str) -> &'static str {
+  match rel.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    "node_modules" => "\u{e718}",      // nf-dev-nodejs
+    "target" => wt_tree::WT_RUST_ICON, // nf-dev-rust
+    "vendor" => "\u{e73d}",            // nf-dev-php
+    "venv" | "__pycache__" | "pytest_cache" | "mypy_cache" | "tox" => "\u{e73c}", // nf-dev-python
+    "dist" | "build" | "out" | "output" | "bin" => "\u{f487}", // nf-oct-package
+    "cache" | "turbo" | "parcel-cache" => "\u{f187}", // nf-fa-archive
+    "nuxt" | "next" | "svelte-kit" | "astro" | "vite" => "\u{e74e}", // nf-dev-javascript
+    "coverage" => "\u{f201}",          // nf-fa-line_chart
+    _ => wt_tree::WT_DIR_ICON,         // generic folder
+  }
+}
+
 /// The visible `[start, end)` slice of a `len`-item picker when at most
 /// `max_visible` rows fit, keeping `selected` in view (centred while
 /// scrolling). Returns the whole list when it fits (issue #325 polish).
@@ -4247,8 +4270,11 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
         .max()
         .unwrap_or(0)
         .clamp(5, 20);
-      let row = |left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
+      // Each row: a matched nerd-font icon (#334), the dir name (left), and
+      // the heatmap-coloured size (right) — all in fixed columns so they align.
+      let row = |icon: &str, left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
         Line::from(vec![
+          Span::styled(format!("{icon}  "), Style::default().fg(accent)),
           Span::styled(format!("{:<relw$}  ", ellipsize_middle(left, relw)), left_style),
           Span::styled(format!("{:>10}", crate::clean::human_size(bytes)), size_style),
         ])
@@ -4258,6 +4284,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
       let shown = reclaim.artifacts.len().min(max_rows);
       for a in reclaim.artifacts.iter().take(shown) {
         lines.push(row(
+          clean_dir_icon(&a.rel),
           &a.rel,
           Style::default().fg(muted),
           a.bytes,
@@ -4273,7 +4300,9 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
           .centered(),
         );
       }
+      // The total row uses an aggregate (sigma) glyph in the icon column.
       lines.push(row(
+        "\u{f03a}",
         "total",
         Style::default().fg(accent).add_modifier(Modifier::BOLD),
         reclaim.total_bytes,

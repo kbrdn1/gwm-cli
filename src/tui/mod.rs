@@ -66,7 +66,7 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
-  build_sidebar_sections, centered_abs, chip_style, ci_indicator, command_logs_footer_hints,
+  build_sidebar_sections, centered_abs, chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints,
   config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line,
   confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle,
   field_input_line, filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines,

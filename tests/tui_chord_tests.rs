@@ -609,3 +609,32 @@ fn help_rows_cover_every_bound_list_view_action() {
     );
   }
 }
+
+#[test]
+fn help_rows_hide_exec_and_clean_in_switch_picker_mode() {
+  // #334 review: `x` / `X` are picker-gated (`run_action` no-ops them in
+  // `gwm switch`), so the help overlay must not advertise them in the Picker
+  // context — only in the focus-mode List View.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let labels: Vec<String> = help_rows(&km, &modal, HintContext::Picker)
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { label, .. } => Some(label.clone()),
+      _ => None,
+    })
+    .collect();
+  assert!(
+    !labels.iter().any(|l| l.contains("[exec.profiles]")),
+    "the exec overlay must be hidden from the switch-picker help"
+  );
+  assert!(
+    !labels.iter().any(|l| l.contains("reclaim build artifacts")),
+    "the clean overlay must be hidden from the switch-picker help"
+  );
+}
