@@ -58,6 +58,12 @@ pub struct PtyOverlay {
   /// soon as it finishes, so the overlay must persist until the user
   /// dismisses it. While `true`, any keystroke closes the overlay.
   pub finished: bool,
+  /// `true` once the child has been observed exited and reaped (by
+  /// [`Self::is_alive`] or [`Self::kill`]). Guards [`Self::kill`] from sending
+  /// a signal to a PID/PGID that the OS may have recycled to an unrelated
+  /// process after reaping (issue #325 / Codex #333 review) — once reaped,
+  /// `kill` is a no-op.
+  reaped: bool,
 }
 
 impl std::fmt::Debug for PtyOverlay {
@@ -140,6 +146,7 @@ impl PtyOverlay {
       rows,
       diff_file: None,
       finished: false,
+      reaped: false,
     })
   }
 
@@ -184,9 +191,17 @@ impl PtyOverlay {
     });
   }
 
-  /// Returns `true` while the child process is still running.
+  /// Returns `true` while the child process is still running. Once it has
+  /// exited, records the reap so [`Self::kill`] never signals the (possibly
+  /// recycled) PID/PGID afterwards (#333 review).
   pub fn is_alive(&mut self) -> bool {
-    matches!(self.child.try_wait(), Ok(None))
+    match self.child.try_wait() {
+      Ok(None) => true,
+      _ => {
+        self.reaped = true;
+        false
+      }
+    }
   }
 
   /// Send SIGKILL (or the platform equivalent) to the child process and
@@ -201,6 +216,14 @@ impl PtyOverlay {
   /// guards against the unexpected: after that we fall back to a blocking
   /// `wait()`.
   pub fn kill(&mut self) {
+    // Already exited and reaped (observed by `is_alive`, or a prior `kill`):
+    // the kernel may have recycled this PID/PGID, so sending SIGKILL to
+    // `-pid` could hit an unrelated process group. Never signal after a reap
+    // — this is the lingering-exec-overlay dismissal path (#333 review), and
+    // also covers lazygit / a shell that exited on its own before close.
+    if self.reaped {
+      return;
+    }
     #[cfg(unix)]
     if let Some(pid) = self.child.process_id() {
       // portable-pty calls setsid() in pre_exec so the child is session
@@ -212,7 +235,10 @@ impl PtyOverlay {
     // consuming from the PTY master fd, preventing a kernel D-state deadlock.
     for _ in 0..100 {
       match self.child.try_wait() {
-        Ok(Some(_)) => return,
+        Ok(Some(_)) => {
+          self.reaped = true;
+          return;
+        }
         _ => {
           for _ in 0..128 {
             if self.rx.try_recv().is_err() {
@@ -224,6 +250,14 @@ impl PtyOverlay {
       }
     }
     let _ = self.child.wait();
+    self.reaped = true;
+  }
+
+  /// `true` once the child has been observed exited and reaped — after which
+  /// [`Self::kill`] is a no-op (it must not signal a recycled PID/PGID).
+  /// Exposed for the state-machine tests (#333 review).
+  pub fn is_reaped(&self) -> bool {
+    self.reaped
   }
 
   /// Poll the exit status without blocking. Exposed for tests that need to

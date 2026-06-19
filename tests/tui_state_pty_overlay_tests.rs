@@ -283,4 +283,32 @@ fn exec_overlay_lingers_after_a_one_shot_command_exits() {
     std::thread::sleep(std::time::Duration::from_millis(20));
   }
   assert!(dead, "the one-shot exec command must exit on its own");
+  // #333: observing the exit records the reap, so dismissing the lingering
+  // overlay (which calls `kill`) never signals the now-recycled PID/PGID.
+  assert!(pty.is_reaped(), "observing the exit must record the reap");
+  pty.kill(); // no-op after reap — must not hang or signal
+  assert!(pty.is_reaped());
+}
+
+#[cfg(unix)]
+#[test]
+fn kill_is_a_noop_after_the_child_was_reaped() {
+  // #333: a child that exited and was reaped (via is_alive) must not be
+  // signalled again by kill — its PID/PGID may have been recycled.
+  let (_dir, app) = make_app();
+  let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "exit 0"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
+  for _ in 0..50 {
+    if !pty.is_alive() {
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+  }
+  assert!(pty.is_reaped(), "the child exited and was reaped");
+  let t0 = std::time::Instant::now();
+  pty.kill();
+  assert!(
+    t0.elapsed().as_millis() < 100,
+    "kill after reap returns immediately (no signal, no drain loop)"
+  );
 }
