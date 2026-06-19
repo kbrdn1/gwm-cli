@@ -7745,3 +7745,55 @@ fn destructive_overlay_open_flags_exec_and_clean_views() {
   app.view = View::Confirm;
   assert!(!app.destructive_overlay_open());
 }
+
+#[test]
+fn clean_overlay_noop_profile_move_keeps_the_countdown_armed() {
+  // Codex #333: with only the `(default)` choice, `j`/`k` are no-ops and must
+  // NOT re-scan — a re-scan resets the ConfirmModal, silently disarming a
+  // pending reclaim while the status bar still reads "armed".
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(!app.clean_overlay.has_profiles(), "only the (default) choice exists");
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Armed);
+  app.clean_overlay_next();
+  assert!(app.clean_overlay.confirm.is_armed(), "a no-op move must not disarm");
+  app.clean_overlay_prev();
+  assert!(
+    app.clean_overlay.confirm.is_armed(),
+    "prev no-op must not disarm either"
+  );
+}
+
+#[test]
+fn clean_overlay_real_profile_change_disarms_the_countdown() {
+  // The complement: actually changing the target re-requires confirmation.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "a/\nb/\n").unwrap();
+  for d in ["a", "b"] {
+    std::fs::create_dir(repo.path().join(d)).unwrap();
+    std::fs::write(repo.path().join(d).join("x"), vec![0u8; 64]).unwrap();
+  }
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[tui]\nconfirm_countdown_secs = 3\n\n[clean.profiles.pa]\ndirs = [\"a\"]\n\n[clean.profiles.pb]\ndirs = [\"b\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(app.clean_overlay.has_profiles());
+  // The `(default)` choice scans built-ins (empty here), so move to `pa`
+  // (which reclaims `a`) before arming.
+  app.clean_overlay_next(); // (default) → pa
+  assert_eq!(app.clean_overlay.selected_profile(), Some("pa"));
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Armed);
+  app.clean_overlay_next(); // pa → pb: a real change
+  assert!(
+    !app.clean_overlay.confirm.is_armed(),
+    "changing the target re-requires confirmation"
+  );
+}

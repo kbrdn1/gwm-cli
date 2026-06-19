@@ -112,25 +112,29 @@ impl CleanOverlay {
     self.choices.get(self.selected).and_then(|c| c.as_deref())
   }
 
-  /// Move the highlight down one row, wrapping. No-op with fewer than two
-  /// choices (nothing to cycle). Disarms the countdown — changing the target
-  /// must be re-confirmed.
-  pub fn next(&mut self) {
+  /// Move the highlight down one row, wrapping. Returns `true` when the
+  /// highlight actually moved (so the orchestrator re-scans and the re-scan
+  /// disarms the countdown). A no-op — fewer than two choices — returns
+  /// `false` and leaves an armed countdown untouched, so a stray `j` with
+  /// only the `(default)` choice can't silently cancel a pending reclaim
+  /// (Codex #333 review).
+  pub fn select_next(&mut self) -> bool {
     if self.choices.len() < 2 {
-      return;
+      return false;
     }
     self.selected = (self.selected + 1) % self.choices.len();
-    self.confirm.reset();
+    true
   }
 
-  /// Move the highlight up one row, wrapping. No-op with fewer than two
-  /// choices. Disarms the countdown.
-  pub fn prev(&mut self) {
+  /// Move the highlight up one row, wrapping. Returns `true` when the
+  /// highlight actually moved; a no-op (fewer than two choices) returns
+  /// `false` and leaves an armed countdown untouched.
+  pub fn select_prev(&mut self) -> bool {
     if self.choices.len() < 2 {
-      return;
+      return false;
     }
     self.selected = (self.selected + self.choices.len() - 1) % self.choices.len();
-    self.confirm.reset();
+    true
   }
 
   /// Store a fresh scan snapshot + the gate-preserved names, disarming any

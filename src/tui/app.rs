@@ -2215,19 +2215,26 @@ impl App {
     Ok(())
   }
 
-  /// Cycle the clean profile picker forward and re-scan (issue #325).
+  /// Cycle the clean profile picker forward and re-scan, but ONLY when the
+  /// highlight actually moved (issue #325 / Codex #333). A no-op move (only
+  /// the `(default)` choice) must not re-scan — that would reset the
+  /// `ConfirmModal` and silently disarm a pending reclaim while the status
+  /// bar still reads `armed`.
   pub fn clean_overlay_next(&mut self) {
-    self.clean_overlay.next();
-    if let Err(e) = self.clean_overlay_rescan() {
-      self.status = format!("clean: {e}");
+    if self.clean_overlay.select_next() {
+      if let Err(e) = self.clean_overlay_rescan() {
+        self.status = format!("clean: {e}");
+      }
     }
   }
 
-  /// Cycle the clean profile picker backward and re-scan (issue #325).
+  /// Cycle the clean profile picker backward and re-scan, only when the
+  /// highlight actually moved (issue #325 / Codex #333).
   pub fn clean_overlay_prev(&mut self) {
-    self.clean_overlay.prev();
-    if let Err(e) = self.clean_overlay_rescan() {
-      self.status = format!("clean: {e}");
+    if self.clean_overlay.select_prev() {
+      if let Err(e) = self.clean_overlay_rescan() {
+        self.status = format!("clean: {e}");
+      }
     }
   }
 
