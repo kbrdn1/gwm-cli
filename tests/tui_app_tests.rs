@@ -7548,3 +7548,39 @@ fn clean_overlay_opens_on_the_default_profile_when_present() {
   // first preview matches `gwm clean` with no --profile.
   assert_eq!(app.clean_overlay.selected_profile(), Some("default"));
 }
+
+#[test]
+fn clean_overlay_delete_revalidates_the_gate_just_before_removing() {
+  // Codex #333 review (TOCTOU): the overlay scans on open, but the delete can
+  // fire seconds later (countdown / overlay left open). If a dir turned unsafe
+  // meanwhile, the delete must re-gate and preserve it — not destroy the now
+  // tracked file the stale snapshot still lists.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 256]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // The scan saw a safe (ignored, untracked) `target/`.
+  assert!(app
+    .clean_overlay
+    .reclaim()
+    .unwrap()
+    .artifacts
+    .iter()
+    .any(|a| a.rel == "target"));
+  // Now force-track a file under it — the snapshot is stale.
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(repo.path())
+    .args(["add", "-f", "target/blob"])
+    .status()
+    .unwrap();
+  app.clean_overlay_delete();
+  // The re-gate catches the now-tracked dir and refuses to remove it.
+  assert!(
+    repo.path().join("target").exists(),
+    "a directory that became tracked after the scan must not be reclaimed"
+  );
+  assert_eq!(app.view, View::List, "the overlay still closes");
+}

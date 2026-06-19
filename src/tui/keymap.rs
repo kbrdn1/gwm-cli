@@ -186,6 +186,14 @@ impl Action {
         // FetchGithub persists detected PR/issue titles + states into the
         // active repo's git config, so it writes through `App.repo` too (#304).
         | Action::FetchGithub
+        // #325: the exec / clean overlays resolve their command / dir-set from
+        // the *active* repo's `[exec]` / `[clean]` config and act on the
+        // selected worktree's path. With a stale workspace selection both the
+        // config and the path belong to the previously active repo — and exec
+        // runs an arbitrary command while clean deletes directories — so they
+        // must be blocked before the overlay opens (Codex #333 review).
+        | Action::ExecOverlay
+        | Action::CleanOverlay
     )
   }
 

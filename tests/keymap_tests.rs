@@ -607,3 +607,17 @@ fn from_slug_compat_still_resolves_canonical_slugs() {
   assert_eq!(Action::from_slug_compat("down"), Some(Action::Down));
   assert_eq!(Action::from_slug_compat("nonexistent_slug_xyz"), None);
 }
+
+#[test]
+fn exec_and_clean_overlays_are_repo_mutating() {
+  // Codex #333 review: in workspace mode the stale-selection guard
+  // (`workspace_active_stale && is_repo_mutating`) must block `x` / `X` —
+  // they resolve their command / dir-set from the active repo's config and
+  // act on the selected path, both stale when the row's repo can't activate.
+  assert!(Action::ExecOverlay.is_repo_mutating());
+  assert!(Action::CleanOverlay.is_repo_mutating());
+  // Sanity: read-only / navigation verbs stay non-mutating.
+  assert!(!Action::Down.is_repo_mutating());
+  assert!(!Action::CommandLogs.is_repo_mutating());
+  assert!(!Action::ConfigPanel.is_repo_mutating());
+}

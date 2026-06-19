@@ -2224,10 +2224,33 @@ impl App {
   /// so this only removes what the CLI `gwm clean --yes` would. Reports the
   /// freed size (or the failure) on the status bar.
   pub fn clean_overlay_delete(&mut self) {
-    let Some(reclaim) = self.clean_overlay.reclaim().cloned() else {
+    // Re-scan + re-gate IMMEDIATELY before deleting rather than trusting the
+    // snapshot shown in the overlay (Codex #333 review). That snapshot can be
+    // seconds old — the safety countdown, or just the overlay sitting open —
+    // and a directory may have turned unsafe meanwhile (e.g. `git add -f
+    // target/file` under an ignored `target/`). Deleting a freshly gated
+    // reclaim closes that TOCTOU window, matching the CLI's scan-then-delete.
+    let Some(sel) = self.selected() else {
       self.close_clean_overlay();
       return;
     };
+    let name = sel.name.clone();
+    let path = sel.path.clone();
+    let profile = self.clean_overlay.selected_profile().map(str::to_string);
+    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.config.clean) {
+      Ok(d) => d,
+      Err(e) => {
+        self.status = format!("clean: {e}");
+        self.close_clean_overlay();
+        return;
+      }
+    };
+    let (reclaim, _skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
+    if reclaim.artifacts.is_empty() {
+      self.status = "nothing to reclaim".into();
+      self.close_clean_overlay();
+      return;
+    }
     match crate::clean::delete_reclaim(&reclaim) {
       Ok(freed) => {
         self.status = format!("reclaimed {} from {}", crate::clean::human_size(freed), reclaim.name);
