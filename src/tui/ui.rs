@@ -3506,6 +3506,16 @@ pub fn link_prompt_modal_width(term_width: u16) -> u16 {
   width.min(72).min(term_width)
 }
 
+/// Modal width for the exec / clean overlays (issue #334 polish). Wider than
+/// the link-prompt modal so the icon + dir name + size columns of the clean
+/// report have room to breathe on a roomy terminal, while staying readable on
+/// a narrow one. ~70 % of the width (90 % when ≤ 80 cols), clamped to
+/// `[48, 110]`.
+pub fn overlay_modal_width(term_width: u16) -> u16 {
+  let pct = if term_width <= 80 { 90 } else { 70 };
+  (term_width.saturating_mul(pct) / 100).clamp(48, 110).min(term_width)
+}
+
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
 pub fn help_section_style(section: Color) -> Style {
@@ -4221,7 +4231,7 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
     &app.theme,
   );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-  let width = link_prompt_modal_width(term.width);
+  let width = overlay_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
@@ -4269,7 +4279,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
         .map(|a| a.rel.chars().count())
         .max()
         .unwrap_or(0)
-        .clamp(5, 20);
+        .clamp(5, 32);
       // Each row: a matched nerd-font icon (#334), the dir name (left), and
       // the heatmap-coloured size (right) — all in fixed columns so they align.
       let row = |icon: &str, left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
@@ -4348,7 +4358,7 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
     &app.theme,
   );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-  let width = link_prompt_modal_width(term.width);
+  let width = overlay_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(border)), area);

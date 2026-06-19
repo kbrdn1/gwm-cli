@@ -1030,3 +1030,17 @@ fn clean_dir_icon_matches_the_ecosystem() {
     assert!(!clean_dir_icon(d).is_empty(), "icon for {d:?} must be non-empty");
   }
 }
+
+#[test]
+fn overlay_modal_width_is_wider_but_clamped() {
+  // #334 polish: the exec/clean overlays use more horizontal space than the
+  // link-prompt modal on a roomy terminal, but stay readable / clamped.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  // On a wide terminal it is meaningfully wider than the 72-col link modal.
+  assert!(overlay_modal_width(160) > link_prompt_modal_width(160));
+  assert!(overlay_modal_width(120) >= 72);
+  // Clamped: never wider than the terminal, never past the 110 ceiling.
+  assert!(overlay_modal_width(300) <= 110);
+  assert!(overlay_modal_width(40) <= 40);
+  assert!(overlay_modal_width(50) >= 45, "narrow terminals still get a usable box");
+}
