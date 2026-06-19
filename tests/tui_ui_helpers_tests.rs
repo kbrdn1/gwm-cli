@@ -965,3 +965,35 @@ fn working_tree_counts_footer_shows_only_nonzero_colored_segments() {
     "deleted paints the `prunable` role"
   );
 }
+
+#[test]
+fn picker_window_keeps_the_selection_visible() {
+  // #325 overlay polish: the picker scrolls to keep the highlight in view.
+  use gwm::tui::picker_window;
+  // Fits within the budget → the whole list, no scroll.
+  assert_eq!(picker_window(3, 0, 5), (0, 3));
+  assert_eq!(picker_window(5, 4, 5), (0, 5));
+  // Overflows → a `max`-row window clamped to the bounds, selection inside.
+  assert_eq!(picker_window(10, 0, 4), (0, 4));
+  assert_eq!(picker_window(10, 9, 4), (6, 10));
+  let (s, e) = picker_window(10, 5, 4);
+  assert!(s <= 5 && 5 < e && e - s == 4, "selection in a 4-row window: {s}..{e}");
+  // Degenerate inputs are safe.
+  assert_eq!(picker_window(0, 0, 5), (0, 0));
+  assert_eq!(picker_window(5, 2, 0), (0, 5));
+}
+
+#[test]
+fn reclaim_size_color_is_a_magnitude_heatmap() {
+  // #325 overlay polish: green (small) → yellow (medium) → red (large).
+  use gwm::tui::reclaim_size_color;
+  use gwm::tui::theme::Theme;
+  let t = Theme::default();
+  const MIB: u64 = 1024 * 1024;
+  assert_eq!(reclaim_size_color(0, &t), t.clean, "zero → green");
+  assert_eq!(reclaim_size_color(10 * MIB, &t), t.clean, "small → green");
+  assert_eq!(reclaim_size_color(50 * MIB, &t), t.dirty, "50 MiB boundary → yellow");
+  assert_eq!(reclaim_size_color(200 * MIB, &t), t.dirty, "medium → yellow");
+  assert_eq!(reclaim_size_color(500 * MIB, &t), t.prunable, "500 MiB boundary → red");
+  assert_eq!(reclaim_size_color(3 * 1024 * MIB, &t), t.prunable, "large → red");
+}

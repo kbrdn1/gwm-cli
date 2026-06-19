@@ -621,7 +621,7 @@ fn exec_picker_modal_renders_title_profiles_and_hints() {
   app.enter_exec_picker();
   assert_eq!(app.view, View::ExecPicker);
   let buf = render(&mut app);
-  assert_present(&buf, "run exec profile", "exec picker title");
+  assert_present(&buf, "Run an exec profile", "exec picker title (capitalised)");
   assert_present(&buf, "build", "exec profile name");
   assert_present(&buf, "run", "exec run hint");
 }
@@ -640,7 +640,7 @@ fn clean_modal_renders_title_report_and_hints() {
   app.enter_clean_overlay();
   assert_eq!(app.view, View::CleanReport);
   let buf = render(&mut app);
-  assert_present(&buf, "reclaim build artifacts", "clean overlay title");
+  assert_present(&buf, "Reclaim build artifacts", "clean overlay title (capitalised)");
   assert_present(&buf, "target", "clean artifact name");
   assert_present(&buf, "total", "clean total line");
 }
