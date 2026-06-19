@@ -3901,11 +3901,13 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
 
   f.render_widget(Clear, area);
 
-  let title = match app.pty_overlay.as_ref().map(|p| &p.kind) {
-    Some(PtyKind::LazyGit) => " LazyGit ",
-    Some(PtyKind::Terminal) => " Terminal ",
-    Some(PtyKind::Review) => " Review ",
-    Some(PtyKind::Exec) => " Exec ",
+  let title = match app.pty_overlay.as_ref().map(|p| (p.kind, p.finished)) {
+    Some((PtyKind::LazyGit, _)) => " LazyGit ",
+    Some((PtyKind::Terminal, _)) => " Terminal ",
+    Some((PtyKind::Review, _)) => " Review ",
+    Some((PtyKind::Exec, false)) => " Exec ",
+    // #325: once the one-shot command exits, the title invites dismissal.
+    Some((PtyKind::Exec, true)) => " Exec · done — press any key ",
     None => " Overlay ",
   };
   let block = overlay_block(app.theme.accent)

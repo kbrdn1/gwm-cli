@@ -51,6 +51,13 @@ pub struct PtyOverlay {
   /// Set by the `ReviewOverlay` dispatcher when `[review].command` uses `{diff}`.
   /// Dropped (and thus unlinked) when the overlay closes.
   pub diff_file: Option<tempfile::NamedTempFile>,
+  /// Set by the run loop when a [`PtyKind::Exec`] child has exited and the
+  /// overlay is *lingering* so its final output stays on screen (issue #325).
+  /// Unlike lazygit / a shell — which close the overlay the instant the child
+  /// dies — a one-shot exec command (`cargo test`, `npm run build`) exits as
+  /// soon as it finishes, so the overlay must persist until the user
+  /// dismisses it. While `true`, any keystroke closes the overlay.
+  pub finished: bool,
 }
 
 impl std::fmt::Debug for PtyOverlay {
@@ -132,6 +139,7 @@ impl PtyOverlay {
       cols,
       rows,
       diff_file: None,
+      finished: false,
     })
   }
 

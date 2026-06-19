@@ -259,3 +259,28 @@ fn pty_kind_review_discriminates_from_lazygit_and_terminal() {
   assert_ne!(PtyKind::Review, PtyKind::LazyGit);
   assert_ne!(PtyKind::Review, PtyKind::Terminal);
 }
+
+#[cfg(unix)]
+#[test]
+fn exec_overlay_lingers_after_a_one_shot_command_exits() {
+  // #325: an exec profile is typically a one-shot command (`cargo test`)
+  // that exits the moment it finishes. The overlay must persist its output —
+  // the run loop sets `finished` and keeps it open — rather than vanish like
+  // an interactive lazygit session. Pin the detectable lifecycle the loop
+  // keys off: a freshly spawned Exec overlay is not yet `finished`, and its
+  // one-shot child reads `!is_alive()` once it exits on its own.
+  let (_dir, app) = make_app();
+  let mut pty = PtyOverlay::spawn(PtyKind::Exec, &["sh", "-c", "exit 0"], &app.workdir, 80, 24)
+    .expect("PTY spawn must succeed on Unix");
+  assert_eq!(pty.kind, PtyKind::Exec);
+  assert!(!pty.finished, "a freshly spawned overlay is not yet lingering");
+  let mut dead = false;
+  for _ in 0..50 {
+    if !pty.is_alive() {
+      dead = true;
+      break;
+    }
+    std::thread::sleep(std::time::Duration::from_millis(20));
+  }
+  assert!(dead, "the one-shot exec command must exit on its own");
+}

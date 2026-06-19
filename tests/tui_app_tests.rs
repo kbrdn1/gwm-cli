@@ -7533,3 +7533,18 @@ fn clean_overlay_close_returns_to_the_list() {
   app.close_clean_overlay();
   assert_eq!(app.view, View::List);
 }
+
+#[test]
+fn clean_overlay_opens_on_the_default_profile_when_present() {
+  let (repo, _) = init_repo();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.aggressive]\ndirs = [\"target\"]\n\n[clean.profiles.default]\ndirs = [\"dist\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // `aggressive` sorts first, but the overlay opens on `default` so the
+  // first preview matches `gwm clean` with no --profile.
+  assert_eq!(app.clean_overlay.selected_profile(), Some("default"));
+}

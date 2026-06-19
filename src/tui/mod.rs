@@ -226,12 +226,22 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // so the next frame reflects the freshest output. If the process has
     // already exited, close the overlay so the list view is rendered instead.
     if app.view == View::Pty {
-      let is_dead = app.pty_overlay.as_mut().is_none_or(|p| {
+      let status = app.pty_overlay.as_mut().map(|p| {
         p.poll_bytes();
-        !p.is_alive()
+        (p.kind, p.is_alive())
       });
-      if is_dead {
-        app.close_pty_overlay();
+      match status {
+        // #325: a one-shot exec command exits the instant it finishes — keep
+        // its final output on screen and let any key dismiss it, instead of
+        // the lazygit / shell behaviour of closing the overlay on child death.
+        Some((PtyKind::Exec, false)) => {
+          if let Some(p) = app.pty_overlay.as_mut() {
+            p.finished = true;
+          }
+        }
+        // Interactive overlays (lazygit / shell / review) close on child exit.
+        Some((_, false)) | None => app.close_pty_overlay(),
+        Some((_, true)) => {}
       }
     }
 
@@ -581,14 +591,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // detach, and routing it through a rebindable context would silently
       // steal a keystroke from the child program. See the `modal_keymap`
       // module note ("What stays hard-coded").
-      View::Pty => match key.code {
-        KeyCode::Esc => app.close_pty_overlay(),
-        _ => {
-          if let Some(ref mut pty) = app.pty_overlay {
-            let _ = pty.write_key(key);
-          }
+      View::Pty => {
+        // #325: once a one-shot exec command has finished, the overlay is
+        // just showing its final output — there is no live child to receive
+        // input, so any key dismisses it. Otherwise `Esc` is the emergency
+        // detach and every other key passes through to the child.
+        let exec_finished = app.pty_overlay.as_ref().is_some_and(|p| p.finished);
+        if key.code == KeyCode::Esc || exec_finished {
+          app.close_pty_overlay();
+        } else if let Some(ref mut pty) = app.pty_overlay {
+          let _ = pty.write_key(key);
         }
-      },
+      }
       // #325: exec profile picker. The testable handler owns the highlight;
       // `Submit` resolves the profile to an argv and spawns it in a PTY
       // overlay rooted at the selected worktree (mirrors `LazyGitPty`).

@@ -43,12 +43,16 @@ impl CleanOverlay {
     Self::default()
   }
 
-  /// Populate the picker profile names, reset the highlight, and clear any
+  /// Populate the picker profile names, seed the highlight, and clear any
   /// stale snapshot / countdown. The orchestrator follows this with
   /// [`Self::set_scan`] once the first scan completes.
+  ///
+  /// The highlight opens on the `default` profile when one is configured —
+  /// so the overlay's first preview matches what `gwm clean` with no
+  /// `--profile` would resolve — falling back to the first row otherwise.
   pub fn open(&mut self, profiles: Vec<String>) {
+    self.selected = profiles.iter().position(|p| p == "default").unwrap_or(0);
     self.profiles = profiles;
-    self.selected = 0;
     self.reclaim = None;
     self.skipped.clear();
     self.confirm.reset();
