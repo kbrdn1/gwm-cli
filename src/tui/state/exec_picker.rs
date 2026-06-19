@@ -7,12 +7,15 @@
 //! PTY overlay with that argv in the selected worktree's directory.
 //!
 //! The picker is deliberately tiny: a sorted list of `[exec.profiles.*]`
-//! names plus a wrapping highlight. `Enter` accepts the highlight, `Esc`
-//! cancels — the `j`/`k`/arrow navigation lives in
-//! [`crate::tui::modal_keymap`] under `KeyContext::ExecPicker`.
+//! names, a wrapping highlight, and the worktree path it was opened for.
+//! `Enter` accepts the highlight, `Esc` cancels — the `j`/`k`/arrow
+//! navigation lives in [`crate::tui::modal_keymap`] under
+//! `KeyContext::ExecPicker`.
+
+use std::path::{Path, PathBuf};
 
 /// Pure state for the exec profile picker. `Default` is an empty, closed
-/// picker (no profiles, highlight at 0).
+/// picker (no profiles, no target, highlight at 0).
 #[derive(Debug, Default)]
 pub struct ExecPicker {
   /// Exec profile names from `[exec.profiles.*]`, in the sorted order the
@@ -21,6 +24,10 @@ pub struct ExecPicker {
   /// Highlighted row index. Always a valid index into `profiles` while
   /// non-empty; the `next`/`prev` wrappers keep it in range.
   selected: usize,
+  /// The worktree directory the picker was opened for. Captured at open so
+  /// `Enter` runs the profile in *that* worktree even if an auto-refresh
+  /// drifts the live selection while the overlay sits open (Codex #333).
+  cwd: Option<PathBuf>,
 }
 
 impl ExecPicker {
@@ -28,12 +35,18 @@ impl ExecPicker {
     Self::default()
   }
 
-  /// (Re)populate the picker from a list of profile names, resetting the
-  /// highlight to the top. Called by the orchestrator's
-  /// `enter_exec_picker` each time the overlay opens.
-  pub fn open(&mut self, profiles: Vec<String>) {
+  /// (Re)populate the picker from a list of profile names + the worktree it
+  /// targets, resetting the highlight to the top. Called by the
+  /// orchestrator's `enter_exec_picker` each time the overlay opens.
+  pub fn open(&mut self, profiles: Vec<String>, cwd: PathBuf) {
     self.profiles = profiles;
     self.selected = 0;
+    self.cwd = Some(cwd);
+  }
+
+  /// The worktree directory the picker was opened for, if any.
+  pub fn cwd(&self) -> Option<&Path> {
+    self.cwd.as_deref()
   }
 
   /// The profile names, in display order.

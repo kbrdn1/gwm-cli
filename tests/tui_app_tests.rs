@@ -7630,3 +7630,36 @@ fn clean_overlay_delete_revalidates_the_gate_just_before_removing() {
   );
   assert_eq!(app.view, View::List, "the overlay still closes");
 }
+
+#[test]
+fn exec_picker_runs_in_the_open_time_worktree_after_a_drift() {
+  // Codex #333: an auto-refresh can drift the live selection while the picker
+  // is open. Resolve must run in the worktree the picker was opened for.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"echo\", \"hi\"]\n");
+  let opened = app.selected().unwrap().path.clone();
+  app.enter_exec_picker();
+  // Drift: a refresh replaced the list with an unrelated worktree.
+  app.worktrees = vec![worktree_fixture("other")];
+  let (argv, cwd) = app.exec_picker_resolve().expect("resolves against the captured cwd");
+  assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
+  assert_eq!(cwd, opened, "runs in the open-time worktree, not the drifted selection");
+}
+
+#[test]
+fn clean_overlay_deletes_the_open_time_worktree_after_a_drift() {
+  // Codex #333: the clean delete must reclaim from the worktree whose report
+  // was previewed, even if the live selection drifted (refresh) meanwhile.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Drift: replace the list with an unrelated (fake-path) row.
+  app.worktrees = vec![worktree_fixture("other")];
+  app.clean_overlay_delete();
+  assert!(
+    !repo.path().join("build").exists(),
+    "reclaimed from the captured worktree despite the drifted selection"
+  );
+}

@@ -14,6 +14,7 @@
 
 use super::confirm::ConfirmModal;
 use crate::clean::WorktreeReclaim;
+use std::path::{Path, PathBuf};
 
 /// The picker label for the no-`--profile` choice — the directory set
 /// `gwm clean` resolves with no profile (`[clean.profiles.default]` when
@@ -33,6 +34,11 @@ pub struct CleanOverlay {
   choices: Vec<Option<String>>,
   /// Highlighted choice row.
   selected: usize,
+  /// The worktree (display name + path) the overlay was opened for, captured
+  /// at open so every re-scan and the final delete pin to *that* worktree —
+  /// not the live selection, which an auto-refresh can drift while the
+  /// overlay sits open / armed (Codex #333 review).
+  target: Option<(String, PathBuf)>,
   /// The most recent gated scan snapshot for the selected worktree, filled
   /// by `App::enter_clean_overlay` and re-filled on a choice change. `None`
   /// before the first scan.
@@ -59,13 +65,22 @@ impl CleanOverlay {
   /// Opens on the no-`--profile` choice so the overlay's first preview always
   /// matches what `gwm clean` would resolve — the built-in set, or
   /// `[clean.profiles.default]` when defined — regardless of which optional
-  /// profiles the repo adds.
-  pub fn open(&mut self, profiles: Vec<String>) {
+  /// profiles the repo adds. `name` / `path` are the worktree the overlay
+  /// targets, captured here so re-scans and the delete pin to it.
+  pub fn open(&mut self, profiles: Vec<String>, name: String, path: PathBuf) {
     self.choices = std::iter::once(None).chain(profiles.into_iter().map(Some)).collect();
     self.selected = 0;
+    self.target = Some((name, path));
     self.reclaim = None;
     self.skipped.clear();
     self.confirm.reset();
+  }
+
+  /// The worktree (display name, path) the overlay was opened for. Every scan
+  /// and the delete resolve against this captured target, not the live
+  /// selection.
+  pub fn target(&self) -> Option<(&str, &Path)> {
+    self.target.as_ref().map(|(n, p)| (n.as_str(), p.as_path()))
   }
 
   /// The picker labels, in display order. The no-`--profile` entry renders as

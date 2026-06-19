@@ -2051,16 +2051,19 @@ impl App {
   /// (status-bar message, no transition) when nothing is selected or no
   /// exec profiles are configured — there is nothing to pick.
   pub fn enter_exec_picker(&mut self) {
-    if self.selected().is_none() {
+    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
       self.status = "nothing selected".into();
       return;
-    }
+    };
     let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
     if names.is_empty() {
       self.status = "no [exec.profiles] configured — add one to .gwm.toml".into();
       return;
     }
-    self.exec_picker.open(names);
+    // Capture the target worktree path now: an auto-refresh can drift the live
+    // selection while the picker is open, so `Enter` must run in *this*
+    // worktree, not whatever is selected later (Codex #333 review).
+    self.exec_picker.open(names, cwd);
     self.view = View::ExecPicker;
   }
 
@@ -2092,7 +2095,9 @@ impl App {
   /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
   pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
     let profile = self.exec_picker.selected_profile()?.to_string();
-    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
+    // Resolve against the worktree captured when the picker opened, NOT the
+    // live selection (which an auto-refresh may have drifted) — #333 review.
+    let Some(cwd) = self.exec_picker.cwd().map(Path::to_path_buf) else {
       self.status = "nothing selected".into();
       return None;
     };
@@ -2122,12 +2127,17 @@ impl App {
   /// nothing is selected. A scan that finds nothing safe still opens — the
   /// report says so.
   pub fn enter_clean_overlay(&mut self) {
-    if self.selected().is_none() {
+    let Some(sel) = self.selected() else {
       self.status = "nothing selected".into();
       return;
-    }
+    };
+    // Capture the target worktree now: an auto-refresh can drift the live
+    // selection while the overlay is open / armed, so every re-scan and the
+    // delete must pin to *this* worktree (Codex #333 review).
+    let name = sel.name.clone();
+    let path = sel.path.clone();
     let names: Vec<String> = self.config.clean.profiles.keys().cloned().collect();
-    self.clean_overlay.open(names);
+    self.clean_overlay.open(names, name, path);
     if let Err(e) = self.clean_overlay_rescan() {
       self.status = format!("clean: {e}");
       return;
@@ -2135,15 +2145,18 @@ impl App {
     self.view = View::CleanReport;
   }
 
-  /// Re-resolve the highlighted profile's dirs and re-scan the selected
-  /// worktree, storing the gated snapshot. Surfaces a profile-resolution
-  /// error (e.g. an invalid `[clean.profiles]` dir) to the caller.
+  /// Re-resolve the highlighted profile's dirs and re-scan the *captured*
+  /// target worktree (not the live selection), storing the gated snapshot.
+  /// Surfaces a profile-resolution error (e.g. an invalid `[clean.profiles]`
+  /// dir) to the caller.
   fn clean_overlay_rescan(&mut self) -> Result<()> {
-    let Some(sel) = self.selected() else {
+    let Some((name, path)) = self
+      .clean_overlay
+      .target()
+      .map(|(n, p)| (n.to_string(), p.to_path_buf()))
+    else {
       return Ok(());
     };
-    let name = sel.name.clone();
-    let path = sel.path.clone();
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
     let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.config.clean)?;
     let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
@@ -2230,12 +2243,16 @@ impl App {
     // and a directory may have turned unsafe meanwhile (e.g. `git add -f
     // target/file` under an ignored `target/`). Deleting a freshly gated
     // reclaim closes that TOCTOU window, matching the CLI's scan-then-delete.
-    let Some(sel) = self.selected() else {
+    // Pin to the CAPTURED target worktree, not the live selection (an
+    // auto-refresh may have drifted it while the countdown ran) — #333.
+    let Some((name, path)) = self
+      .clean_overlay
+      .target()
+      .map(|(n, p)| (n.to_string(), p.to_path_buf()))
+    else {
       self.close_clean_overlay();
       return;
     };
-    let name = sel.name.clone();
-    let path = sel.path.clone();
     let profile = self.clean_overlay.selected_profile().map(str::to_string);
     let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.config.clean) {
       Ok(d) => d,
