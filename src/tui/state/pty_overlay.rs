@@ -27,6 +27,9 @@ pub enum PtyKind {
   Terminal,
   /// The `[review]` launcher (e.g. `codex review --base dev`) in PTY overlay.
   Review,
+  /// An `[exec.profiles.<name>]` profile command, run in the selected
+  /// worktree via the exec picker overlay (issue #325).
+  Exec,
 }
 
 /// Live PTY overlay — one spawned process, one vt100 parser, one mpsc reader

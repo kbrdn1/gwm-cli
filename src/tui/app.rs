@@ -6,6 +6,7 @@ use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
+use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
@@ -90,12 +91,35 @@ pub enum View {
   /// kills the child and returns to the list. State lives on
   /// [`App::pty_overlay`].
   Pty,
+  /// Exec profile picker overlay (issue #325). A small centred modal that
+  /// lists the `[exec.profiles.*]` names; `Enter` resolves the highlight
+  /// to an argv and the run loop spawns it in a PTY overlay
+  /// ([`PtyKind::Exec`]) rooted at the selected worktree. State lives on
+  /// [`App::exec_picker`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::ExecPicker`].
+  ExecPicker,
   /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
   /// Desc) pre-filled by parsing the current branch; submitting renames the
   /// local + remote branch and moves the worktree directory. State lives on
   /// [`App::create_form`] plus [`App::edit_original_branch`] /
   /// [`App::edit_original_path`].
   Edit,
+}
+
+/// What the run loop must do after [`App::handle_exec_picker_key`]
+/// processes a key in the exec picker overlay (issue #325). Mirrors
+/// [`CreateKey`] / [`LinkPromptKey`]: the testable handler owns the
+/// highlight movement, the loop owns the two side effects (resolve the
+/// argv + spawn the PTY overlay, or close back to the list).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ExecPickerKey {
+  /// The key moved the highlight (or was ignored); stay in the picker.
+  Handled,
+  /// `Enter` — the loop should resolve the highlighted profile and spawn
+  /// the PTY overlay.
+  Submit,
+  /// `Esc` — the loop should close the picker back to the list.
+  Cancel,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -406,6 +430,12 @@ pub struct App {
   /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
   pub pty_overlay: Option<PtyOverlay>,
 
+  /// Exec profile picker overlay state (issue #325). Populated by
+  /// [`Self::enter_exec_picker`] from `[exec.profiles.*]`; on `Enter` the
+  /// run loop resolves the highlight to an argv and spawns a PTY overlay
+  /// ([`PtyKind::Exec`]) in the selected worktree's directory.
+  pub exec_picker: ExecPicker,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -514,6 +544,7 @@ impl App {
       config_panel: ConfigPanel::new(),
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
+      exec_picker: ExecPicker::new(),
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -1672,6 +1703,7 @@ impl App {
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
+      View::ExecPicker => HintContext::ExecPicker,
       View::Edit => HintContext::Rename,
       View::List => self.pane_hint_context(),
     }
@@ -1992,6 +2024,75 @@ impl App {
     }
     self.pty_overlay = None;
     if self.view == View::Pty {
+      self.view = View::List;
+    }
+  }
+
+  // ── Exec picker overlay (issue #325) ───────────────────────────────────
+
+  /// Open the exec profile picker (issue #325). Populates it from
+  /// `[exec.profiles.*]` and switches to [`View::ExecPicker`]. Refuses
+  /// (status-bar message, no transition) when nothing is selected or no
+  /// exec profiles are configured — there is nothing to pick.
+  pub fn enter_exec_picker(&mut self) {
+    if self.selected().is_none() {
+      self.status = "nothing selected".into();
+      return;
+    }
+    let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
+    if names.is_empty() {
+      self.status = "no [exec.profiles] configured — add one to .gwm.toml".into();
+      return;
+    }
+    self.exec_picker.open(names);
+    self.view = View::ExecPicker;
+  }
+
+  /// Handle a key inside the exec picker overlay (issue #325). The
+  /// testable handler owns the highlight movement; the run loop owns the
+  /// two side effects (resolve + spawn, or close). Keys resolve through
+  /// [`KeyContext::ExecPicker`] so they honour `[tui.keys.modal.exec]`.
+  pub fn handle_exec_picker_key(&mut self, key: KeyEvent) -> ExecPickerKey {
+    match self.resolve_modal(KeyContext::ExecPicker, key) {
+      Some(ModalAction::ExecPickerCancel) => ExecPickerKey::Cancel,
+      Some(ModalAction::ExecPickerAccept) => ExecPickerKey::Submit,
+      Some(ModalAction::ExecPickerNext) => {
+        self.exec_picker.next();
+        ExecPickerKey::Handled
+      }
+      Some(ModalAction::ExecPickerPrev) => {
+        self.exec_picker.prev();
+        ExecPickerKey::Handled
+      }
+      _ => ExecPickerKey::Handled,
+    }
+  }
+
+  /// Resolve the highlighted exec profile to an `(argv, cwd)` pair for the
+  /// run loop to spawn in a PTY overlay (issue #325). `None` (with a
+  /// status-bar message) when nothing is selected or the profile fails to
+  /// resolve — e.g. an empty `command` array. The argv is the frozen
+  /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
+  /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
+  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
+    let profile = self.exec_picker.selected_profile()?.to_string();
+    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.config.exec) {
+      Ok(argv) => Some((argv, cwd)),
+      Err(e) => {
+        self.status = format!("exec profile {profile:?}: {e}");
+        None
+      }
+    }
+  }
+
+  /// Close the exec picker without running anything (issue #325). Returns
+  /// to [`View::List`].
+  pub fn close_exec_picker(&mut self) {
+    if self.view == View::ExecPicker {
       self.view = View::List;
     }
   }

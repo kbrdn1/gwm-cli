@@ -166,6 +166,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
     View::Pty => draw_pty_overlay(f, app),
+    // #325: exec profile picker renders as a small centred modal.
+    View::ExecPicker => draw_exec_picker(f, app),
     // #290: branch-rename inline modal renders over the list.
     View::Edit => draw_edit_worktree(f, app),
     View::List => {}
@@ -1806,6 +1808,9 @@ pub enum HintContext {
   /// PTY overlay (embedded lazygit / terminal). All keys pass through to the
   /// child process; Esc is the only gwm-level escape hatch.
   Pty,
+  /// Exec profile picker overlay (issue #325): j/k pick, Enter runs, Esc
+  /// cancels.
+  ExecPicker,
   /// Branch-rename modal (`View::Edit`, #290).
   Rename,
 }
@@ -1827,6 +1832,7 @@ impl HintContext {
       HintContext::Report => "report",
       HintContext::Help => "help",
       HintContext::Pty => "terminal",
+      HintContext::ExecPicker => "exec",
       HintContext::Rename => "rename",
     }
   }
@@ -1945,6 +1951,14 @@ impl HintContext {
         Hint::Modal(ModalAction::HelpClose, "close"),
       ],
       HintContext::Pty => &[Hint::Lit("Esc", "close")],
+      // #325: pick a profile then run it in a PTY. The j/k movement pair
+      // stays literal (no single resolved key captures it), matching the
+      // palette / create convention.
+      HintContext::ExecPicker => &[
+        Hint::Lit("↑/↓", "pick"),
+        Hint::Modal(ModalAction::ExecPickerAccept, "run"),
+        Hint::Modal(ModalAction::ExecPickerCancel, "cancel"),
+      ],
       // Rename reuses the create-form input handler, hence the `create`
       // context's verbs (#290 / #219).
       HintContext::Rename => &[
@@ -1993,6 +2007,7 @@ impl HintContext {
       HintContext::CommandPalette => KeyContext::CommandPalette,
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
+      HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
     })
   }
@@ -3875,6 +3890,7 @@ fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
     Some(PtyKind::LazyGit) => " LazyGit ",
     Some(PtyKind::Terminal) => " Terminal ",
     Some(PtyKind::Review) => " Review ",
+    Some(PtyKind::Exec) => " Exec ",
     None => " Overlay ",
   };
   let block = overlay_block(app.theme.accent)
@@ -4051,6 +4067,38 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
       lines
     }
   };
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let term = f.area();
+  let width = link_prompt_modal_width(term.width);
+  let area = centered_abs(width, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Render the exec profile picker overlay (issue #325). A small centred
+/// modal listing the `[exec.profiles.*]` names; the highlighted row reads
+/// in the accent with a `▸` marker, the rest muted. `Enter` resolves the
+/// highlight and the run loop spawns it in a PTY overlay.
+fn draw_exec_picker(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let selected = app.exec_picker.selected_index();
+  let mut lines = overlay_title_lines("run exec profile", accent);
+  for (i, name) in app.exec_picker.profiles().iter().enumerate() {
+    let line = if i == selected {
+      Line::from(format!("▸ {name}")).style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+    } else {
+      Line::from(format!("  {name}")).style(Style::default().fg(muted))
+    };
+    lines.push(line.centered());
+  }
+  push_modal_hint(
+    &mut lines,
+    HintContext::ExecPicker,
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+  );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
   let term = f.area();
   let width = link_prompt_modal_width(term.width);

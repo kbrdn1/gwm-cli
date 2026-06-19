@@ -7304,3 +7304,93 @@ fn link_modal_binding_on_fetch_key_wins_over_fetch_fallback() {
     "a contextual binding on the fetch key must win over the fetch fallback"
   );
 }
+
+// ── Exec picker overlay (issue #325) ──────────────────────────────────────
+
+/// An `App` over a fresh repo whose `.gwm.toml` carries `toml`, so the exec
+/// config is loaded at construction. The selected worktree is the main one
+/// (the repo root) — a valid `cwd` for an exec run.
+fn app_with_gwm_toml(toml: &str) -> (tempfile::TempDir, App) {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gwm.toml"), toml).unwrap();
+  let app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  (repo, app)
+}
+
+#[test]
+fn exec_picker_refuses_to_open_with_no_profiles() {
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::List, "no profiles ⇒ no transition");
+  assert!(
+    app.status.contains("exec.profiles"),
+    "the status explains why nothing opened: {}",
+    app.status
+  );
+}
+
+#[test]
+fn exec_picker_opens_and_lists_profiles_sorted() {
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.test]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.build]\ncommand = [\"cargo\", \"build\"]\n",
+  );
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  // `BTreeMap` key order ⇒ alphabetical: build, then test.
+  assert_eq!(app.exec_picker.profiles(), &["build".to_string(), "test".to_string()]);
+  assert_eq!(app.exec_picker.selected_profile(), Some("build"));
+}
+
+#[test]
+fn exec_picker_navigation_moves_the_highlight() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::ExecPickerKey;
+  let (_repo, mut app) =
+    app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n\n[exec.profiles.b]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  let down = app.handle_exec_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  assert_eq!(down, ExecPickerKey::Handled);
+  assert_eq!(app.exec_picker.selected_profile(), Some("b"));
+  app.handle_exec_picker_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+  assert_eq!(app.exec_picker.selected_profile(), Some("a"));
+}
+
+#[test]
+fn exec_picker_enter_submits_and_esc_cancels() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::ExecPickerKey;
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  assert_eq!(
+    app.handle_exec_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    ExecPickerKey::Submit
+  );
+  assert_eq!(
+    app.handle_exec_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    ExecPickerKey::Cancel
+  );
+}
+
+#[test]
+fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.build]\ncommand = [\"cargo\", \"build\", \"--release\"]\n");
+  app.enter_exec_picker();
+  let expected_cwd = app.selected().unwrap().path.clone();
+  let (argv, cwd) = app.exec_picker_resolve().expect("a valid profile resolves");
+  assert_eq!(
+    argv,
+    vec!["cargo".to_string(), "build".to_string(), "--release".to_string()],
+    "argv is the frozen command array verbatim (no shell)"
+  );
+  assert_eq!(cwd, expected_cwd, "cwd is the selected worktree's path");
+}
+
+#[test]
+fn exec_picker_close_returns_to_the_list() {
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  app.close_exec_picker();
+  assert_eq!(app.view, View::List);
+}

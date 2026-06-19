@@ -27,7 +27,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub use app::{App, CreateKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View};
+pub use app::{
+  App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
+};
 pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
@@ -35,6 +37,7 @@ pub use state::config_panel::{
 };
 pub use state::confirm::{ConfirmButton, ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 pub use state::create_form::{CreateForm, Field};
+pub use state::exec_picker::ExecPicker;
 pub use state::filter::FilterState;
 pub use state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 pub use state::link_prompt::LinkPrompt;
@@ -572,6 +575,31 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           }
         }
       },
+      // #325: exec profile picker. The testable handler owns the highlight;
+      // `Submit` resolves the profile to an argv and spawns it in a PTY
+      // overlay rooted at the selected worktree (mirrors `LazyGitPty`).
+      View::ExecPicker => match app.handle_exec_picker_key(key) {
+        ExecPickerKey::Submit => {
+          if let Some((argv, cwd)) = app.exec_picker_resolve() {
+            let sz = terminal.size().unwrap_or_default();
+            let inner_cols = ((sz.width as u32 * 90 / 100) as u16).saturating_sub(6).max(20);
+            let inner_rows = ((sz.height as u32 * 90 / 100) as u16).saturating_sub(4).max(5);
+            let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match PtyOverlay::spawn(PtyKind::Exec, &argv_refs, &cwd, inner_cols, inner_rows) {
+              Ok(pty) => app.open_pty_overlay(pty),
+              Err(e) => {
+                app.status = format!("exec overlay failed: {}", e);
+                app.close_exec_picker();
+              }
+            }
+          } else {
+            // Resolve failed (status already set) — close back to the list.
+            app.close_exec_picker();
+          }
+        }
+        ExecPickerKey::Cancel => app.close_exec_picker(),
+        ExecPickerKey::Handled => {}
+      },
       // #290: worktree-rename modal. Reuses the Create form input handler
       // (Type / Issue / Desc), but routes submit to the rename worker. Input
       // is swallowed while the async rename is in flight, mirroring create.
@@ -833,6 +861,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // overlay it is read-only and not picker-gated — harmless inside
     // `gwm switch`, opening from any List state.
     Action::ConfigPanel => app.enter_config_panel(),
+    // Issue #325: `x` opens the exec profile picker. Picker-gated —
+    // running a profile in a PTY is a focus-mode action, meaningless in
+    // the stripped-down `gwm switch` picker.
+    Action::ExecOverlay if !app.picker_mode => app.enter_exec_picker(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into

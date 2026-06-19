@@ -142,6 +142,7 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  ExecOverlay       => "exec_overlay",
   Help              => "help",
   Quit              => "quit",
   // Future surface — bound to ':' by default, picked up by #32.
@@ -487,6 +488,8 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #325: `x` opens the exec profile picker overlay.
+      def(Action::ExecOverlay, &["x"]),
       def(Action::Filter, &["/"]),
       def(Action::Refresh, &["f"]),
       // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
