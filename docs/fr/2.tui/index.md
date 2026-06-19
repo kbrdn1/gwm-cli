@@ -15,6 +15,7 @@ Lancer `gwm` sans argument ouvre l'interface ratatui sur le dépôt courant. De 
 - **[Compte à rebours de la surcouche de confirmation](/fr/tui/confirm-countdown)** — le compte à rebours de sécurité qui empêche les suppressions accidentelles de branches lorsque `D` est armé.
 - **[Lanceurs configurables](/fr/tui/launchers)** — `[git_tui]` (`l` overlay / `L` plein écran) et `[review]` (`r` overlay / `R` plein écran), avec les placeholders `{base} {head} {path} {diff}` et l'overlay PTY embarqué.
 - **[Dispatch d'ouverture](/fr/tui/open-dispatch)** — `o` ouvre un terminal dans un overlay PTY embarqué ; `O` exécute le dispatch `[tui.open]` (`shell` / `editor` / `finder`).
+- **[Surcouches exec / clean](/fr/tui/keybindings#surcouche-de-sélection-exec-x)** — `x` choisit un profil `[exec.profiles]` et le lance dans une surcouche PTY ; `X` prévisualise et récupère l'espace des artefacts de build (même garde-fou git-ignore que `gwm clean --yes`, derrière un compte à rebours de confirmation).
 - **[Thèmes](/fr/tui/themes)** — couleurs `[theme]` basées sur des rôles et presets intégrés (`catppuccin`, `gruvbox`, `tokyo-night`, `claude-dark`).
 - **[Keymap & palette de commandes](/fr/tui/keymap-and-palette)** — remappez n'importe quel binding via `[tui.keys]` (avec support des chords), ou déclenchez une action par son nom depuis la palette `:`.
 
