@@ -65,7 +65,11 @@ pub struct PtyOverlay {
   /// The child leader's PID, captured at spawn so the process-group SIGKILL
   /// can target it even after the leader is reaped (its live `process_id()`
   /// may then be `None`). On Unix the child is a session leader (PGID == PID),
-  /// so `kill(-pid)` reaps the whole pipeline.
+  /// so `kill(-pid)` reaps the whole pipeline. Read only inside the
+  /// `#[cfg(unix)]` arm of [`Self::signal_group`]; Windows has no process
+  /// groups (termination goes through `Child::kill`), so the field is unused
+  /// there.
+  #[cfg_attr(not(unix), allow(dead_code))]
   spawn_pid: Option<u32>,
   /// `true` once the process-group SIGKILL has been sent (issue #325 / Codex
   /// #333 review). Sent exactly once — promptly when an exec leader exits
