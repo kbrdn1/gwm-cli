@@ -283,18 +283,30 @@ fn exec_overlay_lingers_after_a_one_shot_command_exits() {
     std::thread::sleep(std::time::Duration::from_millis(20));
   }
   assert!(dead, "the one-shot exec command must exit on its own");
-  // #333: observing the exit records the reap, so dismissing the lingering
-  // overlay (which calls `kill`) never signals the now-recycled PID/PGID.
-  assert!(pty.is_reaped(), "observing the exit must record the reap");
-  pty.kill(); // no-op after reap — must not hang or signal
-  assert!(pty.is_reaped());
+  assert!(pty.is_reaped(), "observing the exit records the reap");
+  assert!(
+    !pty.group_signalled(),
+    "the group is not signalled until the loop marks it finished"
+  );
+  // #333: the run loop marks a dead exec finished — which lingers the output
+  // AND promptly SIGKILLs the process group (descendant cleanup) in the safe
+  // window, before the dismissal keystroke could let the PGID be recycled.
+  pty.mark_finished();
+  assert!(pty.finished, "the overlay lingers showing its final output");
+  assert!(pty.group_signalled(), "the process group is reaped promptly on finish");
+  // Dismissal calls kill() — idempotent (no second signal), returns fast.
+  let t0 = std::time::Instant::now();
+  pty.kill();
+  assert!(t0.elapsed().as_millis() < 100, "kill after finish is a fast no-op");
 }
 
 #[cfg(unix)]
 #[test]
-fn kill_is_a_noop_after_the_child_was_reaped() {
-  // #333: a child that exited and was reaped (via is_alive) must not be
-  // signalled again by kill — its PID/PGID may have been recycled.
+fn kill_after_reap_still_signals_the_process_group_once() {
+  // #333: my earlier no-op-after-reap guard leaked backgrounded descendants
+  // (`sh -c "sleep 60 &"`) because it skipped the process-group SIGKILL. kill
+  // must STILL signal the group after the leader was reaped — once — so the
+  // descendants are cleaned, without re-signalling a possibly-recycled PGID.
   let (_dir, app) = make_app();
   let mut pty = PtyOverlay::spawn(PtyKind::Terminal, &["sh", "-c", "exit 0"], &app.workdir, 80, 24)
     .expect("PTY spawn must succeed on Unix");
@@ -304,11 +316,19 @@ fn kill_is_a_noop_after_the_child_was_reaped() {
     }
     std::thread::sleep(std::time::Duration::from_millis(20));
   }
-  assert!(pty.is_reaped(), "the child exited and was reaped");
+  assert!(pty.is_reaped(), "the leader exited and was reaped");
+  assert!(!pty.group_signalled(), "no group signal yet");
   let t0 = std::time::Instant::now();
   pty.kill();
   assert!(
-    t0.elapsed().as_millis() < 100,
-    "kill after reap returns immediately (no signal, no drain loop)"
+    pty.group_signalled(),
+    "kill still cleans the process group after a reap"
   );
+  assert!(
+    t0.elapsed().as_millis() < 100,
+    "and returns fast (no drain loop — leader already reaped)"
+  );
+  // A second kill is idempotent — the group is never signalled twice.
+  pty.kill();
+  assert!(pty.group_signalled());
 }

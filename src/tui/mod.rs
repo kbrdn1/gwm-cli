@@ -239,9 +239,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         // #325: a one-shot exec command exits the instant it finishes — keep
         // its final output on screen and let any key dismiss it, instead of
         // the lazygit / shell behaviour of closing the overlay on child death.
+        // `mark_finished` also reaps the process group now (so a backgrounded
+        // descendant is cleaned in the safe window, not after the linger).
         Some((PtyKind::Exec, false)) => {
           if let Some(p) = app.pty_overlay.as_mut() {
-            p.finished = true;
+            p.mark_finished();
           }
         }
         // Interactive overlays (lazygit / shell / review) close on child exit.
