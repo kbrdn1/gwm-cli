@@ -463,6 +463,12 @@ pub struct App {
   /// auto-refresh could swap to another repo's (Codex #333 review).
   clean_overlay_cfg: CleanConfig,
 
+  /// The safety-countdown duration (seconds) captured when the clean overlay
+  /// opened (issue #325). Pinned alongside [`Self::clean_overlay_cfg`] so a
+  /// workspace config swap can't shorten — or clear to `0` — the delay
+  /// before an armed reclaim fires (Codex #333 review).
+  clean_overlay_countdown_secs: u32,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -575,6 +581,7 @@ impl App {
       exec_picker_cfg: ExecConfig::default(),
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
+      clean_overlay_countdown_secs: 0,
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -2121,7 +2128,17 @@ impl App {
     };
     // Resolve against the `[exec]` config captured at open, not the live one.
     match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
-      Ok(argv) => Some((argv, cwd)),
+      Ok(mut argv) => {
+        // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
+        // the captured worktree, exactly like the CLI exec path — otherwise
+        // `argv[0]` would resolve against gwm's own cwd (Codex #333 review).
+        // A bare command (`cargo`) or an absolute path is returned unchanged
+        // (PATH lookup / as-is).
+        if let Some(first) = argv.first_mut() {
+          *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
+        }
+        Some((argv, cwd))
+      }
       Err(e) => {
         self.status = format!("exec profile {profile:?}: {e}");
         None
@@ -2158,6 +2175,7 @@ impl App {
     let name = sel.name.clone();
     let path = sel.path.clone();
     self.clean_overlay_cfg = self.config.clean.clone();
+    self.clean_overlay_countdown_secs = self.config.tui.effective_confirm_countdown_secs();
     let names: Vec<String> = self.clean_overlay_cfg.profiles.keys().cloned().collect();
     self.clean_overlay.open(names, name, path);
     if let Err(e) = self.clean_overlay_rescan() {
@@ -2207,7 +2225,9 @@ impl App {
   /// `[tui] confirm_countdown_secs` directly. `Duration::ZERO` ⇒ classic
   /// single-keystroke confirm.
   pub fn clean_countdown_total(&self) -> Duration {
-    Duration::from_secs(u64::from(self.config.tui.effective_confirm_countdown_secs()))
+    // The value captured at open (Codex #333) — never the live config, which a
+    // workspace refresh could swap (e.g. to `0`, erasing the safety delay).
+    Duration::from_secs(u64::from(self.clean_overlay_countdown_secs))
   }
 
   /// Handle the clean confirm key. Arms / disarms / fires the countdown via

@@ -7677,3 +7677,51 @@ fn clean_overlay_deletes_the_open_time_target_and_config_after_a_drift() {
     "reclaimed via the captured target + config despite the drift"
   );
 }
+
+#[test]
+fn exec_picker_pins_a_worktree_relative_program_to_the_target() {
+  // Codex #333: a `[exec.profiles].command` like `./run.sh` must resolve
+  // against the captured worktree (like the CLI's resolve_program), not gwm's
+  // own cwd.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.run]\ncommand = [\"./run.sh\", \"--ci\"]\n");
+  let wt = app.selected().unwrap().path.clone();
+  app.enter_exec_picker();
+  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  // Same anchoring the CLI exec path applies — an absolute path under the
+  // worktree, not gwm's own cwd.
+  assert_eq!(
+    argv[0],
+    gwm::exec::resolve_program(&wt, "./run.sh").to_string_lossy(),
+    "the relative executable is pinned to the worktree"
+  );
+  assert!(std::path::Path::new(&argv[0]).is_absolute(), "and is absolute");
+  assert_eq!(argv[1], "--ci", "the args are passed through unchanged");
+}
+
+#[test]
+fn exec_picker_leaves_a_bare_command_for_path_lookup() {
+  // A bare command (no path separator) must NOT be anchored — it relies on
+  // PATH resolution inside the worktree.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.t]\ncommand = [\"cargo\", \"test\"]\n");
+  app.enter_exec_picker();
+  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+}
+
+#[test]
+fn clean_countdown_is_pinned_to_the_open_time_config() {
+  // Codex #333: the safety delay is captured at open, so a workspace config
+  // swap (e.g. to a repo with confirm_countdown_secs = 0) can't erase it
+  // while the overlay is armed.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Drift: a refresh swapped in a repo with no safety delay.
+  app.config.tui.confirm_countdown_secs = 0;
+  assert_eq!(
+    app.clean_countdown_total(),
+    Duration::from_secs(3),
+    "the safety delay captured at open survives a live config swap"
+  );
+}
