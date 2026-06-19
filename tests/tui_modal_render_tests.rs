@@ -606,3 +606,41 @@ fn command_palette_renders_the_input_above_the_matches() {
     rows.join("\n")
   );
 }
+
+#[test]
+fn exec_picker_modal_renders_title_profiles_and_hints() {
+  // #325: the exec picker lists `[exec.profiles]` and offers run / cancel.
+  let (dir, _) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[exec.profiles.build]\ncommand = [\"cargo\", \"build\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  let buf = render(&mut app);
+  assert_present(&buf, "run exec profile", "exec picker title");
+  assert_present(&buf, "build", "exec profile name");
+  assert_present(&buf, "run", "exec run hint");
+}
+
+#[test]
+fn clean_modal_renders_title_report_and_hints() {
+  // #325: the clean overlay reports the gated reclaim and offers reclaim /
+  // cancel. The scan shells out to `git check-ignore` against the real temp
+  // repo, so it is deterministic though not offline like the other modals.
+  let (dir, _) = init_repo();
+  std::fs::write(dir.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(dir.path().join("target")).unwrap();
+  std::fs::write(dir.path().join("target").join("blob"), vec![0u8; 4096]).unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.open = false;
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  let buf = render(&mut app);
+  assert_present(&buf, "reclaim build artifacts", "clean overlay title");
+  assert_present(&buf, "target", "clean artifact name");
+  assert_present(&buf, "total", "clean total line");
+}

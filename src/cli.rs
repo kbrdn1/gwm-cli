@@ -1461,26 +1461,17 @@ fn clean_scan_repo(
   // uses, BEFORE reporting — so the dry-run preview's total and promise match
   // what `--yes` would actually remove. A name that is not git-ignored or holds
   // tracked files is unrecoverable (clean is not journaled), so it is reported
-  // as skipped rather than counted.
+  // as skipped rather than counted. The gate lives in `clean::scan_worktree_safe`
+  // so the TUI clean overlay (#325) reuses the identical contract.
   let mut reclaims = Vec::with_capacity(targets.len());
   let mut skipped = Vec::new();
   for w in targets {
-    let scan = clean::scan_worktree(&w.name, &w.path, &patterns);
-    let mut deletable = Vec::new();
-    for a in scan.artifacts {
-      if dir_is_safe_to_clean(&w.path, &a.rel) {
-        deletable.push(a);
-      } else {
-        skipped.push((display(&w.name), a.rel));
-      }
+    let (mut reclaim, skips) = clean::scan_worktree_safe(&w.name, &w.path, &patterns);
+    reclaim.name = display(&w.name);
+    for rel in skips {
+      skipped.push((display(&w.name), rel));
     }
-    let total_bytes = deletable.iter().map(|a| a.bytes).sum();
-    reclaims.push(clean::WorktreeReclaim {
-      name: display(&w.name),
-      path: w.path.clone(),
-      artifacts: deletable,
-      total_bytes,
-    });
+    reclaims.push(reclaim);
   }
   Ok((reclaims, skipped))
 }
@@ -1521,48 +1512,6 @@ fn clean_finish(reclaims: &[clean::WorktreeReclaim], skipped: &[(String, String)
     std::process::exit(1);
   }
   Ok(())
-}
-
-/// The safety gate for `gwm clean --yes`: a directory is safe to delete only
-/// when git treats it as ignored AND it holds no tracked files. The ignore
-/// check alone is not enough — git tracks files, not directories, so a force
-/// added `dist/index.html` can survive under a `dist/` ignore rule, and
-/// `remove_dir_all` would otherwise destroy that tracked (possibly edited)
-/// file. Every failure path resolves conservatively to "not safe" (preserve).
-fn dir_is_safe_to_clean(worktree: &Path, rel: &str) -> bool {
-  dir_is_git_ignored(worktree, rel) && !dir_has_tracked_files(worktree, rel)
-}
-
-/// Whether git considers `rel` (relative to `worktree`) ignored. Shells out to
-/// `git check-ignore -q -- <rel>` (exit 0 = ignored). Any failure (git missing,
-/// not a repo) is treated as "not ignored" so the default is to preserve.
-///
-/// The `--` delimiter is required: with a config-supplied `[clean.profiles]`
-/// dir, a name like `-cache` would otherwise be parsed by git as an option and
-/// the directory would always read as "not ignored" (skipped). `ls-files`
-/// below already passes `--` for the same reason.
-fn dir_is_git_ignored(worktree: &Path, rel: &str) -> bool {
-  std::process::Command::new("git")
-    .arg("-C")
-    .arg(worktree)
-    .args(["check-ignore", "-q", "--", rel])
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false)
-}
-
-/// Whether any tracked file lives under `rel`. `git ls-files -- <rel>` prints
-/// one line per tracked path; non-empty stdout ⇒ tracked content present. On
-/// any error we assume `true` (tracked) so the safety gate errs toward
-/// preserving the directory.
-fn dir_has_tracked_files(worktree: &Path, rel: &str) -> bool {
-  std::process::Command::new("git")
-    .arg("-C")
-    .arg(worktree)
-    .args(["ls-files", "--", rel])
-    .output()
-    .map(|o| !o.status.success() || !o.stdout.is_empty())
-    .unwrap_or(true)
 }
 
 /// Auto-detect prompt for bare `gwm` (issue #36): when the cwd is not inside a

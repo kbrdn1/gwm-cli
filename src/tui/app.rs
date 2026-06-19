@@ -2,6 +2,7 @@ use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
 use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
@@ -98,6 +99,13 @@ pub enum View {
   /// [`App::exec_picker`]; keys resolve through
   /// [`crate::tui::modal_keymap::KeyContext::ExecPicker`].
   ExecPicker,
+  /// Clean reclaim overlay (issue #325). A centred modal showing the gated
+  /// `clean::scan_worktree_safe` report for the selected worktree, an
+  /// optional `[clean.profiles.*]` picker, and a safety countdown; the run
+  /// loop fires `clean::delete_reclaim` when the countdown elapses. State
+  /// lives on [`App::clean_overlay`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::Clean`].
+  CleanReport,
   /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
   /// Desc) pre-filled by parsing the current branch; submitting renames the
   /// local + remote branch and moves the worktree directory. State lives on
@@ -436,6 +444,12 @@ pub struct App {
   /// ([`PtyKind::Exec`]) in the selected worktree's directory.
   pub exec_picker: ExecPicker,
 
+  /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
+  /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
+  /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
+  /// fires [`crate::clean::delete_reclaim`] when the countdown elapses.
+  pub clean_overlay: CleanOverlay,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -545,6 +559,7 @@ impl App {
       global_path: global_path.map(Path::to_path_buf),
       pty_overlay: None,
       exec_picker: ExecPicker::new(),
+      clean_overlay: CleanOverlay::new(),
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -1704,6 +1719,7 @@ impl App {
       View::Config => self.pane_hint_context(),
       View::Pty => super::ui::HintContext::Pty,
       View::ExecPicker => HintContext::ExecPicker,
+      View::CleanReport => HintContext::Clean,
       View::Edit => HintContext::Rename,
       View::List => self.pane_hint_context(),
     }
@@ -2093,6 +2109,139 @@ impl App {
   /// to [`View::List`].
   pub fn close_exec_picker(&mut self) {
     if self.view == View::ExecPicker {
+      self.view = View::List;
+    }
+  }
+
+  // ── Clean overlay (issue #325) ─────────────────────────────────────────
+
+  /// Open the clean overlay (issue #325). Populates the `[clean.profiles]`
+  /// picker, scans the selected worktree through the safety gate
+  /// ([`crate::clean::scan_worktree_safe`]), and switches to
+  /// [`View::CleanReport`]. Refuses (status-bar message, no transition) when
+  /// nothing is selected. A scan that finds nothing safe still opens — the
+  /// report says so.
+  pub fn enter_clean_overlay(&mut self) {
+    if self.selected().is_none() {
+      self.status = "nothing selected".into();
+      return;
+    }
+    let names: Vec<String> = self.config.clean.profiles.keys().cloned().collect();
+    self.clean_overlay.open(names);
+    if let Err(e) = self.clean_overlay_rescan() {
+      self.status = format!("clean: {e}");
+      return;
+    }
+    self.view = View::CleanReport;
+  }
+
+  /// Re-resolve the highlighted profile's dirs and re-scan the selected
+  /// worktree, storing the gated snapshot. Surfaces a profile-resolution
+  /// error (e.g. an invalid `[clean.profiles]` dir) to the caller.
+  fn clean_overlay_rescan(&mut self) -> Result<()> {
+    let Some(sel) = self.selected() else {
+      return Ok(());
+    };
+    let name = sel.name.clone();
+    let path = sel.path.clone();
+    let profile = self.clean_overlay.selected_profile().map(str::to_string);
+    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.config.clean)?;
+    let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
+    self.clean_overlay.set_scan(reclaim, skipped);
+    Ok(())
+  }
+
+  /// Cycle the clean profile picker forward and re-scan (issue #325).
+  pub fn clean_overlay_next(&mut self) {
+    self.clean_overlay.next();
+    if let Err(e) = self.clean_overlay_rescan() {
+      self.status = format!("clean: {e}");
+    }
+  }
+
+  /// Cycle the clean profile picker backward and re-scan (issue #325).
+  pub fn clean_overlay_prev(&mut self) {
+    self.clean_overlay.prev();
+    if let Err(e) = self.clean_overlay_rescan() {
+      self.status = format!("clean: {e}");
+    }
+  }
+
+  /// Total duration of the clean safety countdown. Unlike the delete-confirm
+  /// modal, clean has no `delete_branch_on_remove` gate — it reads
+  /// `[tui] confirm_countdown_secs` directly. `Duration::ZERO` ⇒ classic
+  /// single-keystroke confirm.
+  pub fn clean_countdown_total(&self) -> Duration {
+    Duration::from_secs(u64::from(self.config.tui.effective_confirm_countdown_secs()))
+  }
+
+  /// Handle the clean confirm key. Arms / disarms / fires the countdown via
+  /// the dedicated [`CleanOverlay`] modal. Nothing-to-reclaim is a no-op
+  /// guard so the user cannot arm a delete that would free zero bytes.
+  pub fn clean_confirm_press(&mut self, now: Instant) -> ConfirmKeyAction {
+    if self.clean_overlay.is_empty_scan() {
+      self.status = "nothing to reclaim".into();
+      return ConfirmKeyAction::Disarmed;
+    }
+    let total = self.clean_countdown_total();
+    let action = self.clean_overlay.confirm.press_y(now, total);
+    match action {
+      ConfirmKeyAction::Armed => {
+        self.status = format!(
+          "armed — reclaiming {} in {}s",
+          crate::clean::human_size(self.clean_overlay.total_bytes()),
+          total.as_secs()
+        );
+      }
+      ConfirmKeyAction::Disarmed => self.status = "clean cancelled".into(),
+      ConfirmKeyAction::FireNow => {}
+    }
+    action
+  }
+
+  /// Tick the clean safety countdown. Called from the event loop on every
+  /// poll-timeout iteration while the overlay is open.
+  pub fn tick_clean_countdown(&mut self, now: Instant) -> CountdownTickOutcome {
+    self.clean_overlay.confirm.tick(now, self.clean_countdown_total())
+  }
+
+  /// Clean countdown progress in `[0.0, 1.0]` for the UI gauge.
+  pub fn clean_countdown_progress(&self, now: Instant) -> f64 {
+    self.clean_overlay.confirm.progress(now, self.clean_countdown_total())
+  }
+
+  /// Seconds remaining (rounded up) on the clean countdown, for the UI label.
+  pub fn clean_countdown_remaining_secs(&self, now: Instant) -> u64 {
+    self
+      .clean_overlay
+      .confirm
+      .remaining_secs(now, self.clean_countdown_total())
+  }
+
+  /// Delete the gated reclaim of the current clean snapshot (issue #325) and
+  /// return to the list. The snapshot was already filtered to the
+  /// git-ignored, untracked artifacts by [`crate::clean::scan_worktree_safe`],
+  /// so this only removes what the CLI `gwm clean --yes` would. Reports the
+  /// freed size (or the failure) on the status bar.
+  pub fn clean_overlay_delete(&mut self) {
+    let Some(reclaim) = self.clean_overlay.reclaim().cloned() else {
+      self.close_clean_overlay();
+      return;
+    };
+    match crate::clean::delete_reclaim(&reclaim) {
+      Ok(freed) => {
+        self.status = format!("reclaimed {} from {}", crate::clean::human_size(freed), reclaim.name);
+      }
+      Err(e) => self.status = format!("clean failed: {e}"),
+    }
+    self.close_clean_overlay();
+  }
+
+  /// Close the clean overlay, disarming the countdown, and return to
+  /// [`View::List`] (issue #325).
+  pub fn close_clean_overlay(&mut self) {
+    self.clean_overlay.confirm.dismiss();
+    if self.view == View::CleanReport {
       self.view = View::List;
     }
   }

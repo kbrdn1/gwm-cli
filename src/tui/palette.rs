@@ -232,6 +232,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "pick an [exec.profiles] profile and run it in a PTY",
     },
     PaletteEntry {
+      action: Action::CleanOverlay,
+      name: "clean",
+      description: "preview and reclaim build artifacts in the selected worktree",
+    },
+    PaletteEntry {
       action: Action::MuxPane,
       name: "mux-pane",
       description: "open the selected worktree in a new multiplexer pane/tab",

@@ -168,6 +168,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::Pty => draw_pty_overlay(f, app),
     // #325: exec profile picker renders as a small centred modal.
     View::ExecPicker => draw_exec_picker(f, app),
+    // #325: clean reclaim report renders as a centred modal.
+    View::CleanReport => draw_clean_overlay(f, app),
     // #290: branch-rename inline modal renders over the list.
     View::Edit => draw_edit_worktree(f, app),
     View::List => {}
@@ -1811,6 +1813,9 @@ pub enum HintContext {
   /// Exec profile picker overlay (issue #325): j/k pick, Enter runs, Esc
   /// cancels.
   ExecPicker,
+  /// Clean reclaim overlay (issue #325): j/k pick a profile, confirm
+  /// reclaims (safety countdown), Esc cancels.
+  Clean,
   /// Branch-rename modal (`View::Edit`, #290).
   Rename,
 }
@@ -1833,6 +1838,7 @@ impl HintContext {
       HintContext::Help => "help",
       HintContext::Pty => "terminal",
       HintContext::ExecPicker => "exec",
+      HintContext::Clean => "clean",
       HintContext::Rename => "rename",
     }
   }
@@ -1959,6 +1965,14 @@ impl HintContext {
         Hint::Modal(ModalAction::ExecPickerAccept, "run"),
         Hint::Modal(ModalAction::ExecPickerCancel, "cancel"),
       ],
+      // #325: the profile picker pair stays literal; confirm / cancel are
+      // rebindable modal verbs (the safety countdown reuses the delete
+      // confirm's `y` / Enter convention).
+      HintContext::Clean => &[
+        Hint::Lit("↑/↓", "profile"),
+        Hint::Modal(ModalAction::CleanConfirm, "reclaim"),
+        Hint::Modal(ModalAction::CleanCancel, "cancel"),
+      ],
       // Rename reuses the create-form input handler, hence the `create`
       // context's verbs (#290 / #219).
       HintContext::Rename => &[
@@ -2008,6 +2022,7 @@ impl HintContext {
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
       HintContext::ExecPicker => KeyContext::ExecPicker,
+      HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
     })
   }
@@ -4105,6 +4120,95 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Render the clean reclaim overlay (issue #325). A centred modal showing
+/// the gated reclaim report for the selected worktree (per-artifact sizes +
+/// total), the `[clean.profiles.*]` picker when configured, the gate-
+/// preserved names, and a danger-coloured armed indicator while the safety
+/// countdown runs. The live countdown progresses on the status bar; the
+/// border switches to the danger colour once armed.
+fn draw_clean_overlay(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let danger = app.theme.prunable;
+  let armed = app.clean_overlay.confirm.is_armed();
+  let border = if armed { danger } else { accent };
+
+  let mut lines = overlay_title_lines("reclaim build artifacts", border);
+
+  // Profile picker (only when `[clean.profiles]` are configured).
+  if app.clean_overlay.has_profiles() {
+    let selected = app.clean_overlay.selected_index();
+    for (i, name) in app.clean_overlay.profiles().iter().enumerate() {
+      let line = if i == selected {
+        Line::from(format!("▸ {name}")).style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+      } else {
+        Line::from(format!("  {name}")).style(Style::default().fg(muted))
+      };
+      lines.push(line.centered());
+    }
+    lines.push(Line::from(""));
+  }
+
+  // The gated reclaim report — only the git-ignored, untracked artifacts.
+  match app.clean_overlay.reclaim() {
+    Some(reclaim) if !reclaim.artifacts.is_empty() => {
+      for a in &reclaim.artifacts {
+        lines.push(
+          Line::from(format!("{:<14} {}", a.rel, crate::clean::human_size(a.bytes)))
+            .style(Style::default().fg(muted))
+            .centered(),
+        );
+      }
+      lines.push(
+        Line::from(format!("total {}", crate::clean::human_size(reclaim.total_bytes)))
+          .style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
+          .centered(),
+      );
+    }
+    _ => {
+      lines.push(
+        Line::from("nothing to reclaim")
+          .style(Style::default().fg(muted))
+          .centered(),
+      );
+    }
+  }
+
+  // Gate-preserved names — explain why a visible `target/` was not counted.
+  for rel in app.clean_overlay.skipped() {
+    lines.push(
+      Line::from(format!("skipped {rel} — not git-ignored / holds tracked files"))
+        .style(Style::default().fg(muted))
+        .centered(),
+    );
+  }
+
+  // Danger-coloured armed indicator; the live countdown shows on the status
+  // bar (set by `clean_confirm_press`), so the render stays time-free.
+  if armed {
+    lines.push(Line::from(""));
+    lines.push(
+      Line::from("⚠ armed — confirm again or cancel to abort")
+        .style(Style::default().fg(danger).add_modifier(Modifier::BOLD))
+        .centered(),
+    );
+  }
+
+  push_modal_hint(
+    &mut lines,
+    HintContext::Clean,
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+  );
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let term = f.area();
+  let width = link_prompt_modal_width(term.width);
+  let area = centered_abs(width, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(border)), area);
 }
 
 /// Render the command palette overlay (issue #32).

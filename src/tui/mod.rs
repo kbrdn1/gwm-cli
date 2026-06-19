@@ -31,6 +31,7 @@ pub use app::{
   App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
 };
 pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+pub use state::clean_overlay::CleanOverlay;
 pub use state::command_logs::CommandLogs;
 pub use state::config_panel::{
   build_key_rows, ConfigPanel, FieldKind, KeyCapture, KeyRow, KeyTarget, SettingField, SettingsLayer, SettingsTab,
@@ -262,6 +263,19 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             app.status = format!("delete failed: {}", e);
           }
         }
+        CountdownTickOutcome::Pending | CountdownTickOutcome::NotArmed => {}
+      }
+    }
+
+    // #325: drive the clean overlay's safety countdown off the same poll
+    // cadence as the delete confirm above, so an armed reclaim auto-fires
+    // after the configured delay even when no key event arrives.
+    if app.view == View::CleanReport {
+      if app.clean_overlay.confirm.is_armed() {
+        app.spinner.tick();
+      }
+      match app.tick_clean_countdown(now) {
+        CountdownTickOutcome::ReadyToFire => app.clean_overlay_delete(),
         CountdownTickOutcome::Pending | CountdownTickOutcome::NotArmed => {}
       }
     }
@@ -600,6 +614,21 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         ExecPickerKey::Cancel => app.close_exec_picker(),
         ExecPickerKey::Handled => {}
       },
+      // #325: clean reclaim overlay. Mirrors the delete-confirm routing —
+      // `confirm` arms / fires the safety countdown, `cancel` aborts, j/k
+      // cycle the `[clean.profiles]` picker (re-scanning each time). The
+      // countdown auto-fire is driven by the tick block above.
+      View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {
+        Some(ModalAction::CleanCancel) => app.close_clean_overlay(),
+        Some(ModalAction::CleanConfirm) => {
+          if app.clean_confirm_press(now) == ConfirmKeyAction::FireNow {
+            app.clean_overlay_delete();
+          }
+        }
+        Some(ModalAction::CleanNext) => app.clean_overlay_next(),
+        Some(ModalAction::CleanPrev) => app.clean_overlay_prev(),
+        _ => {}
+      },
       // #290: worktree-rename modal. Reuses the Create form input handler
       // (Type / Issue / Desc), but routes submit to the rename worker. Input
       // is swallowed while the async rename is in flight, mirroring create.
@@ -865,6 +894,9 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // running a profile in a PTY is a focus-mode action, meaningless in
     // the stripped-down `gwm switch` picker.
     Action::ExecOverlay if !app.picker_mode => app.enter_exec_picker(),
+    // Issue #325: `X` opens the clean reclaim overlay. Picker-gated — it
+    // deletes from the selected worktree, a focus-mode action.
+    Action::CleanOverlay if !app.picker_mode => app.enter_clean_overlay(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into

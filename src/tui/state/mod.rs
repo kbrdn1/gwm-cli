@@ -16,6 +16,7 @@
 //! - `config_panel` — scroll + resolved-row snapshot for the Configuration overlay (#232)
 
 pub mod async_task;
+pub mod clean_overlay;
 pub mod command_logs;
 pub mod config_panel;
 pub mod confirm;

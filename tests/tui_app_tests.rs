@@ -7394,3 +7394,142 @@ fn exec_picker_close_returns_to_the_list() {
   app.close_exec_picker();
   assert_eq!(app.view, View::List);
 }
+
+// ── Clean overlay (issue #325) ────────────────────────────────────────────
+
+#[test]
+fn clean_overlay_scans_gitignored_artifacts() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 2048]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  let reclaim = app.clean_overlay.reclaim().expect("the worktree was scanned");
+  assert!(
+    reclaim.artifacts.iter().any(|a| a.rel == "target"),
+    "the git-ignored target/ is counted: {:?}",
+    reclaim.artifacts
+  );
+  assert!(app.clean_overlay.total_bytes() >= 2048);
+}
+
+#[test]
+fn clean_overlay_gate_skips_non_gitignored_artifacts() {
+  let (repo, _) = init_repo();
+  // No `.gitignore` ⇒ `target/` is NOT ignored ⇒ the safety gate preserves it.
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 1024]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  let reclaim = app.clean_overlay.reclaim().expect("scanned");
+  assert!(reclaim.artifacts.is_empty(), "a non-ignored target/ is never counted");
+  assert!(
+    app.clean_overlay.skipped().contains(&"target".to_string()),
+    "and is reported as skipped: {:?}",
+    app.clean_overlay.skipped()
+  );
+  assert_eq!(app.clean_overlay.total_bytes(), 0);
+}
+
+#[test]
+fn clean_overlay_delete_reclaims_only_the_gated_dir() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("out"), vec![0u8; 512]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(repo.path().join("build").exists());
+  app.clean_overlay_delete();
+  assert!(!repo.path().join("build").exists(), "the build dir was reclaimed");
+  assert_eq!(app.view, View::List, "and the overlay closed");
+  assert!(
+    app.status.contains("reclaimed"),
+    "status reports the reclaim: {}",
+    app.status
+  );
+}
+
+#[test]
+fn clean_confirm_arms_then_is_ready_after_the_countdown() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "dist/\n").unwrap();
+  std::fs::create_dir(repo.path().join("dist")).unwrap();
+  std::fs::write(repo.path().join("dist").join("x"), vec![0u8; 100]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  let t0 = Instant::now();
+  assert_eq!(app.clean_confirm_press(t0), ConfirmKeyAction::Armed);
+  assert!(app.clean_overlay.confirm.is_armed());
+  assert_eq!(
+    app.tick_clean_countdown(t0 + Duration::from_secs(1)),
+    CountdownTickOutcome::Pending
+  );
+  assert_eq!(
+    app.tick_clean_countdown(t0 + Duration::from_secs(3)),
+    CountdownTickOutcome::ReadyToFire
+  );
+}
+
+#[test]
+fn clean_confirm_with_zero_countdown_fires_immediately() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "node_modules/\n").unwrap();
+  std::fs::create_dir(repo.path().join("node_modules")).unwrap();
+  std::fs::write(repo.path().join("node_modules").join("y"), vec![0u8; 64]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 0\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::FireNow);
+}
+
+#[test]
+fn clean_confirm_is_a_noop_when_nothing_to_reclaim() {
+  let (repo, _) = init_repo(); // no artifact dirs ⇒ empty scan
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(app.clean_overlay.is_empty_scan());
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Disarmed);
+  assert!(app.status.contains("nothing to reclaim"), "status: {}", app.status);
+}
+
+#[test]
+fn clean_overlay_profile_picker_rescans_per_profile() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "cache/\nout/\n").unwrap();
+  std::fs::create_dir(repo.path().join("cache")).unwrap();
+  std::fs::write(repo.path().join("cache").join("c"), vec![0u8; 100]).unwrap();
+  std::fs::create_dir(repo.path().join("out")).unwrap();
+  std::fs::write(repo.path().join("out").join("o"), vec![0u8; 200]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.a]\ndirs = [\"cache\"]\n\n[clean.profiles.b]\ndirs = [\"out\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Profile `a` (sorted first) resolves to `cache` only.
+  assert_eq!(app.clean_overlay.selected_profile(), Some("a"));
+  let a = app.clean_overlay.reclaim().unwrap();
+  assert!(a.artifacts.iter().any(|x| x.rel == "cache"));
+  assert!(!a.artifacts.iter().any(|x| x.rel == "out"));
+  // Cycling to `b` re-scans for `out`.
+  app.clean_overlay_next();
+  assert_eq!(app.clean_overlay.selected_profile(), Some("b"));
+  let b = app.clean_overlay.reclaim().unwrap();
+  assert!(b.artifacts.iter().any(|x| x.rel == "out"));
+  assert!(!b.artifacts.iter().any(|x| x.rel == "cache"));
+}
+
+#[test]
+fn clean_overlay_close_returns_to_the_list() {
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  app.close_clean_overlay();
+  assert_eq!(app.view, View::List);
+}

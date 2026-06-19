@@ -101,6 +101,8 @@ pub enum KeyContext {
   LinkInputNumber,
   /// Exec profile picker overlay (issue #325).
   ExecPicker,
+  /// Clean reclaim overlay (issue #325).
+  Clean,
 }
 
 impl KeyContext {
@@ -119,6 +121,7 @@ impl KeyContext {
       KeyContext::LinkChooseTarget => "link.choose_target",
       KeyContext::LinkInputNumber => "link.input_number",
       KeyContext::ExecPicker => "exec",
+      KeyContext::Clean => "clean",
     }
   }
 
@@ -144,6 +147,7 @@ impl KeyContext {
       LinkChooseTarget,
       LinkInputNumber,
       ExecPicker,
+      Clean,
     ]
   }
 }
@@ -275,6 +279,12 @@ define_modal_actions! {
     ExecPickerPrev   => "prev"   [ "k", "Up" ],
     ExecPickerAccept => "accept" [ "Enter" ],
     ExecPickerCancel => "cancel" [ "Esc" ],
+  }
+  Clean {
+    CleanNext    => "next"    [ "j", "Down" ],
+    CleanPrev    => "prev"    [ "k", "Up" ],
+    CleanConfirm => "confirm" [ "y", "Enter" ],
+    CleanCancel  => "cancel"  [ "n", "Esc" ],
   }
 }
 
