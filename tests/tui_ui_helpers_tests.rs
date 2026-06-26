@@ -965,3 +965,82 @@ fn working_tree_counts_footer_shows_only_nonzero_colored_segments() {
     "deleted paints the `prunable` role"
   );
 }
+
+#[test]
+fn picker_window_keeps_the_selection_visible() {
+  // #325 overlay polish: the picker scrolls to keep the highlight in view.
+  use gwm::tui::picker_window;
+  // Fits within the budget → the whole list, no scroll.
+  assert_eq!(picker_window(3, 0, 5), (0, 3));
+  assert_eq!(picker_window(5, 4, 5), (0, 5));
+  // Overflows → a `max`-row window clamped to the bounds, selection inside.
+  assert_eq!(picker_window(10, 0, 4), (0, 4));
+  assert_eq!(picker_window(10, 9, 4), (6, 10));
+  let (s, e) = picker_window(10, 5, 4);
+  assert!(s <= 5 && 5 < e && e - s == 4, "selection in a 4-row window: {s}..{e}");
+  // Degenerate inputs are safe.
+  assert_eq!(picker_window(0, 0, 5), (0, 0));
+  assert_eq!(picker_window(5, 2, 0), (0, 5));
+}
+
+#[test]
+fn reclaim_size_color_is_a_magnitude_heatmap() {
+  // #325 overlay polish: green (small) → yellow (medium) → red (large).
+  use gwm::tui::reclaim_size_color;
+  use gwm::tui::theme::Theme;
+  let t = Theme::default();
+  const MIB: u64 = 1024 * 1024;
+  assert_eq!(reclaim_size_color(0, &t), t.clean, "zero → green");
+  assert_eq!(reclaim_size_color(10 * MIB, &t), t.clean, "small → green");
+  assert_eq!(reclaim_size_color(50 * MIB, &t), t.dirty, "50 MiB boundary → yellow");
+  assert_eq!(reclaim_size_color(200 * MIB, &t), t.dirty, "medium → yellow");
+  assert_eq!(reclaim_size_color(500 * MIB, &t), t.prunable, "500 MiB boundary → red");
+  assert_eq!(reclaim_size_color(3 * 1024 * MIB, &t), t.prunable, "large → red");
+}
+
+#[test]
+fn clean_dir_icon_matches_the_ecosystem() {
+  // #334 polish: each reclaimable dir gets a nerd-font glyph matched to its
+  // ecosystem; unknown names fall back to the generic folder. Leading dots
+  // are ignored so `.venv` matches like `venv`.
+  use gwm::tui::clean_dir_icon;
+  let folder = clean_dir_icon("some-unknown-dir");
+  assert_ne!(clean_dir_icon("node_modules"), folder, "node_modules has its own icon");
+  assert_ne!(clean_dir_icon("target"), folder, "target (Rust) has its own icon");
+  assert_eq!(
+    clean_dir_icon(".venv"),
+    clean_dir_icon("venv"),
+    "leading dot is ignored"
+  );
+  assert_eq!(clean_dir_icon(".cache"), clean_dir_icon("cache"));
+  // Distinct ecosystems get distinct glyphs.
+  assert_ne!(clean_dir_icon("node_modules"), clean_dir_icon("target"));
+  assert_ne!(clean_dir_icon("vendor"), clean_dir_icon("venv"));
+  // Every glyph is a single non-empty token.
+  for d in [
+    "node_modules",
+    "target",
+    "vendor",
+    ".venv",
+    "dist",
+    ".cache",
+    "coverage",
+    "whatever",
+  ] {
+    assert!(!clean_dir_icon(d).is_empty(), "icon for {d:?} must be non-empty");
+  }
+}
+
+#[test]
+fn overlay_modal_width_is_wider_but_clamped() {
+  // #334 polish: the exec/clean overlays use more horizontal space than the
+  // link-prompt modal on a roomy terminal, but stay readable / clamped.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  // On a wide terminal it is meaningfully wider than the 72-col link modal.
+  assert!(overlay_modal_width(160) > link_prompt_modal_width(160));
+  assert!(overlay_modal_width(120) >= 72);
+  // Clamped: never wider than the terminal, never past the 88 ceiling.
+  assert!(overlay_modal_width(300) <= 88);
+  assert!(overlay_modal_width(40) <= 40);
+  assert!(overlay_modal_width(50) >= 45, "narrow terminals still get a usable box");
+}

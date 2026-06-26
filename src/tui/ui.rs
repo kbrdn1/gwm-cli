@@ -2568,6 +2568,18 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
+  // #334 review: the exec / clean overlays are picker-gated (`run_action`
+  // no-ops them in `gwm switch`), so only advertise them outside picker mode.
+  if !picker_mode {
+    rows.push(entry(
+      Action::ExecOverlay,
+      "pick an [exec.profiles] profile and run it in a PTY",
+    ));
+    rows.push(entry(
+      Action::CleanOverlay,
+      "preview and reclaim build artifacts (with confirm)",
+    ));
+  }
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
@@ -3494,6 +3506,16 @@ pub fn link_prompt_modal_width(term_width: u16) -> u16 {
   width.min(72).min(term_width)
 }
 
+/// Modal width for the exec / clean overlays (issue #334 polish). A bit wider
+/// than the link-prompt modal so the full-width clean report (icon + dir name
+/// pinned left, size pinned right) uses the horizontal space — but capped so
+/// the name↔size gap never stretches absurdly on an ultra-wide terminal.
+/// ~62 % of the width (90 % when ≤ 80 cols), clamped to `[48, 88]`.
+pub fn overlay_modal_width(term_width: u16) -> u16 {
+  let pct = if term_width <= 80 { 90 } else { 62 };
+  (term_width.saturating_mul(pct) / 100).clamp(48, 88).min(term_width)
+}
+
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
 pub fn help_section_style(section: Color) -> Style {
@@ -4092,23 +4114,126 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
+/// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
+/// green (small) → yellow (medium) → red (large) so a big reclaim stands out
+/// at a glance. Thresholds tuned for build artifacts (50 MiB / 500 MiB).
+pub fn reclaim_size_color(bytes: u64, theme: &Theme) -> Color {
+  const MIB: u64 = 1024 * 1024;
+  if bytes >= 500 * MIB {
+    theme.prunable
+  } else if bytes >= 50 * MIB {
+    theme.dirty
+  } else {
+    theme.clean
+  }
+}
+
+/// A nerd-font glyph matched to a reclaimable directory name (issue #334
+/// polish) — the ecosystem the artifact belongs to (`node_modules` → node,
+/// `target` → Rust, `vendor` → PHP, `.venv` → Python, `dist`/`build` →
+/// package, `.cache` → archive…), falling back to a generic folder. Leading
+/// dots are stripped so `.venv` / `.nuxt` match like `venv` / `nuxt`.
+pub fn clean_dir_icon(rel: &str) -> &'static str {
+  match rel.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    "node_modules" => "\u{e718}",      // nf-dev-nodejs
+    "target" => wt_tree::WT_RUST_ICON, // nf-dev-rust
+    "vendor" => "\u{e73d}",            // nf-dev-php
+    "venv" | "__pycache__" | "pytest_cache" | "mypy_cache" | "tox" => "\u{e73c}", // nf-dev-python
+    "dist" | "build" | "out" | "output" | "bin" => "\u{f487}", // nf-oct-package
+    "cache" | "turbo" | "parcel-cache" => "\u{f187}", // nf-fa-archive
+    "nuxt" | "next" | "svelte-kit" | "astro" | "vite" => "\u{e74e}", // nf-dev-javascript
+    "coverage" => "\u{f201}",          // nf-fa-line_chart
+    _ => wt_tree::WT_DIR_ICON,         // generic folder
+  }
+}
+
+/// The visible `[start, end)` slice of a `len`-item picker when at most
+/// `max_visible` rows fit, keeping `selected` in view (centred while
+/// scrolling). Returns the whole list when it fits (issue #325 polish).
+pub fn picker_window(len: usize, selected: usize, max_visible: usize) -> (usize, usize) {
+  if max_visible == 0 || len <= max_visible {
+    return (0, len);
+  }
+  let half = max_visible / 2;
+  let start = selected.saturating_sub(half).min(len - max_visible);
+  (start, start + max_visible)
+}
+
+/// Build the full-width, scrollable rows for an overlay profile picker (issue
+/// #334 polish). Each row spans the modal's `inner` width — left-aligned so
+/// the labels start at the same column and the selection highlight reads as a
+/// full-width bar — and the visible window follows `selected` with
+/// `↑ / ↓ N more` markers (centred) when the list overflows `max_visible`.
+fn picker_lines(
+  labels: &[&str],
+  selected: usize,
+  max_visible: usize,
+  inner: usize,
+  theme: &Theme,
+) -> Vec<Line<'static>> {
+  let mut out = Vec::new();
+  if labels.is_empty() {
+    return out;
+  }
+  // Width available for the label text after the ` ▸ ` marker gutter.
+  let textw = inner.saturating_sub(3);
+  let (start, end) = picker_window(labels.len(), selected, max_visible);
+  if start > 0 {
+    out.push(
+      Line::from(Span::styled(
+        format!("↑ {start} more"),
+        Style::default().fg(theme.muted),
+      ))
+      .centered(),
+    );
+  }
+  for (i, label) in labels.iter().enumerate().take(end).skip(start) {
+    let marker = if i == selected { "▸" } else { " " };
+    // Pad to the full inner width so the selection bar fills the whole row.
+    let txt = format!(" {marker} {:<textw$}", ellipsize_middle(label, textw));
+    let style = if i == selected {
+      Style::default()
+        .fg(theme.accent)
+        .bg(theme.selection_bg)
+        .add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(theme.muted)
+    };
+    out.push(Line::from(Span::styled(txt, style)));
+  }
+  if end < labels.len() {
+    out.push(
+      Line::from(Span::styled(
+        format!("↓ {} more", labels.len() - end),
+        Style::default().fg(theme.muted),
+      ))
+      .centered(),
+    );
+  }
+  out
+}
+
 /// Render the exec profile picker overlay (issue #325). A small centred
-/// modal listing the `[exec.profiles.*]` names; the highlighted row reads
-/// in the accent with a `▸` marker, the rest muted. `Enter` resolves the
-/// highlight and the run loop spawns it in a PTY overlay.
+/// modal listing the `[exec.profiles.*]` names; the highlighted row reads in
+/// the accent (with a selection bar) and a `▸` marker, the rest muted. The
+/// list is aligned, same-width, and scrolls to keep the highlight in view.
+/// `Enter` resolves the highlight and the run loop spawns it in a PTY overlay.
 fn draw_exec_picker(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
-  let muted = app.theme.muted;
-  let selected = app.exec_picker.selected_index();
-  let mut lines = overlay_title_lines("run exec profile", accent);
-  for (i, name) in app.exec_picker.profiles().iter().enumerate() {
-    let line = if i == selected {
-      Line::from(format!("▸ {name}")).style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
-    } else {
-      Line::from(format!("  {name}")).style(Style::default().fg(muted))
-    };
-    lines.push(line.centered());
-  }
+  let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+  let mut lines = overlay_title_lines("Run an exec profile", accent);
+  // Leave room for the title + hint + borders; the picker scrolls past that.
+  let max_visible = (term.height as usize).saturating_sub(8).max(3);
+  let labels: Vec<&str> = app.exec_picker.profiles().iter().map(String::as_str).collect();
+  lines.extend(picker_lines(
+    &labels,
+    app.exec_picker.selected_index(),
+    max_visible,
+    inner,
+    &app.theme,
+  ));
   push_modal_hint(
     &mut lines,
     HintContext::ExecPicker,
@@ -4117,8 +4242,6 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
     &app.theme,
   );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-  let term = f.area();
-  let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
@@ -4136,39 +4259,74 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
   let danger = app.theme.prunable;
   let armed = app.clean_overlay.confirm.is_armed();
   let border = if armed { danger } else { accent };
+  let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
 
-  let mut lines = overlay_title_lines("reclaim build artifacts", border);
+  let mut lines = overlay_title_lines("Reclaim build artifacts", border);
 
   // Profile picker — the `(default)` choice plus any `[clean.profiles]`.
-  // Only worth rendering when the repo configures named profiles.
+  // Full-width, scrollable; only rendered when named profiles exist.
   if app.clean_overlay.has_profiles() {
-    let selected = app.clean_overlay.selected_index();
-    for (i, label) in app.clean_overlay.choice_labels().iter().enumerate() {
-      let line = if i == selected {
-        Line::from(format!("▸ {label}")).style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
-      } else {
-        Line::from(format!("  {label}")).style(Style::default().fg(muted))
-      };
-      lines.push(line.centered());
-    }
+    let labels = app.clean_overlay.choice_labels();
+    let max_visible = (term.height as usize).saturating_sub(14).max(3);
+    lines.extend(picker_lines(
+      &labels,
+      app.clean_overlay.selected_index(),
+      max_visible,
+      inner,
+      &app.theme,
+    ));
     lines.push(Line::from(""));
   }
 
   // The gated reclaim report — only the git-ignored, untracked artifacts.
+  // Each row fills the modal's inner width: a matched nerd-font icon (#334) +
+  // dir name pinned left, the heatmap-coloured size pinned to the right edge,
+  // so the columns use the whole box. Capped to the modal height with a
+  // `… N more` overflow marker.
   match app.clean_overlay.reclaim() {
     Some(reclaim) if !reclaim.artifacts.is_empty() => {
-      for a in &reclaim.artifacts {
+      // Name column = inner width minus the ` icon  ` gutter (4) and the
+      // `<size> ` tail (11), so the size lands flush on the right edge.
+      let namew = inner.saturating_sub(15).max(5);
+      let row = |icon: &str, left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
+        Line::from(vec![
+          Span::styled(format!(" {icon}  "), Style::default().fg(accent)),
+          Span::styled(format!("{:<namew$}", ellipsize_middle(left, namew)), left_style),
+          Span::styled(format!("{:>10} ", crate::clean::human_size(bytes)), size_style),
+        ])
+      };
+      let max_rows = (term.height as usize).saturating_sub(14).max(3);
+      let shown = reclaim.artifacts.len().min(max_rows);
+      for a in reclaim.artifacts.iter().take(shown) {
+        lines.push(row(
+          clean_dir_icon(&a.rel),
+          &a.rel,
+          Style::default().fg(muted),
+          a.bytes,
+          Style::default().fg(reclaim_size_color(a.bytes, &app.theme)),
+        ));
+      }
+      if reclaim.artifacts.len() > shown {
         lines.push(
-          Line::from(format!("{:<14} {}", a.rel, crate::clean::human_size(a.bytes)))
-            .style(Style::default().fg(muted))
-            .centered(),
+          Line::from(Span::styled(
+            format!("… {} more", reclaim.artifacts.len() - shown),
+            Style::default().fg(muted),
+          ))
+          .centered(),
         );
       }
-      lines.push(
-        Line::from(format!("total {}", crate::clean::human_size(reclaim.total_bytes)))
-          .style(Style::default().fg(accent).add_modifier(Modifier::BOLD))
-          .centered(),
-      );
+      // The total row uses an aggregate (sigma) glyph in the icon column.
+      lines.push(row(
+        "\u{f03a}",
+        "total",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        reclaim.total_bytes,
+        Style::default()
+          .fg(reclaim_size_color(reclaim.total_bytes, &app.theme))
+          .add_modifier(Modifier::BOLD),
+      ));
     }
     _ => {
       lines.push(
@@ -4207,8 +4365,6 @@ fn draw_clean_overlay(f: &mut Frame, app: &App) {
     &app.theme,
   );
   let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
-  let term = f.area();
-  let width = link_prompt_modal_width(term.width);
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(border)), area);

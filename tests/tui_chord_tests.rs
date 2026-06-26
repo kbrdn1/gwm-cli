@@ -546,3 +546,95 @@ fn help_overlay_reflects_a_modal_rebind() {
     lines.join("\n")
   );
 }
+
+#[test]
+fn help_rows_document_the_exec_and_clean_overlays() {
+  // #334: the #325 exec (`x`) / clean (`X`) overlays were added to the keymap
+  // and palette but omitted from the hand-curated help overlay (`?`). Pin them
+  // so they can't silently disappear from `?` again.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+
+  let documents = |action: Action, label_needle: &str| -> bool {
+    let keys = km.keys_display(action);
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Entry { keys: k, label } if *k == keys && label.contains(label_needle)))
+  };
+  assert!(
+    documents(Action::ExecOverlay, "exec"),
+    "the help overlay must document the exec picker (x): {rows:?}"
+  );
+  assert!(
+    documents(Action::CleanOverlay, "reclaim"),
+    "the help overlay must document the clean overlay (X): {rows:?}"
+  );
+}
+
+#[test]
+fn help_rows_cover_every_bound_list_view_action() {
+  // #334: the help overlay is hand-curated, so a newly bound Action can be
+  // reachable by key + palette yet missing from `?` (exactly how exec/clean
+  // slipped). Guard it: every action bound by default must appear in the List
+  // View help, except the handful documented only in their own modal context.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+  let documented: std::collections::HashSet<String> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } if !keys.is_empty() => Some(keys.clone()),
+      _ => None,
+    })
+    .collect();
+
+  // Strict: EVERY bound action is documented today (no exclusions), so a new
+  // omission goes red immediately.
+  for action in Action::all() {
+    let keys = km.keys_display(action);
+    assert!(
+      documented.contains(&keys),
+      "Action::{action:?} (keys {keys:?}) is bound but missing from the help overlay — add it to help_rows()"
+    );
+  }
+}
+
+#[test]
+fn help_rows_hide_exec_and_clean_in_switch_picker_mode() {
+  // #334 review: `x` / `X` are picker-gated (`run_action` no-ops them in
+  // `gwm switch`), so the help overlay must not advertise them in the Picker
+  // context — only in the focus-mode List View.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let labels: Vec<String> = help_rows(&km, &modal, HintContext::Picker)
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { label, .. } => Some(label.clone()),
+      _ => None,
+    })
+    .collect();
+  assert!(
+    !labels.iter().any(|l| l.contains("[exec.profiles]")),
+    "the exec overlay must be hidden from the switch-picker help"
+  );
+  assert!(
+    !labels.iter().any(|l| l.contains("reclaim build artifacts")),
+    "the clean overlay must be hidden from the switch-picker help"
+  );
+}
