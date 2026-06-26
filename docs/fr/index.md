@@ -24,7 +24,7 @@ CLI Rust + TUI ratatui pour gérer les worktrees git entre projets.
 - `gwm sync` récupère l'upstream d'un worktree et fait un rebase (ou un merge) dessus, sans risque en cas de conflit.
 - Corvées de flotte sur les worktrees : `gwm exec [<slug>…] -- <cmd>` exécute une commande dans chaque worktree séquentiellement (tout ce qui suit `--` est transmis verbatim, récap `✓` / `✗` par worktree, code de sortie non nul si l'un échoue), et `gwm clean [<slug>…]` rapporte les répertoires `target/` / `node_modules/` / `dist/` / `build/` récupérables — rapport uniquement jusqu'à ce que vous passiez `--yes` (qui ne supprime que les répertoires ignorés par git).
 - [Trust ledger TOFU](/fr/configuration/trust-ledger) sur `.gwm.toml` — le premier `gwm create` / `gwm bootstrap` sur un dépôt demande confirmation avant d'exécuter la moindre ligne de commande de bootstrap. `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1` pour contourner en CI.
-- Installation via `cargo install gwm`, `cargo binstall gwm` (archives précompilées, sans toolchain), Homebrew ou Nix.
+- Installation via `cargo install gwm-cli`, `cargo binstall gwm-cli` (archives précompilées, sans toolchain), Homebrew ou Nix.
 
 ## carte de la documentation
 
@@ -42,8 +42,8 @@ CLI Rust + TUI ratatui pour gérer les worktrees git entre projets.
 
 ```bash
 # install
-cargo install gwm
-# or: cargo binstall gwm        # prebuilt archive, no Rust toolchain
+cargo install gwm-cli
+# or: cargo binstall gwm-cli        # prebuilt archive, no Rust toolchain
 # or: brew tap kbrdn1/tap && brew install gwm
 
 # bootstrap a per-repo config (optional but recommended)
