@@ -22,7 +22,7 @@ Rust CLI + ratatui TUI to manage git worktrees across projects.
 - `gwm sync` fetches a worktree's upstream and rebases (or merges) onto it, conflict-safe.
 - Fleet chores across worktrees: `gwm exec [<slug>…] -- <cmd>` runs a command in each worktree sequentially (everything after `--` forwarded verbatim, `✓` / `✗` per-worktree rollup, non-zero exit if any failed), and `gwm clean [<slug>…]` reports reclaimable `target/` / `node_modules/` / `dist/` / `build/` directories — report-only until you pass `--yes` (which only deletes git-ignored dirs).
 - [TOFU trust ledger](/configuration/trust-ledger) on `.gwm.toml` — first `gwm create` / `gwm bootstrap` on a repo prompts before executing any bootstrap command line. `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP=1` for CI bypass.
-- Install via `cargo install gwm`, `cargo binstall gwm` (prebuilt archives, no toolchain), Homebrew, or Nix.
+- Install via `cargo install gwm-cli`, `cargo binstall gwm-cli` (prebuilt archives, no toolchain), Homebrew, or Nix.
 
 ## documentation map
 
@@ -40,8 +40,8 @@ Rust CLI + ratatui TUI to manage git worktrees across projects.
 
 ```bash
 # install
-cargo install gwm
-# or: cargo binstall gwm        # prebuilt archive, no Rust toolchain
+cargo install gwm-cli
+# or: cargo binstall gwm-cli        # prebuilt archive, no Rust toolchain
 # or: brew tap kbrdn1/tap && brew install gwm
 
 # bootstrap a per-repo config (optional but recommended)

@@ -876,7 +876,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
-name = "gwm"
+name = "gwm-cli"
 version = "1.0.0"
 dependencies = [
  "anyhow",

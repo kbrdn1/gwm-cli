@@ -1,5 +1,9 @@
 [package]
-name = "gwm"
+# crates.io package name. The bare `gwm` name is taken by an unrelated
+# project (shutootaki/gwm), so we publish as `gwm-cli` — the installed
+# binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
+# so `cargo install gwm-cli` still yields the `gwm` command.
+name = "gwm-cli"
 version = "1.0.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
