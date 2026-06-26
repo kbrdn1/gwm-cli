@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kbrdn1/gwm-cli/docs/schema/path.schema.json",
+  "version": 1,
+  "title": "gwm path result",
+  "description": "Output of `gwm path <pattern> --format=json` and the daemon's `path` JSON-RPC method (issue #38).",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "path", "branch"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Display name of the resolved worktree."
+    },
+    "path": {
+      "type": "string",
+      "description": "Absolute path to the worktree working directory."
+    },
+    "branch": {
+      "type": ["string", "null"],
+      "description": "Checked-out branch shorthand, or null when unresolvable."
+    }
+  }
+}

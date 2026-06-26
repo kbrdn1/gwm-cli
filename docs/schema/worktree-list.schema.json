@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kbrdn1/gwm-cli/docs/schema/worktree-list.schema.json",
+  "version": 1,
+  "title": "gwm worktree list",
+  "description": "Output of `gwm list --format=json` and the daemon's `list` JSON-RPC method (issue #38). A stable array of worktrees, decoupled from gwm's internal types.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/worktree" },
+  "$defs": {
+    "worktree": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "name",
+        "id",
+        "path",
+        "branch",
+        "head",
+        "is_main",
+        "is_locked",
+        "is_prunable",
+        "status",
+        "age_seconds",
+        "issue",
+        "pr"
+      ],
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Owning repo name. Present ONLY in workspace mode (`gwm --workspace <root> list --format=json`); absent for a single-repo listing."
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name — basename of the worktree directory."
+        },
+        "id": {
+          "type": "string",
+          "description": "Internal git worktree id (.git/worktrees/<id>); may diverge from name after a `git worktree move`."
+        },
+        "path": {
+          "type": "string",
+          "description": "Absolute path to the worktree working directory."
+        },
+        "branch": {
+          "type": ["string", "null"],
+          "description": "Checked-out branch shorthand, or null when unresolvable."
+        },
+        "head": {
+          "type": ["string", "null"],
+          "description": "Full HEAD commit oid (40-char hex), or null when unresolvable."
+        },
+        "is_main": { "type": "boolean" },
+        "is_locked": { "type": "boolean" },
+        "is_prunable": { "type": "boolean" },
+        "status": { "$ref": "#/$defs/status" },
+        "age_seconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Branch age relative to the trunk baseline, in whole seconds. Null for trunk branches and unresolvable repos."
+        },
+        "issue": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Linked GitHub issue number, or null."
+        },
+        "pr": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "description": "Linked GitHub PR number, or null."
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["is_dirty", "has_upstream", "ahead", "behind", "unknown"],
+      "properties": {
+        "is_dirty": { "type": "boolean" },
+        "has_upstream": { "type": "boolean" },
+        "ahead": { "type": "integer", "minimum": 0 },
+        "behind": { "type": "integer", "minimum": 0 },
+        "unknown": {
+          "type": "boolean",
+          "description": "Status couldn't be computed (detached HEAD, unborn branch)."
+        }
+      }
+    }
+  }
+}

@@ -87,21 +87,37 @@ fn status_has_absolute_priority_when_space_is_tiny() {
 }
 
 #[test]
-fn keys_render_as_reverse_video_chips_on_the_accent_colour() {
+fn keys_render_as_accent_bold_binds_not_badges() {
+  // Issue #279: the footer hints drop the reverse-video badge for a
+  // herdr-style "accent bind + muted action" treatment. The key reads in
+  // the accent colour + BOLD with no REVERSED box.
   let line = footer_line(
     HINTS,
     "ready",
     120,
     &Theme {
       accent: Color::Magenta,
+      muted: Color::Gray,
       ..Theme::default()
     },
   );
-  // At least one span is a chip: reverse-video, accent-coloured, carrying a key.
-  let has_chip = line.spans.iter().any(|s| {
-    s.style.add_modifier.contains(Modifier::REVERSED) && s.style.fg == Some(Color::Magenta) && s.content.contains('n')
-  });
-  assert!(has_chip, "no reverse-video accent chip found in footer spans");
+  // A bind span: accent-coloured, bold, NOT reversed, carrying the key.
+  let bind = line
+    .spans
+    .iter()
+    .find(|s| s.style.fg == Some(Color::Magenta) && s.content.as_ref() == "n")
+    .expect("a bare accent 'n' bind span");
+  assert!(
+    bind.style.add_modifier.contains(Modifier::BOLD),
+    "bind is bold: {bind:?}"
+  );
+  assert!(
+    !line
+      .spans
+      .iter()
+      .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+    "no hint span should be a reverse-video badge anymore"
+  );
   // Labels are still present so the row stays self-documenting.
   assert!(plain(&line).contains("new"));
 }
@@ -158,20 +174,23 @@ fn status_line_shows_context_chip_at_the_left() {
     text.trim_start().starts_with("worktrees") || text.contains("worktrees"),
     "context chip missing at the left: {text:?}"
   );
-  // …and it is a reversed accent chip, like the hint badges.
+  // …and the context label stays a reversed focus chip — it's a "where am
+  // I" anchor, not a hint, so it keeps the badge treatment (issue #279).
   let has_ctx_chip = line.spans.iter().any(|s| {
     s.style.add_modifier.contains(Modifier::REVERSED)
       && s.style.fg == Some(Color::Green)
       && s.content.contains("worktrees")
   });
   assert!(has_ctx_chip, "context label is not a reversed focus chip: {text:?}");
+  // Hint binds, by contrast, are now flat accent-bold glyphs (no badge).
   assert!(
-    line
-      .spans
-      .iter()
-      .filter(|s| s.style.add_modifier.contains(Modifier::REVERSED))
-      .any(|s| s.style.fg == Some(Color::Magenta) && s.content.contains(" n ")),
-    "hint key badges should keep the accent colour while context uses focus: {text:?}"
+    line.spans.iter().any(|s| {
+      !s.style.add_modifier.contains(Modifier::REVERSED)
+        && s.style.fg == Some(Color::Magenta)
+        && s.style.add_modifier.contains(Modifier::BOLD)
+        && s.content.as_ref() == "n"
+    }),
+    "hint binds should be flat accent-bold glyphs while context uses a focus chip: {text:?}"
   );
 }
 
@@ -211,7 +230,7 @@ fn status_line_keeps_context_and_log_when_narrow_dropping_hints() {
 fn link_prompt_status_line_keeps_short_log_at_80_cols() {
   use gwm::tui::keymap::Keymap;
   let km = Keymap::defaults();
-  let resolved = HintContext::LinkPrompt.resolve(&km);
+  let resolved = HintContext::LinkPrompt.resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults());
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
 
   let line = status_line("link", &hints, "pick", None, 80, &Theme::default());
@@ -242,7 +261,9 @@ fn hint_context_exposes_label_and_hints() {
     HintContext::CommandPalette,
   ] {
     assert!(
-      !ctx.resolve(&km).is_empty(),
+      !ctx
+        .resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults())
+        .is_empty(),
       "context {:?} must advertise hints",
       ctx.label()
     );
@@ -256,7 +277,7 @@ fn worktrees_and_status_hints_advertise_the_command_logs_key() {
   use gwm::tui::keymap::Keymap;
   let km = Keymap::defaults();
   for ctx in [HintContext::Worktrees, HintContext::Status] {
-    let resolved = ctx.resolve(&km);
+    let resolved = ctx.resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults());
     assert!(
       resolved.iter().any(|(k, l)| k == "3" && l == "logs"),
       "context {:?} must advertise the `3 logs` hint: {resolved:?}",
@@ -266,16 +287,17 @@ fn worktrees_and_status_hints_advertise_the_command_logs_key() {
 }
 
 #[test]
-fn worktrees_and_status_hints_advertise_the_config_panel_key() {
-  // Issue #232: the statusbar which-key must advertise `4 config` so the
-  // Configuration panel is discoverable, alongside the `1`/`2`/`3` pane keys.
+fn worktrees_and_status_hints_advertise_the_settings_panel_key() {
+  // Issue #232 / #279: the statusbar which-key must advertise `4 settings`
+  // so the Settings panel is discoverable, alongside the `1`/`2`/`3` pane
+  // keys (renamed from `config` when the panel became editable).
   use gwm::tui::keymap::Keymap;
   let km = Keymap::defaults();
   for ctx in [HintContext::Worktrees, HintContext::Status] {
-    let resolved = ctx.resolve(&km);
+    let resolved = ctx.resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults());
     assert!(
-      resolved.iter().any(|(k, l)| k == "4" && l == "config"),
-      "context {:?} must advertise the `4 config` hint: {resolved:?}",
+      resolved.iter().any(|(k, l)| k == "4" && l == "settings"),
+      "context {:?} must advertise the `4 settings` hint: {resolved:?}",
       ctx.label()
     );
   }
@@ -288,7 +310,7 @@ fn status_hints_resolve_user_rebindings() {
   // `F` by default; rebind it and the resolved hint follows.
   use gwm::tui::keymap::{Action, KeyStroke, Keymap};
   let mut km = Keymap::defaults();
-  let default = HintContext::Status.resolve(&km);
+  let default = HintContext::Status.resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults());
   assert!(
     default.iter().any(|(k, l)| k == "F" && l == "fetch"),
     "default status hints should advertise the `F` fetch binding: {default:?}"
@@ -296,7 +318,7 @@ fn status_hints_resolve_user_rebindings() {
 
   km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
     .unwrap();
-  let resolved = HintContext::Status.resolve(&km);
+  let resolved = HintContext::Status.resolve(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults());
   assert!(
     resolved.iter().any(|(k, l)| k == "Ctrl+g" && l == "fetch"),
     "rebinding fetch_github must change the statusbar hint key: {resolved:?}"
@@ -308,11 +330,152 @@ fn status_hints_resolve_user_rebindings() {
 }
 
 #[test]
+fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
+  // The footer is truncated right-to-left when narrow, so the order is also a
+  // priority: actions are grouped by family (worktree lifecycle → act on the
+  // selected worktree → find / navigate panes → global) with the most-used
+  // verb of each family first.
+  use gwm::tui::keymap::Keymap;
+  let labels: Vec<String> = HintContext::Worktrees
+    .resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults())
+    .into_iter()
+    .map(|(_, l)| l)
+    .collect();
+  assert_eq!(
+    labels,
+    vec![
+      "new", "del", "boot", // lifecycle
+      "open", "git", "review", "yank", // act on the selected worktree
+      "filter", "status", "logs", "settings", // find / navigate
+      "help", "quit", // global
+    ],
+    "worktrees footer hints must follow the grouped order"
+  );
+}
+
+#[test]
+fn status_hints_are_grouped_read_then_sidebar_then_navigate_then_global() {
+  use gwm::tui::keymap::Keymap;
+  let labels: Vec<String> = HintContext::Status
+    .resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults())
+    .into_iter()
+    .map(|(_, l)| l)
+    .collect();
+  assert_eq!(
+    labels,
+    vec![
+      "scroll",
+      "fetch", // read the status pane
+      "mode",
+      "layout", // sidebar mode / layout
+      "worktrees",
+      "filter",
+      "logs",
+      "settings", // navigate panes
+      "help",
+      "quit", // global
+    ],
+    "status footer hints must follow the grouped order"
+  );
+}
+
+#[test]
 fn confirm_hints_include_delete_branch_toggle_binding() {
   use gwm::tui::keymap::Keymap;
-  let resolved = HintContext::Confirm.resolve(&Keymap::defaults());
+  let resolved = HintContext::Confirm.resolve(&Keymap::defaults(), &gwm::tui::modal_keymap::ModalKeymap::defaults());
   assert!(
-    resolved.iter().any(|(k, l)| k == "p" && l == "branch"),
+    resolved.iter().any(|(k, l)| k == "D" && l == "branch"),
     "Delete Worktree hints should advertise the branch toggle binding: {resolved:?}"
+  );
+}
+
+#[test]
+fn report_close_hint_resolves_user_rebinding() {
+  // #219 review (P3): the report overlay footer advertised a literal
+  // `Enter/Esc` even after `[tui.keys.modal.report] close` was rebound — the event
+  // loop already routes close through the modal keymap, so the footer must
+  // follow it instead of printing a stale key.
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  let km = Keymap::defaults();
+  let default = HintContext::Report.resolve(&km, &ModalKeymap::defaults());
+  assert!(
+    default.iter().any(|(k, l)| k == "Esc" && l == "close"),
+    "default report footer must advertise the primary `Esc` close: {default:?}"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ReportClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  let resolved = HintContext::Report.resolve(&km, &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebinding report close must change the footer hint: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(k, _)| k == "Enter/Esc"),
+    "the stale literal `Enter/Esc` must not linger after the rebind: {resolved:?}"
+  );
+}
+
+#[test]
+fn link_input_number_drops_fetch_hint_when_shadowed() {
+  // #219 review (P3): in the number-input stage the footer advertises the
+  // global `F fetch` fallback, but if a modal verb is rebound onto `F` the
+  // event loop resolves `F` as that verb first, leaving the fetch hint
+  // pointing at an unreachable action. The footer must drop a global hint
+  // whose key is shadowed by a modal binding in the active context.
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  let km = Keymap::defaults();
+
+  let default = HintContext::LinkInputNumber.resolve(&km, &ModalKeymap::defaults());
+  assert!(
+    default.iter().any(|(k, l)| k == "F" && l == "fetch"),
+    "by default `F fetch` is reachable during number input: {default:?}"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::LinkInputSubmit, vec![parse_single("F").unwrap()])
+    .unwrap();
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "the shadowed `F fetch` hint must be dropped: {resolved:?}"
+  );
+  assert!(
+    resolved.iter().any(|(k, l)| k == "F" && l == "submit"),
+    "F now resolves as submit and must show through: {resolved:?}"
+  );
+}
+
+#[test]
+fn help_close_hint_resolves_user_rebinding() {
+  // #219 review (P3): same staleness on the Keybindings overlay — rebinding
+  // `[tui.keys.modal.help] close` must show through the footer (scroll/pan pairs
+  // stay literal because no single resolved key captures `j/k` / `h/l`).
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  let km = Keymap::defaults();
+  let default = HintContext::Help.resolve(&km, &ModalKeymap::defaults());
+  assert!(
+    default.iter().any(|(k, l)| k == "Esc" && l == "close"),
+    "default help footer must advertise the primary `Esc` close: {default:?}"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::HelpClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  let resolved = HintContext::Help.resolve(&km, &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebinding help close must change the footer hint: {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(k, _)| k == "Esc/q"),
+    "the stale literal `Esc/q` must not linger after the rebind: {resolved:?}"
   );
 }

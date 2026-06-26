@@ -111,12 +111,43 @@ pub enum GwmError {
     source: serde_json::Error,
   },
 
+  /// Issue #38: failed to serialize a `--format=json` / daemon JSON-RPC
+  /// payload. The output DTOs in `json_api` are plain structs so this is
+  /// effectively unreachable, but surfacing it as a typed error keeps the
+  /// JSON output paths off `unwrap`/`expect` (CLAUDE.md house rule).
+  #[error("failed to serialize json output: {0}")]
+  JsonSerialize(#[from] serde_json::Error),
+
   /// Issue #105: `gwm open` / `gwm link` was asked for an issue or PR
   /// linked to a branch but no such link is recorded in git-config.
   /// `kind` names which side (issue vs PR) is missing; `branch` is
   /// the branch shorthand the user queried.
   #[error("no {kind} linked to branch '{branch}'")]
   LinkMissing { kind: LinkKind, branch: String },
+
+  /// Issue #36: `--workspace <dir>` pointed at a directory that holds no
+  /// git repos directly below it. Surfaced rather than opening an empty
+  /// table / TUI so the user can tell a wrong path from an empty root.
+  #[error("no git repos found directly under workspace root '{root}'")]
+  EmptyWorkspace { root: String },
+
+  /// Issue #36: `gwm create` in workspace mode is ambiguous without an
+  /// explicit target repo — list the candidates so the user can pick one.
+  #[error("workspace mode: `gwm create` requires --repo <name> (one of: {available})")]
+  WorkspaceRepoRequired { available: String },
+
+  /// Issue #36: `--repo <name>` named a repo that is not present directly
+  /// under the workspace root.
+  #[error("repo '{name}' not found in workspace (available: {available})")]
+  WorkspaceRepoNotFound { name: String, available: String },
+
+  /// Issue #36: `--workspace` is a global flag, so clap accepts it for every
+  /// subcommand, but only `list`, `create` and bare `gwm` (the TUI) implement
+  /// it. Reject it elsewhere rather than silently ignoring it and acting on
+  /// the current single repo — a wrong-target footgun for destructive
+  /// commands like `gwm remove` (Codex review #303 P2).
+  #[error("--workspace is only supported with `gwm list`, `gwm create`, `gwm exec`, `gwm clean`, or bare `gwm` (the TUI) — refusing to run this subcommand against a single repo")]
+  WorkspaceUnsupportedCommand,
 
   #[error("{0}")]
   Other(String),

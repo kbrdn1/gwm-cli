@@ -1,5 +1,5 @@
 use crate::error::{GwmError, Result};
-use crate::github::{self, BranchLink};
+use crate::github::{self, BranchLink, IssueState, PrState};
 use git2::{BranchType, Repository, StatusOptions, WorktreeAddOptions, WorktreePruneOptions};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,6 +13,11 @@ use std::time::Duration;
 /// convention). Hardcoded here because `branch_age` is also reachable
 /// from contexts that don't carry a `Config` (CLI smoke paths).
 const TRUNK_CANDIDATES: &[&str] = &["main", "master", "dev"];
+/// Common trunk branch names tried (after any configured trunks) when
+/// resolving a PR / diff base, and treated as "this branch is itself a
+/// trunk" by [`is_trunk_branch`]. Superset of [`TRUNK_CANDIDATES`].
+const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
+const BRANCH_CREATED_AT_CONFIG_KEY: &str = "gwm-created-at";
 const RECENT_COMMITS_CACHE_MAX_ENTRIES: usize = 64;
 type RecentCommitCacheKey = (PathBuf, git2::Oid, usize);
 
@@ -21,7 +26,17 @@ static RECENT_COMMITS_CACHE: LazyLock<Mutex<HashMap<RecentCommitCacheKey, Vec<Co
 
 #[derive(Debug, Clone)]
 pub struct WorktreeInfo {
+  /// Display name — the basename of the worktree directory on disk. This is
+  /// what the user sees, yanks, and filters on, so after a `git worktree move`
+  /// (the `c` rename, #290) it reflects the new slug rather than the stale
+  /// internal id (Codex review on PR #292).
   pub name: String,
+  /// Internal git worktree id — the `.git/worktrees/<id>` entry from
+  /// `repo.worktrees()`. `git worktree move` does NOT rename it, so it can
+  /// diverge from [`Self::name`] after a rename. Use this (not `name`) for
+  /// `worktree::remove` / `find_worktree`, which resolve by id. Equal to
+  /// `name` for a freshly created worktree and for the main worktree.
+  pub id: String,
   pub path: PathBuf,
   pub branch: Option<String>,
   pub head: Option<String>,
@@ -34,6 +49,12 @@ pub struct WorktreeInfo {
   /// re-shelling `git config`. Empty link = no marker dot. See
   /// `tui/ui.rs::table_marker`.
   pub link: BranchLink,
+  /// Loaded GitHub issue state for the row, if the TUI has fetched it this
+  /// session. `None` keeps the table on its no-fetch linked/unlinked colour.
+  pub issue_state: Option<IssueState>,
+  /// Loaded GitHub PR state for the row, if the TUI has fetched it this
+  /// session. `None` keeps the table on its no-fetch linked/unlinked colour.
+  pub pr_state: Option<PrState>,
   /// Branch age relative to the trunk baseline, pre-computed at list
   /// time so the TUI render path never opens a fresh `git2::Repository`
   /// per row per frame (issue #103). `None` for trunk branches and for
@@ -185,11 +206,14 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
     let age = branch.as_deref().and_then(|b| branch_age(repo, b));
+    let main_name = workdir
+      .file_name()
+      .map(|n| n.to_string_lossy().to_string())
+      .unwrap_or_else(|| "main".into());
     out.push(WorktreeInfo {
-      name: workdir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "main".into()),
+      // The main worktree has no `.git/worktrees/<id>` entry; id == display.
+      id: main_name.clone(),
+      name: main_name,
       path: workdir.to_path_buf(),
       branch,
       head,
@@ -197,6 +221,8 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked: false,
       is_prunable: false,
       status: compute_status(repo),
+      issue_state: link.issue_state,
+      pr_state: link.pr_state,
       link,
       age,
     });
@@ -247,8 +273,15 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       .as_deref()
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
+    // Display name = basename of the on-disk path (tracks `git worktree move`);
+    // id = the `repo.worktrees()` entry (stable, used for remove/find).
+    let display_name = path
+      .file_name()
+      .map(|n| n.to_string_lossy().to_string())
+      .unwrap_or_else(|| name.to_string());
     out.push(WorktreeInfo {
-      name: name.to_string(),
+      name: display_name,
+      id: name.to_string(),
       path,
       branch,
       head,
@@ -256,6 +289,8 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
       is_locked,
       is_prunable,
       status,
+      issue_state: link.issue_state,
+      pr_state: link.pr_state,
       link,
       age,
     });
@@ -302,7 +337,7 @@ pub fn add(
   let head_ref = repo.head()?;
   let head_short = head_ref.shorthand().ok().map(|s| s.to_string());
   let head_commit = head_ref.peel_to_commit()?;
-  let branch = match repo.find_branch(branch_name, git2::BranchType::Local) {
+  let (branch, created_branch) = match repo.find_branch(branch_name, git2::BranchType::Local) {
     Ok(b) => {
       if !reuse_branch {
         // Resolve the existing tip for the error message so the user
@@ -318,10 +353,13 @@ pub fn add(
           oid,
         });
       }
-      b
+      (b, false)
     }
-    Err(_) => repo.branch(branch_name, &head_commit, false)?,
+    Err(_) => (repo.branch(branch_name, &head_commit, false)?, true),
   };
+  if created_branch {
+    let _ = write_branch_created_at(repo, branch_name, chrono::Utc::now().timestamp());
+  }
   let reference = branch.into_reference();
 
   let mut opts = WorktreeAddOptions::new();
@@ -335,6 +373,28 @@ pub fn add(
   }
 
   Ok(target_path.to_path_buf())
+}
+
+fn branch_config_key(branch: &str, leaf: &str) -> String {
+  format!("branch.{}.{}", branch, leaf)
+}
+
+fn write_branch_created_at(repo: &Repository, branch: &str, unix_secs: i64) -> Result<()> {
+  let mut cfg = repo.config()?;
+  cfg.set_str(
+    &branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY),
+    &unix_secs.to_string(),
+  )?;
+  Ok(())
+}
+
+fn branch_created_age(repo: &Repository, branch: &str) -> Option<Duration> {
+  let cfg = repo.config().ok()?;
+  let key = branch_config_key(branch, BRANCH_CREATED_AT_CONFIG_KEY);
+  let raw = cfg.get_string(&key).ok()?;
+  let created = raw.trim().parse::<i64>().ok()?;
+  let now = chrono::Utc::now().timestamp();
+  Some(Duration::from_secs((now - created).max(0) as u64))
 }
 
 /// Remove a worktree directory and prune its admin files. Optionally delete the branch.
@@ -373,6 +433,278 @@ pub fn remove(repo: &Repository, name: &str, delete_branch: bool) -> Result<()> 
   }
 
   Ok(())
+}
+
+/// Run a `git` subcommand in `dir`, returning trimmed stdout on success or a
+/// [`GwmError::CommandFailed`] carrying stderr on a non-zero exit. Shared by
+/// the worktree-rename steps (#290) so each step reports a precise error.
+fn git_in(dir: &Path, args: &[&str]) -> Result<String> {
+  let mut cmd = Command::new("git");
+  cmd.args(args).current_dir(dir);
+  // Route through the command-log chokepoint so the rename's mutating steps
+  // (`worktree move`, `branch -m`, the lease `fetch`, `push --atomic`) surface
+  // in the Command Logs modal (#290). `git_in` is rename-only, so this never
+  // spams the log with read-only sidebar previews.
+  let out = crate::command_log::run_logged(&mut cmd, format!("git {}", args.join(" ")))?;
+  if out.status.success() {
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+  } else {
+    Err(GwmError::CommandFailed(
+      String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    ))
+  }
+}
+
+/// Rename a worktree's branch (local + remote) and move its directory on
+/// disk (`c` in the TUI, #290).
+///
+/// The directory move is the step most likely to fail (the row is the main
+/// or a locked worktree, or the target path already exists), so it runs
+/// **first** — a failure there leaves every ref untouched (Codex review on
+/// PR #292). Only once the directory is in place are the refs renamed, and a
+/// branch-rename failure rolls the move back so the worktree is never left
+/// in a half-renamed state. Order of operations:
+///
+/// 1. Preflight: refuse if `<new_path>` already exists (the move would fail).
+/// 2. `git worktree move <old_path> <new_path>` (run from `workdir`, the main
+///    repo, so the CWD is never inside the moved dir). Skipped when the path
+///    is unchanged.
+/// 3. When the branch name changes, `git branch -m <old> <new>` from the
+///    moved directory. On failure, roll the move back and return the error. A
+///    path-only edit (same branch) skips this and every remote step.
+/// 4. If `<old_branch>` exists on `origin`, `git push --atomic origin :<old>
+///    <new>:<new>` renames the remote branch (the `--atomic` flag makes the
+///    delete-old + create-new pair all-or-nothing, so a rejected push can't
+///    leave the remote with neither branch), then `git branch
+///    --set-upstream-to` re-points tracking (non-fatal). A rejected push rolls
+///    back both the local rename and the move so the repo is never left
+///    half-renamed.
+///
+/// Returns `true` when the remote branch was also renamed (it existed on
+/// `origin`), `false` when only the local branch + directory changed (or a
+/// path-only move with no branch change).
+pub fn rename_worktree(
+  workdir: &Path,
+  old_path: &Path,
+  old_branch: &str,
+  new_path: &Path,
+  new_branch: &str,
+) -> Result<bool> {
+  let moves = new_path != old_path;
+
+  // 1. Preflight — a pre-existing target would make `git worktree move`
+  //    fail anyway, so reject it up front before touching any ref.
+  if moves && new_path.exists() {
+    return Err(GwmError::CommandFailed(format!(
+      "target path already exists: {}",
+      new_path.display()
+    )));
+  }
+
+  // 2. Move the worktree directory first: it is the most failure-prone step
+  //    (main/locked worktree, busy dir), and failing here leaves all refs
+  //    untouched.
+  if moves {
+    git_in(
+      workdir,
+      &[
+        "worktree",
+        "move",
+        &old_path.to_string_lossy(),
+        &new_path.to_string_lossy(),
+      ],
+    )
+    .map_err(|e| GwmError::CommandFailed(format!("worktree move failed: {e}")))?;
+  }
+  // From here on the branch lives in `branch_dir`.
+  let branch_dir = if moves { new_path } else { old_path };
+
+  // Roll the directory move back to its original location. Used when a later
+  // step fails so the worktree is never left moved-but-not-renamed.
+  let rollback_move = || {
+    if moves {
+      let _ = git_in(
+        workdir,
+        &[
+          "worktree",
+          "move",
+          &new_path.to_string_lossy(),
+          &old_path.to_string_lossy(),
+        ],
+      );
+    }
+  };
+
+  // A path-only edit (same branch, different dir — e.g. a changed
+  // `[worktree].base`) must skip every ref mutation: `git branch -m old old`
+  // is an error, which would roll a valid move back (Codex review on PR #292).
+  let renames_branch = new_branch != old_branch;
+  if !renames_branch {
+    return Ok(false);
+  }
+
+  // 3. Local branch rename. Roll the directory move back on failure so the
+  //    worktree is not left moved-but-not-renamed.
+  if let Err(e) = git_in(branch_dir, &["branch", "-m", old_branch, new_branch]) {
+    rollback_move();
+    return Err(GwmError::CommandFailed(format!("local rename failed: {e}")));
+  }
+
+  // 4. Remote branch rename, only when the old branch is on origin.
+  //    First decide whether an `origin` remote is even configured: with no
+  //    remote a local-only rename is perfectly valid (don't abort). Only when
+  //    `origin` exists do we look the branch up — and there, with
+  //    `--exit-code`, `git ls-remote` exits 0 when the branch is found and 2
+  //    when it is genuinely absent. Any other status (auth, network, server)
+  //    is a lookup *failure*, not "absent": treating it as absent would skip
+  //    the remote rename and report local-only success while `origin/<old>`
+  //    lives on, so abort + roll back instead (Codex review on PR #292).
+  let has_origin = Command::new("git")
+    .args(["remote", "get-url", "origin"])
+    .current_dir(branch_dir)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+  let remote_exists = if has_origin {
+    let ls = Command::new("git")
+      .args(["ls-remote", "--exit-code", "--heads", "origin", old_branch])
+      .current_dir(branch_dir)
+      .output();
+    match ls {
+      Ok(o) if o.status.success() => true,
+      Ok(o) if o.status.code() == Some(2) => false,
+      other => {
+        let detail = match other {
+          Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+          Err(e) => e.to_string(),
+        };
+        let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+        rollback_move();
+        return Err(GwmError::CommandFailed(format!("remote lookup failed: {detail}")));
+      }
+    }
+  } else {
+    false
+  };
+  let mut remote_renamed = false;
+  if remote_exists {
+    // Lease check (Codex review on PR #292): the rename deletes `origin/<old>`
+    // and recreates it from the LOCAL tip. If `origin/<old>` has commits this
+    // worktree never fetched, that would silently drop them. Fetch the current
+    // remote tip and refuse unless it is already contained in the local branch.
+    let _ = git_in(branch_dir, &["fetch", "origin", old_branch]);
+    let remote_tip = Command::new("git")
+      .args(["rev-parse", "FETCH_HEAD"])
+      .current_dir(branch_dir)
+      .output();
+    // Keep the fetched old tip so the push can lease against it (Codex review
+    // on PR #292, P1): the ancestor check below only proves the tip we *saw*
+    // is contained locally — it cannot stop `origin/<old>` from advancing in
+    // the window between this fetch and the push. The `--force-with-lease`
+    // makes the delete refspec conditional on this exact tip, so a concurrent
+    // push lands the rename in the rejected/rollback path instead of dropping
+    // the other writer's commits.
+    let fetched_old_tip = match &remote_tip {
+      Ok(o) if o.status.success() => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()),
+      _ => None,
+    };
+    let up_to_date = match &fetched_old_tip {
+      Some(tip) => {
+        // The remote tip must be an ancestor of (already contained in) the
+        // local branch — otherwise origin carries commits we don't have.
+        Command::new("git")
+          .args(["merge-base", "--is-ancestor", tip, new_branch])
+          .current_dir(branch_dir)
+          .output()
+          .map(|o| o.status.success())
+          .unwrap_or(false)
+      }
+      None => false,
+    };
+    if !up_to_date {
+      let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+      rollback_move();
+      return Err(GwmError::CommandFailed(format!(
+        "origin/{old_branch} has commits not in your local branch; fetch/merge before renaming"
+      )));
+    }
+    // Prove `origin/<new_branch>` is absent before pushing (Codex review on
+    // PR #292, P1). If it already exists and is an ancestor of our local tip,
+    // the `<new>:<new>` refspec is a fast-forward, not a create — the atomic
+    // push would move that pre-existing remote branch AND delete origin/<old>,
+    // silently overwriting another worktree's branch. Refuse up front and roll
+    // the local rename + move back. (`ls-remote --exit-code` exits 0 when the
+    // ref is found.)
+    let target_exists = Command::new("git")
+      .args([
+        "ls-remote",
+        "--exit-code",
+        "origin",
+        &format!("refs/heads/{new_branch}"),
+      ])
+      .current_dir(branch_dir)
+      .output()
+      .map(|o| o.status.success())
+      .unwrap_or(false);
+    if target_exists {
+      let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+      rollback_move();
+      return Err(GwmError::CommandFailed(format!(
+        "origin/{new_branch} already exists; choose another name or delete it on the remote first"
+      )));
+    }
+    // `--atomic` makes the two-refspec push all-or-nothing: without it git can
+    // delete `origin/<old>` and then fail on `<new>`, leaving the remote with
+    // neither branch — and the local rollback below can't restore a deleted
+    // remote ref (Codex review on PR #292). With `--atomic`, a rejected push
+    // leaves `origin/<old>` intact, so the local rollback fully restores state.
+    //
+    // `--force-with-lease=<old>:<fetched tip>` guards the delete refspec: the
+    // server only honours `:{old_branch}` while `origin/<old>` still points at
+    // the tip we fetched and proved contained locally. A commit pushed by
+    // someone else in the fetch→push window flips the lease, the atomic push
+    // is rejected as a whole, and we roll back instead of dropping their work
+    // (Codex review on PR #292, P1).
+    let lease = fetched_old_tip
+      .as_deref()
+      .map(|tip| format!("--force-with-lease={old_branch}:{tip}"));
+    // Absence lease on the new ref (Codex review on PR #292, P1, iter 4): a
+    // zero-OID expected value makes `<new>:<new>` a *create-only* push. The
+    // preflight `ls-remote` above has a window — another client can create
+    // `origin/<new>` before our push — and without this lease an atomic push
+    // would fast-forward that ref while deleting `origin/<old>`. The zero-OID
+    // lease makes the server reject the whole push if `origin/<new>` exists.
+    let new_absence_lease = format!("--force-with-lease={new_branch}:{}", "0".repeat(40));
+    let mut push_args: Vec<&str> = vec!["push", "--atomic"];
+    if let Some(lease) = lease.as_deref() {
+      push_args.push(lease);
+    }
+    push_args.push(&new_absence_lease);
+    let old_refspec = format!(":{old_branch}");
+    let new_refspec = format!("{new_branch}:{new_branch}");
+    push_args.extend(["origin", &old_refspec, &new_refspec]);
+    if let Err(e) = git_in(branch_dir, &push_args) {
+      // The remote push was rejected (protected branch, auth/network, or an
+      // existing remote target). Undo the local branch rename and the move so
+      // the repo is not left half-renamed (Codex review on PR #292).
+      let _ = git_in(branch_dir, &["branch", "-m", new_branch, old_branch]);
+      rollback_move();
+      return Err(GwmError::CommandFailed(format!("remote rename failed: {e}")));
+    }
+    // Re-track the new upstream. Non-fatal: the rename is already done.
+    let _ = git_in(
+      branch_dir,
+      &[
+        "branch",
+        "--set-upstream-to",
+        &format!("origin/{new_branch}"),
+        new_branch,
+      ],
+    );
+    remote_renamed = true;
+  }
+
+  Ok(remote_renamed)
 }
 
 /// One prunable worktree entry as surfaced by `gwm prune --dry-run`
@@ -583,17 +915,33 @@ fn parse_git_log_with_author_output(raw: &str) -> Result<Vec<CommitRow>> {
 /// non-zero exit (or the spawn error if `git` could not be launched).
 ///
 /// This is the single shell-out helper for the read-side git invocations
-/// (sidebar previews, PR-body fillers) and for `gwm sync`'s mutating steps
-/// (issue #237 deduped five hand-rolled copies of this exact pattern).
+/// (sidebar previews, PR-body fillers). Read-only previews fire on every
+/// selection change, so this variant is deliberately **not** logged — see
+/// [`run_git_logged`] for the mutating-step counterpart used by `gwm sync`.
 /// Callers that need trimming, truncation, or field parsing post-process the
 /// returned `String` themselves.
 pub fn run_git(dir: &Path, args: &[&str]) -> Result<String> {
-  let out = Command::new("git")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .output()
-    .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
+  run_git_inner(dir, args, false)
+}
+
+/// Like [`run_git`] but records the call on the process-global command log so
+/// it surfaces in the Command Logs modal (#290). Used for `gwm sync`'s
+/// mutating steps (`fetch` / `rebase` / `merge` / `--abort`), which are
+/// user-triggered operations the user expects to find in the transcript —
+/// unlike the read-only previews that go through [`run_git`].
+pub fn run_git_logged(dir: &Path, args: &[&str]) -> Result<String> {
+  run_git_inner(dir, args, true)
+}
+
+fn run_git_inner(dir: &Path, args: &[&str], log: bool) -> Result<String> {
+  let mut cmd = Command::new("git");
+  cmd.arg("-C").arg(dir).args(args);
+  let out = if log {
+    crate::command_log::run_logged(&mut cmd, format!("git {}", args.join(" ")))
+  } else {
+    cmd.output()
+  }
+  .map_err(|e| GwmError::CommandFailed(format!("git {} failed to spawn: {}", args.join(" "), e)))?;
   if !out.status.success() {
     return Err(GwmError::CommandFailed(format!(
       "git {} exited {}: {}",
@@ -643,6 +991,97 @@ pub fn git_diff_stat_between(path: &Path, base: &str, head: &str, max_lines: usi
     ));
   }
   Ok(out)
+}
+
+/// Insertion / deletion line counts of a branch versus its base trunk
+/// (issue #287). Populated from `git diff --shortstat <base>...HEAD` — the
+/// three-dot merge-base form, so the figures reflect only what the branch
+/// itself contributed (the GitHub-PR view), not divergence that landed on
+/// the trunk after the fork.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DiffLineStat {
+  /// Lines added by the branch relative to the merge-base with its trunk.
+  pub insertions: usize,
+  /// Lines removed by the branch relative to the merge-base with its trunk.
+  pub deletions: usize,
+}
+
+impl DiffLineStat {
+  /// True when the branch carries no committed diff against its base — a
+  /// fresh branch with no commits past the fork point, or one whose net
+  /// change is empty. The sidebar hides the `Diff` line in that case.
+  pub fn is_empty(&self) -> bool {
+    self.insertions == 0 && self.deletions == 0
+  }
+}
+
+/// Parse a `git diff --shortstat` summary line into a [`DiffLineStat`]
+/// (issue #287). The line looks like
+/// ` 3 files changed, 12 insertions(+), 4 deletions(-)`, but either the
+/// insertions or the deletions clause can be absent — an all-additions or
+/// all-deletions diff omits the empty side, and an empty diff yields an
+/// empty string. Any clause that's missing counts as zero; the singular
+/// `1 insertion(+)` / `1 deletion(-)` forms are handled too.
+pub fn parse_diff_shortstat(raw: &str) -> DiffLineStat {
+  let mut out = DiffLineStat::default();
+  for part in raw.split(',') {
+    let part = part.trim();
+    if let Some(n) = part
+      .strip_suffix("insertions(+)")
+      .or_else(|| part.strip_suffix("insertion(+)"))
+    {
+      out.insertions = n.trim().parse().unwrap_or(0);
+    } else if let Some(n) = part
+      .strip_suffix("deletions(-)")
+      .or_else(|| part.strip_suffix("deletion(-)"))
+    {
+      out.deletions = n.trim().parse().unwrap_or(0);
+    }
+  }
+  out
+}
+
+/// True when `branch` is itself a trunk — present in the configured trunk
+/// list or in the [`COMMON_TRUNKS`] defaults. Used to suppress the Status
+/// pane's diff row on trunk worktrees regardless of which trunk
+/// `resolve_trunk` would pick as the base (issue #287).
+pub fn is_trunk_branch(branch: &str, configured: &[String]) -> bool {
+  configured.iter().any(|t| t == branch) || COMMON_TRUNKS.contains(&branch)
+}
+
+/// Committed diff size of the worktree's current branch versus its base
+/// trunk (issue #287), via `git diff --shortstat <base>...HEAD`. Returns
+/// `Ok(None)` when the path is not a readable repo, when HEAD is itself a
+/// trunk (no meaningful base to diff against — see [`is_trunk_branch`]), or
+/// when no base trunk resolves locally. `trunks` is the configured
+/// trunk-priority list (`config.doctor.trunks`) so the figure matches the
+/// base `gwm pr` would target — `resolve_trunk` walks it before falling
+/// back to the common defaults.
+pub fn git_diff_stat_vs_base(path: &Path, trunks: &[String]) -> Result<Option<DiffLineStat>> {
+  let repo = match Repository::open(path) {
+    Ok(r) => r,
+    Err(_) => return Ok(None),
+  };
+  // HEAD sitting on *any* trunk has no meaningful base to diff against —
+  // suppress the row so a trunk worktree never shows a `Diff`. This must
+  // check the whole trunk universe, not just the resolved base: with the
+  // default `["dev", "main"]`, a worktree on `main` resolves its base to
+  // `dev` (the earlier candidate), and a `head == base` check alone would
+  // leak a `main...dev` diff onto a trunk worktree (issue #287 review).
+  if let Ok(head) = repo.head() {
+    if let Ok(branch) = head.shorthand() {
+      if is_trunk_branch(branch, trunks) {
+        return Ok(None);
+      }
+    }
+  }
+  let base = match resolve_trunk(&repo, trunks) {
+    Some(b) => b,
+    None => return Ok(None),
+  };
+  let range = format!("{}...HEAD", base);
+  let raw = run_git(path, &["diff", "--shortstat", &range])?;
+  Ok(Some(parse_diff_shortstat(&raw)))
 }
 
 /// One row of `git stash list` (issue #34). Surfaced by the sidebar
@@ -697,10 +1136,127 @@ pub fn git_stash_list(path: &Path, limit: usize) -> Result<Vec<StashEntry>> {
   Ok(entries)
 }
 
-/// Shell out to `git status --short` inside `path` and return raw stdout.
-/// Used by the TUI sidebar to preview the working-tree state.
-pub fn git_status_short(path: &Path) -> Result<String> {
-  run_git(path, &["status", "--short"])
+/// Hard cap on the number of NUL-terminated `git status -z` records read
+/// before the scan is abandoned (issue #300). `--untracked-files=all` makes
+/// git recurse into unignored generated/vendor directories; streaming the
+/// output and stopping here bounds **both** git's directory walk (the child
+/// is killed once the cap is hit) and our own parse / allocation, so a
+/// pathological worktree can't stall the TUI. Set well above any realistic
+/// change set; the file tree itself renders at most
+/// [`crate::tui::wt_tree::WT_TREE_MAX_FILES`].
+pub const STATUS_SCAN_CAP: usize = 5000;
+
+/// Stream `git status --porcelain -z --untracked-files=all` inside `path`
+/// and return raw stdout, capped at [`STATUS_SCAN_CAP`] records. Used by the
+/// TUI sidebar to preview the working-tree state.
+///
+/// Two flags matter for the Working Tree file-explorer (issue #300):
+///
+/// - `--untracked-files=all` expands an entirely-untracked directory into
+///   its individual files (`src/app/mod.rs`) instead of git's default
+///   collapsed `src/` row, so the tree can nest them. Git-ignored paths
+///   (e.g. `target/`) stay excluded, so the pane never floods with build
+///   artefacts.
+/// - `--porcelain -z` emits paths **verbatim**, NUL-terminated — no double-
+///   quoting of non-ASCII / special-character names, and renames carry the
+///   source path as a separate NUL field instead of an ambiguous
+///   `old -> new` text join. This lets [`crate::tui::wt_tree::parse_status_z`]
+///   parse filenames containing spaces, arrows, quotes, or UTF-8 bytes
+///   without guesswork. The footer counts (issue #287) parse the same
+///   stream.
+pub fn git_status_short(path: &Path) -> Result<(String, bool)> {
+  git_status_short_capped(path, STATUS_SCAN_CAP)
+}
+
+/// Cap-injectable core of [`git_status_short`]. Spawns git with a piped
+/// stdout, reads NUL-terminated records until `cap` is reached (then kills
+/// the child so git stops walking the tree), and returns `(bytes, truncated)`
+/// — the raw stdout gathered so far plus whether the cap was hit (so the
+/// caller reports a lower bound rather than an exact total). Exposed so
+/// integration tests can exercise truncation with a small `cap` instead of
+/// creating thousands of files.
+pub fn git_status_short_capped(path: &Path, cap: usize) -> Result<(String, bool)> {
+  use std::io::{BufRead, BufReader};
+  use std::process::{Command, Stdio};
+
+  // `--no-optional-locks` keeps git from taking the index lock for its
+  // opportunistic stat-cache refresh (the flag git ships for status pollers
+  // like IDEs / watchman). Without it, killing the child at the cap could
+  // leave a stale `.git/index.lock` behind and break the next git command in
+  // that worktree.
+  let mut child = Command::new("git")
+    .arg("--no-optional-locks")
+    .arg("-C")
+    .arg(path)
+    .args(["status", "--porcelain", "-z", "--untracked-files=all"])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .map_err(|e| GwmError::CommandFailed(format!("git status failed to spawn: {}", e)))?;
+
+  let stdout = child
+    .stdout
+    .take()
+    .ok_or_else(|| GwmError::CommandFailed("git status: stdout pipe missing".to_string()))?;
+  // Drain stderr on its own thread so a chatty git (advisory warnings under
+  // `-uall`) can't fill the stderr pipe and deadlock against our stdout read.
+  let stderr_reader = child.stderr.take().map(|mut stderr| {
+    std::thread::spawn(move || {
+      use std::io::Read;
+      let mut buf = String::new();
+      let _ = stderr.read_to_string(&mut buf);
+      buf
+    })
+  });
+
+  let mut reader = BufReader::new(stdout);
+  let mut collected: Vec<u8> = Vec::new();
+  let mut segment: Vec<u8> = Vec::new();
+  let mut records = 0usize;
+  let mut truncated = false;
+  loop {
+    if records >= cap {
+      truncated = true;
+      break;
+    }
+    segment.clear();
+    let n = reader
+      .read_until(0u8, &mut segment)
+      .map_err(|e| GwmError::CommandFailed(format!("git status: read failed: {}", e)))?;
+    if n == 0 {
+      break; // EOF — git produced fewer than `cap` records.
+    }
+    collected.extend_from_slice(&segment);
+    // A trailing NUL marks a complete record; a final unterminated chunk
+    // (only at true EOF) is kept verbatim and just isn't counted.
+    if segment.last() == Some(&0) {
+      records += 1;
+    }
+  }
+
+  if truncated {
+    // We have enough to render — stop git's directory walk. The kill is
+    // best-effort: the child may have already exited on a small tree.
+    let _ = child.kill();
+  }
+  let status = child
+    .wait()
+    .map_err(|e| GwmError::CommandFailed(format!("git status: wait failed: {}", e)))?;
+  // Joining the drainer also closes our end of the stderr pipe.
+  let stderr = stderr_reader.and_then(|h| h.join().ok()).unwrap_or_default();
+
+  // A non-truncated, unsuccessful run is a real failure (e.g. not a repo) —
+  // surface git's stderr. A truncated run was killed on purpose, so its
+  // non-zero status is expected and ignored.
+  if !truncated && !status.success() {
+    return Err(GwmError::CommandFailed(format!(
+      "git status exited {}: {}",
+      status,
+      stderr.trim()
+    )));
+  }
+
+  Ok((String::from_utf8_lossy(&collected).into_owned(), truncated))
 }
 
 /// Time elapsed since the *oldest* commit on `branch` that's not also on a
@@ -718,6 +1274,10 @@ pub fn branch_age(repo: &Repository, branch: &str) -> Option<Duration> {
   // UI can render a dash instead of a misleadingly precise duration.
   if TRUNK_CANDIDATES.contains(&branch) {
     return None;
+  }
+
+  if let Some(age) = branch_created_age(repo, branch) {
+    return Some(age);
   }
 
   let local = repo.find_branch(branch, BranchType::Local).ok()?;
@@ -793,8 +1353,49 @@ pub fn format_relative_duration(d: Duration) -> String {
 /// Resolve a worktree by exact name first, then by substring (case-insensitive) within the dir name.
 pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
   let all = list(repo)?;
-  if let Some(exact) = all.iter().find(|w| w.name == pattern && !w.is_main) {
-    return Ok(exact.clone());
+  // Exact display-name match. Since #290 derives `name` from the path basename,
+  // it is no longer guaranteed unique (two worktrees in different parent dirs
+  // can share a basename), so an exact match that hits more than one row is
+  // ambiguous rather than "take the first" (Codex review on PR #292).
+  let exact: Vec<&WorktreeInfo> = all.iter().filter(|w| w.name == pattern && !w.is_main).collect();
+  match exact.len() {
+    1 => {
+      // A *different* worktree's stable id can equal this display name (an old
+      // slug left behind by `git worktree move`). Returning the name-match
+      // would silently shadow it, so a token that is one worktree's id and
+      // another's name is ambiguous (Codex review on PR #292).
+      if let Some(by_id) = all
+        .iter()
+        .find(|w| w.id == pattern && w.id != exact[0].id && !w.is_main)
+      {
+        return Err(GwmError::Other(format!(
+          "'{}' is ambiguous: the display name of '{}' and the id of '{}'; target one by its unique id",
+          pattern, exact[0].id, by_id.id
+        )));
+      }
+      return Ok(exact[0].clone());
+    }
+    n if n > 1 => {
+      // Duplicate display names are always ambiguous — even if one worktree's
+      // internal id equals the typed token. Resolving to that id-match would
+      // silently pick one row while the same visible name labels another, so a
+      // user typing the duplicated name (e.g. `gwm remove dup`) is forced to
+      // disambiguate by a unique id instead (Codex review on PR #292, iter 4).
+      // Ids that differ from any duplicated name stay reachable through the
+      // unique-name-not-found branch below.
+      let ids = exact.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(", ");
+      return Err(GwmError::Other(format!(
+        "name '{}' is ambiguous ({} worktrees share it); target one by id: {}",
+        pattern, n, ids
+      )));
+    }
+    // Unique display name not found: allow an exact id match before falling
+    // back to substring search, so a renamed worktree stays reachable by id.
+    _ => {
+      if let Some(by_id) = all.iter().find(|w| w.id == pattern && !w.is_main) {
+        return Ok(by_id.clone());
+      }
+    }
   }
   let pat = pattern.to_lowercase();
   let mut matches: Vec<&WorktreeInfo> = all
@@ -821,7 +1422,6 @@ pub fn find_fuzzy(repo: &Repository, pattern: &str) -> Result<WorktreeInfo> {
 /// downstream `gh pr create --base main` produces a clean error message
 /// instead of a panic.
 pub fn resolve_trunk(repo: &Repository, configured: &[String]) -> Option<String> {
-  const COMMON_TRUNKS: &[&str] = &["main", "master", "dev", "develop", "trunk"];
   for trunk in configured {
     if repo.find_branch(trunk, BranchType::Local).is_ok() {
       return Some(trunk.clone());

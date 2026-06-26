@@ -119,23 +119,111 @@ define_actions! {
   DeleteConfirm     => "delete",
   Bootstrap         => "bootstrap",
   ToggleDeleteBranch => "delete_branch",
-  // Hand-offs
-  GitTui            => "git_tui",
-  Review            => "review",
-  Yank              => "yank",
-  Open              => "open",
-  OpenMenu          => "open_menu",
+  Pull              => "pull",
+  Push              => "push",
+  EditWorktree      => "edit_worktree",
+  ExitToWorktree    => "exit_to_worktree",
+  LazyGitPty        => "lazygit_pty",
+  LazyGitFullscreen => "lazygit_fullscreen",
+  ReviewFullscreen  => "review_fullscreen",
+  ReviewPty         => "review_pty",
+  YankPath          => "yank_path",
+  YankBranchName    => "yank_branch_name",
+  YankWorktreeName  => "yank_worktree_name",
+  TerminalPty       => "terminal_pty",
+  TerminalFullscreen => "terminal_fullscreen",
+  BrowseLinks       => "browse_links",
   OpenDocs          => "open_docs",
   LinkPrompt        => "link",
   FetchGithub       => "fetch_github",
+  MuxPane           => "mux_pane",
+  Macro1            => "macro_one",
+  Macro2            => "macro_two",
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  ExecOverlay       => "exec_overlay",
+  CleanOverlay      => "clean_overlay",
   Help              => "help",
   Quit              => "quit",
   // Future surface — bound to ':' by default, picked up by #32.
   CommandPalette    => "command_palette",
 }
+
+impl Action {
+  /// Like [`Action::from_slug`] but also accepts the pre-#290 slugs that were
+  /// renamed. Use this in config deserialization so existing `.gwm.toml` files
+  /// with the old key names keep working after the upgrade.
+  ///
+  /// The canonical slug is tried first; only on a miss do the compat aliases
+  /// fire. The aliases are intentionally one-way: `Action::slug()` still
+  /// returns the new canonical slug, so `gwm tui keys` and the help overlay
+  /// stay up-to-date.
+  pub fn from_slug_compat(s: &str) -> Option<Self> {
+    if let Some(a) = Self::from_slug(s) {
+      return Some(a);
+    }
+    COMPAT_ALIASES.iter().find(|(slug, _)| *slug == s).map(|(_, a)| *a)
+  }
+
+  /// Whether this action mutates a repo through the *active* repo context
+  /// (`App.repo`/`workdir`/`config`) rather than only the selected worktree's
+  /// path. In workspace mode (#304) these are blocked while the selected row's
+  /// repo can't be activated, since they would otherwise target the previously
+  /// active repo. Navigation, yanks and read-only launchers are absent on
+  /// purpose — they don't write through the active repo handle.
+  pub fn is_repo_mutating(self) -> bool {
+    matches!(
+      self,
+      Action::Create
+        | Action::DeleteConfirm
+        | Action::Bootstrap
+        | Action::Sync
+        | Action::Pull
+        | Action::Push
+        | Action::EditWorktree
+        | Action::LinkPrompt
+        // FetchGithub persists detected PR/issue titles + states into the
+        // active repo's git config, so it writes through `App.repo` too (#304).
+        | Action::FetchGithub
+        // #325: the exec / clean overlays resolve their command / dir-set from
+        // the *active* repo's `[exec]` / `[clean]` config and act on the
+        // selected worktree's path. With a stale workspace selection both the
+        // config and the path belong to the previously active repo — and exec
+        // runs an arbitrary command while clean deletes directories — so they
+        // must be blocked before the overlay opens (Codex #333 review).
+        | Action::ExecOverlay
+        | Action::CleanOverlay
+    )
+  }
+
+  /// The pre-#290 alias slug(s) that resolve to this action, if any. Used by
+  /// the in-TUI keymap editor (issue #294) to strip a stale alias from a
+  /// legacy config when the canonical slug is (re)written — otherwise the
+  /// alias, applied later in the sorted override walk, would silently shadow
+  /// the new binding (Codex #297 review).
+  pub fn compat_alias_slugs(self) -> impl Iterator<Item = &'static str> {
+    COMPAT_ALIASES
+      .iter()
+      .filter(move |(_, a)| *a == self)
+      .map(|(slug, _)| *slug)
+  }
+}
+
+/// Pre-#290 slug aliases, accepted by [`Action::from_slug_compat`] so existing
+/// `.gwm.toml` files keep working after the #290 rename. The canonical slug is
+/// always preferred; these only fire on a miss. Single source of truth for both
+/// directions (resolve + [`Action::compat_alias_slugs`]).
+const COMPAT_ALIASES: &[(&str, Action)] = &[
+  ("git_tui", Action::LazyGitFullscreen),
+  ("git_tui_overlay", Action::LazyGitPty),
+  ("review", Action::ReviewFullscreen),
+  ("review_overlay", Action::ReviewPty),
+  ("yank", Action::YankPath),
+  ("open", Action::TerminalFullscreen),
+  ("open_terminal_overlay", Action::TerminalPty),
+  ("open_menu", Action::BrowseLinks),
+];
 
 // ---------------------------------------------------------------------------
 // Key-string parser
@@ -182,12 +270,23 @@ impl KeyStroke {
   /// modifier) matches every variant. Without this, the bound chord and
   /// the runtime event compared unequal on SHIFT-reporting terminals and
   /// every uppercase binding (`G`, `R`, `V`, `H`, …) silently did nothing
-  /// (PR #192). Non-`Char` codes (e.g. `Shift+Tab` → `BackTab`) keep their
-  /// SHIFT bit untouched.
+  /// (PR #192).
+  ///
+  /// `BackTab` gets the same treatment for the same reason: it *is* the
+  /// shifted Tab, but terminals disagree on whether they additionally set
+  /// the `SHIFT` bit (some send bare `BackTab`, others `BackTab` + `SHIFT`,
+  /// kitty `BackTab` + `SHIFT`). We canonicalise to bare `BackTab` so a
+  /// binding written `"BackTab"` matches every variant. Without this the
+  /// modal `prev_field` / `prev_tab` defaults silently stopped firing on
+  /// SHIFT-reporting terminals once they routed through the keymap instead
+  /// of a modifier-blind `match KeyCode::BackTab` (issue #219 review).
   fn normalize(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
     match code {
       KeyCode::Char(c) if modifiers.contains(KeyModifiers::SHIFT) => {
         (KeyCode::Char(c.to_ascii_uppercase()), modifiers - KeyModifiers::SHIFT)
+      }
+      KeyCode::BackTab if modifiers.contains(KeyModifiers::SHIFT) => {
+        (KeyCode::BackTab, modifiers - KeyModifiers::SHIFT)
       }
       _ => (code, modifiers),
     }
@@ -387,32 +486,67 @@ impl Keymap {
       def(Action::Up, &["k", "Up"]),
       def(Action::Top, &["g g"]),
       def(Action::Bottom, &["G", "End"]),
-      def(Action::ToggleSidebar, &["v"]),
-      def(Action::ToggleSidebarMode, &["s"]),
-      def(Action::CycleSidebarLayout, &["V"]),
-      def(Action::ToggleSidebarPosition, &["H"]),
+      // #290: V=toggle show/hide, S=cycle content (Commits↔Stashes),
+      // Space=cycle orientation (auto/side-by-side/stacked), v=toggle position.
+      def(Action::ToggleSidebar, &["V"]),
+      def(Action::ToggleSidebarMode, &["S"]),
+      def(Action::CycleSidebarLayout, &["Space"]),
+      def(Action::ToggleSidebarPosition, &["v"]),
       def(Action::FocusSwap, &["Tab"]),
       def(Action::FocusWorktrees, &["1"]),
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #325: `x` opens the exec profile picker overlay.
+      def(Action::ExecOverlay, &["x"]),
+      // #325: `X` opens the clean reclaim overlay.
+      def(Action::CleanOverlay, &["X"]),
       def(Action::Filter, &["/"]),
-      def(Action::Refresh, &["f", "r"]),
-      // `s` is taken by ToggleSidebarMode, so Sync defaults to `S` — an
-      // uppercase lifecycle verb alongside `F` (FetchGithub) / `R` (Review).
-      def(Action::Sync, &["S"]),
+      def(Action::Refresh, &["f"]),
+      // #290: `s` (lowercase) is now Sync — replaces ToggleSidebarMode.
+      def(Action::Sync, &["s"]),
       def(Action::Create, &["n"]),
       def(Action::DeleteConfirm, &["d"]),
       def(Action::Bootstrap, &["b"]),
-      def(Action::ToggleDeleteBranch, &["p"]),
-      def(Action::GitTui, &["l"]),
-      def(Action::Review, &["R"]),
-      def(Action::Yank, &["y"]),
-      def(Action::Open, &["o"]),
-      def(Action::OpenMenu, &["O"]),
+      // #290: `D` (uppercase) is now ToggleDeleteBranch — `p` repurposed as Pull.
+      def(Action::ToggleDeleteBranch, &["D"]),
+      // #290: `p` is now Pull (was ToggleDeleteBranch before).
+      def(Action::Pull, &["p"]),
+      // #290: `P` is Push.
+      def(Action::Push, &["P"]),
+      // #290: `c` opens the edit-worktree modal (rename branch).
+      def(Action::EditWorktree, &["c"]),
+      // #290: `e` exits the TUI and prints the selected worktree path to stdout.
+      def(Action::ExitToWorktree, &["e"]),
+      // #35/#290: `l` opens lazygit in an embedded PTY overlay.
+      def(Action::LazyGitPty, &["l"]),
+      // #290: `L` opens lazygit fullscreen (was unbound before #290).
+      def(Action::LazyGitFullscreen, &["L"]),
+      // #290: `R` opens the review launcher fullscreen (renamed from review).
+      def(Action::ReviewFullscreen, &["R"]),
+      // #35/#290: `r` opens the review launcher in an embedded PTY overlay.
+      def(Action::ReviewPty, &["r"]),
+      // #290: `Y` yanks the worktree path (was `y` before #290).
+      def(Action::YankPath, &["Y"]),
+      // #290: `y` yanks the branch name (was yank-path `y` before #290).
+      def(Action::YankBranchName, &["y"]),
+      // #290: `w` yanks the worktree slug/name.
+      def(Action::YankWorktreeName, &["w"]),
+      // #35/#290: `o` opens a native terminal PTY overlay (renamed from open_terminal_overlay).
+      def(Action::TerminalPty, &["o"]),
+      // #290: `O` opens a native terminal fullscreen (was unbound before #290).
+      def(Action::TerminalFullscreen, &["O"]),
+      // #290: `B` opens the browse-links menu (was `O` for open_menu before #290).
+      def(Action::BrowseLinks, &["B"]),
       def(Action::OpenDocs, &["."]),
-      def(Action::LinkPrompt, &["L"]),
+      // #290: `i` links the selected worktree to an issue/PR (was `L` before #290).
+      def(Action::LinkPrompt, &["i"]),
       def(Action::FetchGithub, &["F"]),
+      // #290: `t` opens the selected worktree in a new multiplexer pane/tab.
+      def(Action::MuxPane, &["t"]),
+      // #290: `h`/`H` fire user-configured macro1/macro2.
+      def(Action::Macro1, &["h"]),
+      def(Action::Macro2, &["H"]),
       def(Action::Help, &["?"]),
       def(Action::Quit, &["q"]),
       def(Action::CommandPalette, &[":"]),
@@ -432,12 +566,25 @@ impl Keymap {
   /// left untouched on error so callers can surface the message and
   /// move on.
   pub fn apply_override(&mut self, action: Action, chords: Vec<Vec<KeyStroke>>) -> Result<()> {
+    // Build the candidate list. For default bindings on other actions, silently
+    // vacate any chord that the new user override is claiming — user intent is
+    // explicit and wins over shipped defaults. User-vs-user conflicts still
+    // fail validation below.
+    let new_chord_set: std::collections::HashSet<&[KeyStroke]> = chords.iter().map(|c| c.as_slice()).collect();
     let mut candidate: Vec<(Action, Vec<Vec<KeyStroke>>)> = self
       .entries
       .iter()
       .map(|b| {
         if b.action == action {
           (b.action, chords.clone())
+        } else if b.source == Source::Default {
+          let pruned: Vec<Vec<KeyStroke>> = b
+            .chords
+            .iter()
+            .filter(|c| !new_chord_set.contains(c.as_slice()))
+            .cloned()
+            .collect();
+          (b.action, pruned)
         } else {
           (b.action, b.chords.clone())
         }
@@ -447,6 +594,14 @@ impl Keymap {
       candidate.push((action, chords.clone()));
     }
     Self::validate(&candidate)?;
+
+    // Commit: vacate the claimed chords from default bindings on other actions,
+    // then update (or insert) the overridden action's binding.
+    for entry in self.entries.iter_mut() {
+      if entry.action != action && entry.source == Source::Default {
+        entry.chords.retain(|c| !new_chord_set.contains(c.as_slice()));
+      }
+    }
 
     let mut replaced = false;
     for entry in self.entries.iter_mut() {
@@ -553,6 +708,18 @@ impl Keymap {
       .find(|b| b.action == action)
       .and_then(|b| b.chords.first())
       .map(|chord| format_chord(chord))
+  }
+
+  /// Every chord bound to `action`, comma-joined (`"j, Down"`) or empty when
+  /// unbound — the help-overlay / Keys-tab row form. Mirrors
+  /// [`crate::tui::modal_keymap::ModalKeymap::keys_display`].
+  pub fn keys_display(&self, action: Action) -> String {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.chords.iter().map(|c| format_chord(c)).collect::<Vec<_>>().join(", "))
+      .unwrap_or_default()
   }
 }
 

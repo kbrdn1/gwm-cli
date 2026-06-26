@@ -1,27 +1,32 @@
 use super::keymap::{Action, ChordResolution, KeyStroke, Keymap};
+use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::palette::PaletteState;
-use super::state::async_task::{TaskKind, TaskMsg, TaskRunner};
+use super::state::async_task::{CreateWorktreeResult, EditWorktreeResult, TaskKind, TaskMsg, TaskRunner};
+use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
-use super::state::config_panel::ConfigPanel;
+use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
 use super::state::create_form::{CreateForm, Field};
+use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
 use super::state::link_prompt::LinkPrompt;
+use super::state::pty_overlay::PtyOverlay;
 use super::state::sidebar::SidebarState;
 use super::state::spinner::Spinner;
 use super::theme::Theme;
 use crate::bootstrap::{self, BootstrapCtx, BootstrapReport, StepStatus};
 use crate::config::BranchType;
-use crate::config::{Config, TuiOpenConfig, TuiOpenMode};
+use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode};
 use crate::error::{GwmError, Result};
-use crate::github::{self, BranchLink, IssueStatus, PrStatus};
+use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
 use crate::naming::BranchSpec;
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
 use ratatui::widgets::TableState;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -81,6 +86,48 @@ pub enum View {
   /// (repo / user / default). Opened on `4`, scrolled like the help
   /// overlay; state lives on [`App::config_panel`].
   Config,
+  /// Embedded PTY overlay (issue #35). A ~90% fullscreen modal that renders
+  /// a live PTY session (lazygit on `l`, native terminal on `o`) over the
+  /// worktree list. All keys are forwarded to the child process; `Esc`
+  /// kills the child and returns to the list. State lives on
+  /// [`App::pty_overlay`].
+  Pty,
+  /// Exec profile picker overlay (issue #325). A small centred modal that
+  /// lists the `[exec.profiles.*]` names; `Enter` resolves the highlight
+  /// to an argv and the run loop spawns it in a PTY overlay
+  /// ([`PtyKind::Exec`]) rooted at the selected worktree. State lives on
+  /// [`App::exec_picker`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::ExecPicker`].
+  ExecPicker,
+  /// Clean reclaim overlay (issue #325). A centred modal showing the gated
+  /// `clean::scan_worktree_safe` report for the selected worktree, an
+  /// optional `[clean.profiles.*]` picker, and a safety countdown; the run
+  /// loop fires `clean::delete_reclaim` when the countdown elapses. State
+  /// lives on [`App::clean_overlay`]; keys resolve through
+  /// [`crate::tui::modal_keymap::KeyContext::Clean`].
+  CleanReport,
+  /// Worktree-rename modal (#290). Reuses the Create form (Type / Issue /
+  /// Desc) pre-filled by parsing the current branch; submitting renames the
+  /// local + remote branch and moves the worktree directory. State lives on
+  /// [`App::create_form`] plus [`App::edit_original_branch`] /
+  /// [`App::edit_original_path`].
+  Edit,
+}
+
+/// What the run loop must do after [`App::handle_exec_picker_key`]
+/// processes a key in the exec picker overlay (issue #325). Mirrors
+/// [`CreateKey`] / [`LinkPromptKey`]: the testable handler owns the
+/// highlight movement, the loop owns the two side effects (resolve the
+/// argv + spawn the PTY overlay, or close back to the list).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum ExecPickerKey {
+  /// The key moved the highlight (or was ignored); stay in the picker.
+  Handled,
+  /// `Enter` — the loop should resolve the highlighted profile and spawn
+  /// the PTY overlay.
+  Submit,
+  /// `Esc` — the loop should close the picker back to the list.
+  Cancel,
 }
 
 /// What the run loop must do after [`App::handle_create_key`] processes a
@@ -145,11 +192,52 @@ pub enum OpenTarget {
 /// learning the new module path.
 pub use super::state::link_prompt::LinkPromptStage;
 
+/// One repo's session-stable metadata in workspace mode (issue #36). The live
+/// `git2::Repository` is *not* stored here (it isn't `Send`/`Clone` and would
+/// duplicate `App.repo`); it is re-opened from `workdir` when this repo
+/// becomes the active one. `config` is cloned into `App.config` on activation
+/// so per-row actions (`create`, bootstrap, hooks) read the right repo's
+/// `.gwm.toml` — matching the issue's "each row inherits its own repo's
+/// config" contract. Keymap/theme stay session-level (resolved once from the
+/// first repo), the same "resolved once, relaunch to change" contract as
+/// single-repo mode.
+#[derive(Debug, Clone)]
+pub struct RepoMeta {
+  pub name: String,
+  pub workdir: PathBuf,
+  pub config: Config,
+}
+
+/// Workspace-mode state (issue #36). `None` in single-repo mode (the default).
+/// The *active* repo lives in `App`'s core fields (`repo`/`repo_name`/
+/// `workdir`/`config`); this holds everything needed to swap a different repo
+/// into those fields as the selection moves between repos.
+#[derive(Debug, Clone)]
+pub struct WorkspaceState {
+  /// The root `--workspace` pointed at.
+  pub root: PathBuf,
+  /// Session-stable repo metadata, in discovery (alphabetical) order.
+  pub repos: Vec<RepoMeta>,
+  /// The owning repo index for each `App.worktrees[i]` row, parallel to that
+  /// vec. Rebuilt by every workspace refresh so it never drifts.
+  pub row_repo: Vec<usize>,
+  /// Index into `repos` of the currently active repo (mirrors `App.repo*`).
+  pub active: usize,
+}
+
 pub struct App {
   pub repo: Repository,
   pub repo_name: String,
   pub workdir: PathBuf,
   pub config: Config,
+  /// Workspace-mode state (issue #36); `None` in single-repo mode.
+  pub workspace: Option<WorkspaceState>,
+  /// Set when the selected row's repo could not be activated in workspace mode
+  /// (moved / deleted / corrupt since listing). While true, `repo`/`workdir`/
+  /// `config` still point at the previously active repo, so repo-mutating
+  /// actions are blocked to avoid a wrong-target write (#304). Always `false`
+  /// in single-repo mode and once a selection activates cleanly.
+  pub workspace_active_stale: bool,
   pub worktrees: Vec<WorktreeInfo>,
   pub list_state: TableState,
   pub view: View,
@@ -161,6 +249,8 @@ pub struct App {
   /// Create-worktree overlay state (extracted per #123). Holds field
   /// focus, type index, and the issue/slug input buffers.
   pub create_form: CreateForm,
+  /// Last asynchronous create failure shown inside the Create modal.
+  pub create_failure: Option<String>,
   /// Branch types displayed in the create-form picker. Resolved once at
   /// startup from [`Config::resolved_branch_types`] so the picker
   /// honours any `[[branch_types]]` override in `.gwm.toml` without
@@ -215,6 +305,12 @@ pub struct App {
   /// change, mirroring how every other knob in `[tui]` behaves.
   pub keymap: Keymap,
 
+  /// Resolved contextual keymap for modals / overlays (issue #219).
+  /// Built from the `[tui.keys.modal.<context>]` sub-tables at construction
+  /// time alongside [`Self::keymap`]; consulted by the modal routing in
+  /// `src/tui/mod.rs` to turn a keystroke into a typed [`ModalAction`].
+  pub modal_keymap: ModalKeymap,
+
   /// Resolved colour theme for this TUI session (issue #33). Built
   /// from `[theme]` in `.gwm.toml` at construction time. Threaded
   /// through `draw_*` calls so user overrides reach every visual
@@ -257,6 +353,11 @@ pub struct App {
   /// API; this `App` keeps the side-effecting wrappers below that compose
   /// the status messages and call `worktree::remove`.
   pub confirm: ConfirmModal,
+
+  /// Last delete-worktree failure shown inside the confirm modal (issue
+  /// #257). Kept on `App`, not `ConfirmModal`, because it is the outcome of
+  /// the async worktree deletion side effect rather than countdown state.
+  pub delete_failure: Option<String>,
 
   /// Animated loader for overlays (issue #187). Advanced by the event
   /// loop's 200ms poll tick while the confirm countdown is armed and
@@ -306,6 +407,9 @@ pub struct App {
   /// Public for the same reason `github` is — the state-machine tests
   /// claim a generation directly without spawning an OS thread.
   pub tasks: TaskRunner,
+  /// Last point at which the periodic TUI worktree refresh was armed.
+  /// Tests set this directly to simulate elapsed time without sleeping.
+  pub last_auto_refresh_at: Instant,
   /// Sender cloned into each background task worker (issue #231; carries the
   /// GitHub fetch results too since #255).
   task_tx: mpsc::Sender<TaskMsg>,
@@ -328,6 +432,61 @@ pub struct App {
   /// config was loaded from — `None` in tests / sandboxed runs with no
   /// global file, matching [`Config::load_layered`]'s injection point.
   global_path: Option<PathBuf>,
+
+  /// Live PTY overlay state (issue #35). `Some` while a lazygit or native
+  /// terminal PTY session is open; `None` at all other times.
+  /// Managed by [`Self::open_pty_overlay`] / [`Self::close_pty_overlay`].
+  pub pty_overlay: Option<PtyOverlay>,
+
+  /// Exec profile picker overlay state (issue #325). Populated by
+  /// [`Self::enter_exec_picker`] from `[exec.profiles.*]`; on `Enter` the
+  /// run loop resolves the highlight to an argv and spawns a PTY overlay
+  /// ([`PtyKind::Exec`]) in the selected worktree's directory.
+  pub exec_picker: ExecPicker,
+
+  /// The `[exec]` config captured when the exec picker opened (issue #325).
+  /// In workspace mode `sync_active_repo` can swap `self.config` to another
+  /// repo while the overlay is open, so `Enter` resolves the argv against
+  /// this snapshot — the active repo's `[exec]` at open time — not the live
+  /// config (Codex #333 review).
+  exec_picker_cfg: ExecConfig,
+
+  /// Clean overlay state (issue #325). Holds the gated reclaim scan of the
+  /// selected worktree, the `[clean.profiles.*]` picker, and a dedicated
+  /// safety countdown. Filled by [`Self::enter_clean_overlay`]; the run loop
+  /// fires [`crate::clean::delete_reclaim`] when the countdown elapses.
+  pub clean_overlay: CleanOverlay,
+
+  /// The `[clean]` config captured when the clean overlay opened (issue
+  /// #325) — every re-scan and the delete resolve their dir-set against this
+  /// snapshot, not the live `self.config.clean`, which a workspace
+  /// auto-refresh could swap to another repo's (Codex #333 review).
+  clean_overlay_cfg: CleanConfig,
+
+  /// The safety-countdown duration (seconds) captured when the clean overlay
+  /// opened (issue #325). Pinned alongside [`Self::clean_overlay_cfg`] so a
+  /// workspace config swap can't shorten — or clear to `0` — the delay
+  /// before an armed reclaim fires (Codex #333 review).
+  clean_overlay_countdown_secs: u32,
+
+  /// Set by `Action::ExitToWorktree` (#290): the path the main loop
+  /// should print to stdout just before quitting so the shell wrapper
+  /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
+  pub should_exit_to: Option<PathBuf>,
+
+  /// The selected worktree's branch name captured when the rename modal
+  /// (`View::Edit`, #290) opens — the `<old>` in `git branch -m <old> <new>`.
+  /// `None` while the modal is closed.
+  pub edit_original_branch: Option<String>,
+
+  /// The selected worktree's on-disk path captured when the rename modal
+  /// opens — the source for `git worktree move <old_path> <new_path>`.
+  pub edit_original_path: Option<PathBuf>,
+
+  /// Last rename failure, surfaced inside the Edit modal (mirrors
+  /// [`Self::create_failure`]) so the user can correct and retry without
+  /// losing the form. Cleared when the modal reopens.
+  pub edit_failure: Option<String>,
 }
 
 impl App {
@@ -356,6 +515,9 @@ impl App {
     // fresh error — but we re-`?` it rather than `.expect()` so a
     // future hot-reload path could exercise the same call.
     let keymap = config.tui.keys.resolved_keymap()?;
+    // Issue #219: resolve the contextual modal keymap once, same lifecycle
+    // as the global keymap above. Pre-validated by `Config::load_for_repo`.
+    let modal_keymap = config.tui.keys.resolved_modal_keymap()?;
     // Issue #33: resolve the colour theme once at construction.
     // Validated by `Config::load_for_repo` already, so this can
     // only surface a fresh error if the loader pre-validation is
@@ -373,6 +535,8 @@ impl App {
       repo_name,
       workdir,
       config,
+      workspace: None,
+      workspace_active_stale: false,
       worktrees,
       list_state: state,
       view: View::List,
@@ -380,6 +544,7 @@ impl App {
       delete_branch_on_remove: false,
       open_menu_selected: LinkTarget::Issue,
       create_form: CreateForm::new(),
+      create_failure: None,
       branch_types,
       report: None,
       help_scroll: 0,
@@ -390,6 +555,7 @@ impl App {
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
+      modal_keymap,
       theme,
       filter: FilterState::new(),
       picker_mode: false,
@@ -397,23 +563,297 @@ impl App {
       picker_should_exit: false,
       should_quit: false,
       confirm: ConfirmModal::new(),
+      delete_failure: None,
       spinner: Spinner::new(),
       github: GitHubFetch::new(),
       link_prompt: LinkPrompt::new(),
       palette: PaletteState::new(),
       trust_mode: crate::trust::TrustMode::Prompt,
       tasks: TaskRunner::new(),
+      last_auto_refresh_at: Instant::now(),
       task_tx,
       task_rx,
       command_logs: CommandLogs::new(),
       config_panel: ConfigPanel::new(),
       global_path: global_path.map(Path::to_path_buf),
+      pty_overlay: None,
+      exec_picker: ExecPicker::new(),
+      exec_picker_cfg: ExecConfig::default(),
+      clean_overlay: CleanOverlay::new(),
+      clean_overlay_cfg: CleanConfig::default(),
+      clean_overlay_countdown_secs: 0,
+      should_exit_to: None,
+      edit_original_branch: None,
+      edit_original_path: None,
+      edit_failure: None,
     };
     // Seed the sidebar position from `[tui] sidebar_position` (issue
     // #188). Orientation stays at its `Auto` default — runtime-only.
     out.sidebar.position = out.config.tui.sidebar_position;
     out.refresh_link();
+    let spawned = out.refresh_linked_github_statuses_for_worktrees();
+    if spawned > 0 {
+      out.status = String::from("fetching GitHub status…");
+    }
     Ok(out)
+  }
+
+  /// Workspace-mode constructor (issue #36): open the TUI over every git repo
+  /// one level below `root`, merging their worktree listings into one
+  /// repo-tagged table. Anchors the session on the first repo (alphabetical)
+  /// for keymap/theme resolution and the event-loop channels, then swaps the
+  /// merged list and per-row repo map in. Errors with [`GwmError::EmptyWorkspace`]
+  /// when no repo sits directly under `root`.
+  pub fn new_workspace_at_layered(root: &Path, global_path: Option<&Path>) -> Result<Self> {
+    let ws = crate::workspace::discover(root)?;
+    if ws.is_empty() {
+      return Err(GwmError::EmptyWorkspace {
+        root: root.display().to_string(),
+      });
+    }
+
+    // Load each repo's `.gwm.toml` once — session-stable metadata swapped into
+    // the active slot on navigation.
+    let mut repos: Vec<RepoMeta> = Vec::with_capacity(ws.repos.len());
+    for r in &ws.repos {
+      let config = Config::load_layered(&r.path, global_path)?;
+      repos.push(RepoMeta {
+        name: r.name.clone(),
+        workdir: r.path.clone(),
+        config,
+      });
+    }
+
+    // Anchor the session on the first repo: this resolves the keymap, theme,
+    // branch types, and sets up the task channels exactly as single-repo mode.
+    let mut app = Self::new_at_layered(Some(&repos[0].workdir), global_path)?;
+
+    // Replace the single-repo list with the merged, repo-tagged one. Map each
+    // row to its repo by the repo's *workdir path*, not its display name —
+    // names can collide (a linked worktree resolving to an owner outside the
+    // root, symlinks), and a name-keyed map would then point rows at the wrong
+    // repo handle/config (Codex review #303 round-2 P2).
+    let path_to_idx: HashMap<&Path, usize> = repos
+      .iter()
+      .enumerate()
+      .map(|(i, m)| (m.workdir.as_path(), i))
+      .collect();
+    let rows = crate::workspace::merge_worktrees(&ws)?;
+    let mut worktrees = Vec::with_capacity(rows.len());
+    let mut row_repo = Vec::with_capacity(rows.len());
+    for row in &rows {
+      let idx = path_to_idx.get(row.repo_path.as_path()).copied().unwrap_or(0);
+      worktrees.push(row.info.clone());
+      row_repo.push(idx);
+    }
+
+    let repo_count = repos.len();
+    let wt_count = worktrees.len();
+    app.worktrees = worktrees;
+    app.workspace = Some(WorkspaceState {
+      root: root.to_path_buf(),
+      repos,
+      row_repo,
+      active: 0,
+    });
+    app.filter.invalidate();
+    app.list_state.select(if wt_count == 0 { None } else { Some(0) });
+    // Resolve the initially-selected row's GitHub link/slug against its own
+    // repo (the anchor). Workspace mode fetches GitHub state per-selection, not
+    // in one cross-repo bulk pass — see `refresh_linked_github_statuses_for_worktrees`.
+    app.refresh_link();
+    app.status = format!(
+      "workspace {} — {} repo(s), {} worktree(s) · press ? for help",
+      root.display(),
+      repo_count,
+      wt_count
+    );
+    Ok(app)
+  }
+
+  /// True when the TUI is in workspace mode (issue #36).
+  pub fn is_workspace(&self) -> bool {
+    self.workspace.is_some()
+  }
+
+  /// Display name of the repo owning raw worktree row `raw_index` (the index
+  /// into [`Self::worktrees`], not the filtered view). `None` in single-repo
+  /// mode or for an out-of-range index. Drives the TUI `REPO` column.
+  pub fn row_repo_name(&self, raw_index: usize) -> Option<&str> {
+    let ws = self.workspace.as_ref()?;
+    let idx = *ws.row_repo.get(raw_index)?;
+    ws.repos.get(idx).map(|m| m.name.as_str())
+  }
+
+  /// Raw `worktrees` index of the current selection, hopping through the fuzzy
+  /// filter map (the selection indexes the filtered view, not the raw vec).
+  fn selected_raw_index(&self) -> Option<usize> {
+    let i = self.list_state.selected()?;
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    filtered.get(i).copied()
+  }
+
+  /// Align the active repo (`repo`/`repo_name`/`workdir`/`config`) with the
+  /// selected worktree's repo (issue #36). A no-op in single-repo mode and
+  /// when the selection still belongs to the active repo, so the event loop
+  /// can call it every frame cheaply. On the repo actually changing it
+  /// re-opens the `git2::Repository` from the target workdir and invalidates
+  /// the sidebar preview; an open failure keeps the current repo and reports
+  /// on the status bar rather than panicking mid-render.
+  pub fn sync_active_repo(&mut self) {
+    let Some(ws) = self.workspace.as_ref() else {
+      return;
+    };
+    let Some(raw) = self.selected_raw_index() else {
+      // No visible/selected row (e.g. the filter hides everything): there is no
+      // active repo the selection points at, so writes must not fall through to
+      // the previously active repo — mark stale to block them (#304). Reached
+      // only in workspace mode (the `ws` guard above returns in single-repo).
+      self.workspace_active_stale = true;
+      return;
+    };
+    let Some(&target) = ws.row_repo.get(raw) else {
+      self.workspace_active_stale = true;
+      return;
+    };
+    if target == ws.active {
+      // The selection is on the live, already-activated repo — clear any stale
+      // flag left over from a previous unreachable selection.
+      self.workspace_active_stale = false;
+      return;
+    }
+    let Some(meta) = ws.repos.get(target).cloned() else {
+      return;
+    };
+    match Repository::open(&meta.workdir) {
+      Ok(repo) => {
+        self.repo = repo;
+        self.repo_name = meta.name;
+        self.workdir = meta.workdir;
+        self.config = meta.config;
+        self.workspace_active_stale = false;
+        // The branch types drive the create form; re-resolve them from the
+        // newly-active repo's config so a per-repo `[[branch_types]]` override
+        // applies to the row being acted on (Codex review #303 P2).
+        self.branch_types = self.config.resolved_branch_types().types;
+        if let Some(ws) = self.workspace.as_mut() {
+          ws.active = target;
+        }
+        self.invalidate_sidebar_cache();
+        // Re-resolve the GitHub link + slug against the now-active repo so the
+        // Issue/PR panel and the `F` refresh act on the selected row's own
+        // repo, not the previously-active one (Codex review #303 P2). The
+        // per-repo nav hook (`on_navigation`) ran `refresh_link` *before* this
+        // swap, while `self.repo` still pointed at the old repo.
+        self.refresh_link();
+      }
+      Err(e) => {
+        // Keep the previously active repo live but mark the selection stale so
+        // repo-mutating actions are blocked until the user moves to a
+        // reachable row (or a refresh drops the dead repo) — #304.
+        self.workspace_active_stale = true;
+        self.status = format!(
+          "workspace: repo '{}' is unavailable ({}) — press r to refresh",
+          meta.name, e
+        );
+      }
+    }
+  }
+
+  /// Set the active config, keeping the workspace cache coherent. In
+  /// workspace mode the per-repo `RepoMeta.config` is the source of truth that
+  /// `sync_active_repo` restores on activation, so a settings/keymap reload
+  /// that only updated `self.config` would be reverted the next time the user
+  /// navigated away and back (Codex review #303 P3). Write the reloaded config
+  /// through to the active repo's cached meta too.
+  fn set_active_config(&mut self, cfg: Config) {
+    self.config = cfg;
+    if let Some(ws) = self.workspace.as_mut() {
+      if let Some(meta) = ws.repos.get_mut(ws.active) {
+        meta.config = self.config.clone();
+      }
+    }
+  }
+
+  /// Reload every workspace repo's cached config from disk (issue #36). Called
+  /// after a Global-layer settings edit, which changes the deep-merged config
+  /// for *all* repos — without this, navigating to a non-active repo would
+  /// restore the config it was loaded with at startup, reverting the edit for
+  /// that repo until relaunch (Codex review #303 P2). The active repo's live
+  /// `self.config` is already current (set by `set_active_config`); this
+  /// re-syncs its cached meta too, so it stays the single source of truth.
+  fn reload_workspace_repo_configs(&mut self) {
+    let Some(ws) = self.workspace.as_ref() else {
+      return;
+    };
+    let global = self.global_path.clone();
+    let targets: Vec<(usize, PathBuf)> = ws
+      .repos
+      .iter()
+      .enumerate()
+      .map(|(i, m)| (i, m.workdir.clone()))
+      .collect();
+    for (i, workdir) in targets {
+      if let Ok(cfg) = Config::load_layered(&workdir, global.as_deref()) {
+        if let Some(ws) = self.workspace.as_mut() {
+          if let Some(meta) = ws.repos.get_mut(i) {
+            meta.config = cfg;
+          }
+        }
+      }
+    }
+  }
+
+  /// Per-row mask of whether each `worktrees` row belongs to the currently
+  /// active repo. `None` in single-repo mode (every row qualifies). Issue/PR
+  /// numbers are only unique *within* a repo, so the number-keyed GitHub state
+  /// stamping must be scoped to the active repo's rows in workspace mode —
+  /// otherwise a fetch for repo A's `#1` would stamp (and persist to the wrong
+  /// repo) every other repo's `#1` row (Codex review #303 P2).
+  fn active_repo_row_mask(&self) -> Option<Vec<bool>> {
+    let ws = self.workspace.as_ref()?;
+    Some(ws.row_repo.iter().map(|&r| r == ws.active).collect())
+  }
+
+  /// Re-list every repo in the workspace and rebuild the merged table +
+  /// row→repo map (issue #36). The single-repo async refresh would clobber the
+  /// merged list with one repo's worktrees, so workspace refresh runs
+  /// synchronously across all repos instead. Repos are fixed for the session
+  /// (a new repo under the root needs a relaunch, matching the config "resolved
+  /// once" contract), so this re-lists the stored metas rather than re-walking
+  /// the root.
+  fn refresh_workspace(&mut self) {
+    let Some(ws) = self.workspace.as_ref() else {
+      return;
+    };
+    let targets: Vec<(usize, PathBuf)> = ws
+      .repos
+      .iter()
+      .enumerate()
+      .map(|(i, m)| (i, m.workdir.clone()))
+      .collect();
+    let mut worktrees = Vec::new();
+    let mut row_repo = Vec::new();
+    for (idx, workdir) in &targets {
+      if let Ok(repo) = Repository::open(workdir) {
+        if let Ok(trees) = worktree::list(&repo) {
+          for t in trees {
+            worktrees.push(t);
+            row_repo.push(*idx);
+          }
+        }
+      }
+    }
+    if let Some(ws) = self.workspace.as_mut() {
+      ws.row_repo = row_repo;
+    }
+    self.apply_refreshed_worktrees(worktrees);
+    // The selection may now land on a different repo's row — re-align the
+    // active repo. `sync_active_repo` only refreshes the link when the repo
+    // actually changes, so re-resolve the selected row's link/slug here too
+    // (the bulk prefetch is a no-op in workspace mode).
+    self.sync_active_repo();
+    self.refresh_link();
   }
 
   /// Builder-style setter for `trust_mode`. The TUI entrypoint
@@ -499,6 +939,11 @@ impl App {
     // `apply_refreshed_worktrees` so the async drain, which shares that
     // tail, does not re-invalidate the run it just applied.
     self.tasks.invalidate(TaskKind::RefreshWorktrees);
+    if self.is_workspace() {
+      // Workspace mode re-lists every repo, not just the active one (#36).
+      self.refresh_workspace();
+      return Ok(());
+    }
     let worktrees = worktree::list(&self.repo)?;
     self.apply_refreshed_worktrees(worktrees);
     Ok(())
@@ -509,15 +954,55 @@ impl App {
   /// at the previous vec — a length change auto-invalidates, but a
   /// same-length list with different contents would not, so the explicit
   /// flush is the safe play), re-clamp the selection (which re-resolves
-  /// the link cache), invalidate the sidebar preview, and report the
-  /// count. Called by the synchronous [`Self::refresh`] and by the
-  /// off-thread drain in [`Self::drain_task_results`].
-  fn apply_refreshed_worktrees(&mut self, worktrees: Vec<WorktreeInfo>) {
+  /// the link cache), refresh every Issue/PR status linked by the listed
+  /// rows, invalidate the sidebar preview, and report the count. Called by
+  /// the synchronous [`Self::refresh`] and by the off-thread drain in
+  /// [`Self::drain_task_results`].
+  fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
+    // The carry-over preserves this session's in-memory fetched issue/PR state
+    // across a re-list, keyed by number. In workspace mode that key collides
+    // across repos (two repos can both own `#1`), so skip it: the freshly
+    // listed rows already carry each repo's own *persisted* state from
+    // `read_link`, which is per-repo-correct (Codex review #303 P2).
+    if !self.is_workspace() {
+      let issue_states: HashMap<u64, IssueState> = self
+        .worktrees
+        .iter()
+        .filter_map(|w| Some((w.link.issue?, w.issue_state?)))
+        .collect();
+      let pr_states = self
+        .worktrees
+        .iter()
+        .filter_map(|w| Some((w.link.pr?, w.pr_state?)))
+        .collect::<HashMap<_, _>>();
+
+      for w in &mut worktrees {
+        if let Some(issue) = w.link.issue {
+          if let Some(state) = issue_states.get(&issue).copied() {
+            w.issue_state = Some(state);
+          }
+        }
+        if let Some(pr) = w.link.pr {
+          if let Some(state) = pr_states.get(&pr).copied() {
+            w.pr_state = Some(state);
+          }
+        }
+      }
+    }
+
     self.worktrees = worktrees;
     self.filter.invalidate();
     self.clamp_selection_to_filter();
+    let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
-    self.status = format!("refreshed — {} worktree(s)", self.worktrees.len());
+    self.status = if spawned > 0 {
+      format!(
+        "refreshed — {} worktree(s); fetching GitHub status…",
+        self.worktrees.len()
+      )
+    } else {
+      format!("refreshed — {} worktree(s)", self.worktrees.len())
+    };
   }
 
   /// Off-thread worktree list refresh for the `f` / `r` key (issue #231):
@@ -527,6 +1012,12 @@ impl App {
   /// while loading is a no-op) and seeds the loader label + spinner. The
   /// result is applied by [`Self::drain_task_results`].
   pub fn request_refresh(&mut self) {
+    if self.is_workspace() {
+      // No single-repo async worker in workspace mode — it would clobber the
+      // merged list with one repo's worktrees (#36). Refresh synchronously.
+      let _ = self.refresh();
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
       // A refresh is already in flight — coalesce onto it.
       return;
@@ -535,6 +1026,33 @@ impl App {
     self.spinner.reset();
     self.status = TaskKind::RefreshWorktrees.loading_label().into();
     self.spawn_refresh(generation);
+  }
+
+  /// Periodic worktree-list refresh for the TUI event loop. Returns `true`
+  /// only when a new async refresh task was actually started. `0` disables
+  /// the feature, and an in-flight refresh coalesces so the renderer is never
+  /// blocked by repeated relist attempts.
+  pub fn maybe_auto_refresh(&mut self, now: Instant) -> bool {
+    let secs = self.config.tui.auto_refresh_secs;
+    if secs == 0 {
+      return false;
+    }
+    if now.saturating_duration_since(self.last_auto_refresh_at) < Duration::from_secs(secs) {
+      return false;
+    }
+    self.last_auto_refresh_at = now;
+    if self.is_workspace() {
+      // Synchronous merged refresh in workspace mode (#36) — see `refresh`.
+      let _ = self.refresh();
+      return true;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
+      return false;
+    };
+    self.spinner.reset();
+    self.status = "auto-refreshing worktrees…".into();
+    self.spawn_refresh(generation);
+    true
   }
 
   /// Spawn one background worktree-list worker tagged with `generation`
@@ -570,6 +1088,10 @@ impl App {
       self.status = "no worktree selected to sync".into();
       return;
     };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Sync) {
+      self.status = self.busy_mutation_status("syncing");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Sync) else {
       // A sync is already in flight — coalesce onto it.
       return;
@@ -614,6 +1136,37 @@ impl App {
     let mut refresh_applied = false;
     while let Ok(msg) = self.task_rx.try_recv() {
       match msg {
+        TaskMsg::CreateWorktree(generation, result) => {
+          if !self.tasks.complete(TaskKind::CreateWorktree, generation) {
+            // Late result — a newer run (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(result) => {
+              self.create_failure = None;
+              self.report = Some(result.report);
+              self.view = View::Report;
+              let refresh_result = self.refresh();
+              self.status = match refresh_result {
+                Ok(()) => format!("created {} @ {}", result.branch, result.created.display()),
+                Err(e) => format!(
+                  "created {} @ {}; refresh failed: {}",
+                  result.branch,
+                  result.created.display(),
+                  e
+                ),
+              };
+            }
+            Err(e) => {
+              self.create_failure = Some(e.clone());
+              self.view = View::Create;
+              self.status = format!("create failed: {}", e);
+            }
+          }
+          applied = true;
+          // Create owns the status line this tick.
+          refresh_applied = true;
+        }
         TaskMsg::RefreshWorktrees(generation, result) => {
           if !self.tasks.complete(TaskKind::RefreshWorktrees, generation) {
             // Late result — a newer run (or an invalidate) superseded it.
@@ -633,6 +1186,9 @@ impl App {
           if !self.tasks.complete(TaskKind::GithubIssue(number), generation) {
             continue;
           }
+          if let Ok(status) = &result {
+            self.persist_loaded_issue_title(status);
+          }
           self.github.complete_issue(number, result);
           applied = true;
           github_applied = true;
@@ -640,6 +1196,9 @@ impl App {
         TaskMsg::GithubPr(generation, number, result) => {
           if !self.tasks.complete(TaskKind::GithubPr(number), generation) {
             continue;
+          }
+          if let Ok(status) = &result {
+            self.persist_loaded_pr_title(status);
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -699,6 +1258,97 @@ impl App {
           // refresh / sync arms use).
           refresh_applied = true;
         }
+        TaskMsg::DeleteWorktree(generation, name, label, result) => {
+          if !self.tasks.complete(TaskKind::DeleteWorktree, generation) {
+            // Late result — a newer run (or an invalidate) superseded it.
+            continue;
+          }
+          match result {
+            Ok(()) => {
+              self.delete_failure = None;
+              self.view = View::List;
+              self.confirm.reset();
+              let refresh_result = self.refresh();
+              self.status = match refresh_result {
+                Ok(()) => format!("removed {} ({})", name, label),
+                Err(e) => format!("removed {} ({}); refresh failed: {}", name, label, e),
+              };
+            }
+            Err(e) => {
+              self.delete_failure = Some(e.clone());
+              self.view = View::Confirm;
+              self.status = format!("delete failed: {}", e);
+            }
+          }
+          applied = true;
+          // Delete owns the status line this tick.
+          refresh_applied = true;
+        }
+        TaskMsg::Pull(generation, name, result) => {
+          if !self.tasks.complete(TaskKind::Pull, generation) {
+            continue;
+          }
+          // Refresh on both arms: a failed pull can still mutate the tree (a
+          // merge/rebase conflict leaves it dirty / mid-rebase), so the table
+          // must not keep showing the pre-pull clean state (Codex review #292).
+          let _ = self.refresh();
+          match result {
+            Ok(msg) => self.status = format!("pulled {}: {}", name, msg),
+            Err(e) => self.status = format!("pull failed: {}", e),
+          }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::Push(generation, name, result) => {
+          if !self.tasks.complete(TaskKind::Push, generation) {
+            continue;
+          }
+          match result {
+            Ok(msg) => {
+              // Pushing updates the remote-tracking ref + ahead/behind, so
+              // refresh the table before overwriting the status, mirroring
+              // the pull/sync path (Codex review on PR #292).
+              let _ = self.refresh();
+              self.status = format!("pushed {}: {}", name, msg);
+            }
+            Err(e) => self.status = format!("push failed: {}", e),
+          }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::EditWorktree(generation, result) => {
+          if !self.tasks.complete(TaskKind::EditWorktree, generation) {
+            continue;
+          }
+          match result {
+            Ok(res) => {
+              let _ = self.refresh();
+              self.status = if res.remote_renamed {
+                format!("renamed to {} (local + remote)", res.new_branch)
+              } else {
+                format!("renamed to {} (local only)", res.new_branch)
+              };
+              // Re-select the renamed worktree by its new path so the cursor
+              // stays on the row the user just edited (mapped through the
+              // filter — Codex review on PR #292).
+              self.reselect_by_path(&res.new_path);
+              self.edit_original_branch = None;
+              self.edit_original_path = None;
+              self.edit_failure = None;
+              self.create_form.reset();
+              self.view = View::List;
+            }
+            // Keep the modal open so the user can fix the form and retry, and
+            // replace the "renaming worktree…" loading status so the bar no
+            // longer reads as in-progress (Codex review on PR #292, P3).
+            Err(e) => {
+              self.status = format!("rename failed: {}", e);
+              self.edit_failure = Some(e);
+            }
+          }
+          applied = true;
+          refresh_applied = true;
+        }
       }
     }
     // Once nothing GitHub-side is left loading, swap the "fetching…"
@@ -721,6 +1371,33 @@ impl App {
   /// the statusbar spinner alongside [`Self::is_github_loading`].
   pub fn is_task_loading(&self) -> bool {
     self.tasks.is_any_loading()
+  }
+
+  /// `true` while the create-worktree worker is in flight (issue #276).
+  pub fn is_create_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::CreateWorktree)
+  }
+
+  /// `true` while the delete-worktree worker is in flight (issue #257).
+  pub fn is_delete_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::DeleteWorktree)
+  }
+
+  /// `true` when a requested quit can safely leave the event loop now.
+  /// Mutating spine workers keep running until their result is drained so
+  /// `sync` / `bootstrap` / delete-worktree are not abandoned mid-operation.
+  pub fn can_quit_now(&self) -> bool {
+    !self.should_quit || !self.tasks.has_mutating_task_in_flight()
+  }
+
+  /// Surface why a requested quit is being held. The event loop keeps
+  /// ticking/draining while this status is visible.
+  pub fn defer_quit_for_mutating_task(&mut self) {
+    if let Some(label) = self.tasks.mutating_loading_label() {
+      self.status = format!("finishing {} before quit…", label.trim_end_matches('…'));
+    } else {
+      self.status = "finishing task before quit…".into();
+    }
   }
 
   /// A clone of the task channel sender background workers report over
@@ -903,6 +1580,14 @@ impl App {
     )
   }
 
+  /// Resolve a keystroke against the contextual modal keymap (issue #219).
+  /// Returns the [`ModalAction`] bound to `key` in `ctx`, or `None` when
+  /// nothing in that context binds it — the modal routing then applies its
+  /// text-input / default fallback (digits, free-text, sub-state guards).
+  pub fn resolve_modal(&self, ctx: KeyContext, key: KeyEvent) -> Option<ModalAction> {
+    self.modal_keymap.resolve(ctx, &KeyStroke::from_event(&key))
+  }
+
   /// Mirror the new `pending_chord` buffer into the legacy
   /// `pending_g` boolean so pre-#87 tests that read it as a field
   /// stay green. Removed when those tests migrate to
@@ -1034,7 +1719,16 @@ impl App {
       View::Create => HintContext::Create,
       View::Confirm => HintContext::Confirm,
       View::OpenMenu => HintContext::OpenMenu,
-      View::LinkPrompt => HintContext::LinkPrompt,
+      // #219: the two link-prompt stages advertise different keys — the
+      // choose-target picker vs the number-input submit/cancel — so the
+      // statusbar tracks whichever stage is live.
+      View::LinkPrompt => {
+        if self.link_prompt_stage() == crate::tui::state::link_prompt::LinkPromptStage::InputNumber {
+          HintContext::LinkInputNumber
+        } else {
+          HintContext::LinkPrompt
+        }
+      }
       View::CommandPalette => HintContext::CommandPalette,
       View::Report => HintContext::Report,
       View::Help => HintContext::Help,
@@ -1045,6 +1739,10 @@ impl App {
       // The Configuration panel (issue #232) is likewise a ~90% fullscreen
       // modal; the statusbar behind it keeps the underlying pane context.
       View::Config => self.pane_hint_context(),
+      View::Pty => super::ui::HintContext::Pty,
+      View::ExecPicker => HintContext::ExecPicker,
+      View::CleanReport => HintContext::Clean,
+      View::Edit => HintContext::Rename,
       View::List => self.pane_hint_context(),
     }
   }
@@ -1112,8 +1810,687 @@ impl App {
         self.status = format!("error: {}", e);
       }
     }
+    self.refresh_key_rows();
     self.config_panel.reset();
     self.view = View::Config;
+  }
+
+  /// Rebuild the Keys-tab rows (issue #294) from the live keymaps, attributing
+  /// each binding's source via the resolved-row snapshot (the same layer
+  /// attribution the `All` tab shows). Called on panel open and after a
+  /// successful rebind so the displayed key(s) + badge track the edit.
+  fn refresh_key_rows(&mut self) {
+    let rows = self.config_panel.rows.clone();
+    let key_rows = super::state::config_panel::build_key_rows(&self.keymap, &self.modal_keymap, |key| {
+      rows
+        .iter()
+        .find(|r| r.key == key)
+        .map(|r| r.source)
+        .unwrap_or(crate::config::ConfigSource::Default)
+    });
+    self.config_panel.key_rows = key_rows;
+  }
+
+  /// Feed a raw key event into the in-progress Keys-tab capture (issue #294),
+  /// normalising it to a [`KeyStroke`] first. No-op when no capture is armed.
+  pub fn push_key_capture(&mut self, key: KeyEvent) {
+    self.config_panel.capture_push(KeyStroke::from_event(&key));
+  }
+
+  /// Drive a key through an armed Keys-tab capture (issue #294). The event loop
+  /// owns no logic — it just routes here when a capture is armed, mirroring
+  /// `handle_create_key` / `handle_link_prompt_key`. Controls (resolved through
+  /// the `config.edit` context so a rebind shows through):
+  ///
+  /// - `cancel` (def Esc) aborts the capture;
+  /// - `submit` (def Enter) commits a **multi-stroke global chord**;
+  /// - `Backspace` drops the last stroke of a global chord;
+  /// - any other key is captured — a **single-stroke modal** verb auto-commits
+  ///   on the first one, a global chord accumulates until `submit`.
+  ///
+  /// `Esc` / `Enter` / `Backspace` stay reserved controls in **both** modes and
+  /// are never themselves captured (a modal verb can't be bound to them via the
+  /// UI — hand-edit `.gwm.toml`), matching the documented capture controls and
+  /// the hard-coded escape-hatch policy.
+  pub fn handle_capture_key(&mut self, key: KeyEvent) {
+    let single = self
+      .config_panel
+      .capture
+      .as_ref()
+      .map(|c| c.single_only)
+      .unwrap_or(false);
+    // Reserved capture controls. The *physical* Esc / Enter / Backspace are
+    // always controls (never captured) regardless of any `config.edit` rebind,
+    // so a custom `submit = ["Ctrl+s"]` can't make Enter assignable (Codex #297
+    // review). The resolved `config.edit` verbs are honoured *in addition*, so a
+    // custom key also cancels / commits.
+    let resolved = self.resolve_modal(KeyContext::ConfigEdit, key);
+    let is_cancel = key.code == KeyCode::Esc || resolved == Some(ModalAction::ConfigEditCancel);
+    let is_submit = key.code == KeyCode::Enter || resolved == Some(ModalAction::ConfigEditSubmit);
+    if is_cancel {
+      self.config_panel.cancel_capture();
+    } else if is_submit {
+      // Enter commits an accumulated global chord; a reserved control (ignored)
+      // for a single-stroke modal capture.
+      if !single {
+        self.commit_key_capture();
+      }
+    } else if key.code == KeyCode::Backspace {
+      // Backspace edits a global chord; reserved (ignored) for a modal capture.
+      if !single {
+        self.config_panel.capture_pop();
+      }
+    } else {
+      self.push_key_capture(key);
+      if single {
+        self.commit_key_capture();
+      }
+    }
+  }
+
+  /// Commit the in-progress Keys-tab capture (issue #294): write the captured
+  /// chord as a TOML array to the selected target's `[tui.keys]` /
+  /// `[tui.keys.modal.<context>]` key in the active layer, then reload the
+  /// config + both keymaps so the rebind is live immediately. An empty capture
+  /// writes `[]` (unbind). Validation (conflict / prefix-collision) happens in
+  /// the writer's validate-before-write gate; on failure the file and the live
+  /// keymaps are left untouched and the error is surfaced on the statusbar.
+  pub fn commit_key_capture(&mut self) {
+    let Some(cap) = self.config_panel.take_capture() else {
+      return;
+    };
+    let target = match self.config_panel.key_rows.get(cap.row) {
+      Some(row) => row.target,
+      None => return,
+    };
+    let config_key = target.config_key();
+    let items = cap.as_config_items();
+
+    // A Project-layer write targets `self.workdir/.gwm.toml`. In workspace mode
+    // with a stale selection that path is the *previously* active repo, so
+    // refuse rather than rebind keys in the wrong repo (#304).
+    if self.workspace_active_stale && self.config_panel.layer == SettingsLayer::Project {
+      self.status = "workspace: selected repo is unavailable — can't edit its project keymap".into();
+      return;
+    }
+    let path = match self.config_panel.layer {
+      SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
+      SettingsLayer::Global => match self.global_path.clone() {
+        Some(p) => p,
+        None => {
+          self.status = "keys: no global config path (set $XDG_CONFIG_HOME or $HOME)".into();
+          return;
+        }
+      },
+    };
+
+    // Snapshot the target file first: `set_array_at` only validates the file
+    // it writes, not the layered merge, so a rebind that is valid in this file
+    // alone but collides with the *other* layer once merged (e.g. a prefix
+    // collision the global layer reveals) would slip past and brick the
+    // config for the next launch. Keep the prior bytes so we can roll back
+    // (Codex #297 review P2).
+    let prior = std::fs::read(&path).ok();
+
+    if let Err(e) = crate::config_cli::set_array_at(&path, &config_key, &items) {
+      // `write_and_validate` writes the edit *before* erroring when the file
+      // was already invalid on its own (the recovery path for #281 — here the
+      // target value can be shadowed by another layer so the app still
+      // loaded). Roll back so a rebind reported as failed never persists or
+      // takes effect on the next launch (Codex #297 review P2).
+      Self::restore_file(&path, prior);
+      self.status = format!("keys: {}", e);
+      return;
+    }
+
+    // Strip any pre-#290 alias of this action from the same file: a legacy
+    // config that still carries e.g. `tui.keys.open_menu` would, on reload,
+    // re-apply the alias after the canonical `browse_links` in the sorted
+    // override walk and silently shadow the new binding (Codex #297 review).
+    // Best-effort: the canonical key is already written, so a cleanup error
+    // is surfaced but does not abort the rebind.
+    for alias_key in target.compat_alias_keys() {
+      if let Err(e) = crate::config_cli::unset_at(&path, &alias_key) {
+        self.status = format!("keys: {}", e);
+      }
+    }
+
+    // Reload the merged config and rebuild both keymaps so the new binding
+    // fires without a restart.
+    match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
+      Ok(cfg) => self.set_active_config(cfg),
+      Err(e) => {
+        // The single-file write validated but the layered merge is invalid —
+        // roll the file back to its prior state so the config is never left
+        // broken on disk, and keep the previous live keymaps.
+        Self::restore_file(&path, prior);
+        self.status = format!("keys: rebind rejected — would break the merged config: {}", e);
+        return;
+      }
+    }
+    match self.config.tui.keys.resolved_keymap() {
+      Ok(km) => self.keymap = km,
+      Err(e) => {
+        self.status = format!("keys: {}", e);
+        return;
+      }
+    }
+    match self.config.tui.keys.resolved_modal_keymap() {
+      Ok(mk) => self.modal_keymap = mk,
+      Err(e) => {
+        self.status = format!("keys: {}", e);
+        return;
+      }
+    }
+    if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      self.config_panel.rows = rows;
+    }
+    self.refresh_key_rows();
+
+    let desc = if items.is_empty() {
+      "unbound".to_string()
+    } else {
+      items.join(" ")
+    };
+    let mut status = format!("set {} = {} ({})", config_key, desc, self.config_panel.layer.label());
+    // Verify the capture actually took effect in the *merged* keymap: a
+    // higher-precedence layer, or a pre-#290 alias still declared in another
+    // layer (which we deliberately don't edit), can shadow the write so the new
+    // key never fires — or, for an unbind, keeps the action bound — even though
+    // it persisted. Warn instead of reporting a clean success (Codex #297
+    // review).
+    if !self.capture_took_effect(target, &cap.pending) {
+      status.push_str(" — shadowed (a higher layer or legacy alias still binds it)");
+    }
+    self.status = status;
+  }
+
+  /// Restore a config file to a snapshot taken before a rebind write: rewrite
+  /// the prior bytes, or remove the file if it did not exist before. Used to
+  /// roll back a failed / merge-invalid Keys-tab write (issue #294).
+  fn restore_file(path: &std::path::Path, prior: Option<Vec<u8>>) {
+    match prior {
+      Some(bytes) => {
+        let _ = std::fs::write(path, bytes);
+      }
+      None => {
+        let _ = std::fs::remove_file(path);
+      }
+    }
+  }
+
+  /// Whether the just-committed capture is the *effective* state in the live
+  /// (merged) keymap, i.e. not shadowed by another layer / a lingering legacy
+  /// alias. For a rebind (`strokes` non-empty) the captured chord must resolve
+  /// to the target's action; for an unbind (`strokes` empty) the action must
+  /// have no remaining binding. Issue #294 (Codex #297 review).
+  fn capture_took_effect(&self, target: KeyTarget, strokes: &[KeyStroke]) -> bool {
+    match target {
+      KeyTarget::Global(action) => {
+        if strokes.is_empty() {
+          self.keymap.keys_display(action).is_empty()
+        } else {
+          matches!(self.keymap.lookup(strokes), ChordResolution::Matched(a) if a == action)
+        }
+      }
+      KeyTarget::Modal(action) => {
+        if strokes.is_empty() {
+          self.modal_keymap.keys_display(action).is_empty()
+        } else {
+          strokes
+            .first()
+            .map(|s| self.modal_keymap.resolve(action.context(), s) == Some(action))
+            .unwrap_or(false)
+        }
+      }
+    }
+  }
+
+  // ── PTY overlay (issue #35) ────────────────────────────────────────────
+
+  /// Open the PTY overlay: store `pty` and switch to [`View::Pty`].
+  pub fn open_pty_overlay(&mut self, pty: super::state::pty_overlay::PtyOverlay) {
+    self.pty_overlay = Some(pty);
+    self.view = View::Pty;
+  }
+
+  /// Close the PTY overlay: kill the child process, drop the state, and
+  /// return to [`View::List`]. Safe to call when no overlay is open.
+  pub fn close_pty_overlay(&mut self) {
+    if let Some(ref mut pty) = self.pty_overlay {
+      pty.kill();
+    }
+    self.pty_overlay = None;
+    if self.view == View::Pty {
+      self.view = View::List;
+    }
+  }
+
+  // ── Exec picker overlay (issue #325) ───────────────────────────────────
+
+  /// `true` while a destructive overlay — the exec picker or the clean
+  /// report — is open (issue #325). The run loop suspends `maybe_auto_refresh`
+  /// and `sync_active_repo` while one is up, so the worktree list (and thus
+  /// the live selection / active repo) cannot reshuffle under an armed reclaim
+  /// or a pending exec run. This closes the drift class at its source (Codex
+  /// #333 review); the per-overlay open-time snapshots stay as defence in
+  /// depth against an already-in-flight refresh landing its result.
+  pub fn destructive_overlay_open(&self) -> bool {
+    matches!(self.view, View::ExecPicker | View::CleanReport)
+  }
+
+  /// Open the exec profile picker (issue #325). Populates it from
+  /// `[exec.profiles.*]` and switches to [`View::ExecPicker`]. Refuses
+  /// (status-bar message, no transition) when nothing is selected or no
+  /// exec profiles are configured — there is nothing to pick.
+  pub fn enter_exec_picker(&mut self) {
+    let Some(cwd) = self.selected().map(|wt| wt.path.clone()) else {
+      self.status = "nothing selected".into();
+      return;
+    };
+    let names: Vec<String> = self.config.exec.profiles.keys().cloned().collect();
+    if names.is_empty() {
+      self.status = "no [exec.profiles] configured — add one to .gwm.toml".into();
+      return;
+    }
+    // Capture the target worktree path AND the active repo's `[exec]` config
+    // now: an auto-refresh can drift the live selection (and, in workspace
+    // mode, the active repo) while the picker is open, so `Enter` must run in
+    // *this* worktree against *this* config — not whatever is live later
+    // (Codex #333 review).
+    self.exec_picker_cfg = self.config.exec.clone();
+    self.exec_picker.open(names, cwd);
+    self.view = View::ExecPicker;
+  }
+
+  /// Handle a key inside the exec picker overlay (issue #325). The
+  /// testable handler owns the highlight movement; the run loop owns the
+  /// two side effects (resolve + spawn, or close). Keys resolve through
+  /// [`KeyContext::ExecPicker`] so they honour `[tui.keys.modal.exec]`.
+  pub fn handle_exec_picker_key(&mut self, key: KeyEvent) -> ExecPickerKey {
+    match self.resolve_modal(KeyContext::ExecPicker, key) {
+      Some(ModalAction::ExecPickerCancel) => ExecPickerKey::Cancel,
+      Some(ModalAction::ExecPickerAccept) => ExecPickerKey::Submit,
+      Some(ModalAction::ExecPickerNext) => {
+        self.exec_picker.next();
+        ExecPickerKey::Handled
+      }
+      Some(ModalAction::ExecPickerPrev) => {
+        self.exec_picker.prev();
+        ExecPickerKey::Handled
+      }
+      _ => ExecPickerKey::Handled,
+    }
+  }
+
+  /// Resolve the highlighted exec profile to an `(argv, cwd)` pair for the
+  /// run loop to spawn in a PTY overlay (issue #325). `None` (with a
+  /// status-bar message) when nothing is selected or the profile fails to
+  /// resolve — e.g. an empty `command` array. The argv is the frozen
+  /// `[exec.profiles.<name>].command` verbatim (no shell), matching the
+  /// 1.0 exec contract; the run loop spawns `argv[0]` directly.
+  pub fn exec_picker_resolve(&mut self) -> Option<(Vec<String>, PathBuf)> {
+    let profile = self.exec_picker.selected_profile()?.to_string();
+    // Resolve against the worktree captured when the picker opened, NOT the
+    // live selection (which an auto-refresh may have drifted) — #333 review.
+    let Some(cwd) = self.exec_picker.cwd().map(Path::to_path_buf) else {
+      self.status = "nothing selected".into();
+      return None;
+    };
+    // Resolve against the `[exec]` config captured at open, not the live one.
+    match crate::exec::resolve_exec_command(Some(&profile), &[], &self.exec_picker_cfg) {
+      Ok(mut argv) => {
+        // Pin a worktree-relative executable (`./run.sh`, `scripts/build`) to
+        // the captured worktree, exactly like the CLI exec path — otherwise
+        // `argv[0]` would resolve against gwm's own cwd (Codex #333 review).
+        // A bare command (`cargo`) or an absolute path is returned unchanged
+        // (PATH lookup / as-is).
+        if let Some(first) = argv.first_mut() {
+          *first = crate::exec::resolve_program(&cwd, first).to_string_lossy().into_owned();
+        }
+        Some((argv, cwd))
+      }
+      Err(e) => {
+        self.status = format!("exec profile {profile:?}: {e}");
+        None
+      }
+    }
+  }
+
+  /// Close the exec picker without running anything (issue #325). Returns
+  /// to [`View::List`].
+  pub fn close_exec_picker(&mut self) {
+    if self.view == View::ExecPicker {
+      self.view = View::List;
+    }
+  }
+
+  // ── Clean overlay (issue #325) ─────────────────────────────────────────
+
+  /// Open the clean overlay (issue #325). Populates the `[clean.profiles]`
+  /// picker, scans the selected worktree through the safety gate
+  /// ([`crate::clean::scan_worktree_safe`]), and switches to
+  /// [`View::CleanReport`]. Refuses (status-bar message, no transition) when
+  /// nothing is selected. A scan that finds nothing safe still opens — the
+  /// report says so.
+  pub fn enter_clean_overlay(&mut self) {
+    let Some(sel) = self.selected() else {
+      self.status = "nothing selected".into();
+      return;
+    };
+    // Capture the target worktree AND the active repo's `[clean]` config now:
+    // an auto-refresh can drift the live selection (and, in workspace mode,
+    // the active repo) while the overlay is open / armed, so every re-scan
+    // and the delete must pin to *this* worktree against *this* config
+    // (Codex #333 review).
+    let name = sel.name.clone();
+    let path = sel.path.clone();
+    self.clean_overlay_cfg = self.config.clean.clone();
+    self.clean_overlay_countdown_secs = self.config.tui.effective_confirm_countdown_secs();
+    let names: Vec<String> = self.clean_overlay_cfg.profiles.keys().cloned().collect();
+    self.clean_overlay.open(names, name, path);
+    if let Err(e) = self.clean_overlay_rescan() {
+      self.status = format!("clean: {e}");
+      return;
+    }
+    self.view = View::CleanReport;
+  }
+
+  /// Re-resolve the highlighted profile's dirs and re-scan the *captured*
+  /// target worktree (not the live selection), storing the gated snapshot.
+  /// Surfaces a profile-resolution error (e.g. an invalid `[clean.profiles]`
+  /// dir) to the caller.
+  fn clean_overlay_rescan(&mut self) -> Result<()> {
+    let Some((name, path)) = self
+      .clean_overlay
+      .target()
+      .map(|(n, p)| (n.to_string(), p.to_path_buf()))
+    else {
+      return Ok(());
+    };
+    let profile = self.clean_overlay.selected_profile().map(str::to_string);
+    let dirs = crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg)?;
+    let (reclaim, skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
+    self.clean_overlay.set_scan(reclaim, skipped);
+    Ok(())
+  }
+
+  /// Cycle the clean profile picker forward and re-scan, but ONLY when the
+  /// highlight actually moved (issue #325 / Codex #333). A no-op move (only
+  /// the `(default)` choice) must not re-scan — that would reset the
+  /// `ConfirmModal` and silently disarm a pending reclaim while the status
+  /// bar still reads `armed`.
+  pub fn clean_overlay_next(&mut self) {
+    if self.clean_overlay.select_next() {
+      if let Err(e) = self.clean_overlay_rescan() {
+        self.status = format!("clean: {e}");
+      }
+    }
+  }
+
+  /// Cycle the clean profile picker backward and re-scan, only when the
+  /// highlight actually moved (issue #325 / Codex #333).
+  pub fn clean_overlay_prev(&mut self) {
+    if self.clean_overlay.select_prev() {
+      if let Err(e) = self.clean_overlay_rescan() {
+        self.status = format!("clean: {e}");
+      }
+    }
+  }
+
+  /// Total duration of the clean safety countdown. Unlike the delete-confirm
+  /// modal, clean has no `delete_branch_on_remove` gate — it reads
+  /// `[tui] confirm_countdown_secs` directly. `Duration::ZERO` ⇒ classic
+  /// single-keystroke confirm.
+  pub fn clean_countdown_total(&self) -> Duration {
+    // The value captured at open (Codex #333) — never the live config, which a
+    // workspace refresh could swap (e.g. to `0`, erasing the safety delay).
+    Duration::from_secs(u64::from(self.clean_overlay_countdown_secs))
+  }
+
+  /// Handle the clean confirm key. Arms / disarms / fires the countdown via
+  /// the dedicated [`CleanOverlay`] modal. Nothing-to-reclaim is a no-op
+  /// guard so the user cannot arm a delete that would free zero bytes.
+  pub fn clean_confirm_press(&mut self, now: Instant) -> ConfirmKeyAction {
+    if self.clean_overlay.is_empty_scan() {
+      self.status = "nothing to reclaim".into();
+      return ConfirmKeyAction::Disarmed;
+    }
+    let total = self.clean_countdown_total();
+    let action = self.clean_overlay.confirm.press_y(now, total);
+    match action {
+      ConfirmKeyAction::Armed => {
+        self.status = format!(
+          "armed — reclaiming {} in {}s",
+          crate::clean::human_size(self.clean_overlay.total_bytes()),
+          total.as_secs()
+        );
+      }
+      ConfirmKeyAction::Disarmed => self.status = "clean cancelled".into(),
+      ConfirmKeyAction::FireNow => {}
+    }
+    action
+  }
+
+  /// Tick the clean safety countdown. Called from the event loop on every
+  /// poll-timeout iteration while the overlay is open.
+  pub fn tick_clean_countdown(&mut self, now: Instant) -> CountdownTickOutcome {
+    self.clean_overlay.confirm.tick(now, self.clean_countdown_total())
+  }
+
+  /// Clean countdown progress in `[0.0, 1.0]` for the UI gauge.
+  pub fn clean_countdown_progress(&self, now: Instant) -> f64 {
+    self.clean_overlay.confirm.progress(now, self.clean_countdown_total())
+  }
+
+  /// Seconds remaining (rounded up) on the clean countdown, for the UI label.
+  pub fn clean_countdown_remaining_secs(&self, now: Instant) -> u64 {
+    self
+      .clean_overlay
+      .confirm
+      .remaining_secs(now, self.clean_countdown_total())
+  }
+
+  /// Delete the gated reclaim of the current clean snapshot (issue #325) and
+  /// return to the list. The snapshot was already filtered to the
+  /// git-ignored, untracked artifacts by [`crate::clean::scan_worktree_safe`],
+  /// so this only removes what the CLI `gwm clean --yes` would. Reports the
+  /// freed size (or the failure) on the status bar.
+  pub fn clean_overlay_delete(&mut self) {
+    // Re-scan + re-gate IMMEDIATELY before deleting rather than trusting the
+    // snapshot shown in the overlay (Codex #333 review). That snapshot can be
+    // seconds old — the safety countdown, or just the overlay sitting open —
+    // and a directory may have turned unsafe meanwhile (e.g. `git add -f
+    // target/file` under an ignored `target/`). Deleting a freshly gated
+    // reclaim closes that TOCTOU window, matching the CLI's scan-then-delete.
+    // Pin to the CAPTURED target worktree, not the live selection (an
+    // auto-refresh may have drifted it while the countdown ran) — #333.
+    let Some((name, path)) = self
+      .clean_overlay
+      .target()
+      .map(|(n, p)| (n.to_string(), p.to_path_buf()))
+    else {
+      self.close_clean_overlay();
+      return;
+    };
+    let profile = self.clean_overlay.selected_profile().map(str::to_string);
+    let dirs = match crate::clean::resolve_clean_dirs(profile.as_deref(), &self.clean_overlay_cfg) {
+      Ok(d) => d,
+      Err(e) => {
+        self.status = format!("clean: {e}");
+        self.close_clean_overlay();
+        return;
+      }
+    };
+    let (reclaim, _skipped) = crate::clean::scan_worktree_safe(&name, &path, &dirs);
+    if reclaim.artifacts.is_empty() {
+      self.status = "nothing to reclaim".into();
+      self.close_clean_overlay();
+      return;
+    }
+    match crate::clean::delete_reclaim(&reclaim) {
+      Ok(freed) => {
+        self.status = format!("reclaimed {} from {}", crate::clean::human_size(freed), reclaim.name);
+      }
+      Err(e) => self.status = format!("clean failed: {e}"),
+    }
+    self.close_clean_overlay();
+  }
+
+  /// Close the clean overlay, disarming the countdown, and return to
+  /// [`View::List`] (issue #325).
+  pub fn close_clean_overlay(&mut self) {
+    self.clean_overlay.confirm.dismiss();
+    if self.view == View::CleanReport {
+      self.view = View::List;
+    }
+  }
+
+  /// Activate the selected Settings field (issue #279): cycle a choice field
+  /// to its next value (writing + applying live), or arm the numeric input
+  /// buffer for a `Uint` field. No-op on the read-only `All` tab.
+  pub fn activate_selected_setting(&mut self) {
+    let Some(field) = self.config_panel.selected_field() else {
+      return;
+    };
+    match field.kind() {
+      FieldKind::Choice => {
+        if let Some(next) = field.next_choice(&self.config) {
+          self.apply_setting(field, &next);
+        }
+      }
+      FieldKind::Uint | FieldKind::Text => {
+        let current = field.current(&self.config);
+        self.config_panel.begin_edit(&current);
+      }
+    }
+  }
+
+  /// Commit the in-progress numeric edit (issue #279): write the buffered
+  /// value to the selected field and apply it live. Clearing the buffer
+  /// reads as `0` (see [`ConfigPanel::take_edit`]).
+  pub fn commit_settings_edit(&mut self) {
+    let Some(field) = self.config_panel.selected_field() else {
+      self.config_panel.cancel_edit();
+      return;
+    };
+    if let Some(value) = self.config_panel.take_edit() {
+      // A cleared numeric input is a valid zero; a cleared text input is a
+      // legitimate empty / unset value.
+      let value = if field.kind() == FieldKind::Uint && value.is_empty() {
+        "0".to_string()
+      } else {
+        value
+      };
+      self.apply_setting(field, &value);
+    }
+  }
+
+  /// Persist `field = value` into the active layer's TOML file and apply the
+  /// change live (issue #279). The write targets the per-project `.gwm.toml`
+  /// or the user-global `config.toml` per the panel's layer selector; on
+  /// success the config is reloaded, the theme re-resolved, the sidebar
+  /// position re-seeded and the resolved-rows snapshot refreshed so the
+  /// `All` tab and the source attribution track the edit. Every fallible
+  /// step routes its error to the status line — no `unwrap` on this path.
+  pub fn apply_setting(&mut self, field: SettingField, value: &str) {
+    // A Project-layer write targets `self.workdir/.gwm.toml`. In workspace mode
+    // with a stale selection that path is the *previously* active repo, so
+    // refuse rather than write settings into the wrong repo (#304). Global-layer
+    // edits are repo-independent and stay allowed.
+    if self.workspace_active_stale && self.config_panel.layer == SettingsLayer::Project {
+      self.status = "workspace: selected repo is unavailable — can't edit its project config".into();
+      return;
+    }
+    let path = match self.config_panel.layer {
+      SettingsLayer::Project => self.workdir.join(crate::config::CONFIG_FILE),
+      SettingsLayer::Global => match self.global_path.clone() {
+        Some(p) => p,
+        None => {
+          self.status = "settings: no global config path (set $XDG_CONFIG_HOME or $HOME)".into();
+          return;
+        }
+      },
+    };
+
+    // Numeric fields write a TOML integer; choices and free text write a
+    // TOML string, so a value like `123` / `true` in a shell command or
+    // worktree pattern is preserved as text rather than coerced (review P2).
+    let write = match field.kind() {
+      FieldKind::Uint => crate::config_cli::set_value_at(&path, field.key_path(), value),
+      FieldKind::Choice | FieldKind::Text => crate::config_cli::set_string_at(&path, field.key_path(), value),
+    };
+    if let Err(e) = write {
+      self.status = format!("settings: {}", e);
+      return;
+    }
+
+    // Reload the merged config so every live read (open mode, confirm
+    // countdown) and the re-seeded state below reflect the edit.
+    match Config::load_layered(&self.workdir, self.global_path.as_deref()) {
+      Ok(cfg) => self.set_active_config(cfg),
+      Err(e) => {
+        self.status = format!("settings saved, but reload failed: {}", e);
+        return;
+      }
+    }
+    // A Global-layer edit changes config for *every* repo, not just the active
+    // one — refresh each cached `RepoMeta.config` so navigating to another repo
+    // doesn't restore the pre-edit global value (Codex review #303 P2). A
+    // Project-layer edit only touched the active repo's `.gwm.toml`, already
+    // handled by `set_active_config`.
+    if self.config_panel.layer == SettingsLayer::Global {
+      self.reload_workspace_repo_configs();
+    }
+    match self.config.theme.resolve() {
+      Ok(theme) => self.theme = theme,
+      Err(e) => self.status = format!("theme: {}", e),
+    }
+    self.sidebar.position = self.config.tui.sidebar_position;
+    if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
+      self.config_panel.rows = rows;
+    }
+
+    let mut status = format!(
+      "set {} = {} ({})",
+      field.key_path(),
+      value,
+      self.config_panel.layer.label()
+    );
+    // Surface a shadowed edit: writing global for a key the repo overrides
+    // leaves the effective value unchanged (repo wins).
+    if self.config_panel.layer == SettingsLayer::Global
+      && self.config_panel.field_source(field) == Some(crate::config::ConfigSource::Repo)
+    {
+      status.push_str(" — shadowed by .gwm.toml");
+    }
+    self.status = status;
+  }
+
+  /// Render the Command Logs transcript as plain text for the clipboard
+  /// (issue #279, `y`): newest-first, mirroring the overlay's layout
+  /// (`$ argv`, the outcome line, then the full captured output — not the
+  /// tail-capped view), entries separated by a blank line. Pure + owned so
+  /// the format is unit-testable without a clipboard. Empty when no commands
+  /// have run.
+  pub fn command_logs_transcript(&self) -> String {
+    use crate::command_log::CommandStatus;
+    let mut out = String::new();
+    for entry in self.command_logs.entries.iter().rev() {
+      out.push_str(&format!("$ {}\n", entry.command));
+      let detail = match &entry.status {
+        CommandStatus::Exited(Some(0)) => format!("→ exit 0 ({} ms)", entry.duration.as_millis()),
+        CommandStatus::Exited(Some(code)) => format!("→ exit {} ({} ms)", code, entry.duration.as_millis()),
+        CommandStatus::Exited(None) => format!("→ terminated ({} ms)", entry.duration.as_millis()),
+        CommandStatus::Spawn => "✗ failed to spawn".to_string(),
+      };
+      out.push_str(&format!("  {}\n", detail));
+      for line in entry.output.lines() {
+        out.push_str(&format!("    {}\n", line));
+      }
+      out.push('\n');
+    }
+    out.trim_end().to_string()
   }
 
   /// Scroll the help overlay down one row, clamped to the renderer-published
@@ -1298,12 +2675,306 @@ impl App {
     }
   }
 
-  /// Return the path that the `y: yank` key should push into the system
-  /// clipboard, or `None` when nothing is selected. Pure — the actual
-  /// shell-out (`pbcopy` / `wl-copy` / `xclip` / `clip`) is handled by
-  /// the event loop so this method stays trivially testable.
+  /// Return the path that the `Y: yank-path` key should push into the
+  /// system clipboard, or `None` when nothing is selected. Pure — the
+  /// shell-out is handled by the event loop.
   pub fn yank_selected_path(&self) -> Option<PathBuf> {
     self.selected().map(|w| w.path.clone())
+  }
+
+  /// Return the branch name for the `y: yank-branch-name` key (#290).
+  pub fn yank_selected_branch(&self) -> Option<String> {
+    self.selected()?.branch.clone()
+  }
+
+  /// Return the worktree slug/name for the `w: yank-worktree-name` key (#290).
+  pub fn yank_selected_worktree_name(&self) -> Option<String> {
+    self.selected().map(|w| w.name.clone())
+  }
+
+  /// Signal the event loop to print the selected worktree path to stdout
+  /// before quitting (`e: exit-to-worktree`, #290). The loop checks
+  /// `should_exit_to` after `can_quit_now` to emit the path.
+  pub fn exit_to_worktree(&mut self) {
+    let Some(path) = self.selected().map(|w| w.path.clone()) else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    self.should_exit_to = Some(path);
+    self.should_quit = true;
+  }
+
+  /// Request an off-thread `git pull` of the selected worktree's branch
+  /// (#290). Coalesces if a pull is already in flight, and refuses to start
+  /// while a *different* mutating task (sync / bootstrap / push / rename /
+  /// create / delete) runs in the same worktree (Codex review on PR #292).
+  pub fn request_pull(&mut self) {
+    let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Pull) {
+      self.status = self.busy_mutation_status("pulling");
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::Pull) else {
+      return;
+    };
+    self.spinner.reset();
+    self.status = TaskKind::Pull.loading_label().into();
+    self.spawn_pull(generation, path, name);
+  }
+
+  /// Status line shown when a mutating verb is pressed while another mutating
+  /// task is in flight. `action` is the gerund of the blocked verb
+  /// (e.g. "pulling", "pushing").
+  fn busy_mutation_status(&self, action: &str) -> String {
+    match self.tasks.mutating_loading_label() {
+      Some(label) => format!("finish {} before {}", label.trim_end_matches('…'), action),
+      None => format!("finish current task before {}", action),
+    }
+  }
+
+  fn spawn_pull(&self, generation: u64, path: PathBuf, name: String) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let mut cmd = std::process::Command::new("git");
+      cmd.args(["pull"]).current_dir(&path);
+      // Route through the command-log chokepoint so `git pull` lands in the
+      // Command Logs modal (#290) — a user-triggered mutating op the user
+      // expects to find in the transcript.
+      let result = crate::command_log::run_logged(&mut cmd, "git pull".to_string())
+        .map_err(|e| e.to_string())
+        .and_then(|out| {
+          if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+          } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+          }
+        });
+      let _ = tx.send(TaskMsg::Pull(generation, name, result));
+    });
+  }
+
+  /// Request an off-thread `git push` of the selected worktree's branch
+  /// (#290). Coalesces if a push is already in flight, and refuses to start
+  /// while a *different* mutating task runs in the same worktree (Codex review
+  /// on PR #292).
+  pub fn request_push(&mut self) {
+    let Some((path, name)) = self.selected().map(|w| (w.path.clone(), w.name.clone())) else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Push) {
+      self.status = self.busy_mutation_status("pushing");
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::Push) else {
+      return;
+    };
+    self.spinner.reset();
+    self.status = TaskKind::Push.loading_label().into();
+    self.spawn_push(generation, path, name);
+  }
+
+  fn spawn_push(&self, generation: u64, path: PathBuf, name: String) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let mut cmd = std::process::Command::new("git");
+      cmd.args(["push"]).current_dir(&path);
+      // Route through the command-log chokepoint so `git push` lands in the
+      // Command Logs modal (#290). git writes its progress to stderr, so the
+      // status line still reads stderr on success.
+      let result = crate::command_log::run_logged(&mut cmd, "git push".to_string())
+        .map_err(|e| e.to_string())
+        .and_then(|out| {
+          if out.status.success() {
+            Ok(String::from_utf8_lossy(&out.stderr).trim().to_string())
+          } else {
+            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+          }
+        });
+      let _ = tx.send(TaskMsg::Push(generation, name, result));
+    });
+  }
+
+  /// Open the rename modal for the selected worktree (`c`, #290). Reuses the
+  /// Create form (Type / Issue / Desc) pre-filled by parsing the current
+  /// branch name, so renaming is symmetric with creating. A branch that does
+  /// not match the `<type>/#<issue>-<desc>` pattern can't be decomposed into
+  /// the form, so the modal refuses to open and explains why.
+  pub fn enter_edit_worktree(&mut self) {
+    let Some((branch, path)) = self
+      .selected()
+      .and_then(|w| w.branch.clone().map(|b| (b, w.path.clone())))
+    else {
+      self.status = "no branch to rename (detached HEAD or nothing selected)".into();
+      return;
+    };
+    let Some(spec) = crate::naming::parse_branch(&branch) else {
+      self.status = format!(
+        "branch '{}' doesn't match <type>/#<issue>-<desc>; can't rename here",
+        branch
+      );
+      return;
+    };
+    // Refuse rather than silently preselect type index 0: a branch whose
+    // parsed type isn't configured (config change, manual branch) would
+    // otherwise be renamed to the first configured type on Enter (Codex
+    // review on PR #292).
+    let Some(type_index) = self.branch_types.iter().position(|t| t.name == spec.type_) else {
+      self.status = format!("branch type '{}' is not configured; can't rename here", spec.type_);
+      return;
+    };
+    self.create_form.reset();
+    self.create_form.type_index = type_index;
+    self.create_form.issue = spec.issue;
+    self.create_form.desc = spec.desc;
+    self.create_form.field = Field::Desc;
+    self.edit_original_branch = Some(branch);
+    self.edit_original_path = Some(path);
+    self.edit_failure = None;
+    self.view = View::Edit;
+  }
+
+  /// `true` while the async rename worker is in flight (#290). The run loop
+  /// swallows input in `View::Edit` while this holds, mirroring create.
+  pub fn is_edit_worktree_loading(&self) -> bool {
+    self.tasks.is_loading(TaskKind::EditWorktree)
+  }
+
+  /// Cancel the rename modal (`Esc`): drop the captured original branch/path
+  /// and return to the list without touching git.
+  pub fn cancel_edit_worktree(&mut self) {
+    self.edit_original_branch = None;
+    self.edit_original_path = None;
+    self.edit_failure = None;
+    self.create_form.reset();
+    self.view = View::List;
+  }
+
+  /// Submit the rename from the `View::Edit` modal (#290). Composes the new
+  /// branch name + worktree path from the form, then spawns an off-thread
+  /// worker that renames the local branch (`git branch -m`), the remote
+  /// branch when it exists (`git push origin :<old> <new>:<new>` + re-track),
+  /// and moves the worktree directory (`git worktree move`). A no-op rename
+  /// (nothing changed) just closes the modal.
+  pub fn submit_edit_worktree(&mut self) -> Result<()> {
+    let type_ = self
+      .branch_types
+      .get(self.create_form.type_index)
+      .map(|t| t.name.clone())
+      .unwrap_or_default();
+    let spec = match BranchSpec::new_with_types(
+      type_,
+      self.create_form.issue.clone(),
+      self.create_form.desc.clone(),
+      &self.branch_types,
+    ) {
+      Ok(s) => s,
+      Err(e) => {
+        self.edit_failure = Some(e.to_string());
+        return Ok(());
+      }
+    };
+    let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
+    let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
+    let new_path = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
+
+    let Some(old_branch) = self.edit_original_branch.clone() else {
+      self.cancel_edit_worktree();
+      return Ok(());
+    };
+    let Some(old_path) = self.edit_original_path.clone() else {
+      self.cancel_edit_worktree();
+      return Ok(());
+    };
+
+    // Nothing changed — close without shelling out to git.
+    if new_branch == old_branch && new_path == old_path {
+      self.status = "no change".into();
+      self.cancel_edit_worktree();
+      return Ok(());
+    }
+
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before renaming", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before renaming".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::EditWorktree) else {
+      return Ok(());
+    };
+    self.edit_failure = None;
+    self.spinner.reset();
+    self.status = TaskKind::EditWorktree.loading_label().into();
+    self.spawn_edit_worktree(
+      generation,
+      old_branch,
+      old_path,
+      new_branch,
+      new_path,
+      new_name,
+      self.workdir.clone(),
+    );
+    Ok(())
+  }
+
+  #[allow(clippy::too_many_arguments)]
+  fn spawn_edit_worktree(
+    &self,
+    generation: u64,
+    old_branch: String,
+    old_path: PathBuf,
+    new_branch: String,
+    new_path: PathBuf,
+    new_name: String,
+    workdir: PathBuf,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = crate::worktree::rename_worktree(&workdir, &old_path, &old_branch, &new_path, &new_branch)
+        .map(|remote_renamed| EditWorktreeResult {
+          new_branch,
+          new_path,
+          new_name,
+          remote_renamed,
+        })
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::EditWorktree(generation, result));
+    });
+  }
+
+  /// Open the selected worktree in a new multiplexer pane/tab (`t`, #290).
+  /// Detects tmux / zellij at runtime via environment variables; prints a
+  /// status message when no supported multiplexer is active.
+  pub fn open_in_mux_pane(&mut self) {
+    use crate::multiplexer::{build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, SpawnMode};
+    let Some(w) = self.selected() else {
+      self.status = "no worktree selected".into();
+      return;
+    };
+    let path = w.path.clone();
+    let name = w.name.clone();
+    // `mux_pane` promises a pane, so split the current pane (tmux
+    // `split-window` / zellij `new-pane`) rather than opening a new
+    // window/tab (Codex review on PR #292).
+    let cmd = if detect_tmux(std::env::var("TMUX").ok()) {
+      build_tmux_command(&name, &path, SpawnMode::Split)
+    } else if detect_zellij(std::env::var("ZELLIJ").ok()) {
+      build_zellij_command(&name, &path, SpawnMode::Split)
+    } else {
+      self.status = "no multiplexer detected ($TMUX / $ZELLIJ not set)".into();
+      return;
+    };
+    let bin = cmd[0].as_str();
+    match std::process::Command::new(bin).args(&cmd[1..]).spawn() {
+      Ok(_) => self.status = format!("opened {} in new pane", name),
+      Err(e) => self.status = format!("mux-pane failed: {}", e),
+    }
   }
 
   /// Resolve what the `o` key should do for the currently selected
@@ -1336,6 +3007,7 @@ impl App {
   pub fn enter_create(&mut self) {
     self.view = View::Create;
     self.create_form.reset();
+    self.create_failure = None;
     // Open focused on Issue rather than the cycle-only Type field (#217 UX):
     // the first keypress then edits text instead of being a silent no-op on
     // Type. The type keeps its `reset()` default and stays reachable via
@@ -1377,27 +3049,34 @@ impl App {
   /// when the Type field is focused; on a text field they are literal input
   /// so the letters are never swallowed.
   pub fn handle_create_key(&mut self, key: KeyEvent) -> CreateKey {
+    if self.is_create_worktree_loading() {
+      return CreateKey::Handled;
+    }
     let on_type = self.create_form.field == Field::Type;
-    match key.code {
-      KeyCode::Esc => return CreateKey::Cancel,
-      KeyCode::Tab => self.create_next_field(),
-      KeyCode::BackTab => self.create_prev_field(),
-      KeyCode::Enter => {
+    // #219: verbs resolve through the `create` context. The type-cycling
+    // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
+    // Type field; on a text field their keys fall through to literal input
+    // so `h` / `l` are never swallowed while typing a description.
+    match self.resolve_modal(KeyContext::Create, key) {
+      Some(ModalAction::CreateCancel) => return CreateKey::Cancel,
+      Some(ModalAction::CreateNextField) => self.create_next_field(),
+      Some(ModalAction::CreatePrevField) => self.create_prev_field(),
+      Some(ModalAction::CreateSubmit) => {
         if self.create_form.field == Field::Desc {
           return CreateKey::Submit;
         }
         self.create_next_field();
       }
-      KeyCode::Up | KeyCode::Left if on_type => self.create_prev_type(),
-      KeyCode::Down | KeyCode::Right if on_type => self.create_next_type(),
-      KeyCode::Char('h') if on_type => self.create_prev_type(),
-      KeyCode::Char('l') if on_type => self.create_next_type(),
-      KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
-        self.status = "issue accepts digits only".into();
-      }
-      KeyCode::Char(c) if !on_type => self.create_push_char(c),
-      KeyCode::Backspace if !on_type => self.create_pop_char(),
-      _ => {}
+      Some(ModalAction::CreatePrevType) if on_type => self.create_prev_type(),
+      Some(ModalAction::CreateNextType) if on_type => self.create_next_type(),
+      _ => match key.code {
+        KeyCode::Char(c) if self.create_form.field == Field::Issue && !c.is_ascii_digit() => {
+          self.status = "issue accepts digits only".into();
+        }
+        KeyCode::Char(c) if !on_type => self.create_push_char(c),
+        KeyCode::Backspace if !on_type => self.create_pop_char(),
+        _ => {}
+      },
     }
     CreateKey::Handled
   }
@@ -1431,19 +3110,60 @@ impl App {
       return Ok(());
     }
 
-    let created = worktree::add(&self.repo, &dirname, &target, &branch, false)?;
-
-    let ctx = BootstrapCtx {
-      main_repo: &self.workdir,
-      worktree: &created,
-      config: &self.config,
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before creating worktree", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before creating worktree".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::CreateWorktree) else {
+      return Ok(());
     };
-    let report = bootstrap::run(&ctx)?;
-    self.report = Some(report);
-    self.view = View::Report;
-    self.refresh()?;
-    self.status = format!("created {} @ {}", branch, created.display());
+    self.create_failure = None;
+    self.spinner.reset();
+    self.status = TaskKind::CreateWorktree.loading_label().into();
+    self.spawn_create_worktree(
+      generation,
+      dirname,
+      target,
+      branch,
+      self.workdir.clone(),
+      self.config.clone(),
+    );
     Ok(())
+  }
+
+  fn spawn_create_worktree(
+    &self,
+    generation: u64,
+    dirname: String,
+    target: PathBuf,
+    branch: String,
+    workdir: PathBuf,
+    config: Config,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let result = (|| -> Result<CreateWorktreeResult> {
+        let repo = worktree::discover_repo(Some(&workdir))?;
+        let created = worktree::add(&repo, &dirname, &target, &branch, false)?;
+        let ctx = BootstrapCtx {
+          main_repo: &workdir,
+          worktree: &created,
+          config: &config,
+        };
+        let report = bootstrap::run(&ctx)?;
+        Ok(CreateWorktreeResult {
+          branch,
+          created,
+          report,
+        })
+      })()
+      .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::CreateWorktree(generation, result));
+    });
   }
 
   // ---- Delete flow ---------------------------------------------------------
@@ -1459,21 +3179,51 @@ impl App {
     }
     self.view = View::Confirm;
     self.confirm.reset();
+    self.delete_failure = None;
     // Start the loader animation from a deterministic frame each time
     // the modal opens (#187).
     self.spinner.reset();
   }
 
   pub fn confirm_delete(&mut self) -> Result<()> {
-    let (name, label) = match self.selected() {
-      Some(s) => (s.name.clone(), s.path.display().to_string()),
+    // `worktree::remove` resolves by the internal git id, which can diverge
+    // from the display name after a rename (#290), so pass `id` here.
+    let (id, label) = match self.selected() {
+      Some(s) => (s.id.clone(), s.path.display().to_string()),
       None => return Ok(()),
     };
-    worktree::remove(&self.repo, &name, self.delete_branch_on_remove)?;
-    self.status = format!("removed {} ({})", name, label);
-    self.view = View::List;
-    self.confirm.reset();
-    self.refresh()
+    if self.is_delete_worktree_loading() {
+      return Ok(());
+    }
+    if self.tasks.has_mutating_task_in_flight() {
+      if let Some(label) = self.tasks.mutating_loading_label() {
+        self.status = format!("finish {} before deleting worktree", label.trim_end_matches('…'));
+      } else {
+        self.status = "finish current task before deleting worktree".into();
+      }
+      return Ok(());
+    }
+    let Some(generation) = self.tasks.request(TaskKind::DeleteWorktree) else {
+      return Ok(());
+    };
+    let delete_branch = self.delete_branch_on_remove;
+    self.delete_failure = None;
+    self.confirm.dismiss();
+    self.spinner.reset();
+    self.status = TaskKind::DeleteWorktree.loading_label().into();
+    self.spawn_delete_worktree(generation, id, label, delete_branch);
+    Ok(())
+  }
+
+  fn spawn_delete_worktree(&self, generation: u64, id: String, label: String, delete_branch: bool) {
+    let tx = self.task_tx.clone();
+    let workdir = self.workdir.clone();
+    std::thread::spawn(move || {
+      let result = worktree::discover_repo(Some(&workdir))
+        .and_then(|repo| worktree::remove(&repo, &id, delete_branch))
+        .map_err(|e| e.to_string());
+      let _ = tx.send(TaskMsg::DeleteWorktree(generation, id, label, result));
+    });
   }
 
   // ---- Confirm-overlay safety countdown (issue #30, extracted per #125) ---
@@ -1510,11 +3260,27 @@ impl App {
       ConfirmKeyAction::FireNow => {}
       ConfirmKeyAction::Disarmed => {
         let secs = total.as_secs();
-        self.status = format!("countdown cancelled — press y to re-arm ({secs}s safety delay)");
+        // #219 review: name the live confirm key, and drop the clause entirely
+        // when it is unbound — never advertise a key that no longer re-arms.
+        self.status = match self.modal_keymap.primary_key(ModalAction::ConfirmConfirm) {
+          Some(c) => format!("countdown cancelled — press {c} to re-arm ({secs}s safety delay)"),
+          None => format!("countdown cancelled ({secs}s safety delay)"),
+        };
       }
       ConfirmKeyAction::Armed => {
         let secs = total.as_secs();
-        self.status = format!("armed — auto-fires in {secs}s · press y again or Esc to cancel");
+        // #219 review: name the live confirm / cancel keys (rebindable via
+        // `[tui.keys.modal.confirm]`), dropping either clause when its verb is
+        // unbound rather than advertising a phantom key while the timer runs.
+        let confirm = self.modal_keymap.primary_key(ModalAction::ConfirmConfirm);
+        let cancel = self.modal_keymap.primary_key(ModalAction::ConfirmCancel);
+        let tail = match (confirm, cancel) {
+          (Some(c), Some(x)) => format!(" · press {c} again or {x} to cancel"),
+          (Some(c), None) => format!(" · press {c} again to disarm"),
+          (None, Some(x)) => format!(" · press {x} to cancel"),
+          (None, None) => String::new(),
+        };
+        self.status = format!("armed — auto-fires in {secs}s{tail}");
       }
     }
     action
@@ -1523,7 +3289,12 @@ impl App {
   /// Handle the dismissal keys (`n` / `Esc`) inside the confirm overlay.
   /// Always disarms the countdown and returns to the list.
   pub fn confirm_dismiss(&mut self) {
+    if self.is_delete_worktree_loading() {
+      self.status = TaskKind::DeleteWorktree.loading_label().into();
+      return;
+    }
     self.confirm.dismiss();
+    self.delete_failure = None;
     self.view = View::List;
   }
 
@@ -1644,6 +3415,32 @@ impl App {
     self.refresh_link();
   }
 
+  /// Move the cursor onto the worktree at `path`, mapping its raw index in
+  /// `self.worktrees` to its slot in the *filtered* list — `list_state`
+  /// indexes `filtered_indices()`, not the raw vec, so selecting a raw index
+  /// under an active filter lands on the wrong visible row or none (Codex
+  /// review on PR #292). A no-op when the path is filtered out.
+  /// The chord that opens the issue/PR link prompt (`i` by default since
+  /// #290), resolved from the live keymap so "press X to link" status hints
+  /// track the binding and any `[tui.keys]` override (Codex review on PR
+  /// #292, P3).
+  fn link_prompt_chord(&self) -> String {
+    self
+      .keymap
+      .primary_chord(Action::LinkPrompt)
+      .unwrap_or_else(|| "i".into())
+  }
+
+  pub fn reselect_by_path(&mut self, path: &Path) {
+    let Some(raw) = self.worktrees.iter().position(|w| w.path == path) else {
+      return;
+    };
+    let pos = self.filtered_indices().iter().position(|&idx| idx == raw);
+    if let Some(pos) = pos {
+      self.list_state.select(Some(pos));
+    }
+  }
+
   // ---- Bootstrap flow ------------------------------------------------------
 
   // ---- Picker mode (issue #22) --------------------------------------------
@@ -1715,6 +3512,10 @@ impl App {
     // itself moves to a worker, with the `View::Report` transition deferred
     // to `drain_task_results`. A second `b` press while one is in flight
     // coalesces (no `Some(generation)`), so two bootstraps never race.
+    if self.tasks.has_mutating_task_in_flight() && !self.tasks.is_loading(TaskKind::Bootstrap) {
+      self.status = self.busy_mutation_status("bootstrapping");
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::Bootstrap) else {
       return;
     };
@@ -1775,6 +3576,102 @@ impl App {
     &self.github.link
   }
 
+  /// Mirror the live resolved `github.link` onto the selected worktree's
+  /// snapshot (issue #283 / Codex review #284). The table renders the PR/
+  /// issue pastilles from `self.worktrees[*].link`, captured at list time,
+  /// so a freshly persisted auto-detection would otherwise stay invisible on
+  /// the selected row until a full relist. Resolves the selection through
+  /// the same filter map as [`Self::selected`].
+  fn sync_selected_link_into_table(&mut self) {
+    let Some(i) = self.list_state.selected() else {
+      return;
+    };
+    let filtered = self.filter.snapshot_indices(&self.worktrees, fuzzy_match_indices);
+    let Some(&original) = filtered.get(i) else {
+      return;
+    };
+    let link = self.github.link.clone();
+    if let Some(w) = self.worktrees.get_mut(original) {
+      if w.link.issue != link.issue {
+        w.issue_state = None;
+      }
+      if w.link.pr != link.pr {
+        w.pr_state = None;
+      }
+      w.link = link;
+    }
+  }
+
+  fn sync_issue_status_into_table(&mut self, status: &IssueStatus) {
+    if self.github.link.issue == Some(status.number) {
+      self.github.link.issue_title = Some(status.title.clone());
+      self.github.link.issue_state = Some(status.state);
+      if let Some(branch) = self.selected_branch_name() {
+        let _ = github::persist_issue_title(&self.repo, &branch, &status.title);
+        let _ = github::persist_issue_state(&self.repo, &branch, status.state);
+      }
+    }
+    // In workspace mode the fetch was for the active repo's selected issue, so
+    // only stamp/persist rows belonging to that repo — a number-only match
+    // would otherwise carry repo A's state onto repo B's same-numbered row and
+    // persist it through the wrong repo handle (Codex review #303 P2).
+    let mask = self.active_repo_row_mask();
+    for (i, w) in self.worktrees.iter_mut().enumerate() {
+      if mask.as_ref().is_some_and(|m| !m[i]) {
+        continue;
+      }
+      if w.link.issue != Some(status.number) {
+        continue;
+      }
+      w.issue_state = Some(status.state);
+      w.link.issue_title = Some(status.title.clone());
+      w.link.issue_state = Some(status.state);
+      if let Some(branch) = w.branch.as_deref() {
+        let _ = github::persist_issue_title(&self.repo, branch, &status.title);
+        let _ = github::persist_issue_state(&self.repo, branch, status.state);
+      }
+    }
+  }
+
+  fn sync_pr_status_into_table(&mut self, status: &PrStatus) {
+    if self.github.link.pr == Some(status.number) {
+      self.github.link.pr_title = Some(status.title.clone());
+      self.github.link.pr_state = Some(status.state);
+      if let Some(branch) = self.selected_branch_name() {
+        let _ = match self.github.link.pr_source {
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, &branch, &status.title)
+            .and_then(|()| github::persist_detected_pr_state(&self.repo, &branch, status.state)),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, &branch, &status.title)
+            .and_then(|()| github::persist_pr_state(&self.repo, &branch, status.state)),
+          github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+        };
+      }
+    }
+    // Scope to the active repo's rows in workspace mode — see the matching
+    // note in `sync_issue_status_into_table` (Codex review #303 P2).
+    let mask = self.active_repo_row_mask();
+    for (i, w) in self.worktrees.iter_mut().enumerate() {
+      if mask.as_ref().is_some_and(|m| !m[i]) {
+        continue;
+      }
+      if w.link.pr != Some(status.number) {
+        continue;
+      }
+      w.pr_state = Some(status.state);
+      w.link.pr_title = Some(status.title.clone());
+      w.link.pr_state = Some(status.state);
+      if let Some(branch) = w.branch.as_deref() {
+        let _ = match w.link.pr_source {
+          github::LinkSource::Detected => github::persist_detected_pr_title(&self.repo, branch, &status.title)
+            .and_then(|()| github::persist_detected_pr_state(&self.repo, branch, status.state)),
+          github::LinkSource::Explicit => github::persist_pr_title(&self.repo, branch, &status.title)
+            .and_then(|()| github::persist_pr_state(&self.repo, branch, status.state)),
+          github::LinkSource::BranchName | github::LinkSource::None => Ok(()),
+        };
+      }
+    }
+  }
+
   pub fn current_slug(&self) -> Option<&str> {
     self.github.link_slug.as_deref()
   }
@@ -1821,24 +3718,46 @@ impl App {
   pub fn refresh_github_status(&mut self) {
     let slug = self.github.link_slug.clone();
 
-    // Drop a prior auto-detection so this refresh re-resolves it live
-    // (issue #181): a detected PR must not stick across `F` presses if
-    // the branch's PR changed. Explicit / branch-name links stay pinned.
-    self.github.clear_detected_pr();
-
-    // Auto-detect the selected branch's PR when none is linked (issue
-    // #181). Synchronous (see method doc); needs a remote, so it's a no-op
-    // without a slug. An explicit `gwm link --pr` wins — `apply_detected_pr`
-    // only fills an empty slot.
-    if self.github.link.pr.is_none() {
+    // Re-resolve a non-explicit PR live on `F` (issue #181/#283): only an
+    // explicit `gwm link --pr` pins the PR; a branch-name / none / persisted-
+    // detected (#283) PR is re-probed so a number that changed since the last
+    // detection is refreshed. The in-memory detection is dropped *only* once
+    // we have a fresh successful result (the `Ok` arm), so a refresh that
+    // cannot probe — no origin slug, no resolvable branch, or a failed `gh`
+    // call — keeps the persisted detection visible instead of blanking the
+    // pane/table (Codex review #284). `apply_detected_pr` only fills an empty
+    // slot, hence the clear-then-apply to replace a stale detection.
+    if self.github.link.pr_source != github::LinkSource::Explicit {
       if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
-        let detected = github::find_pr_for_branch(slug, &branch).ok().flatten();
-        self.github.apply_detected_pr(detected);
+        if let Ok(detected) = github::find_pr_for_branch(slug, &branch) {
+          self.github.clear_detected_pr();
+          self.github.apply_detected_pr(detected);
+          // Persist the detection (issue #283) so the no-fetch table read
+          // path colours the PR pastille on every row, not just the selected
+          // one. Only a successful probe is authoritative: store a hit, clear
+          // the key on a proven `Ok(None)`. Best-effort write — a git-config
+          // failure must not break the refresh, so the result is discarded.
+          let _ = match detected {
+            Some(n) => github::persist_detected_pr(&self.repo, &branch, n),
+            None => github::clear_persisted_detected_pr(&self.repo, &branch),
+          };
+        }
+        // On a `gh` failure (Err) nothing was cleared, so the link keeps
+        // whatever `read_link` resolved (possibly a persisted detection).
+        //
+        // Mirror the resolved link onto the selected row's snapshot so the
+        // table pastille reflects the detection immediately, without waiting
+        // for a separate relist (Codex review #284). The table renders from
+        // `self.worktrees[*].link`, not the live `github.link`.
+        self.sync_selected_link_into_table();
       }
     }
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
-      self.status = "nothing linked — press L to link an issue or PR".into();
+      self.status = format!(
+        "nothing linked — press {} to link an issue or PR",
+        self.link_prompt_chord()
+      );
       return;
     }
     let Some(slug) = slug else {
@@ -1870,6 +3789,56 @@ impl App {
       // report the current outcome immediately.
       self.report_github_refresh_status();
     }
+  }
+
+  fn refresh_linked_github_statuses_for_worktrees(&mut self) -> u32 {
+    // Workspace mode (#36): this bulk prefetch resolves every merged row's
+    // issue/PR against a single repo's slug (`self.github.link_slug`), which
+    // mis-attributes numbers across child repos with different remotes (Codex
+    // review #303 P2). In workspace mode GitHub state is fetched per-selection
+    // instead — `sync_active_repo`/`on_navigation` call `refresh_link`, which
+    // re-resolves the slug from the selected row's own repo. So skip the bulk
+    // cross-repo prefetch here.
+    if self.is_workspace() {
+      return 0;
+    }
+    let Some(slug) = self.github.link_slug.clone() else {
+      return 0;
+    };
+    let issues = self
+      .worktrees
+      .iter()
+      .filter_map(|w| w.link.issue)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    let prs = self
+      .worktrees
+      .iter()
+      .filter_map(|w| w.link.pr)
+      .collect::<BTreeSet<_>>()
+      .into_iter()
+      .collect::<Vec<_>>();
+    if issues.is_empty() && prs.is_empty() {
+      return 0;
+    }
+
+    self.invalidate_github();
+    let mut spawned = 0u32;
+    for n in issues {
+      if self.spawn_github_issue(n, &slug) {
+        spawned += 1;
+      }
+    }
+    for n in prs {
+      if self.spawn_github_pr(n, &slug) {
+        spawned += 1;
+      }
+    }
+    if spawned > 0 {
+      self.spinner.reset();
+    }
+    spawned
   }
 
   /// Flush the GitHub result cache **and** drop any in-flight GitHub worker
@@ -1984,11 +3953,25 @@ impl App {
   }
 
   pub fn apply_issue_fetch_result(&mut self, r: std::result::Result<IssueStatus, String>) {
+    if let Ok(status) = &r {
+      self.persist_loaded_issue_title(status);
+    }
     self.github.apply_issue_result(r);
   }
 
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
+    if let Ok(status) = &r {
+      self.persist_loaded_pr_title(status);
+    }
     self.github.apply_pr_result(r);
+  }
+
+  fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
+    self.sync_issue_status_into_table(status);
+  }
+
+  fn persist_loaded_pr_title(&mut self, status: &PrStatus) {
+    self.sync_pr_status_into_table(status);
   }
 
   // ---- Open menu ----------------------------------------------------------
@@ -2024,14 +4007,14 @@ impl App {
       LinkTarget::Issue => match self.github.link.issue {
         Some(n) => github::issue_url(&slug, n),
         None => {
-          self.status = "no issue linked — press L to link one".into();
+          self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
         Some(n) => github::pr_url(&slug, n),
         None => {
-          self.status = "no PR linked — press L to link one".into();
+          self.status = format!("no PR linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
@@ -2065,29 +4048,36 @@ impl App {
   /// (submit shell-out, view transition).
   pub fn handle_link_prompt_key(&mut self, key: KeyEvent) -> LinkPromptKey {
     use crate::tui::state::link_prompt::LinkPromptStage;
-    if self.key_matches_action(key, Action::FetchGithub) {
-      return LinkPromptKey::Refresh;
-    }
-    match (self.link_prompt.stage, key.code) {
-      (_, KeyCode::Esc) => return LinkPromptKey::Cancel,
-      // ChooseTarget: a vertical selectable list. j/k (and arrows) move the
-      // highlight, Enter links the highlighted row, i/p stay direct picks.
-      // With exactly two targets, up and down land on the same other row, so
-      // a single flip serves j/k/Up/Down alike.
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Down | KeyCode::Up) => {
-        self.link_prompt.toggle_selection()
-      }
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('i')) => self.link_prompt_choose(LinkTarget::Issue),
-      (LinkPromptStage::ChooseTarget, KeyCode::Char('p')) => self.link_prompt_choose(LinkTarget::Pr),
-      (LinkPromptStage::ChooseTarget, KeyCode::Enter) => {
-        let target = self.link_prompt.selected;
-        self.link_prompt_choose(target);
-      }
-      // InputNumber: type the digits, Enter submits, Backspace deletes.
-      (LinkPromptStage::InputNumber, KeyCode::Enter) => return LinkPromptKey::Submit,
-      (LinkPromptStage::InputNumber, KeyCode::Char(c)) => self.link_prompt_push_char(c),
-      (LinkPromptStage::InputNumber, KeyCode::Backspace) => self.link_prompt_pop_char(),
-      _ => {}
+    // #219: each stage is its own modal context. ChooseTarget is a vertical
+    // two-row picker — `next` / `prev` both flip the highlight (a single
+    // flip serves j/k/Up/Down alike), while `issue` / `pr` are direct picks.
+    // InputNumber routes `submit` / `cancel` through the context and treats
+    // everything else as digit input. The global `fetch_github` key is a
+    // FALLBACK after the stage context, so a contextual binding on that key
+    // (e.g. `submit = ["F"]`) wins over the fetch shortcut (#293 review).
+    match self.link_prompt.stage {
+      LinkPromptStage::ChooseTarget => match self.resolve_modal(KeyContext::LinkChooseTarget, key) {
+        Some(ModalAction::LinkChooseCancel) => return LinkPromptKey::Cancel,
+        Some(ModalAction::LinkChooseNext) | Some(ModalAction::LinkChoosePrev) => self.link_prompt.toggle_selection(),
+        Some(ModalAction::LinkChooseIssue) => self.link_prompt_choose(LinkTarget::Issue),
+        Some(ModalAction::LinkChoosePr) => self.link_prompt_choose(LinkTarget::Pr),
+        Some(ModalAction::LinkChooseAccept) => {
+          let target = self.link_prompt.selected;
+          self.link_prompt_choose(target);
+        }
+        _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
+        _ => {}
+      },
+      LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
+        Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
+        Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,
+        _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
+        _ => match key.code {
+          KeyCode::Char(c) => self.link_prompt_push_char(c),
+          KeyCode::Backspace => self.link_prompt_pop_char(),
+          _ => {}
+        },
+      },
     }
     LinkPromptKey::Handled
   }

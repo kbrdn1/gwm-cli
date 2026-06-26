@@ -11,11 +11,13 @@ use gwm::tui::ConfirmButton;
 use gwm::tui::{
   badge_group_width, bootstrap_report_lines, centered_abs, confirm_buttons_line, create_buttons_line, ellipsize_middle,
   field_input_line, link_prompt_modal_width, link_target_line, modal_hint_line, pane_counter, recent_items_pane_title,
-  status_pane_title, type_selector_line, working_tree_pane_title, worktrees_pane_title,
+  status_pane_title, type_selector_line, working_tree_counts_footer, working_tree_pane_title,
+  working_tree_status_counts, worktrees_pane_title, WorkingTreeCounts, WT_CREATED_ICON, WT_DELETED_ICON,
+  WT_MODIFIED_ICON,
 };
 use gwm::tui::{
-  confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_section_style,
-  issue_pr_pane_title,
+  confirm_delete_branch_line, confirm_detail_line, delete_worktree_title, help_body_section_color, help_entry_line,
+  help_section_style, issue_pr_pane_title,
 };
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
@@ -58,28 +60,57 @@ fn ellipsize_middle_counts_chars_not_bytes() {
 }
 
 #[test]
-fn badge_group_width_single_chord_is_chord_plus_two_pad() {
-  // ` q ` → 1 + 2.
-  assert_eq!(badge_group_width("q"), 3);
-  // ` Ctrl-C ` → 6 + 2.
-  assert_eq!(badge_group_width("Ctrl-C"), 8);
+fn badge_group_width_single_chord_is_the_bare_chord_width() {
+  // Issue #279: chords are flat accent-bold glyphs now, no `` key `` box —
+  // so a group's width is the bare chord width, not chord + 2 pad.
+  assert_eq!(badge_group_width("q"), 1);
+  assert_eq!(badge_group_width("Ctrl-C"), 6);
 }
 
 #[test]
-fn badge_group_width_splits_comma_chords_into_separate_badges() {
-  // `j, Down` renders as `[ j ] [ Down ]`:
-  //   ` j ` = 3, one separator space, ` Down ` = 6  → 10.
-  assert_eq!(badge_group_width("j, Down"), 3 + 1 + 6);
-  // `g g` is a *single* sequential chord (space inside, no comma) → one
-  // badge ` g g ` = 5.
-  assert_eq!(badge_group_width("g g"), 5);
+fn badge_group_width_splits_comma_chords_with_a_single_space() {
+  // `j, Down` renders as `j Down` (flat): 1 + one separator space + 4 → 6.
+  assert_eq!(badge_group_width("j, Down"), 1 + 1 + 4);
+  // `g g` is a *single* sequential chord (space inside, no comma) → `g g` = 3.
+  assert_eq!(badge_group_width("g g"), 3);
 }
 
 #[test]
-fn badge_group_width_unbound_renders_one_muted_badge() {
-  let expected = "(unbound)".chars().count() + 2;
+fn badge_group_width_unbound_is_the_bare_placeholder_width() {
+  let expected = "(unbound)".chars().count();
   assert_eq!(badge_group_width("(unbound)"), expected);
   assert_eq!(badge_group_width(""), expected);
+}
+
+#[test]
+fn help_entry_line_renders_flat_accent_chords_not_badges() {
+  // Issue #279: the keybindings body drops the reverse-video chord badge
+  // for flat accent-bold glyphs (herdr-style). The label stays readable.
+  let theme = Theme {
+    accent: Color::Magenta,
+    ..Theme::default()
+  };
+  let line = help_entry_line("j, Down", "next", 10, &theme);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("next"), "label missing: {text:?}");
+  // The first chord renders as a bare `j` accent-bold span — no padding box.
+  let chord = line
+    .spans
+    .iter()
+    .find(|s| s.content.as_ref() == "j")
+    .expect("a bare 'j' chord span");
+  assert_eq!(chord.style.fg, Some(Color::Magenta), "chord wears the accent");
+  assert!(
+    chord.style.add_modifier.contains(Modifier::BOLD),
+    "chord is bold: {chord:?}"
+  );
+  assert!(
+    !line
+      .spans
+      .iter()
+      .any(|s| s.style.add_modifier.contains(Modifier::REVERSED)),
+    "no chord span should be a reverse-video badge anymore"
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -153,15 +184,21 @@ fn sidebar_subpane_titles_surface_live_bindings() {
   assert_eq!(working_tree_pane_title(&km), " Working Tree [R] ");
   assert_eq!(
     recent_items_pane_title(SidebarMode::Commits, &km),
-    " Recent Commits [l] "
+    " Recent Commits [L] "
   );
 
   km.apply_override(Action::FetchGithub, vec![KeyStroke::parse_chord("Ctrl+g").unwrap()])
     .unwrap();
-  km.apply_override(Action::Review, vec![KeyStroke::parse_chord("Ctrl+r").unwrap()])
-    .unwrap();
-  km.apply_override(Action::GitTui, vec![KeyStroke::parse_chord("Ctrl+l").unwrap()])
-    .unwrap();
+  km.apply_override(
+    Action::ReviewFullscreen,
+    vec![KeyStroke::parse_chord("Ctrl+r").unwrap()],
+  )
+  .unwrap();
+  km.apply_override(
+    Action::LazyGitFullscreen,
+    vec![KeyStroke::parse_chord("Ctrl+l").unwrap()],
+  )
+  .unwrap();
 
   assert_eq!(issue_pr_pane_title(&km), " Issue / PR [Ctrl+g] ");
   assert_eq!(working_tree_pane_title(&km), " Working Tree [Ctrl+r] ");
@@ -224,19 +261,40 @@ fn confirm_buttons_render_as_chips_without_brackets() {
 }
 
 #[test]
-fn modal_hint_line_uses_statusbar_badge_treatment() {
-  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &Theme::default());
+fn modal_hint_line_renders_accent_bind_then_muted_action() {
+  // Issue #279: hints drop the reverse-video badge for a herdr-style
+  // "accent bind + space + muted action" treatment. The key span carries
+  // the accent colour + BOLD (no REVERSED box); the label reads muted.
+  let theme = Theme {
+    accent: Color::Magenta,
+    muted: Color::Gray,
+    ..Theme::default()
+  };
+  let line = modal_hint_line(&[("F", "fetch"), ("Esc", "close")], &theme);
   let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(text.contains("fetch"), "hint label missing: {text:?}");
-  let fetch = line
+  // The bind is the bare key glyph — no surrounding padding box.
+  let key = line
     .spans
     .iter()
-    .find(|s| s.content.contains("F"))
-    .expect("fetch key badge");
+    .find(|s| s.content.as_ref() == "F")
+    .expect("a bare 'F' bind span (no badge padding)");
+  assert_eq!(key.style.fg, Some(Color::Magenta), "bind wears the accent");
   assert!(
-    fetch.style.add_modifier.contains(Modifier::REVERSED),
-    "modal key hints should use statusbar-like badges"
+    key.style.add_modifier.contains(Modifier::BOLD),
+    "bind is bold for emphasis"
   );
+  assert!(
+    !key.style.add_modifier.contains(Modifier::REVERSED),
+    "hints no longer use a reverse-video badge: {key:?}"
+  );
+  // The action reads in the muted role.
+  let label = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("fetch"))
+    .expect("a fetch label span");
+  assert_eq!(label.style.fg, Some(Color::Gray), "action reads muted");
 }
 
 #[test]
@@ -296,6 +354,31 @@ fn create_buttons_render_as_chips_with_create_highlighted() {
     !cancel.style.add_modifier.contains(Modifier::REVERSED),
     "idle Cancel button must not be reversed"
   );
+}
+
+#[test]
+fn rename_buttons_say_rename_not_create() {
+  // Codex review on PR #292 (P3): the `c` modal is titled "Rename Worktree"
+  // and Enter renames, so its primary button must read "Rename", not the
+  // create overlay's "Create".
+  let line = gwm::tui::rename_buttons_line(Color::Magenta, Color::Gray);
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(text.contains("Rename"), "missing Rename label: {text:?}");
+  assert!(text.contains("Cancel"), "missing Cancel label: {text:?}");
+  assert!(
+    !text.contains("Create"),
+    "the rename modal must not say Create: {text:?}"
+  );
+  let primary = line
+    .spans
+    .iter()
+    .find(|s| s.content.contains("Rename"))
+    .expect("a Rename span");
+  assert!(
+    primary.style.add_modifier.contains(Modifier::REVERSED),
+    "primary Rename button must be the reversed chip"
+  );
+  assert_eq!(primary.style.fg, Some(Color::Magenta), "Rename chip carries the accent");
 }
 
 #[test]
@@ -404,6 +487,217 @@ fn link_target_line_highlights_the_selected_row() {
   assert!(
     idle.spans.iter().all(|s| s.style.fg != Some(Color::Magenta)),
     "an unselected row must not wear the accent: {itext:?}"
+  );
+}
+
+#[test]
+fn link_target_keys_track_rebinding_per_context() {
+  // #219 review (P3): the Issue / PR direct-pick chips hard-coded `i` / `p`.
+  // They must resolve from the active context's modal bindings so a rebind of
+  // `[tui.keys.modal.link.choose_target]` (or `[tui.keys.modal.open_menu]`) shows through,
+  // and the two contexts stay independent (the whole point of #219).
+  use gwm::tui::link_target_keys;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::HintContext;
+
+  assert_eq!(
+    link_target_keys(HintContext::LinkPrompt, &ModalKeymap::defaults()),
+    ("i".to_string(), "p".to_string()),
+    "defaults must keep the historical i / p direct-pick keys"
+  );
+  assert_eq!(
+    link_target_keys(HintContext::OpenMenu, &ModalKeymap::defaults()),
+    ("i".to_string(), "p".to_string()),
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::LinkChooseIssue, vec![parse_single("x").unwrap()])
+    .unwrap();
+  assert_eq!(
+    link_target_keys(HintContext::LinkPrompt, &modal),
+    ("x".to_string(), "p".to_string()),
+    "rebinding the link choose-target issue key must show through the chip"
+  );
+  assert_eq!(
+    link_target_keys(HintContext::OpenMenu, &modal),
+    ("i".to_string(), "p".to_string()),
+    "the open-menu chips are an independent context and must not change"
+  );
+}
+
+#[test]
+fn config_edit_footer_hints_track_rebinding() {
+  // #219 review (P2): the Settings panel edit footer printed a fixed
+  // `Enter save / Esc cancel`. Once `[tui.keys.modal.config.edit]` is rebound the
+  // handler stops treating Enter/Esc as save/cancel, so the footer must
+  // resolve those hints from the ConfigEdit* modal bindings too.
+  use gwm::tui::config_edit_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  assert_eq!(
+    config_edit_footer_hints(&ModalKeymap::defaults()),
+    vec![
+      ("Enter".to_string(), "save".to_string()),
+      ("Esc".to_string(), "cancel".to_string()),
+    ],
+    "default settings edit footer must read Enter save / Esc cancel"
+  );
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ConfigEditSubmit, vec![parse_single("Ctrl+s").unwrap()])
+    .unwrap();
+  assert_eq!(
+    config_edit_footer_hints(&modal),
+    vec![
+      ("Ctrl+s".to_string(), "save".to_string()),
+      ("Esc".to_string(), "cancel".to_string()),
+    ],
+    "rebinding config.edit submit must change the save hint"
+  );
+
+  // Unbinding a verb drops it rather than advertising a phantom key.
+  let mut unbound = ModalKeymap::defaults();
+  unbound.apply_override(ModalAction::ConfigEditCancel, vec![]).unwrap();
+  let hints = config_edit_footer_hints(&unbound);
+  assert!(
+    !hints.iter().any(|(_, l)| l == "cancel"),
+    "an unbound cancel must drop from the settings edit footer: {hints:?}"
+  );
+}
+
+#[test]
+fn config_nav_footer_hints_track_rebinding() {
+  // #219 review (P3): the Settings panel *nav* footer (non-edit) still printed
+  // hard-coded Tab / L / Esc / Enter / Space. Resolve the single-key verbs
+  // (section / layer / close / activate) from the Config modal bindings; the
+  // j/k scroll pair stays literal (no single resolved key captures it).
+  use gwm::tui::config_nav_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::{FieldKind, SettingsTab};
+
+  let all = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::All, None);
+  assert_eq!(
+    all[0],
+    ("j/k".to_string(), "scroll".to_string()),
+    "All tab leads with the literal scroll pair"
+  );
+  assert!(all.iter().any(|(k, l)| k == "Tab" && l == "section"));
+  assert!(all.iter().any(|(k, l)| k == "L" && l == "layer"));
+  assert!(all.iter().any(|(k, l)| k == "Esc" && l == "close"));
+
+  // An editable field advertises `edit`; a Choice field advertises `cycle`.
+  let editable = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Text));
+  assert!(
+    editable.iter().any(|(_, l)| l == "edit"),
+    "editable field footer: {editable:?}"
+  );
+  let choice = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Tui, Some(FieldKind::Choice));
+  assert!(
+    choice.iter().any(|(_, l)| l == "cycle"),
+    "choice field footer: {choice:?}"
+  );
+
+  // Rebinding close + next_tab shows through.
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::ConfigClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  modal
+    .apply_override(ModalAction::ConfigNextTab, vec![parse_single("n").unwrap()])
+    .unwrap();
+  let rebound = config_nav_footer_hints(&modal, SettingsTab::All, None);
+  assert!(
+    rebound.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebound close: {rebound:?}"
+  );
+  assert!(
+    rebound.iter().any(|(k, l)| k == "n" && l == "section"),
+    "rebound section: {rebound:?}"
+  );
+  assert!(
+    !rebound.iter().any(|(k, _)| k == "Tab" || k == "Esc"),
+    "stale Tab / Esc must not linger after the rebind: {rebound:?}"
+  );
+
+  // Keys tab (issue #294): `activate` advertises `rebind`, not `edit`/`cycle`.
+  let keys = config_nav_footer_hints(&ModalKeymap::defaults(), SettingsTab::Keys, None);
+  assert!(
+    keys.iter().any(|(_, l)| l == "rebind"),
+    "Keys tab footer advertises rebind: {keys:?}"
+  );
+}
+
+#[test]
+fn config_capture_footer_hints_differ_by_capture_kind() {
+  // Issue #294: while capturing, the footer resolves cancel (+ save for a
+  // multi-stroke global chord) from the ConfigEdit modal bindings; a
+  // single-stroke modal capture auto-commits, so it advertises the live
+  // prompt instead of a save verb.
+  use gwm::tui::config_capture_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  let global = config_capture_footer_hints(&ModalKeymap::defaults(), false);
+  assert!(global.iter().any(|(k, l)| k == "Enter" && l == "save"), "{global:?}");
+  assert!(
+    global.iter().any(|(k, l)| k == "Backspace" && l == "delete"),
+    "{global:?}"
+  );
+  assert!(global.iter().any(|(k, l)| k == "Esc" && l == "cancel"), "{global:?}");
+
+  let modal = config_capture_footer_hints(&ModalKeymap::defaults(), true);
+  assert!(
+    modal.iter().any(|(_, l)| l == "bind"),
+    "single-stroke prompt: {modal:?}"
+  );
+  assert!(modal.iter().any(|(_, l)| l == "cancel"), "{modal:?}");
+  assert!(
+    !modal.iter().any(|(_, l)| l == "save"),
+    "a single-stroke capture auto-commits, no save verb: {modal:?}"
+  );
+
+  // A rebind of the config.edit cancel verb shows through.
+  let mut mk = ModalKeymap::defaults();
+  mk.apply_override(ModalAction::ConfigEditCancel, vec![parse_single("q").unwrap()])
+    .unwrap();
+  let rebound = config_capture_footer_hints(&mk, false);
+  assert!(rebound.iter().any(|(k, l)| k == "q" && l == "cancel"), "{rebound:?}");
+}
+
+#[test]
+fn command_logs_footer_hints_track_rebinding() {
+  // #219 review (P3): the Command Logs overlay footer hard-coded j/k, g/G, y,
+  // Esc. Resolve copy / close from the CommandLogs modal bindings (movement
+  // pairs stay literal, as on Help).
+  use gwm::tui::command_logs_footer_hints;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+
+  let default = command_logs_footer_hints(&ModalKeymap::defaults());
+  assert!(default.iter().any(|(k, l)| k == "j/k" && l == "scroll"));
+  assert!(default.iter().any(|(k, l)| k == "g/G" && l == "top/bottom"));
+  assert!(default.iter().any(|(k, l)| k == "y" && l == "copy"));
+  assert!(default.iter().any(|(k, l)| k == "Esc" && l == "close"));
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::CommandLogsCopy, vec![parse_single("c").unwrap()])
+    .unwrap();
+  modal
+    .apply_override(ModalAction::CommandLogsClose, vec![parse_single("x").unwrap()])
+    .unwrap();
+  let rebound = command_logs_footer_hints(&modal);
+  assert!(
+    rebound.iter().any(|(k, l)| k == "c" && l == "copy"),
+    "rebound copy: {rebound:?}"
+  );
+  assert!(
+    rebound.iter().any(|(k, l)| k == "x" && l == "close"),
+    "rebound close: {rebound:?}"
+  );
+  assert!(
+    !rebound.iter().any(|(k, l)| k == "y" && l == "copy"),
+    "stale `y copy` must not linger after the rebind: {rebound:?}"
   );
 }
 
@@ -595,4 +889,158 @@ fn centered_abs_caps_height_taller_than_the_area() {
       height: 40
     }
   );
+}
+
+// ---- working_tree_status_counts / footer (issue #287) ----------------------
+
+#[test]
+fn working_tree_status_counts_buckets_each_file_once() {
+  // One NUL-delimited (`-z`) record per porcelain family; created wins over
+  // deleted wins over modified so every record increments exactly one
+  // counter. The rename (`R`) carries a trailing source field (`orig.rs`)
+  // that the shared parser drops, so it still counts once.
+  let status = "?? new.rs\0 M mod.rs\0 D del.rs\0A  added.rs\0AM both.rs\0R  renamed.rs\0orig.rs\0";
+  let c = working_tree_status_counts(status);
+  assert_eq!(c.created, 3, "?? + A + AM → created: {c:?}");
+  assert_eq!(c.modified, 2, " M + R → modified: {c:?}");
+  assert_eq!(c.deleted, 1, " D → deleted: {c:?}");
+}
+
+#[test]
+fn working_tree_status_counts_empty_string_is_clean() {
+  assert!(working_tree_status_counts("").is_empty());
+}
+
+#[test]
+fn working_tree_counts_footer_is_none_when_all_zero() {
+  // A clean tree must produce no footer at all (rather than a bare ` 0 `).
+  let counts = WorkingTreeCounts::default();
+  assert!(working_tree_counts_footer(&counts, &Theme::default()).is_none());
+}
+
+#[test]
+fn working_tree_counts_footer_shows_only_nonzero_colored_segments() {
+  let counts = WorkingTreeCounts {
+    created: 3,
+    modified: 0,
+    deleted: 1,
+  };
+  let line = working_tree_counts_footer(&counts, &Theme::default()).expect("non-empty counts → footer");
+
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    text.contains(WT_CREATED_ICON) && text.contains('3'),
+    "created segment shown: {text:?}"
+  );
+  assert!(
+    text.contains(WT_DELETED_ICON) && text.contains('1'),
+    "deleted segment shown: {text:?}"
+  );
+  assert!(
+    !text.contains(WT_MODIFIED_ICON),
+    "a zero count must be omitted entirely: {text:?}"
+  );
+
+  // Colour roles must be wired to the *theme*, not hardcoded literals.
+  // Drive a theme whose `untracked` / `prunable` are unique non-default
+  // `Rgb` values and assert those exact colours land — a `Color::Green`
+  // hardcode (which equals the default `untracked`) would pass against the
+  // default theme but fail here (mirrors the #170/#211 audit rule).
+  let theme = Theme {
+    untracked: Color::Rgb(1, 2, 3),
+    prunable: Color::Rgb(4, 5, 6),
+    ..Theme::default()
+  };
+  let line = working_tree_counts_footer(&counts, &theme).unwrap();
+  let created_span = line.spans.iter().find(|s| s.content.contains(WT_CREATED_ICON)).unwrap();
+  assert_eq!(
+    created_span.style.fg,
+    Some(Color::Rgb(1, 2, 3)),
+    "created paints the `untracked` role"
+  );
+  let deleted_span = line.spans.iter().find(|s| s.content.contains(WT_DELETED_ICON)).unwrap();
+  assert_eq!(
+    deleted_span.style.fg,
+    Some(Color::Rgb(4, 5, 6)),
+    "deleted paints the `prunable` role"
+  );
+}
+
+#[test]
+fn picker_window_keeps_the_selection_visible() {
+  // #325 overlay polish: the picker scrolls to keep the highlight in view.
+  use gwm::tui::picker_window;
+  // Fits within the budget → the whole list, no scroll.
+  assert_eq!(picker_window(3, 0, 5), (0, 3));
+  assert_eq!(picker_window(5, 4, 5), (0, 5));
+  // Overflows → a `max`-row window clamped to the bounds, selection inside.
+  assert_eq!(picker_window(10, 0, 4), (0, 4));
+  assert_eq!(picker_window(10, 9, 4), (6, 10));
+  let (s, e) = picker_window(10, 5, 4);
+  assert!(s <= 5 && 5 < e && e - s == 4, "selection in a 4-row window: {s}..{e}");
+  // Degenerate inputs are safe.
+  assert_eq!(picker_window(0, 0, 5), (0, 0));
+  assert_eq!(picker_window(5, 2, 0), (0, 5));
+}
+
+#[test]
+fn reclaim_size_color_is_a_magnitude_heatmap() {
+  // #325 overlay polish: green (small) → yellow (medium) → red (large).
+  use gwm::tui::reclaim_size_color;
+  use gwm::tui::theme::Theme;
+  let t = Theme::default();
+  const MIB: u64 = 1024 * 1024;
+  assert_eq!(reclaim_size_color(0, &t), t.clean, "zero → green");
+  assert_eq!(reclaim_size_color(10 * MIB, &t), t.clean, "small → green");
+  assert_eq!(reclaim_size_color(50 * MIB, &t), t.dirty, "50 MiB boundary → yellow");
+  assert_eq!(reclaim_size_color(200 * MIB, &t), t.dirty, "medium → yellow");
+  assert_eq!(reclaim_size_color(500 * MIB, &t), t.prunable, "500 MiB boundary → red");
+  assert_eq!(reclaim_size_color(3 * 1024 * MIB, &t), t.prunable, "large → red");
+}
+
+#[test]
+fn clean_dir_icon_matches_the_ecosystem() {
+  // #334 polish: each reclaimable dir gets a nerd-font glyph matched to its
+  // ecosystem; unknown names fall back to the generic folder. Leading dots
+  // are ignored so `.venv` matches like `venv`.
+  use gwm::tui::clean_dir_icon;
+  let folder = clean_dir_icon("some-unknown-dir");
+  assert_ne!(clean_dir_icon("node_modules"), folder, "node_modules has its own icon");
+  assert_ne!(clean_dir_icon("target"), folder, "target (Rust) has its own icon");
+  assert_eq!(
+    clean_dir_icon(".venv"),
+    clean_dir_icon("venv"),
+    "leading dot is ignored"
+  );
+  assert_eq!(clean_dir_icon(".cache"), clean_dir_icon("cache"));
+  // Distinct ecosystems get distinct glyphs.
+  assert_ne!(clean_dir_icon("node_modules"), clean_dir_icon("target"));
+  assert_ne!(clean_dir_icon("vendor"), clean_dir_icon("venv"));
+  // Every glyph is a single non-empty token.
+  for d in [
+    "node_modules",
+    "target",
+    "vendor",
+    ".venv",
+    "dist",
+    ".cache",
+    "coverage",
+    "whatever",
+  ] {
+    assert!(!clean_dir_icon(d).is_empty(), "icon for {d:?} must be non-empty");
+  }
+}
+
+#[test]
+fn overlay_modal_width_is_wider_but_clamped() {
+  // #334 polish: the exec/clean overlays use more horizontal space than the
+  // link-prompt modal on a roomy terminal, but stay readable / clamped.
+  use gwm::tui::{link_prompt_modal_width, overlay_modal_width};
+  // On a wide terminal it is meaningfully wider than the 72-col link modal.
+  assert!(overlay_modal_width(160) > link_prompt_modal_width(160));
+  assert!(overlay_modal_width(120) >= 72);
+  // Clamped: never wider than the terminal, never past the 88 ceiling.
+  assert!(overlay_modal_width(300) <= 88);
+  assert!(overlay_modal_width(40) <= 40);
+  assert!(overlay_modal_width(50) >= 45, "narrow terminals still get a usable box");
 }

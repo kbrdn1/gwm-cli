@@ -102,3 +102,114 @@ fn sidebar_warm_cache_render_is_stable_across_frames() {
     "two consecutive warm-cache draws must produce byte-identical sidebar buffers"
   );
 }
+
+#[test]
+fn working_tree_section_renders_colored_status_counts_footer() {
+  // 11 fresh untracked files → all land in the `created` bucket (issue
+  // #287), so the footer renders the created glyph + count rather than a
+  // bare total.
+  let dir = repo_with_commits(1);
+  for i in 0..11 {
+    std::fs::write(dir.path().join(format!("dirty-{i}.txt")), "dirty").unwrap();
+  }
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("Working Tree"),
+    "sidebar must render the Working Tree pane: {text}"
+  );
+  assert!(
+    text.contains(gwm::tui::WT_CREATED_ICON),
+    "footer must render the created (diff-added) nerdfont glyph: {text}"
+  );
+  assert!(text.contains("11"), "footer must render the created-file count: {text}");
+}
+
+#[test]
+fn working_tree_section_renders_file_tree_with_icons() {
+  // A nested untracked file must render as an explorer tree (issue #300):
+  // the collapsed `src/app` directory row with a folder glyph, then the
+  // `mod.rs` leaf with the Rust file-type glyph — not a flat `?? src/app/mod.rs`.
+  let dir = repo_with_commits(1);
+  std::fs::create_dir_all(dir.path().join("src/app")).unwrap();
+  std::fs::write(dir.path().join("src/app/mod.rs"), "fn x() {}").unwrap();
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("src/app"),
+    "single-child dir chain renders collapsed: {text}"
+  );
+  assert!(text.contains("mod.rs"), "the leaf file name renders: {text}");
+  assert!(
+    text.contains(gwm::tui::wt_tree::WT_DIR_OPEN_ICON),
+    "directory row carries a folder glyph: {text}"
+  );
+  assert!(
+    text.contains(gwm::tui::wt_tree::WT_RUST_ICON),
+    "the .rs leaf carries the Rust file-type glyph: {text}"
+  );
+  assert!(
+    text.contains('└') || text.contains('├'),
+    "rows are drawn with tree connector lines: {text}"
+  );
+}
+
+/// Run a `git` CLI command in `dir`, asserting success. Lets a render test
+/// build a feature branch with a deterministic diff against `main`.
+fn git_in(dir: &std::path::Path, args: &[&str]) {
+  let out = std::process::Command::new("git")
+    .current_dir(dir)
+    .args(args)
+    .env("GIT_AUTHOR_NAME", "gwm-test")
+    .env("GIT_AUTHOR_EMAIL", "gwm@test")
+    .env("GIT_COMMITTER_NAME", "gwm-test")
+    .env("GIT_COMMITTER_EMAIL", "gwm@test")
+    .output()
+    .unwrap();
+  assert!(
+    out.status.success(),
+    "git {:?} failed: {}",
+    args,
+    String::from_utf8_lossy(&out.stderr)
+  );
+}
+
+#[test]
+fn status_pane_renders_diff_vs_base_line_on_a_feature_branch() {
+  // Repo seeded on `main`; branch off and change a line so the three-dot
+  // diff against `main` is non-empty. The main worktree (HEAD = the feature
+  // branch) must then show the `Diff +N -M` line in the Status pane (issue
+  // #287).
+  let dir = repo_with_commits(1);
+  let path = dir.path();
+  std::fs::write(path.join("f.txt"), "a\nb\nc\n").unwrap();
+  git_in(path, &["add", "f.txt"]);
+  git_in(path, &["commit", "-m", "base file"]);
+  git_in(path, &["checkout", "-b", "feat/#287-diff"]);
+  std::fs::write(path.join("f.txt"), "a\nB\nc\nd\n").unwrap();
+  git_in(path, &["commit", "-am", "tweak"]);
+
+  let mut app = App::new_at_layered(Some(path), None).unwrap();
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(text.contains("Diff"), "Status pane must show the Diff label: {text}");
+  // +2 insertions (line B replaced + line d added), -1 deletion (line b).
+  assert!(text.contains("+2"), "Status pane must show insertions: {text}");
+  assert!(text.contains("-1"), "Status pane must show deletions: {text}");
+}

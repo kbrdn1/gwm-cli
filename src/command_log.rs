@@ -22,13 +22,15 @@
 //! ## Scope (deliberately narrow for the first cut)
 //!
 //! Only the **captured-output** shell commands are logged: `gh`, bootstrap
-//! steps, hooks. The read-only sidebar previews (`worktree::run_git` for
-//! `git log` / `git status`) are *not* — they fire on every selection
-//! change and would bury the real operations in noise. Interactive
-//! launchers (`.status()` / `.spawn()`, which inherit the terminal and have
-//! no captured output) and the libgit2 worktree ops (which run no
-//! subprocess) are out of scope here; `gwm sync` joins once it has a TUI
-//! action (#258).
+//! steps, hooks, and the user-triggered mutating git ops (`pull`, `push`,
+//! `sync`'s `fetch`/`rebase`/`merge`, and the `rename` steps — #290). The
+//! read-only sidebar previews (`worktree::run_git` for `git log` /
+//! `git status`) are *not* — they fire on every selection change and would
+//! bury the real operations in noise (the mutating sync steps go through the
+//! logged [`run_git_logged`](crate::worktree::run_git_logged) sibling
+//! instead). Interactive launchers (`.status()` / `.spawn()`, which inherit
+//! the terminal and have no captured output) and the libgit2 worktree ops
+//! (which run no subprocess) are out of scope here.
 
 use std::collections::VecDeque;
 use std::process::{Command, Output};

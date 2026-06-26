@@ -1,8 +1,8 @@
 //! Generic background-task spine for the TUI (issue #231).
 //!
 //! Generalises the off-thread pattern introduced for the GitHub fetch
-//! (#217) so any slow, one-shot operation — currently the worktree list
-//! refresh (`f` / `r`), with bootstrap / launcher-prep to follow — runs
+//! (#217) so any slow, one-shot operation — worktree list refresh, create,
+//! sync, bootstrap, delete, and GitHub fetches — runs
 //! on a worker thread and posts its result back to the event loop rather
 //! than blocking it. The event loop keeps rendering (the statusbar
 //! spinner animates, `q` / `Esc` stay responsive); a result whose run
@@ -10,8 +10,8 @@
 //!
 //! Unlike [`super::github_fetch`] this is **not** a result cache. The
 //! GitHub layer caches `(target, number)` lookups and dedupes them; a
-//! refresh / sync / bootstrap is a one-shot "run it, give me a fresh
-//! result" with nothing worth caching by key. So the spine keeps only
+//! create / refresh / sync / bootstrap / delete-worktree is a one-shot "run
+//! it, give me a fresh result" with nothing worth caching by key. So the spine keeps only
 //! two things from that design — *coalescing* and the *late-result
 //! drop* — and drops the per-key cache:
 //!
@@ -39,12 +39,17 @@ use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
 use crate::worktree::WorktreeInfo;
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 /// Identity of a background task — the coalescing key and the source of
-/// the loader label. One variant per migrated op; bootstrap / sync /
-/// launcher-prep join here as their call sites move off-thread.
+/// the loader label. One variant per migrated op.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TaskKind {
+  /// Off-thread create flow from the Create modal (issue #276):
+  /// `worktree::add` plus bootstrap can touch disk, refs, copies and hooks, so
+  /// the modal must stay renderable while it runs. A single global op like
+  /// [`Self::Bootstrap`] — one create in flight at a time.
+  CreateWorktree,
   /// Off-thread worktree list refresh (the `f` / `r` key path). The
   /// synchronous `App::refresh` stays for internal post-mutation callers
   /// (create / delete / report-close) that need the list fresh before the
@@ -73,6 +78,23 @@ pub enum TaskKind {
   /// before the spawn; completion sets `App::report` and flips to
   /// `View::Report`.
   Bootstrap,
+  /// Off-thread delete of the selected worktree (issue #257):
+  /// `worktree::remove` can touch git admin files, remove the worktree
+  /// directory, and optionally delete the branch, so it must not block the
+  /// render loop while the confirm modal is open.
+  DeleteWorktree,
+  /// Off-thread `git pull` of the selected worktree's branch (#290). One
+  /// global slot — a second `p` press coalesces while one is in flight.
+  Pull,
+  /// Off-thread `git push` of the selected worktree's branch to its remote
+  /// (#290). One global slot — a second `P` press coalesces.
+  Push,
+  /// Off-thread rename of the selected worktree (`c`, #290): renames the
+  /// local branch (`git branch -m`), the remote branch when it exists
+  /// (`git push origin :<old> <new>:<new>` + re-track), and moves the
+  /// worktree directory on disk (`git worktree move`) so the slug stays in
+  /// sync. One global slot — a second `c` submit coalesces.
+  EditWorktree,
 }
 
 impl TaskKind {
@@ -81,10 +103,15 @@ impl TaskKind {
   /// reads consistently.
   pub fn loading_label(self) -> &'static str {
     match self {
+      TaskKind::CreateWorktree => "creating worktree…",
       TaskKind::RefreshWorktrees => "refreshing worktrees…",
       TaskKind::GithubIssue(_) | TaskKind::GithubPr(_) => "fetching GitHub status…",
       TaskKind::Sync => "syncing…",
       TaskKind::Bootstrap => "bootstrapping…",
+      TaskKind::DeleteWorktree => "deleting worktree…",
+      TaskKind::Pull => "pulling…",
+      TaskKind::Push => "pushing…",
+      TaskKind::EditWorktree => "renaming worktree…",
     }
   }
 
@@ -96,6 +123,40 @@ impl TaskKind {
   pub fn is_github(self) -> bool {
     matches!(self, TaskKind::GithubIssue(_) | TaskKind::GithubPr(_))
   }
+
+  /// `true` for workers that can leave repository / worktree state
+  /// partially changed if the process exits before their result is drained.
+  pub fn is_mutating(self) -> bool {
+    matches!(
+      self,
+      TaskKind::CreateWorktree
+        | TaskKind::Sync
+        | TaskKind::Bootstrap
+        | TaskKind::DeleteWorktree
+        | TaskKind::Pull
+        | TaskKind::Push
+        | TaskKind::EditWorktree
+    )
+  }
+}
+
+/// Successful result of a Create-modal worker (issue #276).
+pub struct CreateWorktreeResult {
+  pub branch: String,
+  pub created: PathBuf,
+  pub report: BootstrapReport,
+}
+
+/// Successful result of an Edit-modal worker (`c`, #290). Carries the new
+/// branch name, the new on-disk path (after `git worktree move`), and the
+/// new worktree display name so the drain can refresh the list and report
+/// the rename in the status bar.
+pub struct EditWorktreeResult {
+  pub new_branch: String,
+  pub new_path: PathBuf,
+  pub new_name: String,
+  /// `true` when the remote branch was also renamed (it existed on origin).
+  pub remote_renamed: bool,
 }
 
 /// Result of an off-thread task, posted from a worker thread back to the
@@ -104,6 +165,10 @@ impl TaskKind {
 /// plus the `generation` the worker was spawned with, so
 /// [`TaskRunner::complete`] can drop a superseded late result.
 pub enum TaskMsg {
+  /// A create-worktree result (issue #276): the worker's `generation` and the
+  /// created worktree + bootstrap report, or a stringified failure from naming,
+  /// libgit2 worktree creation, or bootstrap.
+  CreateWorktree(u64, std::result::Result<CreateWorktreeResult, String>),
   /// A worktree list refresh result: the freshly-listed worktrees, or a
   /// stringified error from the off-thread `discover_repo` + `list`.
   RefreshWorktrees(u64, std::result::Result<Vec<WorktreeInfo>, String>),
@@ -123,6 +188,20 @@ pub enum TaskMsg {
   /// drain sets `App::report` and flips to `View::Report`; a superseded
   /// late result is dropped by [`TaskRunner::complete`].
   Bootstrap(u64, std::result::Result<BootstrapReport, String>),
+  /// A delete-worktree result (issue #257): the worker's generation, the
+  /// deleted worktree's display name + path label for the status line, and
+  /// the deletion outcome.
+  DeleteWorktree(u64, String, String, std::result::Result<(), String>),
+  /// A `git pull` result (#290): the worker's generation, the worktree's
+  /// display name, and the outcome (a one-line status string on success or
+  /// a stringified error).
+  Pull(u64, String, std::result::Result<String, String>),
+  /// A `git push` result (#290): same shape as [`Self::Pull`].
+  Push(u64, String, std::result::Result<String, String>),
+  /// An edit-worktree result (`c`, #290): the worker's generation and the
+  /// rename outcome (new branch/path/name on success, or a stringified error
+  /// from `git branch -m` / `git push` / `git worktree move`).
+  EditWorktree(u64, std::result::Result<EditWorktreeResult, String>),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
@@ -213,6 +292,33 @@ impl TaskRunner {
   /// alongside the GitHub fetch's own loading signal.
   pub fn is_any_loading(&self) -> bool {
     !self.running.is_empty()
+  }
+
+  /// `true` while a mutating worker is still in flight. Quit handling uses
+  /// this to keep `sync` / `bootstrap` / delete-worktree from being abandoned mid-operation.
+  pub fn has_mutating_task_in_flight(&self) -> bool {
+    self.running.iter().any(|kind| kind.is_mutating())
+  }
+
+  /// Loader label for a mutating in-flight task, if any.
+  pub fn mutating_loading_label(&self) -> Option<&'static str> {
+    if self.running.contains(&TaskKind::CreateWorktree) {
+      Some(TaskKind::CreateWorktree.loading_label())
+    } else if self.running.contains(&TaskKind::Sync) {
+      Some(TaskKind::Sync.loading_label())
+    } else if self.running.contains(&TaskKind::Bootstrap) {
+      Some(TaskKind::Bootstrap.loading_label())
+    } else if self.running.contains(&TaskKind::DeleteWorktree) {
+      Some(TaskKind::DeleteWorktree.loading_label())
+    } else if self.running.contains(&TaskKind::Pull) {
+      Some(TaskKind::Pull.loading_label())
+    } else if self.running.contains(&TaskKind::Push) {
+      Some(TaskKind::Push.loading_label())
+    } else if self.running.contains(&TaskKind::EditWorktree) {
+      Some(TaskKind::EditWorktree.loading_label())
+    } else {
+      None
+    }
   }
 
   /// The loader label for an in-flight task, if any. `None` when nothing

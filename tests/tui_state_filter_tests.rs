@@ -30,6 +30,7 @@ use std::path::PathBuf;
 fn wt(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/{}", name)),
     branch: None,
     head: None,
@@ -38,6 +39,8 @@ fn wt(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
     age: None,
   }
 }

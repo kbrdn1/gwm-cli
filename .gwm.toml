@@ -42,3 +42,15 @@ when = "file_exists:Cargo.toml"
 # `lumen` preset = `lumen diff {base}..{head}` fullscreen suspend-and-resume.
 [review]
 tool = "lumen"
+
+# -- TUI macros (issue #290) -------------------------------------------------
+# Two user-defined commands fired from the worktree list, run in the selected
+# worktree's directory. `open_in` defaults to `pty` (embedded overlay, TUI
+# suspends until exit). Dev shortcuts for hacking on gwm itself:
+#   h → wipe this worktree's `target/` (each worktree keeps its own, see above)
+#   H → (re)install the gwm binary from this worktree's sources
+[tui.macro1]
+command = "cargo clean"
+
+[tui.macro2]
+command = "cargo install --path ."

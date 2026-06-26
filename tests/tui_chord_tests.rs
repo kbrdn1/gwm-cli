@@ -133,12 +133,12 @@ fn uppercase_binding_matches_shift_modifier_variants() {
   let (_dir, mut app) = make_app();
   assert_eq!(
     app.dispatch_key(press_shift_upper('V')),
-    Some(Action::CycleSidebarLayout),
+    Some(Action::ToggleSidebar),
     "uppercase char + SHIFT must resolve the `V` binding"
   );
   assert_eq!(
     app.dispatch_key(press_shift_lower('h')),
-    Some(Action::ToggleSidebarPosition),
+    Some(Action::Macro2),
     "base char + SHIFT (kitty-style) must resolve the `H` binding"
   );
   // And the pre-existing bare-uppercase path still works.
@@ -186,7 +186,7 @@ fn help_overlay_lists_pane_focus_bindings() {
   use gwm::tui::keymap::Keymap;
 
   let km = Keymap::defaults();
-  let lines = help_lines(&km, false);
+  let lines = help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), false);
   assert!(
     lines.iter().any(|l| l.starts_with("  1 ")),
     "expected the default `1` focus binding in the help overlay:\n{}",
@@ -200,40 +200,26 @@ fn help_overlay_lists_pane_focus_bindings() {
 }
 
 #[test]
-fn s_dispatches_toggle_sidebar_mode() {
-  // Issue #34: pressing `s` in the list view must cycle the sidebar
-  // preview mode (Commits ↔ Stashes). The binding is wired through
-  // the rebindable keymap (`Action::ToggleSidebarMode`) so users can
-  // remap it via `[tui.keys]` if `s` clashes with their muscle
-  // memory.
+fn s_dispatches_sync() {
+  // #290: `s` is now bound to `Sync` (git fetch + pull --rebase).
+  // `ToggleSidebarMode` was moved to an unbound action.
   let (_dir, mut app) = make_app();
-  assert_eq!(
-    app.dispatch_key(press('s')),
-    Some(gwm::tui::keymap::Action::ToggleSidebarMode)
-  );
+  assert_eq!(app.dispatch_key(press('s')), Some(gwm::tui::keymap::Action::Sync));
 }
 
 #[test]
-fn help_overlay_lists_toggle_sidebar_mode() {
-  // The keymap-driven help overlay surfaces the new action with its
-  // default `s` binding so users discover the stashes mode through
-  // `?` rather than the changelog.
+fn help_overlay_lists_sync() {
+  // #290: `s` → Sync. The help overlay must show `s` next to the
+  // sync/pull+fetch entry, not `toggle_sidebar_mode`.
   use gwm::tui::help_lines;
   use gwm::tui::keymap::Keymap;
 
   let km = Keymap::defaults();
-  let lines = help_lines(&km, false);
+  let lines = help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), false);
   let row = lines
     .iter()
-    .find(|l| l.contains("sidebar mode") || l.contains("stash") || l.contains("toggle_sidebar_mode"))
-    .unwrap_or_else(|| panic!("expected a sidebar-mode row in:\n{}", lines.join("\n")));
-  // Target the keys column specifically. `help_lines` formats every
-  // row as `  {keys:<13} {label}`, so the default `s` binding
-  // surfaces as exactly `"  s            "` at the row start.
-  // Pre-review the assertion was `row.contains('s')`, which passed
-  // trivially because the description carries words like
-  // "stashes" / "sidebar" — a regression in the binding column
-  // would not have failed.
+    .find(|l| l.contains("sync") || l.contains("pull") || l.contains("fetch"))
+    .unwrap_or_else(|| panic!("expected a sync row in:\n{}", lines.join("\n")));
   assert!(
     row.starts_with("  s ") || row.starts_with("  s\t"),
     "expected the default `s` binding in the keys column, got: {row}"
@@ -257,7 +243,7 @@ fn help_overlay_reflects_user_keymap_override() {
   )
   .unwrap();
 
-  let lines = help_lines(&km, false);
+  let lines = help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), false);
   let next_line = lines
     .iter()
     .find(|l| l.contains("next"))
@@ -311,7 +297,11 @@ fn help_rows_structures_title_sections_and_entries() {
   use gwm::tui::{HelpRow, HintContext};
 
   let km = Keymap::defaults();
-  let rows = help_rows(&km, HintContext::Worktrees);
+  let rows = help_rows(
+    &km,
+    &gwm::tui::modal_keymap::ModalKeymap::defaults(),
+    HintContext::Worktrees,
+  );
 
   // Issue #217: the overlay title is now "Keybindings", followed by a
   // context subtitle reflecting the focused pane.
@@ -335,6 +325,18 @@ fn help_rows_structures_title_sections_and_entries() {
       .iter()
       .any(|r| matches!(r, HelpRow::Section(s) if s == "Delete Worktree")),
     "expected a `Delete Worktree` section header"
+  );
+  assert!(
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Section(s) if s == "Issue / PR")),
+    "expected a clean `Issue / PR` section header"
+  );
+  assert!(
+    !rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Section(s) if s.contains("(#67)"))),
+    "Which Key section headers must not expose internal issue references"
   );
   for pair in rows.windows(2) {
     if matches!(pair[0], HelpRow::Section(_)) {
@@ -368,6 +370,90 @@ fn help_rows_structures_title_sections_and_entries() {
 }
 
 #[test]
+fn help_rows_link_descriptions_track_modal_rebindings() {
+  // #219 review (P3): the help table's `open menu` / `link prompt` rows hard-
+  // coded `i=issue · p=pull request` and `j/k + enter, or i/p`. Those keys are
+  // the OpenMenu / LinkChooseTarget modal verbs, so a rebind must show through
+  // instead of advertising keys that no longer work.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{parse_single, ModalAction, ModalKeymap};
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(ModalAction::OpenMenuIssue, vec![parse_single("x").unwrap()])
+    .unwrap();
+  modal
+    .apply_override(ModalAction::LinkChooseIssue, vec![parse_single("z").unwrap()])
+    .unwrap();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+
+  let label_of = |needle: &str| -> String {
+    rows
+      .iter()
+      .find_map(|r| match r {
+        HelpRow::Entry { label, .. } if label.contains(needle) => Some(label.clone()),
+        _ => None,
+      })
+      .unwrap_or_else(|| panic!("no help entry containing {needle:?}: {rows:?}"))
+  };
+
+  let open_menu = label_of("open menu");
+  assert!(
+    open_menu.contains("x=issue") && !open_menu.contains("i=issue"),
+    "open-menu help must use the rebound issue key: {open_menu:?}"
+  );
+  let link_prompt = label_of("link prompt");
+  assert!(
+    link_prompt.contains('z'),
+    "link-prompt help must use the rebound choose-target issue key: {link_prompt:?}"
+  );
+}
+
+#[test]
+fn help_rows_link_descriptions_drop_unbound_keys() {
+  // #219 review (P3): when a direct-pick verb is explicitly unbound, the help
+  // description must not fall back to the literal `i` / `enter` — drop the
+  // clause like every other modal hint instead of advertising a dead key.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let mut modal = ModalKeymap::defaults();
+  modal.apply_override(ModalAction::OpenMenuIssue, vec![]).unwrap();
+  modal.apply_override(ModalAction::LinkChooseIssue, vec![]).unwrap();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+  let label_of = |needle: &str| -> String {
+    rows
+      .iter()
+      .find_map(|r| match r {
+        HelpRow::Entry { label, .. } if label.contains(needle) => Some(label.clone()),
+        _ => None,
+      })
+      .unwrap_or_else(|| panic!("no help entry containing {needle:?}"))
+  };
+
+  let open_menu = label_of("open menu");
+  assert!(
+    !open_menu.contains("=issue"),
+    "an unbound open-menu issue pick must drop from the help text: {open_menu:?}"
+  );
+  assert!(
+    open_menu.contains("pull request"),
+    "the still-bound pr pick must remain: {open_menu:?}"
+  );
+  let link_prompt = label_of("link prompt");
+  assert!(
+    !link_prompt.contains("i/p"),
+    "the unbound link issue pick must drop (no `i/p`): {link_prompt:?}"
+  );
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in
@@ -383,7 +469,7 @@ fn help_lines_is_help_rows_flattened() {
     } else {
       HintContext::Worktrees
     };
-    let expected: Vec<String> = help_rows(&km, ctx)
+    let expected: Vec<String> = help_rows(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), ctx)
       .into_iter()
       .map(|row| match row {
         HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
@@ -394,7 +480,11 @@ fn help_lines_is_help_rows_flattened() {
         }
       })
       .collect();
-    assert_eq!(help_lines(&km, picker_mode), expected, "picker_mode={picker_mode}");
+    assert_eq!(
+      help_lines(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), picker_mode),
+      expected,
+      "picker_mode={picker_mode}"
+    );
   }
 }
 
@@ -412,10 +502,139 @@ fn help_subtitle_tracks_the_pane_context() {
     (HintContext::Status, "status"),
     (HintContext::Picker, "switch"),
   ] {
-    let rows = help_rows(&km, ctx);
+    let rows = help_rows(&km, &gwm::tui::modal_keymap::ModalKeymap::defaults(), ctx);
     assert!(
       rows.iter().any(|r| matches!(r, HelpRow::Subtitle(s) if s == want)),
       "expected `{want}` subtitle for {want} context"
     );
   }
+}
+
+#[test]
+fn help_overlay_reflects_a_modal_rebind() {
+  // #219: the Create Form / Delete Worktree help rows resolve from the
+  // contextual modal keymap, so `[tui.keys.modal.confirm] confirm = ["o"]` shows
+  // `o` next to the "confirm" row instead of the default `y`.
+  use gwm::tui::help_lines;
+  use gwm::tui::keymap::{KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+
+  let km = Keymap::defaults();
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(
+      ModalAction::ConfirmConfirm,
+      vec![KeyStroke::new(KeyCode::Char('o'), KeyModifiers::empty())],
+    )
+    .unwrap();
+
+  let lines = help_lines(&km, &modal, false);
+  let row = lines
+    .iter()
+    .find(|l| l.trim_end().ends_with("confirm") && !l.contains("Confirm"))
+    .unwrap_or_else(|| panic!("expected a `confirm` row in:\n{}", lines.join("\n")));
+  assert!(
+    row.starts_with("  o "),
+    "expected the confirm row to show the rebound `o`, got: {row}"
+  );
+  // The default `y` row for confirm must be gone.
+  assert!(
+    !lines
+      .iter()
+      .any(|l| l.starts_with("  y ") && l.trim_end().ends_with("confirm")),
+    "the default `y` binding must not remain after the modal rebind:\n{}",
+    lines.join("\n")
+  );
+}
+
+#[test]
+fn help_rows_document_the_exec_and_clean_overlays() {
+  // #334: the #325 exec (`x`) / clean (`X`) overlays were added to the keymap
+  // and palette but omitted from the hand-curated help overlay (`?`). Pin them
+  // so they can't silently disappear from `?` again.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+
+  let documents = |action: Action, label_needle: &str| -> bool {
+    let keys = km.keys_display(action);
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Entry { keys: k, label } if *k == keys && label.contains(label_needle)))
+  };
+  assert!(
+    documents(Action::ExecOverlay, "exec"),
+    "the help overlay must document the exec picker (x): {rows:?}"
+  );
+  assert!(
+    documents(Action::CleanOverlay, "reclaim"),
+    "the help overlay must document the clean overlay (X): {rows:?}"
+  );
+}
+
+#[test]
+fn help_rows_cover_every_bound_list_view_action() {
+  // #334: the help overlay is hand-curated, so a newly bound Action can be
+  // reachable by key + palette yet missing from `?` (exactly how exec/clean
+  // slipped). Guard it: every action bound by default must appear in the List
+  // View help, except the handful documented only in their own modal context.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let rows = help_rows(&km, &modal, HintContext::Worktrees);
+  let documented: std::collections::HashSet<String> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } if !keys.is_empty() => Some(keys.clone()),
+      _ => None,
+    })
+    .collect();
+
+  // Strict: EVERY bound action is documented today (no exclusions), so a new
+  // omission goes red immediately.
+  for action in Action::all() {
+    let keys = km.keys_display(action);
+    assert!(
+      documented.contains(&keys),
+      "Action::{action:?} (keys {keys:?}) is bound but missing from the help overlay — add it to help_rows()"
+    );
+  }
+}
+
+#[test]
+fn help_rows_hide_exec_and_clean_in_switch_picker_mode() {
+  // #334 review: `x` / `X` are picker-gated (`run_action` no-ops them in
+  // `gwm switch`), so the help overlay must not advertise them in the Picker
+  // context — only in the focus-mode List View.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let modal = ModalKeymap::defaults();
+  let labels: Vec<String> = help_rows(&km, &modal, HintContext::Picker)
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { label, .. } => Some(label.clone()),
+      _ => None,
+    })
+    .collect();
+  assert!(
+    !labels.iter().any(|l| l.contains("[exec.profiles]")),
+    "the exec overlay must be hidden from the switch-picker help"
+  );
+  assert!(
+    !labels.iter().any(|l| l.contains("reclaim build artifacts")),
+    "the clean overlay must be hidden from the switch-picker help"
+  );
 }

@@ -66,6 +66,86 @@ pub struct Config {
   pub issue_template: IssueTemplateConfig,
   #[serde(default)]
   pub pr_template: PrTemplateConfig,
+  /// `[exec]` — named command profiles for `gwm exec --profile <name>`
+  /// (issue #324). Absent block resolves to no profiles, so the inline
+  /// `gwm exec -- <cmd>` surface is unchanged. Frozen for 1.0: a profile's
+  /// `command` is an argv **array** (no shell), diverging from the
+  /// string-shell `command` of `[git_tui]` / `[review]`.
+  #[serde(default)]
+  pub exec: ExecConfig,
+  /// `[clean]` — named directory-set profiles for `gwm clean --profile
+  /// <name>` (issue #324). Absent block resolves to no profiles, so
+  /// `gwm clean` keeps cleaning the built-in `target`/`node_modules`/
+  /// `dist`/`build` set. A profile's `dirs` is a COMPLETE set that
+  /// replaces the built-ins, never adds to them.
+  #[serde(default)]
+  pub clean: CleanConfig,
+}
+
+/// `[exec]` — named command profiles for `gwm exec` (issue #324).
+///
+/// Each `[exec.profiles.<name>]` carries the argv to run via
+/// `gwm exec --profile <name>`. The block is opt-in: an absent `[exec]`
+/// resolves to an empty profile map, leaving the inline `gwm exec -- <cmd>`
+/// surface untouched.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecConfig {
+  /// `[exec] jobs` — the global default parallelism for `gwm exec` (issue
+  /// #324). `1` or absent ⇒ sequential (live, inherited stdio — the MVP
+  /// behaviour); `> 1` ⇒ bounded parallel with per-worktree captured output.
+  /// Precedence: `--jobs` flag > `[exec.profiles.<name>].jobs` > this > `1`.
+  #[serde(default)]
+  pub jobs: Option<u32>,
+  /// `[exec.profiles.<name>]` sub-tables. `BTreeMap` for a deterministic
+  /// ordering when surfaced.
+  #[serde(default)]
+  pub profiles: BTreeMap<String, ExecProfile>,
+}
+
+/// One `[exec.profiles.<name>]` entry.
+///
+/// `command` is an argv **array** (`["cargo", "test"]`) executed with **no
+/// shell** — the same contract as the inline `gwm exec -- <cmd>`. This
+/// diverges from `[git_tui]` / `[review]`, whose `command` is a single
+/// shell line; the divergence is intentional and frozen for 1.0.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecProfile {
+  /// argv to run in each worktree. Required — a profile with no command is
+  /// a config error at load time (`deny_unknown_fields` + no `serde(default)`).
+  pub command: Vec<String>,
+  /// Per-profile parallelism override (issue #324). Overrides `[exec] jobs`
+  /// when this profile runs; the `--jobs` flag still wins over it.
+  #[serde(default)]
+  pub jobs: Option<u32>,
+}
+
+/// `[clean]` — named directory-set profiles for `gwm clean` (issue #324).
+///
+/// Opt-in like [`ExecConfig`]: an absent `[clean]` resolves to an empty
+/// profile map, so `gwm clean` keeps using the built-in directory set.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanConfig {
+  /// `[clean.profiles.<name>]` sub-tables. The `default` profile, when
+  /// present, is what `gwm clean` uses **without** `--profile`.
+  #[serde(default)]
+  pub profiles: BTreeMap<String, CleanProfile>,
+}
+
+/// One `[clean.profiles.<name>]` entry.
+///
+/// `dirs` is a **complete** directory set that **replaces** the built-in
+/// `target`/`node_modules`/`dist`/`build` — it never adds to them. The
+/// safety gate (git-ignored + no tracked files + skip symlinks) still
+/// applies to every listed directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CleanProfile {
+  /// Complete set of directory names to reclaim. Required — a profile with
+  /// no `dirs` is a config error at load time.
+  pub dirs: Vec<String>,
 }
 
 /// One `[[labels]]` entry. `name` is the GitHub key (unique per repo);
@@ -431,6 +511,38 @@ impl SidebarPosition {
   }
 }
 
+/// Where a macro command runs when fired from the TUI (#290).
+/// Serialised as snake_case strings in `[tui.macro1]` / `[tui.macro2]`
+/// (`open_in = "pty"` / `open_in = "mux_pane"`) — `snake_case`, not
+/// `lowercase`, so the documented `"mux_pane"` value deserialises (Codex
+/// review on PR #292: `lowercase` produced `"muxpane"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MacroOpenMode {
+  /// Open the command in an embedded PTY overlay (same as lazygit-pty /
+  /// terminal-pty). The TUI suspends until the command exits.
+  #[default]
+  Pty,
+  /// Open the command in a new pane of the running multiplexer (tmux /
+  /// Zellij / GNU Screen). Falls back to `Pty` when no multiplexer is
+  /// detected.
+  MuxPane,
+}
+
+/// `[tui.macro1]` / `[tui.macro2]` sub-table — a user-defined command
+/// that the `h` / `H` keys fire from inside the worktree TUI (#290).
+/// Absent → the key does nothing (no-op). Present → the command is run
+/// in the worktree's directory in the mode requested by `open_in`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TuiMacroConfig {
+  /// Shell command to execute. Forwarded to the OS shell (`sh -c`).
+  pub command: String,
+  /// How the command is opened. Defaults to `pty`.
+  #[serde(default)]
+  pub open_in: MacroOpenMode,
+}
+
 /// `[tui]` table — runtime knobs for the worktree TUI. Currently exposes
 /// the safety countdown on the delete-confirm overlay (issue #30): when
 /// `delete_branch_on_remove` has been toggled ON, the modal forces the
@@ -452,6 +564,12 @@ pub struct TuiConfig {
   /// clamp instead of erroring out at parse time.
   #[serde(default = "default_confirm_countdown_secs")]
   pub confirm_countdown_secs: u32,
+
+  /// Periodic worktree-list refresh interval in seconds. Default `60`
+  /// keeps Issue/PR table state reasonably fresh; `0` disables the
+  /// automatic refresh loop.
+  #[serde(default = "default_auto_refresh_secs")]
+  pub auto_refresh_secs: u64,
 
   /// `[tui.open]` sub-table — drives the dispatch of the `o` key in the
   /// list view. Default mode is `shell` (lazygit-like worktree-manager
@@ -475,74 +593,241 @@ pub struct TuiConfig {
   /// empty array (`down = []`) unbinds the action entirely.
   #[serde(default)]
   pub keys: TuiKeysConfig,
+
+  /// `[tui.macro1]` — user-defined command bound to `h` by default (#290).
+  /// Absent → the key does nothing.
+  #[serde(default)]
+  pub macro1: Option<TuiMacroConfig>,
+
+  /// `[tui.macro2]` — user-defined command bound to `H` by default (#290).
+  /// Absent → the key does nothing.
+  #[serde(default)]
+  pub macro2: Option<TuiMacroConfig>,
 }
 
 impl Default for TuiConfig {
   fn default() -> Self {
     Self {
       confirm_countdown_secs: default_confirm_countdown_secs(),
+      auto_refresh_secs: default_auto_refresh_secs(),
       open: TuiOpenConfig::default(),
       sidebar_position: SidebarPosition::default(),
       keys: TuiKeysConfig::default(),
+      macro1: None,
+      macro2: None,
     }
   }
 }
 
 /// `[tui.keys]` — user-facing override table for the TUI keymap.
-/// Stored as `action-slug -> [chord, …]` so the TOML stays declarative
-/// and copy-pastable across machines.
 ///
-/// Resolution / validation happens in [`Self::resolved_keymap`], which
-/// is called from `Config::load_for_repo` so a malformed override is
-/// surfaced at load time (action name typos, parse errors, chord
-/// conflicts, prefix collisions) rather than as a silent no-op in the
-/// TUI. The raw map is preserved on `Self` so `gwm tui keys` can show
-/// both the user's source and the resolved bindings.
+/// Two kinds of entry live side by side, disambiguated by value type
+/// (issue #219):
+///
+/// - **array value** → a *global* `View::List` verb, e.g. `quit = ["q"]`.
+///   Resolved by [`Self::resolved_keymap`] into a
+///   [`crate::tui::keymap::Keymap`].
+/// - **table value** → a *contextual* modal sub-table, e.g.
+///   `[tui.keys.modal.confirm]` or `[tui.keys.modal.link.choose_target]`. Resolved by
+///   [`Self::resolved_modal_keymap`] into a
+///   [`crate::tui::modal_keymap::ModalKeymap`].
+///
+/// A few names exist in both worlds (`create`, `help`, `command_logs`,
+/// `link` are global actions *and* modal contexts). TOML forbids defining
+/// the same key twice, so a user picks one per file; the value type is
+/// what the walkers below key off. Resolution / validation runs at
+/// `Config::load_for_repo` time via [`Config::validate_tui_keys`] so a
+/// malformed override (unknown action / context / verb, parse error,
+/// per-context conflict, multi-stroke modal chord) is surfaced at load
+/// rather than as a silent no-op in the TUI. The raw table is preserved so
+/// `gwm tui keys` can show both the user's source and the resolved set.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct TuiKeysConfig {
-  pub bindings: std::collections::BTreeMap<String, Vec<String>>,
+  pub raw: toml::Table,
 }
 
 impl TuiKeysConfig {
-  /// Apply this user override layer on top of the built-in defaults.
-  /// Returns a fully-resolved [`crate::tui::keymap::Keymap`] ready to
-  /// hand to the TUI event loop.
+  /// Resolve the **global** `View::List` keymap: the top-level array
+  /// entries of `[tui.keys]`. The `[tui.keys.modal]` sub-table (modal
+  /// contexts) is skipped here and handled by [`Self::resolved_modal_keymap`].
   pub fn resolved_keymap(&self) -> Result<crate::tui::keymap::Keymap> {
     use crate::tui::keymap::{Action, KeyStroke, Keymap};
 
     let mut km = Keymap::defaults();
-    for (action_slug, chord_strings) in &self.bindings {
-      let action = Action::from_slug(action_slug).ok_or_else(|| {
+    for (action_slug, value) in &self.raw {
+      // Modal contexts live under `[tui.keys.modal.<context>]` and are
+      // resolved by `resolved_modal_keymap`. The dedicated namespace (issue
+      // #219 review) keeps a global action and a same-named modal context
+      // (`create` / `help` / `command_logs` / `link`) from colliding at the
+      // `tui.keys.<name>` path during the layered merge — which previously
+      // replaced the global array with the modal table and silently dropped
+      // the user's global override.
+      if action_slug == TUI_KEYS_MODAL_NAMESPACE {
+        continue;
+      }
+      let chord_strings = match value {
+        toml::Value::Array(_) => as_chord_list(action_slug, value)?,
+        other => {
+          return Err(GwmError::Config(format!(
+            "tui.keys.{}: expected an array of chords; modal contexts go under [tui.keys.modal.<context>], got {}",
+            action_slug,
+            other.type_str()
+          )))
+        }
+      };
+      let action = Action::from_slug_compat(action_slug).ok_or_else(|| {
         GwmError::Config(format!(
           "tui.keys: unknown action {:?} (run `gwm tui keys` for the full list)",
           action_slug
         ))
       })?;
       let mut parsed = Vec::with_capacity(chord_strings.len());
-      for chord_str in chord_strings {
-        let chord = KeyStroke::parse_chord(chord_str).map_err(|e| {
-          // Re-wrap so the user sees `tui.keys.<action>` as the
-          // coordinate rather than the bare "keymap:" prefix from
-          // the parser.
-          let inner = match e {
-            GwmError::Config(msg) => msg,
-            other => other.to_string(),
-          };
-          GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
-        })?;
+      for chord_str in &chord_strings {
+        let chord = KeyStroke::parse_chord(chord_str).map_err(|e| rewrap(&format!("tui.keys.{}", action_slug), e))?;
         parsed.push(chord);
       }
-      km.apply_override(action, parsed).map_err(|e| {
-        let inner = match e {
-          GwmError::Config(msg) => msg,
-          other => other.to_string(),
-        };
-        GwmError::Config(format!("tui.keys.{}: {}", action_slug, inner))
-      })?;
+      km.apply_override(action, parsed)
+        .map_err(|e| rewrap(&format!("tui.keys.{}", action_slug), e))?;
     }
     Ok(km)
   }
+
+  /// Resolve the **contextual** modal keymap from the `[tui.keys.modal]`
+  /// sub-table, recursing into stages (`link.choose_target`, `config.edit`).
+  /// A missing `[tui.keys.modal]` table means no overrides — the built-in
+  /// defaults stand. The dedicated namespace (issue #219 review) keeps modal
+  /// contexts from colliding with same-named global actions during the
+  /// layered merge.
+  pub fn resolved_modal_keymap(&self) -> Result<crate::tui::modal_keymap::ModalKeymap> {
+    use crate::tui::modal_keymap::ModalKeymap;
+
+    let mut mk = ModalKeymap::defaults();
+    let Some(modal_val) = self.raw.get(TUI_KEYS_MODAL_NAMESPACE) else {
+      return Ok(mk);
+    };
+    let table = modal_val.as_table().ok_or_else(|| {
+      GwmError::Config(format!(
+        "tui.keys.modal: expected a table of modal contexts, got {}",
+        modal_val.type_str()
+      ))
+    })?;
+    for (ctx_key, value) in table {
+      match value {
+        toml::Value::Table(sub) => walk_modal_context(ctx_key, sub, &mut mk)?,
+        other => {
+          return Err(GwmError::Config(format!(
+            "tui.keys.modal.{}: expected a context table, got {}",
+            ctx_key,
+            other.type_str()
+          )))
+        }
+      }
+    }
+    Ok(mk)
+  }
+}
+
+/// Sub-table key under `[tui.keys]` that holds the contextual modal bindings
+/// (`[tui.keys.modal.<context>]`). See [`TuiKeysConfig::resolved_modal_keymap`].
+const TUI_KEYS_MODAL_NAMESPACE: &str = "modal";
+
+/// Extract a `["a", "b"]` chord list from a TOML array value, erroring on a
+/// non-string element. `coord` is the dotted `tui.keys.…` path for messages.
+fn as_chord_list(coord: &str, value: &toml::Value) -> Result<Vec<String>> {
+  let arr = value
+    .as_array()
+    .expect("as_chord_list called on a non-array — caller must match Value::Array first");
+  let mut out = Vec::with_capacity(arr.len());
+  for v in arr {
+    let s = v.as_str().ok_or_else(|| {
+      GwmError::Config(format!(
+        "tui.keys.{}: chord list must contain strings, got {}",
+        coord,
+        v.type_str()
+      ))
+    })?;
+    out.push(s.to_string());
+  }
+  Ok(out)
+}
+
+/// `true` when `path` is a non-leaf context *group* — i.e. some real
+/// context nests below it (`link` → `link.choose_target`). Used to give a
+/// precise "bind under a stage" error instead of "unknown context".
+fn is_modal_context_group(path: &str) -> bool {
+  let prefix = format!("{}.", path);
+  crate::tui::modal_keymap::KeyContext::all()
+    .iter()
+    .any(|c| c.config_path().starts_with(&prefix))
+}
+
+/// Walk one `[tui.keys.modal.<ctx_path>]` sub-table, applying every `verb = [keys]`
+/// entry to `mk` and recursing into nested stage sub-tables.
+fn walk_modal_context(
+  ctx_path: &str,
+  table: &toml::Table,
+  mk: &mut crate::tui::modal_keymap::ModalKeymap,
+) -> Result<()> {
+  use crate::tui::modal_keymap::{parse_single, KeyContext, ModalAction};
+
+  let ctx = KeyContext::from_config_path(ctx_path);
+  if ctx.is_none() && !is_modal_context_group(ctx_path) {
+    return Err(GwmError::Config(format!(
+      "tui.keys.modal.{}: unknown modal context (run `gwm tui keys` for the list)",
+      ctx_path
+    )));
+  }
+
+  for (key, value) in table {
+    match value {
+      toml::Value::Array(_) => {
+        let ctx = ctx.ok_or_else(|| {
+          GwmError::Config(format!(
+            "tui.keys.modal.{path}: {path:?} is a context group, not a leaf — bind under a stage (e.g. {path}.<stage>)",
+            path = ctx_path
+          ))
+        })?;
+        let coord = format!("modal.{}.{}", ctx_path, key);
+        let chords = as_chord_list(&coord, value)?;
+        let action = ModalAction::from_context_verb(ctx, key).ok_or_else(|| {
+          GwmError::Config(format!(
+            "tui.keys.modal.{}: unknown verb {:?} (run `gwm tui keys` for the list)",
+            ctx_path, key
+          ))
+        })?;
+        let mut parsed = Vec::with_capacity(chords.len());
+        for s in &chords {
+          parsed.push(parse_single(s).map_err(|e| rewrap(&coord, e))?);
+        }
+        mk.apply_override(action, parsed)
+          .map_err(|e| rewrap(&format!("tui.keys.modal.{}", ctx_path), e))?;
+      }
+      toml::Value::Table(sub) => {
+        let child = format!("{}.{}", ctx_path, key);
+        walk_modal_context(&child, sub, mk)?;
+      }
+      other => {
+        return Err(GwmError::Config(format!(
+          "tui.keys.modal.{}.{}: expected an array of keys or a sub-table, got {}",
+          ctx_path,
+          key,
+          other.type_str()
+        )))
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Re-wrap a parser / keymap error so the user sees the `tui.keys.<coord>`
+/// coordinate rather than the bare `keymap:` prefix from the inner layer.
+fn rewrap(coord: &str, e: GwmError) -> GwmError {
+  let inner = match e {
+    GwmError::Config(msg) => msg,
+    other => other.to_string(),
+  };
+  GwmError::Config(format!("{}: {}", coord, inner))
 }
 
 /// `[theme]` block (issue #33) — role-based TUI colour scheme.
@@ -675,6 +960,10 @@ fn default_confirm_countdown_secs() -> u32 {
   3
 }
 
+fn default_auto_refresh_secs() -> u64 {
+  60
+}
+
 /// Read a config file as a raw `toml::Value` (always a table at the
 /// document root). Kept separate from `toml::from_str::<Config>` so the
 /// two layers can be deep-merged at the value level before a single
@@ -705,6 +994,71 @@ fn merge_toml(base: toml::Value, over: toml::Value) -> toml::Value {
       toml::Value::Table(b)
     }
     (_, over) => over,
+  }
+}
+
+/// Load a single top-level config section (e.g. `[exec]` / `[clean]`) from the
+/// layered config (global `~/.config/gwm/config.toml` then repo `.gwm.toml`),
+/// **tolerant of errors elsewhere** in the file but **strict on the section
+/// itself**.
+///
+/// `gwm exec --profile` / `gwm clean` each consult exactly one section. An
+/// unrelated problem — a stray top-level key, a semantic `[tui.keys]` error,
+/// another section's shape — must not block them, so only the requested
+/// subtree is deserialized; the rest is never validated. But the requested
+/// section IS deserialized with its `deny_unknown_fields` / required-field
+/// rules, so its OWN error still surfaces. That distinction matters for the
+/// destructive `gwm clean`: a malformed `[clean.profiles.default]` must error
+/// rather than silently revert to the built-in directory set (#324 review).
+///
+/// A missing section yields `T::default()`. A TOML *syntax* error (an
+/// unreadable file) still surfaces — there is no section to read.
+///
+/// `repo_root` is `None` for a **bare** repo (no workdir, hence no repo
+/// `.gwm.toml`): the repo layer is skipped, but the user-level GLOBAL config
+/// is still read, so a global `[exec] jobs = N` applies even there (#324
+/// review).
+fn load_config_section<T>(repo_root: Option<&Path>, key: &str) -> Result<T>
+where
+  T: serde::de::DeserializeOwned + Default,
+{
+  load_config_section_layered(global_config_path().as_deref(), repo_root, key)
+}
+
+/// Core of [`load_config_section`] with the global config path injected, so
+/// the layering can be pinned by a test without touching the runner's real
+/// `$HOME` / `$XDG_CONFIG_HOME`.
+fn load_config_section_layered<T>(global: Option<&Path>, repo_root: Option<&Path>, key: &str) -> Result<T>
+where
+  T: serde::de::DeserializeOwned + Default,
+{
+  let global_val = match global {
+    Some(p) if p.exists() => Some(read_config_value(p)?),
+    _ => None,
+  };
+  let repo_val = match repo_root {
+    Some(root) => {
+      let repo_path = root.join(CONFIG_FILE);
+      if repo_path.exists() {
+        Some(read_config_value(&repo_path)?)
+      } else {
+        None
+      }
+    }
+    None => None,
+  };
+  let merged = match (global_val, repo_val) {
+    (None, None) => return Ok(T::default()),
+    (Some(g), None) => g,
+    (None, Some(r)) => r,
+    (Some(g), Some(r)) => merge_toml(g, r),
+  };
+  match merged.get(key) {
+    Some(section) => section
+      .clone()
+      .try_into()
+      .map_err(|e| GwmError::Config(format!("invalid `[{key}]` config: {e}"))),
+    None => Ok(T::default()),
   }
 }
 
@@ -880,6 +1234,66 @@ impl Config {
     Self::load_layered(repo_root, global_config_path().as_deref())
   }
 
+  /// Load just the `[exec]` section (layered global → repo), tolerant of
+  /// errors elsewhere in the config but strict on `[exec]` itself. Used by
+  /// `gwm exec --profile` so an unrelated `.gwm.toml` problem doesn't block
+  /// it. See [`load_config_section`].
+  ///
+  /// "Strict on itself" means EVERY `[exec.profiles.*]` is validated (not just
+  /// the one the command selects), so `gwm exec --profile good` rejects the
+  /// same file `Config::load_for_repo` / `gwm config validate` / doctor reject
+  /// — a sibling profile's semantic error can't pass on the command path only.
+  pub fn load_exec_config(repo_root: &Path) -> Result<ExecConfig> {
+    let cfg: ExecConfig = load_config_section(Some(repo_root), "exec")?;
+    for (name, p) in &cfg.profiles {
+      crate::exec::validate_exec_profile_command(name, &p.command)?;
+    }
+    Ok(cfg)
+  }
+
+  /// Read ONLY the `[exec] jobs` default (issue #324), without validating the
+  /// `[exec.profiles.*]` semantics. Used by inline `gwm exec -- <cmd>` (no
+  /// `--profile`, no `--jobs`) which needs the parallelism default but uses no
+  /// profile — so a sibling profile's *semantic* issue must not block it. A
+  /// shape error in `[exec]` (unknown field, wrong type) still surfaces.
+  ///
+  /// `repo_root` is `None` for a bare repo (no workdir): the repo `.gwm.toml`
+  /// is skipped but the GLOBAL `[exec] jobs` still applies.
+  pub fn load_exec_jobs_default(repo_root: Option<&Path>) -> Result<Option<u32>> {
+    let cfg: ExecConfig = load_config_section(repo_root, "exec")?;
+    Ok(cfg.jobs)
+  }
+
+  /// Like [`Self::load_exec_jobs_default`] but with the global config path
+  /// injected, so the global-vs-repo layering can be pinned by a test without
+  /// touching the runner's real `$HOME` / `$XDG_CONFIG_HOME`.
+  pub fn load_exec_jobs_default_layered(global: Option<&Path>, repo_root: Option<&Path>) -> Result<Option<u32>> {
+    let cfg: ExecConfig = load_config_section_layered(global, repo_root, "exec")?;
+    Ok(cfg.jobs)
+  }
+
+  /// Load just the `[clean]` section (layered global → repo), tolerant of
+  /// errors elsewhere but strict on `[clean]` itself. Used by `gwm clean` so
+  /// an unrelated `.gwm.toml` problem doesn't block the built-in clean, while
+  /// a malformed `[clean.profiles.default]` still errors rather than silently
+  /// reverting to the built-in set before a destructive `--yes`. See
+  /// [`load_config_section`].
+  ///
+  /// As with [`Self::load_exec_config`], EVERY `[clean.profiles.*]` is
+  /// validated — a sibling profile that escapes the worktree can't slip
+  /// through `gwm clean --profile good` while `gwm config validate` rejects it.
+  ///
+  /// `repo_root` is `None` for a bare repo (no workdir): the repo `.gwm.toml`
+  /// is skipped but the GLOBAL `[clean]` section still applies (the built-ins
+  /// are used when no `default` profile is defined).
+  pub fn load_clean_config(repo_root: Option<&Path>) -> Result<CleanConfig> {
+    let cfg: CleanConfig = load_config_section(repo_root, "clean")?;
+    for (name, p) in &cfg.profiles {
+      crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
+    }
+    Ok(cfg)
+  }
+
   /// Load the effective config by deep-merging the user-level global
   /// config (`global_path`, the base) under the repo's `.gwm.toml`
   /// (the override). Issue #190.
@@ -895,6 +1309,44 @@ impl Config {
   /// the merge contract can be pinned by a test without touching the
   /// runner's real `$HOME` / `$XDG_CONFIG_HOME`.
   pub fn load_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
+    let cfg = Self::merge_layered(repo_root, global_path)?;
+    cfg.validate_branch_types()?;
+    cfg.validate_bootstrap_paths()?;
+    cfg.validate_bootstrap_guards()?;
+    cfg.validate_labels()?;
+    cfg.validate_aliases()?;
+    cfg.validate_tui_keys()?;
+    cfg.validate_theme()?;
+    cfg.validate_profiles()?;
+    Ok(cfg)
+  }
+
+  /// Reject semantically invalid `[exec.profiles.*]` / `[clean.profiles.*]`
+  /// entries — an empty exec `command`, or a clean `dirs` entry that escapes
+  /// the worktree (absolute, `..`, `.`/root, nested) — at config-load time, so
+  /// `gwm config validate` / `gwm doctor` reject exactly what `gwm exec
+  /// --profile` / `gwm clean` would (issue #324 review). The per-command
+  /// resolvers share the same validators, so the two paths can't drift.
+  pub(crate) fn validate_profiles(&self) -> Result<()> {
+    for (name, p) in &self.exec.profiles {
+      crate::exec::validate_exec_profile_command(name, &p.command)?;
+    }
+    for (name, p) in &self.clean.profiles {
+      crate::clean::validate_clean_profile_dirs(name, &p.dirs)?;
+    }
+    Ok(())
+  }
+
+  /// Build the effective (deep-merged) config from disk **without** running
+  /// the semantic validators. Same merge rule as [`Self::load_layered`]; only
+  /// the TOML structure must be sound (a parse / shape error still fails).
+  ///
+  /// `gwm doctor` uses this to re-check one section against the real on-disk
+  /// config even when the lenient `repo_context_lenient` defaulted the whole
+  /// config away after `load_for_repo` rejected it — otherwise a check would
+  /// validate the default and mask the very error it promises to surface
+  /// (issue #219 review).
+  pub(crate) fn merge_layered(repo_root: &Path, global_path: Option<&Path>) -> Result<Self> {
     let repo_path = repo_root.join(CONFIG_FILE);
     let global_val = match global_path {
       Some(p) if p.exists() => Some(read_config_value(p)?),
@@ -906,21 +1358,12 @@ impl Config {
       None
     };
 
-    let cfg: Config = match (global_val, repo_val) {
-      (None, None) => return Ok(Self::default()),
+    Ok(match (global_val, repo_val) {
+      (None, None) => Self::default(),
       (Some(g), None) => g.try_into()?,
       (None, Some(r)) => r.try_into()?,
       (Some(g), Some(r)) => merge_toml(g, r).try_into()?,
-    };
-
-    cfg.validate_branch_types()?;
-    cfg.validate_bootstrap_paths()?;
-    cfg.validate_bootstrap_guards()?;
-    cfg.validate_labels()?;
-    cfg.validate_aliases()?;
-    cfg.validate_tui_keys()?;
-    cfg.validate_theme()?;
-    Ok(cfg)
+    })
   }
 
   /// Reject `[tui.keys]` entries that name an unknown action, list a
@@ -931,7 +1374,11 @@ impl Config {
   /// (it's rebuilt by the TUI at startup); the call is only kept for
   /// its error side-effects.
   pub(crate) fn validate_tui_keys(&self) -> Result<()> {
-    self.tui.keys.resolved_keymap().map(|_| ())
+    // Global verbs (array entries) and contextual modal verbs (table
+    // entries) are validated in one pass each; the resolved keymaps are
+    // discarded — they're rebuilt by the TUI at startup.
+    self.tui.keys.resolved_keymap().map(|_| ())?;
+    self.tui.keys.resolved_modal_keymap().map(|_| ())
   }
 
   /// Reject `[theme]` entries that name an unknown preset, unknown
@@ -1099,11 +1546,18 @@ impl Config {
 
   /// Write a default config to the given repo root.
   pub fn write_default(repo_root: &Path) -> Result<PathBuf> {
+    Self::write_preset(repo_root, crate::presets::GENERIC_BODY)
+  }
+
+  /// Write a `.gwm.toml` body (a built-in preset, see [`crate::presets`])
+  /// to the repo root, refusing to clobber an existing file. Factored out
+  /// of [`Self::write_default`] so `gwm init --preset <name>` seeds a
+  /// stack-specific template through the same idempotency guard.
+  pub fn write_preset(repo_root: &Path, body: &str) -> Result<PathBuf> {
     let target = repo_root.join(CONFIG_FILE);
     if target.exists() {
       return Err(GwmError::Config(format!("{} already exists", target.display())));
     }
-    let body = include_str!("../examples/gwm.toml.example");
     std::fs::write(&target, body)?;
     Ok(target)
   }

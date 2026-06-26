@@ -16,6 +16,7 @@ _No changes yet — entries land here as PRs merge into `dev`, then move to a pe
 
 In reverse chronological order:
 
+- [`1.0.0`](changelogs/1.0.0.md) — 2026-06-26
 - [`0.9.0`](changelogs/0.9.0.md) — 2026-06-07
 - [`0.8.0`](changelogs/0.8.0.md) — 2026-06-01
 - [`0.7.0`](changelogs/0.7.0.md) — 2026-05-23
@@ -30,6 +31,10 @@ In reverse chronological order:
 
 Per-RC notes covering only the delta against the previous RC (or against the previous stable, for `rc.1`):
 
+- [`0.10.0-rc.4`](changelogs/pre-releases/0.10.0-rc.4.md) — 2026-06-17
+- [`0.10.0-rc.3`](changelogs/pre-releases/0.10.0-rc.3.md) — 2026-06-17
+- [`0.10.0-rc.2`](changelogs/pre-releases/0.10.0-rc.2.md) — 2026-06-16
+- [`0.10.0-rc.1`](changelogs/pre-releases/0.10.0-rc.1.md) — 2026-06-10
 - [`0.9.0-rc.3`](changelogs/pre-releases/0.9.0-rc.3.md) — 2026-06-07
 - [`0.9.0-rc.2`](changelogs/pre-releases/0.9.0-rc.2.md) — 2026-06-06
 - [`0.9.0-rc.1`](changelogs/pre-releases/0.9.0-rc.1.md) — 2026-06-02

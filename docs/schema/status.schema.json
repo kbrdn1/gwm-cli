@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/kbrdn1/gwm-cli/docs/schema/status.schema.json",
+  "version": 1,
+  "title": "gwm status result",
+  "description": "Output of `gwm status --json` (issue #38) — the issue/PR link of a worktree plus, when `gh` is available, live GitHub state. A stable schema for scripting.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["branch", "issue", "pr"],
+  "properties": {
+    "branch": {
+      "type": "string",
+      "description": "Checked-out branch shorthand of the inspected worktree."
+    },
+    "repo": {
+      "type": "string",
+      "description": "GitHub owner/name slug. Present ONLY when a remote is resolvable; absent for a worktree with no GitHub remote."
+    },
+    "issue": {
+      "description": "Linked issue, or null when none. The live fields (state/title/labels/url) appear only when `gh` resolved the issue.",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/issue_link" }]
+    },
+    "pr": {
+      "description": "Linked PR, or null when none. The live fields (state/title/checks/url) appear only when `gh` resolved the PR.",
+      "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/pr_link" }]
+    }
+  },
+  "$defs": {
+    "link_source": {
+      "type": "string",
+      "enum": ["none", "branch-name", "explicit", "detected"],
+      "description": "How the link was established."
+    },
+    "issue_link": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["number", "source"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 0 },
+        "source": { "$ref": "#/$defs/link_source" },
+        "state": {
+          "type": "string",
+          "enum": ["open", "closed"],
+          "description": "Live issue state; present only when `gh` resolved it."
+        },
+        "title": { "type": "string" },
+        "labels": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "url": { "type": "string" }
+      }
+    },
+    "pr_link": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["number", "source"],
+      "properties": {
+        "number": { "type": "integer", "minimum": 0 },
+        "source": { "$ref": "#/$defs/link_source" },
+        "state": {
+          "type": "string",
+          "enum": ["open", "draft", "closed", "merged"],
+          "description": "Live PR state; present only when `gh` resolved it."
+        },
+        "title": { "type": "string" },
+        "checks_passed": { "type": "integer", "minimum": 0 },
+        "checks_total": { "type": "integer", "minimum": 0 },
+        "url": { "type": "string" }
+      }
+    }
+  }
+}

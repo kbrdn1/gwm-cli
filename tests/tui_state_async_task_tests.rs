@@ -122,6 +122,50 @@ fn is_github_is_true_only_for_github_kinds() {
 }
 
 #[test]
+fn is_mutating_is_true_only_for_tasks_that_change_worktrees() {
+  assert!(TaskKind::CreateWorktree.is_mutating());
+  assert!(TaskKind::Sync.is_mutating());
+  assert!(TaskKind::Bootstrap.is_mutating());
+  assert!(!TaskKind::RefreshWorktrees.is_mutating());
+  assert!(!TaskKind::GithubIssue(1).is_mutating());
+  assert!(!TaskKind::GithubPr(1).is_mutating());
+}
+
+#[test]
+fn runner_reports_when_a_mutating_task_is_in_flight() {
+  let mut runner = TaskRunner::new();
+  runner.request(TaskKind::RefreshWorktrees);
+  runner.request(TaskKind::GithubIssue(42));
+
+  assert!(runner.is_any_loading());
+  assert!(!runner.has_mutating_task_in_flight());
+
+  runner.request(TaskKind::Sync);
+  assert!(runner.has_mutating_task_in_flight());
+}
+
+#[test]
+fn mutating_loading_label_prefers_mutating_work_over_read_only_work() {
+  let mut runner = TaskRunner::new();
+  runner.request(TaskKind::RefreshWorktrees);
+  runner.request(TaskKind::GithubIssue(42));
+  runner.request(TaskKind::Bootstrap);
+  runner.request(TaskKind::Sync);
+
+  assert_eq!(runner.mutating_loading_label(), Some("syncing…"));
+}
+
+#[test]
+fn runner_stops_reporting_mutating_work_once_it_completes() {
+  let mut runner = TaskRunner::new();
+  let generation = runner.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(runner.has_mutating_task_in_flight());
+  assert!(runner.complete(TaskKind::Bootstrap, generation));
+  assert!(!runner.has_mutating_task_in_flight());
+}
+
+#[test]
 fn github_issue_and_pr_with_same_number_are_independent_slots() {
   // The (target, number) identity carries onto the spine: Issue(42) and
   // Pr(42) never coalesce or share a generation.
@@ -187,6 +231,31 @@ fn sync_task_reports_the_syncing_label() {
 }
 
 #[test]
+fn create_worktree_task_reports_the_creating_label_and_is_mutating() {
+  assert_eq!(TaskKind::CreateWorktree.loading_label(), "creating worktree…");
+  assert!(
+    !TaskKind::CreateWorktree.is_github(),
+    "CreateWorktree is not a GitHub kind"
+  );
+  assert!(
+    TaskKind::CreateWorktree.is_mutating(),
+    "CreateWorktree mutates disk/git state"
+  );
+}
+
+#[test]
+fn second_create_worktree_request_while_inflight_is_coalesced() {
+  let mut runner = TaskRunner::new();
+  assert_eq!(runner.request(TaskKind::CreateWorktree), Some(1));
+  assert_eq!(
+    runner.request(TaskKind::CreateWorktree),
+    None,
+    "a second create request while one is inflight must coalesce"
+  );
+  assert!(runner.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
 fn second_sync_request_while_inflight_is_coalesced() {
   // Only one sync runs at a time — a second `S` press while a rebase is in
   // flight must not spawn a second concurrent rebase.
@@ -220,6 +289,19 @@ fn a_late_sync_result_after_invalidate_is_dropped() {
 fn bootstrap_task_reports_the_bootstrapping_label() {
   assert_eq!(TaskKind::Bootstrap.loading_label(), "bootstrapping…");
   assert!(!TaskKind::Bootstrap.is_github(), "Bootstrap is not a GitHub kind");
+}
+
+#[test]
+fn delete_worktree_task_reports_the_deleting_label_and_is_mutating() {
+  assert_eq!(TaskKind::DeleteWorktree.loading_label(), "deleting worktree…");
+  assert!(
+    !TaskKind::DeleteWorktree.is_github(),
+    "DeleteWorktree is not a GitHub kind"
+  );
+  assert!(
+    TaskKind::DeleteWorktree.is_mutating(),
+    "DeleteWorktree mutates disk/git state"
+  );
 }
 
 #[test]

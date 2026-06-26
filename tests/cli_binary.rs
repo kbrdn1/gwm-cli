@@ -30,6 +30,8 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  new "))
     // Issue #84: render the PR body from `[pr_template]` and shell out to `gh pr create`.
     .stdout(predicate::str::contains("  pr "))
+    // Issue #308: materialise an existing PR into a worktree (inbound review).
+    .stdout(predicate::str::contains("  review "))
     .stdout(predicate::str::contains("  path "))
     .stdout(predicate::str::contains("[aliases: cd]"))
     .stdout(predicate::str::contains("  bootstrap "))
@@ -63,7 +65,17 @@ fn help_prints_subcommands() {
     .stdout(predicate::str::contains("  undo "))
     .stdout(predicate::str::contains("  history "))
     // Issue #87: configurable TUI keymap (`gwm tui keys`).
-    .stdout(predicate::str::contains("  tui "));
+    .stdout(predicate::str::contains("  tui "))
+    // Issue #38: long-running JSON-RPC daemon over a unix socket. The
+    // subcommand is always listed (help is identical cross-platform); the
+    // socket impl is `cfg(unix)`-gated and returns a clean error elsewhere.
+    .stdout(predicate::str::contains("  daemon "))
+    // Issue #309: first daemon consumer — compact statusline for prompts.
+    .stdout(predicate::str::contains("  statusline "))
+    // Issue #313: run a command in each worktree.
+    .stdout(predicate::str::contains("  exec "))
+    // Issue #313: report / reclaim heavy build artifacts across worktrees.
+    .stdout(predicate::str::contains("  clean "));
 }
 
 // --- gitmoji (issue #85) ------------------------------------------------
@@ -907,6 +919,238 @@ fn list_format_names_emits_one_name_per_line() {
     .stdout(predicate::str::is_empty());
 }
 
+// --- JSON output flags (issue #38, phase 1) ----------------------------
+
+#[test]
+fn list_format_json_emits_a_parseable_worktree_array() {
+  // Unlike `--format names`, the JSON array includes the main worktree:
+  // an editor / statusbar consumer wants the full set, and resolves the
+  // active worktree from it. A fresh repo has exactly the main worktree.
+  let (dir, _repo) = init_repo();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "list --format=json must exit 0");
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+  let arr = v.as_array().expect("top level must be a JSON array");
+  assert_eq!(arr.len(), 1, "a fresh repo has exactly the main worktree");
+  let main = &arr[0];
+  assert_eq!(main["is_main"], serde_json::json!(true));
+  // Stable schema keys present.
+  assert!(main.get("name").is_some());
+  assert!(main.get("path").is_some());
+  assert!(main.get("status").is_some());
+  assert!(main["status"].get("is_dirty").is_some());
+  // Optional link fields are present and null on a fresh repo.
+  assert_eq!(main["pr"], serde_json::Value::Null);
+}
+
+#[test]
+fn list_format_json_with_detect_pr_populates_the_pr_field() {
+  // `--format=json --detect-pr` must agree with the table: the JSON `pr`
+  // field carries the freshly detected number, not just the persisted
+  // link (issue #38 review).
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(fake_bin.path(), r#"[{"number":128}]"#, r#"{}"#);
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  // The main worktree's branch gets the detected PR #128.
+  assert!(
+    arr.iter().any(|w| w["pr"] == serde_json::json!(128)),
+    "detected PR number must surface in the JSON `pr` field, got: {v}"
+  );
+}
+
+#[test]
+fn list_format_json_detect_pr_keeps_explicit_link_when_detection_cannot_run() {
+  // Regression (issue #38 review): with `--detect-pr` in a repo that has
+  // no GitHub slug, live detection can't run, so it must NOT clobber an
+  // explicit/persisted local PR link that the plain listing already shows.
+  let (dir, repo) = init_repo();
+  // No remote → repo_slug fails → detection yields None for every row.
+  let head = repo.head().unwrap();
+  let branch = head.shorthand().unwrap().to_string();
+  // Explicit PR link in branch config (`branch.<name>.gwm-pr`).
+  repo
+    .config()
+    .unwrap()
+    .set_i64(&format!("branch.{branch}.gwm-pr"), 77)
+    .unwrap();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  assert!(
+    arr.iter().any(|w| w["pr"] == serde_json::json!(77)),
+    "explicit PR link must be preserved when detection can't run, got: {v}"
+  );
+}
+
+#[test]
+fn list_format_json_detect_pr_clears_a_stale_persisted_pr() {
+  // The flip side (issue #38 review): when detection DOES run (GitHub slug
+  // present) and `gh pr list` returns no PR for a branch that had a
+  // persisted detected PR, the JSON must clear it to null — matching the
+  // table — not leave the stale number.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap();
+  let branch = head.shorthand().unwrap().to_string();
+  // A persisted (now stale) detected PR in branch config.
+  repo
+    .config()
+    .unwrap()
+    .set_i64(&format!("branch.{branch}.gwm-pr-detected"), 99)
+    .unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  // `gh pr list --head` returns no PR → detection clears the cache.
+  let fake_gh = write_dispatch_gh(fake_bin.path(), "[]", "{}");
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--format=json", "--detect-pr"])
+    .output()
+    .unwrap();
+  assert!(out.status.success());
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid JSON");
+  let arr = v.as_array().unwrap();
+  assert!(
+    arr.iter().all(|w| w["pr"] != serde_json::json!(99)),
+    "a stale persisted PR must be cleared once detection runs, got: {v}"
+  );
+}
+
+#[test]
+fn doctor_format_json_emits_checks_severity_and_exit_code() {
+  let (dir, _repo) = init_repo();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["doctor", "--format=json"])
+    .output()
+    .unwrap();
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("doctor json must parse");
+  assert!(v["checks"].is_array(), "checks must be an array");
+  assert!(
+    !v["checks"].as_array().unwrap().is_empty(),
+    "doctor runs at least one check"
+  );
+  let sev = v["severity"].as_str().expect("severity must be a string");
+  assert!(
+    matches!(sev, "ok" | "warning" | "failed"),
+    "severity stable enum, got {sev}"
+  );
+  // The JSON exit_code mirrors the process exit code.
+  let json_code = v["exit_code"].as_i64().expect("exit_code is an integer");
+  let proc_code = out.status.code().unwrap_or(-1) as i64;
+  assert_eq!(json_code, proc_code, "json exit_code must equal the process exit code");
+  // Per-check shape.
+  let first = &v["checks"][0];
+  assert!(first.get("name").is_some());
+  let cs = first["status"].as_str().unwrap();
+  assert!(matches!(cs, "ok" | "warning" | "failed"));
+}
+
+#[test]
+fn path_format_json_emits_name_path_branch() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "38", "json-path"])
+    .assert()
+    .success();
+
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["path", "json-path", "--format=json"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "path --format=json must exit 0");
+  let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("path json must parse");
+  let obj = v.as_object().expect("path json must be an object");
+  assert_eq!(obj.len(), 3, "exactly {{name, path, branch}}");
+  assert_eq!(v["name"], serde_json::json!("feat-38-json-path"));
+  assert_eq!(v["branch"], serde_json::json!("feat/#38-json-path"));
+  assert!(
+    v["path"].as_str().unwrap().ends_with("feat-38-json-path"),
+    "path points at the worktree dir"
+  );
+}
+
+#[test]
+fn daemon_rejects_zero_poll_ms() {
+  // `--poll-ms 0` would spin a subscribe loop with no wait; clap rejects
+  // it at parse time (range 1..) so the daemon never starts (issue #38
+  // review). No repo / socket needed — validation fails first.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["daemon", "--poll-ms", "0"])
+    .assert()
+    .failure()
+    .stderr(
+      predicate::str::contains("0").and(predicate::str::contains("not in").or(predicate::str::contains("invalid"))),
+    );
+}
+
+#[test]
+fn statusline_without_a_daemon_prints_blank_and_exits_zero() {
+  // No daemon is listening at the given socket. A prompt substitution must
+  // not break: the command exits 0 and emits no worktree summary, just a
+  // blank line (issue #309 graceful-degradation contract).
+  let sock_dir = tempfile::TempDir::new().unwrap();
+  let missing = sock_dir.path().join("no-daemon.sock");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .arg("statusline")
+    .arg("--socket")
+    .arg(&missing)
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(" wt").not());
+}
+
+#[test]
+fn statusline_help_documents_watch_and_socket() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["statusline", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--watch"))
+    .stdout(predicate::str::contains("--socket"));
+}
+
 #[test]
 fn cd_unknown_pattern_fails_with_not_found() {
   let (dir, _repo) = init_repo();
@@ -1411,6 +1655,76 @@ fn status_auto_detects_pr_when_none_explicitly_linked() {
 }
 
 #[test]
+fn status_persists_detected_pr_title_after_fetch() {
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let head = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("detect-me", &head, false).unwrap();
+  repo.set_head("refs/heads/detect-me").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    r#"[{"number":128}]"#,
+    r#"{"number":128,"title":"Auto-detect PR","state":"OPEN","isDraft":false,"url":"https://github.com/kbrdn1/gwm-cli/pull/128"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["status", "--json"])
+    .assert()
+    .success();
+
+  let link = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(link.pr, Some(128));
+  assert_eq!(link.pr_source, gwm::github::LinkSource::Detected);
+  assert_eq!(link.pr_title.as_deref(), Some("Auto-detect PR"));
+}
+
+#[test]
+fn review_resolves_pr_metadata_and_names_branch_end_to_end() {
+  // E2E (issue #308): drive `gwm review <PR#>` through the clap entry point.
+  // A fake `gh` resolves the PR head metadata and `repo_slug` parses the
+  // GitHub origin; `GIT_ALLOW_PROTOCOL=file` then makes the subsequent
+  // `git fetch` over https fail instantly (no network) right after the
+  // resolution block is printed — so the assertion stays hermetic and fast.
+  //
+  // This pins the clap surface + gh metadata resolution + review naming +
+  // `[worktree].base` expansion that the unit / integration tests bypass. The
+  // full fetch→worktree→link→base path is covered hermetically by
+  // tests/review_integration.rs (which drives `review::materialize` directly
+  // against a local origin and needs no GitHub URL — the slug/fetch coupling
+  // makes that step un-mockable through the binary without a network call).
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let fake_gh = write_dispatch_gh(
+    fake_bin.path(),
+    "[]",
+    r#"{"number":1,"author":{"login":"alice"},"headRefName":"feat/spike-x","baseRefName":"main"}"#,
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GH", &fake_gh)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .env("GIT_ALLOW_PROTOCOL", "file") // reject the https fetch instantly, no network
+    .args(["review", "1"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("PR     : #1 by alice (feat/spike-x → main)"))
+    .stdout(predicate::str::contains("branch : review/pr-1-alice-spike-x"))
+    .stdout(predicate::str::contains("review-pr-1-alice-spike-x"));
+}
+
+#[test]
 fn status_explicit_pr_link_wins_over_detection() {
   // An explicit `gwm link --pr` must not be clobbered by detection: the
   // reported source stays "explicit" even though `gh pr list` would
@@ -1598,6 +1912,98 @@ fn init_outside_git_repo_fails() {
     .assert()
     .failure()
     .stderr(predicate::str::contains("not inside a git repository"));
+}
+
+// --- init --preset (issue #37) ------------------------------------------
+
+#[test]
+fn init_list_presets_enumerates_builtins() {
+  // `--list-presets` is a pure stdout enumeration — it must work without a
+  // git repo (it returns before `discover_repo`) and name every built-in.
+  let dir = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--list-presets"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("generic"))
+    .stdout(predicate::str::contains("laravel"))
+    .stdout(predicate::str::contains("node"))
+    .stdout(predicate::str::contains("rust"))
+    .stdout(predicate::str::contains("python-uv"));
+}
+
+#[test]
+fn init_preset_show_prints_without_writing() {
+  // `--show` prints the resolved preset to stdout and writes nothing — so a
+  // user can diff a preset against an existing config.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "rust", "--show"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[[bootstrap.no_symlink]]"))
+    .stdout(predicate::str::contains("target"));
+
+  assert!(!cfg_path.exists(), "--show must not write .gwm.toml to disk");
+}
+
+#[test]
+fn init_preset_writes_stack_config() {
+  // `--preset laravel` seeds the opinionated stack config: the AWS-RDS guard
+  // and the vendor/ no-symlink are the markers that distinguish it from the
+  // generic template.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "laravel"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(".gwm.toml"));
+
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(body.contains("no-aws-rds"), "laravel preset missing the AWS-RDS guard");
+  assert!(body.contains("vendor"), "laravel preset missing the vendor no-symlink");
+}
+
+#[test]
+fn init_unknown_preset_fails() {
+  // An unknown preset name must fail loudly and point the user at
+  // `--list-presets` rather than silently writing the generic template.
+  let (dir, _repo) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "cobol"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cobol"))
+    .stderr(predicate::str::contains("list-presets"));
+}
+
+#[test]
+fn init_preset_nuxt_alias_writes_node_body() {
+  // `nuxt` is an alias of `node`: it must seed the node_modules no-symlink.
+  let (dir, _repo) = init_repo();
+  let cfg_path = dir.path().join(".gwm.toml");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["init", "--preset", "nuxt"])
+    .assert()
+    .success();
+
+  let body = std::fs::read_to_string(&cfg_path).unwrap();
+  assert!(body.contains("node_modules"), "nuxt alias must seed the node preset");
 }
 
 // --- create -------------------------------------------------------------
@@ -4168,4 +4574,919 @@ fn theme_show_output_round_trips_through_gwm_toml() {
     // stderr to pin the round-trip.
     .stderr(predicate::str::contains("invalid TOML").not())
     .stderr(predicate::str::contains("config error").not());
+}
+
+#[test]
+fn tui_keys_lists_modal_contexts() {
+  // Issue #219: the listing prints the contextual modal bindings under
+  // their `[tui.keys.modal.<context>]` headings, including nested link stages.
+  let (dir, _) = init_repo();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["tui", "keys"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("[tui.keys.modal.confirm]"))
+    .stdout(predicate::str::contains("focus_confirm"))
+    .stdout(predicate::str::contains("[tui.keys.modal.link.choose_target]"));
+}
+
+// --- exec / clean (issue #313) ------------------------------------------
+
+/// Spin up a repo plus one non-main worktree via the real binary, so the
+/// `exec` / `clean` tests exercise the actual worktree-discovery and
+/// target-selection path (not just the pure helpers). Returns the main repo
+/// tempdir, the worktree-base tempdir (kept alive), and the worktree path.
+fn repo_with_one_worktree() -> (tempfile::TempDir, tempfile::TempDir, PathBuf) {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  // Reuse the shared writer so the tempdir path is TOML-escaped (backslashes
+  // on Windows CI would otherwise make `.gwm.toml` invalid).
+  write_test_config(dir.path(), base.path());
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "feat", "1", "wt"])
+    .assert()
+    .success();
+  let wt = base.path().join("feat-1-wt");
+  assert!(wt.exists(), "worktree must exist for the exec/clean tests");
+  (dir, base, wt)
+}
+
+#[test]
+fn exec_runs_the_command_inside_each_worktree() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // The command's CWD is the worktree, so the marker lands there — proving
+  // discovery + per-worktree execution, not just a parse.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "sh", "-c", "echo hi > exec_marker.txt"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓"))
+    .stdout(predicate::str::contains("feat-1-wt"));
+  assert!(
+    wt.join("exec_marker.txt").exists(),
+    "the command must run with the worktree as its working directory"
+  );
+}
+
+#[test]
+fn exec_exits_nonzero_when_a_worktree_command_fails() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "sh", "-c", "exit 5"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗"))
+    .stdout(predicate::str::contains("exit 5"));
+}
+
+/// Append a TOML snippet to the repo's `.gwm.toml` (the writer created by
+/// `repo_with_one_worktree`), so a test can add `[exec.profiles.*]` /
+/// `[clean.profiles.*]` entries on top of the base config.
+fn append_config(repo_root: &Path, snippet: &str) {
+  use std::io::Write;
+  let mut f = std::fs::OpenOptions::new()
+    .append(true)
+    .open(repo_root.join(".gwm.toml"))
+    .unwrap();
+  writeln!(f, "{snippet}").unwrap();
+}
+
+// --- exec/clean named profiles (issue #324) ---------------------------------
+
+#[test]
+fn exec_runs_a_named_profile_command() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[exec.profiles.greet]\ncommand = [\"sh\", \"-c\", \"echo hi > prof_marker.txt\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "greet"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("✓"));
+  assert!(
+    wt.join("prof_marker.txt").exists(),
+    "the profile's command must run in the worktree"
+  );
+}
+
+#[test]
+fn exec_jobs_runs_the_parallel_capture_path() {
+  // `--jobs > 1` runs the bounded-parallel path: each worktree's output is
+  // captured and printed as a block (after its header), and the command still
+  // runs and rolls up ✓.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args([
+      "exec",
+      "--jobs",
+      "2",
+      "--",
+      "sh",
+      "-c",
+      "echo blockline; echo hi > exec_jobs_marker.txt",
+    ])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("blockline")) // captured stdout printed as a block
+    .stdout(predicate::str::contains("feat-1-wt"))
+    .stdout(predicate::str::contains("✓"));
+  assert!(
+    wt.join("exec_jobs_marker.txt").exists(),
+    "the command must still run under --jobs"
+  );
+}
+
+#[test]
+fn exec_jobs_preserves_raw_binary_output() {
+  // The parallel path captures bytes, but must re-emit them RAW — a
+  // `String::from_utf8_lossy` would mangle a non-UTF-8 byte (0xFF) into the
+  // U+FFFD replacement char. `printf '\377'` emits a literal 0xFF.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  let out = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "2", "--", "printf", "\\377"])
+    .output()
+    .unwrap();
+  assert!(out.status.success(), "exec should succeed: {out:?}");
+  assert!(
+    out.stdout.contains(&0xFFu8),
+    "the raw 0xFF byte must survive the capture, not be UTF-8-mangled"
+  );
+}
+
+#[test]
+fn exec_inline_inside_bare_repo_does_not_require_a_workdir() {
+  // A bare repo has no `workdir()`, so there's no `.gwm.toml` to read — but
+  // inline `gwm exec` must still run (it enumerates worktrees, not config).
+  // Regression: reading the `[exec] jobs` default must fall back gracefully
+  // here instead of failing with `NotInGitRepo` (#324 review).
+  let dir = tempfile::TempDir::new().unwrap();
+  git2::Repository::init_bare(dir.path()).expect("init bare repo");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "true"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no worktrees to run in"));
+}
+
+#[test]
+fn exec_jobs_flag_skips_config_when_inline() {
+  // Inline + `--jobs`: the flag is authoritative and the command is on the
+  // CLI, so `[exec]` is never read — a malformed sibling profile can't block
+  // `gwm exec --jobs N -- <cmd>` (#324 review).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.bad]\ncommand = []\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "2", "--", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_inline_jobs_default_tolerates_a_semantic_sibling_profile() {
+  // Inline + no `--jobs`: the `[exec] jobs` default IS read, but sibling
+  // profiles are NOT semantically validated (inline uses none of them), so a
+  // `command = []` sibling doesn't block the inline run.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec]\njobs = 1\n[exec.profiles.bad]\ncommand = []\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_jobs_flag_parses_and_propagates_failure() {
+  // The parallel path propagates a non-zero rollup just like sequential.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--jobs", "3", "--", "sh", "-c", "exit 4"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗"))
+    .stdout(predicate::str::contains("exit 4"));
+}
+
+#[test]
+fn exec_inline_command_ignores_a_broken_gwm_toml() {
+  // The inline `gwm exec -- <cmd>` surface is promised config-free: an
+  // unrelated `.gwm.toml` error must NOT break it (it only reads config for
+  // a `--profile` lookup). Here a stray top-level key would fail a config
+  // load, yet the inline command still runs.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--", "sh", "-c", "true"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn exec_profile_tolerates_an_unrelated_config_error() {
+  // The `--profile` path reads only the `[exec]` section, so an UNRELATED
+  // top-level typo is tolerated — the failure is the unknown profile, not the
+  // typo (exit 1 either way, but for the right reason).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "whatever"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `whatever`"));
+}
+
+#[test]
+fn exec_profile_surfaces_a_malformed_exec_section() {
+  // A shape error in the `[exec]` section ITSELF still surfaces (exit 1):
+  // an unknown field in a profile is rejected by `deny_unknown_fields`.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.bad]\ncommand = [\"true\"]\nbogus = 1\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "bad"])
+    .assert()
+    .failure()
+    .code(1);
+}
+
+#[test]
+fn exec_profile_and_inline_command_are_mutually_exclusive() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[exec.profiles.t]\ncommand = [\"true\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "t", "--", "echo", "hi"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("mutually exclusive"));
+}
+
+#[test]
+fn exec_unknown_profile_exits_one() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn clean_unknown_profile_exits_one() {
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn clean_builtin_ignores_a_broken_gwm_toml() {
+  // The built-in `gwm clean` (no `--profile`) is opt-in/config-tolerant: an
+  // unrelated `.gwm.toml` error (a stray top-level key) must NOT block it —
+  // only the `[clean]` section is read, so it falls back to the built-in dirs.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "nonsense_key = true\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn clean_honors_default_profile_despite_an_unrelated_config_error() {
+  // A configured `[clean.profiles.default]` must NOT be silently dropped
+  // (reverting to the built-in set) just because an unrelated key is wrong —
+  // that would make a destructive `--yes` delete the wrong set. The default
+  // profile's `coverage` (only reclaimable under that profile) is reported.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  std::fs::create_dir_all(wt.join("coverage")).unwrap();
+  std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
+  append_config(
+    dir.path(),
+    "nonsense_key = true\n[clean.profiles.default]\ndirs = [\"coverage\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("coverage"));
+}
+
+#[test]
+fn clean_surfaces_a_malformed_clean_section() {
+  // A shape error in the `[clean]` section ITSELF still surfaces (exit 1),
+  // even without `--profile` — a profile missing its required `dirs` must not
+  // be silently ignored before a destructive clean.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[clean.profiles.broken]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .failure()
+    .code(1);
+}
+
+#[test]
+fn clean_rejects_a_sibling_invalid_profile() {
+  // The `[clean]` loader validates EVERY profile, not just the selected one:
+  // a sibling `bad` that escapes the worktree fails `--profile good` too, so
+  // the command path matches `gwm config validate` / doctor (#324 review).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[clean.profiles.good]\ndirs = [\"target\"]\n[clean.profiles.bad]\ndirs = [\"..\"]\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "good"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains(".."));
+}
+
+#[test]
+fn exec_rejects_a_sibling_invalid_profile() {
+  // Same for `[exec]`: a sibling `bad` with an empty command fails
+  // `--profile good`.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(
+    dir.path(),
+    "[exec.profiles.good]\ncommand = [\"true\"]\n[exec.profiles.bad]\ncommand = []\n",
+  );
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--profile", "good"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("empty `command`"));
+}
+
+#[test]
+fn clean_profile_with_an_unsafe_dir_exits_one() {
+  // A `dirs` entry that could escape the worktree (here `..`) is refused at
+  // resolution, before any filesystem scan — exit 1, nothing walked.
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  append_config(dir.path(), "[clean.profiles.evil]\ndirs = [\"..\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "evil"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("escape the worktree"));
+}
+
+#[test]
+fn clean_named_profile_scopes_the_reclaim_to_its_dirs() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // `coverage/` is only reclaimable under a profile that lists it; the
+  // built-in set (target/node_modules/dist/build) would ignore it.
+  std::fs::create_dir_all(wt.join("coverage")).unwrap();
+  std::fs::write(wt.join("coverage/lcov.info"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "coverage/\n").unwrap();
+  append_config(dir.path(), "[clean.profiles.cov]\ndirs = [\"coverage\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "cov"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("coverage"));
+}
+
+#[test]
+fn clean_reclaims_a_leading_dash_profile_dir() {
+  // A profile dir whose name starts with `-` (e.g. `-cache`) must flow through
+  // the git-ignored safety check correctly — the check passes `--` so git
+  // doesn't parse the name as an option and wrongly skip it (#324 review P3).
+  let (dir, _base, wt) = repo_with_one_worktree();
+  std::fs::create_dir_all(wt.join("-cache")).unwrap();
+  std::fs::write(wt.join("-cache/blob.bin"), vec![0u8; 2048]).unwrap();
+  std::fs::write(wt.join(".gitignore"), "/-cache/\n").unwrap();
+  append_config(dir.path(), "[clean.profiles.dash]\ndirs = [\"-cache\"]\n");
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--profile", "dash", "--yes"])
+    .assert()
+    .success();
+  assert!(
+    !wt.join("-cache").exists(),
+    "a git-ignored `-cache` profile dir must be reclaimed, not skipped"
+  );
+}
+
+#[test]
+fn clean_reports_artifacts_without_deleting_by_default() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // target/ is git-ignored ⇒ deletable, so the dry-run preview counts it and
+  // prompts to re-run — but report-only must not actually delete it.
+  fs::write(wt.join(".gitignore"), "/target\n").unwrap();
+  fs::create_dir_all(wt.join("target")).unwrap();
+  fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("target"))
+    .stdout(predicate::str::contains("re-run with --yes"));
+
+  assert!(wt.join("target").exists(), "report-only mode must not delete anything");
+}
+
+#[test]
+fn clean_preview_excludes_non_deletable_dirs_from_total() {
+  // A non-ignored dist/ must not be counted as reclaimable nor trigger the
+  // "re-run with --yes" promise — the preview must match what --yes would do.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  fs::create_dir_all(wt.join("dist")).unwrap();
+  fs::write(wt.join("dist").join("keep.txt"), b"hand-authored").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped"))
+    .stdout(predicate::str::contains("dist"))
+    .stdout(predicate::str::contains("nothing to reclaim"))
+    .stdout(predicate::str::contains("re-run with --yes").not());
+}
+
+#[test]
+fn clean_yes_deletes_gitignored_artifacts() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // target/ is ignored ⇒ safe to reclaim.
+  fs::write(wt.join(".gitignore"), "/target\n").unwrap();
+  fs::create_dir_all(wt.join("target")).unwrap();
+  fs::write(wt.join("target").join("blob.bin"), vec![0u8; 4096]).unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--yes"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("reclaimed"));
+
+  assert!(
+    !wt.join("target").exists(),
+    "a git-ignored target/ should be deleted with --yes"
+  );
+}
+
+#[test]
+fn clean_yes_refuses_to_delete_non_ignored_artifacts() {
+  let (dir, _base, wt) = repo_with_one_worktree();
+  // dist/ is NOT ignored (no matching rule) and holds hand-authored content;
+  // the safety gate must skip it rather than destroy it.
+  fs::create_dir_all(wt.join("dist")).unwrap();
+  fs::write(wt.join("dist").join("keep.txt"), b"non-regenerable work").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--yes"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped"))
+    .stdout(predicate::str::contains("dist"));
+
+  assert!(wt.join("dist").exists(), "a non-ignored dist/ must be preserved");
+  assert!(
+    wt.join("dist").join("keep.txt").exists(),
+    "hand-authored content under a non-ignored dir must survive --yes"
+  );
+}
+
+#[test]
+fn clean_yes_refuses_ignored_dir_holding_tracked_files() {
+  // git tracks files, not directories: a `dist/` ignore rule can coexist with
+  // a force-added, committed `dist/index.html`. `check-ignore dist` succeeds,
+  // but the dir holds tracked work — the gate must still skip it.
+  let (dir, _base, wt) = repo_with_one_worktree();
+  fs::write(wt.join(".gitignore"), "/dist\n").unwrap();
+  fs::create_dir_all(wt.join("dist")).unwrap();
+  fs::write(wt.join("dist").join("index.html"), b"tracked output").unwrap();
+  // Force-track the file despite the ignore rule.
+  std::process::Command::new("git")
+    .current_dir(&wt)
+    .args(["add", "-f", "dist/index.html"])
+    .status()
+    .expect("git add -f");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--yes"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("skipped"))
+    .stdout(predicate::str::contains("dist"));
+
+  assert!(
+    wt.join("dist").join("index.html").exists(),
+    "a tracked file under an ignored dir must survive --yes"
+  );
+}
+
+/// Run `git <args>` in `dir`, asserting success — fixture setup helper.
+fn git_at(dir: &Path, args: &[&str]) {
+  // Pin signing off so a developer with `commit.gpgsign=true` (or a missing
+  // signing key) in their ambient git config doesn't make these fixtures fail
+  // before `gwm` is even exercised (#326 review).
+  let ok = std::process::Command::new("git")
+    .current_dir(dir)
+    .args(["-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false"])
+    .args(args)
+    .status()
+    .unwrap()
+    .success();
+  assert!(ok, "git {args:?} in {} failed", dir.display());
+}
+
+/// A workspace root with two child repos (`alpha`, `beta`), each carrying one
+/// non-main linked worktree at `<root>/alpha-wt` / `<root>/beta-wt`. `discover`
+/// collapses each worktree onto its owning repo, so the workspace has exactly
+/// the two repos and `exec`/`clean` fan out over their worktrees.
+fn workspace_with_worktrees() -> tempfile::TempDir {
+  let root = tempfile::TempDir::new().unwrap();
+  for (repo, wt) in [("alpha", "alpha-wt"), ("beta", "beta-wt")] {
+    let repo_dir = root.path().join(repo);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git_at(&repo_dir, &["init", "-b", "main"]);
+    git_at(&repo_dir, &["config", "user.email", "t@t.t"]);
+    git_at(&repo_dir, &["config", "user.name", "t"]);
+    std::fs::write(repo_dir.join("README.md"), "x").unwrap();
+    git_at(&repo_dir, &["add", "."]);
+    git_at(&repo_dir, &["commit", "-m", "init"]);
+    let wt_path = root.path().join(wt);
+    git_at(
+      &repo_dir,
+      &["worktree", "add", "-b", "feat/x", wt_path.to_str().unwrap()],
+    );
+  }
+  root
+}
+
+/// A workspace root with two child repos that have ONLY their main checkout
+/// (no linked worktrees) — so exec/clean fan-out finds no targets anywhere.
+fn workspace_main_only() -> tempfile::TempDir {
+  let root = tempfile::TempDir::new().unwrap();
+  for repo in ["alpha", "beta"] {
+    let repo_dir = root.path().join(repo);
+    std::fs::create_dir_all(&repo_dir).unwrap();
+    git_at(&repo_dir, &["init", "-b", "main"]);
+    git_at(&repo_dir, &["config", "user.email", "t@t.t"]);
+    git_at(&repo_dir, &["config", "user.name", "t"]);
+    std::fs::write(repo_dir.join("README.md"), "x").unwrap();
+    git_at(&repo_dir, &["add", "."]);
+    git_at(&repo_dir, &["commit", "-m", "init"]);
+  }
+  root
+}
+
+// `gwm exec` / `gwm clean` now FAN OUT across a workspace's child repos under
+// `--workspace <root>` (issue #326), reversing the #319 deferral. This is an
+// additive transition — a previous refusal turning into a success is not a
+// breaking change. These tests pin the fan-out: a repo-tagged rollup/report
+// across every child repo, with an aggregated exit code. The `--workspace`
+// refusal now only applies to commands that still don't implement it (covered
+// by `workspace_refuses_unsupported_subcommand` below).
+
+#[test]
+fn exec_fans_out_across_workspace_child_repos() {
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "sh", "-c", "echo ran > ws_exec_marker.txt"])
+    .assert()
+    .success()
+    // A `══ <repo>` header per child repo, and a repo-tagged rollup.
+    .stdout(predicate::str::contains("══ alpha"))
+    .stdout(predicate::str::contains("══ beta"))
+    .stdout(predicate::str::contains("✓ alpha/"))
+    .stdout(predicate::str::contains("✓ beta/"));
+  // The command actually ran in each child repo's worktree.
+  assert!(root.path().join("alpha-wt/ws_exec_marker.txt").exists());
+  assert!(root.path().join("beta-wt/ws_exec_marker.txt").exists());
+}
+
+#[test]
+fn exec_workspace_scopes_to_a_matching_slug() {
+  // A slug matching a worktree in only one child repo scopes the fan-out to
+  // that repo (the others contribute nothing — not an error).
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["alpha-wt", "--", "sh", "-c", "echo hi > scoped.txt"])
+    .assert()
+    .success();
+  assert!(root.path().join("alpha-wt/scoped.txt").exists(), "alpha matched");
+  assert!(
+    !root.path().join("beta-wt/scoped.txt").exists(),
+    "beta did not match the slug"
+  );
+}
+
+#[test]
+fn exec_workspace_scoped_slug_ignores_an_unrelated_repos_missing_profile() {
+  // Only `alpha` defines `[exec.profiles.fmt]`; `beta` has none. Scoping to
+  // `alpha-wt` must not resolve `beta`'s config (it contributes no target), so
+  // the run succeeds despite `beta` lacking the profile (#326 review).
+  let root = workspace_with_worktrees();
+  std::fs::write(
+    root.path().join("alpha/.gwm.toml"),
+    "[exec.profiles.fmt]\ncommand = [\"sh\", \"-c\", \"echo hi > prof.txt\"]\n",
+  )
+  .unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["alpha-wt", "--profile", "fmt"])
+    .assert()
+    .success();
+  assert!(root.path().join("alpha-wt/prof.txt").exists(), "alpha's profile ran");
+}
+
+#[test]
+fn exec_workspace_errors_on_a_slug_matching_no_child_repo() {
+  // A typo that matches nothing in ANY child repo is an error, not a silent
+  // exit-0 having run nothing (#326 review).
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["ghost-typo", "--", "true"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("ghost-typo"));
+}
+
+#[test]
+fn exec_workspace_aggregates_a_nonzero_exit() {
+  let root = workspace_with_worktrees();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "sh", "-c", "exit 3"])
+    .assert()
+    .failure()
+    .stdout(predicate::str::contains("✗ alpha/"))
+    .stdout(predicate::str::contains("✗ beta/"));
+}
+
+#[test]
+fn clean_fans_out_across_workspace_child_repos() {
+  let root = workspace_with_worktrees();
+  // A git-ignored `target/` in each child repo's worktree is reclaimable.
+  for (repo, wt) in [("alpha", "alpha-wt"), ("beta", "beta-wt")] {
+    let _ = repo;
+    let wtdir = root.path().join(wt);
+    std::fs::create_dir_all(wtdir.join("target")).unwrap();
+    std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+    std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  }
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .success()
+    // Report is repo-tagged; report-only must not delete.
+    .stdout(predicate::str::contains("alpha/"))
+    .stdout(predicate::str::contains("beta/"))
+    .stdout(predicate::str::contains("re-run with --yes"));
+  assert!(
+    root.path().join("alpha-wt/target").exists(),
+    "report-only keeps target/"
+  );
+}
+
+#[test]
+fn clean_workspace_yes_deletes_in_every_child_repo() {
+  let root = workspace_with_worktrees();
+  for wt in ["alpha-wt", "beta-wt"] {
+    let wtdir = root.path().join(wt);
+    std::fs::create_dir_all(wtdir.join("target")).unwrap();
+    std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+    std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  }
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .arg("--yes")
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("reclaimed"));
+  assert!(!root.path().join("alpha-wt/target").exists());
+  assert!(!root.path().join("beta-wt/target").exists());
+}
+
+#[test]
+fn clean_workspace_errors_before_deleting_on_a_corrupt_child_repo() {
+  // A child that looks like a repo (.git present) but won't open must fail the
+  // whole fan-out BEFORE any deletion — not be silently skipped while the valid
+  // repos get cleaned (#326 review).
+  let root = workspace_with_worktrees();
+  let wtdir = root.path().join("alpha-wt");
+  std::fs::create_dir_all(wtdir.join("target")).unwrap();
+  std::fs::write(wtdir.join("target/blob.bin"), vec![0u8; 4096]).unwrap();
+  std::fs::write(wtdir.join(".gitignore"), "/target\n").unwrap();
+  let corrupt = root.path().join("corrupt");
+  std::fs::create_dir_all(&corrupt).unwrap();
+  std::fs::write(corrupt.join(".git"), "gitdir: /nonexistent-gitdir\n").unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .arg("--yes")
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("corrupt"));
+  // The valid repo's reclaimable target/ survives — nothing was deleted.
+  assert!(wtdir.join("target").exists(), "fan-out must fail before any deletion");
+}
+
+#[test]
+fn exec_workspace_all_empty_errors_on_a_missing_command() {
+  // Every repo is main-only (no targets), but a usage error (neither inline
+  // command nor --profile) must still surface, not a silent exit 0 (#326 rev).
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("provide a command"));
+}
+
+#[test]
+fn exec_workspace_all_empty_errors_on_an_unknown_profile() {
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ghost"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn exec_workspace_all_empty_inline_command_exits_zero() {
+  // A valid inline command with no targets anywhere is "nothing to do", exit 0.
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["exec", "--workspace"])
+    .arg(root.path())
+    .args(["--", "true"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("no worktrees to run in"));
+}
+
+#[test]
+fn clean_workspace_all_empty_errors_on_an_unknown_profile() {
+  // A typo'd `--profile` with no targets anywhere must surface, not silently
+  // report "nothing to reclaim" (#326 review).
+  let root = workspace_main_only();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["clean", "--workspace"])
+    .arg(root.path())
+    .args(["--profile", "ghost", "--yes"])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("no profile named `ghost`"));
+}
+
+#[test]
+fn workspace_refuses_a_still_unsupported_subcommand() {
+  // `--workspace` is still refused on commands that don't implement it (only
+  // list/create/exec/clean and the bare TUI do).
+  let (dir, _base, _wt) = repo_with_one_worktree();
+  let ws = tempfile::TempDir::new().unwrap();
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["sync", "--workspace", ws.path().to_str().unwrap()])
+    .assert()
+    .failure()
+    .code(1)
+    .stderr(predicate::str::contains("--workspace is only supported"));
 }

@@ -5,7 +5,8 @@
 //! index + issue number buffer + slug buffer) and exposes the rotation /
 //! push-pop / reset primitives. The `App` orchestrator owns the side
 //! effects in `submit_create` (it composes `BranchSpec` from the form's
-//! values, then drives `worktree::add` + `bootstrap::run`).
+//! values, then dispatches `worktree::add` + `bootstrap::run` on the async
+//! task spine).
 
 /// Max digits accepted in the issue-number field. Seven digits covers any
 /// realistic GitHub issue/PR number (up to 9,999,999) while keeping the

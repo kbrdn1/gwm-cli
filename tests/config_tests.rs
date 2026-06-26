@@ -1,6 +1,6 @@
 use gwm::config::{
   expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, Config, ConfigRow, ConfigSource,
-  SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+  MacroOpenMode, SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
 };
 use tempfile::TempDir;
 
@@ -459,6 +459,10 @@ fn tui_section_defaults_to_three_second_countdown() {
   let cfg = Config::default();
   assert_eq!(cfg.tui.confirm_countdown_secs, 3);
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 3);
+  assert_eq!(
+    cfg.tui.auto_refresh_secs, 60,
+    "TUI auto-refresh defaults to once per minute"
+  );
 }
 
 #[test]
@@ -546,6 +550,36 @@ confirm_countdown_secs = 0
   .unwrap();
   let cfg = Config::load_layered(dir.path(), None).unwrap();
   assert_eq!(cfg.tui.effective_confirm_countdown_secs(), 0);
+}
+
+#[test]
+fn tui_auto_refresh_zero_disables_periodic_refresh() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+auto_refresh_secs = 0
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.auto_refresh_secs, 0);
+}
+
+#[test]
+fn tui_auto_refresh_round_trips_through_toml() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui]
+auto_refresh_secs = 15
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.auto_refresh_secs, 15);
 }
 
 #[test]
@@ -1544,7 +1578,7 @@ fn tui_keys_default_is_empty_map() {
   // layer then keeps every built-in default. Mirrors the `labels` /
   // `milestones` "no override declared" contract.
   let cfg = Config::default();
-  assert!(cfg.tui.keys.bindings.is_empty());
+  assert!(cfg.tui.keys.raw.is_empty());
 }
 
 #[test]
@@ -1562,18 +1596,22 @@ top  = ["g g"]
   .unwrap();
 
   let cfg = Config::load_layered(dir.path(), None).unwrap();
-  assert_eq!(
-    cfg.tui.keys.bindings.get("down").map(Vec::as_slice),
-    Some(["j".to_string(), "Ctrl+n".to_string()].as_slice())
-  );
-  assert_eq!(
-    cfg.tui.keys.bindings.get("up").map(Vec::as_slice),
-    Some(["k".to_string(), "Ctrl+p".to_string()].as_slice())
-  );
-  assert_eq!(
-    cfg.tui.keys.bindings.get("top").map(Vec::as_slice),
-    Some(["g g".to_string()].as_slice())
-  );
+  // The raw `[tui.keys]` table preserves the user's source verbatim
+  // (issue #219 stores it as a `toml::Table` to also carry contextual
+  // sub-tables); pull each chord list back out as strings.
+  let chords = |slug: &str| -> Vec<String> {
+    cfg
+      .tui
+      .keys
+      .raw
+      .get(slug)
+      .and_then(|v| v.as_array())
+      .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+      .unwrap_or_default()
+  };
+  assert_eq!(chords("down"), vec!["j".to_string(), "Ctrl+n".to_string()]);
+  assert_eq!(chords("up"), vec!["k".to_string(), "Ctrl+p".to_string()]);
+  assert_eq!(chords("top"), vec!["g g".to_string()]);
 }
 
 #[test]
@@ -1629,11 +1667,12 @@ fn tui_keys_rejects_chord_that_is_strict_prefix() {
   // creates a chord/prefix ambiguity. Per the design note on PR #87
   // this is a hard error at load — never a runtime timeout.
   let dir = TempDir::new().unwrap();
+  // `terminal_fullscreen` replaces the old `open` slug (#290).
   std::fs::write(
     dir.path().join(CONFIG_FILE),
     r#"
 [tui.keys]
-open = ["g"]
+terminal_fullscreen = ["g"]
 "#,
   )
   .unwrap();
@@ -1875,4 +1914,467 @@ fn config_source_labels_are_stable() {
   assert_eq!(ConfigSource::Repo.label(), "repo");
   assert_eq!(ConfigSource::User.label(), "user");
   assert_eq!(ConfigSource::Default.label(), "default");
+}
+
+#[test]
+fn macro_open_in_accepts_documented_pty_and_mux_pane_values() {
+  // #290 / Codex review on PR #292: `MacroOpenMode` must deserialize the
+  // documented `open_in = "mux_pane"` (snake_case) — under the earlier
+  // `rename_all = "lowercase"` serde expected "muxpane" and a config
+  // following the docs failed to load, taking the whole TUI down.
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.macro1]
+command = "make test"
+open_in = "mux_pane"
+
+[tui.macro2]
+command = "codex"
+open_in = "pty"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let m1 = cfg.tui.macro1.expect("macro1 must parse");
+  assert_eq!(m1.command, "make test");
+  assert_eq!(m1.open_in, MacroOpenMode::MuxPane, "\"mux_pane\" must map to MuxPane");
+  let m2 = cfg.tui.macro2.expect("macro2 must parse");
+  assert_eq!(m2.open_in, MacroOpenMode::Pty, "\"pty\" must map to Pty");
+}
+
+#[test]
+fn macro_open_in_defaults_to_pty_when_omitted() {
+  // `open_in` is optional and defaults to Pty (the in-overlay mode).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.macro1]
+command = "lazygit"
+"#,
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let m1 = cfg.tui.macro1.expect("macro1 must parse");
+  assert_eq!(m1.open_in, MacroOpenMode::Pty);
+}
+
+// --- [tui.keys.modal.<context>] contextual modal bindings (issue #219) ---
+
+use crossterm::event::{KeyCode, KeyModifiers};
+use gwm::tui::keymap::KeyStroke;
+use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+
+fn ks(code: KeyCode) -> KeyStroke {
+  KeyStroke::new(code, KeyModifiers::empty())
+}
+fn kc(c: char) -> KeyStroke {
+  KeyStroke::new(KeyCode::Char(c), KeyModifiers::empty())
+}
+
+#[test]
+fn modal_keys_nested_context_resolves() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.confirm]
+confirm = ["o"]
+cancel  = ["n", "Esc"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  // new key fires, old default `y` is gone
+  assert_eq!(
+    mk.resolve(KeyContext::Confirm, &kc('o')),
+    Some(ModalAction::ConfirmConfirm)
+  );
+  assert_eq!(mk.resolve(KeyContext::Confirm, &kc('y')), None);
+}
+
+#[test]
+fn modal_keys_link_stage_uses_dotted_table() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.link.choose_target]
+issue = ["x"]
+
+[tui.keys.modal.link.input_number]
+submit = ["Right"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(
+    mk.resolve(KeyContext::LinkChooseTarget, &kc('x')),
+    Some(ModalAction::LinkChooseIssue)
+  );
+  assert_eq!(
+    mk.resolve(KeyContext::LinkInputNumber, &ks(KeyCode::Right)),
+    Some(ModalAction::LinkInputSubmit)
+  );
+}
+
+#[test]
+fn modal_keys_config_edit_substage_resolves() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.config]
+close = ["q"]
+
+[tui.keys.modal.config.edit]
+cancel = ["Backspace"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(mk.resolve(KeyContext::Config, &kc('q')), Some(ModalAction::ConfigClose));
+  assert_eq!(
+    mk.resolve(KeyContext::ConfigEdit, &ks(KeyCode::Backspace)),
+    Some(ModalAction::ConfigEditCancel)
+  );
+}
+
+#[test]
+fn modal_keys_global_and_contextual_coexist() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys]
+quit = ["Q"]
+
+[tui.keys.modal.confirm]
+confirm = ["o"]
+"#,
+  )
+  .unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  // global path sees the array entry
+  let km = cfg.tui.keys.resolved_keymap().unwrap();
+  assert_eq!(km.primary_chord(gwm::tui::keymap::Action::Quit).as_deref(), Some("Q"));
+  // contextual path sees the table entry
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(
+    mk.resolve(KeyContext::Confirm, &kc('o')),
+    Some(ModalAction::ConfirmConfirm)
+  );
+}
+
+#[test]
+fn modal_namespace_does_not_collide_with_a_same_named_global_action() {
+  // #219 review (P2): before the dedicated `[tui.keys.modal]` namespace, a
+  // global `[tui.keys] create = ["c"]` and a modal `[tui.keys.create]` shared
+  // the `tui.keys.create` path. The layered merge saw array-vs-table at the
+  // same path, replaced the global array with the modal table, and silently
+  // dropped the user's global override (`resolved_keymap` then skipped the
+  // table). With the disjoint namespace the two live at different paths
+  // (`tui.keys.create` vs `tui.keys.modal.create`) and both survive the merge.
+  let global = TempDir::new().unwrap();
+  let global_path = global.path().join("global.toml");
+  std::fs::write(&global_path, "[tui.keys]\ncreate = [\"c\"]\n").unwrap();
+  let repo = TempDir::new().unwrap();
+  std::fs::write(
+    repo.path().join(CONFIG_FILE),
+    "[tui.keys.modal.create]\ncancel = [\"x\"]\n",
+  )
+  .unwrap();
+
+  let cfg = Config::load_layered(repo.path(), Some(&global_path)).unwrap();
+
+  // The global `create` override survives the merge (was silently lost before).
+  let km = cfg.tui.keys.resolved_keymap().unwrap();
+  assert_eq!(
+    km.primary_chord(gwm::tui::keymap::Action::Create).as_deref(),
+    Some("c"),
+    "the global create override must survive a same-named modal context"
+  );
+
+  // ...and the modal `create.cancel` override resolves independently.
+  let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
+  assert_eq!(
+    mk.resolve(KeyContext::Create, &kc('x')),
+    Some(ModalAction::CreateCancel)
+  );
+}
+
+#[test]
+fn modal_keys_reject_unknown_context() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.confrm]
+confirm = ["y"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("typo'd context must reject");
+  assert!(err.to_string().contains("unknown modal context"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_unknown_verb() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.confirm]
+gallop = ["y"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("unknown verb must reject");
+  assert!(err.to_string().contains("unknown verb"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_multistroke_chord() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.confirm]
+confirm = ["g g"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("modal chords must be single strokes");
+  assert!(err.to_string().contains("single keystroke"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_in_context_conflict() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.confirm]
+confirm = ["x"]
+cancel  = ["x"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("two verbs sharing a key must conflict");
+  assert!(err.to_string().contains("conflict"), "{err}");
+}
+
+#[test]
+fn modal_keys_reject_array_directly_under_group() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(
+    dir.path().join(CONFIG_FILE),
+    r#"
+[tui.keys.modal.link]
+issue = ["i"]
+"#,
+  )
+  .unwrap();
+  let err = Config::load_layered(dir.path(), None).expect_err("link needs a stage");
+  assert!(err.to_string().contains("context group"), "{err}");
+}
+
+// --- [exec] / [clean] profiles (issue #324) ---------------------------------
+
+fn load_toml(body: &str) -> gwm::error::Result<Config> {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), body).unwrap();
+  Config::load_layered(dir.path(), None)
+}
+
+#[test]
+fn exec_and_clean_default_to_no_profiles() {
+  // Absent `[exec]` / `[clean]` blocks resolve to empty profile maps — the
+  // inline `gwm exec -- <cmd>` and built-in `gwm clean` surfaces are unchanged.
+  let cfg = Config::default();
+  assert!(cfg.exec.profiles.is_empty());
+  assert!(cfg.clean.profiles.is_empty());
+}
+
+#[test]
+fn exec_profiles_parse_command_as_an_argv_array() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+
+[exec.profiles.fmt]
+command = ["cargo", "fmt", "--all"]
+"#,
+  )
+  .expect("exec profiles parse");
+  assert_eq!(
+    cfg.exec.profiles["test"].command,
+    vec!["cargo".to_string(), "test".to_string()]
+  );
+  assert_eq!(
+    cfg.exec.profiles["fmt"].command,
+    vec!["cargo".to_string(), "fmt".to_string(), "--all".to_string()]
+  );
+}
+
+#[test]
+fn exec_jobs_parse_global_and_per_profile() {
+  let cfg = load_toml(
+    r#"
+[exec]
+jobs = 4
+
+[exec.profiles.fmt]
+command = ["cargo", "fmt"]
+jobs = 2
+"#,
+  )
+  .expect("jobs parse");
+  assert_eq!(cfg.exec.jobs, Some(4), "global [exec] jobs");
+  assert_eq!(cfg.exec.profiles["fmt"].jobs, Some(2), "per-profile jobs");
+}
+
+#[test]
+fn exec_jobs_default_honors_global_even_without_a_repo() {
+  // A bare repo passes `repo = None`, but the GLOBAL `[exec] jobs` still
+  // applies (#324 review). A repo `[exec] jobs` overrides the global.
+  let global_dir = TempDir::new().unwrap();
+  let global = global_dir.path().join("config.toml");
+  std::fs::write(&global, "[exec]\njobs = 4\n").unwrap();
+
+  // repo = None (bare): only the global is read.
+  assert_eq!(
+    Config::load_exec_jobs_default_layered(Some(&global), None).unwrap(),
+    Some(4),
+    "bare repo still honours the global [exec] jobs"
+  );
+
+  // A repo `.gwm.toml` overrides the global default.
+  let repo_dir = TempDir::new().unwrap();
+  std::fs::write(repo_dir.path().join(CONFIG_FILE), "[exec]\njobs = 2\n").unwrap();
+  assert_eq!(
+    Config::load_exec_jobs_default_layered(Some(&global), Some(repo_dir.path())).unwrap(),
+    Some(2),
+    "repo [exec] jobs overrides the global"
+  );
+
+  // No global, no repo ⇒ None (sequential).
+  assert_eq!(Config::load_exec_jobs_default_layered(None, None).unwrap(), None);
+}
+
+#[test]
+fn exec_jobs_default_to_none() {
+  let cfg = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+"#,
+  )
+  .expect("parse");
+  assert!(cfg.exec.jobs.is_none(), "no [exec] jobs ⇒ None (sequential)");
+  assert!(cfg.exec.profiles["test"].jobs.is_none());
+}
+
+#[test]
+fn clean_profiles_parse_dirs_as_a_complete_set() {
+  let cfg = load_toml(
+    r#"
+[clean.profiles.default]
+dirs = ["target", "node_modules", "dist", "build", "coverage", ".turbo"]
+
+[clean.profiles.deep]
+dirs = ["target", ".cache", ".venv"]
+"#,
+  )
+  .expect("clean profiles parse");
+  assert_eq!(
+    cfg.clean.profiles["default"].dirs,
+    vec!["target", "node_modules", "dist", "build", "coverage", ".turbo"]
+  );
+  assert_eq!(cfg.clean.profiles["deep"].dirs, vec!["target", ".cache", ".venv"]);
+}
+
+#[test]
+fn exec_profile_without_command_is_a_load_error() {
+  // `command` is required within a profile — an empty `[exec.profiles.x]`
+  // table is a config error, surfaced at load time.
+  let err = load_toml(
+    r#"
+[exec.profiles.broken]
+"#,
+  )
+  .expect_err("missing command must error");
+  assert!(
+    err.to_string().contains("command"),
+    "error should name the missing field: {err}"
+  );
+}
+
+#[test]
+fn clean_profile_without_dirs_is_a_load_error() {
+  let err = load_toml(
+    r#"
+[clean.profiles.broken]
+"#,
+  )
+  .expect_err("missing dirs must error");
+  assert!(
+    err.to_string().contains("dirs"),
+    "error should name the missing field: {err}"
+  );
+}
+
+#[test]
+fn exec_profile_rejects_unknown_fields() {
+  // `deny_unknown_fields` guards the frozen schema — a stray key is refused
+  // rather than silently ignored.
+  let err = load_toml(
+    r#"
+[exec.profiles.test]
+command = ["cargo", "test"]
+nonsense = true
+"#,
+  )
+  .expect_err("unknown field must error");
+  assert!(
+    err.to_string().contains("nonsense") || err.to_string().contains("unknown"),
+    "{err}"
+  );
+}
+
+#[test]
+fn exec_profile_with_an_empty_command_fails_validation() {
+  // `command = []` parses (it's a valid array) but is semantically invalid —
+  // caught at config-load time so `gwm config validate` rejects what
+  // `gwm exec --profile` would.
+  let err = load_toml(
+    r#"
+[exec.profiles.empty]
+command = []
+"#,
+  )
+  .expect_err("empty command must fail validation");
+  assert!(err.to_string().contains("empty `command`"), "{err}");
+}
+
+#[test]
+fn clean_profile_with_an_escaping_dir_fails_validation() {
+  // `dirs = [".."]` parses but escapes the worktree — caught at config-load
+  // time, not only later in `gwm clean`.
+  let err = load_toml(
+    r#"
+[clean.profiles.default]
+dirs = [".."]
+"#,
+  )
+  .expect_err("escaping dir must fail validation");
+  assert!(err.to_string().contains(".."), "{err}");
 }

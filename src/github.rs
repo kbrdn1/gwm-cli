@@ -26,6 +26,18 @@ static PR_URL_RE: LazyLock<regex::Regex> =
 
 const ISSUE_CONFIG_KEY: &str = "gwm-issue";
 const PR_CONFIG_KEY: &str = "gwm-pr";
+/// Persisted home of an auto-detected PR (issue #283). Kept distinct from
+/// the explicit [`PR_CONFIG_KEY`] so [`read_link`] can resolve it as
+/// [`LinkSource::Detected`] (not `Explicit`) — the pane needs that
+/// distinction for its `detected` badge, and the explicit override must
+/// still win.
+const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
+const ISSUE_TITLE_CONFIG_KEY: &str = "gwm-issue-title";
+const PR_TITLE_CONFIG_KEY: &str = "gwm-pr-title";
+const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
+const ISSUE_STATE_CONFIG_KEY: &str = "gwm-issue-state";
+const PR_STATE_CONFIG_KEY: &str = "gwm-pr-state";
+const DETECTED_PR_STATE_CONFIG_KEY: &str = "gwm-pr-detected-state";
 
 /// Where the issue or PR number came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,9 +49,10 @@ pub enum LinkSource {
   /// Explicit override set via `gwm link …` (lives in git branch config).
   Explicit,
   /// Auto-detected from GitHub: a PR whose head ref is this branch was
-  /// found via `gh pr list --head <branch>` (issue #181). Ephemeral —
-  /// never written to the git config, so an explicit `gwm link --pr`
-  /// always wins on the next read.
+  /// found via `gh pr list --head <branch>` (issue #181). May be persisted
+  /// to the `gwm-pr-detected` branch-config key (issue #283) so the
+  /// no-fetch table read path surfaces it on every row; an explicit
+  /// `gwm link --pr` still always wins on the next read.
   Detected,
 }
 
@@ -49,6 +62,10 @@ pub enum LinkSource {
 pub struct BranchLink {
   pub issue: Option<u64>,
   pub pr: Option<u64>,
+  pub issue_title: Option<String>,
+  pub pr_title: Option<String>,
+  pub issue_state: Option<IssueState>,
+  pub pr_state: Option<PrState>,
   pub issue_source: LinkSource,
   pub pr_source: LinkSource,
 }
@@ -58,6 +75,10 @@ impl BranchLink {
     Self {
       issue: None,
       pr: None,
+      issue_title: None,
+      pr_title: None,
+      issue_state: None,
+      pr_state: None,
       issue_source: LinkSource::None,
       pr_source: LinkSource::None,
     }
@@ -87,14 +108,43 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
     },
   };
 
+  // PR resolution order (issue #283): an explicit `gwm link --pr` wins,
+  // then a persisted auto-detection (`gwm-pr-detected`), then nothing. The
+  // persisted-detected branch is what lets the no-fetch table read path
+  // colour the PR pastille on every row without a per-row `gh` shell-out.
   let (pr, pr_source) = match explicit_pr {
     Some(n) => (Some(n), LinkSource::Explicit),
-    None => (None, LinkSource::None),
+    None => match read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)? {
+      Some(n) => (Some(n), LinkSource::Detected),
+      None => (None, LinkSource::None),
+    },
+  };
+  let issue_title = match issue {
+    Some(_) => read_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY)?,
+    None => None,
+  };
+  let issue_state = match issue {
+    Some(_) => read_branch_issue_state(repo, branch)?,
+    None => None,
+  };
+  let pr_title = match pr_source {
+    LinkSource::Explicit => read_branch_string(repo, branch, PR_TITLE_CONFIG_KEY)?,
+    LinkSource::Detected => read_branch_string(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?,
+    LinkSource::BranchName | LinkSource::None => None,
+  };
+  let pr_state = match pr_source {
+    LinkSource::Explicit => read_branch_pr_state(repo, branch, PR_STATE_CONFIG_KEY)?,
+    LinkSource::Detected => read_branch_pr_state(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)?,
+    LinkSource::BranchName | LinkSource::None => None,
   };
 
   Ok(BranchLink {
     issue,
     pr,
+    issue_title,
+    pr_title,
+    issue_state,
+    pr_state,
     issue_source,
     pr_source,
   })
@@ -107,50 +157,164 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
 ///
 /// An explicit (or previously-detected) PR always wins: when `link.pr`
 /// is already `Some`, this is a no-op so a `gwm link --pr` override is
-/// never clobbered. The applied number is marked [`LinkSource::Detected`]
-/// and is *never* persisted to the git config by this function — it lives
-/// only on the in-memory [`BranchLink`].
+/// never clobbered. The applied number is marked [`LinkSource::Detected`].
+/// This function only mutates the in-memory [`BranchLink`]; call
+/// [`persist_detected_pr`] separately to write it to the git config so the
+/// table read path (issue #283) picks it up.
 pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
   if link.pr.is_none() {
     if let Some(n) = detected {
       link.pr = Some(n);
       link.pr_source = LinkSource::Detected;
+      link.pr_title = None;
+      link.pr_state = None;
     }
   }
 }
 
-/// Resolve the link for `branch` and, when no PR is explicitly linked,
+/// Resolve the link for `branch` and, unless a PR is *explicitly* linked,
 /// auto-detect the branch's PR from GitHub via `gh` (issue #181). The
-/// detected PR is marked [`LinkSource::Detected`] and is never persisted.
+/// detected PR is marked [`LinkSource::Detected`].
 ///
-/// Detection is best-effort: a `gh` failure (not installed, no network,
-/// no PR for the branch) degrades silently to "no PR" rather than
-/// erroring — the local link is still returned. This shells out, so
-/// callers on hot paths (per-worktree listing) must opt in deliberately
-/// rather than route every read through here.
+/// A persisted auto-detection (`gwm-pr-detected`, issue #283) does NOT pin
+/// the result here: this is the live-detection path (`gwm status` /
+/// `gwm list --detect-pr`), so it re-runs `gh pr list` to reflect a PR that
+/// was opened / closed / replaced since the last detection, rather than
+/// echoing a stale stored number (Codex review #284). Only an explicit
+/// `gwm link --pr` short-circuits the probe.
+///
+/// On a successful probe this also **reconciles the persisted cache**
+/// (`gwm-pr-detected`): it rewrites the stored number to the fresh result,
+/// or clears it when the PR vanished, so the no-fetch consumers (`read_link`,
+/// the TUI table at startup, `gwm open pr`) don't resurrect a stale number
+/// after this path saw it change (Codex review #284). The cache write is
+/// best-effort — a read-only repo must not turn `gwm status` into an error.
+///
+/// Detection is best-effort: a `gh` failure (not installed, no network)
+/// leaves the link untouched — a persisted detection survives the failed
+/// probe rather than being wiped — and the local link is still returned.
+/// This shells out, so callers on hot paths (per-worktree listing) must opt
+/// in deliberately rather than route every read through here.
 pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) -> Result<BranchLink> {
   let mut link = read_link(repo, branch)?;
-  if link.pr.is_none() {
-    let detected = find_pr_for_branch(slug, branch).ok().flatten();
-    apply_detected_pr(&mut link, detected);
+  if link.pr_source != LinkSource::Explicit {
+    // Re-resolve live. On success, the fresh result replaces any persisted
+    // detection (a vanished PR clears it); on a `gh` failure, keep whatever
+    // `read_link` already resolved (possibly a persisted detection).
+    if let Ok(detected) = find_pr_for_branch(slug, branch) {
+      let previous_pr = link.pr;
+      let previous_pr_source = link.pr_source;
+      let previous_pr_title = link.pr_title.clone();
+      let previous_pr_state = link.pr_state;
+      link.pr = detected;
+      link.pr_source = match detected {
+        Some(_) => LinkSource::Detected,
+        None => LinkSource::None,
+      };
+      link.pr_title = if previous_pr_source == LinkSource::Detected && detected == previous_pr {
+        previous_pr_title
+      } else {
+        None
+      };
+      link.pr_state = if previous_pr_source == LinkSource::Detected && detected == previous_pr {
+        previous_pr_state
+      } else {
+        None
+      };
+      // Reconcile the persisted cache (issue #283 / Codex review #284) so the
+      // no-fetch consumers (`read_link`, the TUI table at startup,
+      // `gwm open pr`) don't resurrect a stale number after this live path
+      // saw it change or vanish. Best-effort: a read-only repo must not turn
+      // `gwm status` into an error, so a write failure is discarded.
+      let _ = match detected {
+        Some(n) => persist_detected_pr(repo, branch, n),
+        None => clear_persisted_detected_pr(repo, branch),
+      };
+    }
   }
   Ok(link)
 }
 
 pub fn link_issue(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)
+  write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)?;
+  remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn link_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, PR_CONFIG_KEY, number)
+  write_branch_u64(repo, branch, PR_CONFIG_KEY, number)?;
+  remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)
 }
 
 pub fn unlink_issue(repo: &Repository, branch: &str) -> Result<()> {
-  remove_branch_key(repo, branch, ISSUE_CONFIG_KEY)
+  remove_branch_key(repo, branch, ISSUE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
-  remove_branch_key(repo, branch, PR_CONFIG_KEY)
+  // Drop both the explicit link and any persisted auto-detection (#283),
+  // otherwise unlinking would leave a stale `gwm-pr-detected` number that
+  // `read_link` would resurface as a `Detected` PR on the next read.
+  remove_branch_key(repo, branch, PR_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
+}
+
+/// Persist an auto-detected PR number to its own branch-config key
+/// (`gwm-pr-detected`, issue #283), distinct from the explicit `gwm-pr`.
+/// This lets the no-fetch table read path surface the detected PR on every
+/// row without a per-row `gh` shell-out, while keeping the
+/// detected/explicit distinction the pane badge needs. An explicit
+/// `gwm link --pr` still wins in [`read_link`]. Re-detection overwrites the
+/// stored value and clears a cached title only when the detected number
+/// actually changed.
+pub fn persist_detected_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
+  let previous = read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?;
+  write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)?;
+  if previous == Some(number) {
+    Ok(())
+  } else {
+    remove_branch_key(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?;
+    remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
+  }
+}
+
+/// Drop a persisted auto-detection (issue #283). A no-op when no detected
+/// PR was stored. Used when a detection no longer holds (the branch's PR
+/// went away) so a stale number doesn't linger in the config.
+pub fn clear_persisted_detected_pr(repo: &Repository, branch: &str) -> Result<()> {
+  remove_branch_key(repo, branch, DETECTED_PR_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY)?;
+  remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
+}
+
+pub fn persist_issue_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  write_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY, title)
+}
+
+pub fn persist_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  write_branch_string(repo, branch, PR_TITLE_CONFIG_KEY, title)
+}
+
+pub fn persist_detected_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  write_branch_string(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY, title)
+}
+
+pub fn persist_issue_state(repo: &Repository, branch: &str, state: IssueState) -> Result<()> {
+  write_branch_string(repo, branch, ISSUE_STATE_CONFIG_KEY, issue_state_config_value(state))
+}
+
+pub fn persist_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  write_branch_string(repo, branch, PR_STATE_CONFIG_KEY, pr_state_config_value(state))
+}
+
+pub fn persist_detected_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  write_branch_string(repo, branch, DETECTED_PR_STATE_CONFIG_KEY, pr_state_config_value(state))
 }
 
 fn config_key(branch: &str, leaf: &str) -> String {
@@ -171,9 +335,75 @@ fn read_branch_u64(repo: &Repository, branch: &str, leaf: &str) -> Result<Option
   }
 }
 
+fn read_branch_string(repo: &Repository, branch: &str, leaf: &str) -> Result<Option<String>> {
+  let cfg = repo.config()?;
+  let key = config_key(branch, leaf);
+  match cfg.get_string(&key) {
+    Ok(s) => Ok(Some(s)),
+    Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
+    Err(e) => Err(GwmError::Git(e)),
+  }
+}
+
+fn read_branch_issue_state(repo: &Repository, branch: &str) -> Result<Option<IssueState>> {
+  Ok(
+    read_branch_string(repo, branch, ISSUE_STATE_CONFIG_KEY)?
+      .as_deref()
+      .and_then(parse_issue_state_config_value),
+  )
+}
+
+fn read_branch_pr_state(repo: &Repository, branch: &str, leaf: &str) -> Result<Option<PrState>> {
+  Ok(
+    read_branch_string(repo, branch, leaf)?
+      .as_deref()
+      .and_then(parse_pr_state_config_value),
+  )
+}
+
+fn parse_issue_state_config_value(value: &str) -> Option<IssueState> {
+  match value.trim().to_ascii_lowercase().as_str() {
+    "open" => Some(IssueState::Open),
+    "closed" => Some(IssueState::Closed),
+    _ => None,
+  }
+}
+
+fn parse_pr_state_config_value(value: &str) -> Option<PrState> {
+  match value.trim().to_ascii_lowercase().as_str() {
+    "open" => Some(PrState::Open),
+    "draft" => Some(PrState::Draft),
+    "closed" => Some(PrState::Closed),
+    "merged" => Some(PrState::Merged),
+    _ => None,
+  }
+}
+
+fn issue_state_config_value(state: IssueState) -> &'static str {
+  match state {
+    IssueState::Open => "open",
+    IssueState::Closed => "closed",
+  }
+}
+
+fn pr_state_config_value(state: PrState) -> &'static str {
+  match state {
+    PrState::Open => "open",
+    PrState::Draft => "draft",
+    PrState::Closed => "closed",
+    PrState::Merged => "merged",
+  }
+}
+
 fn write_branch_u64(repo: &Repository, branch: &str, leaf: &str, value: u64) -> Result<()> {
   let mut cfg = repo.config()?;
   cfg.set_str(&config_key(branch, leaf), &value.to_string())?;
+  Ok(())
+}
+
+fn write_branch_string(repo: &Repository, branch: &str, leaf: &str, value: &str) -> Result<()> {
+  let mut cfg = repo.config()?;
+  cfg.set_str(&config_key(branch, leaf), value)?;
   Ok(())
 }
 
@@ -286,6 +516,24 @@ pub enum PrState {
   Merged,
 }
 
+/// Overall CI outcome derived from a PR's `statusCheckRollup` (issue #299).
+/// A single ordered signal so the sidebar can render pass/fail/running at a
+/// glance instead of a bare `N/M` count. Priority is **failing > running >
+/// passing**: the most actionable state always wins, so a red check is never
+/// hidden behind an in-flight one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CiState {
+  /// The PR has no checks at all — render nothing.
+  None,
+  /// Every check completed successfully (counting `NEUTRAL` / `SKIPPED`).
+  Passing,
+  /// At least one check is still in flight and none has failed.
+  Running,
+  /// At least one check completed with a failing conclusion
+  /// (`FAILURE` / `CANCELLED` / `TIMED_OUT` / `ACTION_REQUIRED`).
+  Failing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrStatus {
   pub number: u64,
@@ -295,6 +543,9 @@ pub struct PrStatus {
   pub updated_at: String,
   pub checks_passed: u32,
   pub checks_total: u32,
+  /// Overall CI state derived from the same rollup that feeds
+  /// `checks_passed` / `checks_total` — no extra GitHub request.
+  pub ci: CiState,
 }
 
 #[derive(Deserialize)]
@@ -328,12 +579,18 @@ struct RawPr {
   status_check_rollup: Vec<RawCheck>,
 }
 
+/// One `statusCheckRollup` entry. GitHub returns two shapes here: a
+/// `CheckRun` (the Checks API — carries `status` + `conclusion`) and a
+/// legacy `StatusContext` (the commit-status API — carries `state`). We
+/// deserialize all three so both shapes classify correctly.
 #[derive(Deserialize)]
 struct RawCheck {
   #[serde(default)]
   status: String,
   #[serde(default)]
   conclusion: Option<String>,
+  #[serde(default)]
+  state: String,
 }
 
 pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
@@ -366,17 +623,16 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     (other, _) => return Err(GwmError::Other(format!("unknown PR state '{}'", other))),
   };
   let checks_total = raw.status_check_rollup.len() as u32;
+  // Count the same "accepted" terminals the CI state treats as green, so the
+  // `N/M` shown next to the indicator stays consistent with its label — a
+  // rollup of SUCCESS + NEUTRAL + SKIPPED reads "passing 3/3", not "1/3"
+  // (Codex review #302).
   let checks_passed = raw
     .status_check_rollup
     .iter()
-    .filter(|c| {
-      c.status.eq_ignore_ascii_case("COMPLETED")
-        && c
-          .conclusion
-          .as_deref()
-          .is_some_and(|s| s.eq_ignore_ascii_case("SUCCESS"))
-    })
+    .filter(|c| matches!(classify_check(c), CheckOutcome::Passing))
     .count() as u32;
+  let ci = derive_ci_state(&raw.status_check_rollup);
   Ok(PrStatus {
     number: raw.number,
     title: raw.title,
@@ -385,7 +641,79 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     updated_at: raw.updated_at,
     checks_passed,
     checks_total,
+    ci,
   })
+}
+
+/// The outcome of a single rollup entry, before the per-PR aggregation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckOutcome {
+  Passing,
+  Running,
+  Failing,
+}
+
+/// Classify one rollup entry, handling both the `CheckRun` shape
+/// (`status` + `conclusion`) and the legacy `StatusContext` shape
+/// (`state`). A `CheckRun` is only green for an *accepted* terminal
+/// conclusion (SUCCESS / NEUTRAL / SKIPPED, or a completed check with no
+/// conclusion); every other terminal conclusion — FAILURE, CANCELLED,
+/// TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE, STALE, … — reads as failing
+/// rather than silently falling through to green (Codex review #302).
+fn classify_check(c: &RawCheck) -> CheckOutcome {
+  // `CheckRun`: `status` is populated (QUEUED / IN_PROGRESS / COMPLETED).
+  if !c.status.is_empty() {
+    if !c.status.eq_ignore_ascii_case("COMPLETED") {
+      return CheckOutcome::Running;
+    }
+    return match c.conclusion.as_deref() {
+      Some(s) if is_accepted_conclusion(s) => CheckOutcome::Passing,
+      // A completed check with no conclusion is treated leniently (green) so
+      // missing data never paints a false red.
+      None => CheckOutcome::Passing,
+      Some(_) => CheckOutcome::Failing,
+    };
+  }
+  // Legacy `StatusContext`: classify by `state`.
+  match c.state.to_ascii_uppercase().as_str() {
+    "SUCCESS" => CheckOutcome::Passing,
+    "FAILURE" | "ERROR" => CheckOutcome::Failing,
+    // PENDING / EXPECTED / unknown — not yet conclusive.
+    _ => CheckOutcome::Running,
+  }
+}
+
+/// Terminal `CheckRun` conclusions that count as green.
+fn is_accepted_conclusion(conclusion: &str) -> bool {
+  matches!(
+    conclusion.to_ascii_uppercase().as_str(),
+    "SUCCESS" | "NEUTRAL" | "SKIPPED"
+  )
+}
+
+/// Collapse a `statusCheckRollup` into a single [`CiState`] with the
+/// priority **failing > running > passing** (issue #299). A failing check
+/// wins immediately; any still-pending check downgrades an otherwise-green
+/// rollup to `Running`; an empty rollup is `None`.
+fn derive_ci_state(checks: &[RawCheck]) -> CiState {
+  if checks.is_empty() {
+    return CiState::None;
+  }
+  let mut any_running = false;
+  for c in checks {
+    match classify_check(c) {
+      // Failing outranks everything — short-circuit so a red check is never
+      // masked by a later in-flight one.
+      CheckOutcome::Failing => return CiState::Failing,
+      CheckOutcome::Running => any_running = true,
+      CheckOutcome::Passing => {}
+    }
+  }
+  if any_running {
+    CiState::Running
+  } else {
+    CiState::Passing
+  }
 }
 
 // ---- gh CLI invocation ---------------------------------------------------
@@ -520,6 +848,74 @@ pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatu
     ],
   )?;
   parse_pr_json(&stdout)
+}
+
+/// The slice of PR metadata `gwm review` needs to materialise a worktree:
+/// the head ref name (slug source), the author login (path component), and
+/// the base ref (diff base). Distinct from [`PrStatus`] so the TUI's
+/// status/CI path stays untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrHead {
+  pub number: u64,
+  /// Author login, e.g. `alice` (`dependabot[bot]` for bot PRs).
+  pub author: String,
+  /// The PR's head branch name, e.g. `feat/spike-x`.
+  pub head_ref_name: String,
+  /// The PR's base branch name, e.g. `main`.
+  pub base_ref_name: String,
+}
+
+#[derive(Deserialize)]
+struct RawPrHead {
+  number: u64,
+  // `Option` (not just `#[serde(default)]`) so an explicit `"author": null`
+  // — a deleted GitHub account — deserialises to `None` instead of erroring;
+  // `default` alone only covers a *missing* key.
+  #[serde(default)]
+  author: Option<RawAuthor>,
+  #[serde(rename = "headRefName", default)]
+  head_ref_name: String,
+  #[serde(rename = "baseRefName", default)]
+  base_ref_name: String,
+}
+
+#[derive(Deserialize, Default)]
+struct RawAuthor {
+  #[serde(default)]
+  login: String,
+}
+
+const PR_HEAD_JSON_FIELDS: &str = "number,author,headRefName,baseRefName";
+
+/// Parse the JSON from `gh pr view <n> --json number,author,headRefName,baseRefName`.
+/// Kept pure + `pub` so its shape is unit-testable without spawning `gh`.
+pub fn parse_pr_head_json(s: &str) -> Result<PrHead> {
+  let raw: RawPrHead = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: "pr head",
+    source: e,
+  })?;
+  Ok(PrHead {
+    number: raw.number,
+    author: raw.author.unwrap_or_default().login,
+    head_ref_name: raw.head_ref_name,
+    base_ref_name: raw.base_ref_name,
+  })
+}
+
+/// Run `gh pr view <n> --repo <slug> --json …` and parse the head metadata
+/// `gwm review` needs (author / head ref / base ref). Works for PRs in any
+/// state — open, draft, closed, or merged.
+pub fn fetch_pr_head(slug: &str, number: u64) -> Result<PrHead> {
+  let stdout = run_gh([
+    "pr",
+    "view",
+    &number.to_string(),
+    "--repo",
+    slug,
+    "--json",
+    PR_HEAD_JSON_FIELDS,
+  ])?;
+  parse_pr_head_json(&stdout)
 }
 
 /// Find the most recent PR opened from `branch` (head ref) on the given

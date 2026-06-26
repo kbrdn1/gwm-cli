@@ -16,12 +16,15 @@
 //! - `config_panel` — scroll + resolved-row snapshot for the Configuration overlay (#232)
 
 pub mod async_task;
+pub mod clean_overlay;
 pub mod command_logs;
 pub mod config_panel;
 pub mod confirm;
 pub mod create_form;
+pub mod exec_picker;
 pub mod filter;
 pub mod github_fetch;
 pub mod link_prompt;
+pub mod pty_overlay;
 pub mod sidebar;
 pub mod spinner;

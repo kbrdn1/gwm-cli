@@ -39,6 +39,80 @@ pub fn set(key: &str, raw_value: Option<&str>) -> Result<()> {
   Ok(())
 }
 
+/// Layer-aware, silent variant of [`set`] for the in-TUI Settings panel
+/// (issue #279): set `key = value` in the TOML file at an EXPLICIT `path`
+/// (the repo `.gwm.toml` OR the user-global `config.toml`) rather than the
+/// discovered repo root, and return without printing so the TUI owns the
+/// feedback. Reuses the exact key-path parser, scalar coercion, surgical
+/// `toml_edit` write and post-write `Config` validation as `gwm config set`,
+/// so a write that round-trips through `gwm config` round-trips here too.
+///
+/// Creates the parent directory when missing so the user-global file can be
+/// written on its first use (the `~/.config/gwm/` dir may not exist yet).
+///
+/// `raw_value` is coerced with the same scalar heuristic as `gwm config set`
+/// (`123` → int, `true` → bool, else string). Use [`set_string_at`] for
+/// free-text settings that must stay strings regardless of their content.
+pub fn set_value_at(path: &Path, key: &str, raw_value: &str) -> Result<()> {
+  set_item_at(path, key, parse_scalar(raw_value))
+}
+
+/// String-forced variant of [`set_value_at`] for free-text Settings fields
+/// (issue #279 review P2): always writes the value as a TOML string, so a
+/// shell/editor command or worktree value like `123` / `true` is preserved
+/// as text rather than coerced to a number/bool by `parse_scalar` (which
+/// would then fail `Config` validation and, pre-fix, leave the file invalid).
+pub fn set_string_at(path: &Path, key: &str, raw_value: &str) -> Result<()> {
+  set_item_at(path, key, value(raw_value))
+}
+
+/// Array variant of [`set_value_at`] for the in-TUI Keys tab (issue #294):
+/// write `key = ["a", "b", …]` as a TOML array of strings at an explicit
+/// `path`. Backs the keymap rebind surface — a global action's chord list
+/// under `[tui.keys]`, or a modal verb's single-stroke list under
+/// `[tui.keys.modal.<context>]`. An empty `items` writes `key = []`, the
+/// legitimate "unbind" value. Reuses the same parent-dir creation, surgical
+/// `toml_edit` edit and validate-before-write as the scalar writers, so a
+/// rebind that produces a conflicting / prefix-colliding keymap is rejected
+/// before it can clobber a good file.
+pub fn set_array_at(path: &Path, key: &str, items: &[String]) -> Result<()> {
+  let mut arr = toml_edit::Array::new();
+  for item in items {
+    arr.push(item.as_str());
+  }
+  set_item_at(path, key, value(arr))
+}
+
+/// Remove `key` from the TOML file at an explicit `path` (issue #294): the
+/// layer-aware sibling of [`unset`], used by the in-TUI Keys tab to strip a
+/// pre-#290 alias when the canonical slug is rewritten. Tolerant — an absent
+/// file or missing key is a no-op (nothing to remove), so callers can clear a
+/// possible alias unconditionally. Validate-before-write like the setters.
+pub fn unset_at(path: &Path, key: &str) -> Result<()> {
+  if !path.exists() {
+    return Ok(());
+  }
+  let mut doc = load_document(path)?;
+  let segments = parse_key(key)?;
+  remove_value(doc.as_table_mut(), &segments)?;
+  write_and_validate(path, &doc)
+}
+
+/// Shared write path: ensure the parent dir exists, set `key` to `item` in
+/// the surgically-edited document, and validate-before-write so an invalid
+/// edit can never overwrite a good file.
+fn set_item_at(path: &Path, key: &str, item: Item) -> Result<()> {
+  if let Some(parent) = path.parent() {
+    if !parent.as_os_str().is_empty() {
+      std::fs::create_dir_all(parent)?;
+    }
+  }
+  let mut doc = load_document(path)?;
+  let segments = parse_key(key)?;
+  set_value(doc.as_table_mut(), &segments, item)?;
+  write_and_validate(path, &doc)
+}
+
 fn split_set_args(key: &str, raw_value: Option<&str>) -> Result<(String, String)> {
   match (key.split_once('='), raw_value) {
     (Some((key, value)), None) if !key.is_empty() => Ok((key.to_string(), value.to_string())),
@@ -134,8 +208,28 @@ fn load_document(path: &Path) -> Result<DocumentMut> {
 }
 
 fn write_and_validate(path: &Path, doc: &DocumentMut) -> Result<()> {
-  std::fs::write(path, doc.to_string())?;
-  validate_file(path)
+  let rendered = doc.to_string();
+  match validate_rendered(path, &rendered) {
+    // The edit is valid — write it.
+    Ok(()) => {
+      std::fs::write(path, rendered)?;
+      Ok(())
+    }
+    // The edit would produce an invalid Config. Only refuse the write when
+    // the existing on-disk file is VALID (or absent) — i.e. this edit would
+    // clobber a good file with a broken one (issue #279 review P2). If the
+    // file is ALREADY invalid, keep the historical write-then-error
+    // behaviour so `gwm config set` can still edit a broken file toward a
+    // fixed state rather than refusing every edit until it is hand-repaired
+    // (issue #281 — the validate-before-write chicken-and-egg).
+    Err(e) => {
+      if validate_file(path).is_ok() {
+        return Err(e);
+      }
+      std::fs::write(path, rendered)?;
+      Err(e)
+    }
+  }
 }
 
 fn validate_file(path: &Path) -> Result<()> {
@@ -143,12 +237,32 @@ fn validate_file(path: &Path) -> Result<()> {
     return Ok(());
   }
   let raw = std::fs::read_to_string(path)?;
-  let cfg = toml::from_str::<Config>(&raw).map_err(|e| config_de_error(path, &raw, e))?;
+  validate_rendered(path, &raw)
+}
+
+/// Validate `raw` as a complete `Config` (deserialization + the semantic
+/// checks `gwm config validate` runs). `path` is only used for error
+/// coordinates. Shared by [`validate_file`] (on-disk) and the
+/// validate-before-write path in [`write_and_validate`].
+fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
+  let cfg = toml::from_str::<Config>(raw).map_err(|e| config_de_error(path, raw, e))?;
   cfg.validate_branch_types()?;
   cfg.validate_bootstrap_paths()?;
   cfg.validate_bootstrap_guards()?;
   cfg.validate_labels()?;
   cfg.validate_aliases()?;
+  // `[tui.keys]` / `[theme]` deserialize into raw tables resolved lazily, so a
+  // malformed keymap or theme passes `toml::from_str` cleanly. Run the same
+  // validators `Config::load_for_repo` does (issue #219 review) — otherwise
+  // `gwm config validate` / validate-before-write greenlights a config the
+  // loader will later reject.
+  cfg.validate_tui_keys()?;
+  cfg.validate_theme()?;
+  // `[exec.profiles]` / `[clean.profiles]` semantics (non-empty command, a
+  // worktree-relative single-name `dirs`) parse cleanly too, so run the same
+  // check `load_for_repo` does — otherwise `gwm config validate` greenlights a
+  // profile the loader and the new commands reject (issue #324 review).
+  cfg.validate_profiles()?;
   Ok(())
 }
 

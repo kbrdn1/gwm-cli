@@ -67,14 +67,34 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "sync the selected worktree onto its upstream (rebase)",
     },
     PaletteEntry {
-      action: Action::Open,
-      name: "open",
-      description: "open the selected worktree (shell / editor / finder)",
+      action: Action::Pull,
+      name: "pull",
+      description: "pull the selected worktree's branch from its upstream",
     },
     PaletteEntry {
-      action: Action::OpenMenu,
-      name: "open-menu",
-      description: "open issue or PR URL in the browser",
+      action: Action::Push,
+      name: "push",
+      description: "push the selected worktree's branch to its remote",
+    },
+    PaletteEntry {
+      action: Action::EditWorktree,
+      name: "edit-worktree",
+      description: "rename the selected worktree's branch",
+    },
+    PaletteEntry {
+      action: Action::ExitToWorktree,
+      name: "exit-to-worktree",
+      description: "quit the TUI and cd to the selected worktree path",
+    },
+    PaletteEntry {
+      action: Action::TerminalFullscreen,
+      name: "terminal-fullscreen",
+      description: "open a native $SHELL fullscreen (suspend TUI)",
+    },
+    PaletteEntry {
+      action: Action::BrowseLinks,
+      name: "browse-links",
+      description: "open the issue/PR URL browser menu",
     },
     PaletteEntry {
       action: Action::OpenDocs,
@@ -92,19 +112,44 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "refresh GitHub issue/PR status via `gh`",
     },
     PaletteEntry {
-      action: Action::GitTui,
-      name: "git-tui",
-      description: "launch the [git_tui] launcher (default lazygit)",
+      action: Action::LazyGitFullscreen,
+      name: "lazygit-fullscreen",
+      description: "open lazygit fullscreen (suspends TUI)",
     },
     PaletteEntry {
-      action: Action::Review,
-      name: "review",
-      description: "run the [review] launcher against the resolved base",
+      action: Action::LazyGitPty,
+      name: "lazygit-pty",
+      description: "open lazygit in an embedded PTY overlay",
     },
     PaletteEntry {
-      action: Action::Yank,
-      name: "yank",
+      action: Action::TerminalPty,
+      name: "terminal-pty",
+      description: "open a native $SHELL in an embedded PTY overlay",
+    },
+    PaletteEntry {
+      action: Action::ReviewFullscreen,
+      name: "review-fullscreen",
+      description: "run the [review] launcher fullscreen",
+    },
+    PaletteEntry {
+      action: Action::ReviewPty,
+      name: "review-pty",
+      description: "run the [review] launcher in an embedded PTY overlay",
+    },
+    PaletteEntry {
+      action: Action::YankPath,
+      name: "yank-path",
       description: "yank the selected worktree path to the clipboard",
+    },
+    PaletteEntry {
+      action: Action::YankBranchName,
+      name: "yank-branch-name",
+      description: "yank the selected worktree's branch name to the clipboard",
+    },
+    PaletteEntry {
+      action: Action::YankWorktreeName,
+      name: "yank-worktree-name",
+      description: "yank the selected worktree's slug/name to the clipboard",
     },
     PaletteEntry {
       action: Action::Filter,
@@ -180,6 +225,31 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       action: Action::ConfigPanel,
       name: "config-panel",
       description: "show the resolved configuration panel",
+    },
+    PaletteEntry {
+      action: Action::ExecOverlay,
+      name: "exec",
+      description: "pick an [exec.profiles] profile and run it in a PTY",
+    },
+    PaletteEntry {
+      action: Action::CleanOverlay,
+      name: "clean",
+      description: "preview and reclaim build artifacts in the selected worktree",
+    },
+    PaletteEntry {
+      action: Action::MuxPane,
+      name: "mux-pane",
+      description: "open the selected worktree in a new multiplexer pane/tab",
+    },
+    PaletteEntry {
+      action: Action::Macro1,
+      name: "macro_one",
+      description: "run the user-configured [tui.macro1] command",
+    },
+    PaletteEntry {
+      action: Action::Macro2,
+      name: "macro_two",
+      description: "run the user-configured [tui.macro2] command",
     },
     PaletteEntry {
       action: Action::Help,

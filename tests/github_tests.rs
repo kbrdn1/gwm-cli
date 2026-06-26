@@ -5,7 +5,9 @@
 mod common;
 
 use common::init_repo;
-use gwm::github::{self, parse_issue_json, parse_pr_json, BranchLink, IssueState, LinkSource, PrState};
+use gwm::github::{
+  self, parse_issue_json, parse_pr_head_json, parse_pr_json, BranchLink, CiState, IssueState, LinkSource, PrState,
+};
 
 fn make_branch(repo: &git2::Repository, name: &str) {
   let head = repo.head().unwrap().peel_to_commit().unwrap();
@@ -98,6 +100,266 @@ fn unlink_pr_clears_the_pr_link_only() {
   let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
   assert_eq!(link.issue, Some(99));
   assert_eq!(link.pr, None);
+}
+
+// --- Persisted PR detection (issue #283) ---------------------------------
+
+#[test]
+fn persist_detected_pr_is_read_back_as_detected_source() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // The detected PR lives in its own key so the no-fetch table read path
+  // can surface it on every row while staying distinguishable from an
+  // explicit link.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.pr, Some(77));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn read_link_round_trips_persisted_issue_title() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo
+    .config()
+    .unwrap()
+    .set_str("branch.feat/#42-tui-search.gwm-issue-title", "TUI title \"quoted\"")
+    .unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_source, LinkSource::BranchName);
+  assert_eq!(link.issue_title.as_deref(), Some("TUI title \"quoted\""));
+}
+
+#[test]
+fn read_link_round_trips_explicit_and_detected_pr_titles() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr", "61").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Explicit PR title")
+      .unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr-detected", "77").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Detected PR title")
+      .unwrap();
+  }
+
+  let explicit = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(explicit.pr, Some(61));
+  assert_eq!(explicit.pr_source, LinkSource::Explicit);
+  assert_eq!(explicit.pr_title.as_deref(), Some("Explicit PR title"));
+
+  github::unlink_pr(&repo, "feat/#42-tui-search").unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  repo
+    .config()
+    .unwrap()
+    .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Detected PR title")
+    .unwrap();
+  let detected = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(detected.pr, Some(77));
+  assert_eq!(detected.pr_source, LinkSource::Detected);
+  assert_eq!(detected.pr_title.as_deref(), Some("Detected PR title"));
+}
+
+#[test]
+fn read_link_round_trips_persisted_issue_state() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  github::persist_issue_state(&repo, "feat/#42-tui-search", IssueState::Closed).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_source, LinkSource::BranchName);
+  assert_eq!(link.issue_state, Some(IssueState::Closed));
+}
+
+#[test]
+fn read_link_round_trips_explicit_and_detected_pr_states() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  github::persist_pr_state(&repo, "feat/#42-tui-search", PrState::Merged).unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Draft).unwrap();
+
+  let explicit = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(explicit.pr, Some(61));
+  assert_eq!(explicit.pr_source, LinkSource::Explicit);
+  assert_eq!(explicit.pr_state, Some(PrState::Merged));
+
+  github::unlink_pr(&repo, "feat/#42-tui-search").unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Draft).unwrap();
+  let detected = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(detected.pr, Some(77));
+  assert_eq!(detected.pr_source, LinkSource::Detected);
+  assert_eq!(detected.pr_state, Some(PrState::Draft));
+}
+
+#[test]
+fn unlink_issue_clears_persisted_issue_title() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "random-branch");
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.random-branch.gwm-issue", "99").unwrap();
+    cfg
+      .set_str("branch.random-branch.gwm-issue-title", "Stale issue title")
+      .unwrap();
+    cfg.set_str("branch.random-branch.gwm-issue-state", "closed").unwrap();
+  }
+
+  github::unlink_issue(&repo, "random-branch").unwrap();
+  let link = github::read_link(&repo, "random-branch").unwrap();
+
+  assert_eq!(link.issue, None);
+  assert_eq!(link.issue_title, None);
+  assert_eq!(link.issue_state, None);
+}
+
+#[test]
+fn unlink_pr_clears_explicit_and_detected_pr_titles() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr", "61").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Explicit PR title")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr-detected", "77").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Detected PR title")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-state", "draft")
+      .unwrap();
+  }
+
+  github::unlink_pr(&repo, "feat/#42-tui-search").unwrap();
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_title, None);
+  assert_eq!(link.pr_state, None);
+}
+
+#[test]
+fn clear_persisted_detected_pr_clears_detected_title() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr-detected", "77").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Detected PR title")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-state", "draft")
+      .unwrap();
+  }
+
+  github::clear_persisted_detected_pr(&repo, "feat/#42-tui-search").unwrap();
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_title, None);
+  assert_eq!(link.pr_state, None);
+}
+
+#[test]
+fn explicit_pr_overrides_persisted_detected_pr() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // Both keys set: the explicit `gwm link --pr` must win, and its source
+  // must read back as Explicit (not Detected) so the pane badge is right.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(61));
+  assert_eq!(link.pr_source, LinkSource::Explicit);
+}
+
+#[test]
+fn persist_detected_pr_overwrites_a_previous_detection() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // Re-detection (the branch's PR changed) refreshes the stored value.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr_title(&repo, "feat/#42-tui-search", "Old detected title").unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Merged).unwrap();
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 88).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(88));
+  assert_eq!(link.pr_title, None);
+  assert_eq!(link.pr_state, None);
+  assert_eq!(link.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn persist_detected_pr_keeps_title_when_number_is_unchanged() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::persist_detected_pr_title(&repo, "feat/#42-tui-search", "Detected PR title").unwrap();
+  github::persist_detected_pr_state(&repo, "feat/#42-tui-search", PrState::Draft).unwrap();
+
+  // A successful refresh that redetects the same PR should not throw away a
+  // known title before the follow-up status fetch has a chance to update it.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(77));
+  assert_eq!(link.pr_title.as_deref(), Some("Detected PR title"));
+  assert_eq!(link.pr_state, Some(PrState::Draft));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn unlink_pr_also_clears_a_persisted_detection() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  // A persisted detection plus an explicit link, then unlink: unlinking a PR
+  // must not resurface a stale auto-detection from the detected key.
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  github::unlink_pr(&repo, "feat/#42-tui-search").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_source, LinkSource::None);
+}
+
+#[test]
+fn clear_persisted_detected_pr_removes_the_detected_link() {
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  github::clear_persisted_detected_pr(&repo, "feat/#42-tui-search").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, None);
+  assert_eq!(link.pr_source, LinkSource::None);
 }
 
 // --- Repo-slug extraction ------------------------------------------------
@@ -283,6 +545,156 @@ fn parse_pr_json_handles_missing_status_check_rollup() {
   assert_eq!(pr.checks_total, 0);
   assert_eq!(pr.checks_passed, 0);
   assert_eq!(pr.state, PrState::Open);
+}
+
+// --- CI state derivation (issue #299) -----------------------------------
+
+/// Build a minimal PR JSON body with the given `statusCheckRollup` array
+/// literal so the CI-state tests stay focused on the rollup.
+fn pr_json_with_rollup(rollup: &str) -> String {
+  format!(
+    r#"{{
+      "number": 7,
+      "title": "x",
+      "state": "OPEN",
+      "isDraft": false,
+      "url": "https://github.com/x/y/pull/7",
+      "statusCheckRollup": {rollup},
+      "updatedAt": "2026-06-15T10:00:00Z"
+    }}"#
+  )
+}
+
+#[test]
+fn ci_state_is_passing_when_all_checks_succeed() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "lint", "status": "COMPLETED", "conclusion": "SUCCESS"}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Passing);
+}
+
+#[test]
+fn ci_state_treats_neutral_and_skipped_as_passing() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "optional", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+      {"name": "deploy", "status": "COMPLETED", "conclusion": "SKIPPED"}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Passing);
+}
+
+#[test]
+fn ci_state_is_running_when_a_check_is_in_flight() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "fmt", "status": "IN_PROGRESS", "conclusion": null}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Running);
+}
+
+#[test]
+fn ci_state_treats_queued_and_pending_as_running() {
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "queued", "status": "QUEUED", "conclusion": null},
+      {"name": "pending", "status": "PENDING", "conclusion": null}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Running);
+}
+
+#[test]
+fn ci_state_is_failing_on_any_failed_conclusion() {
+  for conclusion in ["FAILURE", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"] {
+    let json = pr_json_with_rollup(&format!(
+      r#"[
+        {{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}},
+        {{"name": "broken", "status": "COMPLETED", "conclusion": "{conclusion}"}}
+      ]"#
+    ));
+    assert_eq!(
+      parse_pr_json(&json).unwrap().ci,
+      CiState::Failing,
+      "conclusion {conclusion} must read as Failing"
+    );
+  }
+}
+
+#[test]
+fn ci_state_failing_outranks_running() {
+  // A red check must never hide behind a still-running one.
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "still-going", "status": "IN_PROGRESS", "conclusion": null},
+      {"name": "broken", "status": "COMPLETED", "conclusion": "FAILURE"}
+    ]"#,
+  );
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::Failing);
+}
+
+#[test]
+fn ci_state_is_none_when_there_are_no_checks() {
+  let json = pr_json_with_rollup("[]");
+  assert_eq!(parse_pr_json(&json).unwrap().ci, CiState::None);
+}
+
+#[test]
+fn ci_state_classifies_legacy_status_context_state() {
+  // A `StatusContext` (legacy commit-status API) carries `state`, not
+  // `status` / `conclusion`. A failed external CI status must read red, not
+  // be mistaken for a still-running check (Codex review #302).
+  let failing = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "FAILURE"}]"#);
+  assert_eq!(parse_pr_json(&failing).unwrap().ci, CiState::Failing);
+
+  let error = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "ERROR"}]"#);
+  assert_eq!(parse_pr_json(&error).unwrap().ci, CiState::Failing);
+
+  let success = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "SUCCESS"}]"#);
+  assert_eq!(parse_pr_json(&success).unwrap().ci, CiState::Passing);
+
+  let pending = pr_json_with_rollup(r#"[{"context": "ci/ext", "state": "PENDING"}]"#);
+  assert_eq!(parse_pr_json(&pending).unwrap().ci, CiState::Running);
+}
+
+#[test]
+fn ci_state_treats_non_success_terminal_conclusions_as_failing() {
+  // A completed check whose conclusion is a terminal failure GitHub doesn't
+  // list among the "common" four (e.g. STARTUP_FAILURE, STALE) must still
+  // read red rather than fall through to green (Codex review #302).
+  for conclusion in ["STARTUP_FAILURE", "STALE"] {
+    let json = pr_json_with_rollup(&format!(
+      r#"[{{"name": "broken", "status": "COMPLETED", "conclusion": "{conclusion}"}}]"#
+    ));
+    assert_eq!(
+      parse_pr_json(&json).unwrap().ci,
+      CiState::Failing,
+      "conclusion {conclusion} must read as Failing"
+    );
+  }
+}
+
+#[test]
+fn checks_passed_counts_accepted_terminals_so_count_matches_ci_label() {
+  // The N/M shown next to the CI label must use the same accepted terminals
+  // as the state, else a green rollup renders "passing 1/3" (Codex review #302).
+  let json = pr_json_with_rollup(
+    r#"[
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"},
+      {"name": "optional", "status": "COMPLETED", "conclusion": "NEUTRAL"},
+      {"name": "deploy", "status": "COMPLETED", "conclusion": "SKIPPED"}
+    ]"#,
+  );
+  let pr = parse_pr_json(&json).unwrap();
+  assert_eq!(pr.ci, CiState::Passing);
+  assert_eq!(pr.checks_passed, 3);
+  assert_eq!(pr.checks_total, 3);
 }
 
 // --- Labels: gh label list --json contract (issue #81) ------------------
@@ -613,6 +1025,10 @@ fn branch_link_summary_renders_human_readable() {
   let link = BranchLink {
     issue: Some(42),
     pr: Some(61),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::Explicit,
   };
@@ -657,6 +1073,10 @@ fn apply_detected_pr_sets_pr_with_detected_source_when_none_linked() {
   let mut link = BranchLink {
     issue: Some(42),
     pr: None,
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
@@ -676,6 +1096,10 @@ fn apply_detected_pr_leaves_explicit_pr_untouched() {
   let mut link = BranchLink {
     issue: None,
     pr: Some(61),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::None,
     pr_source: LinkSource::Explicit,
   };
@@ -738,6 +1162,33 @@ fn parse_pr_list_number_returns_none_for_empty_array() {
 #[test]
 fn parse_pr_list_number_errors_on_malformed_json() {
   assert!(github::parse_pr_list_number("not json").is_err());
+}
+
+#[test]
+fn parse_pr_head_json_extracts_author_head_and_base() {
+  // Issue #308: `gwm review` keys off the PR head ref (slug), the author
+  // login (path component), and the base ref (diff base).
+  let json = r#"{
+    "number": 312,
+    "author": { "login": "alice" },
+    "headRefName": "feat/spike-x",
+    "baseRefName": "main"
+  }"#;
+  let head = parse_pr_head_json(json).unwrap();
+  assert_eq!(head.number, 312);
+  assert_eq!(head.author, "alice");
+  assert_eq!(head.head_ref_name, "feat/spike-x");
+  assert_eq!(head.base_ref_name, "main");
+}
+
+#[test]
+fn parse_pr_head_json_tolerates_a_null_author() {
+  // A deleted GitHub account surfaces as `"author": null`; the default
+  // keeps parsing from blowing up (the slug/branch fall back to empty).
+  let json = r#"{ "number": 7, "author": null, "headRefName": "x", "baseRefName": "dev" }"#;
+  let head = parse_pr_head_json(json).unwrap();
+  assert_eq!(head.author, "");
+  assert_eq!(head.base_ref_name, "dev");
 }
 
 #[test]

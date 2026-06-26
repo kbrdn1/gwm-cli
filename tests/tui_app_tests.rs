@@ -32,6 +32,7 @@ fn env_lock() -> &'static Mutex<()> {
 fn worktree_fixture(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/gwm-test/{}", name)),
     branch: Some(format!("feat/#0-{}", name)),
     head: None,
@@ -40,6 +41,8 @@ fn worktree_fixture(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
     age: None,
   }
 }
@@ -133,6 +136,518 @@ fn enter_config_panel_opens_resolves_rows_and_resets_scroll() {
     .find(|r| r.key == "worktree.base")
     .expect("worktree.base resolved");
   assert_eq!(base.source, ConfigSource::Default);
+}
+
+// ── Keys tab: in-TUI keymap editor (issue #294) ────────────────────────────
+
+#[test]
+fn enter_config_panel_builds_the_keys_tab_rows() {
+  use gwm::tui::keymap::Action;
+  use gwm::tui::modal_keymap::ModalAction;
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+
+  let expected = Action::all().count() + ModalAction::all().count();
+  assert_eq!(
+    app.config_panel.key_rows.len(),
+    expected,
+    "opening the panel enumerates every global + modal binding"
+  );
+}
+
+#[test]
+fn capturing_a_global_chord_rebinds_it_live_and_writes_the_file() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .expect("quit row present");
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  // The live keymap reflects the rebind without a restart.
+  let q = KeyStroke::new(KeyCode::Char('Q'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[q]), ChordResolution::Matched(Action::Quit));
+
+  // …and it round-trips to disk under `[tui.keys]`.
+  let raw = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(raw.contains("quit = [\"Q\"]"), "binding persisted: {raw}");
+}
+
+#[test]
+fn capturing_a_modal_verb_rebinds_it_live() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .expect("confirm row present");
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  let o = KeyStroke::new(KeyCode::Char('o'), KeyModifiers::NONE);
+  assert_eq!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &o),
+    Some(ModalAction::ConfirmConfirm),
+    "the modal verb fires on its new key immediately"
+  );
+}
+
+#[test]
+fn an_invalid_rebind_is_rejected_and_leaves_the_binding_live() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .expect("refresh row present");
+  app.config_panel.selected = idx;
+
+  // `g` is a strict prefix of `top`'s default `g g` chord — a prefix
+  // collision the validate-before-write gate must reject.
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "error surfaced: {}", app.status);
+  // The previous binding survives — `f` still refreshes.
+  let f = KeyStroke::new(KeyCode::Char('f'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[f]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn cancelling_a_capture_writes_nothing() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.selected = 0;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.config_panel.cancel_capture();
+
+  assert!(app.config_panel.capture.is_none(), "capture cleared on cancel");
+  assert!(
+    !dir.path().join(".gwm.toml").exists(),
+    "a cancelled capture must not write the file"
+  );
+}
+
+#[test]
+fn a_cross_layer_conflict_rolls_back_and_does_not_brick_the_config() {
+  // Codex #297 review (P2): `set_array_at` validates only the file it writes.
+  // A rebind that is valid in the project file alone but collides with the
+  // global layer once merged must NOT be left on disk — otherwise the next
+  // launch's layered load fails and the repo config is bricked.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config::Config;
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  // The global layer binds `top` to a two-stroke chord.
+  set_array_at(&global, "tui.keys.top", &["z z".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project; // write the repo file
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  // `z` alone is a prefix of the global `z z` — valid in the repo file by
+  // itself, invalid once the layers merge.
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "rejection surfaced: {}", app.status);
+  // The merged config still loads — nothing was left broken on disk.
+  assert!(
+    Config::load_layered(repo.path(), Some(&global)).is_ok(),
+    "the layered config must still load after a rolled-back rebind"
+  );
+  let repo_toml = repo.path().join(".gwm.toml");
+  if repo_toml.exists() {
+    let raw = std::fs::read_to_string(&repo_toml).unwrap();
+    assert!(!raw.contains("refresh"), "the rejected rebind was rolled back: {raw}");
+  }
+  // The previous binding survives — `f` still refreshes.
+  let f = KeyStroke::new(KeyCode::Char('f'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[f]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn a_shadowed_global_key_rebind_warns() {
+  // Codex #297 review (P3): editing the global layer for a key the repo
+  // overrides leaves the effective binding unchanged (repo wins). Mirror
+  // `apply_setting` and flag the shadow rather than reporting a clean set.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  // The repo pins `quit` to `x`, so a global rebind of `quit` is shadowed.
+  set_array_at(&repo.path().join(".gwm.toml"), "tui.keys.quit", &["x".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("shadowed"),
+    "a shadowed global rebind must warn: {}",
+    app.status
+  );
+}
+
+#[test]
+fn physical_enter_stays_reserved_even_with_a_custom_config_edit_submit() {
+  // Codex #297 review (P2): rebinding `config.edit.submit` to e.g. Ctrl+s must
+  // not make the *physical* Enter assignable in capture — it stays a reserved
+  // control regardless of the config.edit lookup.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{App, KeyTarget, SettingsTab};
+
+  let (repo, _) = init_repo();
+  set_array_at(
+    &repo.path().join(".gwm.toml"),
+    "tui.keys.modal.config.edit.submit",
+    &["Ctrl+s".to_string()],
+  )
+  .unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  // Physical Enter is reserved: ignored, not captured — capture stays armed.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  assert!(app.config_panel.capture.is_some(), "physical Enter must stay reserved");
+  let enter = KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE);
+  assert_ne!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &enter),
+    Some(ModalAction::ConfirmConfirm),
+    "Enter must not have become the binding"
+  );
+}
+
+#[test]
+fn a_failed_write_to_an_already_invalid_shadowed_file_rolls_back() {
+  // Codex #297 review (P2): when the target file is invalid on its own but
+  // loaded because the bad value is shadowed by another layer,
+  // `write_and_validate` writes the edit then returns Err (recovery path). The
+  // commit must roll back so a rebind reported as failed never persists.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+  // Global is invalid on its own (non-numeric countdown)…
+  std::fs::write(&global, "[tui]\nconfirm_countdown_secs = \"abc\"\n").unwrap();
+  // …but the repo overrides it with a valid value, so the merged config loads.
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 4\n").unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global; // write the invalid file
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(app.status.starts_with("keys:"), "failure surfaced: {}", app.status);
+  let raw = std::fs::read_to_string(&global).unwrap();
+  assert!(
+    !raw.contains("quit"),
+    "a failed write must be rolled back, not persisted: {raw}"
+  );
+}
+
+#[test]
+fn modal_capture_reserves_enter_and_backspace_as_controls() {
+  // Codex #297 review (P2): Enter / Backspace must stay reserved capture
+  // controls even for a single-stroke modal target — they can't be captured
+  // as a binding (hand-edit for those), matching the documented controls.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Modal(ModalAction::ConfirmConfirm))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  // Enter and Backspace are ignored — the capture stays armed, nothing bound.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "Enter must not capture a modal verb"
+  );
+  app.handle_capture_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "Backspace must not capture a modal verb"
+  );
+  let enter = KeyStroke::new(KeyCode::Enter, KeyModifiers::NONE);
+  assert_ne!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &enter),
+    Some(ModalAction::ConfirmConfirm),
+    "Enter must not have become the binding"
+  );
+
+  // A real key auto-commits the single-stroke modal capture.
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
+  assert!(app.config_panel.capture.is_none(), "a real key commits the capture");
+  let o = KeyStroke::new(KeyCode::Char('o'), KeyModifiers::NONE);
+  assert_eq!(
+    app.modal_keymap.resolve(KeyContext::Confirm, &o),
+    Some(ModalAction::ConfirmConfirm)
+  );
+}
+
+#[test]
+fn global_capture_commits_on_enter_and_pops_on_backspace() {
+  // The global (multi-stroke) path: real keys accumulate, Backspace drops the
+  // last, Enter commits — all through the testable handler.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{KeyTarget, SettingsTab};
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Refresh))
+    .unwrap();
+  app.config_panel.selected = idx;
+  app.config_panel.begin_capture();
+
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+  app.handle_capture_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  assert!(
+    app.config_panel.capture.is_some(),
+    "global chord accumulates, no auto-commit"
+  );
+  app.handle_capture_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)); // drop 'z'
+  app.handle_capture_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)); // commit "x"
+
+  assert!(app.config_panel.capture.is_none(), "Enter commits the global chord");
+  let x = KeyStroke::new(KeyCode::Char('x'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[x]), ChordResolution::Matched(Action::Refresh));
+}
+
+#[test]
+fn an_unbind_shadowed_by_another_layer_warns() {
+  // Codex #297 review (P2): an empty capture (unbind) on a low-precedence
+  // layer is shadowed when a higher layer still binds the action — warn rather
+  // than report a clean `unbound`.
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::Action;
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  set_array_at(&repo.path().join(".gwm.toml"), "tui.keys.quit", &["x".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Global;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::Quit))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  // Empty capture → unbind written to the global layer.
+  app.config_panel.begin_capture();
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("unbound"),
+    "status reports the unbind: {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("shadowed"),
+    "a shadowed unbind must warn: {}",
+    app.status
+  );
+}
+
+#[test]
+fn a_cross_layer_alias_shadow_is_detected_and_warned() {
+  // Codex #297 review (P2, cross-layer): the legacy alias lives in the OTHER
+  // layer (global `open_menu`) while the canonical `browse_links` is rebound in
+  // the project layer. We don't edit the global file, so the alias survives the
+  // merge and shadows the new key — the commit must detect the ineffective
+  // rebind and warn rather than report a clean success.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let home = tempfile::tempdir().unwrap();
+  let global = home.path().join("gwm").join("config.toml");
+  set_array_at(&global, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), Some(&global)).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::BrowseLinks))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  assert!(
+    app.status.contains("shadowed"),
+    "a cross-layer alias shadow must warn: {}",
+    app.status
+  );
+  // The new key really doesn't fire — the global alias `B` still wins.
+  let z = KeyStroke::new(KeyCode::Char('z'), KeyModifiers::NONE);
+  assert_ne!(app.keymap.lookup(&[z]), ChordResolution::Matched(Action::BrowseLinks));
+}
+
+#[test]
+fn rebinding_an_aliased_action_strips_the_legacy_alias() {
+  // Codex #297 review (P2): a pre-#290 config carrying `tui.keys.open_menu`
+  // (alias for `browse_links`) would, after a rebind writes the canonical
+  // `browse_links`, re-apply the alias last in the sorted override walk and
+  // silently shadow the new key. The commit must strip the alias so the new
+  // binding actually wins.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::config_cli::set_array_at;
+  use gwm::tui::keymap::{Action, ChordResolution, KeyStroke};
+  use gwm::tui::{App, KeyTarget, SettingsLayer, SettingsTab};
+
+  let (repo, _) = init_repo();
+  let toml = repo.path().join(".gwm.toml");
+  set_array_at(&toml, "tui.keys.open_menu", &["B".to_string()]).unwrap();
+
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Keys;
+  app.config_panel.layer = SettingsLayer::Project;
+  let idx = app
+    .config_panel
+    .key_rows
+    .iter()
+    .position(|r| r.target == KeyTarget::Global(Action::BrowseLinks))
+    .unwrap();
+  app.config_panel.selected = idx;
+
+  app.config_panel.begin_capture();
+  app.push_key_capture(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE));
+  app.commit_key_capture();
+
+  let raw = std::fs::read_to_string(&toml).unwrap();
+  assert!(!raw.contains("open_menu"), "the legacy alias was stripped: {raw}");
+  // The new key actually wins — the alias can no longer shadow it on reload.
+  let z = KeyStroke::new(KeyCode::Char('z'), KeyModifiers::NONE);
+  assert_eq!(app.keymap.lookup(&[z]), ChordResolution::Matched(Action::BrowseLinks));
 }
 
 #[test]
@@ -1082,6 +1597,66 @@ fn confirm_press_y_a_second_time_disarms_the_timer() {
 }
 
 #[test]
+fn countdown_status_uses_rebound_confirm_keys() {
+  // #219 review (P3): the armed/disarmed countdown status copy hard-coded
+  // `y` / `Esc`. When the confirm context's confirm/cancel verbs are rebound,
+  // the instructions must name the live keys, not the defaults.
+  use gwm::tui::modal_keymap::{parse_single, ModalAction};
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmConfirm, vec![parse_single("c").unwrap()])
+    .unwrap();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmCancel, vec![parse_single("x").unwrap()])
+    .unwrap();
+  app.toggle_delete_branch();
+
+  let t0 = Instant::now();
+  app.confirm_press_y(t0); // arms
+  assert!(
+    app.status.contains("press c again or x to cancel"),
+    "armed copy must use the rebound confirm/cancel keys: {}",
+    app.status
+  );
+
+  let action = app.confirm_press_y(t0 + Duration::from_millis(500)); // disarms
+  assert_eq!(action, ConfirmKeyAction::Disarmed);
+  assert!(
+    app.status.contains("press c to re-arm"),
+    "disarmed copy must use the rebound confirm key: {}",
+    app.status
+  );
+}
+
+#[test]
+fn countdown_status_omits_an_unbound_cancel_key() {
+  // #219 review (P2): with `[tui.keys.modal.confirm] cancel = []`, Esc no
+  // longer cancels — the armed status must not advertise a phantom cancel key
+  // (it would tell the user to press a key that does nothing while the delete
+  // timer runs). Drop it instead of falling back to the literal.
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfirmCancel, vec![])
+    .unwrap();
+  app.toggle_delete_branch();
+  app.confirm_press_y(Instant::now()); // arms
+  assert!(
+    !app.status.contains("Esc") && !app.status.contains("to cancel"),
+    "armed status must not advertise an unbound cancel key: {}",
+    app.status
+  );
+  assert!(
+    app.status.contains("press y again"),
+    "the still-bound confirm key must remain in the copy: {}",
+    app.status
+  );
+}
+
+#[test]
 fn confirm_dismiss_resets_timer_and_returns_to_list() {
   let (_dir, mut app) = make_app();
   app.toggle_delete_branch();
@@ -1208,7 +1783,7 @@ fn filled_cells_floors_partial_progress() {
 
 // ---- Issue / PR linking (issue #67) -------------------------------------
 
-use gwm::github::{IssueState, IssueStatus, LinkSource, PrState, PrStatus};
+use gwm::github::{CiState, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use gwm::tui::{GitHubFetchState, LinkPromptStage, LinkTarget};
 
 fn make_app_on_branch(name: &str) -> (tempfile::TempDir, git2::Repository, App) {
@@ -1271,6 +1846,14 @@ fn open_menu_pick_returns_none_when_no_link() {
   assert!(
     app.status.to_lowercase().contains("no pr"),
     "status should mention missing PR link: {}",
+    app.status
+  );
+  // Codex review on PR #292 (P3): the "press X to link" hint must point at
+  // LinkPrompt's real binding (`i` since #290), not the stale `L` (now
+  // LazyGitFullscreen).
+  assert!(
+    app.status.contains("press i to link"),
+    "status must use LinkPrompt's real chord, not the stale `L`: {}",
     app.status
   );
 }
@@ -1530,6 +2113,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     updated_at: "2026-05-19T00:00:00Z".into(),
     checks_passed: 2,
     checks_total: 3,
+    ci: CiState::Running,
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -1546,6 +2130,206 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     GitHubFetchState::Loaded(_) => {}
     other => panic!("expected Loaded for stamped pr 61, got {:?}", other),
   }
+}
+
+#[test]
+fn loaded_issue_status_persists_title_for_no_fetch_startup() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  app.apply_issue_fetch_result(Ok(IssueStatus {
+    number: 42,
+    title: "Persisted issue title".into(),
+    state: IssueState::Open,
+    url: "https://example.test/issues/42".into(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.issue, Some(42));
+  assert_eq!(link.issue_title.as_deref(), Some("Persisted issue title"));
+}
+
+#[test]
+fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "Persisted explicit PR title".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+  }));
+
+  let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(61));
+  assert_eq!(link.pr_source, LinkSource::Explicit);
+  assert_eq!(link.pr_title.as_deref(), Some("Persisted explicit PR title"));
+}
+
+#[test]
+fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::persist_detected_pr(&repo, "feat/#42-tui-search", 77).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 77,
+    title: "Persisted detected PR title".into(),
+    state: PrState::Merged,
+    url: "https://example.test/pull/77".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+  }));
+
+  let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.pr, Some(77));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(link.pr_title.as_deref(), Some("Persisted detected PR title"));
+}
+
+#[test]
+fn github_status_lines_show_persisted_titles_before_fetch() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Startup issue title")
+      .unwrap();
+    cfg.set_str("branch.feat/#42-tui-search.gwm-pr-detected", "77").unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-detected-title", "Startup PR title")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let text = gwm::tui::github_status_lines(&app, 120)
+    .into_iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+
+  assert!(text.contains("Startup issue title"), "issue title missing: {text}");
+  assert!(text.contains("Startup PR title"), "PR title missing: {text}");
+}
+
+#[test]
+fn github_status_lines_show_persisted_state_before_fetch() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Closed PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "closed")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let lines = gwm::tui::github_status_lines(&app, 120);
+  let text = lines
+    .iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+  assert!(text.contains(" closed "), "persisted issue state missing: {text}");
+  assert!(text.contains("Closed issue"), "persisted issue title missing: {text}");
+  assert!(text.contains("Closed PR"), "persisted PR title missing: {text}");
+
+  let theme = Theme::default();
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "persisted issue icon should use the persisted state colour"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(gwm::tui::pr_badge_color(PrState::Closed, &theme)),
+    "persisted PR icon should use the persisted state colour"
+  );
+}
+
+#[test]
+fn github_status_lines_keep_persisted_state_visible_while_loading() {
+  use gwm::tui::FetchKey;
+
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Merged PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.github.mark_loading(FetchKey::Issue(42));
+  app.github.mark_loading(FetchKey::Pr(61));
+
+  let lines = gwm::tui::github_status_lines(&app, 120);
+  let text = lines
+    .iter()
+    .map(|line| spans_to_text(&line.spans))
+    .collect::<Vec<_>>()
+    .join("\n");
+  assert!(
+    text.contains(" closed "),
+    "loading issue line should keep cached state: {text}"
+  );
+  assert!(
+    text.contains(" merged "),
+    "loading PR line should keep cached state: {text}"
+  );
+  assert!(
+    text.contains("loading"),
+    "loading line should still disclose the refresh: {text}"
+  );
+
+  let theme = Theme::default();
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "loading issue icon should keep the persisted state colour"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(gwm::tui::pr_badge_color(PrState::Merged, &theme)),
+    "loading PR icon should keep the persisted state colour"
+  );
 }
 
 fn sample_issue(n: u64) -> gwm::github::IssueStatus {
@@ -1838,6 +2622,92 @@ fn filter_clamping_resets_fetch_state_when_selection_moves() {
 }
 
 #[test]
+fn edit_worktree_failure_replaces_the_loading_status() {
+  // Codex review on PR #292 (P3): a recoverable rename failure keeps the modal
+  // open (edit_failure set) but must not leave the status bar on the
+  // "renaming worktree…" loading label, which reads as still-in-progress.
+  use gwm::tui::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app
+    .tasks
+    .request(TaskKind::EditWorktree)
+    .expect("a fresh task generation");
+  app.status = TaskKind::EditWorktree.loading_label().into();
+  let tx = app.task_result_sender();
+  tx.send(TaskMsg::EditWorktree(
+    generation,
+    Err("target path already exists".into()),
+  ))
+  .unwrap();
+  app.drain_task_results();
+
+  assert_ne!(
+    app.status,
+    TaskKind::EditWorktree.loading_label(),
+    "the loading label must be replaced after a failure"
+  );
+  assert!(
+    app.status.contains("target path already exists"),
+    "status must surface the rename failure: {}",
+    app.status
+  );
+  assert_eq!(
+    app.edit_failure.as_deref(),
+    Some("target path already exists"),
+    "the modal keeps the failure for inline display"
+  );
+}
+
+#[test]
+fn fullscreen_child_stdout_routes_to_tty_only_when_gwm_stdout_is_captured() {
+  // Codex review on PR #292 (P2): a fullscreen launcher (L/O/R) must keep its
+  // stdout off the `cd "$(gwm)"` command-substitution pipe. Policy: reroute to
+  // the tty exactly when gwm's own stdout is NOT a terminal (captured). The
+  // actual /dev/tty open is env-dependent I/O; the decision is pure and pinned
+  // here.
+  assert!(
+    gwm::tui::wants_child_stdout_on_tty(false),
+    "captured stdout (pipe) → child stdout must be rerouted to the tty"
+  );
+  assert!(
+    !gwm::tui::wants_child_stdout_on_tty(true),
+    "a real tty stdout → inherit, no reroute"
+  );
+}
+
+#[test]
+fn reselect_by_path_maps_the_renamed_row_through_an_active_filter() {
+  // Codex review on PR #292 (P2): after a rename with a filter active, the
+  // cursor must land on the renamed row via its slot in the *filtered* list,
+  // not its raw index — a raw index points at a different visible row or none.
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![
+    worktree_fixture("alpha"),     // raw 0 — filtered out by "zz"
+    worktree_fixture("beta-zz"),   // raw 1 — filtered slot 0
+    worktree_fixture("target-zz"), // raw 2 — filtered slot 1
+  ];
+  app.enter_filter();
+  for c in "zz".chars() {
+    app.filter_push_char(c);
+  }
+
+  app.reselect_by_path(&PathBuf::from("/tmp/gwm-test/target-zz"));
+
+  // The raw index (2) overflows the 2-row filtered list; only the mapped
+  // filtered slot (1) lands on the renamed worktree.
+  assert_eq!(
+    app.list_state.selected(),
+    Some(1),
+    "selection must be the filtered slot, not the raw index"
+  );
+  assert_eq!(
+    app.selected().expect("a selection").name,
+    "target-zz",
+    "cursor must land on the renamed row through the filter"
+  );
+}
+
+#[test]
 fn refresh_worktrees_resets_fetch_state() {
   let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   app.apply_pr_fetch_result(Err("stale".into()));
@@ -1863,6 +2733,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     updated_at: "".into(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -1937,6 +2808,15 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   app.refresh_github_status();
   assert_eq!(app.current_link().pr, Some(128));
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+  // Table-snapshot sync (Codex review #284): the table renders from
+  // `self.worktrees[*].link`, not the live `github.link`, so a detection
+  // must be mirrored onto the selected row or its PR pastille stays white
+  // until a separate relist.
+  assert_eq!(
+    app.selected().map(|w| w.link.pr),
+    Some(Some(128)),
+    "the selected row snapshot must reflect the detected PR immediately"
+  );
 
   // The branch's PR changed (e.g. closed + reopened as #200). A detected
   // link is "resolved live", so a second refresh must re-detect rather
@@ -1961,6 +2841,283 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
     "a detected PR must re-resolve on refresh"
   );
   assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+
+  // Wiring guard (issue #283): the detection must be PERSISTED to the git
+  // config, not just held in memory — that is what lets the no-fetch table
+  // read path colour the PR pastille on every row. Read the link straight
+  // from the repo (bypassing the in-memory `app.github.link`) so dropping
+  // `persist_detected_pr` from `refresh_github_status` turns this red.
+  let persisted = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(
+    persisted.pr,
+    Some(200),
+    "the detected PR must be persisted so the table read path sees it"
+  );
+  assert_eq!(persisted.pr_source, LinkSource::Detected);
+}
+
+#[test]
+fn refresh_keeps_persisted_pr_when_no_remote_slug() {
+  // Codex review #284: pressing `F` when the probe cannot run at all (no
+  // origin remote → `link_slug` is None) must NOT blank a persisted
+  // detection. The unconditional `clear_detected_pr()` used to wipe the
+  // in-memory link before the skipped probe could restore it.
+  let (_dir, repo, mut app) = make_app_on_branch("detect-me");
+  // No origin remote is configured, so there is no slug to probe with.
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+  app.refresh_link();
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "precondition: the persisted detection loads into memory"
+  );
+
+  app.refresh_github_status();
+
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "a refresh that cannot probe must keep the persisted detection"
+  );
+  assert_eq!(app.current_link().pr_source, LinkSource::Detected);
+}
+
+#[cfg(unix)]
+#[test]
+fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: a transient `gh` failure (missing binary, offline,
+  // rate limit) must NOT wipe a previously persisted detection — pressing
+  // `F` offline should keep showing the PR, not blank it.
+  let (dir, repo, mut app) = make_app_on_branch("detect-me");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.refresh_link();
+
+  // A `gh` that detects PR #128, then a `gh` that always fails (exit 1).
+  let gh_ok = dir.path().join("fake-gh-ok");
+  std::fs::write(
+    &gh_ok,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":128}]'\n\
+     elif [ \"$1\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '%s' '{\"number\":128,\"title\":\"x\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/128\"}'\n\
+     fi\n",
+  )
+  .unwrap();
+  let gh_fail = dir.path().join("fake-gh-fail");
+  std::fs::write(&gh_fail, "#!/bin/sh\nexit 1\n").unwrap();
+  for p in [&gh_ok, &gh_fail] {
+    let mut perms = std::fs::metadata(p).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(p, perms).unwrap();
+  }
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_ok);
+  }
+  app.refresh_github_status();
+  assert_eq!(app.current_link().pr, Some(128), "first refresh detects #128");
+
+  // Now `gh` fails. The probe did not prove the PR vanished.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh_fail);
+  }
+  app.refresh_github_status();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  // The persisted key survives a failed probe...
+  let persisted = gwm::github::read_link(&repo, "detect-me").unwrap();
+  assert_eq!(
+    persisted.pr,
+    Some(128),
+    "a failed gh probe must not wipe the persisted detection"
+  );
+  assert_eq!(persisted.pr_source, LinkSource::Detected);
+  // ...and stays visible in memory rather than blanking the pane.
+  assert_eq!(
+    app.current_link().pr,
+    Some(128),
+    "the pane must keep the still-valid PR after a failed probe"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: a persisted detection (#283) must NOT make the live
+  // CLI detection path (`gwm status` / `gwm list --detect-pr`) authoritative.
+  // It must still re-run `gh pr list` so a PR that was replaced since the
+  // last TUI `F` is reflected — only an explicit `gwm link --pr` pins it.
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+
+  // Stale persisted detection: #128.
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+
+  // Live `gh` now reports #200 for the branch.
+  let gh = dir.path().join("fake-gh-200");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":200}]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  // The live path must reconcile the persisted cache (#284), not just memory,
+  // so no-fetch consumers (table at startup, `gwm open pr`) don't resurrect
+  // the stale #128. Capture the stored value before the explicit link below.
+  let reconciled = gwm::github::read_link(&repo, "detect-me").unwrap();
+
+  // Explicit override still wins even over a live re-detection.
+  gwm::github::link_pr(&repo, "detect-me", 61).unwrap();
+  let explicit = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(
+    link.pr,
+    Some(200),
+    "live detection must override the stale persisted #128"
+  );
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(
+    reconciled.pr,
+    Some(200),
+    "the live detection must rewrite the persisted cache to the fresh number"
+  );
+  assert_eq!(explicit.pr, Some(61), "an explicit link still wins over live detection");
+  assert_eq!(explicit.pr_source, LinkSource::Explicit);
+}
+
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_keeps_title_when_detected_pr_is_unchanged() {
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+  gwm::github::persist_detected_pr_title(&repo, "detect-me", "Cached detected title").unwrap();
+
+  let gh = dir.path().join("fake-gh-128");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[{\"number\":128}]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(link.pr, Some(128));
+  assert_eq!(link.pr_source, LinkSource::Detected);
+  assert_eq!(link.pr_title.as_deref(), Some("Cached detected title"));
+}
+
+#[cfg(unix)]
+#[test]
+fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
+  use std::os::unix::fs::PermissionsExt;
+
+  // Codex review #284: when the live probe proves the PR is gone (`Ok(None)`),
+  // the live CLI path must clear the persisted cache too, otherwise a no-fetch
+  // read (`read_link`) would resurrect the stale stored number.
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("detect-me", &head, false).unwrap();
+  }
+  gwm::github::persist_detected_pr(&repo, "detect-me", 128).unwrap();
+
+  // Live `gh pr list` returns an empty array — the PR no longer exists.
+  let gh = dir.path().join("fake-gh-empty");
+  std::fs::write(
+    &gh,
+    "#!/bin/sh\n\
+     if [ \"$1\" = \"pr\" ] && [ \"$2\" = \"list\" ]; then\n\
+       printf '%s' '[]'\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by `env_lock()`; GWM_GH restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &gh);
+  }
+  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let stored = gwm::github::read_link(&repo, "detect-me").unwrap();
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert_eq!(link.pr, None, "a vanished PR resolves to no PR live");
+  assert_eq!(
+    stored.pr, None,
+    "the persisted cache must be cleared so no-fetch reads don't resurrect it"
+  );
 }
 
 // ---- Configurable launchers (issue #75) --------------------------------
@@ -2352,51 +3509,219 @@ fn yank_selected_path_returns_none_when_nothing_selected() {
   assert!(app.yank_selected_path().is_none());
 }
 
-// ---- Issue #73 (PR #74 follow-up): table marker pastille ------------------
-// The marker column (first cell) doubles as the lazygit-style status dot.
-// `★` still wins for main; non-main worktrees that carry a link (issue or
-// PR) get `●` so the row visually signals "this has GitHub context", even
-// when the sidebar is hidden (`<120` cols or `v` collapsed).
+// ---- Issue #283: table marker pastilles -----------------------------------
+// The marker column (first cell) renders two slots separated by `/`: linked
+// Issue/PR slots use a pastille, empty slots use `-`. The main worktree keeps
+// its `★`. The table is the no-fetch read path until GitHub status has been
+// fetched, at which point Issue/PR rows can carry their loaded state colours.
+
+/// Pull each span's `(content, fg)` out of a `table_marker` line so the
+/// pastille assertions read as a flat list.
+fn marker_cells(line: &ratatui::text::Line<'_>) -> Vec<(String, Option<Color>)> {
+  line
+    .spans
+    .iter()
+    .map(|s| (s.content.as_ref().to_string(), s.style.fg))
+    .collect()
+}
 
 #[test]
-fn table_marker_for_main_worktree_is_yellow_star() {
+fn table_marker_for_main_worktree_is_a_yellow_star() {
   use gwm::github::BranchLink;
   let mut w = worktree_fixture("main");
   w.is_main = true;
   w.link = BranchLink::empty();
-  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, "★");
-  assert_eq!(color, Color::Yellow);
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  assert_eq!(marker_cells(&line), vec![("★".to_string(), Some(Color::Yellow))]);
 }
 
 #[test]
-fn table_marker_for_linked_non_main_is_neutral_dot() {
-  // No fetched state available at the table layer — colour stays neutral
-  // (Cyan) so the dot reads as "has link" without claiming a specific
-  // open/closed status. The coloured dot lives in the sidebar header where
-  // the live fetch state is known.
+fn table_marker_paints_green_issue_and_violet_pr_pastilles() {
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: Some(42),
+    pr: Some(43),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
+    issue_source: LinkSource::BranchName,
+    pr_source: LinkSource::Detected,
+  };
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  assert_eq!(
+    marker_cells(&line),
+    vec![
+      ("●".to_string(), Some(Color::Green)),    // issue linked → clean role
+      ("/".to_string(), Some(Color::DarkGray)), // muted separator
+      ("●".to_string(), Some(Color::Magenta)),  // pr linked → locked role
+    ]
+  );
+}
+
+#[test]
+fn table_marker_issue_only_leaves_the_pr_slot_as_dash() {
   use gwm::github::{BranchLink, LinkSource};
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
   w.link = BranchLink {
     issue: Some(42),
     pr: None,
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::None,
   };
-  let (label, color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, "●");
-  assert_eq!(color, Color::Cyan);
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].1, Some(Color::Green), "issue dot green");
+  assert_eq!(cells[2].0, "-", "empty pr slot uses a dash");
+  assert_eq!(cells[2].1, Some(Color::White), "empty pr dash white");
 }
 
 #[test]
-fn table_marker_for_unlinked_non_main_is_blank() {
+fn table_marker_issue_pastille_uses_loaded_closed_issue_state() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let mut w = worktree_fixture("feat-1");
+  w.branch = Some("feat/#42-tui-search".into());
+  w.link = app.current_link().clone();
+  app.worktrees = vec![w];
+  app.list_state.select(Some(0));
+
+  app.apply_issue_fetch_result(Ok(IssueStatus {
+    number: 42,
+    title: "Done".into(),
+    state: IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  let theme = Theme::default();
+  let line = gwm::tui::table_marker(&app.worktrees[0], &theme);
+  let cells = marker_cells(&line);
+  assert_eq!(
+    cells[0].1,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "closed issue dot should use the closed issue state colour"
+  );
+}
+
+#[test]
+fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  let mut w = worktree_fixture("feat-1");
+  w.branch = Some("feat/#42-tui-search".into());
+  w.link = gwm::github::BranchLink {
+    issue: None,
+    pr: Some(61),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
+    issue_source: LinkSource::None,
+    pr_source: LinkSource::Explicit,
+  };
+  app.github.link = w.link.clone();
+  app.worktrees = vec![w];
+  app.list_state.select(Some(0));
+
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "Closed".into(),
+    state: PrState::Closed,
+    url: String::new(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+  }));
+
+  let theme = Theme::default();
+  let line = gwm::tui::table_marker(&app.worktrees[0], &theme);
+  let cells = marker_cells(&line);
+  assert_eq!(
+    cells[2].1,
+    Some(gwm::tui::pr_badge_color(PrState::Closed, &theme)),
+    "closed PR dot should use the loaded PR state colour"
+  );
+}
+
+#[test]
+fn table_marker_uses_persisted_issue_and_pr_state_on_startup() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "closed")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  let theme = Theme::default();
+  let mut listed = app.worktrees[0].clone();
+  listed.is_main = false;
+  let cells = marker_cells(&gwm::tui::table_marker(&listed, &theme));
+  assert_eq!(
+    cells[0].1,
+    Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+    "issue marker should reuse persisted issue state after restart"
+  );
+  assert_eq!(
+    cells[2].1,
+    Some(gwm::tui::pr_badge_color(PrState::Closed, &theme)),
+    "PR marker should reuse persisted PR state after restart"
+  );
+}
+
+#[test]
+fn table_marker_pr_only_leaves_the_issue_slot_as_dash() {
+  use gwm::github::{BranchLink, LinkSource};
+  let mut w = worktree_fixture("feat-1");
+  w.is_main = false;
+  w.link = BranchLink {
+    issue: None,
+    pr: Some(43),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
+    issue_source: LinkSource::None,
+    pr_source: LinkSource::Detected,
+  };
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].0, "-", "empty issue slot uses a dash");
+  assert_eq!(cells[0].1, Some(Color::White), "empty issue dash white");
+  assert_eq!(cells[2].1, Some(Color::Magenta), "pr dot violet");
+}
+
+#[test]
+fn table_marker_unlinked_non_main_is_two_white_dashes() {
   use gwm::github::BranchLink;
   let mut w = worktree_fixture("feat-1");
   w.is_main = false;
   w.link = BranchLink::empty();
-  let (label, _color) = gwm::tui::table_marker(&w, &Theme::default());
-  assert_eq!(label, " ", "unlinked non-main rows keep an empty marker cell");
+  let line = gwm::tui::table_marker(&w, &Theme::default());
+  let cells = marker_cells(&line);
+  assert_eq!(cells[0].0, "-", "empty issue slot uses a dash");
+  assert_eq!(cells[0].1, Some(Color::White), "empty issue dash white");
+  assert_eq!(cells[1].0, "/", "muted separator between slots");
+  assert_eq!(cells[2].0, "-", "empty pr slot uses a dash");
+  assert_eq!(cells[2].1, Some(Color::White), "empty pr dash white");
 }
 
 #[test]
@@ -2431,6 +3756,7 @@ use gwm::tui::build_sidebar_sections;
 fn detailed_worktree_fixture() -> WorktreeInfo {
   WorktreeInfo {
     name: "api-rest".into(),
+    id: "api-rest".into(),
     path: PathBuf::from("/Users/test/cc-worktree/api-rest"),
     branch: Some("feat/#42-api-rest".into()),
     head: Some("08d1029f1234567890abcdef".into()),
@@ -2445,6 +3771,8 @@ fn detailed_worktree_fixture() -> WorktreeInfo {
       unknown: false,
     },
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
     age: None,
   }
 }
@@ -2460,7 +3788,12 @@ fn section_text(lines: &[ratatui::text::Line<'static>]) -> String {
 #[test]
 fn sidebar_sections_omit_commands_block() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -2490,7 +3823,12 @@ fn sidebar_sections_omit_inline_section_headers() {
   // `Basic Settings:` / `Recent commits:` / `Working tree:` headers must
   // disappear from the content lines.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let all = format!(
     "{}\n{}\n{}",
     section_text(&sections.worktree),
@@ -2505,7 +3843,12 @@ fn sidebar_sections_omit_inline_section_headers() {
 #[test]
 fn sidebar_worktree_section_is_compact_identity() {
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let text = section_text(&sections.worktree);
 
   assert!(text.contains("api-rest"), "name on top line: {}", text);
@@ -2528,7 +3871,12 @@ fn sidebar_worktree_section_short_enough_for_compact_layout() {
   // Compact identity block: name, branch · head, badges, path → 4 lines target.
   // Allow ≤5 to leave headroom for variable badges.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   assert!(
     sections.worktree.len() <= 5,
     "compact worktree block must stay ≤5 lines (target 4), got {}: {:?}",
@@ -2541,13 +3889,68 @@ fn section_text_single(l: &ratatui::text::Line<'static>) -> String {
   l.spans.iter().map(|s| s.content.as_ref()).collect()
 }
 
-// ---- working_tree_status_line (issue #179) ---------------------------------
-// Colourisation of each `git status --short` entry in the Working Tree sidebar
-// block, with three distinct status colours so modified ≠ created at a glance:
-//   - staged (X column)        → cyan
-//   - modified (Y column)      → yellow
-//   - untracked (`??`)         → green
-// The file name takes the dominant status colour.
+#[test]
+fn sidebar_diff_line_renders_counts_in_theme_roles() {
+  // A passed `DiffLineStat` surfaces a `Diff +<ins> -<del>` line whose
+  // insertions wear the `untracked` role and deletions the `prunable`
+  // role. Unique non-default `Rgb` values pin the wiring (a `Color::Green`
+  // hardcode would pass against defaults but fail here — #170/#211 rule).
+  let w = detailed_worktree_fixture();
+  let theme = Theme {
+    untracked: Color::Rgb(10, 20, 30),
+    prunable: Color::Rgb(40, 50, 60),
+    ..Theme::default()
+  };
+  let diff = gwm::worktree::DiffLineStat {
+    insertions: 12,
+    deletions: 4,
+  };
+  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, Some(diff), &theme);
+
+  let diff_line = sections
+    .worktree
+    .iter()
+    .find(|l| section_text_single(l).contains("Diff"))
+    .expect("identity card must carry a Diff line when a stat is supplied");
+  let ins = diff_line.spans.iter().find(|s| s.content.contains("+12")).unwrap();
+  assert_eq!(
+    ins.style.fg,
+    Some(Color::Rgb(10, 20, 30)),
+    "insertions wear `untracked`"
+  );
+  let del = diff_line.spans.iter().find(|s| s.content.contains("-4")).unwrap();
+  assert_eq!(del.style.fg, Some(Color::Rgb(40, 50, 60)), "deletions wear `prunable`");
+}
+
+#[test]
+fn sidebar_diff_line_absent_for_empty_or_missing_stat() {
+  // No stat (`None`) and an all-zero stat both leave the card without a
+  // Diff line — the `+0 -0` case is suppressed.
+  let w = detailed_worktree_fixture();
+  for diff in [None, Some(gwm::worktree::DiffLineStat::default())] {
+    let sections = build_sidebar_sections(
+      &w,
+      gwm::tui::state::sidebar::SidebarMode::Commits,
+      diff,
+      &Theme::default(),
+    );
+    assert!(
+      !sections
+        .worktree
+        .iter()
+        .any(|l| section_text_single(l).contains("Diff")),
+      "no Diff line should render for {diff:?}"
+    );
+  }
+}
+
+// ---- working_tree_status_line (issue #179, recoloured in #287) -------------
+// The whole row is painted by the file's change category so it matches the
+// Working Tree footer count it belongs to:
+//   - created (`??` / `A`)     → green
+//   - modified (`M`, `R`, …)   → yellow
+//   - deleted (`D`)            → red
+// (The pre-#287 staged-vs-worktree cyan `X`-column split is gone.)
 use gwm::tui::working_tree_status_line;
 
 fn filename_span_fg(line: &ratatui::text::Line<'static>, needle: &str) -> Option<Color> {
@@ -2568,6 +3971,7 @@ fn working_tree_status_line_preserves_raw_text() {
     "A  staged.rs",
     "AM both.rs",
     " M tracked.rs",
+    " D gone.rs",
     "?? untracked.rs",
     "R  old.rs -> new.rs",
   ] {
@@ -2581,26 +3985,21 @@ fn working_tree_status_line_preserves_raw_text() {
 }
 
 #[test]
-fn working_tree_status_line_staged_only_is_cyan() {
+fn working_tree_status_line_added_is_green() {
+  // `A` (added / staged) is a *created* file → green, status code + name.
   let line = working_tree_status_line("A  staged.rs", &Theme::default());
-  assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X column (staged) → cyan");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "added code → green");
   assert_eq!(
     filename_span_fg(&line, "staged.rs"),
-    Some(Color::Cyan),
-    "staged-only filename → cyan"
+    Some(Color::Green),
+    "added filename → green"
   );
 }
 
 #[test]
-fn working_tree_status_line_unstaged_modified_is_yellow() {
+fn working_tree_status_line_modified_is_yellow() {
   let line = working_tree_status_line(" M tracked.rs", &Theme::default());
-  assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(
-    line.spans[1].style.fg,
-    Some(Color::Yellow),
-    "Y column (modified) → yellow"
-  );
+  assert_eq!(line.spans[0].style.fg, Some(Color::Yellow), "modified code → yellow");
   assert_eq!(
     filename_span_fg(&line, "tracked.rs"),
     Some(Color::Yellow),
@@ -2609,10 +4008,23 @@ fn working_tree_status_line_unstaged_modified_is_yellow() {
 }
 
 #[test]
+fn working_tree_status_line_deleted_is_red() {
+  // `D` (deleted) → red, matching the footer's deleted segment (issue #287).
+  for raw in ["D  gone.rs", " D gone.rs"] {
+    let line = working_tree_status_line(raw, &Theme::default());
+    assert_eq!(line.spans[0].style.fg, Some(Color::Red), "deleted code → red: {raw:?}");
+    assert_eq!(
+      filename_span_fg(&line, "gone.rs"),
+      Some(Color::Red),
+      "deleted filename → red: {raw:?}"
+    );
+  }
+}
+
+#[test]
 fn working_tree_status_line_untracked_is_green() {
   let line = working_tree_status_line("?? untracked.rs", &Theme::default());
-  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked `?` (X) → green");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Green), "untracked `?` (Y) → green");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "untracked code → green");
   assert_eq!(
     filename_span_fg(&line, "untracked.rs"),
     Some(Color::Green),
@@ -2636,18 +4048,16 @@ fn working_tree_status_line_handles_multibyte_leading_chars() {
 }
 
 #[test]
-fn working_tree_status_line_partially_staged_splits_status_columns() {
-  // `AM`: index add (cyan) + worktree modify (yellow). The file name takes the
-  // dominant worktree colour (yellow) since it carries unstaged changes.
+fn working_tree_status_line_added_then_modified_is_green() {
+  // `AM`: created wins over a later modification (precedence created >
+  // deleted > modified), so the whole row is green — matching the bucket
+  // the file is counted in.
   let line = working_tree_status_line("AM both.rs", &Theme::default());
-  assert_eq!(line.spans[0].content.as_ref(), "A");
-  assert_eq!(line.spans[0].style.fg, Some(Color::Cyan), "X=A staged → cyan");
-  assert_eq!(line.spans[1].content.as_ref(), "M");
-  assert_eq!(line.spans[1].style.fg, Some(Color::Yellow), "Y=M modified → yellow");
+  assert_eq!(line.spans[0].style.fg, Some(Color::Green), "AM (created wins) → green");
   assert_eq!(
     filename_span_fg(&line, "both.rs"),
-    Some(Color::Yellow),
-    "filename with modified change → yellow"
+    Some(Color::Green),
+    "AM filename → green"
   );
 }
 
@@ -2657,7 +4067,12 @@ fn sidebar_worktree_section_skips_irrelevant_badges() {
   // those flags — only the ones that are true add visual noise.
   let mut w = detailed_worktree_fixture();
   w.is_main = false;
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let text = section_text(&sections.worktree);
   assert!(
     !text.contains("★ main"),
@@ -2690,7 +4105,12 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_ahead() {
     behind: 0,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -2710,7 +4130,12 @@ fn sidebar_worktree_badge_uses_divergence_sigil_when_behind() {
     behind: 3,
     unknown: false,
   };
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(
     !badge.contains("✓"),
@@ -2726,7 +4151,12 @@ fn sidebar_worktree_badge_keeps_check_sigil_when_synced() {
   // synced label *should* still display `✓`. Guards against an over-eager
   // fix that would drop the sigil everywhere.
   let w = detailed_worktree_fixture();
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   let badge = section_text_single(&sections.worktree[2]);
   assert!(badge.contains("✓"), "synced branch must keep the ✓ sigil: {}", badge);
   assert!(badge.contains("synced"), "label must still say synced: {}", badge);
@@ -2789,6 +4219,27 @@ fn github_status_idle_body_does_not_render_fetch_prompt() {
   assert!(
     !text.contains("press "),
     "fetch prompt should not render inside the Issue/PR body: {text}"
+  );
+}
+
+#[test]
+fn github_status_no_link_hint_uses_the_real_link_prompt_chord() {
+  // Regression (#290 keymap redesign): the "no link" hint hardcoded `L`,
+  // which pre-#290 opened the link menu but is now LazyGitFullscreen. The
+  // hint must derive LinkPrompt's real chord (`i`) from the keymap so it
+  // never drifts from the binding (and tracks `[tui.keys]` overrides).
+  // A branch with no `#N` auto-detects no issue, so the link is empty and
+  // the no-link row renders.
+  let (_dir, _repo, app) = make_app_on_branch("scratch");
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref().to_string()))
+    .collect::<Vec<_>>()
+    .join("");
+  assert!(text.contains("no link"), "the no-link hint should render: {text}");
+  assert!(
+    text.contains("press i to link"),
+    "hint must use LinkPrompt's real chord, not the stale `L`: {text}"
   );
 }
 
@@ -2860,6 +4311,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     url: String::new(),
     checks_passed: 3,
     checks_total: 3,
+    ci: CiState::Passing,
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -2924,6 +4376,323 @@ fn issue_summary_line_truncates_error_state_to_budget() {
   assert!(width <= 30, "error line must fit in 30 cols, got {}", width);
 }
 
+// ---- Issue #283: pane icons + source / state chips ----------------------
+
+fn span_with<'a>(line: &'a ratatui::text::Line<'a>, needle: &str) -> Option<&'a ratatui::text::Span<'a>> {
+  line.spans.iter().find(|s| s.content.contains(needle))
+}
+
+#[test]
+fn issue_summary_line_leads_with_the_issue_icon() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert!(
+    line.spans[0].content.contains(gwm::tui::ISSUE_ICON),
+    "issue pane line must lead with the issue nerdfont glyph: {:?}",
+    line.spans[0].content
+  );
+}
+
+#[test]
+fn issue_summary_line_icon_has_trailing_space_only() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert_eq!(
+    line.spans[0].content.as_ref(),
+    format!("{}  ", gwm::tui::ISSUE_ICON),
+    "issue icon segment should leave two spaces after the glyph only"
+  );
+}
+
+#[test]
+fn issue_summary_line_loaded_icon_uses_issue_state_color() {
+  let status = gwm::github::IssueStatus {
+    number: 7,
+    title: "x".into(),
+    state: gwm::github::IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &theme,
+  );
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(gwm::tui::issue_badge_color(gwm::github::IssueState::Closed, &theme)),
+    "loaded issue icon should reuse the issue state badge role"
+  );
+}
+
+#[test]
+fn issue_summary_line_idle_icon_stays_muted() {
+  let theme = Theme::default();
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &theme,
+  );
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(theme.muted),
+    "idle issue icon stays neutral"
+  );
+}
+
+#[test]
+fn pr_summary_line_leads_with_the_pr_icon() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  assert!(
+    line.spans[0].content.contains(gwm::tui::PR_ICON),
+    "pr pane line must lead with the pr nerdfont glyph: {:?}",
+    line.spans[0].content
+  );
+}
+
+#[test]
+fn pr_summary_line_icon_has_trailing_space_only() {
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  assert_eq!(
+    line.spans[0].content.as_ref(),
+    format!("{}  ", gwm::tui::PR_ICON),
+    "PR icon segment should leave two spaces after the glyph only"
+  );
+}
+
+#[test]
+fn pr_summary_line_loaded_icon_uses_pr_state_color() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Merged,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &theme,
+  );
+  assert_eq!(
+    line.spans[0].style.fg,
+    Some(gwm::tui::pr_badge_color(gwm::github::PrState::Merged, &theme)),
+    "loaded PR icon should reuse the PR state badge role"
+  );
+}
+
+#[test]
+fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
+  // Issue #299: a PR with a failing rollup must surface a coloured CI
+  // indicator (icon + label + N/M), not just the bare count.
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 1,
+    checks_total: 2,
+    ci: gwm::github::CiState::Failing,
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &theme,
+  );
+  let ci = span_with(&line, "CI").expect("a CI indicator span");
+  assert!(
+    ci.content.contains("failing") && ci.content.contains("1/2"),
+    "CI indicator must carry the failing label and count, got {:?}",
+    ci.content
+  );
+  assert_eq!(
+    ci.style.fg,
+    Some(theme.prunable),
+    "a failing CI indicator must paint with the prunable (red) role"
+  );
+}
+
+#[test]
+fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: gwm::github::CiState::None,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    !joined.contains("CI"),
+    "a PR with no checks must not render any CI indicator: {}",
+    joined
+  );
+}
+
+#[test]
+fn ci_indicator_maps_states_to_status_roles() {
+  let theme = Theme::default();
+  // None renders nothing.
+  assert!(gwm::tui::ci_indicator(gwm::github::CiState::None, 0, 0, &theme).is_none());
+  // Passing → clean (green), failing → prunable (red), running → dirty (yellow).
+  let (txt, col) = gwm::tui::ci_indicator(gwm::github::CiState::Passing, 9, 9, &theme).unwrap();
+  assert!(txt.contains("passing") && txt.contains("9/9"));
+  assert_eq!(col, theme.clean);
+  let (txt, col) = gwm::tui::ci_indicator(gwm::github::CiState::Failing, 7, 9, &theme).unwrap();
+  assert!(txt.contains("failing") && txt.contains("7/9"));
+  assert_eq!(col, theme.prunable);
+  let (txt, col) = gwm::tui::ci_indicator(gwm::github::CiState::Running, 8, 9, &theme).unwrap();
+  assert!(txt.contains("running") && txt.contains("8/9"));
+  assert_eq!(col, theme.dirty);
+}
+
+#[test]
+fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let status = gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+    updated_at: String::new(),
+  };
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::Detected,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "detected").expect("a 'detected' source chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the source chip must use the version-badge reverse-video treatment"
+  );
+}
+
+#[test]
+fn issue_summary_line_renders_auto_source_as_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "auto").expect("an 'auto' source chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the source chip must use the version-badge reverse-video treatment"
+  );
+}
+
+#[test]
+fn explicit_link_renders_no_source_chip() {
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Idle,
+    80,
+    &Theme::default(),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+  assert!(
+    !text.contains("auto"),
+    "explicit link must not show an auto chip: {text}"
+  );
+  assert!(
+    !text.contains("detected"),
+    "explicit link must not show a detected chip: {text}"
+  );
+}
+
+#[test]
+fn issue_summary_line_state_badge_is_a_reverse_video_chip() {
+  use ratatui::style::Modifier;
+  let status = gwm::github::IssueStatus {
+    number: 7,
+    title: "x".into(),
+    state: gwm::github::IssueState::Open,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let line = issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &GitHubFetchState::Loaded(status),
+    80,
+    &Theme::default(),
+  );
+  let chip = span_with(&line, "open").expect("an 'open' state chip span");
+  assert!(
+    chip.style.add_modifier.contains(Modifier::REVERSED),
+    "the state badge must use the version-badge reverse-video treatment"
+  );
+}
+
 // ---- Recent Commits panel: lazygit-style fill + clip (issue #71) ---------
 
 use gwm::tui::{recent_commits_lines, RECENT_COMMITS_LIMIT};
@@ -2944,6 +4713,7 @@ fn add_commits(repo: &git2::Repository, count: usize) {
 fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
   WorktreeInfo {
     name: "test".into(),
+    id: "test".into(),
     path: dir.to_path_buf(),
     branch: Some("main".into()),
     head: None,
@@ -2952,6 +4722,8 @@ fn worktree_pointing_at_dir(dir: &std::path::Path) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
     age: None,
   }
 }
@@ -3060,7 +4832,12 @@ fn build_sidebar_sections_fetches_up_to_default_recent_commits_limit() {
   let (dir, repo) = init_repo();
   add_commits(&repo, 30); // 31 total commits
   let w = worktree_pointing_at_dir(dir.path());
-  let sections = build_sidebar_sections(&w, gwm::tui::state::sidebar::SidebarMode::Commits, &Theme::default());
+  let sections = build_sidebar_sections(
+    &w,
+    gwm::tui::state::sidebar::SidebarMode::Commits,
+    None,
+    &Theme::default(),
+  );
   assert_eq!(
     sections.recent_commits.len(),
     31,
@@ -3692,6 +5469,149 @@ run  = "echo would-have-run"
   let _ = BRANCH_TYPES; // keep the import live; the indirect lookup above relies on the default list.
 }
 
+// ---- Issue #276: create worktree on the async-task spine ------------------
+
+fn fill_create_form(app: &mut App, issue: &str, desc: &str) {
+  let feat_idx = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "feat")
+    .expect("`feat` is in branch types");
+  app.create_form.type_index = feat_idx;
+  app.create_form.issue = issue.into();
+  app.create_form.desc = desc.into();
+}
+
+#[test]
+fn submit_create_starts_async_create_and_keeps_create_modal_open() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let base_dir = tempfile::TempDir::new().unwrap();
+  let body = format!(
+    r#"[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+"#,
+    base = toml_basic_string(base_dir.path()),
+  );
+  let (_dir, mut app) = app_with_config(&body);
+  app.view = View::Create;
+  fill_create_form(&mut app, "276", "async-create");
+
+  app
+    .submit_create()
+    .expect("submit_create must only enqueue async create");
+
+  assert_eq!(app.view, View::Create, "the modal stays open while create runs");
+  assert!(
+    app.tasks.is_loading(TaskKind::CreateWorktree),
+    "create must claim an async loading slot"
+  );
+  assert_eq!(app.status, TaskKind::CreateWorktree.loading_label());
+
+  // A real async worktree create + bootstrap drains in well under 100ms on a
+  // dev box, but a loaded Windows CI runner can take longer. The old 500ms
+  // budget (50 × 10ms) was too tight and flaked (#328); 3s is generous enough
+  // to absorb a slow runner while still bailing fast if the task truly hangs.
+  for _ in 0..300 {
+    if app.drain_task_results() {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+  }
+  assert!(
+    !app.tasks.is_loading(TaskKind::CreateWorktree),
+    "background create should drain before temp dirs are dropped"
+  );
+}
+
+#[test]
+fn drain_applies_async_create_result_and_flips_to_report_view() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      generation,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#276-async-create".into(),
+        created: PathBuf::from("/tmp/gwm-created"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("post_create hook")],
+        },
+      }),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a live create result must be applied");
+  assert_eq!(app.view, View::Report);
+  assert!(app.report.is_some(), "create report is shown in the Report view");
+  assert!(
+    app.status.contains("created feat/#276-async-create @ /tmp/gwm-created"),
+    "status reports the created branch and path: {:?}",
+    app.status
+  );
+  assert!(!app.tasks.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
+fn drain_create_failure_stays_in_create_and_reports_status() {
+  use gwm::tui::{TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.view = View::Create;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(generation, Err("branch already exists".into())))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "a create failure still clears the live slot");
+  assert_eq!(app.view, View::Create);
+  assert_eq!(app.status, "create failed: branch already exists");
+  assert!(!app.tasks.is_loading(TaskKind::CreateWorktree));
+}
+
+#[test]
+fn drain_drops_a_superseded_create_result() {
+  use gwm::bootstrap::{BootstrapReport, StepResult};
+  use gwm::tui::{CreateWorktreeResult, TaskKind, TaskMsg};
+
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::CreateWorktree).unwrap();
+  app.tasks.invalidate(TaskKind::CreateWorktree);
+  app.view = View::Create;
+  app.status = "untouched".into();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::CreateWorktree(
+      stale,
+      Ok(CreateWorktreeResult {
+        branch: "feat/#276-stale".into(),
+        created: PathBuf::from("/tmp/stale"),
+        report: BootstrapReport {
+          steps: vec![StepResult::ok("stale")],
+        },
+      }),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Create);
+  assert_eq!(app.status, "untouched");
+  assert!(app.report.is_none());
+}
+
 #[test]
 fn tui_bootstrap_selected_aborts_on_untrusted_config() {
   // Counterpart of the submit_create test — the `b` keybinding
@@ -4124,6 +6044,307 @@ fn drain_applies_async_refresh_result() {
   );
 }
 
+#[cfg(unix)]
+#[test]
+fn worktree_refresh_fetches_issue_and_pr_status_for_every_linked_worktree() {
+  use gwm::github::BranchLink;
+  use gwm::tui::{TaskKind, TaskMsg};
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-selected");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  let fake_gh = dir.path().join("fake-gh-refresh-all");
+  std::fs::write(
+    &fake_gh,
+    "#!/bin/sh\n\
+     kind=\"$1\"\n\
+     number=\"$3\"\n\
+     if [ \"$kind\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"issue %s\",\"state\":\"CLOSED\",\"url\":\"https://example.test/issues/%s\",\"labels\":[],\"updatedAt\":\"2026-06-09T00:00:00Z\"}' \"$number\" \"$number\" \"$number\"\n\
+     elif [ \"$kind\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"pr %s\",\"state\":\"MERGED\",\"isDraft\":false,\"url\":\"https://example.test/pull/%s\",\"updatedAt\":\"2026-06-09T00:00:00Z\",\"statusCheckRollup\":[]}' \"$number\" \"$number\" \"$number\"\n\
+     else\n\
+       exit 2\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&fake_gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&fake_gh, perms).unwrap();
+
+  let linked = |name: &str, branch: &str, issue: u64, pr: u64| {
+    let mut w = worktree_fixture(name);
+    w.branch = Some(branch.into());
+    w.link = BranchLink {
+      issue: Some(issue),
+      pr: Some(pr),
+      issue_title: None,
+      pr_title: None,
+      issue_state: None,
+      pr_state: None,
+      issue_source: LinkSource::Explicit,
+      pr_source: LinkSource::Explicit,
+    };
+    w
+  };
+  for (branch, issue, pr) in [("feat/#42-selected", 42, 61), ("feat/#283-other", 283, 286)] {
+    gwm::github::link_issue(&repo, branch, issue).unwrap();
+    gwm::github::link_pr(&repo, branch, pr).unwrap();
+  }
+  let fresh = vec![
+    linked("selected", "feat/#42-selected", 42, 61),
+    linked("other", "feat/#283-other", 283, 286),
+  ];
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` and restored before the
+  // test returns. The worker captures this path on the main thread.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(generation, Ok(fresh)))
+    .unwrap();
+  assert!(app.drain_task_results(), "the worktree refresh result must apply");
+
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubIssue(42)),
+    "worktree refresh must fetch the selected issue"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubPr(61)),
+    "worktree refresh must fetch the selected PR"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubIssue(283)),
+    "worktree refresh must fetch issues from non-selected rows too"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubPr(286)),
+    "worktree refresh must fetch PRs from non-selected rows too"
+  );
+
+  for _ in 0..50 {
+    if !app.tasks.is_loading(TaskKind::GithubIssue(42))
+      && !app.tasks.is_loading(TaskKind::GithubPr(61))
+      && !app.tasks.is_loading(TaskKind::GithubIssue(283))
+      && !app.tasks.is_loading(TaskKind::GithubPr(286))
+    {
+      break;
+    }
+    std::thread::sleep(Duration::from_millis(10));
+    app.drain_task_results();
+  }
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  let theme = Theme::default();
+  for (idx, issue, pr) in [(0, 42, 61), (1, 283, 286)] {
+    let cells = marker_cells(&gwm::tui::table_marker(&app.worktrees[idx], &theme));
+    assert_eq!(
+      cells[0].1,
+      Some(gwm::tui::issue_badge_color(IssueState::Closed, &theme)),
+      "issue #{issue} marker should reflect the fetched closed state"
+    );
+    assert_eq!(
+      cells[2].1,
+      Some(gwm::tui::pr_badge_color(PrState::Merged, &theme)),
+      "PR #{pr} marker should reflect the fetched merged state"
+    );
+  }
+
+  for (branch, issue_title, pr_title) in [
+    ("feat/#42-selected", "issue 42", "pr 61"),
+    ("feat/#283-other", "issue 283", "pr 286"),
+  ] {
+    let link = gwm::github::read_link(&repo, branch).unwrap();
+    assert_eq!(
+      link.issue_title.as_deref(),
+      Some(issue_title),
+      "issue title should persist on branch {branch}"
+    );
+    assert_eq!(
+      link.issue_state,
+      Some(IssueState::Closed),
+      "issue state should persist on branch {branch}"
+    );
+    assert_eq!(
+      link.pr_title.as_deref(),
+      Some(pr_title),
+      "PR title should persist on branch {branch}"
+    );
+    assert_eq!(
+      link.pr_state,
+      Some(PrState::Merged),
+      "PR state should persist on branch {branch}"
+    );
+  }
+}
+
+#[cfg(unix)]
+#[test]
+fn app_startup_fetches_issue_and_pr_status_for_linked_worktrees() {
+  use gwm::tui::TaskKind;
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-startup", &head, false).unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-startup").unwrap();
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  gwm::github::link_pr(&repo, "feat/#42-startup", 61).unwrap();
+
+  let fake_gh = dir.path().join("fake-gh-startup-refresh");
+  std::fs::write(
+    &fake_gh,
+    "#!/bin/sh\n\
+     kind=\"$1\"\n\
+     number=\"$3\"\n\
+     if [ \"$kind\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"issue %s\",\"state\":\"OPEN\",\"url\":\"https://example.test/issues/%s\",\"labels\":[],\"updatedAt\":\"2026-06-09T00:00:00Z\"}' \"$number\" \"$number\" \"$number\"\n\
+     elif [ \"$kind\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"pr %s\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/%s\",\"updatedAt\":\"2026-06-09T00:00:00Z\",\"statusCheckRollup\":[]}' \"$number\" \"$number\" \"$number\"\n\
+     else\n\
+       exit 2\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&fake_gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&fake_gh, perms).unwrap();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation is guarded by `env_lock()` and the TUI captures the
+  // program path before spawning its initial GitHub workers.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  let app = App::new_at_layered(Some(dir.path()), None).unwrap();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubIssue(42)),
+    "startup should fetch the linked issue immediately"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::GithubPr(61)),
+    "startup should fetch the linked PR immediately"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn github_refresh_fetches_only_the_current_link_without_relisting_worktrees() {
+  use gwm::github::BranchLink;
+  use gwm::tui::TaskKind;
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, _repo, mut app) = make_app_on_branch("feat/#42-selected");
+  let fake_gh = dir.path().join("fake-gh-current-only");
+  std::fs::write(
+    &fake_gh,
+    "#!/bin/sh\n\
+     kind=\"$1\"\n\
+     number=\"$3\"\n\
+     if [ \"$kind\" = \"issue\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"issue %s\",\"state\":\"OPEN\",\"url\":\"https://example.test/issues/%s\",\"labels\":[],\"updatedAt\":\"2026-06-09T00:00:00Z\"}' \"$number\" \"$number\" \"$number\"\n\
+     elif [ \"$kind\" = \"pr\" ] && [ \"$2\" = \"view\" ]; then\n\
+       printf '{\"number\":%s,\"title\":\"pr %s\",\"state\":\"OPEN\",\"isDraft\":false,\"url\":\"https://example.test/pull/%s\",\"updatedAt\":\"2026-06-09T00:00:00Z\",\"statusCheckRollup\":[]}' \"$number\" \"$number\" \"$number\"\n\
+     else\n\
+       exit 2\n\
+     fi\n",
+  )
+  .unwrap();
+  let mut perms = std::fs::metadata(&fake_gh).unwrap().permissions();
+  perms.set_mode(0o755);
+  std::fs::set_permissions(&fake_gh, perms).unwrap();
+
+  let mut selected = worktree_fixture("selected");
+  selected.branch = Some("feat/#42-selected".into());
+  selected.link = BranchLink {
+    issue: Some(42),
+    pr: Some(61),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
+    issue_source: LinkSource::Explicit,
+    pr_source: LinkSource::Explicit,
+  };
+  let mut other = worktree_fixture("other");
+  other.branch = Some("feat/#283-other".into());
+  other.link = BranchLink {
+    issue: Some(283),
+    pr: Some(286),
+    issue_title: None,
+    pr_title: None,
+    issue_state: None,
+    pr_state: None,
+    issue_source: LinkSource::Explicit,
+    pr_source: LinkSource::Explicit,
+  };
+  app.github.link = selected.link.clone();
+  app.github.link_slug = Some("kbrdn1/gwm-cli".into());
+  app.worktrees = vec![selected, other];
+  app.list_state.select(Some(0));
+  let names_before: Vec<String> = app.worktrees.iter().map(|w| w.name.clone()).collect();
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: guarded by `env_lock()` and restored before returning.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake_gh);
+  }
+
+  app.refresh_github_status();
+
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::RefreshWorktrees),
+    "GitHub refresh must not relist worktrees"
+  );
+  assert_eq!(
+    app.worktrees.iter().map(|w| w.name.clone()).collect::<Vec<_>>(),
+    names_before,
+    "GitHub refresh must leave the worktree list untouched"
+  );
+  assert!(app.tasks.is_loading(TaskKind::GithubIssue(42)));
+  assert!(app.tasks.is_loading(TaskKind::GithubPr(61)));
+  assert!(
+    !app.tasks.is_loading(TaskKind::GithubIssue(283)),
+    "GitHub refresh must not fetch a non-selected row's issue"
+  );
+  assert!(
+    !app.tasks.is_loading(TaskKind::GithubPr(286)),
+    "GitHub refresh must not fetch a non-selected row's PR"
+  );
+}
+
 #[test]
 fn drain_drops_async_refresh_invalidated_mid_flight() {
   // Issue #231 carries the #138 guarantee onto the generic spine: a refresh
@@ -4257,6 +6478,89 @@ fn drain_drops_a_superseded_sync_result() {
 }
 
 #[test]
+fn drain_delete_worktree_success_returns_to_list_and_reports_removed_target() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+  app.delete_failure = Some("old failure".into());
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "delete result should be applied");
+  assert!(!app.is_delete_worktree_loading(), "delete slot clears after success");
+  assert_eq!(app.view, View::List);
+  assert!(app.delete_failure.is_none(), "old failure is cleared after success");
+  assert!(
+    app.status.contains("removed alpha") && app.status.contains("/tmp/alpha"),
+    "status reports the removed target: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_delete_worktree_failure_stays_in_confirm_and_records_failure() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let generation = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.view = View::Confirm;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      generation,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Err("permission denied".into()),
+    ))
+    .unwrap();
+  let applied = app.drain_task_results();
+
+  assert!(applied, "delete failure should still be applied");
+  assert!(!app.is_delete_worktree_loading(), "delete slot clears after failure");
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.delete_failure.as_deref(), Some("permission denied"));
+  assert!(
+    app.status.contains("delete failed") && app.status.contains("permission denied"),
+    "status reports the delete failure: {:?}",
+    app.status
+  );
+}
+
+#[test]
+fn drain_drops_a_superseded_delete_worktree_result() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+  app.tasks.invalidate(TaskKind::DeleteWorktree);
+  app.view = View::Confirm;
+  app.status = "untouched".into();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::DeleteWorktree(
+      stale,
+      "alpha".into(),
+      "/tmp/alpha".into(),
+      Ok(()),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.view, View::Confirm);
+  assert_eq!(app.status, "untouched");
+}
+
+#[test]
 fn request_sync_coalesces_onto_an_inflight_run() {
   // A second `S` press while a sync is already in flight must not spawn a
   // second rebase — `request_sync` coalesces and returns early (zero threads).
@@ -4308,6 +6612,156 @@ fn request_refresh_coalesces_onto_an_inflight_run() {
 }
 
 #[test]
+fn auto_refresh_triggers_after_default_interval_without_resetting_selection() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  app.worktrees = vec![worktree_fixture("alpha"), worktree_fixture("beta")];
+  app.list_state.select(Some(1));
+  let start = Instant::now();
+  app.last_auto_refresh_at = start;
+
+  assert!(
+    !app.maybe_auto_refresh(start + Duration::from_secs(59)),
+    "default interval is 60s, so 59s must not refresh"
+  );
+  assert_eq!(app.list_state.selected(), Some(1), "selection stays put before refresh");
+
+  assert!(
+    app.maybe_auto_refresh(start + Duration::from_secs(60)),
+    "60s default interval should trigger a worktree refresh"
+  );
+  assert!(
+    app.tasks.is_loading(TaskKind::RefreshWorktrees),
+    "auto-refresh uses the async refresh task"
+  );
+  assert_eq!(
+    app.list_state.selected(),
+    Some(1),
+    "requesting auto-refresh must not reset the user's selection"
+  );
+}
+
+#[test]
+fn auto_refresh_advances_timer_when_refresh_is_already_inflight() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let start = Instant::now();
+  app.last_auto_refresh_at = start;
+  let generation = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  let elapsed = start + Duration::from_secs(60);
+
+  assert!(
+    !app.maybe_auto_refresh(elapsed),
+    "an in-flight refresh coalesces instead of spawning a second worker"
+  );
+  assert_eq!(
+    app.last_auto_refresh_at, elapsed,
+    "coalescing still advances the timer to avoid an immediate follow-up refresh"
+  );
+  assert!(
+    app.tasks.complete(TaskKind::RefreshWorktrees, generation),
+    "the original refresh remains authoritative"
+  );
+  assert!(
+    !app.maybe_auto_refresh(elapsed + Duration::from_secs(1)),
+    "the next event-loop tick should not immediately start another auto-refresh"
+  );
+}
+
+#[test]
+fn auto_refresh_zero_is_disabled() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  app.config.tui.auto_refresh_secs = 0;
+  let start = Instant::now();
+  app.last_auto_refresh_at = start;
+
+  assert!(
+    !app.maybe_auto_refresh(start + Duration::from_secs(3600)),
+    "auto_refresh_secs = 0 disables periodic refresh"
+  );
+  assert!(
+    !app.tasks.is_loading(TaskKind::RefreshWorktrees),
+    "disabled auto-refresh must not claim a refresh task"
+  );
+}
+
+#[test]
+fn quit_waits_while_a_sync_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Sync).unwrap();
+
+  assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_create_worktree_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::CreateWorktree).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+  assert_eq!(app.status, "finishing creating worktree before quit…");
+}
+
+#[test]
+fn quit_waits_while_a_bootstrap_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(!app.can_quit_now());
+}
+
+#[test]
+fn quit_waits_while_a_delete_worktree_task_is_in_flight() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::DeleteWorktree).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+  assert_eq!(app.status, "finishing deleting worktree before quit…");
+}
+
+#[test]
+fn quit_does_not_wait_for_read_only_tasks() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app.tasks.request(TaskKind::GithubIssue(42)).unwrap();
+  app.tasks.request(TaskKind::GithubPr(7)).unwrap();
+
+  assert!(app.can_quit_now());
+}
+
+#[test]
+fn quit_waiting_status_explains_the_deferred_exit() {
+  use gwm::tui::state::async_task::TaskKind;
+
+  let (_dir, mut app) = make_app();
+  app.should_quit = true;
+  app.tasks.request(TaskKind::Bootstrap).unwrap();
+
+  assert!(!app.can_quit_now());
+  app.defer_quit_for_mutating_task();
+
+  assert_eq!(app.status, "finishing bootstrapping before quit…");
+}
+
+#[test]
 fn sync_refresh_invalidates_an_inflight_async_refresh() {
   // Issue #231 race guard: a synchronous `refresh()` (the create / delete /
   // report-close path) must bump the task generation so a still-in-flight
@@ -4334,5 +6788,1012 @@ fn sync_refresh_invalidates_an_inflight_async_refresh() {
   assert!(
     !app.worktrees.iter().any(|w| w.name == "ghost"),
     "the dropped result's payload must never reach the list"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Editable Settings panel — apply-live + persistence (issue #279)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn activate_choice_setting_persists_project_layer_and_applies_live() {
+  use gwm::config::{Config, SidebarPosition};
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0; // sidebar position
+  assert_eq!(app.config.tui.sidebar_position, SidebarPosition::Right);
+
+  // Cycle the choice: right → left, written to the project `.gwm.toml` and
+  // applied live.
+  app.activate_selected_setting();
+
+  assert_eq!(
+    app.config.tui.sidebar_position,
+    SidebarPosition::Left,
+    "live config updated"
+  );
+  assert_eq!(
+    app.sidebar.position,
+    SidebarPosition::Left,
+    "live sidebar position re-seeded"
+  );
+
+  let written = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(
+    written.contains("sidebar_position"),
+    "edit persisted to .gwm.toml: {written}"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.tui.sidebar_position,
+    SidebarPosition::Left,
+    "edit round-trips through a fresh layered load"
+  );
+}
+
+#[test]
+fn committing_numeric_input_persists_the_typed_value() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 2; // confirm countdown (Uint input)
+
+  // Arm the input, retype "5", commit.
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on a Uint field opens the input"
+  );
+  app.config_panel.editing = Some("5".into());
+  app.commit_settings_edit();
+
+  assert!(app.config_panel.editing.is_none(), "commit closes the input");
+  assert_eq!(app.config.tui.confirm_countdown_secs, 5, "live config updated");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.confirm_countdown_secs, 5, "typed value persisted");
+}
+
+#[test]
+fn committing_auto_refresh_secs_persists_the_typed_value() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 3; // auto refresh (Uint input)
+
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on auto refresh opens the numeric input"
+  );
+  app.config_panel.editing = Some("0".into());
+  app.commit_settings_edit();
+
+  assert_eq!(app.config.tui.auto_refresh_secs, 0, "live config updated");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.auto_refresh_secs, 0, "typed value persisted");
+}
+
+#[test]
+fn committing_text_input_persists_a_worktree_pattern() {
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Worktree;
+  app.config_panel.selected = 0; // base directory (Text input)
+
+  app.activate_selected_setting();
+  assert!(
+    app.config_panel.editing.is_some(),
+    "Enter on a Text field opens the input"
+  );
+  app.config_panel.editing = Some("{home}/custom-wt/{repo}".into());
+  app.commit_settings_edit();
+
+  assert_eq!(
+    app.config.worktree.base, "{home}/custom-wt/{repo}",
+    "live config updated"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.worktree.base, "{home}/custom-wt/{repo}", "text value persisted");
+}
+
+#[test]
+fn committing_numeric_looking_text_persists_as_a_string() {
+  // Review P2: a Text field whose value looks like a number must round-trip
+  // as a string through the typed load, not be coerced to an int.
+  use gwm::config::Config;
+  use gwm::tui::SettingsTab;
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Worktree;
+  app.config_panel.selected = 0; // base directory (Text input)
+
+  app.activate_selected_setting();
+  app.config_panel.editing = Some("404".into());
+  app.commit_settings_edit();
+
+  assert_eq!(app.config.worktree.base, "404", "live config keeps the text value");
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.worktree.base, "404", "numeric-looking text persisted as a string");
+}
+
+#[test]
+fn command_logs_transcript_is_newest_first_and_empty_when_blank() {
+  use gwm::command_log::{CommandLogEntry, CommandStatus};
+  use std::time::Duration;
+
+  let (_dir, mut app) = make_app();
+  // Empty transcript when nothing has run.
+  assert!(app.command_logs_transcript().is_empty());
+
+  app.command_logs.entries = vec![
+    CommandLogEntry {
+      command: "first cmd".into(),
+      duration: Duration::from_millis(10),
+      status: CommandStatus::Exited(Some(0)),
+      output: "ok".into(),
+    },
+    CommandLogEntry {
+      command: "second cmd".into(),
+      duration: Duration::from_millis(20),
+      status: CommandStatus::Exited(Some(2)),
+      output: "boom".into(),
+    },
+  ];
+  let t = app.command_logs_transcript();
+  assert!(
+    t.contains("$ first cmd") && t.contains("$ second cmd"),
+    "both argv present: {t}"
+  );
+  // Newest-first: the last-pushed entry leads the transcript.
+  assert!(
+    t.find("second cmd").unwrap() < t.find("first cmd").unwrap(),
+    "newest entry must come first: {t}"
+  );
+  assert!(t.contains("→ exit 2"), "non-zero exit is recorded: {t}");
+  assert!(
+    t.contains("boom") && t.contains("ok"),
+    "captured output is included: {t}"
+  );
+}
+
+#[test]
+fn activate_is_a_noop_on_the_read_only_all_tab() {
+  use gwm::tui::SettingsTab;
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::All;
+  app.activate_selected_setting();
+  // Nothing written: the All tab has no editable field.
+  assert!(
+    !dir.path().join(".gwm.toml").exists(),
+    "the read-only All tab must not write anything"
+  );
+}
+
+// ---- Edit-worktree modal (rename, #290) ----------------------------------
+
+#[test]
+fn enter_edit_worktree_prefills_create_form_from_branch() {
+  // `c` opens the rename modal by decomposing the current branch into the
+  // Create form (Type / Issue / Desc), so renaming is symmetric with create.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("fix/#42-broken-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit);
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "broken-thing");
+  assert_eq!(
+    app.branch_types[app.create_form.type_index].name, "fix",
+    "the type selector must point at the parsed branch type"
+  );
+  assert_eq!(app.edit_original_branch.as_deref(), Some("fix/#42-broken-thing"));
+  assert!(
+    app.edit_original_path.is_some(),
+    "the original path is captured for git worktree move"
+  );
+}
+
+#[test]
+fn enter_edit_worktree_rejects_unparseable_branch() {
+  // A branch that isn't `<type>/#<issue>-<desc>` (e.g. `main`) can't be
+  // decomposed into the form, so the modal refuses to open.
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("main".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "unparseable branch must not open the modal");
+  assert!(app.edit_original_branch.is_none());
+}
+
+#[test]
+fn cancel_edit_worktree_resets_state() {
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.cancel_edit_worktree();
+
+  assert_eq!(app.view, View::List);
+  assert!(app.edit_original_branch.is_none());
+  assert!(app.edit_original_path.is_none());
+}
+
+#[test]
+fn request_push_refuses_while_another_mutation_runs() {
+  // Codex review on PR #292: pressing `P` while a different mutating task is
+  // in flight must not start a concurrent push in the same worktree.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  // A sync is already running (a different mutating kind).
+  app.tasks.request(TaskKind::Sync);
+
+  app.request_push();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Push),
+    "push must not start while a sync is in flight"
+  );
+  assert!(
+    app.status.contains("before pushing"),
+    "status must explain the block: {}",
+    app.status
+  );
+}
+
+#[test]
+fn request_pull_refuses_while_another_mutation_runs() {
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.tasks.request(TaskKind::Bootstrap);
+
+  app.request_pull();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Pull),
+    "pull must not start while a bootstrap is in flight"
+  );
+  assert!(
+    app.status.contains("before pulling"),
+    "status must explain the block: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_edit_worktree_refuses_unconfigured_branch_type() {
+  // Codex review on PR #292: a branch whose parsed type is not in branch_types
+  // must refuse to open the rename modal rather than silently preselecting the
+  // first configured type (which Enter would then rename the branch to).
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  // `zzz` is a well-formed <type>/#<issue>-<desc> but not a configured type.
+  wt.branch = Some("zzz/#7-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("not configured"),
+    "status must explain: {}",
+    app.status
+  );
+}
+
+#[test]
+fn request_sync_refuses_while_another_mutation_runs() {
+  // Codex review on PR #292: the concurrent-mutation guard is centralized, so
+  // sync also refuses to start while a different mutating task is in flight.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#1-x".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.tasks.request(TaskKind::Pull);
+
+  app.request_sync();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sync),
+    "sync must not start while a pull is in flight"
+  );
+  assert!(
+    app.status.contains("before syncing"),
+    "status must explain: {}",
+    app.status
+  );
+}
+
+// --- contextual modal rebinding (issue #219) -----------------------------
+
+#[test]
+fn create_modal_honours_a_rebound_submit_key() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  // Rebind create.submit from Enter to F2.
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::CreateSubmit,
+      vec![KeyStroke::new(KeyCode::F(2), KeyModifiers::empty())],
+    )
+    .unwrap();
+
+  // Advance Type -> Issue -> Desc using the default `next_field` (Tab).
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+  assert_eq!(app.create_form.field, Field::Desc);
+
+  // The rebound key submits…
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)),
+    CreateKey::Submit
+  );
+  // …and the old default Enter no longer submits (it is unbound now).
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    CreateKey::Handled
+  );
+}
+
+#[test]
+fn create_modal_type_cycle_keys_stay_literal_on_text_fields() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+
+  let (_dir, mut app) = make_app();
+  // On the Desc field, `l` is literal text — it must NOT cycle the type
+  // (the default next_type binding includes `l`, gated on the Type field).
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Issue
+  app.handle_create_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)); // Desc
+  assert_eq!(app.create_form.field, Field::Desc);
+  let before = app.create_form.type_index;
+  assert_eq!(
+    app.handle_create_key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+    CreateKey::Handled
+  );
+  assert_eq!(
+    app.create_form.type_index, before,
+    "type must not cycle while typing a description"
+  );
+  assert!(
+    app.create_form.desc.contains('l'),
+    "`l` must reach the description buffer as literal text"
+  );
+}
+
+#[test]
+fn resolve_modal_reflects_a_confirm_rebind() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction};
+
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::ConfirmConfirm,
+      vec![KeyStroke::new(KeyCode::Char('o'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  // The inline confirm routing resolves through App::resolve_modal, so a
+  // rebind is observable there: `o` now means confirm, `y` no longer does.
+  assert_eq!(
+    app.resolve_modal(
+      KeyContext::Confirm,
+      KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE)
+    ),
+    Some(ModalAction::ConfirmConfirm)
+  );
+  assert_eq!(
+    app.resolve_modal(
+      KeyContext::Confirm,
+      KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)
+    ),
+    None
+  );
+}
+
+#[test]
+fn link_input_number_context_advertises_its_own_hints() {
+  // #219 review: while typing the number, the hints must resolve submit /
+  // cancel from `[tui.keys.modal.link.input_number]` (including a rebind), not the
+  // choose-target keys.
+  use crossterm::event::{KeyCode, KeyModifiers};
+  use gwm::tui::keymap::{KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  use gwm::tui::HintContext;
+
+  let mut modal = ModalKeymap::defaults();
+  modal
+    .apply_override(
+      ModalAction::LinkInputSubmit,
+      vec![KeyStroke::new(KeyCode::Char('x'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  let resolved = HintContext::LinkInputNumber.resolve(&Keymap::defaults(), &modal);
+  assert!(
+    resolved.iter().any(|(k, l)| l == "submit" && k == "x"),
+    "submit hint must show the rebound key, got {resolved:?}"
+  );
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "kind" || l == "move"),
+    "the input-number stage must not advertise choose-target hints: {resolved:?}"
+  );
+}
+
+#[test]
+fn hint_context_switches_to_link_input_number_while_typing() {
+  use gwm::tui::HintContext;
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app.enter_link_prompt();
+  assert_eq!(app.hint_context(), HintContext::LinkPrompt, "choose-target stage");
+  // Commit a target → InputNumber stage; the statusbar context must follow.
+  app.link_prompt_choose(LinkTarget::Issue);
+  assert_eq!(app.link_prompt_stage(), LinkPromptStage::InputNumber);
+  assert_eq!(app.hint_context(), HintContext::LinkInputNumber, "number-input stage");
+}
+
+#[test]
+fn link_modal_binding_on_fetch_key_wins_over_fetch_fallback() {
+  // #293 review: the global fetch shortcut is a FALLBACK after the stage
+  // context, so a contextual binding on that key is reachable. Rebinding the
+  // number-input submit onto `F` (also the default fetch key) must submit,
+  // not refresh.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::LinkPromptKey;
+
+  let (_dir, _repo, mut app) = make_app_on_branch("random-branch");
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::LinkInputSubmit,
+      vec![KeyStroke::new(KeyCode::Char('F'), KeyModifiers::empty())],
+    )
+    .unwrap();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue); // → InputNumber stage
+  assert!(
+    matches!(
+      app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::NONE)),
+      LinkPromptKey::Submit
+    ),
+    "a contextual binding on the fetch key must win over the fetch fallback"
+  );
+}
+
+// ── Exec picker overlay (issue #325) ──────────────────────────────────────
+
+/// An `App` over a fresh repo whose `.gwm.toml` carries `toml`, so the exec
+/// config is loaded at construction. The selected worktree is the main one
+/// (the repo root) — a valid `cwd` for an exec run.
+fn app_with_gwm_toml(toml: &str) -> (tempfile::TempDir, App) {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gwm.toml"), toml).unwrap();
+  let app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  (repo, app)
+}
+
+#[test]
+fn exec_picker_refuses_to_open_with_no_profiles() {
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::List, "no profiles ⇒ no transition");
+  assert!(
+    app.status.contains("exec.profiles"),
+    "the status explains why nothing opened: {}",
+    app.status
+  );
+}
+
+#[test]
+fn exec_picker_opens_and_lists_profiles_sorted() {
+  let (_repo, mut app) = app_with_gwm_toml(
+    "[exec.profiles.test]\ncommand = [\"cargo\", \"test\"]\n\n[exec.profiles.build]\ncommand = [\"cargo\", \"build\"]\n",
+  );
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  // `BTreeMap` key order ⇒ alphabetical: build, then test.
+  assert_eq!(app.exec_picker.profiles(), &["build".to_string(), "test".to_string()]);
+  assert_eq!(app.exec_picker.selected_profile(), Some("build"));
+}
+
+#[test]
+fn exec_picker_navigation_moves_the_highlight() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::ExecPickerKey;
+  let (_repo, mut app) =
+    app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n\n[exec.profiles.b]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  let down = app.handle_exec_picker_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+  assert_eq!(down, ExecPickerKey::Handled);
+  assert_eq!(app.exec_picker.selected_profile(), Some("b"));
+  app.handle_exec_picker_key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE));
+  assert_eq!(app.exec_picker.selected_profile(), Some("a"));
+}
+
+#[test]
+fn exec_picker_enter_submits_and_esc_cancels() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::ExecPickerKey;
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  assert_eq!(
+    app.handle_exec_picker_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+    ExecPickerKey::Submit
+  );
+  assert_eq!(
+    app.handle_exec_picker_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+    ExecPickerKey::Cancel
+  );
+}
+
+#[test]
+fn exec_picker_resolves_the_highlighted_profile_to_its_argv() {
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.build]\ncommand = [\"cargo\", \"build\", \"--release\"]\n");
+  app.enter_exec_picker();
+  let expected_cwd = app.selected().unwrap().path.clone();
+  let (argv, cwd) = app.exec_picker_resolve().expect("a valid profile resolves");
+  assert_eq!(
+    argv,
+    vec!["cargo".to_string(), "build".to_string(), "--release".to_string()],
+    "argv is the frozen command array verbatim (no shell)"
+  );
+  assert_eq!(cwd, expected_cwd, "cwd is the selected worktree's path");
+}
+
+#[test]
+fn exec_picker_close_returns_to_the_list() {
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"true\"]\n");
+  app.enter_exec_picker();
+  assert_eq!(app.view, View::ExecPicker);
+  app.close_exec_picker();
+  assert_eq!(app.view, View::List);
+}
+
+// ── Clean overlay (issue #325) ────────────────────────────────────────────
+
+#[test]
+fn clean_overlay_scans_gitignored_artifacts() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 2048]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  let reclaim = app.clean_overlay.reclaim().expect("the worktree was scanned");
+  assert!(
+    reclaim.artifacts.iter().any(|a| a.rel == "target"),
+    "the git-ignored target/ is counted: {:?}",
+    reclaim.artifacts
+  );
+  assert!(app.clean_overlay.total_bytes() >= 2048);
+}
+
+#[test]
+fn clean_overlay_gate_skips_non_gitignored_artifacts() {
+  let (repo, _) = init_repo();
+  // No `.gitignore` ⇒ `target/` is NOT ignored ⇒ the safety gate preserves it.
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 1024]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  let reclaim = app.clean_overlay.reclaim().expect("scanned");
+  assert!(reclaim.artifacts.is_empty(), "a non-ignored target/ is never counted");
+  assert!(
+    app.clean_overlay.skipped().contains(&"target".to_string()),
+    "and is reported as skipped: {:?}",
+    app.clean_overlay.skipped()
+  );
+  assert_eq!(app.clean_overlay.total_bytes(), 0);
+}
+
+#[test]
+fn clean_overlay_delete_reclaims_only_the_gated_dir() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("out"), vec![0u8; 512]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(repo.path().join("build").exists());
+  app.clean_overlay_delete();
+  assert!(!repo.path().join("build").exists(), "the build dir was reclaimed");
+  assert_eq!(app.view, View::List, "and the overlay closed");
+  assert!(
+    app.status.contains("reclaimed"),
+    "status reports the reclaim: {}",
+    app.status
+  );
+}
+
+#[test]
+fn clean_confirm_arms_then_is_ready_after_the_countdown() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "dist/\n").unwrap();
+  std::fs::create_dir(repo.path().join("dist")).unwrap();
+  std::fs::write(repo.path().join("dist").join("x"), vec![0u8; 100]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  let t0 = Instant::now();
+  assert_eq!(app.clean_confirm_press(t0), ConfirmKeyAction::Armed);
+  assert!(app.clean_overlay.confirm.is_armed());
+  assert_eq!(
+    app.tick_clean_countdown(t0 + Duration::from_secs(1)),
+    CountdownTickOutcome::Pending
+  );
+  assert_eq!(
+    app.tick_clean_countdown(t0 + Duration::from_secs(3)),
+    CountdownTickOutcome::ReadyToFire
+  );
+}
+
+#[test]
+fn clean_confirm_with_zero_countdown_fires_immediately() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "node_modules/\n").unwrap();
+  std::fs::create_dir(repo.path().join("node_modules")).unwrap();
+  std::fs::write(repo.path().join("node_modules").join("y"), vec![0u8; 64]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 0\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::FireNow);
+}
+
+#[test]
+fn clean_confirm_is_a_noop_when_nothing_to_reclaim() {
+  let (repo, _) = init_repo(); // no artifact dirs ⇒ empty scan
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(app.clean_overlay.is_empty_scan());
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Disarmed);
+  assert!(app.status.contains("nothing to reclaim"), "status: {}", app.status);
+}
+
+#[test]
+fn clean_overlay_profile_picker_rescans_per_profile() {
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "cache/\nout/\n").unwrap();
+  std::fs::create_dir(repo.path().join("cache")).unwrap();
+  std::fs::write(repo.path().join("cache").join("c"), vec![0u8; 100]).unwrap();
+  std::fs::create_dir(repo.path().join("out")).unwrap();
+  std::fs::write(repo.path().join("out").join("o"), vec![0u8; 200]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.a]\ndirs = [\"cache\"]\n\n[clean.profiles.b]\ndirs = [\"out\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Opens on the `(default)` choice (no --profile) — built-in set here, which
+  // doesn't include `cache` / `out`.
+  assert_eq!(app.clean_overlay.selected_profile(), None);
+  // Cycle to profile `a` → re-scans for `cache` only.
+  app.clean_overlay_next();
+  assert_eq!(app.clean_overlay.selected_profile(), Some("a"));
+  let a = app.clean_overlay.reclaim().unwrap();
+  assert!(a.artifacts.iter().any(|x| x.rel == "cache"));
+  assert!(!a.artifacts.iter().any(|x| x.rel == "out"));
+  // Cycle to profile `b` → re-scans for `out`.
+  app.clean_overlay_next();
+  assert_eq!(app.clean_overlay.selected_profile(), Some("b"));
+  let b = app.clean_overlay.reclaim().unwrap();
+  assert!(b.artifacts.iter().any(|x| x.rel == "out"));
+  assert!(!b.artifacts.iter().any(|x| x.rel == "cache"));
+}
+
+#[test]
+fn clean_overlay_close_returns_to_the_list() {
+  let (repo, _) = init_repo();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(app.view, View::CleanReport);
+  app.close_clean_overlay();
+  assert_eq!(app.view, View::List);
+}
+
+#[test]
+fn clean_overlay_opens_on_the_no_profile_default_choice() {
+  // The overlay always opens on the `(default)` / no-`--profile` choice, so
+  // its first preview matches `gwm clean` — even when the repo defines named
+  // profiles that sort before it.
+  let (repo, _) = init_repo();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.aggressive]\ndirs = [\"target\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert_eq!(
+    app.clean_overlay.selected_profile(),
+    None,
+    "opens on the no-profile choice"
+  );
+  assert_eq!(app.clean_overlay.choice_labels().first().copied(), Some("(default)"));
+  assert!(
+    app.clean_overlay.has_profiles(),
+    "a named profile makes the picker worth showing"
+  );
+}
+
+#[test]
+fn clean_overlay_default_choice_uses_builtins_without_a_default_profile() {
+  // Codex #333 review: a repo with only a non-`default` profile must not make
+  // the built-in set unreachable. The `(default)` choice resolves to the
+  // built-in `target` / … set (matching `gwm clean` with no --profile), NOT
+  // the alphabetically-first profile.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\ncoverage/\n").unwrap();
+  // `target` is a built-in; `coverage` is only reachable via the named profile.
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("t"), vec![0u8; 128]).unwrap();
+  std::fs::create_dir(repo.path().join("coverage")).unwrap();
+  std::fs::write(repo.path().join("coverage").join("c"), vec![0u8; 256]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.coverage]\ndirs = [\"coverage\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // The `(default)` choice scans the built-in set → finds `target`, not `coverage`.
+  let r = app.clean_overlay.reclaim().unwrap();
+  assert!(
+    r.artifacts.iter().any(|a| a.rel == "target"),
+    "built-in target/ is reachable"
+  );
+  assert!(
+    !r.artifacts.iter().any(|a| a.rel == "coverage"),
+    "the named profile is not the default"
+  );
+}
+
+#[test]
+fn clean_overlay_delete_revalidates_the_gate_just_before_removing() {
+  // Codex #333 review (TOCTOU): the overlay scans on open, but the delete can
+  // fire seconds later (countdown / overlay left open). If a dir turned unsafe
+  // meanwhile, the delete must re-gate and preserve it — not destroy the now
+  // tracked file the stale snapshot still lists.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "target/\n").unwrap();
+  std::fs::create_dir(repo.path().join("target")).unwrap();
+  std::fs::write(repo.path().join("target").join("blob"), vec![0u8; 256]).unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // The scan saw a safe (ignored, untracked) `target/`.
+  assert!(app
+    .clean_overlay
+    .reclaim()
+    .unwrap()
+    .artifacts
+    .iter()
+    .any(|a| a.rel == "target"));
+  // Now force-track a file under it — the snapshot is stale.
+  std::process::Command::new("git")
+    .arg("-C")
+    .arg(repo.path())
+    .args(["add", "-f", "target/blob"])
+    .status()
+    .unwrap();
+  app.clean_overlay_delete();
+  // The re-gate catches the now-tracked dir and refuses to remove it.
+  assert!(
+    repo.path().join("target").exists(),
+    "a directory that became tracked after the scan must not be reclaimed"
+  );
+  assert_eq!(app.view, View::List, "the overlay still closes");
+}
+
+#[test]
+fn exec_picker_runs_in_the_open_time_worktree_and_config_after_a_drift() {
+  // Codex #333: an auto-refresh can drift the live selection AND (workspace)
+  // swap the active config while the picker is open. Resolve must run in the
+  // captured worktree against the captured `[exec]` config — not the live
+  // ones.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.a]\ncommand = [\"echo\", \"hi\"]\n");
+  let opened = app.selected().unwrap().path.clone();
+  app.enter_exec_picker();
+  // Drift: the list AND the live config moved out from under the overlay.
+  app.worktrees = vec![worktree_fixture("other")];
+  app.config.exec.profiles.clear();
+  let (argv, cwd) = app
+    .exec_picker_resolve()
+    .expect("resolves against the captured cfg + cwd");
+  assert_eq!(argv, vec!["echo".to_string(), "hi".to_string()]);
+  assert_eq!(cwd, opened, "runs in the open-time worktree, not the drifted selection");
+}
+
+#[test]
+fn clean_overlay_deletes_the_open_time_target_and_config_after_a_drift() {
+  // Codex #333: the clean delete must reclaim the previewed worktree using the
+  // captured `[clean]` config, even if the live selection AND config drifted
+  // (workspace refresh) meanwhile.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[clean.profiles.x]\ndirs = [\"build\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  app.clean_overlay_next(); // select profile `x` (dirs = build)
+  assert_eq!(app.clean_overlay.selected_profile(), Some("x"));
+  // Drift: replace the list AND drop the live config's profile.
+  app.worktrees = vec![worktree_fixture("other")];
+  app.config.clean.profiles.clear();
+  app.clean_overlay_delete();
+  assert!(
+    !repo.path().join("build").exists(),
+    "reclaimed via the captured target + config despite the drift"
+  );
+}
+
+#[test]
+fn exec_picker_pins_a_worktree_relative_program_to_the_target() {
+  // Codex #333: a `[exec.profiles].command` like `./run.sh` must resolve
+  // against the captured worktree (like the CLI's resolve_program), not gwm's
+  // own cwd.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.run]\ncommand = [\"./run.sh\", \"--ci\"]\n");
+  let wt = app.selected().unwrap().path.clone();
+  app.enter_exec_picker();
+  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  // Same anchoring the CLI exec path applies — an absolute path under the
+  // worktree, not gwm's own cwd.
+  assert_eq!(
+    argv[0],
+    gwm::exec::resolve_program(&wt, "./run.sh").to_string_lossy(),
+    "the relative executable is pinned to the worktree"
+  );
+  assert!(std::path::Path::new(&argv[0]).is_absolute(), "and is absolute");
+  assert_eq!(argv[1], "--ci", "the args are passed through unchanged");
+}
+
+#[test]
+fn exec_picker_leaves_a_bare_command_for_path_lookup() {
+  // A bare command (no path separator) must NOT be anchored — it relies on
+  // PATH resolution inside the worktree.
+  let (_repo, mut app) = app_with_gwm_toml("[exec.profiles.t]\ncommand = [\"cargo\", \"test\"]\n");
+  app.enter_exec_picker();
+  let (argv, _cwd) = app.exec_picker_resolve().expect("resolves");
+  assert_eq!(argv, vec!["cargo".to_string(), "test".to_string()]);
+}
+
+#[test]
+fn clean_countdown_is_pinned_to_the_open_time_config() {
+  // Codex #333: the safety delay is captured at open, so a workspace config
+  // swap (e.g. to a repo with confirm_countdown_secs = 0) can't erase it
+  // while the overlay is armed.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  // Drift: a refresh swapped in a repo with no safety delay.
+  app.config.tui.confirm_countdown_secs = 0;
+  assert_eq!(
+    app.clean_countdown_total(),
+    Duration::from_secs(3),
+    "the safety delay captured at open survives a live config swap"
+  );
+}
+
+#[test]
+fn destructive_overlay_open_flags_exec_and_clean_views() {
+  // Codex #333: the run loop suspends auto-refresh / active-repo sync while a
+  // destructive overlay is open, gating on this predicate so the captured
+  // exec/clean target can't drift mid-overlay.
+  let (_repo, mut app) = make_app();
+  assert!(
+    !app.destructive_overlay_open(),
+    "list view is not a destructive overlay"
+  );
+  app.view = View::ExecPicker;
+  assert!(app.destructive_overlay_open());
+  app.view = View::CleanReport;
+  assert!(app.destructive_overlay_open());
+  // The delete-confirm modal is not in this class — it has no captured target
+  // to protect and reads the live selection by design.
+  app.view = View::Confirm;
+  assert!(!app.destructive_overlay_open());
+}
+
+#[test]
+fn clean_overlay_noop_profile_move_keeps_the_countdown_armed() {
+  // Codex #333: with only the `(default)` choice, `j`/`k` are no-ops and must
+  // NOT re-scan — a re-scan resets the ConfirmModal, silently disarming a
+  // pending reclaim while the status bar still reads "armed".
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "build/\n").unwrap();
+  std::fs::create_dir(repo.path().join("build")).unwrap();
+  std::fs::write(repo.path().join("build").join("o"), vec![0u8; 64]).unwrap();
+  std::fs::write(repo.path().join(".gwm.toml"), "[tui]\nconfirm_countdown_secs = 3\n").unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(!app.clean_overlay.has_profiles(), "only the (default) choice exists");
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Armed);
+  app.clean_overlay_next();
+  assert!(app.clean_overlay.confirm.is_armed(), "a no-op move must not disarm");
+  app.clean_overlay_prev();
+  assert!(
+    app.clean_overlay.confirm.is_armed(),
+    "prev no-op must not disarm either"
+  );
+}
+
+#[test]
+fn clean_overlay_real_profile_change_disarms_the_countdown() {
+  // The complement: actually changing the target re-requires confirmation.
+  let (repo, _) = init_repo();
+  std::fs::write(repo.path().join(".gitignore"), "a/\nb/\n").unwrap();
+  for d in ["a", "b"] {
+    std::fs::create_dir(repo.path().join(d)).unwrap();
+    std::fs::write(repo.path().join(d).join("x"), vec![0u8; 64]).unwrap();
+  }
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    "[tui]\nconfirm_countdown_secs = 3\n\n[clean.profiles.pa]\ndirs = [\"a\"]\n\n[clean.profiles.pb]\ndirs = [\"b\"]\n",
+  )
+  .unwrap();
+  let mut app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  app.enter_clean_overlay();
+  assert!(app.clean_overlay.has_profiles());
+  // The `(default)` choice scans built-ins (empty here), so move to `pa`
+  // (which reclaims `a`) before arming.
+  app.clean_overlay_next(); // (default) → pa
+  assert_eq!(app.clean_overlay.selected_profile(), Some("pa"));
+  assert_eq!(app.clean_confirm_press(Instant::now()), ConfirmKeyAction::Armed);
+  app.clean_overlay_next(); // pa → pb: a real change
+  assert!(
+    !app.clean_overlay.confirm.is_armed(),
+    "changing the target re-requires confirmation"
   );
 }

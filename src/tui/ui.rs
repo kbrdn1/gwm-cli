@@ -1,20 +1,29 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
 use super::keymap::{Action, Keymap};
+use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
+use super::state::async_task::TaskKind;
+use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
 use super::state::create_form::Field;
+use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
 use super::theme::Theme;
+use super::wt_tree::{self, working_tree_category, WtCategory, WtNode, WT_DIR_OPEN_ICON};
 use crate::bootstrap::{BootstrapReport, StepStatus};
 use crate::command_log::CommandStatus;
 use crate::config::ConfigSource;
-use crate::github::{IssueState, LinkSource, PrState};
+use crate::github::{CiState, IssueState, LinkSource, PrState};
 use crate::worktree::{self, BranchStatus, WorktreeInfo};
 use ratatui::{
+  buffer::Buffer,
   layout::{Alignment, Constraint, Direction, Layout, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span},
-  widgets::{Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Table, Wrap},
+  widgets::{
+    Block, BorderType, Borders, Cell, Clear, Padding, Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Table, Widget, Wrap,
+  },
   Frame,
 };
 use std::time::{Duration, Instant};
@@ -34,8 +43,102 @@ pub struct SidebarSections {
   pub worktree: Vec<Line<'static>>,
   /// `git status --short` lines, or `✓ clean`, or a load error.
   pub working_tree: Vec<Line<'static>>,
+  /// Per-category counts of changed files (issue #287): created / modified
+  /// / deleted, driving the colour-coded nerdfont footer of the Working
+  /// Tree pane.
+  pub working_tree_counts: WorkingTreeCounts,
   /// Up to 10 oneline commits, or an empty / error notice.
   pub recent_commits: Vec<Line<'static>>,
+}
+
+/// Reusable one-line loader for dedicated panel/modal areas (issue #257).
+#[derive(Debug, Clone, Copy)]
+pub enum LoaderWidgetState<'a> {
+  Running {
+    glyph: &'a str,
+    label: &'a str,
+    detail: Option<&'a str>,
+  },
+  Failed {
+    message: &'a str,
+    detail: Option<&'a str>,
+  },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoaderWidget<'a> {
+  state: LoaderWidgetState<'a>,
+  accent: Color,
+  text: Color,
+  muted: Color,
+  failed: Color,
+  alignment: Alignment,
+}
+
+impl<'a> LoaderWidget<'a> {
+  pub fn running(glyph: &'a str, label: &'a str, detail: Option<&'a str>, theme: &Theme) -> Self {
+    Self {
+      state: LoaderWidgetState::Running { glyph, label, detail },
+      accent: theme.accent,
+      text: theme.name,
+      muted: theme.muted,
+      failed: theme.prunable,
+      alignment: Alignment::Left,
+    }
+  }
+
+  pub fn failed(message: &'a str, detail: Option<&'a str>, theme: &Theme) -> Self {
+    Self {
+      state: LoaderWidgetState::Failed { message, detail },
+      accent: theme.accent,
+      text: theme.name,
+      muted: theme.muted,
+      failed: theme.prunable,
+      alignment: Alignment::Left,
+    }
+  }
+
+  pub fn alignment(mut self, alignment: Alignment) -> Self {
+    self.alignment = alignment;
+    self
+  }
+
+  fn line(self) -> Line<'static> {
+    let mut spans = match self.state {
+      LoaderWidgetState::Running { glyph, label, .. } => vec![
+        Span::styled(
+          format!("{glyph} "),
+          Style::default().fg(self.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+          label.to_string(),
+          Style::default().fg(self.text).add_modifier(Modifier::BOLD),
+        ),
+      ],
+      LoaderWidgetState::Failed { message, .. } => vec![
+        Span::styled("! ", Style::default().fg(self.failed).add_modifier(Modifier::BOLD)),
+        Span::styled(
+          message.to_string(),
+          Style::default().fg(self.failed).add_modifier(Modifier::BOLD),
+        ),
+      ],
+    };
+
+    let detail = match self.state {
+      LoaderWidgetState::Running { detail, .. } | LoaderWidgetState::Failed { detail, .. } => detail,
+    };
+    if let Some(detail) = detail {
+      spans.push(Span::styled(" — ", Style::default().fg(self.muted)));
+      spans.push(Span::styled(detail.to_string(), Style::default().fg(self.muted)));
+    }
+    Line::from(spans)
+  }
+}
+
+impl Widget for LoaderWidget<'_> {
+  fn render(self, area: Rect, buf: &mut Buffer) {
+    Paragraph::new(self.line()).alignment(self.alignment).render(area, buf);
+  }
 }
 
 pub fn draw(f: &mut Frame, app: &mut App) {
@@ -62,6 +165,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CommandPalette => draw_command_palette(f, app),
     View::CommandLogs => draw_command_logs(f, app),
     View::Config => draw_config_panel(f, app),
+    View::Pty => draw_pty_overlay(f, app),
+    // #325: exec profile picker renders as a small centred modal.
+    View::ExecPicker => draw_exec_picker(f, app),
+    // #325: clean reclaim report renders as a centred modal.
+    View::CleanReport => draw_clean_overlay(f, app),
+    // #290: branch-rename inline modal renders over the list.
+    View::Edit => draw_edit_worktree(f, app),
     View::List => {}
   }
 }
@@ -346,6 +456,24 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // borrow handed to `render_stateful_widget`.
   let theme = app.theme;
 
+  // Workspace mode (issue #36): a leading REPO column naming each row's repo.
+  // Names are resolved per visible row up front so the immutable `app` reads
+  // don't clash with the mutable `list_state` borrow at render time.
+  let is_workspace = app.is_workspace();
+  let repo_names: Vec<String> = if is_workspace {
+    filtered
+      .iter()
+      .map(|&raw| app.row_repo_name(raw).unwrap_or("?").to_string())
+      .collect()
+  } else {
+    Vec::new()
+  };
+  let repo_w = if is_workspace {
+    column_width(repo_names.iter().map(|s| s.as_str()), 6, 24)
+  } else {
+    0
+  };
+
   // Dynamic column widths derived from the visible subset so columns fit the
   // rows actually on screen. The path column is always last and absorbs the
   // remaining width.
@@ -353,22 +481,26 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   let branch_w = column_width(visible.iter().map(|w| w.branch.as_deref().unwrap_or("-")), 18, 38);
   let status_w: u16 = 16;
 
-  let header = Row::new(vec![
-    // Age column lives at column 0 — recency-first, lazygit-style. No
-    // caption; the glyphs (`2d`, `3w`, `1M`, `5y`, `-`) are self-evident
-    // and a header would steal space from BRANCH on narrow terminals.
-    Cell::from(""),
-    Cell::from(""),
-    Cell::from("NAME"),
-    Cell::from("BRANCH"),
-    Cell::from("STATUS"),
-    Cell::from("PATH"),
-  ])
-  .style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
+  // Header cells, with an optional REPO column after the (caption-less) age
+  // column in workspace mode.
+  let mut header_cells = vec![Cell::from("")];
+  if is_workspace {
+    header_cells.push(Cell::from("REPO"));
+  }
+  header_cells.push(Cell::from("I/P"));
+  header_cells.push(Cell::from("NAME"));
+  header_cells.push(Cell::from("BRANCH"));
+  header_cells.push(Cell::from("STATUS"));
+  header_cells.push(Cell::from("PATH"));
+  let header = Row::new(header_cells).style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
 
   let rows: Vec<Row> = visible
     .iter()
-    .map(|w| build_row(w, name_w, branch_w, status_w, &theme))
+    .enumerate()
+    .map(|(vi, w)| {
+      let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
+      build_row(w, repo, name_w, branch_w, status_w, &theme)
+    })
     .collect();
 
   // ratatui's Layout solver squeezes the FIRST `Length` column to
@@ -376,22 +508,27 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   // column rock-stable at 4 cells (the cost of losing the unit
   // letter to truncation — "22h" → "22" — is worse than name/branch
   // shrinking by a char or two). Strategy:
-  //   - `Length(4)` for age, `Length(2)` for marker, `Length(16)` for
-  //     status: hard-fixed lengths the solver must honour.
+  //   - `Length(4)` for age, `Length(3)` for marker (`●/●`, `●/-`, etc.),
+  //     `Length(16)` for status: hard-fixed lengths the solver must honour.
   //   - `Min(name_w)` / `Min(branch_w)`: these absorb the pressure
   //     when the terminal is narrow (they shrink down to 8) and grow
   //     to the original clamped width (or more) when there's room.
   //   - `Fill(1)` for path: takes whatever's left, vanishes last.
   // Verified by standalone probe down to 40-cell terminals: col 0
   // stays at 4 cells across every size.
-  let widths = [
-    Constraint::Length(4),
-    Constraint::Length(2),
+  let mut widths = vec![Constraint::Length(4)];
+  if is_workspace {
+    // REPO column sits between age and the I/P marker; a hard length so the
+    // solver doesn't starve it on narrow terminals.
+    widths.push(Constraint::Length(repo_w));
+  }
+  widths.extend([
+    Constraint::Length(3),
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
     Constraint::Fill(1),
-  ];
+  ]);
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
@@ -514,9 +651,16 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     None => true,
   };
   if needs_refresh {
+    // Committed diff of the branch vs its base trunk (issue #287). Resolved
+    // through `config.doctor.trunks` so the figure matches the base
+    // `gwm pr` would target; folded into the cached payload so the git
+    // call only fires on a selection / mode change, not every frame.
+    let diff = worktree::git_diff_stat_vs_base(&w.path, &app.config.doctor.trunks)
+      .ok()
+      .flatten();
     app.sidebar.cache = Some((
       (w.path.clone(), active_mode),
-      build_sidebar_sections(&w, active_mode, &theme),
+      build_sidebar_sections(&w, active_mode, diff, &theme),
     ));
   }
 
@@ -531,12 +675,13 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // Read the cached section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
   // worktree section gains +1 row for the live header prefix.
-  let (worktree_len, working_tree_len, commits_len) = {
+  let (worktree_len, working_tree_len, working_tree_counts, commits_len) = {
     let cache = app.sidebar.cache.as_ref();
     let s = cache.map(|(_, s)| s);
     (
       s.map(|s| s.worktree.len()).unwrap_or(0) + 1,
       s.map(|s| s.working_tree.len()).unwrap_or(0),
+      s.map(|s| s.working_tree_counts).unwrap_or_default(),
       s.map(|s| s.recent_commits.len()).unwrap_or(0) as u16,
     )
   };
@@ -602,6 +747,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   };
   let issue_pr_title = issue_pr_pane_title(&app.keymap);
   let working_tree_title = working_tree_pane_title(&app.keymap);
+  // Working Tree footer (issue #287): colour-coded created / modified /
+  // deleted counts. `None` in stashes mode (no section) and on a clean tree
+  // (all-zero counts → `working_tree_counts_footer` returns `None`), so the
+  // footer disappears instead of showing a bare ` 0 `.
+  let working_tree_footer = if working_tree_len == 0 {
+    None
+  } else {
+    working_tree_counts_footer(&working_tree_counts, &theme)
+  };
 
   // The render borrow: cached sections are read by reference and never
   // cloned (issue #238). On a cache hit this copies zero commit text — the
@@ -639,7 +793,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
         SectionBody::new(&cache.working_tree),
         border_color,
         0,
-        None,
+        working_tree_footer,
       );
     }
     render_section(
@@ -649,7 +803,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       SectionBody::new(&cache.recent_commits),
       border_color,
       scroll,
-      panel_footer,
+      panel_footer.map(ratatui::text::Line::from),
     );
   }
 }
@@ -700,7 +854,7 @@ fn render_section(
   body: SectionBody<'_>,
   border_color: Color,
   scroll: u16,
-  footer: Option<String>,
+  footer: Option<ratatui::text::Line<'static>>,
 ) {
   let SectionBody { prefix, lines } = body;
   let mut block = Block::default()
@@ -709,7 +863,7 @@ fn render_section(
     .title(title.into())
     .border_style(Style::default().fg(border_color));
   if let Some(f) = footer {
-    block = block.title_bottom(ratatui::text::Line::from(f).right_aligned());
+    block = block.title_bottom(f.right_aligned());
   }
   // Pad content with one leading space per line for breathing room against
   // the left border. Each padded line BORROWS its span content from the
@@ -775,6 +929,7 @@ fn sidebar_status_dot(app: &App) -> (&'static str, Color) {
 pub fn build_sidebar_sections(
   w: &WorktreeInfo,
   mode: super::state::sidebar::SidebarMode,
+  diff: Option<worktree::DiffLineStat>,
   theme: &Theme,
 ) -> SidebarSections {
   use super::state::sidebar::SidebarMode;
@@ -791,13 +946,14 @@ pub fn build_sidebar_sections(
     // follow-up list; v1 ships `<ref>  <subject>` only.
     SidebarMode::Stashes => stash_lines(w, STASHES_DISPLAY_LIMIT, theme),
   };
-  let working_tree = match mode {
+  let (working_tree, working_tree_counts) = match mode {
     SidebarMode::Commits => working_tree_lines(w, theme),
-    SidebarMode::Stashes => Vec::new(),
+    SidebarMode::Stashes => (Vec::new(), WorkingTreeCounts::default()),
   };
   SidebarSections {
-    worktree: worktree_identity_lines(w, theme),
+    worktree: worktree_identity_lines(w, diff.as_ref(), theme),
     working_tree,
+    working_tree_counts,
     recent_commits: body,
   }
 }
@@ -845,8 +1001,12 @@ fn stash_lines(w: &WorktreeInfo, limit: usize, theme: &Theme) -> Vec<Line<'stati
 /// not cached here, so the dot can track GitHub fetch state without
 /// invalidating the git-preview cache. Skips badges whose flags are
 /// false to avoid visual noise.
-fn worktree_identity_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
-  let mut out: Vec<Line<'static>> = Vec::with_capacity(4);
+fn worktree_identity_lines(
+  w: &WorktreeInfo,
+  diff: Option<&worktree::DiffLineStat>,
+  theme: &Theme,
+) -> Vec<Line<'static>> {
+  let mut out: Vec<Line<'static>> = Vec::with_capacity(5);
   let label_w = "Created".chars().count();
   let label_style = Style::default().fg(theme.muted);
 
@@ -875,7 +1035,24 @@ fn worktree_identity_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>
     Span::styled(branch_age_label(w), Style::default().fg(branch_age_color(w, theme))),
   ]));
 
-  // Line 3 — "State  <badges>" with optional flag badges. Only renders the badges
+  // Line 3 (issue #287) — "Diff  +<ins> -<del>" of the branch versus its
+  // base trunk (three-dot merge-base diff, matching `gwm pr`'s base).
+  // Insertions paint green (`untracked` role), deletions red (`prunable`
+  // role). Skipped when there's no base, HEAD is the trunk, or the branch
+  // has no committed diff yet — `diff` arrives `None` / empty in those
+  // cases so the card stays compact.
+  if let Some(d) = diff {
+    if !d.is_empty() {
+      out.push(Line::from(vec![
+        Span::styled(format!("{:<label_w$}  ", "Diff", label_w = label_w), label_style),
+        Span::styled(format!("+{}", d.insertions), Style::default().fg(theme.untracked)),
+        Span::raw(" "),
+        Span::styled(format!("-{}", d.deletions), Style::default().fg(theme.prunable)),
+      ]));
+    }
+  }
+
+  // Line 4 — "State  <badges>" with optional flag badges. Only renders the badges
   // that are *true* / *interesting*; the false cases stay invisible.
   let mut state_spans = vec![Span::styled(
     format!("{:<label_w$}  ", "State", label_w = label_w),
@@ -954,38 +1131,223 @@ fn badges_line(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   Line::from(spans)
 }
 
-fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> Vec<Line<'static>> {
+fn working_tree_lines(w: &WorktreeInfo, theme: &Theme) -> (Vec<Line<'static>>, WorkingTreeCounts) {
   match worktree::git_status_short(&w.path) {
-    Ok(s) if s.trim().is_empty() => {
+    Ok((s, _)) if s.trim().is_empty() => (
       vec![Line::from(Span::styled(
         "✓ clean".to_string(),
         Style::default().fg(theme.clean),
-      ))]
+      ))],
+      WorkingTreeCounts::default(),
+    ),
+    Ok((s, scan_truncated)) => {
+      let counts = working_tree_status_counts(&s);
+      let records = wt_tree::parse_status_z(&s);
+      // Cap the explorer for a pathological untracked-dir explosion (issue
+      // #300): build at most WT_TREE_MAX_FILES leaves and surface the
+      // remainder as a single muted `… N more` row, so the non-scrollable
+      // section can't be sized from tens of thousands of files.
+      let (tree, overflow) = wt_tree::build_capped_tree(&records, wt_tree::WT_TREE_MAX_FILES);
+      let mut lines = working_tree_tree_lines(&tree, theme);
+      if overflow > 0 {
+        // After a scan truncation the real remainder is unknown (git was
+        // killed at the cap), so `overflow` is only a lower bound — render
+        // `… N+ more` rather than claiming an exact count.
+        let label = if scan_truncated {
+          format!("… {}+ more", overflow)
+        } else {
+          format!("… {} more", overflow)
+        };
+        lines.push(Line::from(Span::styled(label, Style::default().fg(theme.muted))));
+      }
+      (lines, counts)
     }
-    Ok(s) => s.lines().map(|line| working_tree_status_line(line, theme)).collect(),
-    Err(e) => vec![Line::from(Span::styled(
-      format!("! {}", e),
-      Style::default().fg(theme.prunable),
-    ))],
+    Err(e) => (
+      vec![Line::from(Span::styled(
+        format!("! {}", e),
+        Style::default().fg(theme.prunable),
+      ))],
+      WorkingTreeCounts::default(),
+    ),
   }
 }
 
-/// Colourise one `git status --short` porcelain line (issue #179).
+/// Render the Working Tree file-explorer model (issue #300) into styled
+/// sidebar rows.
 ///
-/// The short format is `XY<space>PATH`, where `X` is the index (staged)
-/// status and `Y` the worktree status. Three distinct colours keep modified
-/// and created files visually apart:
+/// - **Connector lines**: each row is prefixed with box-drawing branches
+///   (`├─ ` / `└─ ` with `│  ` / `   ` carried down from ancestors) in the
+///   muted role, so the hierarchy reads like `tree(1)`.
+/// - **Directory colour is retroactive**: a folder is painted by the
+///   aggregate git category of its subtree — only-modified → yellow,
+///   only-new → green, only-deleted → red, mixed (or none) → neutral
+///   `accent`.
+/// - **Files** carry a category-coloured status badge + a nerd-font
+///   file-type icon + the leaf name, painted in the file's change-category
+///   colour so a row's colour matches the footer count it belongs to (the
+///   #287 invariant, preserved).
+/// - An **extra space** follows each nerd-font glyph: most glyphs render
+///   double-width but occupy a single terminal cell, so the pad keeps the
+///   following text from being clipped.
+fn working_tree_tree_lines(nodes: &[WtNode], theme: &Theme) -> Vec<Line<'static>> {
+  let mut out = Vec::new();
+  push_wt_nodes(&mut out, nodes, String::new(), theme);
+  out
+}
+
+/// Depth-first walk used by [`working_tree_tree_lines`]. `prefix` is the
+/// accumulated ancestor connector string; each child appends `├─ `/`└─ `
+/// for its own row and `│  `/`   ` for its descendants.
+fn push_wt_nodes(out: &mut Vec<Line<'static>>, nodes: &[WtNode], prefix: String, theme: &Theme) {
+  let last = nodes.len().saturating_sub(1);
+  for (i, node) in nodes.iter().enumerate() {
+    let is_last = i == last;
+    let connector = format!("{}{}", prefix, if is_last { "└─ " } else { "├─ " });
+    match node {
+      WtNode::Dir {
+        name,
+        children,
+        category,
+      } => {
+        let color = match category {
+          Some(c) => working_tree_category_color(*c, theme),
+          None => theme.accent,
+        };
+        out.push(Line::from(vec![
+          Span::styled(connector, Style::default().fg(theme.muted)),
+          Span::styled(
+            format!("{}  {}", WT_DIR_OPEN_ICON, wt_tree::sanitize_name(name)),
+            Style::default().fg(color),
+          ),
+        ]));
+        let child_prefix = format!("{}{}", prefix, if is_last { "   " } else { "│  " });
+        push_wt_nodes(out, children, child_prefix, theme);
+      }
+      WtNode::File {
+        name,
+        icon,
+        badge,
+        category,
+      } => {
+        let color = working_tree_category_color(*category, theme);
+        out.push(Line::from(vec![
+          Span::styled(connector, Style::default().fg(theme.muted)),
+          Span::styled(format!("{} ", badge), Style::default().fg(color)),
+          Span::styled(
+            format!("{}  {}", icon, wt_tree::sanitize_name(name)),
+            Style::default().fg(color),
+          ),
+        ]));
+      }
+    }
+  }
+}
+
+/// Per-category counts of changed files in the Working Tree pane (issue
+/// #287), derived from `git status --short`. Each tracked / untracked file
+/// is counted once, into the single category that dominates its porcelain
+/// `XY` status pair.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkingTreeCounts {
+  /// Untracked or added files (`??`, or `A` in either column).
+  pub created: usize,
+  /// Files changed in place (`M`, `R`, `C`, `T`, `U`, …).
+  pub modified: usize,
+  /// Files removed (`D` in either column).
+  pub deleted: usize,
+}
+
+impl WorkingTreeCounts {
+  /// True when no file falls in any category — a clean (or empty) status,
+  /// so the Working Tree footer renders nothing rather than a bare ` 0 `.
+  pub fn is_empty(&self) -> bool {
+    self.created == 0 && self.modified == 0 && self.deleted == 0
+  }
+}
+
+/// Nerdfont codicon glyphs for the Working Tree footer counts (issue #287):
+/// `diff-added` / `diff-modified` / `diff-removed`, the purpose-built file-
+/// status trio.
+pub const WT_CREATED_ICON: &str = "\u{eadc}";
+pub const WT_MODIFIED_ICON: &str = "\u{eadd}";
+pub const WT_DELETED_ICON: &str = "\u{eade}";
+
+/// Theme colour for a change category (issue #287): created → `untracked`
+/// (green), modified → `modified` (yellow), deleted → `prunable` (red).
+fn working_tree_category_color(cat: WtCategory, theme: &Theme) -> Color {
+  match cat {
+    WtCategory::Created => theme.untracked,
+    WtCategory::Modified => theme.modified,
+    WtCategory::Deleted => theme.prunable,
+  }
+}
+
+/// Tally `git status --porcelain -z` output into per-category
+/// [`WorkingTreeCounts`] (issue #287) via [`working_tree_category`]. Shares
+/// the NUL-delimited parser ([`wt_tree::parse_status_z`]) with the file
+/// tree, so a rename counts once (its source token is dropped) and the
+/// footer total always matches the number of rows the tree renders.
+pub fn working_tree_status_counts(status_z: &str) -> WorkingTreeCounts {
+  let mut c = WorkingTreeCounts::default();
+  for rec in wt_tree::parse_status_z(status_z) {
+    match working_tree_category(rec.x, rec.y) {
+      WtCategory::Created => c.created += 1,
+      WtCategory::Modified => c.modified += 1,
+      WtCategory::Deleted => c.deleted += 1,
+    }
+  }
+  c
+}
+
+/// Build the Working Tree pane footer (issue #287): per-category file
+/// counts as colour-coded nerdfont segments — created (green / `untracked`
+/// role), modified (yellow / `modified` role), deleted (red / `prunable`
+/// role). Each segment renders only when its count is non-zero; an all-zero
+/// (clean) tally yields `None` so the footer disappears entirely instead of
+/// showing a bare ` 0 `.
+pub fn working_tree_counts_footer(counts: &WorkingTreeCounts, theme: &Theme) -> Option<Line<'static>> {
+  if counts.is_empty() {
+    return None;
+  }
+  let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+  if counts.created > 0 {
+    spans.push(Span::styled(
+      format!("{} {} ", WT_CREATED_ICON, counts.created),
+      Style::default().fg(theme.untracked),
+    ));
+  }
+  if counts.modified > 0 {
+    spans.push(Span::styled(
+      format!("{} {} ", WT_MODIFIED_ICON, counts.modified),
+      Style::default().fg(theme.modified),
+    ));
+  }
+  if counts.deleted > 0 {
+    spans.push(Span::styled(
+      format!("{} {} ", WT_DELETED_ICON, counts.deleted),
+      Style::default().fg(theme.prunable),
+    ));
+  }
+  Some(Line::from(spans))
+}
+
+/// Colourise one `git status --short` porcelain line (issue #179, recoloured
+/// in #287).
 ///
-/// - staged change (`X` column) → cyan,
-/// - modified-in-worktree (`Y` column) → yellow,
-/// - `??` (untracked / created) → green,
-/// - the **file name** → the dominant status colour: green when untracked,
-///   else yellow when the worktree side carries a change, else cyan when only
-///   the index side does.
+/// The short format is `XY<space>PATH`. The whole row — both status columns
+/// and the file name — is painted by the file's single change category, so
+/// a row's colour always equals the Working-Tree footer segment it's
+/// counted in:
 ///
-/// The separator space is left unstyled. The rendered text is byte-for-byte
-/// identical to the input — only `Span` styling is added — so the sidebar
-/// keeps showing the exact `git status --short` codes it always did.
+/// - created (`??` / `A`) → green (`untracked` role),
+/// - modified (`M`, `R`, `C`, `T`, `U`, …) → yellow (`modified` role),
+/// - deleted (`D`) → red (`prunable` role).
+///
+/// Precedence created > deleted > modified mirrors
+/// [`working_tree_status_counts`] via the shared [`working_tree_category`].
+/// The pre-#287 staged-vs-worktree (cyan `X` column) distinction is dropped
+/// in favour of this add/modify/delete scheme. The separator space is left
+/// unstyled; the rendered text is byte-for-byte identical to the input.
 pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   // Porcelain short output is always `XY<space>PATH` with ASCII status
   // codes, but the helper is `pub` — a non-git caller could pass arbitrary
@@ -997,7 +1359,7 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
     Some(c) => c,
     None => return Line::from(raw.to_string()),
   };
-  let (y_at, y) = match indices.next() {
+  let (_y_at, y) = match indices.next() {
     Some(c) => c,
     None => return Line::from(raw.to_string()),
   };
@@ -1007,49 +1369,15 @@ pub fn working_tree_status_line(raw: &str, theme: &Theme) -> Line<'static> {
   };
   // Byte offset where the path begins (just past the separator char).
   let path_at = sep_at + sep.len_utf8();
-  let untracked = x == '?' && y == '?';
 
-  // The three git-status families paint through their own roles (issue
-  // #211; defaults cyan/yellow/green match the pre-#211 borrowed
-  // accent/dirty/clean, so a `[theme]`-less config is unchanged):
-  // staged → `staged`, worktree-modified → `modified`, untracked/created
-  // → `untracked`.
-  let staged = Style::default().fg(theme.staged);
-  let modified = Style::default().fg(theme.modified);
-  let created = Style::default().fg(theme.untracked);
-  // X column: untracked `?` → created, other staged change → staged.
-  let x_style = if x == '?' {
-    created
-  } else if x != ' ' {
-    staged
-  } else {
-    Style::default()
-  };
-  // Y column: untracked `?` → created, worktree modification → modified.
-  let y_style = if y == '?' {
-    created
-  } else if y != ' ' {
-    modified
-  } else {
-    Style::default()
-  };
-  // File name takes the dominant status colour: created wins, then a
-  // worktree modification, then a staged-only change.
-  let name_style = if untracked {
-    created
-  } else if y != ' ' {
-    modified
-  } else if x != ' ' {
-    staged
-  } else {
-    Style::default()
-  };
+  // One colour for the whole row, from the file's change category — so the
+  // row and the footer count agree (issue #287).
+  let style = Style::default().fg(working_tree_category_color(working_tree_category(x, y), theme));
 
   Line::from(vec![
-    Span::styled(raw[x_at..y_at].to_string(), x_style),
-    Span::styled(raw[y_at..sep_at].to_string(), y_style),
+    Span::styled(raw[x_at..sep_at].to_string(), style),
     Span::raw(raw[sep_at..path_at].to_string()),
-    Span::styled(raw[path_at..].to_string(), name_style),
+    Span::styled(raw[path_at..].to_string(), style),
   ])
 }
 
@@ -1276,6 +1604,23 @@ pub fn chip_style(color: Color) -> Style {
     .add_modifier(Modifier::REVERSED | Modifier::BOLD)
 }
 
+/// The hint *bind* style (issue #279): the accent-coloured, **bold** key
+/// glyph that leads every statusbar / modal hint. This replaces the
+/// pre-#279 reverse-video [`chip_style`] badge with a flat herdr-style
+/// "accent bind + space + muted action" treatment — no box around the key.
+/// Action *buttons* (Create / confirm / type selector) and the statusbar
+/// context anchor keep [`chip_style`]; only the which-key hints are flat.
+pub fn hint_key_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
+}
+
+/// The hint *action* style (issue #279): the muted description trailing a
+/// [`hint_key_style`] bind. Routed through the `muted` role so a theme
+/// override recolours it with the rest of the dim chrome.
+pub fn hint_label_style(theme: &Theme) -> Style {
+  Style::default().fg(theme.muted)
+}
+
 /// Style for a *non-highlighted* command name in the command palette
 /// (issue #210 follow-up). Routes through the `name` role (default
 /// `White`) so a `[theme]` override / light preset recolours it, instead
@@ -1295,8 +1640,19 @@ pub fn help_label_style(theme: &Theme) -> Style {
   Style::default().fg(theme.name)
 }
 
-fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme: &Theme) -> Row<'static> {
-  let (marker_label, marker_color) = table_marker(w, theme);
+/// Build one worktree table row. In workspace mode (issue #36) `repo` is
+/// `Some((name, width))` and a leading `REPO` cell is inserted after the age
+/// column, painted in the `accent` role; in single-repo mode it is `None` and
+/// the row keeps its historical shape.
+fn build_row(
+  w: &WorktreeInfo,
+  repo: Option<(&str, u16)>,
+  name_w: u16,
+  branch_w: u16,
+  status_w: u16,
+  theme: &Theme,
+) -> Row<'static> {
+  let marker = table_marker(w, theme);
   let branch_text = w.branch.clone().unwrap_or_else(|| "-".into());
 
   // The worktree name is the row's primary identity text. It paints with
@@ -1326,14 +1682,19 @@ fn build_row(w: &WorktreeInfo, name_w: u16, branch_w: u16, status_w: u16, theme:
   // `Gray`) — a structural mid-grey distinct from `muted`/`DarkGray`.
   let path_cell = Cell::from(w.path.to_string_lossy().to_string()).style(worktree_path_style(theme));
 
-  Row::new(vec![
-    age_cell,
-    Cell::from(marker_label).style(Style::default().fg(marker_color)),
-    name_cell,
-    branch_cell,
-    status_cell,
-    path_cell,
-  ])
+  let mut cells = vec![age_cell];
+  if let Some((repo_name, repo_w)) = repo {
+    cells.push(
+      Cell::from(trunc(repo_name, repo_w as usize))
+        .style(Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)),
+    );
+  }
+  cells.push(Cell::from(marker));
+  cells.push(name_cell);
+  cells.push(branch_cell);
+  cells.push(status_cell);
+  cells.push(path_cell);
+  Row::new(cells)
 }
 
 /// Owned-String wrapper around `worktree::format_relative_duration` so
@@ -1403,9 +1764,14 @@ pub fn format_status(s: &BranchStatus, width: usize, theme: &Theme) -> (String, 
 /// rebound.
 #[derive(Debug, Clone, Copy)]
 enum Hint {
-  /// Resolve the displayed key from the keymap (honours `[tui.keys]`).
+  /// Resolve the displayed key from the global keymap (honours `[tui.keys]`).
   Key(super::keymap::Action, &'static str),
-  /// A fixed key + label for a non-rebindable contextual keystroke.
+  /// Resolve the displayed key from the contextual modal keymap (honours
+  /// `[tui.keys.modal.<context>]`, issue #219). Used for modal verbs whose hint
+  /// is a single rebindable key (cancel / submit / confirm / issue / pr).
+  Modal(ModalAction, &'static str),
+  /// A fixed key + label for a non-rebindable keystroke or a multi-key
+  /// movement pair (`↑/↓`, `j/k`) that no single resolved key captures.
   Lit(&'static str, &'static str),
 }
 
@@ -1429,14 +1795,29 @@ pub enum HintContext {
   Confirm,
   /// Open issue/PR URL menu.
   OpenMenu,
-  /// Two-stage issue/PR link prompt.
+  /// Issue/PR link prompt, stage 1 — choose issue vs PR.
   LinkPrompt,
+  /// Issue/PR link prompt, stage 2 — typing the number (#219): submit /
+  /// cancel resolve from `[tui.keys.modal.link.input_number]`, not the choose
+  /// stage's keys.
+  LinkInputNumber,
   /// Command palette overlay.
   CommandPalette,
   /// Bootstrap report overlay.
   Report,
   /// Keybindings help overlay.
   Help,
+  /// PTY overlay (embedded lazygit / terminal). All keys pass through to the
+  /// child process; Esc is the only gwm-level escape hatch.
+  Pty,
+  /// Exec profile picker overlay (issue #325): j/k pick, Enter runs, Esc
+  /// cancels.
+  ExecPicker,
+  /// Clean reclaim overlay (issue #325): j/k pick a profile, confirm
+  /// reclaims (safety countdown), Esc cancels.
+  Clean,
+  /// Branch-rename modal (`View::Edit`, #290).
+  Rename,
 }
 
 impl HintContext {
@@ -1451,92 +1832,154 @@ impl HintContext {
       HintContext::Confirm => "confirm",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
+      HintContext::LinkInputNumber => "link",
       HintContext::CommandPalette => "command",
       HintContext::Report => "report",
       HintContext::Help => "help",
+      HintContext::Pty => "terminal",
+      HintContext::ExecPicker => "exec",
+      HintContext::Clean => "clean",
+      HintContext::Rename => "rename",
     }
   }
 
   /// Static hint specs for this context. List-view contexts use rebindable
-  /// [`Hint::Key`] verbs (resolved live by [`Self::resolve`]); modal /
-  /// overlay contexts use [`Hint::Lit`] because their keys are hard-coded
-  /// contextual escape hatches (Esc / Enter / digits), not keymap actions.
+  /// [`Hint::Key`] verbs (resolved against the global keymap); modal /
+  /// overlay contexts use [`Hint::Modal`] for their single-key rebindable
+  /// verbs (resolved against the contextual keymap, issue #219) and
+  /// [`Hint::Lit`] only for movement pairs (`↑/↓`, `j/k`) and the genuinely
+  /// hard-coded escape hatches (the PTY overlay's `Esc`). All resolved live
+  /// by [`Self::resolve`].
   fn hint_specs(self) -> &'static [Hint] {
     use super::keymap::Action::*;
     match self {
+      // Grouped by family, most-used verb of each first; the order doubles as
+      // the right-to-left truncation priority (#290 footer reorg).
       HintContext::Worktrees => &[
+        // Worktree lifecycle.
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
-        Hint::Key(Open, "open"),
-        Hint::Key(Yank, "yank"),
-        Hint::Key(GitTui, "git"),
-        Hint::Key(Review, "review"),
+        // Act on the selected worktree.
+        Hint::Key(TerminalFullscreen, "open"),
+        Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(ReviewFullscreen, "review"),
+        Hint::Key(YankPath, "yank"),
+        // Find / navigate panes.
+        Hint::Key(Filter, "filter"),
         Hint::Key(FocusStatus, "status"),
         Hint::Key(CommandLogs, "logs"),
-        Hint::Key(ConfigPanel, "config"),
-        Hint::Key(Filter, "filter"),
+        Hint::Key(ConfigPanel, "settings"),
+        // Global.
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
       HintContext::Status => &[
+        // Read the status pane.
         Hint::Key(Down, "scroll"),
+        Hint::Key(FetchGithub, "fetch"),
+        // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
-        Hint::Key(FetchGithub, "fetch"),
+        // Navigate panes.
         Hint::Key(FocusWorktrees, "worktrees"),
-        Hint::Key(CommandLogs, "logs"),
-        Hint::Key(ConfigPanel, "config"),
         Hint::Key(Filter, "filter"),
+        Hint::Key(CommandLogs, "logs"),
+        Hint::Key(ConfigPanel, "settings"),
+        // Global.
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
       HintContext::Picker => &[
+        // Pick / dismiss.
         Hint::Lit("Enter", "select"),
         Hint::Lit("Esc", "cancel"),
-        Hint::Key(Open, "open"),
-        Hint::Key(Yank, "yank"),
-        Hint::Key(GitTui, "git"),
+        // Act on the highlighted worktree.
+        Hint::Key(TerminalFullscreen, "open"),
+        Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(YankPath, "yank"),
+        // Find / global.
         Hint::Key(Filter, "filter"),
         Hint::Key(Help, "help"),
         Hint::Key(Quit, "quit"),
       ],
+      // #219: single-key modal verbs use Hint::Modal so a rebind shows
+      // through; multi-key movement pairs (↑/↓, j/k, ←/→) stay literal
+      // because no single resolved key captures them.
       HintContext::Create => &[
-        Hint::Lit("Tab", "field"),
+        Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
-        Hint::Lit("Enter", "submit"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
       HintContext::Confirm => &[
-        Hint::Lit("y", "confirm"),
+        Hint::Modal(ModalAction::ConfirmConfirm, "confirm"),
         Hint::Key(ToggleDeleteBranch, "branch"),
         Hint::Lit("←/→", "move"),
-        Hint::Lit("Enter", "activate"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::ConfirmActivate, "activate"),
+        Hint::Modal(ModalAction::ConfirmCancel, "cancel"),
       ],
       HintContext::OpenMenu => &[
-        Hint::Lit("i", "issue"),
-        Hint::Lit("p", "pr"),
+        Hint::Modal(ModalAction::OpenMenuIssue, "issue"),
+        Hint::Modal(ModalAction::OpenMenuPr, "pr"),
         Hint::Key(FetchGithub, "fetch"),
-        Hint::Lit("Esc", "close"),
+        Hint::Modal(ModalAction::OpenMenuClose, "close"),
       ],
       HintContext::LinkPrompt => &[
-        Hint::Lit("j/k", "move"),
-        Hint::Lit("i/p", "kind"),
-        Hint::Lit("Enter", "link"),
+        Hint::Modal(ModalAction::LinkChoosePrev, "prev"),
+        Hint::Modal(ModalAction::LinkChooseNext, "next"),
+        Hint::Modal(ModalAction::LinkChooseIssue, "issue"),
+        Hint::Modal(ModalAction::LinkChoosePr, "pr"),
+        Hint::Modal(ModalAction::LinkChooseAccept, "link"),
         Hint::Key(FetchGithub, "fetch"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::LinkChooseCancel, "cancel"),
+      ],
+      // #219: while typing the number, submit / cancel come from the
+      // input-number context — not the choose-target keys above.
+      HintContext::LinkInputNumber => &[
+        Hint::Lit("0-9", "number"),
+        Hint::Modal(ModalAction::LinkInputSubmit, "submit"),
+        Hint::Key(FetchGithub, "fetch"),
+        Hint::Modal(ModalAction::LinkInputCancel, "cancel"),
       ],
       HintContext::CommandPalette => &[
         Hint::Lit("↑/↓", "move"),
-        Hint::Lit("Enter", "run"),
-        Hint::Lit("Esc", "cancel"),
+        Hint::Modal(ModalAction::CommandPaletteAccept, "run"),
+        Hint::Modal(ModalAction::CommandPaletteClose, "cancel"),
       ],
-      HintContext::Report => &[Hint::Lit("Enter/Esc", "close")],
+      // #219: `close` is a single rebindable verb, so it resolves through the
+      // modal keymap; the scroll/pan pairs stay literal (no single resolved
+      // key captures `j/k` / `h/l`, matching the Create/Confirm convention).
+      HintContext::Report => &[Hint::Modal(ModalAction::ReportClose, "close")],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
-        Hint::Lit("Esc/q", "close"),
+        Hint::Modal(ModalAction::HelpClose, "close"),
+      ],
+      HintContext::Pty => &[Hint::Lit("Esc", "close")],
+      // #325: pick a profile then run it in a PTY. The j/k movement pair
+      // stays literal (no single resolved key captures it), matching the
+      // palette / create convention.
+      HintContext::ExecPicker => &[
+        Hint::Lit("↑/↓", "pick"),
+        Hint::Modal(ModalAction::ExecPickerAccept, "run"),
+        Hint::Modal(ModalAction::ExecPickerCancel, "cancel"),
+      ],
+      // #325: the profile picker pair stays literal; confirm / cancel are
+      // rebindable modal verbs (the safety countdown reuses the delete
+      // confirm's `y` / Enter convention).
+      HintContext::Clean => &[
+        Hint::Lit("↑/↓", "profile"),
+        Hint::Modal(ModalAction::CleanConfirm, "reclaim"),
+        Hint::Modal(ModalAction::CleanCancel, "cancel"),
+      ],
+      // Rename reuses the create-form input handler, hence the `create`
+      // context's verbs (#290 / #219).
+      HintContext::Rename => &[
+        Hint::Modal(ModalAction::CreateNextField, "field"),
+        Hint::Lit("↑/↓", "type"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
     }
   }
@@ -1546,15 +1989,54 @@ impl HintContext {
   /// binding (issue #217 review) — the same `primary_chord` source the help
   /// overlay and the Issue/PR prompt use. An unbound action is dropped from
   /// the row rather than advertised with a phantom key.
-  pub fn resolve(self, keymap: &super::keymap::Keymap) -> Vec<(String, String)> {
+  pub fn resolve(self, keymap: &super::keymap::Keymap, modal: &ModalKeymap) -> Vec<(String, String)> {
     self
       .hint_specs()
       .iter()
       .filter_map(|h| match h {
-        Hint::Key(action, label) => keymap.primary_chord(*action).map(|k| (k, label.to_string())),
+        // #219: a global verb whose key is claimed by a modal binding in the
+        // active context is resolved as that modal verb first — the event loop
+        // never reaches the global action. Drop the hint rather than advertise
+        // a duplicate key for an unreachable action.
+        Hint::Key(action, label) => keymap
+          .primary_chord(*action)
+          .filter(|k| !self.key_shadowed_by_modal(k, modal))
+          .map(|k| (k, label.to_string())),
+        Hint::Modal(action, label) => modal.primary_key(*action).map(|k| (k, label.to_string())),
         Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
       })
       .collect()
+  }
+
+  /// The modal [`KeyContext`] this hint context renders, when it is a modal /
+  /// overlay surface (the global panes have none). Used to detect a global
+  /// hint key shadowed by a modal binding in the same context.
+  fn modal_context(self) -> Option<KeyContext> {
+    Some(match self {
+      HintContext::Create | HintContext::Rename => KeyContext::Create,
+      HintContext::Confirm => KeyContext::Confirm,
+      HintContext::OpenMenu => KeyContext::OpenMenu,
+      HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
+      HintContext::LinkInputNumber => KeyContext::LinkInputNumber,
+      HintContext::CommandPalette => KeyContext::CommandPalette,
+      HintContext::Report => KeyContext::Report,
+      HintContext::Help => KeyContext::Help,
+      HintContext::ExecPicker => KeyContext::ExecPicker,
+      HintContext::Clean => KeyContext::Clean,
+      HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
+    })
+  }
+
+  /// `true` when `key` is bound to a modal verb in this context — i.e. the
+  /// modal keymap intercepts it before any global action with the same key.
+  fn key_shadowed_by_modal(self, key: &str, modal: &ModalKeymap) -> bool {
+    match self.modal_context() {
+      Some(ctx) => modal
+        .bindings_for(ctx)
+        .iter()
+        .any(|b| b.keys.iter().any(|ks| ks.to_string() == key)),
+      None => false,
+    }
   }
 }
 
@@ -1567,39 +2049,150 @@ pub fn issue_pr_pane_title(keymap: &Keymap) -> String {
 }
 
 pub fn working_tree_pane_title(keymap: &Keymap) -> String {
-  format!(" Working Tree [{}] ", action_chord(keymap, Action::Review, "R"))
+  format!(
+    " Working Tree [{}] ",
+    action_chord(keymap, Action::ReviewFullscreen, "R")
+  )
 }
 
 pub fn recent_items_pane_title(mode: SidebarMode, keymap: &Keymap) -> String {
   match mode {
-    SidebarMode::Commits => format!(" Recent Commits [{}] ", action_chord(keymap, Action::GitTui, "l")),
-    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::GitTui, "l")),
+    SidebarMode::Commits => format!(
+      " Recent Commits [{}] ",
+      action_chord(keymap, Action::LazyGitFullscreen, "l")
+    ),
+    SidebarMode::Stashes => format!(" Stashes [{}] ", action_chord(keymap, Action::LazyGitFullscreen, "l")),
   }
 }
 
 pub fn modal_hint_line(hints: &[(&str, &str)], theme: &Theme) -> Line<'static> {
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let mut spans: Vec<Span<'static>> = Vec::new();
   for (i, (key, label)) in hints.iter().enumerate() {
     if i > 0 {
-      spans.push(Span::raw(" "));
+      // Two spaces between hint pairs keep `key action` groups visually
+      // distinct now that the badge box is gone (issue #279).
+      spans.push(Span::raw("  "));
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
   }
   Line::from(spans).centered()
 }
 
-fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, theme: &Theme) -> Line<'static> {
-  let resolved = ctx.resolve(keymap);
+/// Settings-panel footer hints shown while a field is being edited (#219
+/// review): `save` / `cancel` resolve from the `ConfigEdit*` modal bindings so
+/// a rebind of `[tui.keys.modal.config.edit]` shows through instead of the literal
+/// `Enter` / `Esc`. An unbound verb is dropped rather than advertised with a
+/// phantom key, mirroring the statusbar's `HintContext::resolve`.
+pub fn config_edit_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  [
+    (ModalAction::ConfigEditSubmit, "save"),
+    (ModalAction::ConfigEditCancel, "cancel"),
+  ]
+  .into_iter()
+  .filter_map(|(action, label)| modal.primary_key(action).map(|k| (k, label.to_string())))
+  .collect()
+}
+
+/// Settings-panel footer hints in *navigation* mode (#219 review): the
+/// single-key verbs (`section` / `layer` / `close`, plus `cycle` / `edit` via
+/// `activate`) resolve from the `Config*` modal bindings so a rebind of
+/// `[tui.keys.modal.config]` shows through. The `j/k` scroll pair stays literal —
+/// no single resolved key captures a movement pair (same rule as Help). The
+/// leading verb depends on the active tab / field kind, mirroring the historic
+/// hard-coded branches.
+pub fn config_nav_footer_hints(
+  modal: &ModalKeymap,
+  tab: SettingsTab,
+  selected_kind: Option<FieldKind>,
+) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = Vec::new();
+  if tab == SettingsTab::All {
+    hints.push(("j/k".to_string(), "scroll".to_string()));
+  } else {
+    let label = if tab == SettingsTab::Keys {
+      "rebind"
+    } else if selected_kind == Some(FieldKind::Choice) {
+      "cycle"
+    } else {
+      "edit"
+    };
+    if let Some(k) = modal.primary_key(ModalAction::ConfigActivate) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  for (action, label) in [
+    (ModalAction::ConfigNextTab, "section"),
+    (ModalAction::ConfigToggleLayer, "layer"),
+    (ModalAction::ConfigClose, "close"),
+  ] {
+    if let Some(k) = modal.primary_key(action) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  hints
+}
+
+/// Settings-panel footer hints while a live keystroke capture is armed on the
+/// Keys tab (issue #294). `cancel` (and, for a multi-stroke global chord,
+/// `save`) resolve from the `ConfigEdit*` modal bindings so a rebind of
+/// `[tui.keys.modal.config.edit]` shows through. A single-stroke modal capture
+/// auto-commits on the first key, so it advertises that instead of a `save`
+/// verb; the multi-stroke global path adds the literal `Backspace` deletes-last
+/// affordance (no modal verb binds it).
+pub fn config_capture_footer_hints(modal: &ModalKeymap, single_only: bool) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = Vec::new();
+  if single_only {
+    hints.push(("any key".to_string(), "bind".to_string()));
+  } else {
+    if let Some(k) = modal.primary_key(ModalAction::ConfigEditSubmit) {
+      hints.push((k, "save".to_string()));
+    }
+    hints.push(("Backspace".to_string(), "delete".to_string()));
+  }
+  if let Some(k) = modal.primary_key(ModalAction::ConfigEditCancel) {
+    hints.push((k, "cancel".to_string()));
+  }
+  hints
+}
+
+/// Command Logs overlay footer hints (#219 review): `copy` / `close` resolve
+/// from the `CommandLogs*` modal bindings so a rebind of
+/// `[tui.keys.modal.command_logs]` shows through; the scroll / top-bottom movement
+/// pairs stay literal (no single resolved key captures `j/k` / `g/G`).
+pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
+  let mut hints: Vec<(String, String)> = vec![
+    ("j/k".to_string(), "scroll".to_string()),
+    ("g/G".to_string(), "top/bottom".to_string()),
+  ];
+  for (action, label) in [
+    (ModalAction::CommandLogsCopy, "copy"),
+    (ModalAction::CommandLogsClose, "close"),
+  ] {
+    if let Some(k) = modal.primary_key(action) {
+      hints.push((k, label.to_string()));
+    }
+  }
+  hints
+}
+
+fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
+  let resolved = ctx.resolve(keymap, modal);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)
 }
 
-fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Keymap, theme: &Theme) {
+fn push_modal_hint(
+  lines: &mut Vec<Line<'static>>,
+  ctx: HintContext,
+  keymap: &Keymap,
+  modal: &ModalKeymap,
+  theme: &Theme,
+) {
   lines.push(Line::from(String::new()));
-  lines.push(modal_hint_for_context(ctx, keymap, theme));
+  lines.push(modal_hint_for_context(ctx, keymap, modal, theme));
 }
 
 /// Build the single-line statusline (issue #180).
@@ -1623,8 +2216,8 @@ fn push_modal_hint(lines: &mut Vec<Line<'static>>, ctx: HintContext, keymap: &Ke
 /// are measured with `chars().count()` to match the rest of `ui.rs` (keys,
 /// labels and the bracketed status are ASCII / single-width in practice).
 pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &Theme) -> Line<'static> {
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let status_style = Style::default().fg(theme.dirty);
 
   // A zero-width row can hold nothing — return an empty line rather than let
@@ -1655,21 +2248,21 @@ pub fn footer_line(hints: &[(&str, &str)], status: &str, width: usize, theme: &T
   let hint_budget = (width - status_w - 1).saturating_sub(1);
 
   let mut spans: Vec<Span<'static>> = Vec::new();
-  let mut used = 0usize; // display columns consumed by hint badges so far
+  let mut used = 0usize; // display columns consumed by hint groups so far
   let mut truncated = false;
   for (i, (key, label)) in hints.iter().enumerate() {
-    let sep = usize::from(i > 0); // single space between badges
-                                  // chip ` key ` (key + 2 pad) + ` label` (label + 1 leading space)
-    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    let sep = if i > 0 { 2 } else { 0 }; // two spaces between hint groups (#279)
+                                         // flat bind `key` + ` label` (label + 1 leading space)
+    let badge_w = key.chars().count() + 1 + label.chars().count();
     if used + sep + badge_w > hint_budget {
       truncated = true;
       break;
     }
-    if sep == 1 {
-      spans.push(Span::raw(" "));
-      used += 1;
+    if sep > 0 {
+      spans.push(Span::raw(" ".repeat(sep)));
+      used += sep;
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
     used += badge_w;
   }
@@ -1715,8 +2308,8 @@ pub fn status_line(
   theme: &Theme,
 ) -> Line<'static> {
   let context_style = chip_style(theme.focus);
-  let chip_style = chip_style(theme.accent);
-  let label_style = Style::default().fg(theme.muted);
+  let key_style = hint_key_style(theme);
+  let label_style = hint_label_style(theme);
   let status_style = Style::default().fg(theme.dirty);
   let spinner_style = Style::default().fg(theme.accent).add_modifier(Modifier::BOLD);
 
@@ -1762,19 +2355,19 @@ pub fn status_line(
   let mut truncated = false;
   let mut hint_used = 0usize;
   for (i, (key, label)) in hints.iter().enumerate() {
-    // A separating space before every badge except the very first one when
-    // there is no left cluster.
-    let sep = usize::from(i > 0 || used > 0);
-    let badge_w = key.chars().count() + 2 + 1 + label.chars().count();
+    // Two spaces between hint groups (#279); a single space after the left
+    // cluster (context chip / spinner) before the first hint.
+    let sep = if i > 0 { 2 } else { usize::from(used > 0) };
+    let badge_w = key.chars().count() + 1 + label.chars().count();
     if hint_used + sep + badge_w > hint_budget {
       truncated = true;
       break;
     }
-    if sep == 1 {
-      spans.push(Span::raw(" "));
-      hint_used += 1;
+    if sep > 0 {
+      spans.push(Span::raw(" ".repeat(sep)));
+      hint_used += sep;
     }
-    spans.push(Span::styled(format!(" {} ", key), chip_style));
+    spans.push(Span::styled((*key).to_string(), key_style));
     spans.push(Span::styled(format!(" {}", label), label_style));
     hint_used += badge_w;
   }
@@ -1811,7 +2404,7 @@ fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
   // Resolve the rebindable hint keys against the live keymap (issue #217
   // review) so a user override shows through, then borrow into the slice
   // `status_line` expects.
-  let resolved = ctx.resolve(&app.keymap);
+  let resolved = ctx.resolve(&app.keymap, &app.modal_keymap);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   let line = status_line(
     ctx.label(),
@@ -1867,7 +2460,7 @@ pub enum HelpRow {
 /// picker-only / non-picker sections render. `HintContext::Picker` is the
 /// `gwm switch` overlay; `Worktrees` / `Status` are the two list-view panes
 /// (same body, the subtitle just names the focused pane).
-pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
+pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintContext) -> Vec<HelpRow> {
   use super::keymap::Action;
 
   let picker_mode = matches!(ctx, HintContext::Picker);
@@ -1903,10 +2496,19 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     }
   };
   // A fixed entry: a non-rebindable surface documented with a literal
-  // key string (Ctrl-C, contextual Enter, create-form / confirm keys).
+  // key string (Ctrl-C, contextual Enter, the picker's hard-coded Enter).
   let fixed = |keys: &str, label: &str| -> HelpRow {
     HelpRow::Entry {
       keys: keys.to_string(),
+      label: label.to_string(),
+    }
+  };
+  // A rebindable modal entry: keys resolved from the contextual keymap
+  // (issue #219) so the create-form / delete-confirm rows track
+  // `[tui.keys.modal.<context>]` overrides instead of a frozen literal.
+  let modal_entry = |action: ModalAction, label: &str| -> HelpRow {
+    HelpRow::Entry {
+      keys: modal.keys_display(action),
       label: label.to_string(),
     }
   };
@@ -1918,7 +2520,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     HelpRow::Section("Global".to_string()),
     HelpRow::Blank,
     entry(Action::Quit, "quit (Esc also quits when filter is clear)"),
-    fixed("Ctrl-C", "force quit (hard-coded escape hatch)"),
+    fixed("Ctrl-C", "quit (hard-coded escape hatch)"),
     HelpRow::Blank,
     HelpRow::Section("List View".to_string()),
     HelpRow::Blank,
@@ -1934,10 +2536,20 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
     rows.push(entry(Action::DeleteConfirm, "delete selected"));
     rows.push(entry(Action::Bootstrap, "bootstrap selected"));
   }
-  rows.push(entry(Action::Open, "open per [tui.open] — shell / editor / finder"));
+  rows.push(entry(
+    Action::TerminalFullscreen,
+    "open per [tui.open] — shell / editor / finder",
+  ));
+  rows.push(entry(Action::TerminalPty, "open native $SHELL in embedded PTY overlay"));
   rows.push(entry(Action::OpenDocs, "open the gwm documentation in the browser"));
-  rows.push(entry(Action::Yank, "yank selected path to system clipboard"));
-  rows.push(entry(Action::GitTui, "launch [git_tui] launcher (default lazygit -p)"));
+  rows.push(entry(Action::YankPath, "yank selected worktree path to clipboard"));
+  rows.push(entry(Action::YankBranchName, "yank selected branch name to clipboard"));
+  rows.push(entry(
+    Action::YankWorktreeName,
+    "yank selected worktree name to clipboard",
+  ));
+  rows.push(entry(Action::LazyGitFullscreen, "launch lazygit fullscreen"));
+  rows.push(entry(Action::LazyGitPty, "open lazygit in embedded PTY overlay"));
   rows.push(entry(Action::ToggleSidebar, "toggle git preview sidebar"));
   rows.push(entry(
     Action::ToggleSidebarMode,
@@ -1956,6 +2568,18 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   rows.push(entry(Action::FocusStatus, "focus the status pane (opens it if hidden)"));
   rows.push(entry(Action::CommandLogs, "show the command logs overlay"));
   rows.push(entry(Action::ConfigPanel, "show the resolved configuration panel"));
+  // #334 review: the exec / clean overlays are picker-gated (`run_action`
+  // no-ops them in `gwm switch`), so only advertise them outside picker mode.
+  if !picker_mode {
+    rows.push(entry(
+      Action::ExecOverlay,
+      "pick an [exec.profiles] profile and run it in a PTY",
+    ));
+    rows.push(entry(
+      Action::CleanOverlay,
+      "preview and reclaim build artifacts (with confirm)",
+    ));
+  }
   rows.push(entry(
     Action::Filter,
     "open fuzzy filter bar (enter: sticky, esc: clear)",
@@ -1963,17 +2587,68 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
   rows.push(entry(Action::Refresh, "refresh worktree list"));
   if !picker_mode {
     rows.push(entry(Action::Sync, "sync selected worktree onto its upstream (rebase)"));
+    rows.push(entry(Action::Pull, "pull selected worktree's branch from upstream"));
+    rows.push(entry(Action::Push, "push selected worktree's branch to remote"));
+    rows.push(entry(Action::EditWorktree, "rename the selected worktree's branch"));
+    rows.push(entry(
+      Action::ExitToWorktree,
+      "quit TUI and print selected path to stdout",
+    ));
+    rows.push(entry(Action::MuxPane, "open selected worktree in new mux pane/tab"));
+    rows.push(entry(Action::Macro1, "run [tui.macro1] command"));
+    rows.push(entry(Action::Macro2, "run [tui.macro2] command"));
     rows.push(entry(Action::FetchGithub, "refresh GitHub issue/PR status via `gh`"));
-    rows.push(entry(Action::Review, "run [review] launcher against the resolved base"));
+    rows.push(entry(Action::ReviewFullscreen, "run [review] launcher fullscreen"));
+    rows.push(entry(
+      Action::ReviewPty,
+      "run [review] launcher in embedded PTY overlay",
+    ));
     rows.push(entry(Action::ToggleDeleteBranch, "toggle 'delete branch on remove'"));
     rows.push(fixed("enter", "show path in status bar"));
     rows.push(HelpRow::Blank);
-    rows.push(HelpRow::Section("Issue / PR (#67)".to_string()));
+    rows.push(HelpRow::Section("Issue / PR".to_string()));
     rows.push(HelpRow::Blank);
-    rows.push(entry(Action::OpenMenu, "open menu — i=issue · p=pull request"));
+    // #219 review: the direct-pick keys named in these descriptions are the
+    // OpenMenu / LinkChooseTarget modal verbs — resolve them so a rebind shows
+    // through, and DROP any verb the user explicitly unbound rather than
+    // advertise a phantom literal (matching every other modal hint).
+    let open_picks: Vec<String> = [
+      (ModalAction::OpenMenuIssue, "issue"),
+      (ModalAction::OpenMenuPr, "pull request"),
+    ]
+    .into_iter()
+    .filter_map(|(a, l)| modal.primary_key(a).map(|k| format!("{k}={l}")))
+    .collect();
+    let open_desc = if open_picks.is_empty() {
+      "open menu".to_string()
+    } else {
+      format!("open menu — {}", open_picks.join(" · "))
+    };
+    rows.push(entry(Action::BrowseLinks, &open_desc));
+
+    let key = |a: ModalAction| modal.primary_key(a);
+    let nav: Vec<String> = [ModalAction::LinkChooseNext, ModalAction::LinkChoosePrev]
+      .into_iter()
+      .filter_map(key)
+      .collect();
+    let picks: Vec<String> = [ModalAction::LinkChooseIssue, ModalAction::LinkChoosePr]
+      .into_iter()
+      .filter_map(key)
+      .collect();
+    let mut parts: Vec<String> = Vec::new();
+    match (nav.is_empty(), key(ModalAction::LinkChooseAccept)) {
+      (false, Some(a)) => parts.push(format!("{} + {a}", nav.join("/"))),
+      (false, None) => parts.push(nav.join("/")),
+      (true, Some(a)) => parts.push(a),
+      (true, None) => {}
+    }
+    if !picks.is_empty() {
+      parts.push(format!("or {}", picks.join("/")));
+    }
+    parts.push("then digits".to_string());
     rows.push(entry(
       Action::LinkPrompt,
-      "link prompt — j/k + enter, or i/p, then digits",
+      &format!("link prompt — {}", parts.join(", ")),
     ));
   }
   rows.push(entry(Action::Help, "this help"));
@@ -1985,17 +2660,24 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
       HelpRow::Blank,
       HelpRow::Section("Create Form".to_string()),
       HelpRow::Blank,
-      fixed("←/→ ↑/↓", "change branch type"),
-      fixed("Tab/Shift-Tab", "next/prev field"),
-      fixed("Enter (desc)", "submit"),
-      fixed("Esc", "cancel"),
+      modal_entry(ModalAction::CreatePrevType, "previous branch type"),
+      modal_entry(ModalAction::CreateNextType, "next branch type"),
+      modal_entry(ModalAction::CreateNextField, "next field"),
+      modal_entry(ModalAction::CreatePrevField, "previous field"),
+      modal_entry(ModalAction::CreateSubmit, "submit (on description) / next field"),
+      modal_entry(ModalAction::CreateCancel, "cancel"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
       HelpRow::Blank,
-      fixed("←/→ Tab", "move focus between Confirm / Cancel"),
-      fixed("Enter", "activate the focused button (defaults to Cancel)"),
-      fixed("y", "confirm"),
-      fixed("n / Esc", "cancel"),
+      modal_entry(ModalAction::ConfirmFocusConfirm, "focus the Confirm button"),
+      modal_entry(ModalAction::ConfirmFocusCancel, "focus the Cancel button"),
+      modal_entry(ModalAction::ConfirmToggleFocus, "toggle the focused button"),
+      modal_entry(
+        ModalAction::ConfirmActivate,
+        "activate the focused button (defaults to Cancel)",
+      ),
+      modal_entry(ModalAction::ConfirmConfirm, "confirm"),
+      modal_entry(ModalAction::ConfirmCancel, "cancel"),
     ]);
   }
   rows
@@ -2006,7 +2688,7 @@ pub fn help_rows(km: &super::keymap::Keymap, ctx: HintContext) -> Vec<HelpRow> {
 /// `tests/tui_chord_tests.rs` asserts against: every entry renders as
 /// `  {keys:<13} {label}`, sections / title as their bare text, blanks
 /// as empty strings. The width 13 is wide enough for `Ctrl+Shift+Tab`.
-pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> {
+pub fn help_lines(km: &super::keymap::Keymap, modal: &ModalKeymap, picker_mode: bool) -> Vec<String> {
   // The bool signature is kept for `gwm tui keys` and the chord tests; map
   // it to the context enum (issue #217). The list-view help body is the same
   // for either pane, so `Worktrees` stands in for the non-picker case.
@@ -2015,7 +2697,7 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
   } else {
     HintContext::Worktrees
   };
-  help_rows(km, ctx)
+  help_rows(km, modal, ctx)
     .into_iter()
     .map(|row| match row {
       HelpRow::Title(s) | HelpRow::Subtitle(s) | HelpRow::Section(s) => s,
@@ -2035,12 +2717,40 @@ pub fn help_lines(km: &super::keymap::Keymap, picker_mode: bool) -> Vec<String> 
 /// so the labels line up regardless of how many chords a row binds.
 pub fn badge_group_width(keys: &str) -> usize {
   if keys.is_empty() || keys == "(unbound)" {
-    return "(unbound)".chars().count() + 2;
+    return "(unbound)".chars().count();
   }
   let chords: Vec<&str> = keys.split(", ").collect();
-  let badges: usize = chords.iter().map(|c| c.chars().count() + 2).sum();
-  // One space between adjacent badges.
-  badges + chords.len().saturating_sub(1)
+  // Flat accent-bold glyphs now (issue #279), no `` key `` padding box: a
+  // group is the sum of bare chord widths plus one space between adjacent
+  // chords.
+  let glyphs: usize = chords.iter().map(|c| c.chars().count()).sum();
+  glyphs + chords.len().saturating_sub(1)
+}
+
+/// One documented-binding row for the Keybindings overlay (issue #279):
+/// the chord(s) as flat accent-bold glyphs (no reverse-video badge),
+/// padded to `max_group_w` so every label lines up in one column, then the
+/// human label. An unbound action reads as a muted `(unbound)` placeholder.
+/// Extracted as a pure builder so the de-badged treatment is pinned by
+/// `tests/tui_ui_helpers_tests.rs` without a ratatui backend.
+pub fn help_entry_line(keys: &str, label: &str, max_group_w: usize, theme: &Theme) -> Line<'static> {
+  let key_style = hint_key_style(theme);
+  let muted_style = Style::default().fg(theme.muted);
+  let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
+  if keys.is_empty() || keys == "(unbound)" {
+    spans.push(Span::styled("(unbound)", muted_style));
+  } else {
+    for (i, chord) in keys.split(", ").enumerate() {
+      if i > 0 {
+        spans.push(Span::raw(" "));
+      }
+      spans.push(Span::styled(chord.to_string(), key_style));
+    }
+  }
+  let pad = max_group_w.saturating_sub(badge_group_width(keys)) + 1;
+  spans.push(Span::raw(" ".repeat(pad)));
+  spans.push(Span::styled(label.to_string(), help_label_style(theme)));
+  Line::from(spans)
 }
 
 fn draw_help(f: &mut Frame, app: &mut App) {
@@ -2048,25 +2758,20 @@ fn draw_help(f: &mut Frame, app: &mut App) {
   // Use the underlying pane context, not the view-priority `hint_context`
   // (which would be `Help` while this overlay is up) — `?` documents the
   // pane you opened it from, and the picker gating depends on it.
-  let rows = help_rows(&app.keymap, app.pane_hint_context());
+  let rows = help_rows(&app.keymap, &app.modal_keymap, app.pane_hint_context());
 
   // Theme-driven colours so the overlay tracks `[theme]` like the rest
   // of the TUI (pre-#187 it was hard-coded `Cyan` + plain text).
   let accent = app.theme.accent;
-  let muted = app.theme.muted;
 
-  // Key *badges* mirror the bottom statusline's chip style
-  // (`footer_line`): a reversed-bold accent block. Section headers and
-  // the title share the bold-accent heading style. Labels stay white
-  // for contrast; an `(unbound)` action renders muted instead of a chip
-  // so it reads as "no binding" rather than a live key.
-  let chip_style = chip_style(accent);
   let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
-  let label_style = help_label_style(&app.theme);
-  let muted_style = Style::default().fg(muted);
+  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
+  // italic, so the context name is clearly a different colour from both the
+  // bold title and the muted key labels (issue #217 follow-up).
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
 
-  // Align every label to the same column: pad each badge *group* out to
-  // the widest one so the descriptions line up under one another.
+  // Align every label to the same column: pad each chord *group* out to the
+  // widest one so the descriptions line up under one another.
   let max_group_w = rows
     .iter()
     .filter_map(|r| match r {
@@ -2076,70 +2781,64 @@ fn draw_help(f: &mut Frame, app: &mut App) {
     .max()
     .unwrap_or(0);
 
-  // Subtitle reads in a distinct accent hue (the theme's branch colour) +
-  // italic, so the context name is clearly a different colour from both the
-  // bold title and the muted key labels (issue #217 follow-up).
-  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
-
-  let mut lines: Vec<Line<'static>> = Vec::with_capacity(rows.len());
+  // Issue #279: split the overlay into a FIXED header (title + subtitle), a
+  // SCROLLABLE body (sections + entries), and a FIXED footer hint. Pre-#279
+  // the whole content scrolled in one `Paragraph`, so the title and the
+  // close hint rolled off the top/bottom as soon as the body outgrew the
+  // modal. Title/subtitle are the leading rows; everything else is body.
+  let mut header_lines: Vec<Line<'static>> = Vec::new();
+  let mut body_lines: Vec<Line<'static>> = Vec::new();
   for row in rows {
     match row {
-      // Title + subtitle are centred (issue #217); section headers stay
-      // left-aligned so they anchor their groups lazygit-style.
-      HelpRow::Title(t) => {
-        lines.push(Line::from(Span::styled(t, heading_style)).centered());
-      }
-      HelpRow::Subtitle(t) => {
-        lines.push(Line::from(Span::styled(t, subtitle_style)).centered());
-      }
-      HelpRow::Section(t) => {
-        lines.push(Line::from(Span::styled(
-          t,
-          help_section_style(help_body_section_color(&app.theme)),
-        )));
-      }
-      HelpRow::Blank => lines.push(Line::from(String::new())),
+      // Title + subtitle are centred (issue #217) and pinned in the header.
+      HelpRow::Title(t) => header_lines.push(Line::from(Span::styled(t, heading_style)).centered()),
+      HelpRow::Subtitle(t) => header_lines.push(Line::from(Span::styled(t, subtitle_style)).centered()),
+      // Section headers stay left-aligned so they anchor their groups
+      // lazygit-style.
+      HelpRow::Section(t) => body_lines.push(Line::from(Span::styled(
+        t,
+        help_section_style(help_body_section_color(&app.theme)),
+      ))),
+      HelpRow::Blank => body_lines.push(Line::from(String::new())),
       HelpRow::Entry { keys, label } => {
-        // One badge per chord, separated by a space (#187 review: the
-        // comma-joined `j, Down` now reads as `[ j ] [ Down ]`).
-        let mut spans: Vec<Span<'static>> = vec![Span::raw("  ")];
-        if keys.is_empty() || keys == "(unbound)" {
-          spans.push(Span::styled(" (unbound) ", muted_style));
-        } else {
-          for (i, chord) in keys.split(", ").enumerate() {
-            if i > 0 {
-              spans.push(Span::raw(" "));
-            }
-            spans.push(Span::styled(format!(" {} ", chord), chip_style));
-          }
-        }
-        let pad = max_group_w.saturating_sub(badge_group_width(&keys)) + 1;
-        spans.push(Span::raw(" ".repeat(pad)));
-        spans.push(Span::styled(label, label_style));
-        lines.push(Line::from(spans));
+        body_lines.push(help_entry_line(&keys, &label, max_group_w, &app.theme));
       }
     }
   }
-  push_modal_hint(&mut lines, HintContext::Help, &app.keymap, &app.theme);
 
-  // Publish the scroll bound against the actual viewport so the Keybindings
-  // overlay can scroll when it outgrows the modal (#217). The renderer is
-  // the only place that knows both the content length and the inner height,
-  // so it clamps the offset here too.
   let block = overlay_block(accent);
   let inner_area = block.inner(area);
-  let viewport = inner_area.height as usize;
-  app.help_max_scroll = (lines.len().saturating_sub(viewport)) as u16;
-  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
-  let viewport_width = inner_area.width as usize;
-  let content_width = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.help_max_x_scroll = content_width.saturating_sub(viewport_width) as u16;
-  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
-  let scroll = app.help_scroll;
-  let x_scroll = app.help_x_scroll;
-
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(block, area);
+
+  // header (fixed) | body (scrollable) | footer hint (fixed). The header is
+  // exactly as tall as its line count; the footer is one row; the body
+  // takes the rest.
+  let header_h = header_lines.len() as u16;
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner_area);
+
+  f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // Publish the scroll bounds against the BODY viewport only (issue #279) —
+  // not the whole inner height — so the clamp matches what actually scrolls
+  // and the last body rows stay reachable.
+  let body_viewport = body_area.height as usize;
+  app.help_max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  app.help_scroll = app.help_scroll.min(app.help_max_scroll);
+  let scroll = app.help_scroll;
+  // Reserve the scrollbar column FIRST, then bound the horizontal pan against
+  // the reduced text width so the final cell stays reachable (review P3).
+  let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  let content_width = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.help_max_x_scroll = content_width.saturating_sub(text_area.width as usize) as u16;
+  app.help_x_scroll = app.help_x_scroll.min(app.help_max_x_scroll);
+  let x_scroll = app.help_x_scroll;
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(
+    modal_hint_for_context(HintContext::Help, &app.keymap, &app.modal_keymap, &app.theme),
+    footer_area,
+  );
 }
 
 /// Render the Command Logs overlay (issue #226): a ~90% fullscreen modal
@@ -2157,15 +2856,39 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
   let err_color = app.theme.prunable;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
 
-  let mut lines: Vec<Line<'static>> = overlay_title_lines("Command Logs", accent);
+  // Fixed header (title) / scrollable body / fixed footer hint (issue #279) —
+  // the title and the close hint stay pinned while the transcript scrolls.
+  let block = overlay_block(accent);
+  let inner = block.inner(area);
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  f.render_widget(
+    Paragraph::new(Line::from(Span::styled("Command Logs", heading_style)).centered()),
+    header_area,
+  );
+
+  // A full-width `-` rule, padded by a blank line above and below, separates
+  // adjacent log entries (issue #279 follow-up).
+  let rule = "-".repeat(body_area.width as usize);
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
   if app.command_logs.entries.is_empty() {
     lines.push(Line::from(Span::styled("No commands run yet.", muted_style)));
   } else {
     // Newest-first: the most recent command is what the user opened the
     // overlay to see, so it sits at the top without scrolling.
-    for entry in app.command_logs.entries.iter().rev() {
+    for (i, entry) in app.command_logs.entries.iter().rev().enumerate() {
+      if i > 0 {
+        lines.push(Line::from(String::new()));
+        lines.push(Line::from(Span::styled(rule.clone(), muted_style)));
+        lines.push(Line::from(String::new()));
+      }
       // The resolved argv, prefixed lazygit-style with `$`.
       lines.push(Line::from(vec![
         Span::styled("$ ", Style::default().fg(accent).add_modifier(Modifier::BOLD)),
@@ -2201,113 +2924,331 @@ fn draw_command_logs(f: &mut Frame, app: &mut App) {
           lines.push(Line::from(Span::styled(format!("    {}", l), muted_style)));
         }
       }
-      lines.push(Line::from(String::new()));
     }
   }
 
-  // Footer hint: scroll + close. A plain muted line (not `push_modal_hint`,
-  // whose contexts are pane-specific) keeps the overlay self-documenting.
-  lines.push(Line::from(Span::styled(
-    "j/k scroll · g/G top/bottom · esc close",
-    muted_style.add_modifier(Modifier::ITALIC),
-  )));
-
-  // Publish the scroll bounds against the live viewport (mirrors
-  // `draw_help`): the renderer is the only place that knows both the
-  // content length and the inner modal height, so it clamps here.
-  let block = overlay_block(accent);
-  let inner = block.inner(area);
-  let viewport = inner.height as usize;
-  app.command_logs.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
+  // Publish the scroll bounds against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.command_logs.max_scroll = (lines.len().saturating_sub(body_viewport)) as u16;
   app.command_logs.scroll = app.command_logs.scroll.min(app.command_logs.max_scroll);
-  let viewport_w = inner.width as usize;
-  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.command_logs.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
-  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let scroll = app.command_logs.scroll;
+  // Reserve the scrollbar column first, then bound the pan (review P3).
+  let text_area = scrollable_body_area(f, body_area, scroll, lines.len(), &app.theme);
+  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
+  app.command_logs.max_x_scroll = content_w.saturating_sub(text_area.width as usize) as u16;
+  app.command_logs.x_scroll = app.command_logs.x_scroll.min(app.command_logs.max_x_scroll);
   let x_scroll = app.command_logs.x_scroll;
-
-  f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(Paragraph::new(lines).scroll((scroll, x_scroll)), text_area);
+  // #219 review: copy / close resolve from the command_logs modal bindings so
+  // a rebind shows through; the scroll / top-bottom pairs stay literal.
+  let footer_owned = command_logs_footer_hints(&app.modal_keymap);
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
-/// Render the Configuration panel overlay (issue #232): a ~90% fullscreen
-/// modal listing the resolved config (user-level global merged under the
-/// repo `.gwm.toml`) grouped by top-level section, each row carrying a
-/// leading colour-coded source column (repo / user / default). Scrolls
-/// like the help / Command Logs overlays — the renderer republishes
-/// `config_panel.max_scroll` / `max_x_scroll` against the live viewport.
-fn draw_config_panel(f: &mut Frame, app: &mut App) {
-  let area = centered(90, 85, f.area());
+/// Render a vertical scrollbar on the right edge of `area` when the content
+/// overflows the viewport (issue #279, herdr-style), and return the text
+/// area shrunk by one column to make room. When everything fits, the area
+/// is returned unchanged and no scrollbar is drawn. The thumb tracks the
+/// theme `accent`; the track reads `muted`.
+fn scrollable_body_area(f: &mut Frame, area: Rect, offset: u16, content_len: usize, theme: &Theme) -> Rect {
+  let viewport = area.height as usize;
+  if content_len <= viewport || area.width < 2 {
+    return area;
+  }
+  // ratatui maps the thumb over `content_length - 1`, but our scroll offset
+  // is clamped to `content_len - viewport` (the last page stays full). Pass
+  // `content_length = max_scroll + 1` with the real viewport length so the
+  // thumb size stays proportional AND reaches the bottom at full scroll
+  // (issue #279 follow-up: the thumb used to top out early).
+  let max_scroll = content_len - viewport;
+  let mut state = ScrollbarState::new(max_scroll + 1)
+    .position(offset as usize)
+    .viewport_content_length(viewport);
+  let bar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(None)
+    .end_symbol(None)
+    .thumb_style(Style::default().fg(theme.accent))
+    .track_style(Style::default().fg(theme.muted));
+  f.render_stateful_widget(bar, area, &mut state);
+  Rect {
+    width: area.width.saturating_sub(1),
+    ..area
+  }
+}
+
+/// Build the read-only `All`-tab body: the resolved config grouped by
+/// top-level section with a colour-coded source column (repo / user /
+/// default). The pre-#279 Configuration view, now one tab of the Settings
+/// overlay.
+fn settings_all_lines(app: &App) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
-  let repo_color = app.theme.clean;
-  let user_color = app.theme.branch;
   let label_style = help_label_style(&app.theme);
   let muted_style = Style::default().fg(muted);
-
-  let mut lines: Vec<Line<'static>> = overlay_title_lines("Configuration", accent);
+  let mut lines: Vec<Line<'static>> = Vec::new();
 
   if app.config_panel.rows.is_empty() {
     lines.push(Line::from(Span::styled("No configuration resolved.", muted_style)));
-  } else {
-    // Rows arrive sorted (the flatten walks a `BTreeMap`), so each
-    // top-level section is contiguous — emit a `[section]` heading when it
-    // changes, mirroring `gwm config list`'s grouping.
-    let mut current_section: Option<String> = None;
-    for row in &app.config_panel.rows {
-      let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
-      if current_section.as_deref() != Some(section.as_str()) {
-        if current_section.is_some() {
-          lines.push(Line::from(String::new()));
-        }
-        lines.push(Line::from(Span::styled(
-          format!("[{section}]"),
-          help_section_style(accent),
-        )));
-        current_section = Some(section);
+    return lines;
+  }
+  let mut current_section: Option<String> = None;
+  for row in &app.config_panel.rows {
+    let section = row.key.split(['.', '[']).next().unwrap_or("").to_string();
+    if current_section.as_deref() != Some(section.as_str()) {
+      if current_section.is_some() {
+        lines.push(Line::from(String::new()));
       }
-      // Leading source column, colour-coded and padded so keys align: repo
-      // overrides read strongest, user next, defaults muted.
-      let src_color = match row.source {
-        ConfigSource::Repo => repo_color,
-        ConfigSource::User => user_color,
-        ConfigSource::Default => muted,
-      };
-      lines.push(Line::from(vec![
-        Span::raw("  "),
-        Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
-        Span::raw("  "),
-        Span::styled(row.key.clone(), label_style),
-        Span::styled(" = ", muted_style),
-        Span::styled(row.value.clone(), Style::default().fg(Color::White)),
-      ]));
+      lines.push(Line::from(Span::styled(
+        format!("[{section}]"),
+        help_section_style(accent),
+      )));
+      current_section = Some(section);
     }
+    let src_color = match row.source {
+      ConfigSource::Repo => app.theme.clean,
+      ConfigSource::User => app.theme.branch,
+      ConfigSource::Default => muted,
+    };
+    lines.push(Line::from(vec![
+      Span::raw("  "),
+      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::raw("  "),
+      Span::styled(row.key.clone(), label_style),
+      Span::styled(" = ", muted_style),
+      Span::styled(row.value.clone(), Style::default().fg(Color::White)),
+    ]));
+  }
+  lines
+}
+
+/// Build an editable-tab body: one row per [`SettingField`], the selected
+/// row marked and its value in the accent. The `Uint` field under edit
+/// shows its live buffer with a cursor; a field whose effective value is
+/// shadowed by a higher-precedence layer carries an inline guidance note
+/// (issue #279 — honours "edit both layers" without a silent dead edit).
+fn settings_fields_lines(app: &App, fields: &[SettingField]) -> Vec<Line<'static>> {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+  let panel = &app.config_panel;
+  let mut lines: Vec<Line<'static>> = Vec::new();
+
+  for (i, field) in fields.iter().enumerate() {
+    let selected = i == panel.selected;
+    let editing = selected && panel.editing.is_some();
+    let value = if editing {
+      format!("{}_", panel.editing.as_deref().unwrap_or(""))
+    } else {
+      field.current(&app.config)
+    };
+    let marker = if selected { "›" } else { " " };
+    let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let value_style = if selected {
+      Style::default().fg(accent).add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(Color::White)
+    };
+    let mut spans = vec![
+      Span::styled(format!(" {marker} "), marker_style),
+      Span::styled(format!("{:<24}", field.label()), label_style),
+      Span::styled(value, value_style),
+    ];
+    // Shadow guidance: editing the Global layer for a field the repo
+    // overrides won't change the effective value (repo wins). Surface it
+    // rather than silently no-op or hard-disable the field.
+    if selected && panel.layer.source() == ConfigSource::User && panel.field_source(*field) == Some(ConfigSource::Repo)
+    {
+      spans.push(Span::styled("  — set in .gwm.toml; switch to Project", muted_style));
+    }
+    lines.push(Line::from(spans));
+  }
+  lines
+}
+
+/// Build the Keys-tab body (issue #294): the rebindable bindings grouped by
+/// scope (`[global]`, `[modal.<context>]`), each row showing its source badge,
+/// label and current key(s). The selected row is marked; while a live capture
+/// is armed its key column becomes a `[ … ]` input echoing the captured
+/// strokes. Returns the line index of the selected row so the caller can keep
+/// it in view (this body is far taller than the viewport). Mirrors
+/// [`settings_all_lines`]'s section grouping + source colours.
+fn settings_keys_lines(app: &App) -> (Vec<Line<'static>>, Option<usize>) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let label_style = help_label_style(&app.theme);
+  let muted_style = Style::default().fg(muted);
+  let panel = &app.config_panel;
+  let mut lines: Vec<Line<'static>> = Vec::new();
+  let mut selected_line: Option<usize> = None;
+
+  if panel.key_rows.is_empty() {
+    lines.push(Line::from(Span::styled("No bindings resolved.", muted_style)));
+    return (lines, None);
   }
 
-  // Footer hint: scroll + close, matching the Command Logs overlay.
-  lines.push(Line::from(String::new()));
-  lines.push(Line::from(Span::styled(
-    "j/k scroll · g/G top/bottom · esc close",
-    muted_style.add_modifier(Modifier::ITALIC),
-  )));
+  let mut current_scope: Option<String> = None;
+  for (i, row) in panel.key_rows.iter().enumerate() {
+    if current_scope.as_deref() != Some(row.scope.as_str()) {
+      if current_scope.is_some() {
+        lines.push(Line::from(String::new()));
+      }
+      lines.push(Line::from(Span::styled(
+        format!("[{}]", row.scope),
+        help_section_style(accent),
+      )));
+      current_scope = Some(row.scope.clone());
+    }
 
-  // Publish the scroll bounds against the live viewport (mirrors
-  // `draw_command_logs` / `draw_help`).
+    let selected = i == panel.selected;
+    if selected {
+      selected_line = Some(lines.len());
+    }
+    let capturing = selected && panel.capture.is_some();
+    let marker = if selected { "›" } else { " " };
+    let marker_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+    let src_color = match row.source {
+      ConfigSource::Repo => app.theme.clean,
+      ConfigSource::User => app.theme.branch,
+      ConfigSource::Default => muted,
+    };
+
+    let key_span = if capturing {
+      let pending = panel
+        .capture
+        .as_ref()
+        .map(|c| c.pending.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+      Span::styled(
+        format!("[ {pending}_ ]"),
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+      )
+    } else {
+      let shown = if row.keys.is_empty() {
+        "(unbound)".to_string()
+      } else {
+        row.keys.clone()
+      };
+      let style = if row.keys.is_empty() {
+        muted_style
+      } else if selected {
+        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+      } else {
+        Style::default().fg(Color::White)
+      };
+      Span::styled(shown, style)
+    };
+
+    lines.push(Line::from(vec![
+      Span::styled(format!(" {marker} "), marker_style),
+      Span::styled(format!("{:<7}", row.source.label()), Style::default().fg(src_color)),
+      Span::raw(" "),
+      Span::styled(format!("{:<24}", row.label), label_style),
+      key_span,
+    ]));
+  }
+  (lines, selected_line)
+}
+
+/// Render the Settings overlay (issue #232; editable in #279): same modal
+/// size as the Keybindings overlay, with a fixed header (title + the edit
+/// layer as a subtitle + category tabs), a scrollable body (the active
+/// tab's fields, or the read-only resolved config on the `All` tab) with a
+/// herdr-style scrollbar, and a fixed footer hint. The renderer republishes
+/// `config_panel.max_scroll` against the live body viewport.
+fn draw_config_panel(f: &mut Frame, app: &mut App) {
+  let area = centered(60, 60, f.area());
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let muted_style = Style::default().fg(muted);
+  let heading_style = Style::default().fg(accent).add_modifier(Modifier::BOLD);
+  // Subtitle reads in the branch hue + italic, mirroring the Keybindings
+  // overlay's context subtitle.
+  let subtitle_style = Style::default().fg(app.theme.branch).add_modifier(Modifier::ITALIC);
+
+  let tab = app.config_panel.tab;
+  let editing = app.config_panel.editing.is_some();
+  let selected_kind = app.config_panel.selected_field().map(SettingField::kind);
+
+  // Header: title + the active edit layer as a subtitle + a blank spacer +
+  // the tab strip (all fixed). The layer-switch key lives in the footer
+  // hints, so the subtitle stays a plain context label.
+  let title = Line::from(Span::styled("Settings", heading_style)).centered();
+  let subtitle = Line::from(Span::styled(app.config_panel.layer.label(), subtitle_style)).centered();
+  let mut tab_spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+  for (i, t) in SettingsTab::ALL.iter().enumerate() {
+    if i > 0 {
+      tab_spans.push(Span::raw("  "));
+    }
+    let style = if *t == tab { chip_style(accent) } else { muted_style };
+    tab_spans.push(Span::styled(format!(" {} ", t.label()), style));
+  }
+  let header_lines = vec![title, subtitle, Line::from(String::new()), Line::from(tab_spans)];
+
+  // Body depends on the active tab. The Keys tab (issue #294) also reports the
+  // line index of the selected row so the renderer can scroll it into view (it
+  // has ~100 rows, unlike the short field tabs).
+  let mut keys_selected_line: Option<usize> = None;
+  let body_lines = match tab {
+    SettingsTab::All => settings_all_lines(app),
+    SettingsTab::Keys => {
+      let (lines, sel) = settings_keys_lines(app);
+      keys_selected_line = sel;
+      lines
+    }
+    other => settings_fields_lines(app, other.fields()),
+  };
+
+  // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
+  // the current tab / edit / capture mode. The edit, capture and nav rows
+  // resolve their single-key verbs from the Config* modal bindings (#219
+  // review) so a rebind of `[tui.keys.modal.config(.edit)]` shows through
+  // instead of literal keys.
+  let capture_single = app.config_panel.capture.as_ref().map(|c| c.single_only);
+  let footer_owned = if let Some(single) = capture_single {
+    config_capture_footer_hints(&app.modal_keymap, single)
+  } else if editing {
+    config_edit_footer_hints(&app.modal_keymap)
+  } else {
+    config_nav_footer_hints(&app.modal_keymap, tab, selected_kind)
+  };
+  let footer_hints: Vec<(&str, &str)> = footer_owned.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
+
   let block = overlay_block(accent);
   let inner = block.inner(area);
-  let viewport = inner.height as usize;
-  app.config_panel.max_scroll = (lines.len().saturating_sub(viewport)) as u16;
-  app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
-  let viewport_w = inner.width as usize;
-  let content_w = lines.iter().map(Line::width).max().unwrap_or(0);
-  app.config_panel.max_x_scroll = content_w.saturating_sub(viewport_w) as u16;
-  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
-  let scroll = app.config_panel.scroll;
-  let x_scroll = app.config_panel.x_scroll;
-
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block).scroll((scroll, x_scroll)), area);
+  f.render_widget(block, area);
+
+  let header_h = header_lines.len() as u16;
+  let [header_area, body_area, footer_area] =
+    Layout::vertical([Constraint::Length(header_h), Constraint::Min(1), Constraint::Length(1)]).areas(inner);
+
+  f.render_widget(Paragraph::new(header_lines), header_area);
+
+  // Publish scroll bounds against the BODY viewport only (issue #279).
+  let body_viewport = body_area.height as usize;
+  app.config_panel.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
+  // Keys tab (issue #294): follow the selected row so it stays on screen as
+  // selection moves (the field tabs are short enough to never need this).
+  if let Some(sel) = keys_selected_line {
+    let scroll = app.config_panel.scroll as usize;
+    if sel < scroll {
+      app.config_panel.scroll = sel as u16;
+    } else if body_viewport > 0 && sel >= scroll + body_viewport {
+      app.config_panel.scroll = (sel + 1 - body_viewport) as u16;
+    }
+  }
+  app.config_panel.scroll = app.config_panel.scroll.min(app.config_panel.max_scroll);
+  let scroll = app.config_panel.scroll;
+  // Reserve the scrollbar column first, then bound the pan (review P3).
+  let text_area = scrollable_body_area(f, body_area, scroll, body_lines.len(), &app.theme);
+  let content_w = body_lines.iter().map(Line::width).max().unwrap_or(0);
+  app.config_panel.max_x_scroll = content_w.saturating_sub(text_area.width as usize) as u16;
+  app.config_panel.x_scroll = app.config_panel.x_scroll.min(app.config_panel.max_x_scroll);
+  let x_scroll = app.config_panel.x_scroll;
+  f.render_widget(Paragraph::new(body_lines).scroll((scroll, x_scroll)), text_area);
+  f.render_widget(modal_hint_line(&footer_hints, &app.theme), footer_area);
 }
 
 fn draw_create(f: &mut Frame, app: &App) {
@@ -2322,17 +3263,10 @@ fn draw_create(f: &mut Frame, app: &App) {
     .map(|t| (t.name.as_str(), t.description.as_str()))
     .unwrap_or(("", "(no branch types configured)"));
 
-  // The modal is a single Paragraph of per-line-aligned rows (the title /
-  // buttons / hint centre themselves, the fields stay left) — no manual
-  // Layout split, the rounded frame's `Padding` owns the breathing room
-  // (issue #217). Height is the fixed row count plus the border + padding
-  // rows, so the box hugs its content; the width is capped so the input
-  // surfaces don't span a wide terminal.
-  const ROWS: u16 = 14; // title(2) + type + gap + 2 preview + gap + issue + gap + desc + gap + buttons + gap + hint
-  let height = ROWS + 2 /* border */ + 2 /* vertical padding */;
-  let area = centered_box(70, 72, height, f.area());
   let block = overlay_block(clean);
-  let inner_w = block.inner(area).width as usize;
+  let term = f.area();
+  let outer = centered_box(70, 72, 1, term);
+  let inner_w = block.inner(outer).width as usize;
 
   // Width of the background-filled value field: the inner width minus the
   // `  label  ` gutter (2 indent + label column + 2 gap).
@@ -2391,12 +3325,57 @@ fn draw_create(f: &mut Frame, app: &App) {
     muted,
     surface,
   ));
-  lines.push(Line::from(String::new()));
-  lines.push(create_buttons_line(accent, muted).centered());
-  push_modal_hint(&mut lines, HintContext::Create, &app.keymap, &app.theme);
+
+  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let area = centered_box(70, 72, height, term);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // title + form fields
+      Constraint::Length(1), // loader / failure
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
 
   f.render_widget(Clear, area);
-  f.render_widget(Paragraph::new(lines).block(block), area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(lines), inner[0]);
+
+  if app.is_create_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::CreateWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.create_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("create failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  }
+
+  if !app.is_create_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(create_buttons_line(accent, muted)).alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Create,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      )),
+      inner[4],
+    );
+  }
 }
 
 /// The create overlay's ` Create ` / ` Cancel ` button row (issue #217).
@@ -2405,10 +3384,22 @@ fn draw_create(f: &mut Frame, app: &App) {
 /// chip rather than defaulting focus to Cancel. Pure so the chip contract
 /// is pinned by `tests/tui_ui_helpers_tests.rs`.
 pub fn create_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  primary_cancel_buttons_line(" Create ", accent, muted)
+}
+
+/// Button row for the rename (`c`) modal: a reversed-accent `Rename` chip
+/// beside a muted `Cancel`. Mirrors [`create_buttons_line`] but labels the
+/// primary action "Rename" so the modal's button matches its title and the
+/// Enter action (Codex review on PR #292, P3).
+pub fn rename_buttons_line(accent: Color, muted: Color) -> Line<'static> {
+  primary_cancel_buttons_line(" Rename ", accent, muted)
+}
+
+fn primary_cancel_buttons_line(primary_label: &'static str, accent: Color, muted: Color) -> Line<'static> {
   let primary = chip_style(accent);
   let idle = Style::default().fg(muted).add_modifier(Modifier::BOLD);
   Line::from(vec![
-    Span::styled(" Create ", primary),
+    Span::styled(primary_label, primary),
     Span::raw("   "),
     Span::styled(" Cancel ", idle),
   ])
@@ -2515,6 +3506,16 @@ pub fn link_prompt_modal_width(term_width: u16) -> u16 {
   width.min(72).min(term_width)
 }
 
+/// Modal width for the exec / clean overlays (issue #334 polish). A bit wider
+/// than the link-prompt modal so the full-width clean report (icon + dir name
+/// pinned left, size pinned right) uses the horizontal space — but capped so
+/// the name↔size gap never stretches absurdly on an ultra-wide terminal.
+/// ~62 % of the width (90 % when ≤ 80 cols), clamped to `[48, 88]`.
+pub fn overlay_modal_width(term_width: u16) -> u16 {
+  let pct = if term_width <= 80 { 90 } else { 62 };
+  (term_width.saturating_mul(pct) / 100).clamp(48, 88).min(term_width)
+}
+
 /// Section-heading style for the Keybindings overlay body. Kept pure so the
 /// title/body colour split is pinned outside the ratatui renderer.
 pub fn help_section_style(section: Color) -> Style {
@@ -2566,20 +3567,39 @@ pub fn help_body_section_color(theme: &Theme) -> Color {
   theme.locked
 }
 
+/// Direct-pick keys (`issue`, `pr`) for the link / open-menu target chips,
+/// resolved from the active context's modal bindings (#219 review) so a
+/// rebind of `[tui.keys.modal.link.choose_target]` / `[tui.keys.modal.open_menu]` shows
+/// through instead of the literal `i` / `p`. An unbound verb yields an empty
+/// string — the chip then renders label-only rather than a phantom key.
+pub fn link_target_keys(ctx: HintContext, modal: &ModalKeymap) -> (String, String) {
+  let (issue, pr) = match ctx {
+    HintContext::OpenMenu => (ModalAction::OpenMenuIssue, ModalAction::OpenMenuPr),
+    _ => (ModalAction::LinkChooseIssue, ModalAction::LinkChoosePr),
+  };
+  (
+    modal.primary_key(issue).unwrap_or_default(),
+    modal.primary_key(pr).unwrap_or_default(),
+  )
+}
+
 pub fn link_open_modal_lines(app: &App, title: &str, selected: Option<LinkTarget>) -> Vec<Line<'static>> {
   let accent = app.theme.accent;
   let muted = app.theme.muted;
-  let mut lines = overlay_title_lines(title, accent);
-  lines.extend(github_status_lines(app, 56));
-  lines.push(Line::from(""));
-  lines.push(link_target_line("i", "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
-  lines.push(link_target_line("p", "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
   let ctx = if title == "Link" {
     HintContext::LinkPrompt
   } else {
     HintContext::OpenMenu
   };
-  push_modal_hint(&mut lines, ctx, &app.keymap, &app.theme);
+  // #219: the direct-pick chips track the active context's issue/pr bindings
+  // (like the footer below) so a rebind shows through instead of `i` / `p`.
+  let (issue_key, pr_key) = link_target_keys(ctx, &app.modal_keymap);
+  let mut lines = overlay_title_lines(title, accent);
+  lines.extend(github_status_lines(app, 56));
+  lines.push(Line::from(""));
+  lines.push(link_target_line(&issue_key, "Issue", selected == Some(LinkTarget::Issue), accent, muted).centered());
+  lines.push(link_target_line(&pr_key, "Pull Request", selected == Some(LinkTarget::Pr), accent, muted).centered());
+  push_modal_hint(&mut lines, ctx, &app.keymap, &app.modal_keymap, &app.theme);
   lines
 }
 
@@ -2644,7 +3664,9 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   content.push(Line::from(""));
   content.push(confirm_delete_branch_line(
     app.delete_branch_on_remove,
-    "p",
+    // Derive the live chord (Codex review on PR #292): ToggleDeleteBranch is
+    // `D` since #290, not the pre-#290 `p`, and tracks `[tui.keys]` overrides.
+    &action_chord(&app.keymap, Action::ToggleDeleteBranch, "D"),
     label_w,
     app.theme.accent,
     muted,
@@ -2677,8 +3699,24 @@ fn draw_confirm(f: &mut Frame, app: &App) {
 
   f.render_widget(Paragraph::new(content).wrap(Wrap { trim: false }), inner[0]);
 
-  // --- loader + countdown (only while the safety countdown is armed) ---
-  if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
+  // --- loader + countdown ---
+  if app.is_delete_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::DeleteWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.delete_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("delete failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if app.confirm_is_countdown_mode() && app.confirm.is_armed() {
     let now = Instant::now();
     let mut spans = vec![Span::styled(
       format!("{} ", app.spinner.glyph(DOT_FRAMES)),
@@ -2695,20 +3733,27 @@ fn draw_confirm(f: &mut Frame, app: &App) {
   }
 
   // --- buttons (focused one highlighted) ---
-  f.render_widget(
-    Paragraph::new(confirm_buttons_line(
-      app.confirm.focused_button(),
-      app.theme.accent,
-      muted,
-    ))
-    .alignment(Alignment::Center),
-    inner[2],
-  );
+  if !app.is_delete_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(confirm_buttons_line(
+        app.confirm.focused_button(),
+        app.theme.accent,
+        muted,
+      ))
+      .alignment(Alignment::Center),
+      inner[2],
+    );
 
-  f.render_widget(
-    Paragraph::new(modal_hint_for_context(HintContext::Confirm, &app.keymap, &app.theme)),
-    inner[4],
-  );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Confirm,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      )),
+      inner[4],
+    );
+  }
 }
 
 /// The ` Confirm ` ` Cancel ` button row (#187, restyled in #217). The
@@ -2856,9 +3901,47 @@ fn draw_report(f: &mut Frame, app: &App) {
   );
   render_section(f, layout[2], " Logs ", SectionBody::new(&logs), accent, 0, None);
   f.render_widget(
-    Paragraph::new(modal_hint_for_context(HintContext::Report, &app.keymap, &app.theme)),
+    Paragraph::new(modal_hint_for_context(
+      HintContext::Report,
+      &app.keymap,
+      &app.modal_keymap,
+      &app.theme,
+    )),
     layout[4],
   );
+}
+
+// ── PTY overlay (issue #35) ────────────────────────────────────────────────
+
+/// Render the embedded PTY overlay (lazygit or native terminal). The overlay
+/// occupies ~90 % × 90 % of the terminal, centred and drawn over the list
+/// view. The rendered PTY content fills the entire inner area of the block
+/// so the child process gets as much screen real-estate as possible.
+fn draw_pty_overlay(f: &mut Frame, app: &mut App) {
+  let term = f.area();
+  let area = centered(90, 90, term);
+
+  f.render_widget(Clear, area);
+
+  let title = match app.pty_overlay.as_ref().map(|p| (p.kind, p.finished)) {
+    Some((PtyKind::LazyGit, _)) => " LazyGit ",
+    Some((PtyKind::Terminal, _)) => " Terminal ",
+    Some((PtyKind::Review, _)) => " Review ",
+    Some((PtyKind::Exec, false)) => " Exec ",
+    // #325: once the one-shot command exits, the title invites dismissal.
+    Some((PtyKind::Exec, true)) => " Exec · done — press any key ",
+    None => " Overlay ",
+  };
+  let block = overlay_block(app.theme.accent)
+    .title(title)
+    .title_alignment(ratatui::layout::Alignment::Center);
+  let inner = block.inner(area);
+  f.render_widget(block, area);
+
+  if let Some(pty) = app.pty_overlay.as_ref() {
+    let pseudo_terminal = tui_term::widget::PseudoTerminal::new(pty.parser.screen());
+    f.render_widget(pseudo_terminal, inner);
+  }
 }
 
 fn centered(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
@@ -3013,7 +4096,13 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
         accent,
       );
       lines.push(Line::from(format!("  {}{}_", label, app.link_prompt_number_input())));
-      push_modal_hint(&mut lines, HintContext::LinkPrompt, &app.keymap, &app.theme);
+      push_modal_hint(
+        &mut lines,
+        HintContext::LinkInputNumber,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      );
       lines
     }
   };
@@ -3025,6 +4114,262 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
 }
 
+/// Magnitude heatmap for a reclaimable size (issue #325 overlay polish):
+/// green (small) → yellow (medium) → red (large) so a big reclaim stands out
+/// at a glance. Thresholds tuned for build artifacts (50 MiB / 500 MiB).
+pub fn reclaim_size_color(bytes: u64, theme: &Theme) -> Color {
+  const MIB: u64 = 1024 * 1024;
+  if bytes >= 500 * MIB {
+    theme.prunable
+  } else if bytes >= 50 * MIB {
+    theme.dirty
+  } else {
+    theme.clean
+  }
+}
+
+/// A nerd-font glyph matched to a reclaimable directory name (issue #334
+/// polish) — the ecosystem the artifact belongs to (`node_modules` → node,
+/// `target` → Rust, `vendor` → PHP, `.venv` → Python, `dist`/`build` →
+/// package, `.cache` → archive…), falling back to a generic folder. Leading
+/// dots are stripped so `.venv` / `.nuxt` match like `venv` / `nuxt`.
+pub fn clean_dir_icon(rel: &str) -> &'static str {
+  match rel.trim_start_matches('.').to_ascii_lowercase().as_str() {
+    "node_modules" => "\u{e718}",      // nf-dev-nodejs
+    "target" => wt_tree::WT_RUST_ICON, // nf-dev-rust
+    "vendor" => "\u{e73d}",            // nf-dev-php
+    "venv" | "__pycache__" | "pytest_cache" | "mypy_cache" | "tox" => "\u{e73c}", // nf-dev-python
+    "dist" | "build" | "out" | "output" | "bin" => "\u{f487}", // nf-oct-package
+    "cache" | "turbo" | "parcel-cache" => "\u{f187}", // nf-fa-archive
+    "nuxt" | "next" | "svelte-kit" | "astro" | "vite" => "\u{e74e}", // nf-dev-javascript
+    "coverage" => "\u{f201}",          // nf-fa-line_chart
+    _ => wt_tree::WT_DIR_ICON,         // generic folder
+  }
+}
+
+/// The visible `[start, end)` slice of a `len`-item picker when at most
+/// `max_visible` rows fit, keeping `selected` in view (centred while
+/// scrolling). Returns the whole list when it fits (issue #325 polish).
+pub fn picker_window(len: usize, selected: usize, max_visible: usize) -> (usize, usize) {
+  if max_visible == 0 || len <= max_visible {
+    return (0, len);
+  }
+  let half = max_visible / 2;
+  let start = selected.saturating_sub(half).min(len - max_visible);
+  (start, start + max_visible)
+}
+
+/// Build the full-width, scrollable rows for an overlay profile picker (issue
+/// #334 polish). Each row spans the modal's `inner` width — left-aligned so
+/// the labels start at the same column and the selection highlight reads as a
+/// full-width bar — and the visible window follows `selected` with
+/// `↑ / ↓ N more` markers (centred) when the list overflows `max_visible`.
+fn picker_lines(
+  labels: &[&str],
+  selected: usize,
+  max_visible: usize,
+  inner: usize,
+  theme: &Theme,
+) -> Vec<Line<'static>> {
+  let mut out = Vec::new();
+  if labels.is_empty() {
+    return out;
+  }
+  // Width available for the label text after the ` ▸ ` marker gutter.
+  let textw = inner.saturating_sub(3);
+  let (start, end) = picker_window(labels.len(), selected, max_visible);
+  if start > 0 {
+    out.push(
+      Line::from(Span::styled(
+        format!("↑ {start} more"),
+        Style::default().fg(theme.muted),
+      ))
+      .centered(),
+    );
+  }
+  for (i, label) in labels.iter().enumerate().take(end).skip(start) {
+    let marker = if i == selected { "▸" } else { " " };
+    // Pad to the full inner width so the selection bar fills the whole row.
+    let txt = format!(" {marker} {:<textw$}", ellipsize_middle(label, textw));
+    let style = if i == selected {
+      Style::default()
+        .fg(theme.accent)
+        .bg(theme.selection_bg)
+        .add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(theme.muted)
+    };
+    out.push(Line::from(Span::styled(txt, style)));
+  }
+  if end < labels.len() {
+    out.push(
+      Line::from(Span::styled(
+        format!("↓ {} more", labels.len() - end),
+        Style::default().fg(theme.muted),
+      ))
+      .centered(),
+    );
+  }
+  out
+}
+
+/// Render the exec profile picker overlay (issue #325). A small centred
+/// modal listing the `[exec.profiles.*]` names; the highlighted row reads in
+/// the accent (with a selection bar) and a `▸` marker, the rest muted. The
+/// list is aligned, same-width, and scrolls to keep the highlight in view.
+/// `Enter` resolves the highlight and the run loop spawns it in a PTY overlay.
+fn draw_exec_picker(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+  let mut lines = overlay_title_lines("Run an exec profile", accent);
+  // Leave room for the title + hint + borders; the picker scrolls past that.
+  let max_visible = (term.height as usize).saturating_sub(8).max(3);
+  let labels: Vec<&str> = app.exec_picker.profiles().iter().map(String::as_str).collect();
+  lines.extend(picker_lines(
+    &labels,
+    app.exec_picker.selected_index(),
+    max_visible,
+    inner,
+    &app.theme,
+  ));
+  push_modal_hint(
+    &mut lines,
+    HintContext::ExecPicker,
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+  );
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let area = centered_abs(width, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Render the clean reclaim overlay (issue #325). A centred modal showing
+/// the gated reclaim report for the selected worktree (per-artifact sizes +
+/// total), the `[clean.profiles.*]` picker when configured, the gate-
+/// preserved names, and a danger-coloured armed indicator while the safety
+/// countdown runs. The live countdown progresses on the status bar; the
+/// border switches to the danger colour once armed.
+fn draw_clean_overlay(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let danger = app.theme.prunable;
+  let armed = app.clean_overlay.confirm.is_armed();
+  let border = if armed { danger } else { accent };
+  let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(6) as usize; // inside borders (1) + overlay_block padding (2) each side
+
+  let mut lines = overlay_title_lines("Reclaim build artifacts", border);
+
+  // Profile picker — the `(default)` choice plus any `[clean.profiles]`.
+  // Full-width, scrollable; only rendered when named profiles exist.
+  if app.clean_overlay.has_profiles() {
+    let labels = app.clean_overlay.choice_labels();
+    let max_visible = (term.height as usize).saturating_sub(14).max(3);
+    lines.extend(picker_lines(
+      &labels,
+      app.clean_overlay.selected_index(),
+      max_visible,
+      inner,
+      &app.theme,
+    ));
+    lines.push(Line::from(""));
+  }
+
+  // The gated reclaim report — only the git-ignored, untracked artifacts.
+  // Each row fills the modal's inner width: a matched nerd-font icon (#334) +
+  // dir name pinned left, the heatmap-coloured size pinned to the right edge,
+  // so the columns use the whole box. Capped to the modal height with a
+  // `… N more` overflow marker.
+  match app.clean_overlay.reclaim() {
+    Some(reclaim) if !reclaim.artifacts.is_empty() => {
+      // Name column = inner width minus the ` icon  ` gutter (4) and the
+      // `<size> ` tail (11), so the size lands flush on the right edge.
+      let namew = inner.saturating_sub(15).max(5);
+      let row = |icon: &str, left: &str, left_style: Style, bytes: u64, size_style: Style| -> Line<'static> {
+        Line::from(vec![
+          Span::styled(format!(" {icon}  "), Style::default().fg(accent)),
+          Span::styled(format!("{:<namew$}", ellipsize_middle(left, namew)), left_style),
+          Span::styled(format!("{:>10} ", crate::clean::human_size(bytes)), size_style),
+        ])
+      };
+      let max_rows = (term.height as usize).saturating_sub(14).max(3);
+      let shown = reclaim.artifacts.len().min(max_rows);
+      for a in reclaim.artifacts.iter().take(shown) {
+        lines.push(row(
+          clean_dir_icon(&a.rel),
+          &a.rel,
+          Style::default().fg(muted),
+          a.bytes,
+          Style::default().fg(reclaim_size_color(a.bytes, &app.theme)),
+        ));
+      }
+      if reclaim.artifacts.len() > shown {
+        lines.push(
+          Line::from(Span::styled(
+            format!("… {} more", reclaim.artifacts.len() - shown),
+            Style::default().fg(muted),
+          ))
+          .centered(),
+        );
+      }
+      // The total row uses an aggregate (sigma) glyph in the icon column.
+      lines.push(row(
+        "\u{f03a}",
+        "total",
+        Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        reclaim.total_bytes,
+        Style::default()
+          .fg(reclaim_size_color(reclaim.total_bytes, &app.theme))
+          .add_modifier(Modifier::BOLD),
+      ));
+    }
+    _ => {
+      lines.push(
+        Line::from("nothing to reclaim")
+          .style(Style::default().fg(muted))
+          .centered(),
+      );
+    }
+  }
+
+  // Gate-preserved names — explain why a visible `target/` was not counted.
+  for rel in app.clean_overlay.skipped() {
+    lines.push(
+      Line::from(format!("skipped {rel} — not git-ignored / holds tracked files"))
+        .style(Style::default().fg(muted))
+        .centered(),
+    );
+  }
+
+  // Danger-coloured armed indicator; the live countdown shows on the status
+  // bar (set by `clean_confirm_press`), so the render stays time-free.
+  if armed {
+    lines.push(Line::from(""));
+    lines.push(
+      Line::from("⚠ armed — confirm again or cancel to abort")
+        .style(Style::default().fg(danger).add_modifier(Modifier::BOLD))
+        .centered(),
+    );
+  }
+
+  push_modal_hint(
+    &mut lines,
+    HintContext::Clean,
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+  );
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let area = centered_abs(width, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(border)), area);
+}
+
 /// Render the command palette overlay (issue #32).
 ///
 /// Layout: a centered modal sized at 60% × 50% of the frame
@@ -3032,7 +4377,144 @@ fn draw_link_prompt(f: &mut Frame, app: &App) {
 /// occupies the top of the inner area, input bar is pinned to the
 /// bottom row. The highlight follows the user's cycle key
 /// (`Up` / `Down` / `Tab`); `Enter` fires the highlighted entry,
-/// `Esc` cancels.
+/// Worktree-rename modal (#290). Mirrors [`draw_create`] — it reuses the
+/// same Create form state (Type / Issue / Desc) pre-filled from the current
+/// branch — plus a `From :` line showing the original branch, an async
+/// "renaming…" loader, and an inline failure surfaced from
+/// `App::edit_failure`. State lives on `App::create_form` +
+/// `App::edit_original_branch`.
+fn draw_edit_worktree(f: &mut Frame, app: &App) {
+  let accent = app.theme.accent;
+  let muted = app.theme.muted;
+  let clean = app.theme.clean;
+  let surface = app.theme.selection_bg;
+
+  let (type_str, type_desc) = app
+    .branch_types
+    .get(app.create_form.type_index)
+    .map(|t| (t.name.as_str(), t.description.as_str()))
+    .unwrap_or(("", "(no branch types configured)"));
+
+  let block = overlay_block(clean);
+  let term = f.area();
+  let outer = centered_box(70, 72, 1, term);
+  let inner_w = block.inner(outer).width as usize;
+  let label_w = 5usize;
+  let gutter = 2 + label_w + 2;
+  let value_w = inner_w.saturating_sub(gutter);
+
+  let label = |s: &str| format!("{:<label_w$}", s);
+  let old_branch = app
+    .edit_original_branch
+    .as_deref()
+    .or_else(|| app.selected().and_then(|w| w.branch.as_deref()))
+    .unwrap_or("(none)");
+  let old_display = ellipsize_middle(old_branch, inner_w.saturating_sub("  From   : ".len()));
+  let branch = ellipsize_middle(
+    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Branch : ".len()),
+  );
+  let dirname = ellipsize_middle(
+    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    inner_w.saturating_sub("  Dir    : ".len()),
+  );
+
+  let mut lines = overlay_title_lines("Rename Worktree", clean);
+  lines.push(Line::from(vec![
+    Span::raw("  From   : "),
+    Span::styled(old_display, Style::default().fg(muted)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(type_selector_line(
+    &label("Type"),
+    type_str,
+    type_desc,
+    app.create_form.field == Field::Type,
+    accent,
+    muted,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(Line::from(vec![
+    Span::raw("  Branch : "),
+    Span::styled(branch, Style::default().fg(app.theme.branch)),
+  ]));
+  lines.push(Line::from(vec![
+    Span::raw("  Dir    : "),
+    Span::styled(dirname, Style::default().fg(app.theme.dirty)),
+  ]));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Issue"),
+    &app.create_form.issue,
+    app.create_form.field == Field::Issue,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+  lines.push(Line::from(String::new()));
+  lines.push(field_input_line(
+    &label("Desc"),
+    &app.create_form.desc,
+    app.create_form.field == Field::Desc,
+    value_w,
+    accent,
+    muted,
+    surface,
+  ));
+
+  let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
+  let area = centered_box(70, 72, height, term);
+  let inner = Layout::default()
+    .direction(Direction::Vertical)
+    .constraints([
+      Constraint::Min(1),    // title + form fields
+      Constraint::Length(1), // loader / failure
+      Constraint::Length(1), // buttons
+      Constraint::Length(1), // hint gap
+      Constraint::Length(1), // hint
+    ])
+    .split(block.inner(area));
+
+  f.render_widget(Clear, area);
+  f.render_widget(block, area);
+  f.render_widget(Paragraph::new(lines), inner[0]);
+
+  if app.is_edit_worktree_loading() {
+    f.render_widget(
+      LoaderWidget::running(
+        app.spinner.glyph(DOT_FRAMES),
+        TaskKind::EditWorktree.loading_label(),
+        None,
+        &app.theme,
+      )
+      .alignment(Alignment::Center),
+      inner[1],
+    );
+  } else if let Some(error) = app.edit_failure.as_deref() {
+    f.render_widget(
+      LoaderWidget::failed("rename failed", Some(error), &app.theme).alignment(Alignment::Center),
+      inner[1],
+    );
+  }
+
+  if !app.is_edit_worktree_loading() {
+    f.render_widget(
+      Paragraph::new(rename_buttons_line(accent, muted)).alignment(Alignment::Center),
+      inner[2],
+    );
+    f.render_widget(
+      Paragraph::new(modal_hint_for_context(
+        HintContext::Rename,
+        &app.keymap,
+        &app.modal_keymap,
+        &app.theme,
+      )),
+      inner[4],
+    );
+  }
+}
+
 fn draw_command_palette(f: &mut Frame, app: &App) {
   let area = centered(60, 50, f.area());
   f.render_widget(Clear, area);
@@ -3121,6 +4603,7 @@ fn draw_command_palette(f: &mut Frame, app: &App) {
     Paragraph::new(modal_hint_for_context(
       HintContext::CommandPalette,
       &app.keymap,
+      &app.modal_keymap,
       &app.theme,
     )),
     layout[6],
@@ -3138,8 +4621,12 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   let mut lines: Vec<Line<'static>> = Vec::new();
 
   if link.issue.is_none() && link.pr.is_none() {
+    // Derive LinkPrompt's chord from the live keymap so the hint tracks the
+    // binding (and any `[tui.keys]` override) instead of drifting — the `L`
+    // hardcoded pre-#290 now belongs to LazyGitFullscreen.
+    let chord = action_chord(&app.keymap, Action::LinkPrompt, "i");
     lines.push(Line::from(Span::styled(
-      trunc("no link · press L to link", max_width),
+      trunc(&format!("no link · press {chord} to link"), max_width),
       Style::default().fg(app.theme.muted),
     )));
     return lines;
@@ -3151,6 +4638,10 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.issue_source,
       app.issue_fetch_state(),
+      PersistedSummary {
+        title: link.issue_title.as_deref(),
+        state: link.issue_state,
+      },
       max_width,
       &app.theme,
       Some(spinner),
@@ -3162,6 +4653,10 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       n,
       link.pr_source,
       app.pr_fetch_state(),
+      PersistedSummary {
+        title: link.pr_title.as_deref(),
+        state: link.pr_state,
+      },
       max_width,
       &app.theme,
       Some(spinner),
@@ -3170,12 +4665,42 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   lines
 }
 
-fn source_marker(s: LinkSource) -> &'static str {
+/// Nerdfont glyph leading the pane's Issue line (issue #283):
+/// `nf-oct-issue_opened`.
+pub const ISSUE_ICON: &str = "\u{f41b}";
+/// Nerdfont glyph leading the pane's PR line (issue #283):
+/// `nf-oct-git_pull_request`.
+pub const PR_ICON: &str = "\u{f407}";
+
+/// Nerdfont glyphs for the per-PR CI indicator (issue #299):
+/// `nf-oct-check` (passing), `nf-oct-x` (failing), `nf-oct-sync` (running).
+pub const CI_PASSING_ICON: &str = "\u{f42e}";
+pub const CI_FAILING_ICON: &str = "\u{f467}";
+pub const CI_RUNNING_ICON: &str = "\u{f46a}";
+
+/// The pane's source chip (issue #283): `auto` for a branch-name inference,
+/// `detected` for a live GitHub match. Explicit / none carry no chip — the
+/// number already speaks for an explicit link. Rendered version-badge style
+/// (reverse-video [`chip_style`]); `auto` stays muted, `detected` takes the
+/// accent so a freshly-found PR draws the eye.
+fn source_chip(s: LinkSource, theme: &Theme) -> Option<(&'static str, Color)> {
   match s {
-    LinkSource::None => "",
-    LinkSource::BranchName => " (auto)",
-    LinkSource::Explicit => "",
-    LinkSource::Detected => " (detected)",
+    LinkSource::BranchName => Some(("auto", theme.muted)),
+    LinkSource::Detected => Some(("detected", theme.accent)),
+    LinkSource::Explicit | LinkSource::None => None,
+  }
+}
+
+/// Collapse a multi-span line into a single truncated plain span when the
+/// styled spans together overflow `max_width`. Used by the pane's narrow
+/// fallback so the icon + chips never push the line past the block border
+/// (issue #283). Width is counted in display columns (`chars().count()`),
+/// matching the budget arithmetic in [`summary_line`].
+fn flatten_if_overflow(spans: &mut Vec<Span<'static>>, max_width: usize) {
+  let w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+  if w > max_width {
+    let raw: String = spans.iter().map(|s| s.content.as_ref()).collect();
+    *spans = vec![Span::raw(trunc(&raw, max_width))];
   }
 }
 
@@ -3191,7 +4716,22 @@ pub fn issue_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  issue_summary_line_with_spinner(n, src, state, max_width, theme, None)
+  issue_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
+}
+
+#[derive(Clone, Copy)]
+struct PersistedSummary<'a, S> {
+  title: Option<&'a str>,
+  state: Option<S>,
+}
+
+impl<S> PersistedSummary<'_, S> {
+  fn none() -> Self {
+    Self {
+      title: None,
+      state: None,
+    }
+  }
 }
 
 /// Resolved render inputs for a GitHub summary line, after the caller has
@@ -3201,80 +4741,183 @@ pub fn issue_summary_line(
 /// between the closing `]` and the final space+title.
 enum SummaryState<'a> {
   Idle,
+  CachedTitle {
+    title: &'a str,
+  },
+  CachedStatus {
+    badge: &'a str,
+    badge_color: Color,
+    trailing: String,
+    /// Colour for the `trailing` segment, e.g. the CI indicator
+    /// (issue #299). `None` paints it with the default foreground.
+    trailing_color: Option<Color>,
+    title: &'a str,
+  },
   Loading,
   Loaded {
     badge: &'a str,
     badge_color: Color,
     trailing: String,
+    /// See [`SummaryState::CachedStatus::trailing_color`].
+    trailing_color: Option<Color>,
     title: &'a str,
   },
   Error(&'a str),
 }
 
-/// Shared renderer behind [`issue_summary_line`] and [`pr_summary_line`].
-/// Both twins resolve their `head` ("Issue #…" vs "PR    #…"), badge, and
-/// `trailing` segment, then delegate here so the truncation budget, the
-/// narrow-fallback flatten, and the Idle/Loading/Error arms live in one
-/// place. The `trailing` param is what keeps the two byte-identical: issue
-/// passes "" → renders `] title`; PR passes ` · checks 1/2` → renders
-/// `]· checks 1/2 title`, exactly as the inlined versions did.
+/// Shared renderer behind [`issue_summary_line`] and [`pr_summary_line`]
+/// (issue #283). Both twins pass their leading nerdfont `icon`, their `head`
+/// identity ("Issue #…" / "PR    #…"), the link `source`, and — for `Loaded`
+/// — a state `badge` + optional `trailing` segment. Every line leads with
+/// `<icon> <head>`, then an optional version-badge-style source chip
+/// (`auto` / `detected`), then the state-specific tail.
+///
+/// `trailing` keeps the two twins identical past the badge: issue passes ""
+/// → renders ` badge  title`; PR passes ` · checks 1/2` → renders
+/// ` badge · checks 1/2 title`. Widths are counted in display columns (the
+/// `·` is U+00B7: 1 column) so the budget arithmetic holds.
+/// Render a `trailing` segment, styling it with `color` when present
+/// (the CI indicator, issue #299) and falling back to the default
+/// foreground otherwise (the legacy uncoloured `· checks N/M`).
+fn trailing_span(trailing: String, color: Option<Color>) -> Span<'static> {
+  match color {
+    Some(c) => Span::styled(trailing, Style::default().fg(c)),
+    None => Span::raw(trailing),
+  }
+}
+
 fn summary_line(
+  icon: &str,
   head: String,
+  source: LinkSource,
   state: SummaryState,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  // The `head` carries no status signal, only identity — it paints with
-  // the `name` role (issue #210; default `White`) while the badge colour
-  // tracks the GitHub state.
+  // `<icon> <head>` plus an optional source chip are common to every state.
+  // `prefix_w` tracks the visible width so the variable tail (title / error
+  // blob) can be trimmed to fit `max_width`.
+  let icon_seg = format!("{}  ", icon); // glyph + two trailing gaps
+  let chip = source_chip(source, theme);
+  // Source chip segment = " " + " <label> " (a leading gap + the padded chip).
+  let source_seg_w = chip.map(|(l, _)| 1 + l.chars().count() + 2).unwrap_or(0);
+  let prefix_w = icon_seg.chars().count() + head.chars().count() + source_seg_w;
+
+  // The `head` carries no status signal, only identity — it paints with the
+  // `name` role (issue #210); the icon mirrors loaded state colour and falls
+  // back to muted while no fresh status exists.
+  let icon_color = match &state {
+    SummaryState::CachedStatus { badge_color, .. } | SummaryState::Loaded { badge_color, .. } => *badge_color,
+    SummaryState::Idle | SummaryState::CachedTitle { .. } | SummaryState::Loading | SummaryState::Error(_) => {
+      theme.muted
+    }
+  };
+  let build_prefix = |head_bold: bool| -> Vec<Span<'static>> {
+    let head_style = if head_bold {
+      Style::default().fg(theme.name).add_modifier(Modifier::BOLD)
+    } else {
+      Style::default().fg(theme.name)
+    };
+    let mut spans = vec![
+      Span::styled(icon_seg.clone(), Style::default().fg(icon_color)),
+      Span::styled(head.clone(), head_style),
+    ];
+    if let Some((label, color)) = chip {
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", label), chip_style(color)));
+    }
+    spans
+  };
+
   match state {
-    SummaryState::Idle => Line::from(Span::styled(trunc(&head, max_width), Style::default().fg(theme.name))),
+    SummaryState::Idle => {
+      let mut spans = build_prefix(false);
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
+    SummaryState::CachedTitle { title } => {
+      let fixed = prefix_w + 1;
+      let budget = max_width.saturating_sub(fixed);
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
+    }
+    SummaryState::CachedStatus {
+      badge,
+      badge_color,
+      trailing,
+      trailing_color,
+      title,
+    } => {
+      let badge_seg_w = 1 + badge.chars().count() + 2;
+      let fixed = prefix_w + badge_seg_w + trailing.chars().count() + 1;
+      if fixed >= max_width {
+        let mut spans = build_prefix(true);
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(format!(" {} ", badge)));
+        spans.push(trailing_span(trailing, trailing_color));
+        flatten_if_overflow(&mut spans, max_width);
+        return Line::from(spans);
+      }
+      let budget = max_width - fixed;
+      let mut spans = build_prefix(true);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
+      spans.push(trailing_span(trailing, trailing_color));
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
+      Line::from(spans)
+    }
     SummaryState::Loading => {
       let glyph = spinner.unwrap_or("…");
-      Line::from(trunc(&format!("{} {} loading", head, glyph), max_width))
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(format!(" {} loading", glyph)));
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
     }
     SummaryState::Loaded {
       badge,
       badge_color,
       trailing,
+      trailing_color,
       title,
     } => {
-      // Fixed prefix = "<head> [<badge>]<trailing> " — try to preserve in
-      // full and trim the title to whatever budget remains. If the prefix
-      // alone already exceeds the width budget (very narrow sidebar), fall
-      // back to flattening the line into a single styled string and
-      // truncating it — preserves no badge color but stays inside the
-      // block. `trailing` is empty for issues and ` · checks N/M` for PRs;
-      // count chars (the `·` is U+00B7: 2 bytes, 1 column) so the budget
-      // arithmetic matches the pre-dedup twins exactly.
-      let fixed = head.chars().count() + 3 + badge.chars().count() + trailing.chars().count() + 1; // " [" + badge + "]" + trailing + " "
+      // Tail fixed cost past the prefix = " " + " <badge> " + trailing + " ".
+      let badge_seg_w = 1 + badge.chars().count() + 2;
+      let fixed = prefix_w + badge_seg_w + trailing.chars().count() + 1;
       if fixed >= max_width {
-        let raw = format!("{} [{}]{} {}", head, badge, trailing, title);
-        return Line::from(trunc(&raw, max_width));
+        // Very narrow pane: keep the prefix + badge, drop the title, and
+        // flatten to fit rather than overflow the block border.
+        let mut spans = build_prefix(true);
+        spans.push(Span::raw(" "));
+        spans.push(Span::raw(format!(" {} ", badge)));
+        spans.push(trailing_span(trailing, trailing_color));
+        flatten_if_overflow(&mut spans, max_width);
+        return Line::from(spans);
       }
       let budget = max_width - fixed;
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name).add_modifier(Modifier::BOLD)),
-        Span::raw(" ["),
-        Span::styled(
-          badge.to_string(),
-          Style::default().fg(badge_color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("]"),
-        Span::raw(trailing),
-        Span::raw(" "),
-        Span::raw(trunc(title, budget)),
-      ])
+      let mut spans = build_prefix(true);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(format!(" {} ", badge), chip_style(badge_color)));
+      spans.push(trailing_span(trailing, trailing_color));
+      spans.push(Span::raw(" "));
+      spans.push(Span::raw(trunc(title, budget)));
+      Line::from(spans)
     }
     SummaryState::Error(e) => {
-      let fixed = head.chars().count() + 2; // " " + "!"
+      let fixed = prefix_w + 2; // " " + "!"
       let budget = max_width.saturating_sub(fixed);
-      Line::from(vec![
-        Span::styled(head, Style::default().fg(theme.name)),
-        Span::raw(" "),
-        Span::styled(format!("!{}", trunc(e, budget)), Style::default().fg(theme.prunable)),
-      ])
+      let mut spans = build_prefix(false);
+      spans.push(Span::raw(" "));
+      spans.push(Span::styled(
+        format!("!{}", trunc(e, budget)),
+        Style::default().fg(theme.prunable),
+      ));
+      flatten_if_overflow(&mut spans, max_width);
+      Line::from(spans)
     }
   }
 }
@@ -3283,14 +4926,48 @@ fn issue_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::IssueStatus>,
+  persisted: PersistedSummary<'_, IssueState>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  let head = format!("Issue #{}{}", n, source_marker(src));
+  let head = format!("Issue #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => SummaryState::Idle,
-    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Idle => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          IssueState::Open => "open",
+          IssueState::Closed => "closed",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: issue_badge_color(state, theme),
+          trailing: String::new(),
+          trailing_color: None,
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => persisted
+        .title
+        .map(|title| SummaryState::CachedTitle { title })
+        .unwrap_or(SummaryState::Idle),
+    },
+    GitHubFetchState::Loading => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          IssueState::Open => "open",
+          IssueState::Closed => "closed",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: issue_badge_color(state, theme),
+          trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          trailing_color: None,
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => SummaryState::Loading,
+    },
     GitHubFetchState::Loaded(s) => {
       // Mirror `issue_badge_color` exactly so the summary line and the
       // sidebar header dot never disagree for the same issue: closed maps
@@ -3305,18 +4982,20 @@ fn issue_summary_line_with_spinner(
         badge,
         badge_color: issue_badge_color(s.state, theme),
         trailing: String::new(),
+        trailing_color: None,
         title: &s.title,
       }
     }
     GitHubFetchState::Error(e) => SummaryState::Error(e),
   };
-  summary_line(head, resolved, max_width, theme, spinner)
+  summary_line(ISSUE_ICON, head, src, resolved, max_width, theme, spinner)
 }
 
 /// Render the Loaded / Idle / Loading / Error variants for a PR link
 /// row in the sidebar. See [`issue_summary_line`] for the `max_width`
-/// contract — same idea, with a `checks N/M` segment squeezed in between
-/// badge and title when the rollup is non-zero.
+/// contract — same idea, with a coloured CI indicator ([`ci_indicator`],
+/// issue #299) squeezed in between badge and title when the rollup is
+/// non-empty.
 pub fn pr_summary_line(
   n: u64,
   src: LinkSource,
@@ -3324,21 +5003,59 @@ pub fn pr_summary_line(
   max_width: usize,
   theme: &Theme,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
 }
 
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
   state: &GitHubFetchState<crate::github::PrStatus>,
+  persisted: PersistedSummary<'_, PrState>,
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
 ) -> Line<'static> {
-  let head = format!("PR    #{}{}", n, source_marker(src));
+  let head = format!("PR    #{}", n);
   let resolved = match state {
-    GitHubFetchState::Idle => SummaryState::Idle,
-    GitHubFetchState::Loading => SummaryState::Loading,
+    GitHubFetchState::Idle => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          PrState::Open => "open",
+          PrState::Draft => "draft",
+          PrState::Closed => "closed",
+          PrState::Merged => "merged",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: pr_badge_color(state, theme),
+          trailing: String::new(),
+          trailing_color: None,
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => persisted
+        .title
+        .map(|title| SummaryState::CachedTitle { title })
+        .unwrap_or(SummaryState::Idle),
+    },
+    GitHubFetchState::Loading => match persisted.state {
+      Some(state) => {
+        let badge = match state {
+          PrState::Open => "open",
+          PrState::Draft => "draft",
+          PrState::Closed => "closed",
+          PrState::Merged => "merged",
+        };
+        SummaryState::CachedStatus {
+          badge,
+          badge_color: pr_badge_color(state, theme),
+          trailing: format!(" · {} loading", spinner.unwrap_or("…")),
+          trailing_color: None,
+          title: persisted.title.unwrap_or(""),
+        }
+      }
+      None => SummaryState::Loading,
+    },
     GitHubFetchState::Loaded(s) => {
       // Route the badge colour through `pr_badge_color` (mirroring how the
       // issue side calls `issue_badge_color`) so the summary line and the
@@ -3351,21 +5068,24 @@ fn pr_summary_line_with_spinner(
         PrState::Closed => "closed",
         PrState::Merged => "merged",
       };
-      let trailing = if s.checks_total > 0 {
-        format!(" · checks {}/{}", s.checks_passed, s.checks_total)
-      } else {
-        String::new()
+      // Issue #299: surface the derived CI state (icon + label + N/M, coloured)
+      // instead of the bare ` · checks N/M`, so pass / fail / running reads at a
+      // glance. `ci_indicator` returns `None` when the PR has no checks.
+      let (trailing, trailing_color) = match ci_indicator(s.ci, s.checks_passed, s.checks_total, theme) {
+        Some((text, color)) => (text, Some(color)),
+        None => (String::new(), None),
       };
       SummaryState::Loaded {
         badge,
         badge_color: pr_badge_color(s.state, theme),
         trailing,
+        trailing_color,
         title: &s.title,
       }
     }
     GitHubFetchState::Error(e) => SummaryState::Error(e),
   };
-  summary_line(head, resolved, max_width, theme, spinner)
+  summary_line(PR_ICON, head, src, resolved, max_width, theme, spinner)
 }
 
 // ---- Issue #73: lazygit-style colour helpers -------------------------------
@@ -3430,6 +5150,23 @@ pub fn pr_badge_color(state: PrState, theme: &Theme) -> Color {
   }
 }
 
+/// Build the CI indicator segment for a loaded PR (issue #299): a nerd-font
+/// glyph + short label + `passed/total` count, plus the theme colour it
+/// paints with. Returns `None` for [`CiState::None`] so a PR with no checks
+/// renders nothing. Colours reuse the status-dot roles already used elsewhere
+/// in the sidebar: passing → `clean` (green), failing → `prunable` (red),
+/// running → `dirty` (yellow). The leading space keeps it flush against the
+/// preceding badge, mirroring the old ` · checks N/M` trailing.
+pub fn ci_indicator(ci: CiState, passed: u32, total: u32, theme: &Theme) -> Option<(String, Color)> {
+  let (icon, label, color) = match ci {
+    CiState::None => return None,
+    CiState::Passing => (CI_PASSING_ICON, "passing", theme.clean),
+    CiState::Failing => (CI_FAILING_ICON, "failing", theme.prunable),
+    CiState::Running => (CI_RUNNING_ICON, "running", theme.dirty),
+  };
+  Some((format!(" {} CI {} {}/{}", icon, label, passed, total), color))
+}
+
 /// Same idea as [`pr_badge_color`] but for a linked issue. Closed maps
 /// to magenta (treated as "moved on") rather than red so a routinely
 /// resolved issue doesn't read as alarming.
@@ -3440,24 +5177,48 @@ pub fn issue_badge_color(state: IssueState, theme: &Theme) -> Color {
   }
 }
 
-/// Pick the marker glyph + colour for the table's first column. `★`
-/// for the main worktree (preserves the pre-#73 convention), `●` for
-/// any other worktree that carries an issue or PR link, blank space
-/// otherwise so unlinked rows don't read as "claimed". Colour stays
-/// neutral (Cyan) — the live PR / issue state isn't known at the
-/// table layer (only the selected worktree triggers a fetch), so the
-/// table dot signals "has link" rather than a specific status. The
-/// colour-coded `●` lives in the sidebar header where the fetch state
-/// is available.
-pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> (&'static str, Color) {
+/// Build the table's first-column marker (issue #283). The main worktree
+/// keeps its single `★` (painted with the `main` role, preserving the
+/// pre-#73 convention). Every other row renders two Issue/PR slots:
+///
+/// - left = **Issue** — `●` with the loaded issue-state colour when known,
+///   `●` in `clean` green when only a link is known, else `-` in white.
+/// - right = **PR** — `●` with the loaded PR-state colour when known, `●`
+///   in `locked` violet when only a link is known, else `-` in white.
+/// - a `muted` `/` separates them.
+///
+/// The table is normally the no-fetch read path. Once GitHub status has been
+/// fetched for linked rows, their snapshots carry loaded states so
+/// the Issue/PR pastilles can mirror open/closed/draft/merged without a
+/// per-frame `gh` call. A detected PR shows here on every row only because it
+/// is persisted to `gwm-pr-detected` (#283) and read back by
+/// [`crate::github::read_link`].
+pub fn table_marker(w: &WorktreeInfo, theme: &Theme) -> Line<'static> {
   if w.is_main {
-    return ("★", theme.main);
+    return Line::from(Span::styled("★", Style::default().fg(theme.main)));
   }
-  if w.link.issue.is_some() || w.link.pr.is_some() {
-    return ("●", theme.accent);
-  }
-  // No semantic role: an unlinked, non-main row carries no signal, so
-  // it stays on the terminal default rather than borrowing a theme
-  // colour that would read as "claimed".
-  (" ", Color::Reset)
+  // An empty slot stays `name`-white so "no link" reads as a neutral
+  // placeholder rather than borrowing a status colour that would claim the
+  // row. A linked slot takes its accent unless a live loaded state exists.
+  let issue_color = match (w.link.issue, w.issue_state) {
+    (Some(_), Some(state)) => issue_badge_color(state, theme),
+    (Some(_), None) => theme.clean,
+    (None, _) => theme.name,
+  };
+  let pr_color = match (w.link.pr, w.pr_state) {
+    (Some(_), Some(state)) => pr_badge_color(state, theme),
+    (Some(_), None) => theme.locked,
+    (None, _) => theme.name,
+  };
+  Line::from(vec![
+    Span::styled(
+      if w.link.issue.is_some() { "●" } else { "-" },
+      Style::default().fg(issue_color),
+    ),
+    Span::styled("/", Style::default().fg(theme.muted)),
+    Span::styled(
+      if w.link.pr.is_some() { "●" } else { "-" },
+      Style::default().fg(pr_color),
+    ),
+  ])
 }

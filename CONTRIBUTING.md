@@ -20,7 +20,7 @@ Thanks for your interest in `gwm` — a Rust CLI / TUI for managing git worktree
 `gwm` is a single-binary Rust crate (`bin` + reusable `lib`):
 
 - **bin** `gwm` — entry point: dispatches to subcommands (CLI) or opens the TUI.
-- **lib** `gwm` — modules (`config`, `naming`, `worktree`, `bootstrap`, `cli`, `tui`, `error`, `trust`, `doctor`, `github`, `labels`, `milestones`, `launcher`, `multiplexer`) exposed publicly so integration tests in `tests/` can drive them directly.
+- **lib** `gwm` — modules (`aliases`, `bootstrap`, `clean`, `cli`, `command_log`, `config`, `config_cli`, `daemon`, `doctor`, `error`, `exec`, `github`, `gitmoji`, `history`, `hooks`, `issue_templates`, `json_api`, `labels`, `launcher`, `lifecycle`, `milestones`, `multiplexer`, `naming`, `pr_templates`, `presets`, `review`, `statusline`, `sync`, `templating`, `trust`, `tui`, `workspace`, `worktree`) exposed publicly so integration tests in `tests/` can drive them directly.
 
 It uses [`git2`](https://docs.rs/git2) (vendored libgit2) for worktree operations and [`ratatui`](https://docs.rs/ratatui) for the TUI.
 
@@ -33,29 +33,68 @@ gwm-cli/
 ├── CONTRIBUTING.md
 ├── LICENSE.md
 ├── README.md
+├── docs/                 # full documentation tree (README delegates here)
 ├── examples/
-│   └── gwm.toml.example
+│   ├── gwm.toml.example
+│   └── presets/          # embedded `gwm init --preset` bodies
 ├── src/
 │   ├── lib.rs            # public re-exports
 │   ├── main.rs           # bin entry point
 │   ├── error.rs
 │   ├── config.rs         # .gwm.toml parsing
+│   ├── config_cli.rs     # `gwm config get/set/...` plumbing
 │   ├── naming.rs         # branch / path conventions
 │   ├── worktree.rs       # libgit2 worktree ops
 │   ├── bootstrap.rs      # copies / guards / shell hooks
+│   ├── lifecycle.rs      # [hooks.*] lifecycle phases
+│   ├── hooks.rs          # git hook install (commit-msg auto-prefix)
 │   ├── trust.rs          # TOFU ledger gating bootstrap (issue #95)
-│   ├── doctor.rs         # 7 health checks for `gwm doctor`
+│   ├── doctor.rs         # 8 health checks for `gwm doctor`
 │   ├── github.rs         # gh shell-out + issue / PR linking
 │   ├── labels.rs         # declarative GitHub label set (issue #81)
 │   ├── milestones.rs     # declarative GitHub milestone set (issue #82)
-│   ├── launcher.rs       # `l` / `R` TUI launcher resolution (issue #75)
+│   ├── launcher.rs       # `l` / `r` TUI launcher resolution (issue #75)
 │   ├── multiplexer.rs    # tmux / zellij window+split helpers
+│   ├── presets.rs        # `gwm init --preset` stack registry (issue #37)
+│   ├── review.rs         # `gwm review <PR#>` (issue #308)
+│   ├── sync.rs           # `gwm sync` fetch + rebase / merge
+│   ├── exec.rs           # `gwm exec ... -- <cmd>` fleet runner (issue #313)
+│   ├── clean.rs          # `gwm clean` artifact reclaim (issue #313)
+│   ├── workspace.rs      # multi-repo workspace mode (issue #36)
+│   ├── daemon.rs         # JSON-RPC unix-socket daemon (issue #38)
+│   ├── json_api.rs       # `--format=json` rendering
+│   ├── statusline.rs     # `gwm statusline` daemon consumer (issue #309)
+│   ├── history.rs        # destructive-op journal + `gwm undo`
+│   ├── command_log.rs    # TUI command log buffer
+│   ├── aliases.rs        # [aliases] argv expansion
+│   ├── gitmoji.rs        # branch-type → :shortcode: map
+│   ├── templating.rs     # placeholder substitution
+│   ├── issue_templates.rs# `gwm new` issue templating
+│   ├── pr_templates.rs   # `gwm pr` body rendering
 │   ├── cli.rs            # clap subcommands
 │   └── tui/
 │       ├── mod.rs        # event loop
 │       ├── app.rs        # state
-│       └── ui.rs         # rendering
-└── tests/
+│       ├── ui.rs         # rendering
+│       ├── keymap.rs     # global keymap (rebindable)
+│       ├── modal_keymap.rs # per-context modal keys
+│       ├── palette.rs    # command palette
+│       ├── theme.rs      # theme presets / roles
+│       ├── wt_tree.rs    # working-tree file tree
+│       ├── commit_graph.rs # recent-commits view
+│       └── state/        # per-view state machines
+│           ├── async_task.rs
+│           ├── command_logs.rs
+│           ├── config_panel.rs
+│           ├── confirm.rs
+│           ├── create_form.rs
+│           ├── filter.rs
+│           ├── github_fetch.rs
+│           ├── link_prompt.rs
+│           ├── pty_overlay.rs
+│           ├── sidebar.rs
+│           └── spinner.rs
+└── tests/                # one `*_tests.rs` / `*_integration.rs` per module
     ├── common/           # shared helpers (init_repo, paths_equal)
     ├── config_tests.rs
     ├── naming_tests.rs
@@ -72,7 +111,7 @@ All tests live under `tests/` — no inline `#[cfg(test)] mod tests` blocks insi
 
 ### Prerequisites
 
-- Rust toolchain (stable channel, 1.80+ — verified on 1.89).
+- Rust toolchain (stable channel, 1.86+ — the MSRV declared in `Cargo.toml`, raised by `tui-term` / `portable-pty` when the PTY overlay landed).
 - A C compiler (libgit2 is vendored and built from source on first `cargo build`).
 
 ### Build & run
@@ -262,8 +301,8 @@ Before opening a PR:
 - [ ] `cargo clippy -- -D warnings`
 - [ ] `cargo test` (all green)
 - [ ] CHANGELOG.md updated under `## [Unreleased]`
-- [ ] If the public CLI changed: README usage section updated
-- [ ] If the config schema changed: `examples/gwm.toml.example` and the README section updated
+- [ ] If the public CLI changed: the `docs/3.cli` section updated (the README is a landing page that delegates to `docs/`)
+- [ ] If the config schema changed: `examples/gwm.toml.example` and the `docs/4.configuration` section updated
 
 Use the PR template (`.github/PULL_REQUEST_TEMPLATE.md`).
 
@@ -284,6 +323,11 @@ Versioning is SemVer (`MAJOR.MINOR.PATCH`), with `-rc.N` / `-alpha.N` / `-beta.N
 - `MINOR` → new feature
 - `PATCH` → bug fix
 - `-rc.N` / `-alpha.N` / `-beta.N` → release candidate / alpha / beta cut from `dev` before promotion to `main`
+
+What a "breaking change" actually covers — the published 1.0 compatibility
+contract (which surfaces are covered by this SemVer promise, which are free to
+change in a minor/patch, the MSRV policy, and the deprecation process) — lives
+in [Stability & compatibility](docs/6.development/3.stability.md).
 
 ### Step 0 — Reconcile open PRs (applies to every tag)
 

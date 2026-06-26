@@ -4,7 +4,8 @@
 //! / `type_index` / `issue` / `desc`, exposes focus rotation, type
 //! cycling, character push/pop. The `App` orchestrator owns the
 //! side-effecting `submit_create` which wires the form's resolved values
-//! into `BranchSpec` + `worktree::add` + `bootstrap::run`.
+//! into `BranchSpec` and dispatches `worktree::add` + `bootstrap::run` on
+//! the async task spine.
 
 use gwm::tui::state::create_form::{CreateForm, Field, MAX_DESC_LEN, MAX_ISSUE_LEN};
 

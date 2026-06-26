@@ -191,46 +191,44 @@ fn keymap_lookup_returns_no_match_for_unbound_key() {
 
 #[test]
 fn default_keymap_binds_sidebar_layout_and_position() {
-  // Issue #188: `V` cycles the sidebar orientation, `H` toggles the
-  // left/right position. Both must be distinct from `v` (ToggleSidebar).
+  // #290: V=toggle show/hide, Space=cycle orientation, v=toggle left/right position.
   let km = Keymap::defaults();
 
-  let cycle = KeyStroke::parse_chord("V").unwrap();
+  let toggle = KeyStroke::parse_chord("V").unwrap();
+  assert!(matches!(
+    km.lookup(&toggle),
+    ChordResolution::Matched(Action::ToggleSidebar)
+  ));
+
+  let cycle = KeyStroke::parse_chord("Space").unwrap();
   assert!(matches!(
     km.lookup(&cycle),
     ChordResolution::Matched(Action::CycleSidebarLayout)
   ));
 
-  let toggle_pos = KeyStroke::parse_chord("H").unwrap();
+  let toggle_pos = KeyStroke::parse_chord("v").unwrap();
   assert!(matches!(
     km.lookup(&toggle_pos),
     ChordResolution::Matched(Action::ToggleSidebarPosition)
   ));
-
-  let open = KeyStroke::parse_chord("v").unwrap();
-  assert!(matches!(
-    km.lookup(&open),
-    ChordResolution::Matched(Action::ToggleSidebar)
-  ));
 }
 
 #[test]
-fn default_keymap_binds_sync_to_uppercase_s() {
-  // Issue #258: `S` runs `gwm sync` on the selected worktree. It must be
-  // uppercase `S` because lowercase `s` is already ToggleSidebarMode — the
-  // mnemonic sits with the other uppercase lifecycle verbs (`F`, `R`).
+fn default_keymap_binds_sync_to_lowercase_s() {
+  // #290: `s` (lowercase) = Sync; `S` (uppercase) = ToggleSidebarMode (Commits↔Stashes).
   let km = Keymap::defaults();
 
-  let sync = KeyStroke::parse_chord("S").unwrap();
+  let sync = KeyStroke::parse_chord("s").unwrap();
   assert!(matches!(km.lookup(&sync), ChordResolution::Matched(Action::Sync)));
 
-  // Guard the conflict that motivated the choice: lowercase `s` stays the
-  // sidebar-mode toggle, untouched.
-  let sidebar_mode = KeyStroke::parse_chord("s").unwrap();
-  assert!(matches!(
-    km.lookup(&sidebar_mode),
-    ChordResolution::Matched(Action::ToggleSidebarMode)
-  ));
+  let sidebar_mode = KeyStroke::parse_chord("S").unwrap();
+  assert!(
+    matches!(
+      km.lookup(&sidebar_mode),
+      ChordResolution::Matched(Action::ToggleSidebarMode)
+    ),
+    "S must bind ToggleSidebarMode (Commits↔Stashes)"
+  );
 }
 
 #[test]
@@ -334,7 +332,7 @@ fn chord_that_is_strict_prefix_of_existing_binding_is_rejected() {
   // Default `g g` is bound to Top. Trying to bind `g` alone to anything
   // else creates a prefix collision and MUST fail.
   let err = km
-    .apply_override(Action::Open, vec![KeyStroke::parse_chord("g").unwrap()])
+    .apply_override(Action::TerminalFullscreen, vec![KeyStroke::parse_chord("g").unwrap()])
     .unwrap_err();
   assert!(
     err.to_string().to_lowercase().contains("prefix"),
@@ -387,4 +385,239 @@ fn list_returns_entries_with_source() {
     .find(|entry| entry.action == Action::Up)
     .expect("Up should appear in list()");
   assert_eq!(up_entry.source, Source::Default);
+}
+
+// ── Issue #290: keymap redesign — new bindings for existing actions ────────
+// These tests assert the *new* default key assignments introduced in #290.
+// They are intentionally written *before* the keymap is updated (TDD red)
+// and will fail until `Keymap::defaults()` is updated in the implementation
+// commit.
+
+#[test]
+fn sync_binds_to_lowercase_s_not_uppercase() {
+  // #290: `s` (lowercase) is now Sync — more ergonomic than `S`.
+  // `ToggleSidebarMode` is unbound by default; users who want it can rebind.
+  let km = Keymap::defaults();
+
+  let s = KeyStroke::parse_chord("s").unwrap();
+  assert!(
+    matches!(km.lookup(&s), ChordResolution::Matched(Action::Sync)),
+    "s must resolve to Sync after #290"
+  );
+
+  // The old `S` must no longer fire Sync.
+  let big_s = KeyStroke::parse_chord("S").unwrap();
+  assert!(
+    !matches!(km.lookup(&big_s), ChordResolution::Matched(Action::Sync)),
+    "S must not resolve to Sync after #290 (s is the new binding)"
+  );
+}
+
+#[test]
+fn toggle_sidebar_position_binds_to_v_not_uppercase_h() {
+  // #290: `v` (lowercase) is now ToggleSidebarPosition — replaces old `H`.
+  // `ToggleSidebar` is unbound by default; users who want it can rebind.
+  let km = Keymap::defaults();
+
+  let v = KeyStroke::parse_chord("v").unwrap();
+  assert!(
+    matches!(km.lookup(&v), ChordResolution::Matched(Action::ToggleSidebarPosition)),
+    "v must resolve to ToggleSidebarPosition after #290"
+  );
+
+  // The old `H` must not be ToggleSidebarPosition any more.
+  let h = KeyStroke::parse_chord("H").unwrap();
+  assert!(
+    !matches!(km.lookup(&h), ChordResolution::Matched(Action::ToggleSidebarPosition)),
+    "H must not resolve to ToggleSidebarPosition after #290"
+  );
+}
+
+#[test]
+fn toggle_delete_branch_binds_to_uppercase_d_not_p() {
+  // #290: `D` is now ToggleDeleteBranch — `p` is repurposed as Pull.
+  let km = Keymap::defaults();
+
+  let big_d = KeyStroke::parse_chord("D").unwrap();
+  assert!(
+    matches!(km.lookup(&big_d), ChordResolution::Matched(Action::ToggleDeleteBranch)),
+    "D must resolve to ToggleDeleteBranch after #290"
+  );
+
+  let p = KeyStroke::parse_chord("p").unwrap();
+  assert!(
+    !matches!(km.lookup(&p), ChordResolution::Matched(Action::ToggleDeleteBranch)),
+    "p must not resolve to ToggleDeleteBranch after #290 (p is Pull)"
+  );
+}
+
+#[test]
+fn link_prompt_binds_to_i_not_uppercase_l() {
+  // #290: `i` is now LinkPrompt — `L` is repurposed as LazyGitFullscreen.
+  let km = Keymap::defaults();
+
+  let i = KeyStroke::parse_chord("i").unwrap();
+  assert!(
+    matches!(km.lookup(&i), ChordResolution::Matched(Action::LinkPrompt)),
+    "i must resolve to LinkPrompt after #290"
+  );
+}
+
+// ── #290 backward-compat: user slug overrides must not conflict ───────────
+// Users who had `lazygit_pty = ["l"]` or `terminal_fullscreen = ["o"]` in
+// their config must be able to upgrade without a "chord conflict" load error.
+// The rule: a user override that claims a chord previously held by a *default*
+// binding on a different action silently wins — the default chord is vacated.
+
+#[test]
+fn user_override_lazygit_fullscreen_reclaims_l_from_pty_default() {
+  let mut km = Keymap::defaults();
+  // By default `l` is bound to LazyGitPty (#290). Binding LazyGitFullscreen
+  // to `l` must succeed and LazyGitPty must lose `l`.
+  km.apply_override(Action::LazyGitFullscreen, vec![KeyStroke::parse_chord("l").unwrap()])
+    .unwrap();
+
+  let l = KeyStroke::parse_chord("l").unwrap();
+  assert!(
+    matches!(km.lookup(&l), ChordResolution::Matched(Action::LazyGitFullscreen)),
+    "l must resolve to LazyGitFullscreen after the override"
+  );
+}
+
+#[test]
+fn user_override_terminal_fullscreen_reclaims_o_from_pty_default() {
+  let mut km = Keymap::defaults();
+  // Same as above for the terminal pair (TerminalFullscreen / TerminalPty).
+  km.apply_override(Action::TerminalFullscreen, vec![KeyStroke::parse_chord("o").unwrap()])
+    .unwrap();
+
+  let o = KeyStroke::parse_chord("o").unwrap();
+  assert!(
+    matches!(km.lookup(&o), ChordResolution::Matched(Action::TerminalFullscreen)),
+    "o must resolve to TerminalFullscreen after the override"
+  );
+}
+
+#[test]
+fn review_pty_has_default_binding_r() {
+  let km = Keymap::defaults();
+  let r = KeyStroke::parse_chord("r").unwrap();
+  assert!(
+    matches!(km.lookup(&r), ChordResolution::Matched(Action::ReviewPty)),
+    "r must resolve to ReviewPty by default (#290)"
+  );
+}
+
+#[test]
+fn refresh_default_binding_does_not_include_r() {
+  let km = Keymap::defaults();
+  // `r` moved to ReviewPty — Refresh must only keep `f`.
+  let binding = km
+    .list()
+    .into_iter()
+    .find(|b| b.action == Action::Refresh)
+    .expect("Refresh must be in keymap");
+  let r = KeyStroke::parse_chord("r").unwrap();
+  assert!(
+    !binding.chords.contains(&r),
+    "Refresh must not include `r` after it was reassigned to ReviewPty"
+  );
+}
+
+#[test]
+fn user_override_review_fullscreen_reclaims_r_from_pty_default() {
+  let mut km = Keymap::defaults();
+  // `r` defaults to ReviewPty (#290). Rebinding ReviewFullscreen to `r` must
+  // succeed and ReviewPty must lose `r`.
+  km.apply_override(Action::ReviewFullscreen, vec![KeyStroke::parse_chord("r").unwrap()])
+    .unwrap();
+
+  let r = KeyStroke::parse_chord("r").unwrap();
+  assert!(
+    matches!(km.lookup(&r), ChordResolution::Matched(Action::ReviewFullscreen)),
+    "r must resolve to ReviewFullscreen after the user override"
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Backward-compatibility aliases (issue #290 slug renames)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn from_slug_compat_accepts_pre_290_slugs() {
+  // Users with existing .gwm.toml [tui.keys] blocks that use the pre-#290
+  // slug names must not get a config error after upgrading.
+  let cases = [
+    ("git_tui", Action::LazyGitFullscreen),
+    ("git_tui_overlay", Action::LazyGitPty),
+    ("review", Action::ReviewFullscreen),
+    ("review_overlay", Action::ReviewPty),
+    ("yank", Action::YankPath),
+    ("open", Action::TerminalFullscreen),
+    ("open_terminal_overlay", Action::TerminalPty),
+    ("open_menu", Action::BrowseLinks),
+  ];
+  for (old_slug, expected) in cases {
+    assert_eq!(
+      Action::from_slug_compat(old_slug),
+      Some(expected),
+      "compat alias for {:?} must resolve to {:?}",
+      old_slug,
+      expected
+    );
+  }
+}
+
+#[test]
+fn compat_alias_slugs_is_the_reverse_of_from_slug_compat() {
+  // Every alias `compat_alias_slugs` reports for an action must resolve back to
+  // that action; a canonical-only action reports none (issue #294 — the Keys
+  // tab strips these from a legacy config on rewrite).
+  assert_eq!(
+    Action::BrowseLinks.compat_alias_slugs().collect::<Vec<_>>(),
+    vec!["open_menu"]
+  );
+  assert_eq!(
+    Action::LazyGitFullscreen.compat_alias_slugs().collect::<Vec<_>>(),
+    vec!["git_tui"]
+  );
+  assert!(
+    Action::Down.compat_alias_slugs().next().is_none(),
+    "an action with no rename reports no alias"
+  );
+  for action in Action::all() {
+    for alias in action.compat_alias_slugs() {
+      assert_eq!(
+        Action::from_slug_compat(alias),
+        Some(action),
+        "alias {alias:?} must resolve back to {action:?}"
+      );
+    }
+  }
+}
+
+#[test]
+fn from_slug_compat_still_resolves_canonical_slugs() {
+  // The compat wrapper must not break the canonical path.
+  assert_eq!(
+    Action::from_slug_compat("lazygit_fullscreen"),
+    Some(Action::LazyGitFullscreen)
+  );
+  assert_eq!(Action::from_slug_compat("yank_path"), Some(Action::YankPath));
+  assert_eq!(Action::from_slug_compat("down"), Some(Action::Down));
+  assert_eq!(Action::from_slug_compat("nonexistent_slug_xyz"), None);
+}
+
+#[test]
+fn exec_and_clean_overlays_are_repo_mutating() {
+  // Codex #333 review: in workspace mode the stale-selection guard
+  // (`workspace_active_stale && is_repo_mutating`) must block `x` / `X` —
+  // they resolve their command / dir-set from the active repo's config and
+  // act on the selected path, both stale when the row's repo can't activate.
+  assert!(Action::ExecOverlay.is_repo_mutating());
+  assert!(Action::CleanOverlay.is_repo_mutating());
+  // Sanity: read-only / navigation verbs stay non-mutating.
+  assert!(!Action::Down.is_repo_mutating());
+  assert!(!Action::CommandLogs.is_repo_mutating());
+  assert!(!Action::ConfigPanel.is_repo_mutating());
 }

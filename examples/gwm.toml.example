@@ -227,6 +227,12 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [tui]
 # confirm_countdown_secs = 3
+#
+# Auto-refresh the TUI worktree list/status every N seconds so Issue/PR
+# markers and branch metadata do not stay stale while the session is open.
+# `0` disables periodic refresh. Default: 60.
+#
+# auto_refresh_secs = 60
 
 # --- TUI sidebar position (issue #188) ---------------------------------------
 # Which side the worktree-details preview sidebar sits on in the side-by-side
@@ -238,6 +244,59 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # [tui]
 # sidebar_position = "left"
+
+# --- TUI keymap: `[tui.keys]` (issues #87 / #219 / #294) ---------------------
+# Remap any TUI key. An override REPLACES the default for that verb; an empty
+# array unbinds it. Run `gwm tui keys` for the full list of actions, contexts,
+# and verbs, and `gwm doctor` to validate overrides. You can also edit every
+# binding live from inside the TUI: open the Settings panel (`4`), tab to
+# `Keys`, select a binding and press the activate key to capture a new key —
+# it writes the same TOML shown below to the layer the panel targets (#294).
+#
+# Global list-view verbs are arrays keyed by action slug (multi-key chords
+# like "g g" allowed here):
+# [tui.keys]
+# quit = ["q", "Esc"]
+# down = ["j", "Down"]
+# top  = ["g g"]
+#
+# Modal / overlay verbs are nested under the dedicated `[tui.keys.modal]`
+# namespace, keyed by context (issue #219). The separate namespace keeps a
+# modal context from colliding with a same-named global action (create / help /
+# command_logs / link are both): a global `create` array and a modal
+# `[tui.keys.modal.create]` table can coexist. These are SINGLE keystrokes
+# only — modals have no chord timeout. The same physical key can mean different
+# verbs in different contexts:
+# [tui.keys.modal.create]
+# next_field = ["Tab"]
+# prev_field = ["BackTab"]
+# submit     = ["Enter"]
+# cancel     = ["Esc"]
+#
+# [tui.keys.modal.confirm]
+# confirm       = ["y"]
+# cancel        = ["n", "Esc"]
+# focus_confirm = ["Left", "h"]
+# focus_cancel  = ["Right", "l"]
+# activate      = ["Enter"]
+#
+# The link prompt and the settings editor are two-stage, addressed with a
+# dotted context path:
+# [tui.keys.modal.link.choose_target]
+# issue  = ["i"]
+# pr     = ["p"]
+# next   = ["j", "Down"]
+# prev   = ["k", "Up"]
+# accept = ["Enter"]
+# cancel = ["Esc"]
+#
+# [tui.keys.modal.link.input_number]
+# submit = ["Enter"]
+# cancel = ["Esc"]
+#
+# [tui.keys.modal.config.edit]
+# submit = ["Enter"]
+# cancel = ["Esc"]
 
 # --- TUI launcher: `l` (git_tui) keybinding (issue #75) ----------------------
 # The `l` key suspends the gwm TUI and launches a git TUI on the selected
@@ -286,6 +345,51 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 # command              = "lumen diff {base}..{head}"
 # fullscreen           = true
 # skip_when_no_changes = true
+
+# --- `gwm exec` profiles (issue #324) ----------------------------------------
+# Saved commands for `gwm exec --profile <name>`. Each profile carries an
+# argv ARRAY — run with NO shell, exactly like the inline `gwm exec -- <cmd>`.
+#
+# ⚠️ Divergence to note: `[exec.profiles.*].command` is an argv ARRAY
+# (`["cargo", "test"]`), whereas the `command` of `[git_tui]` / `[review]`
+# above is a single SHELL line (`"lazygit -p {path}"`). exec deliberately
+# avoids a shell — no word-splitting, no globbing, no `{path}` placeholders;
+# the program is run verbatim in each worktree. This is frozen for 1.0.
+#
+# `--profile` and an inline `-- <cmd>` are mutually exclusive (exit 1), and an
+# unknown profile name exits 1.
+#
+# `jobs` is bounded parallelism: `[exec] jobs` is the global default, a
+# profile's `jobs` overrides it, and the `--jobs <n>` flag wins over both
+# (precedence: --jobs > profile.jobs > [exec] jobs > 1). `1`/absent runs
+# sequentially with live output; `> 1` runs up to N worktrees at once and
+# prints each one's captured output as a block at the end.
+#
+# [exec]
+# jobs = 1
+#
+# [exec.profiles.test]
+# command = ["cargo", "test"]
+#
+# [exec.profiles.fmt]
+# command = ["cargo", "fmt", "--all"]
+# jobs = 4
+
+# --- `gwm clean` profiles (issue #324) ---------------------------------------
+# Saved directory sets for `gwm clean --profile <name>`. A profile's `dirs` is
+# a COMPLETE set that REPLACES the built-in target/node_modules/dist/build —
+# it never adds to them. The safety gate (git-ignored + no tracked files +
+# skip symlinks) still applies to every listed directory.
+#
+# The `default` profile is special: `gwm clean` WITHOUT `--profile` uses it
+# when present, else falls back to the built-in four. An unknown `--profile`
+# name exits 1.
+#
+# [clean.profiles.default]
+# dirs = ["target", "node_modules", "dist", "build", "coverage", ".turbo"]
+#
+# [clean.profiles.deep]
+# dirs = ["target", "node_modules", "dist", "build", ".cache", ".venv"]
 
 # --- `o: open` dispatch (issue #73) -----------------------------------------
 # How the `o` key behaves on the highlighted worktree. Three modes:

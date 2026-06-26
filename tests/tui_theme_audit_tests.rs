@@ -25,19 +25,22 @@
 //! dot) and `Color::Reset` (unlinked marker) still carry no semantic role.
 //! Since #211 the git-status families have dedicated roles `staged`
 //! (default cyan) / `modified` (yellow) / `untracked` (green) rather
-//! than borrowing accent / dirty / clean.
+//! than borrowing accent / dirty / clean. Since #287 the Working Tree
+//! *rows* are painted by change category — created → `untracked` (green) /
+//! modified → `modified` (yellow) / deleted → `prunable` (red) — to match
+//! the footer counts; the `staged` cyan column split is retired there.
 
 mod common;
 
 use common::init_repo;
-use gwm::github::{BranchLink, IssueState, PrState};
+use gwm::github::{BranchLink, CiState, IssueState, PrState};
 use gwm::tui::commit_graph::{render_pipe_set, test_row, Pipe, PipeKind};
 use gwm::tui::state::sidebar::SidebarMode;
 use gwm::tui::theme::Theme;
 use gwm::tui::{
   branch_name_color, branch_status_color, build_sidebar_sections, footer_line, format_status, freshness_color,
-  header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color, table_marker,
-  working_tree_status_line, worktree_name_style, worktree_path_style,
+  github_status_lines, header_line, help_label_style, issue_badge_color, palette_name_style, pr_badge_color,
+  table_marker, working_tree_status_line, worktree_name_style, worktree_path_style, App,
 };
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use ratatui::style::{Color, Modifier};
@@ -221,54 +224,109 @@ fn issue_badge_color_resolves_through_theme_roles() {
 }
 
 #[test]
-fn table_marker_resolves_through_theme_roles_but_keeps_neutral_default() {
+fn table_marker_resolves_through_theme_roles() {
   let t = audit_theme();
 
+  // Main keeps its single `★` painted with the `main` role.
   let mut main = base_worktree("main");
   main.is_main = true;
-  assert_eq!(table_marker(&main, &t).1, t.main, "main worktree marker → main role");
+  assert_eq!(
+    table_marker(&main, &t).spans[0].style.fg,
+    Some(t.main),
+    "main marker → main role"
+  );
 
-  let mut linked = base_worktree("linked");
-  linked.link = BranchLink {
+  // Issue linked, PR empty: issue dot → `clean`, separator → `muted`, the
+  // empty PR dash → `name` (the neutral white slot).
+  let mut issue_only = base_worktree("issue");
+  issue_only.link = BranchLink {
     issue: Some(7),
     ..BranchLink::empty()
   };
-  assert_eq!(table_marker(&linked, &t).1, t.accent, "linked marker → accent role");
+  let line = table_marker(&issue_only, &t);
+  assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.clean), "issue dot → clean role");
+  assert_eq!(line.spans[1].style.fg, Some(t.muted), "separator → muted role");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 
-  let unlinked = base_worktree("plain");
+  // Once an issue status is loaded, the Issue dot follows the same state role
+  // as the Issue/PR pane badge.
+  let mut closed_issue = issue_only.clone();
+  closed_issue.issue_state = Some(IssueState::Closed);
+  let line = table_marker(&closed_issue, &t);
   assert_eq!(
-    table_marker(&unlinked, &t).1,
-    Color::Reset,
-    "unlinked, non-main marker carries no role and stays Reset"
+    line.spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "closed issue dot → issue_badge_color closed role"
   );
+
+  // PR linked, issue empty: mirror — empty issue dash → `name`, PR → `locked`.
+  let mut pr_only = base_worktree("pr");
+  pr_only.link = BranchLink {
+    pr: Some(8),
+    ..BranchLink::empty()
+  };
+  let line = table_marker(&pr_only, &t);
+  assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
+  assert_eq!(line.spans[2].style.fg, Some(t.locked), "pr dot → locked role");
+
+  let mut closed_pr = pr_only.clone();
+  closed_pr.pr_state = Some(PrState::Closed);
+  let line = table_marker(&closed_pr, &t);
+  assert_eq!(
+    line.spans[2].style.fg,
+    Some(pr_badge_color(PrState::Closed, &t)),
+    "closed pr dot → pr_badge_color closed role"
+  );
+
+  // Nothing linked: two `name`-white slots.
+  let unlinked = base_worktree("plain");
+  let line = table_marker(&unlinked, &t);
+  assert_eq!(line.spans[0].content.as_ref(), "-", "empty issue slot → dash");
+  assert_eq!(line.spans[0].style.fg, Some(t.name), "empty issue dash → name role");
+  assert_eq!(line.spans[2].content.as_ref(), "-", "empty pr slot → dash");
+  assert_eq!(line.spans[2].style.fg, Some(t.name), "empty pr dash → name role");
 }
 
 // ---------------------------------------------------------------------------
-// working_tree_status_line — #211: git-status families have dedicated roles
+// working_tree_status_line — #287: each row painted by its change category
+// (created → untracked, modified → modified, deleted → prunable), matching
+// the Working Tree footer counts. Supersedes the #211 staged/modified/
+// untracked column split.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn working_tree_status_line_resolves_status_families_through_dedicated_roles() {
+fn working_tree_status_line_resolves_change_categories_through_dedicated_roles() {
   let t = audit_theme();
 
-  // The dedicated roles are distinct from the accent/dirty/clean they used
-  // to borrow, so this fixture proves the families decoupled (a regression
-  // back to the borrow would resolve to accent/dirty/clean and fail here).
-  assert_ne!(t.staged, t.accent, "fixture: staged must differ from accent");
-  assert_ne!(t.modified, t.dirty, "fixture: modified must differ from dirty");
-  assert_ne!(t.untracked, t.clean, "fixture: untracked must differ from clean");
+  // Distinct fixture values per role prove the wiring (a regression to a
+  // literal, or to the wrong role, would fail here).
+  assert_ne!(t.untracked, t.modified, "fixture: untracked must differ from modified");
+  assert_ne!(t.prunable, t.modified, "fixture: prunable must differ from modified");
+  assert_ne!(t.untracked, t.prunable, "fixture: untracked must differ from prunable");
 
-  // Staged change (X column set, Y blank) → `staged` on both the status
-  // code column and the file name.
-  let staged = working_tree_status_line("A  staged.rs", &t);
-  assert_eq!(staged.spans[0].style.fg, Some(t.staged), "staged code → staged role");
+  // Added (`A`) and untracked (`??`) are *created* → `untracked` role on
+  // both the status code and the file name.
+  let added = working_tree_status_line("A  staged.rs", &t);
   assert_eq!(
-    fg_containing(&staged, "staged.rs"),
-    Some(t.staged),
-    "staged name → staged role"
+    added.spans[0].style.fg,
+    Some(t.untracked),
+    "added code → untracked role"
+  );
+  assert_eq!(
+    fg_containing(&added, "staged.rs"),
+    Some(t.untracked),
+    "added name → untracked role"
+  );
+  let untracked = working_tree_status_line("?? new.rs", &t);
+  assert_eq!(
+    fg_containing(&untracked, "new.rs"),
+    Some(t.untracked),
+    "untracked name → untracked role"
   );
 
-  // Worktree modification (Y column set) → `modified`.
+  // Worktree / index modification → `modified`.
   let modified = working_tree_status_line(" M tracked.rs", &t);
   assert_eq!(
     fg_containing(&modified, "tracked.rs"),
@@ -276,29 +334,39 @@ fn working_tree_status_line_resolves_status_families_through_dedicated_roles() {
     "modified name → modified role"
   );
 
-  // Untracked (`??`) → `untracked`.
-  let untracked = working_tree_status_line("?? new.rs", &t);
+  // Deletion (`D`) → `prunable` (red).
+  let deleted = working_tree_status_line(" D gone.rs", &t);
   assert_eq!(
-    fg_containing(&untracked, "new.rs"),
-    Some(t.untracked),
-    "untracked name → untracked role"
+    deleted.spans[0].style.fg,
+    Some(t.prunable),
+    "deleted code → prunable role"
+  );
+  assert_eq!(
+    fg_containing(&deleted, "gone.rs"),
+    Some(t.prunable),
+    "deleted name → prunable role"
   );
 }
 
 #[test]
-fn working_tree_status_families_default_to_legacy_cyan_yellow_green() {
-  // Guard the "no visible change without [theme]" contract: with the
-  // default theme the families keep their pre-#211 cyan/yellow/green.
+fn working_tree_status_categories_default_to_green_yellow_red() {
+  // Guard the default appearance: created → green, modified → yellow,
+  // deleted → red, untracked → green (issue #287).
   let d = Theme::default();
   assert_eq!(
     working_tree_status_line("A  s.rs", &d).spans[0].style.fg,
-    Some(Color::Cyan),
-    "default staged → Cyan"
+    Some(Color::Green),
+    "default added → Green"
   );
   assert_eq!(
     fg_containing(&working_tree_status_line(" M t.rs", &d), "t.rs"),
     Some(Color::Yellow),
     "default modified → Yellow"
+  );
+  assert_eq!(
+    working_tree_status_line(" D g.rs", &d).spans[0].style.fg,
+    Some(Color::Red),
+    "default deleted → Red"
   );
   assert_eq!(
     fg_containing(&working_tree_status_line("?? n.rs", &d), "n.rs"),
@@ -355,6 +423,7 @@ fn pr_summary_line_merged_badge_routes_through_pr_badge_color() {
     url: String::new(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
     updated_at: String::new(),
   };
   let line = gwm::tui::pr_summary_line(
@@ -470,6 +539,127 @@ fn summary_line_heads_resolve_through_name_role() {
   );
 }
 
+#[test]
+fn summary_line_loaded_icons_resolve_through_state_roles() {
+  let t = audit_theme();
+  let issue_status = gwm::github::IssueStatus {
+    number: 7,
+    title: "closed".into(),
+    state: IssueState::Closed,
+    url: String::new(),
+    labels: vec![],
+    updated_at: String::new(),
+  };
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(issue_status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    issue.spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "loaded issue icon → issue state role"
+  );
+
+  let pr_status = gwm::github::PrStatus {
+    number: 9,
+    title: "merged".into(),
+    state: PrState::Merged,
+    url: String::new(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 0,
+    ci: CiState::None,
+  };
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Loaded(pr_status),
+    80,
+    &t,
+  );
+  assert_eq!(
+    pr.spans[0].style.fg,
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "loaded PR icon → PR state role"
+  );
+}
+
+#[test]
+fn github_status_cached_state_icons_resolve_through_state_roles() {
+  let (dir, repo) = init_repo();
+  {
+    let head = repo.head().unwrap().peel_to_commit().unwrap();
+    repo.branch("feat/#42-tui-search", &head, false).unwrap();
+  }
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  {
+    let mut cfg = repo.config().unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-title", "Closed issue")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-issue-state", "closed")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-title", "Merged PR")
+      .unwrap();
+    cfg
+      .set_str("branch.feat/#42-tui-search.gwm-pr-state", "merged")
+      .unwrap();
+  }
+  repo.set_head("refs/heads/feat/#42-tui-search").unwrap();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let t = audit_theme();
+  app.theme = t;
+
+  let lines = github_status_lines(&app, 120);
+
+  assert_eq!(
+    lines[0].spans[0].style.fg,
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "cached issue icon -> issue state role"
+  );
+  assert_eq!(
+    fg_containing(&lines[0], "closed"),
+    Some(issue_badge_color(IssueState::Closed, &t)),
+    "cached issue badge -> issue state role"
+  );
+  assert_eq!(
+    lines[1].spans[0].style.fg,
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "cached PR icon -> PR state role"
+  );
+  assert_eq!(
+    fg_containing(&lines[1], "merged"),
+    Some(pr_badge_color(PrState::Merged, &t)),
+    "cached PR badge -> PR state role"
+  );
+}
+
+#[test]
+fn summary_line_non_loaded_icons_stay_muted() {
+  let t = audit_theme();
+  let issue = gwm::tui::issue_summary_line(
+    7,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Idle,
+    80,
+    &t,
+  );
+  assert_eq!(issue.spans[0].style.fg, Some(t.muted), "idle issue icon → muted");
+  let pr = gwm::tui::pr_summary_line(
+    9,
+    gwm::github::LinkSource::Explicit,
+    &gwm::tui::GitHubFetchState::Error("offline".into()),
+    80,
+    &t,
+  );
+  assert_eq!(pr.spans[0].style.fg, Some(t.muted), "error PR icon → muted");
+}
+
 // ---------------------------------------------------------------------------
 // Header / footer chrome
 // ---------------------------------------------------------------------------
@@ -541,7 +731,7 @@ fn sidebar_identity_badges_resolve_through_theme_roles() {
   w.is_prunable = true;
   w.status = dirty_status();
 
-  let sections = build_sidebar_sections(&w, SidebarMode::Commits, &t);
+  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &t);
 
   // The badges_line lives in the worktree identity section. Flatten its
   // spans and assert each flag badge wears its role colour.
@@ -579,7 +769,7 @@ fn sidebar_identity_default_theme_preserves_legacy_palette() {
   w.is_main = true;
   w.is_locked = true;
   w.is_prunable = true;
-  let sections = build_sidebar_sections(&w, SidebarMode::Commits, &d);
+  let sections = build_sidebar_sections(&w, SidebarMode::Commits, None, &d);
   let badge_fg = |needle: &str| -> Option<Color> {
     sections
       .worktree
@@ -633,6 +823,7 @@ branch = "#abcdef"
 fn base_worktree(name: &str) -> WorktreeInfo {
   WorktreeInfo {
     name: name.into(),
+    id: name.into(),
     path: PathBuf::from(format!("/tmp/gwm-theme-audit/{}", name)),
     branch: Some(format!("feat/#170-{}", name)),
     head: Some("0123456789abcdef0123456789abcdef01234567".into()),
@@ -641,6 +832,8 @@ fn base_worktree(name: &str) -> WorktreeInfo {
     is_prunable: false,
     status: BranchStatus::default(),
     link: BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
     age: Some(Duration::from_secs(3600)),
   }
 }

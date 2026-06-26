@@ -11,6 +11,8 @@ fn ctx_for<'a>(repo: &'a git2::Repository, workdir: &'a std::path::Path, config:
     repo_workdir: workdir,
     repo,
     config,
+    // Isolated by default: no global layer is read for injected test contexts.
+    global_config_path: None,
   }
 }
 
@@ -74,6 +76,28 @@ branch_pattern = "{type}/#{issue}-{desc}"
     .find(|c| c.name.contains(".gwm.toml"))
     .expect("expected a `.gwm.toml` check");
   assert_eq!(cfg.status, CheckStatus::Ok);
+}
+
+#[test]
+fn semantically_invalid_profile_marks_config_check_failed() {
+  // #324 review (P2): a profile that parses but is semantically invalid
+  // (`dirs = [".."]` escapes the worktree) must fail the `.gwm.toml` check,
+  // not be reported green — doctor mirrors what the loader/commands reject.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[clean.profiles.default]\ndirs = [\"..\"]\n",
+  )
+  .unwrap();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let cfg = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains(".gwm.toml"))
+    .expect("expected a `.gwm.toml` check");
+  assert_eq!(cfg.status, CheckStatus::Failed);
 }
 
 // Severity/exit-code arithmetic is asserted on hand-built reports so the
@@ -846,6 +870,176 @@ quit = []
   assert!(
     c.detail.to_lowercase().contains("ctrl"),
     "expected message to mention the Ctrl+C fallback, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_reports_modal_binding_count_on_default_keymap() {
+  // Issue #219: the keymap check now also resolves the contextual modal
+  // keymap and folds its bound count into the detail line.
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(c.status, CheckStatus::Ok);
+  assert!(
+    c.detail.contains("modal"),
+    "detail must mention the modal binding count, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_fails_on_in_context_modal_conflict() {
+  // A `[tui.keys.modal.confirm]` block binding two verbs to the same key is a
+  // per-context conflict. Written to disk (load-time validation rejects it, so
+  // the lenient doctor context defaults ctx.config away) to prove `gwm doctor`
+  // re-reads the file and independently catches it.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys.modal.confirm]\nconfirm = [\"x\"]\ncancel = [\"x\"]\n",
+  )
+  .unwrap();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(c.status, CheckStatus::Failed);
+  assert!(
+    c.detail.contains("conflict"),
+    "detail must explain the conflict, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_keymap_check_reads_only_the_threaded_global_layer() {
+  // #219 review (P2): the keymap check must merge the global layer that was
+  // *threaded into the context*, never an ambient `global_config_path()` read —
+  // otherwise a developer's real `~/.config/gwm` would make an isolated temp
+  // repo's check flap. A bad global is seen only when explicitly threaded.
+  let (dir, repo) = init_repo();
+  let global = dir.path().join("global.toml");
+  std::fs::write(&global, "[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n").unwrap();
+  let config = Config::default();
+
+  // Threaded → the bad global keymap surfaces.
+  let with = DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: Some(global.as_path()),
+  };
+  let c = doctor::run(&with)
+    .unwrap()
+    .checks
+    .into_iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("keymap check");
+  assert_eq!(
+    c.status,
+    CheckStatus::Failed,
+    "a threaded bad global must fail the check: {}",
+    c.detail
+  );
+
+  // Not threaded (None) → the very same file is ignored; the check is clean.
+  let without = DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: None,
+  };
+  let c2 = doctor::run(&without)
+    .unwrap()
+    .checks
+    .into_iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("keymap check");
+  assert_eq!(
+    c2.status,
+    CheckStatus::Ok,
+    "an un-threaded global config must be ignored: {}",
+    c2.detail
+  );
+}
+
+#[test]
+fn doctor_modal_error_outranks_the_quit_warning() {
+  // #219 review (P2): an invalid modal binding is a hard Failed. When the same
+  // config also unbinds `quit` (a Warning), the modal error must still win —
+  // otherwise the quit-warning early return hides the actionable modal error.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys]\nquit = []\n\n[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n",
+  )
+  .unwrap();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(
+    c.status,
+    CheckStatus::Failed,
+    "the modal error must outrank the quit warning, got: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.contains("single keystroke"),
+    "detail must be the modal error, not the quit warning, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn doctor_fails_on_disk_modal_error_even_when_context_defaulted() {
+  // #219 review (P2): `repo_context_lenient` returns `Config::default()` when
+  // `load_for_repo` rejects the user's `.gwm.toml` (here a multi-stroke modal
+  // chord, which load-time validation refuses). If doctor only re-validated
+  // that defaulted ctx.config it would report OK for a config that actually
+  // refuses to start the TUI — so the keymap check must re-read the on-disk
+  // file. This reproduces the real lenient path (the existing conflict test
+  // injects straight into ctx.config and never exercises the default-away).
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[tui.keys.modal.confirm]\nconfirm = [\"g g\"]\n",
+  )
+  .unwrap();
+  // The file must be load-invalid (so the lenient loader would default it).
+  assert!(
+    Config::load_layered(dir.path(), None).is_err(),
+    "the on-disk modal chord must be rejected at load time for this regression"
+  );
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report
+    .checks
+    .iter()
+    .find(|c| c.name.to_lowercase().contains("keymap"))
+    .expect("expected a TUI keymap check");
+  assert_eq!(
+    c.status,
+    CheckStatus::Failed,
+    "doctor must flag the on-disk modal error, not the defaulted ctx.config: {}",
+    c.detail
+  );
+  assert!(
+    c.detail.contains("single keystroke"),
+    "detail must explain the multi-stroke modal chord rejection, got: {}",
     c.detail
   );
 }

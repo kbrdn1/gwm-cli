@@ -18,7 +18,7 @@
 //!   `Pr(42)`, and `Issue(43)` are all independent (the #138 keying).
 //! - `invalidate()` clears the cache.
 
-use gwm::github::{IssueState, IssueStatus, PrState, PrStatus};
+use gwm::github::{CiState, IssueState, IssueStatus, PrState, PrStatus};
 use gwm::tui::state::github_fetch::{FetchKey, GitHubFetch, GitHubFetchState};
 
 fn sample_issue(n: u64) -> IssueStatus {
@@ -41,6 +41,7 @@ fn sample_pr(n: u64) -> PrStatus {
     updated_at: "2026-01-01T00:00:00Z".into(),
     checks_passed: 0,
     checks_total: 0,
+    ci: CiState::None,
   }
 }
 
