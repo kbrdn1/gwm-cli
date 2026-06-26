@@ -4,25 +4,33 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v0.9.0 stable, v0.10.0-rc.3 in progress on `dev`
+## Current state — v1.0.0 stable
 
-The current **stable** line is **v0.9.0**. Three pre-release trains have since
-landed on `dev` and are queued for the next stable cut: the
-**v0.10.0-rc.1** Settings-editability + TUI enrichment cycle (2026-06-10); a
-**v0.10.0-rc.2** train that adds the embedded PTY overlays, the TUI keymap
+The current **stable** line is **v1.0.0** (2026-06-26) — the SemVer milestone.
+The surface is feature-complete and the **machine-readable contracts are now
+frozen**: the CLI subcommands / flags / exit codes, the `--format=json` schemas,
+the daemon JSON-RPC protocol, and the `.gwm.toml` section set will not break
+without a major bump (see [Stability & compatibility](docs/6.development/3.stability.md)).
+
+1.0.0 promotes the entire **0.10.0 train**: the **rc.1** Settings-editability +
+TUI enrichment cycle; the **rc.2** train (embedded PTY overlays, the TUI keymap
 redesign, rebindable contextual modal keys + the Settings Keys tab, multi-repo
 workspace mode, config presets for `gwm init`, the JSON API + daemon, the
-current-PR CI indicator, and the file-explorer Working Tree pane; and a
-**v0.10.0-rc.3** train (2026-06-17) that **closes the GitHub loop** —
-`gwm review <PR#>` (materialise an inbound PR into a worktree) and `gwm
-statusline` (the first real consumer of `gwm daemon`). On top of rc.3, the
-in-progress `[Unreleased]` delta adds the fleet-chore pair `gwm exec` and
-`gwm clean`. All three trains are pre-releases — no stable 0.10.0 cut yet. See
-the [Shipped highlights](#shipped-highlights) table for the per-issue breakdown,
-[`changelogs/pre-releases/0.10.0-rc.3.md`](changelogs/pre-releases/0.10.0-rc.3.md)
-for the rc.3 delta, and [`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` for the
-post-rc.3 delta. The MSRV is now **1.86** (raised by the PTY overlay's
-`portable-pty` / `tui-term` dependencies).
+current-PR CI indicator, and the file-explorer Working Tree pane); the **rc.3**
+train that **closes the GitHub loop** — `gwm review <PR#>` and `gwm statusline`;
+and the **rc.4** fleet-chore pair `gwm exec` / `gwm clean`. The post-rc.4 stable
+delta completes the 1.0 commitment: the frozen, versioned machine contracts
+([#317](https://github.com/kbrdn1/gwm-cli/issues/317)), the published stability
+policy ([#318](https://github.com/kbrdn1/gwm-cli/issues/318)), the frozen
+`exec` / `clean` surface decision ([#319](https://github.com/kbrdn1/gwm-cli/issues/319)),
+and the additive features it anticipated — named `[exec]` / `[clean]` profiles,
+bounded `--jobs`, and `--workspace` fan-out ([#324](https://github.com/kbrdn1/gwm-cli/issues/324),
+[#326](https://github.com/kbrdn1/gwm-cli/issues/326)) — plus TUI exec / clean
+overlays ([#325](https://github.com/kbrdn1/gwm-cli/issues/325)). See the
+[Shipped highlights](#shipped-highlights) table for the per-issue breakdown and
+[`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes. The
+MSRV is **1.86** (raised by the PTY overlay's `portable-pty` / `tui-term`
+dependencies; MSRV bumps ride a minor per the stability policy).
 
 The 0.9.x stable line ships:
 
@@ -109,27 +117,26 @@ For reference (each linked to its closing PR):
 | [#35](https://github.com/kbrdn1/gwm-cli/issues/35) ([PR #289](https://github.com/kbrdn1/gwm-cli/pull/289)) / [#290](https://github.com/kbrdn1/gwm-cli/issues/290) ([PR #292](https://github.com/kbrdn1/gwm-cli/pull/292)) / [#219](https://github.com/kbrdn1/gwm-cli/issues/219) ([PR #293](https://github.com/kbrdn1/gwm-cli/pull/293)) / [#294](https://github.com/kbrdn1/gwm-cli/issues/294) ([PR #297](https://github.com/kbrdn1/gwm-cli/pull/297)) / [#300](https://github.com/kbrdn1/gwm-cli/issues/300) ([PR #301](https://github.com/kbrdn1/gwm-cli/pull/301)) / [#299](https://github.com/kbrdn1/gwm-cli/issues/299) ([PR #302](https://github.com/kbrdn1/gwm-cli/pull/302)) / [#36](https://github.com/kbrdn1/gwm-cli/issues/36) ([PR #303](https://github.com/kbrdn1/gwm-cli/pull/303)) / [#37](https://github.com/kbrdn1/gwm-cli/issues/37) ([PR #305](https://github.com/kbrdn1/gwm-cli/pull/305)) / [#38](https://github.com/kbrdn1/gwm-cli/issues/38) ([PR #306](https://github.com/kbrdn1/gwm-cli/pull/306)) | v0.10.0-rc.2 | PTY + power-user + integration train: embedded PTY overlays for lazygit (`l` / `L`) and a native `$SHELL` (`o` / `O`) via `portable-pty` + `tui-term` (MSRV → 1.86); TUI keymap redesign (unified list-view bindings — `p`/`P` pull/push, `c` edit-worktree, `e` exit-to-worktree, `y`/`w` yank, `t` mux pane, `h`/`H` macros — plus `[tui.macro1]` / `[tui.macro2]`); rebindable contextual modal keys under `[tui.keys.modal.<context>]`; edit every keymap live from the Settings Keys tab (keystroke capture + validated write-back); Working Tree pane as a nerd-font file-explorer tree (git-coloured rows, bounded scan); current-PR CI indicator in the Status pane; multi-repo workspace mode (`--workspace`, REPO column, `gwm create --repo`); config presets for `gwm init` (`--preset` / `--list-presets` / `--show`); JSON API (`--format=json` on `list` / `doctor` / `path`) + `gwm daemon` (JSON-RPC 2.0 over a unix socket with `subscribe`) |
 | [#308](https://github.com/kbrdn1/gwm-cli/issues/308) ([PR #310](https://github.com/kbrdn1/gwm-cli/pull/310)) | v0.10.0-rc.3 | `gwm review <PR#>` — materialise an existing GitHub PR into an isolated worktree (resolves head via `gh`, fetches `refs/pull/<N>/head` — cross-fork aware, any PR state — into `review/pr-<N>-<author>-<slug>`, links the PR + points the diff base at `origin/<base>`); safe-by-default (no bootstrap / lifecycle hooks unless `--bootstrap`), `--name` overrides the branch |
 | [#309](https://github.com/kbrdn1/gwm-cli/issues/309) ([PR #311](https://github.com/kbrdn1/gwm-cli/pull/311)) | v0.10.0-rc.3 | `gwm statusline` — first real consumer of `gwm daemon` (#38): a dependency-free client rendering a compact one-line worktree summary (active branch, count, dirty / ahead / behind, linked issue / PR) for tmux / starship / zsh; `--watch` rides the `subscribe` stream, degrades to a blank line + exit `0` when no daemon is reachable; `docs/5.integrations/4.daemon-consumers.md` (EN + FR) |
-| [#313](https://github.com/kbrdn1/gwm-cli/issues/313) ([PR #314](https://github.com/kbrdn1/gwm-cli/pull/314)) | v0.10.0 (unreleased) | Fleet chores across worktrees: `gwm exec [<slug>...] -- <cmd>` (run a command in each worktree sequentially — every non-main worktree by default, or listed slugs; everything after `--` forwarded verbatim; `✓ / ✗` rollup, non-zero exit on any failure) and `gwm clean [<slug>...] [--yes]` (report — or with `--yes` reclaim — heavy build artifacts `target/` / `node_modules/` / `dist/` / `build/`; deletes only git-ignored dirs, never follows symlinks, not journaled into `gwm history`) |
+| [#313](https://github.com/kbrdn1/gwm-cli/issues/313) ([PR #314](https://github.com/kbrdn1/gwm-cli/pull/314)) | v0.10.0-rc.4 | Fleet chores across worktrees: `gwm exec [<slug>...] -- <cmd>` (run a command in each worktree sequentially — every non-main worktree by default, or listed slugs; everything after `--` forwarded verbatim; `✓ / ✗` rollup, non-zero exit on any failure) and `gwm clean [<slug>...] [--yes]` (report — or with `--yes` reclaim — heavy build artifacts `target/` / `node_modules/` / `dist/` / `build/`; deletes only git-ignored dirs, never follows symlinks, not journaled into `gwm history`) |
+| [#317](https://github.com/kbrdn1/gwm-cli/issues/317) / [#318](https://github.com/kbrdn1/gwm-cli/issues/318) / [#319](https://github.com/kbrdn1/gwm-cli/issues/319) / [#324](https://github.com/kbrdn1/gwm-cli/issues/324) / [#325](https://github.com/kbrdn1/gwm-cli/issues/325) / [#326](https://github.com/kbrdn1/gwm-cli/issues/326) / [#334](https://github.com/kbrdn1/gwm-cli/issues/334) | v1.0.0 | The 1.0 commitment: frozen, versioned machine contracts pinned by `tests/contract_tests.rs` (`SCHEMA_VERSION = 1`, daemon `schema_version`, `docs/schema/README.md`) (#317); published stability & compatibility policy (`docs/6.development/3.stability.md`, EN + FR) (#318); frozen `exec` / `clean` surface decision (#319); named `[exec]` / `[clean]` config profiles + bounded `--jobs` parallelism (#324); `--workspace` fan-out for `gwm exec` / `gwm clean` (#326); TUI exec (`x`) / clean (`X`) overlays (#325); help-overlay + overlay polish (#334) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
 ## Next up
 
-All three v0.10.0 pre-release trains have shipped to `dev` and are queued for
-the next stable cut — see the [Shipped highlights](#shipped-highlights) table
-above, [`changelogs/pre-releases/0.10.0-rc.1.md`](changelogs/pre-releases/0.10.0-rc.1.md)
-and [`changelogs/pre-releases/0.10.0-rc.3.md`](changelogs/pre-releases/0.10.0-rc.3.md)
-for the per-train deltas, and [`CHANGELOG.md`](CHANGELOG.md) `[Unreleased]` for
-the post-rc.3 delta (`gwm exec` / `gwm clean`, #313). The rc trains landed
-everything that previously sat under "Next up" and "Ambitious": the PTY overlays
-(#35), the keymap redesign (#290), the contextual modal keys (#219) and the
-Settings Keys tab (#294), multi-repo workspace mode (#36), config presets (#37),
-the JSON API + daemon (#38), the current-PR CI indicator (#299) and the
-file-explorer Working Tree pane (#300), plus the GitHub-loop closers
-`gwm review <PR#>` (#308) and the first daemon consumer `gwm statusline` (#309).
+**1.0.0 is cut** (2026-06-26) — the 0.10.0 train plus the 1.0 commitment work
+(frozen contracts #317, stability policy #318, the `exec` / `clean` surface
+freeze #319 and its additive follow-ons #324 / #325 / #326) all shipped to the
+stable line. See the [Shipped highlights](#shipped-highlights) table above and
+[`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes.
 
-No new directed work is queued here yet — the next item lands once an issue with
-a concrete scope is filed.
+With the machine surface frozen under SemVer, the next minor (`1.1.0`) is the
+home for additive work — new subcommands / flags, new opt-in `.gwm.toml`
+sections, additive JSON fields under the same `SCHEMA_VERSION`. Anything that
+would break a frozen surface waits for a future major.
+
+No new directed feature work is queued here yet — the next item lands once an
+issue with a concrete scope is filed.
 
 Housekeeping:
 
