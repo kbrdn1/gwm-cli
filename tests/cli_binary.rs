@@ -4003,6 +4003,75 @@ branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
 }
 
 #[test]
+fn undo_bootstrap_without_trust_aborts() {
+  // Issue #338: `gwm undo --bootstrap` must mediate the repo's
+  // `[[bootstrap.command]]` shell through the SAME TOFU trust gate as
+  // create / review / bootstrap. Before the fix, `cmd_undo` had no
+  // `trust_mode` parameter and called `bootstrap::run` directly, so the
+  // bootstrap commands ran unprompted on undo. Pin the gate at the CLI
+  // boundary: create → remove → `undo --bootstrap` from a non-tty with
+  // an empty ledger and no `GWM_ALLOW_BOOTSTRAP` must abort with the
+  // trust message rather than silently running the bootstrap surface.
+  let (dir, _) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  let history_dir = tempfile::TempDir::new().unwrap();
+  let history_file = history_dir.path().join("history.toml");
+  let ledger_dir = tempfile::TempDir::new().unwrap();
+  let ledger = ledger_dir.path().join("trust.toml");
+
+  let body = format!(
+    r#"
+[worktree]
+base = "{base}"
+path_pattern = "{{type}}-{{issue}}-{{desc}}"
+branch_pattern = "{{type}}/#{{issue}}-{{desc}}"
+
+[[bootstrap.command]]
+name = "trap"
+run  = "echo trapped"
+"#,
+    base = toml_basic_string(base.path()),
+  );
+  std::fs::write(dir.path().join(".gwm.toml"), body).unwrap();
+
+  // 1. Create — bypass the gate via the env var, skip the shell step.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["create", "feat", "338", "undo-trust", "--no-bootstrap"])
+    .assert()
+    .success();
+
+  // 2. Remove — records the journal entry `undo` will replay.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["remove", "feat-338-undo-trust"])
+    .assert()
+    .success();
+
+  // 3. `undo --bootstrap` with an empty ledger and no allow-bypass,
+  //    from a non-tty → the trust gate must abort rather than running
+  //    the `[[bootstrap.command]]` shell unprompted.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_HISTORY_FILE", &history_file)
+    .args(["undo", "--bootstrap"])
+    .assert()
+    .failure()
+    .stderr(
+      predicate::str::contains("not in the trust ledger").or(predicate::str::contains("stdin is not interactive")),
+    );
+}
+
+#[test]
 fn undo_refuses_detached_head_entry_with_clear_error() {
   // PR #155 Copilot review: a journal entry with `branch = ""` (the
   // serialised form of `branch: None`) flags a worktree that was
