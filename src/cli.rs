@@ -1046,7 +1046,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Aliases { action } => cmd_aliases(action),
     Command::Config { action } => cmd_config(action),
     Command::History { limit, all } => cmd_history(limit, all),
-    Command::Undo { bootstrap } => cmd_undo(bootstrap),
+    Command::Undo { bootstrap } => cmd_undo(bootstrap, mode),
     Command::Tui { action } => cmd_tui(action),
     Command::Theme { action } => cmd_theme(action),
     Command::Exec {
@@ -4258,7 +4258,7 @@ fn cmd_history(limit: usize, all: bool) -> Result<()> {
   Ok(())
 }
 
-fn cmd_undo(run_bootstrap: bool) -> Result<()> {
+fn cmd_undo(run_bootstrap: bool, trust_mode: TrustMode) -> Result<()> {
   let path = history::default_journal_path()?;
   let mut journal = history::Journal::load(&path)?;
   let root = current_repo_root()?;
@@ -4338,6 +4338,11 @@ fn cmd_undo(run_bootstrap: bool) -> Result<()> {
   // (4) Optionally re-run bootstrap.
   if run_bootstrap {
     let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
+    // Issue #338: mediate the bootstrap re-run through the SAME TOFU
+    // trust gate as create / review / bootstrap. A repo's
+    // `[[bootstrap.command]]` shell must never run unprompted on undo —
+    // honours --allow-bootstrap / GWM_ALLOW_BOOTSTRAP / --deny-bootstrap.
+    trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
     let config = Config::load_for_repo(&workdir)?;
     let ctx = BootstrapCtx {
       main_repo: &workdir,
