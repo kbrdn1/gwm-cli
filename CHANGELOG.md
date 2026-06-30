@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Dropped the unsound, unmaintained `serde_yml` dependency** ([#340],
+  RUSTSEC-2025-0068). The issue-form front-matter parser now uses the
+  maintained `serde_yaml_ng` fork; bumped `anyhow` to 1.0.103 to clear
+  RUSTSEC-2026-0190. The CI `cargo audit` job is now blocking
+  (`--deny warnings`, `continue-on-error` removed) so warning-class
+  advisories — unmaintained / unsound / yanked — fail the build instead
+  of being silently ignored.
+
+[#340]: https://github.com/kbrdn1/gwm-cli/issues/340
+
 ### Fixed
 
 - **`gwm undo --bootstrap` now goes through the TOFU trust gate** ([#338]).
