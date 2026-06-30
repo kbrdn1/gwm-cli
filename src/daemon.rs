@@ -423,7 +423,7 @@ mod server {
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
   use std::sync::Arc;
-  use std::time::Duration;
+  use std::time::{Duration, Instant};
 
   /// RAII counter of live client connections. [`ActiveGuard::try_acquire`]
   /// increments (refusing past the configured cap); `Drop` decrements — so
@@ -516,24 +516,44 @@ mod server {
     format!("gwm-{}", current_uid())
   }
 
-  /// Resolve the default socket path: `$XDG_RUNTIME_DIR/gwm.sock`, falling
-  /// back to `$TMPDIR/gwm.sock`, then `/tmp/gwm-<uid>/gwm.sock`.
-  ///
-  /// `$XDG_RUNTIME_DIR` (Linux) and `$TMPDIR` (always set, per-user and
-  /// `0700`, on macOS) are already private dirs, so the socket sits directly
-  /// as `<base>/gwm.sock` — the path the consumer docs advertise. Only the
-  /// world-writable `/tmp` last resort needs isolating: there the socket is
-  /// nested in a per-user owner-only `gwm-<uid>/` dir (created + verified in
-  /// [`serve`]), so it stays un-connectable cross-user even on platforms
-  /// that don't enforce socket-file perms for `connect(2)` (issue #341).
+  /// True when `dir` is a real directory we own with no group/other access
+  /// (`0700`-style). Used to decide whether a base dir is safe to drop the
+  /// socket into directly, or whether it needs a private `gwm-<uid>/` nest.
+  /// `symlink_metadata` so a symlinked base isn't trusted on its target.
+  fn is_private_dir(dir: &Path) -> bool {
+    match std::fs::symlink_metadata(dir) {
+      Ok(m) => m.file_type().is_dir() && m.uid() == current_uid() && m.mode() & 0o077 == 0,
+      Err(_) => false,
+    }
+  }
+
+  /// Place the socket directly in `base` when `base` is genuinely owner-only
+  /// (`$XDG_RUNTIME_DIR` per the XDG spec, macOS's per-user `$TMPDIR`) — the
+  /// `<base>/gwm.sock` path the consumer docs advertise. Otherwise (a base
+  /// that resolves to a shared dir like `/tmp`) nest the socket in a per-user
+  /// owner-only `gwm-<uid>/` sub-dir so it stays un-connectable cross-user.
+  pub fn socket_in(base: &Path) -> PathBuf {
+    if is_private_dir(base) {
+      base.join("gwm.sock")
+    } else {
+      base.join(private_subdir_name()).join("gwm.sock")
+    }
+  }
+
+  /// Resolve the default socket path: `$XDG_RUNTIME_DIR` → `$TMPDIR` → `/tmp`
+  /// for the base dir, then [`socket_in`] to decide direct vs. private-nested
+  /// placement based on the base's actual ownership/perms (issue #341). The
+  /// nested `gwm-<uid>/` dir is created + verified in [`serve`]. Pure modulo
+  /// reading the env and stat-ing the base — server and client agree on the
+  /// result since the base's perms are stable across their runs.
   pub fn socket_path() -> PathBuf {
     if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()) {
-      return PathBuf::from(base).join("gwm.sock");
+      return socket_in(&PathBuf::from(base));
     }
     if let Some(base) = std::env::var_os("TMPDIR").filter(|s| !s.is_empty()) {
-      return PathBuf::from(base).join("gwm.sock");
+      return socket_in(&PathBuf::from(base));
     }
-    PathBuf::from("/tmp").join(private_subdir_name()).join("gwm.sock")
+    socket_in(Path::new("/tmp"))
   }
 
   /// Ensure `dir` exists as a directory we own with `0700` perms — creating
@@ -546,9 +566,10 @@ mod server {
     let meta = match std::fs::symlink_metadata(dir) {
       Ok(m) => m,
       Err(_) => {
-        return std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(|e| {
-          GwmError::Other(format!("daemon: failed to create private dir {}: {e}", dir.display()))
-        });
+        return std::fs::DirBuilder::new()
+          .mode(0o700)
+          .create(dir)
+          .map_err(|e| GwmError::Other(format!("daemon: failed to create private dir {}: {e}", dir.display())));
       }
     };
     if !meta.file_type().is_dir() {
@@ -566,9 +587,8 @@ mod server {
     // We own it — tighten loose perms rather than refuse (idempotent on a
     // dir we created `0700` ourselves on a previous run).
     if meta.mode() & 0o077 != 0 {
-      std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
-        GwmError::Other(format!("daemon: failed to restrict perms on {}: {e}", dir.display()))
-      })?;
+      std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| GwmError::Other(format!("daemon: failed to restrict perms on {}: {e}", dir.display())))?;
     }
     Ok(())
   }
@@ -710,13 +730,66 @@ mod server {
     Ok(())
   }
 
+  /// Read one newline-terminated request line, bounded two ways (issue
+  /// #341): `max_len` caps the bytes buffered (a never-terminated line is
+  /// dropped), and `deadline` caps the WALL time spent on the whole line.
+  /// The deadline is the real slow-loris guard — `SO_RCVTIMEO` alone resets
+  /// on every successful read, so a client dribbling one byte just under the
+  /// timeout could hold its connection slot until the length cap; shrinking
+  /// the socket timeout toward a fixed per-line deadline closes that.
+  ///
+  /// Returns the line bytes (without the trailing `\n`), or `None` on EOF /
+  /// timeout / oversize / error — the caller then drops the connection.
+  fn read_request_line(
+    stream: &UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    max_len: usize,
+    deadline: Option<Instant>,
+  ) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    loop {
+      if let Some(dl) = deadline {
+        match dl.checked_duration_since(Instant::now()) {
+          // Cap the next read at the line's remaining time budget.
+          Some(rem) if !rem.is_zero() => {
+            let _ = stream.set_read_timeout(Some(rem));
+          }
+          _ => return None, // per-line deadline exceeded — slow-loris
+        }
+      }
+      let chunk = match reader.fill_buf() {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+        Err(_) => return None, // timeout / reset / dead link
+      };
+      if chunk.is_empty() {
+        return None; // EOF (a partial line here is an incomplete request)
+      }
+      if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+        if buf.len() + pos > max_len {
+          return None; // oversize before the newline
+        }
+        buf.extend_from_slice(&chunk[..pos]);
+        reader.consume(pos + 1);
+        return Some(buf);
+      }
+      if buf.len() + chunk.len() > max_len {
+        return None; // unterminated line past the cap
+      }
+      let n = chunk.len();
+      buf.extend_from_slice(chunk);
+      reader.consume(n);
+    }
+  }
+
   /// Serve one connection: a loop of request→response lines, until the
   /// client disconnects — or, on a `subscribe`, a switch into a one-way
   /// notification stream.
   ///
-  /// Two DoS guards apply on the request/response path (issue #341):
-  /// `read_timeout` reaps a client that opens the connection then stalls;
-  /// `max_line_len` caps how much an unterminated line can buffer.
+  /// Three DoS guards apply on the request/response path (issue #341):
+  /// `read_timeout` reaps a client that opens the connection then stalls and
+  /// bounds the wall time per request line (slow-loris); `max_line_len` caps
+  /// how much an unterminated line can buffer.
   fn handle_connection(
     stream: UnixStream,
     workdir: &Path,
@@ -725,7 +798,8 @@ mod server {
     read_timeout: Option<Duration>,
     shutdown: &AtomicBool,
   ) {
-    // A stalled or slow-loris client must not pin this detached thread.
+    // Baseline blocking/timeout; `read_request_line` shrinks it per read when
+    // a deadline is set. With `read_timeout = None` the read simply blocks.
     let _ = stream.set_read_timeout(read_timeout);
     let read_half = match stream.try_clone() {
       Ok(s) => s,
@@ -735,20 +809,13 @@ mod server {
     let mut reader = BufReader::new(read_half);
 
     loop {
-      // Bound each line: read at most `max_line_len + 1` bytes looking for a
-      // newline. `take` is recreated per line so the cap is per-line, not
-      // per-connection. An unterminated line that hits the cap (no trailing
-      // `\n`) is a misbehaving / hostile client — drop the connection.
-      let mut buf = Vec::new();
-      match (&mut reader).take(max_line_len as u64 + 1).read_until(b'\n', &mut buf) {
-        Ok(0) => break, // EOF: client closed
-        Ok(_) => {}
-        Err(_) => break, // idle read timeout, connection reset, or dead link
-      }
-      if buf.len() > max_line_len && buf.last() != Some(&b'\n') {
-        break; // oversized line — refuse to keep buffering
-      }
-      let line = match std::str::from_utf8(&buf) {
+      // Fresh per-line deadline so each request gets the full budget, but no
+      // single line (and no dribbling client) can outlast it.
+      let deadline = read_timeout.map(|t| Instant::now() + t);
+      let Some(bytes) = read_request_line(&writer, &mut reader, max_line_len, deadline) else {
+        break; // EOF, timeout, oversize, or dead link — drop the connection
+      };
+      let line = match std::str::from_utf8(&bytes) {
         Ok(s) => s.trim(),
         Err(_) => break, // not a UTF-8 JSON-RPC client
       };
@@ -830,4 +897,4 @@ mod server {
 }
 
 #[cfg(all(unix, feature = "daemon"))]
-pub use server::{serve, socket_path, ServeOptions};
+pub use server::{serve, socket_in, socket_path, ServeOptions};

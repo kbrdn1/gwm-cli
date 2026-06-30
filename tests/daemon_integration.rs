@@ -524,3 +524,83 @@ fn isolates_the_tmp_fallback_socket_in_an_owner_only_dir() {
     mode & 0o777
   );
 }
+
+#[test]
+fn socket_nests_under_a_non_private_base_but_not_a_private_one() {
+  // Issue #341 (review): a base dir that is genuinely owner-only (the XDG /
+  // macOS-TMPDIR case) keeps the documented `<base>/gwm.sock`; a base that
+  // resolves to a shared dir (e.g. `TMPDIR=/tmp`) is isolated under a
+  // per-user `gwm-<uid>/` sub-dir instead of exposing the socket directly.
+  use gwm::daemon::socket_in;
+  use std::os::unix::fs::PermissionsExt;
+
+  // An explicitly owner-only (0700) base keeps the direct, documented path.
+  // (`TempDir::new` honours the umask, so it's typically 0755 — pin 0700.)
+  let private = TempDir::new().unwrap();
+  std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+  assert_eq!(
+    socket_in(private.path()),
+    private.path().join("gwm.sock"),
+    "an owner-only base keeps the direct, documented path"
+  );
+
+  // Loosen one to world-writable: the socket must drop into a gwm-<uid>/ nest.
+  let shared = TempDir::new().unwrap();
+  std::fs::set_permissions(shared.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+  let nested = socket_in(shared.path());
+  assert_eq!(nested.file_name().unwrap(), "gwm.sock");
+  let parent = nested.parent().unwrap();
+  assert_eq!(
+    parent.parent().unwrap(),
+    shared.path(),
+    "nested one level under the shared base"
+  );
+  assert!(
+    parent.file_name().unwrap().to_str().unwrap().starts_with("gwm-"),
+    "the private sub-dir is named gwm-<uid>, got {parent:?}"
+  );
+}
+
+#[test]
+fn reaps_a_slow_loris_dribbling_under_the_read_timeout() {
+  // Issue #341 (review): a client trickling one byte just under the per-read
+  // timeout, never sending a newline, would reset `SO_RCVTIMEO` on each byte
+  // and hold its connection slot. The per-line wall-clock deadline must drop
+  // it regardless. `max_line_len` is large so the DEADLINE (not the size
+  // cap) is what bites.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.read_timeout = Some(Duration::from_millis(300));
+    o.max_line_len = 1 << 20;
+  });
+
+  let stream = daemon.connect();
+  stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+  let mut writer = stream.try_clone().unwrap();
+  let mut reader = BufReader::new(stream);
+
+  // Dribble a byte every 100 ms (< the 300 ms per-read budget) with no '\n'.
+  let dribble = thread::spawn(move || {
+    for _ in 0..20 {
+      if writer.write_all(b"x").is_err() || writer.flush().is_err() {
+        return; // server dropped us — stop
+      }
+      thread::sleep(Duration::from_millis(100));
+    }
+  });
+
+  let start = std::time::Instant::now();
+  let mut line = String::new();
+  let n = reader.read_line(&mut line).expect("read on the slow-loris connection");
+  let elapsed = start.elapsed();
+  assert_eq!(
+    n, 0,
+    "a slow-loris dribble must be dropped at the per-line deadline (EOF)"
+  );
+  assert!(
+    elapsed < Duration::from_secs(2),
+    "must be reaped near the 300 ms deadline despite dribbling, took {elapsed:?}"
+  );
+  let _ = dribble.join();
+}
