@@ -10,7 +10,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
+### Fixed
+
+- **`gwm undo --bootstrap` now goes through the TOFU trust gate** ([#338]).
+  Re-running a repo's `[[bootstrap.command]]` shell on undo previously
+  bypassed `trust_or_prompt` entirely — `cmd_undo` called `bootstrap::run`
+  directly with no trust check, so an untrusted `.gwm.toml` could run shell
+  commands unprompted. Undo now mediates the bootstrap re-run through the
+  same gate as `create` / `review --bootstrap` / `bootstrap`, honouring
+  `--allow-bootstrap` / `GWM_ALLOW_BOOTSTRAP` / `--deny-bootstrap`.
+
+[#338]: https://github.com/kbrdn1/gwm-cli/issues/338
 
 ## Past releases
 
