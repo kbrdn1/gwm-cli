@@ -336,7 +336,10 @@ pub enum Command {
   /// explanatory error.
   Daemon {
     /// Socket path to bind. Defaults to `$XDG_RUNTIME_DIR/gwm.sock`,
-    /// falling back to `$TMPDIR`, then `/tmp`.
+    /// falling back to `$TMPDIR`, then `/tmp`. When the chosen base dir is
+    /// not owner-only (e.g. the shared `/tmp` last resort), the socket is
+    /// isolated in a per-user `<base>/gwm-<uid>/gwm.sock` instead, so it
+    /// stays un-connectable cross-user.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Worktree-state poll interval in milliseconds for `subscribe` push
@@ -361,8 +364,10 @@ pub enum Command {
   /// nothing instead of erroring. A CI rollup is intentionally not shown —
   /// it is not part of the daemon's stable schema.
   Statusline {
-    /// Daemon socket path. Defaults to the same resolution as
-    /// `gwm daemon`: `$XDG_RUNTIME_DIR/gwm.sock`, then `$TMPDIR`, then `/tmp`.
+    /// Daemon socket path. Defaults to the same resolution as `gwm daemon`:
+    /// `$XDG_RUNTIME_DIR/gwm.sock`, then `$TMPDIR`, then `/tmp` — isolated in
+    /// a per-user `<base>/gwm-<uid>/gwm.sock` when the base dir isn't
+    /// owner-only (the shared `/tmp` fallback).
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Stream live updates: subscribe to `worktrees.changed` and reprint
@@ -2875,12 +2880,15 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
 
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
-  let socket = socket.unwrap_or_else(crate::daemon::socket_path);
-  let opts = crate::daemon::ServeOptions {
-    socket,
-    repo_workdir: workdir,
-    poll_interval: std::time::Duration::from_millis(poll_ms),
+  // A user `--socket` is taken verbatim (we never touch its parent dir); the
+  // default resolution may nest the socket in a private `gwm-<uid>/` dir on a
+  // shared base, in which case `serve` owns and secures that dir (issue #341).
+  let (socket, manage_socket_dir) = match socket {
+    Some(s) => (s, false),
+    None => crate::daemon::default_socket(),
   };
+  let mut opts = crate::daemon::ServeOptions::new(socket, workdir, std::time::Duration::from_millis(poll_ms));
+  opts.manage_socket_dir = manage_socket_dir;
   // `serve` prints the "listening" line itself, but only after the socket
   // is actually bound — so the message can't precede a bind failure (issue
   // #38 review). `socket` is kept by `opts`; nothing more to do here.
