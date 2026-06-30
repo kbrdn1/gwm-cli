@@ -418,7 +418,7 @@ mod server {
   use super::*;
   use crate::error::GwmError;
   use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-  use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+  use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
   use std::os::unix::net::{UnixListener, UnixStream};
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -503,16 +503,74 @@ mod server {
     }
   }
 
+  /// The current real user id. `getuid(2)` is infallible and has no
+  /// preconditions, so the `unsafe` call is sound.
+  fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+  }
+
+  /// Name of the per-user private dir the `/tmp` fallback nests the socket
+  /// in (`gwm-<uid>`). The uid namespaces it so two users on the same host
+  /// don't collide on one shared `/tmp` dir.
+  fn private_subdir_name() -> String {
+    format!("gwm-{}", current_uid())
+  }
+
   /// Resolve the default socket path: `$XDG_RUNTIME_DIR/gwm.sock`, falling
-  /// back to `$TMPDIR`, then `/tmp`. `XDG_RUNTIME_DIR` is unset on macOS,
-  /// so the fallback chain matters on the dev box and the macOS CI runner.
+  /// back to `$TMPDIR/gwm.sock`, then `/tmp/gwm-<uid>/gwm.sock`.
+  ///
+  /// `$XDG_RUNTIME_DIR` (Linux) and `$TMPDIR` (always set, per-user and
+  /// `0700`, on macOS) are already private dirs, so the socket sits directly
+  /// as `<base>/gwm.sock` — the path the consumer docs advertise. Only the
+  /// world-writable `/tmp` last resort needs isolating: there the socket is
+  /// nested in a per-user owner-only `gwm-<uid>/` dir (created + verified in
+  /// [`serve`]), so it stays un-connectable cross-user even on platforms
+  /// that don't enforce socket-file perms for `connect(2)` (issue #341).
   pub fn socket_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-      .filter(|s| !s.is_empty())
-      .or_else(|| std::env::var_os("TMPDIR").filter(|s| !s.is_empty()))
-      .map(PathBuf::from)
-      .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("gwm.sock")
+    if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()) {
+      return PathBuf::from(base).join("gwm.sock");
+    }
+    if let Some(base) = std::env::var_os("TMPDIR").filter(|s| !s.is_empty()) {
+      return PathBuf::from(base).join("gwm.sock");
+    }
+    PathBuf::from("/tmp").join(private_subdir_name()).join("gwm.sock")
+  }
+
+  /// Ensure `dir` exists as a directory we own with `0700` perms — creating
+  /// it if absent, tightening it if we own it but it's too permissive, and
+  /// refusing if it's a symlink / not a directory / owned by another user (a
+  /// squat on a shared `/tmp`). Only ever called on the gwm-managed
+  /// `gwm-<uid>` dir, never on a system base dir or a user's `--socket`
+  /// parent (issue #341).
+  fn ensure_private_dir(dir: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(dir) {
+      Ok(m) => m,
+      Err(_) => {
+        return std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(|e| {
+          GwmError::Other(format!("daemon: failed to create private dir {}: {e}", dir.display()))
+        });
+      }
+    };
+    if !meta.file_type().is_dir() {
+      return Err(GwmError::Other(format!(
+        "daemon: refusing to use {}: exists and is not a directory",
+        dir.display()
+      )));
+    }
+    if meta.uid() != current_uid() {
+      return Err(GwmError::Other(format!(
+        "daemon: refusing to use {}: not owned by the current user",
+        dir.display()
+      )));
+    }
+    // We own it — tighten loose perms rather than refuse (idempotent on a
+    // dir we created `0700` ourselves on a previous run).
+    if meta.mode() & 0o077 != 0 {
+      std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+        GwmError::Other(format!("daemon: failed to restrict perms on {}: {e}", dir.display()))
+      })?;
+    }
+    Ok(())
   }
 
   /// If a socket file already exists at `path`, decide whether it's stale.
@@ -553,6 +611,19 @@ mod server {
   /// flag never flips (the process runs until killed); tests pass a flag
   /// they flip on teardown.
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
+    // If the socket lives in a gwm-managed private dir (the `/tmp` fallback's
+    // `gwm-<uid>/`), create + verify it `0700` before binding. `chmod 0600`
+    // on the socket alone doesn't block cross-user connect on platforms that
+    // don't enforce socket-file perms (macOS/BSD); an owner-only parent dir
+    // does, since directory-traversal perms are enforced everywhere. We never
+    // touch a system base dir or a user-supplied `--socket` parent — only the
+    // dir whose name we own (issue #341).
+    let private_name = private_subdir_name();
+    if let Some(parent) = opts.socket.parent() {
+      if parent.file_name().and_then(|n| n.to_str()) == Some(private_name.as_str()) {
+        ensure_private_dir(parent)?;
+      }
+    }
     clear_stale_socket(&opts.socket)?;
     let listener = UnixListener::bind(&opts.socket)
       .map_err(|e| GwmError::Other(format!("daemon: failed to bind {}: {e}", opts.socket.display())))?;

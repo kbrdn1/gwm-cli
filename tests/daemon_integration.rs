@@ -487,3 +487,40 @@ fn reaps_an_idle_client_that_never_sends() {
   let n = reader.read_line(&mut line).expect("read on the idle connection");
   assert_eq!(n, 0, "an idle client must be reaped (EOF) after the read timeout");
 }
+
+#[test]
+fn isolates_the_tmp_fallback_socket_in_an_owner_only_dir() {
+  // On the world-writable `/tmp` fallback the socket is nested in a per-user
+  // `gwm-<uid>/` dir created 0700, so cross-user access is blocked even on a
+  // platform that doesn't enforce socket-file perms for connect (issue #341).
+  // `chmod 0600` on the socket alone wouldn't guarantee that.
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  let (dir, _repo) = init_repo();
+  let base = TempDir::new().unwrap();
+  // Same uid the daemon derives from getuid(): the owner of a file we create.
+  let uid = std::fs::metadata(base.path()).unwrap().uid();
+  let priv_dir = base.path().join(format!("gwm-{uid}"));
+  let socket = priv_dir.join("s");
+
+  let shutdown = Arc::new(AtomicBool::new(false));
+  let opts = ServeOptions::new(socket.clone(), dir.path().to_path_buf(), Duration::from_millis(30));
+  let flag = Arc::clone(&shutdown);
+  let handle = thread::spawn(move || serve(&opts, flag).expect("serve must create the dir and bind"));
+
+  for _ in 0..200 {
+    if UnixStream::connect(&socket).is_ok() {
+      break;
+    }
+    thread::sleep(Duration::from_millis(10));
+  }
+  let mode = std::fs::metadata(&priv_dir).unwrap().permissions().mode();
+  shutdown.store(true, Ordering::Relaxed);
+  handle.join().unwrap();
+
+  assert_eq!(
+    mode & 0o777,
+    0o700,
+    "the gwm-<uid> dir must be owner-only (0700), got {:o}",
+    mode & 0o777
+  );
+}
