@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#340]: https://github.com/kbrdn1/gwm-cli/issues/340
 
+- **Hardened the `gwm daemon` unix socket** ([#341]). The socket is now
+  created owner-only (`0600`), so on a shared host's `/tmp` fallback another
+  local user can no longer connect and read the worktree list. Added DoS
+  guards on the request/response path: a per-line length cap, an idle read
+  timeout, and a concurrent-connection cap (all configurable on
+  `ServeOptions`). Also fixed a bug where a transient `run_list` git error
+  pushed a phantom-empty `worktrees.changed` to `subscribe` clients (they
+  flickered "everything vanished", then self-healed next poll) — transient
+  errors are now swallowed instead of streamed as an empty snapshot.
+
+[#341]: https://github.com/kbrdn1/gwm-cli/issues/341
+
 ### Fixed
 
 - **`gwm undo --bootstrap` now goes through the TOFU trust gate** ([#338]).
