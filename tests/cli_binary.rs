@@ -4069,6 +4069,31 @@ run  = "echo trapped"
     .stderr(
       predicate::str::contains("not in the trust ledger").or(predicate::str::contains("stdin is not interactive")),
     );
+
+  // 4. The gate runs BEFORE any resurrection (fail-fast), so a denied
+  //    undo must leave the journal entry and worktree untouched — not
+  //    half-apply then exit non-zero. The worktree must still be gone…
+  let wt_path = base.path().join("feat-338-undo-trust");
+  assert!(
+    !wt_path.exists(),
+    "a denied trust gate must NOT restore the worktree — undo must stay retryable"
+  );
+
+  // …and a follow-up `undo` (no --bootstrap → no gate) must still find
+  //    the journal entry and restore the worktree, proving the denied
+  //    run consumed nothing.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_HISTORY_FILE", &history_file)
+    .arg("undo")
+    .assert()
+    .success();
+  assert!(
+    wt_path.exists(),
+    "retry undo must restore the worktree — the entry was preserved"
+  );
 }
 
 #[test]
