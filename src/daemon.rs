@@ -475,6 +475,12 @@ mod server {
     /// then immediately closed, so a connection flood can't exhaust threads
     /// / file descriptors (DoS guard).
     pub max_connections: usize,
+    /// Whether [`serve`] owns the socket's parent directory and must create
+    /// it and secure it to `0700`. Set ONLY for the default resolution's
+    /// private `gwm-<uid>/` fallback nest (see [`default_socket`]); never for
+    /// a user-supplied `--socket`, whose parent is left untouched even when
+    /// its name happens to match `gwm-<uid>` (issue #341 review).
+    pub manage_socket_dir: bool,
   }
 
   impl ServeOptions {
@@ -499,6 +505,8 @@ mod server {
         max_line_len: Self::DEFAULT_MAX_LINE_LEN,
         read_timeout: Some(Self::DEFAULT_READ_TIMEOUT),
         max_connections: Self::DEFAULT_MAX_CONNECTIONS,
+        // Conservative: only the default `/tmp`-fallback resolution opts in.
+        manage_socket_dir: false,
       }
     }
   }
@@ -554,6 +562,20 @@ mod server {
       return socket_in(&PathBuf::from(base));
     }
     socket_in(Path::new("/tmp"))
+  }
+
+  /// The default [`socket_path`] plus whether [`serve`] should create +
+  /// secure its parent dir. The flag is `true` only when resolution nested
+  /// the socket in a private `gwm-<uid>/` fallback dir (a shared base);
+  /// `false` for the direct `$XDG_RUNTIME_DIR` / `$TMPDIR` paths. The CLI
+  /// passes a user `--socket` with the flag `false`, so a user-supplied
+  /// parent is never modified — even one coincidentally named `gwm-<uid>`
+  /// (issue #341 review).
+  pub fn default_socket() -> (PathBuf, bool) {
+    let path = socket_path();
+    let managed =
+      path.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some(private_subdir_name().as_str());
+    (path, managed)
   }
 
   /// Ensure `dir` exists as a directory we own with `0700` perms — creating
@@ -631,16 +653,17 @@ mod server {
   /// flag never flips (the process runs until killed); tests pass a flag
   /// they flip on teardown.
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
-    // If the socket lives in a gwm-managed private dir (the `/tmp` fallback's
-    // `gwm-<uid>/`), create + verify it `0700` before binding. `chmod 0600`
-    // on the socket alone doesn't block cross-user connect on platforms that
-    // don't enforce socket-file perms (macOS/BSD); an owner-only parent dir
-    // does, since directory-traversal perms are enforced everywhere. We never
-    // touch a system base dir or a user-supplied `--socket` parent — only the
-    // dir whose name we own (issue #341).
-    let private_name = private_subdir_name();
-    if let Some(parent) = opts.socket.parent() {
-      if parent.file_name().and_then(|n| n.to_str()) == Some(private_name.as_str()) {
+    // When we own the socket's parent dir (the `/tmp` fallback's private
+    // `gwm-<uid>/`, flagged by `manage_socket_dir`), create + verify it
+    // `0700` before binding. `chmod 0600` on the socket alone doesn't block
+    // cross-user connect on platforms that don't enforce socket-file perms
+    // (macOS/BSD); an owner-only parent dir does, since directory-traversal
+    // perms are enforced everywhere. We never touch a system base dir or a
+    // user-supplied `--socket` parent — the flag, not a name match, gates
+    // this so a `--socket` path that happens to sit in a `gwm-<uid>` dir is
+    // left alone (issue #341).
+    if opts.manage_socket_dir {
+      if let Some(parent) = opts.socket.parent() {
         ensure_private_dir(parent)?;
       }
     }
@@ -897,4 +920,4 @@ mod server {
 }
 
 #[cfg(all(unix, feature = "daemon"))]
-pub use server::{serve, socket_in, socket_path, ServeOptions};
+pub use server::{default_socket, serve, socket_in, socket_path, ServeOptions};

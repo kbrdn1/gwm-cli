@@ -503,7 +503,9 @@ fn isolates_the_tmp_fallback_socket_in_an_owner_only_dir() {
   let socket = priv_dir.join("s");
 
   let shutdown = Arc::new(AtomicBool::new(false));
-  let opts = ServeOptions::new(socket.clone(), dir.path().to_path_buf(), Duration::from_millis(30));
+  let mut opts = ServeOptions::new(socket.clone(), dir.path().to_path_buf(), Duration::from_millis(30));
+  // The default `/tmp`-fallback resolution sets this; here we simulate it.
+  opts.manage_socket_dir = true;
   let flag = Arc::clone(&shutdown);
   let handle = thread::spawn(move || serve(&opts, flag).expect("serve must create the dir and bind"));
 
@@ -603,4 +605,45 @@ fn reaps_a_slow_loris_dribbling_under_the_read_timeout() {
     "must be reaped near the 300 ms deadline despite dribbling, took {elapsed:?}"
   );
   let _ = dribble.join();
+}
+
+#[test]
+fn user_socket_parent_is_left_untouched_even_when_named_gwm_uid() {
+  // Issue #341 (review): a user `--socket` is taken verbatim — its parent
+  // dir must NOT be hardened, even if its basename coincidentally matches
+  // `gwm-<uid>` (e.g. `~/shared/gwm-501/api.sock`). The gating is the
+  // `manage_socket_dir` flag (false for --socket), not a name match.
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  let (dir, _repo) = init_repo();
+  let base = TempDir::new().unwrap();
+  let uid = std::fs::metadata(base.path()).unwrap().uid();
+  // A pre-existing, deliberately group/other-accessible dir named gwm-<uid>.
+  let user_dir = base.path().join(format!("gwm-{uid}"));
+  std::fs::create_dir(&user_dir).unwrap();
+  std::fs::set_permissions(&user_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let socket = user_dir.join("s");
+
+  let shutdown = Arc::new(AtomicBool::new(false));
+  // manage_socket_dir stays false (the --socket path) → serve must not chmod
+  // the parent.
+  let opts = ServeOptions::new(socket.clone(), dir.path().to_path_buf(), Duration::from_millis(30));
+  let flag = Arc::clone(&shutdown);
+  let handle = thread::spawn(move || serve(&opts, flag).expect("serve must bind the user socket"));
+
+  for _ in 0..200 {
+    if UnixStream::connect(&socket).is_ok() {
+      break;
+    }
+    thread::sleep(Duration::from_millis(10));
+  }
+  let mode = std::fs::metadata(&user_dir).unwrap().permissions().mode();
+  shutdown.store(true, Ordering::Relaxed);
+  handle.join().unwrap();
+
+  assert_eq!(
+    mode & 0o777,
+    0o755,
+    "a user --socket parent must be left as-is (not chmod'd to 0700), got {:o}",
+    mode & 0o777
+  );
 }
