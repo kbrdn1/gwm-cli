@@ -224,6 +224,34 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
   })
 }
 
+/// Decide what a `subscribe` stream should push next, given the previous
+/// snapshot (`None` until the first successful one) and the latest poll
+/// result. Returns `Some(snapshot)` to push, or `None` to stay quiet.
+///
+/// Issue #341: a **transient** `Err` from `run_list` (a flaky git scan, an
+/// index lock contended by a concurrent write) is swallowed — we keep the
+/// last good snapshot and push nothing. The pre-fix code did
+/// `run_list(..).unwrap_or_default()`, turning that `Err` into an **empty**
+/// list, which `worktrees_differ` then read as "everything vanished" and
+/// pushed a phantom `worktrees.changed` (subscribers flicker empty, then
+/// self-heal next poll). A genuine `Ok(empty)` — the last worktree really
+/// removed — is still a real change and IS pushed; only the error path is
+/// skipped. Pure so it can be unit-tested without a live socket.
+pub fn next_subscription_push(
+  last: &Option<Vec<JsonWorktree>>,
+  latest: Result<Vec<JsonWorktree>>,
+) -> Option<Vec<JsonWorktree>> {
+  let now = match latest {
+    Ok(now) => now,
+    Err(_) => return None,
+  };
+  match last {
+    None => Some(now),                                       // first snapshot
+    Some(prev) if worktrees_differ(prev, &now) => Some(now), // genuine change
+    Some(_) => None,                                         // unchanged
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Client side — request lines + response/notification parsers (issue #309).
 // Cross-platform and pure: the statusline consumer and any other client
@@ -390,19 +418,43 @@ mod server {
   use super::*;
   use crate::error::GwmError;
   use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-  use std::os::unix::fs::FileTypeExt;
+  use std::os::unix::fs::{FileTypeExt, PermissionsExt};
   use std::os::unix::net::{UnixListener, UnixStream};
   use std::path::PathBuf;
-  use std::sync::atomic::{AtomicBool, Ordering};
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
   use std::sync::Arc;
   use std::time::Duration;
+
+  /// RAII counter of live client connections. [`ActiveGuard::try_acquire`]
+  /// increments (refusing past the configured cap); `Drop` decrements — so
+  /// even a panicking connection thread frees its slot (issue #341).
+  struct ActiveGuard(Arc<AtomicUsize>);
+
+  impl ActiveGuard {
+    fn try_acquire(active: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
+      if active.fetch_add(1, Ordering::SeqCst) + 1 > max {
+        active.fetch_sub(1, Ordering::SeqCst);
+        return None;
+      }
+      Some(ActiveGuard(Arc::clone(active)))
+    }
+  }
+
+  impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+      self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+  }
 
   /// How long the accept loop blocks before re-checking the shutdown
   /// flag. Independent of the worktree poll interval; small enough that a
   /// test's `serve` thread tears down promptly.
   const ACCEPT_TICK: Duration = Duration::from_millis(50);
 
-  /// Configuration for [`serve`].
+  /// Configuration for [`serve`]. Construct with [`ServeOptions::new`] for
+  /// the production DoS defaults, then override individual guard fields in
+  /// tests (tiny caps / timeouts make the limits assertable without flaky
+  /// timing — issue #341).
   pub struct ServeOptions {
     /// Path to bind the unix domain socket at.
     pub socket: PathBuf,
@@ -410,6 +462,45 @@ mod server {
     pub repo_workdir: PathBuf,
     /// Interval between worktree-state polls for `subscribe` streams.
     pub poll_interval: Duration,
+    /// Max bytes accepted for a single request line before the connection is
+    /// dropped. Caps memory a client can force the daemon to buffer by never
+    /// sending a newline (DoS guard).
+    pub max_line_len: usize,
+    /// Idle read timeout on the request/response path: a client that opens a
+    /// connection and then stalls (sends nothing, or a partial line) is
+    /// dropped after this, freeing its detached thread (slow-loris guard).
+    /// `None` disables the timeout.
+    pub read_timeout: Option<Duration>,
+    /// Max concurrent client connections. Excess connections are accepted
+    /// then immediately closed, so a connection flood can't exhaust threads
+    /// / file descriptors (DoS guard).
+    pub max_connections: usize,
+  }
+
+  impl ServeOptions {
+    /// 64 KiB is far above any real JSON-RPC request line the daemon serves
+    /// (`list` / `path` / `doctor` / `subscribe`), but bounds a malicious
+    /// unterminated line.
+    pub const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024;
+    /// Request/response clients do one short round-trip; 30 s is generous for
+    /// a real client yet promptly reaps a stalled one.
+    pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+    /// One daemon serves one repo's handful of consumers (TUI, statusline,
+    /// the odd `nc`); 128 concurrent connections is comfortably above that.
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
+
+    /// Build options with production DoS defaults. Tests override the guard
+    /// fields directly afterwards.
+    pub fn new(socket: PathBuf, repo_workdir: PathBuf, poll_interval: Duration) -> Self {
+      Self {
+        socket,
+        repo_workdir,
+        poll_interval,
+        max_line_len: Self::DEFAULT_MAX_LINE_LEN,
+        read_timeout: Some(Self::DEFAULT_READ_TIMEOUT),
+        max_connections: Self::DEFAULT_MAX_CONNECTIONS,
+      }
+    }
   }
 
   /// Resolve the default socket path: `$XDG_RUNTIME_DIR/gwm.sock`, falling
@@ -465,9 +556,30 @@ mod server {
     clear_stale_socket(&opts.socket)?;
     let listener = UnixListener::bind(&opts.socket)
       .map_err(|e| GwmError::Other(format!("daemon: failed to bind {}: {e}", opts.socket.display())))?;
+    // Restrict the socket to the owner (`0600`). A unix socket is created
+    // `0777 & ~umask`; the usual `022` umask leaves it group/other-
+    // connectable — and on Linux socket perms ARE enforced for connect, so
+    // on a shared host's `/tmp` fallback another local user could read the
+    // worktree list. `chmod` (not a `umask` twiddle) because `umask` is
+    // process-global and not thread-safe — a daemon under test runs many
+    // `serve`s in parallel. Fail closed: refuse to serve an over-permissive
+    // socket rather than expose it. The brief bind→chmod window is a
+    // negligible exposure for a read-only socket (issue #341).
+    std::fs::set_permissions(&opts.socket, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+      let _ = std::fs::remove_file(&opts.socket);
+      GwmError::Other(format!(
+        "daemon: failed to restrict permissions on {}: {e}",
+        opts.socket.display()
+      ))
+    })?;
     listener
       .set_nonblocking(true)
       .map_err(|e| GwmError::Other(format!("daemon: set_nonblocking failed: {e}")))?;
+
+    // Live-connection counter shared with each connection's `ActiveGuard`,
+    // so a connection flood can't exhaust threads / file descriptors. Kept
+    // per-`serve` (not a global static) so parallel tests don't interfere.
+    let active = Arc::new(AtomicUsize::new(0));
 
     // Announce readiness ONLY now that the socket is bound, so the line
     // can't precede a bind failure and mislead a wrapper that treats it as
@@ -490,15 +602,24 @@ mod server {
             eprintln!("daemon: failed to set connection blocking: {e}");
             continue;
           }
+          // Refuse past the concurrency cap: accept then immediately drop
+          // the stream (closing it) so a flood can't pile up threads.
+          let Some(guard) = ActiveGuard::try_acquire(&active, opts.max_connections) else {
+            continue;
+          };
           let workdir = opts.repo_workdir.clone();
           let poll = opts.poll_interval;
+          let max_line_len = opts.max_line_len;
+          let read_timeout = opts.read_timeout;
           let shutdown = Arc::clone(&shutdown);
           // Detached: a long-running daemon must not accumulate JoinHandles
           // for every short-lived client (`nc`, reconnecting integrations).
           // Each connection thread observes the shared `shutdown` flag and
-          // exits on its own (issue #38 review).
+          // exits on its own (issue #38 review). `guard` rides along and
+          // frees the connection slot when the thread ends.
           std::thread::spawn(move || {
-            handle_connection(stream, &workdir, poll, &shutdown);
+            let _guard = guard;
+            handle_connection(stream, &workdir, poll, max_line_len, read_timeout, &shutdown);
           });
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -521,26 +642,52 @@ mod server {
   /// Serve one connection: a loop of request→response lines, until the
   /// client disconnects — or, on a `subscribe`, a switch into a one-way
   /// notification stream.
-  fn handle_connection(stream: UnixStream, workdir: &Path, poll: Duration, shutdown: &AtomicBool) {
+  ///
+  /// Two DoS guards apply on the request/response path (issue #341):
+  /// `read_timeout` reaps a client that opens the connection then stalls;
+  /// `max_line_len` caps how much an unterminated line can buffer.
+  fn handle_connection(
+    stream: UnixStream,
+    workdir: &Path,
+    poll: Duration,
+    max_line_len: usize,
+    read_timeout: Option<Duration>,
+    shutdown: &AtomicBool,
+  ) {
+    // A stalled or slow-loris client must not pin this detached thread.
+    let _ = stream.set_read_timeout(read_timeout);
     let read_half = match stream.try_clone() {
       Ok(s) => s,
       Err(_) => return,
     };
     let mut writer = stream;
-    let reader = BufReader::new(read_half);
+    let mut reader = BufReader::new(read_half);
 
-    for line in reader.lines() {
-      let line = match line {
-        Ok(l) => l,
-        Err(_) => break,
+    loop {
+      // Bound each line: read at most `max_line_len + 1` bytes looking for a
+      // newline. `take` is recreated per line so the cap is per-line, not
+      // per-connection. An unterminated line that hits the cap (no trailing
+      // `\n`) is a misbehaving / hostile client — drop the connection.
+      let mut buf = Vec::new();
+      match (&mut reader).take(max_line_len as u64 + 1).read_until(b'\n', &mut buf) {
+        Ok(0) => break, // EOF: client closed
+        Ok(_) => {}
+        Err(_) => break, // idle read timeout, connection reset, or dead link
+      }
+      if buf.len() > max_line_len && buf.last() != Some(&b'\n') {
+        break; // oversized line — refuse to keep buffering
+      }
+      let line = match std::str::from_utf8(&buf) {
+        Ok(s) => s.trim(),
+        Err(_) => break, // not a UTF-8 JSON-RPC client
       };
-      if line.trim().is_empty() {
+      if line.is_empty() {
         continue;
       }
 
       // Peek the method: `subscribe` upgrades the connection to a stream
       // and never returns to request/response mode.
-      let is_subscribe = serde_json::from_str::<RpcRequest>(&line)
+      let is_subscribe = serde_json::from_str::<RpcRequest>(line)
         .map(|r| r.method == "subscribe")
         .unwrap_or(false);
       if is_subscribe {
@@ -549,7 +696,7 @@ mod server {
       }
 
       // A notification (no `id`) returns None — process, send nothing.
-      if let Some(response) = handle_line(workdir, &line) {
+      if let Some(response) = handle_line(workdir, line) {
         if writeln!(writer, "{response}").is_err() || writer.flush().is_err() {
           break;
         }
@@ -571,9 +718,15 @@ mod server {
     if stream.set_read_timeout(Some(poll)).is_err() {
       return;
     }
-    let mut last = run_list(workdir).unwrap_or_default();
-    if send_notification(stream, &last).is_err() {
-      return;
+    // `None` until the first SUCCESSFUL snapshot — so a transient git error
+    // on the very first poll defers the immediate snapshot to the next tick
+    // instead of pushing a phantom-empty one (issue #341).
+    let mut last: Option<Vec<JsonWorktree>> = None;
+    if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
+      if send_notification(stream, &snapshot).is_err() {
+        return;
+      }
+      last = Some(snapshot);
     }
     let mut buf = [0u8; 64];
     loop {
@@ -589,12 +742,11 @@ mod server {
         Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
         Err(_) => return,
       }
-      let now = run_list(workdir).unwrap_or_default();
-      if worktrees_differ(&last, &now) {
-        if send_notification(stream, &now).is_err() {
+      if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
+        if send_notification(stream, &snapshot).is_err() {
           return;
         }
-        last = now;
+        last = Some(snapshot);
       }
     }
   }

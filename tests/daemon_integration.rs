@@ -32,13 +32,16 @@ impl TestDaemon {
   /// `sock_dir` under a 1-char name to stay well under the ~104-byte
   /// `sun_path` limit on macOS.
   fn start(repo_workdir: &Path, sock_dir: &Path, poll: Duration) -> Self {
+    Self::start_with(repo_workdir, sock_dir, poll, |_| {})
+  }
+
+  /// Like [`start`], but lets a test tweak the [`ServeOptions`] DoS guards
+  /// (tiny caps / timeouts) before the daemon binds (issue #341).
+  fn start_with(repo_workdir: &Path, sock_dir: &Path, poll: Duration, tweak: impl FnOnce(&mut ServeOptions)) -> Self {
     let socket = sock_dir.join("s");
     let shutdown = Arc::new(AtomicBool::new(false));
-    let opts = ServeOptions {
-      socket: socket.clone(),
-      repo_workdir: repo_workdir.to_path_buf(),
-      poll_interval: poll,
-    };
+    let mut opts = ServeOptions::new(socket.clone(), repo_workdir.to_path_buf(), poll);
+    tweak(&mut opts);
     let flag = Arc::clone(&shutdown);
     let handle = thread::spawn(move || {
       serve(&opts, flag).expect("serve must bind and run");
@@ -146,11 +149,7 @@ fn serve_refuses_to_unlink_a_non_socket_path() {
   let path = sock_dir.path().join("s");
   std::fs::write(&path, b"precious user data").unwrap();
 
-  let opts = ServeOptions {
-    socket: path.clone(),
-    repo_workdir: dir.path().to_path_buf(),
-    poll_interval: Duration::from_millis(50),
-  };
+  let opts = ServeOptions::new(path.clone(), dir.path().to_path_buf(), Duration::from_millis(50));
   let err = serve(&opts, Arc::new(AtomicBool::new(false))).unwrap_err();
   assert!(
     err.to_string().contains("not a unix socket"),
@@ -390,4 +389,101 @@ fn client_list_once_times_out_on_a_silent_socket() {
     elapsed < Duration::from_secs(2),
     "list_once must give up near the timeout, not block (took {elapsed:?})"
   );
+}
+
+// --- Issue #341: socket hardening (perms) + DoS guards (caps/timeouts) ------
+
+#[test]
+fn socket_is_created_owner_only_0600() {
+  // On a shared host's `/tmp` fallback the socket must not be cross-user
+  // connectable. Bound under a 0o177 umask + chmod, so the inode is 0600.
+  use std::os::unix::fs::PermissionsExt;
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(30));
+  let _ = daemon.connect(); // ensure the socket is bound before we stat it
+
+  let mode = std::fs::metadata(&daemon.socket).unwrap().permissions().mode();
+  assert_eq!(
+    mode & 0o777,
+    0o600,
+    "socket must be owner-only (0600), got {:o}",
+    mode & 0o777
+  );
+}
+
+#[test]
+fn refuses_connections_past_the_concurrency_cap() {
+  // With the cap at 1, a held connection occupies the only slot; a second
+  // connection is accepted at the OS level then immediately closed by the
+  // daemon (over cap), so the client reads EOF.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.max_connections = 1;
+  });
+
+  // Hold the only slot with a subscribe stream. Reading its snapshot proves
+  // the daemon has accepted it and acquired the slot BEFORE we race a second
+  // connection in — making the outcome deterministic.
+  let hold = daemon.connect();
+  let mut hw = hold.try_clone().unwrap();
+  let mut hr = BufReader::new(hold);
+  writeln!(hw, r#"{{"method":"subscribe","id":1}}"#).unwrap();
+  hw.flush().unwrap();
+  let mut snap = String::new();
+  hr.read_line(&mut snap).expect("first client gets its snapshot");
+
+  let second = UnixStream::connect(&daemon.socket).expect("OS accepts the connection");
+  second.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+  let mut sr = BufReader::new(second);
+  let mut line = String::new();
+  let n = sr.read_line(&mut line).expect("read on the over-cap connection");
+  assert_eq!(
+    n, 0,
+    "an over-cap connection must be closed immediately (EOF), got: {line:?}"
+  );
+}
+
+#[test]
+fn drops_a_client_sending_an_oversized_line() {
+  // A line longer than `max_line_len` with no newline must stop the daemon
+  // buffering and drop the connection, rather than growing memory unbounded.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.max_line_len = 16;
+  });
+
+  let stream = daemon.connect();
+  let mut writer = stream.try_clone().unwrap();
+  let mut reader = BufReader::new(stream);
+
+  writer.write_all(&[b'x'; 64]).unwrap(); // 64 bytes, no '\n'
+  writer.flush().unwrap();
+
+  let mut line = String::new();
+  let n = reader.read_line(&mut line).expect("read after the oversized line");
+  assert_eq!(n, 0, "an oversized unterminated line must drop the connection (EOF)");
+}
+
+#[test]
+fn reaps_an_idle_client_that_never_sends() {
+  // A client that connects on the request/response path and then stalls
+  // (sends nothing) must be reaped after `read_timeout`, freeing its thread,
+  // instead of pinning it forever.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.read_timeout = Some(Duration::from_millis(200));
+  });
+
+  let stream = daemon.connect();
+  stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+  let mut reader = BufReader::new(stream);
+
+  // Send nothing; the daemon's request-path read times out and drops us.
+  let mut line = String::new();
+  let n = reader.read_line(&mut line).expect("read on the idle connection");
+  assert_eq!(n, 0, "an idle client must be reaped (EOF) after the read timeout");
 }

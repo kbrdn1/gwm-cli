@@ -179,6 +179,51 @@ fn worktrees_differ_detects_real_changes() {
   assert!(!worktrees_differ(from_ref(&base), from_ref(&base)));
 }
 
+#[test]
+fn subscription_push_skips_phantom_empty_on_transient_error() {
+  // Issue #341: a transient `run_list` error must NOT push an empty
+  // `worktrees.changed`. The pre-fix `unwrap_or_default()` turned the Err
+  // into `[]`, which `worktrees_differ` read as "everything vanished" and
+  // streamed to subscribers (flicker, then self-heal next poll).
+  use gwm::daemon::next_subscription_push;
+  use gwm::error::GwmError;
+
+  let snapshot = vec![sample("a"), sample("b")];
+
+  // The bug: a non-empty last snapshot + a transient error → stay quiet.
+  assert_eq!(
+    next_subscription_push(
+      &Some(snapshot.clone()),
+      Err(GwmError::Other("transient git lock".into()))
+    ),
+    None,
+    "a transient error must not emit a phantom-empty snapshot"
+  );
+
+  // First successful snapshot (last is None) is always pushed.
+  assert_eq!(
+    next_subscription_push(&None, Ok(snapshot.clone())),
+    Some(snapshot.clone())
+  );
+
+  // A genuine change is pushed.
+  let grown = vec![sample("a"), sample("b"), sample("c")];
+  assert_eq!(
+    next_subscription_push(&Some(snapshot.clone()), Ok(grown.clone())),
+    Some(grown)
+  );
+
+  // A genuine `Ok(empty)` — the last worktree really removed — is a real
+  // change and IS pushed (only the error path is suppressed).
+  assert_eq!(
+    next_subscription_push(&Some(snapshot.clone()), Ok(vec![])),
+    Some(vec![])
+  );
+
+  // No change → stay quiet.
+  assert_eq!(next_subscription_push(&Some(snapshot.clone()), Ok(snapshot)), None);
+}
+
 // --- Client-side parsers (issue #309) --------------------------------------
 
 #[test]

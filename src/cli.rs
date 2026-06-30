@@ -2876,11 +2876,7 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let workdir = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let socket = socket.unwrap_or_else(crate::daemon::socket_path);
-  let opts = crate::daemon::ServeOptions {
-    socket,
-    repo_workdir: workdir,
-    poll_interval: std::time::Duration::from_millis(poll_ms),
-  };
+  let opts = crate::daemon::ServeOptions::new(socket, workdir, std::time::Duration::from_millis(poll_ms));
   // `serve` prints the "listening" line itself, but only after the socket
   // is actually bound — so the message can't precede a bind failure (issue
   // #38 review). `socket` is kept by `opts`; nothing more to do here.
