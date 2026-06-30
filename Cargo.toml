@@ -65,7 +65,6 @@ crossterm = "0.29"
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "0.0.13"
 toml = "1.1"
 toml_edit = "0.25"
 anyhow = "1"
@@ -90,6 +89,7 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
+serde_yaml_ng = "0.10.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /

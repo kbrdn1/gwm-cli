@@ -113,9 +113,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
+      # `--deny warnings` makes warning-class advisories (unmaintained /
+      # unsound / yanked) fail the job, not just outright vulnerabilities.
+      # Plain `cargo audit` exits 0 on those, which is why RUSTSEC-2025-0068
+      # (serde_yml, unsound + unmaintained) slipped past for ~9 months even
+      # before accounting for `continue-on-error`. Accepted advisories go in
+      # `audit.toml` (`[advisories] ignore = […]`) with a rationale so each
+      # is a conscious decision (issue #340).
       - name: cargo audit
-        run: cargo audit
-        continue-on-error: true
+        run: cargo audit --deny warnings
 
   doctor:
     name: gwm doctor (advisory)
