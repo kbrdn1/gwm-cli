@@ -38,6 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#341]: https://github.com/kbrdn1/gwm-cli/issues/341
 
+### Performance
+
+- **Moved the last synchronous git subprocesses off the TUI render path**
+  ([#343]). The details sidebar rebuilt its git-backed sections
+  (`git_diff_stat_vs_base`, `git status --porcelain -z`, `git log`,
+  `git stash list`) synchronously inside `terminal.draw()` on every
+  selection / mode change, stalling `j` / `k` on a large repo or a slow
+  filesystem; workspace-mode auto-refresh re-listed every repo
+  synchronously too. Both now ride the `TaskRunner` (#231): the render
+  path only reads the last-known payload — showing a muted `loading…`
+  placeholder while a rebuild is in flight (the identity card still
+  renders instantly) — and a coalesced worker rebuilds it off-thread,
+  keyed to the current selection. A held `j` coalesces onto the single
+  in-flight worker instead of spawning a thread per row, and the poll
+  cadence tightens to 50 ms while a task is loading so the preview lands
+  fast.
+
+[#343]: https://github.com/kbrdn1/gwm-cli/issues/343
+
 ### Fixed
 
 - **`gwm undo --bootstrap` now goes through the TOFU trust gate** ([#338]).

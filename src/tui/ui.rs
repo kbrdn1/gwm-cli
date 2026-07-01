@@ -644,25 +644,48 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     return;
   };
 
-  // Populate (or refresh) the cache for the current selection. After this
-  // short mutable borrow ends, `app.sidebar.cache` is guaranteed `Some`.
-  let needs_refresh = match &app.sidebar.cache {
-    Some(((p, m), _)) => *p != w.path || *m != active_mode,
-    None => true,
+  // Issue #343: the render path NEVER shells out. The git-backed sections
+  // (`git_diff_stat_vs_base` + `git status` + `git log` / `git stash list`)
+  // are rebuilt off-thread by the async sidebar worker (`App::
+  // maybe_refresh_sidebar` → `TaskKind::Sidebar`), which stores the payload in
+  // `app.sidebar.cache` keyed by `(path, mode)`. Here we only READ it, and
+  // only when it was built for the *current* selection + mode — a stale-key or
+  // cold cache renders a muted "loading…" placeholder while the worker catches
+  // up. The identity card (branch / head / path / badges) comes straight from
+  // `w`, so it shows instantly on navigation; only the diff figure and the
+  // status / commits blocks wait on the worker. The live `● <name>` header and
+  // the Issue / PR block are still built per-frame below (no subprocess).
+  // Whether the cached payload is authoritative for the current selection.
+  // The sections to render are resolved from this at each read site (lengths
+  // below, render pass further down) as a direct match so the immutable cache
+  // borrow stays scoped and never overlaps the `app.sidebar.max_scroll` /
+  // `scroll` writes in between — the pre-#343 borrow discipline, unchanged.
+  let cache_is_current = matches!(
+    &app.sidebar.cache,
+    Some(((p, m), _)) if *p == w.path && *m == active_mode
+  );
+
+  // The loading placeholder, built ONLY when the cache is stale — on the warm
+  // path it stays an empty `default()` (no per-frame identity-line allocation
+  // in what is, after all, a render-perf change). The identity card renders
+  // straight from `w` (no subprocess), so it shows instantly on navigation;
+  // the status / commits blocks read "loading…" until the worker's payload
+  // lands.
+  let placeholder = if cache_is_current {
+    SidebarSections::default()
+  } else {
+    SidebarSections {
+      worktree: worktree_identity_lines(&w, None, &theme),
+      working_tree: match active_mode {
+        super::state::sidebar::SidebarMode::Commits => {
+          vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))]
+        }
+        super::state::sidebar::SidebarMode::Stashes => Vec::new(),
+      },
+      working_tree_counts: WorkingTreeCounts::default(),
+      recent_commits: vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))],
+    }
   };
-  if needs_refresh {
-    // Committed diff of the branch vs its base trunk (issue #287). Resolved
-    // through `config.doctor.trunks` so the figure matches the base
-    // `gwm pr` would target; folded into the cached payload so the git
-    // call only fires on a selection / mode change, not every frame.
-    let diff = worktree::git_diff_stat_vs_base(&w.path, &app.config.doctor.trunks)
-      .ok()
-      .flatten();
-    app.sidebar.cache = Some((
-      (w.path.clone(), active_mode),
-      build_sidebar_sections(&w, active_mode, diff, &theme),
-    ));
-  }
 
   // The live header line and the per-frame Issue / PR block are built BEFORE
   // the long cache borrow so they don't overlap it. The header is the only
@@ -672,17 +695,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   let header_line = sidebar_header_line(&w, app);
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
 
-  // Read the cached section lengths via a short immutable borrow so the
+  // Read the resolved section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
   // worktree section gains +1 row for the live header prefix.
   let (worktree_len, working_tree_len, working_tree_counts, commits_len) = {
-    let cache = app.sidebar.cache.as_ref();
-    let s = cache.map(|(_, s)| s);
+    let s = if cache_is_current {
+      app.sidebar.cache.as_ref().map(|(_, s)| s).unwrap_or(&placeholder)
+    } else {
+      &placeholder
+    };
     (
-      s.map(|s| s.worktree.len()).unwrap_or(0) + 1,
-      s.map(|s| s.working_tree.len()).unwrap_or(0),
-      s.map(|s| s.working_tree_counts).unwrap_or_default(),
-      s.map(|s| s.recent_commits.len()).unwrap_or(0) as u16,
+      s.worktree.len() + 1,
+      s.working_tree.len(),
+      s.working_tree_counts,
+      s.recent_commits.len() as u16,
     )
   };
 
@@ -757,55 +783,59 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     working_tree_counts_footer(&working_tree_counts, &theme)
   };
 
-  // The render borrow: cached sections are read by reference and never
-  // cloned (issue #238). On a cache hit this copies zero commit text — the
-  // up-to-300 `git log` lines stay put in `app.sidebar.cache`; `render_section`
-  // only rebuilds the thin padded `Vec<Span>` per visible row, borrowing the
-  // span content. `app` is only read immutably from here on (all mutation
-  // already happened above), so this long borrow is conflict-free. The
-  // `if let` is guaranteed to bind (the cache was populated above for the
-  // selected worktree) — matching rather than `unwrap()` keeps the render
-  // path panic-free per the house rules.
-  if let Some((_, cache)) = app.sidebar.cache.as_ref() {
+  // The render borrow: sections are read by reference and never cloned (issue
+  // #238). On a cache hit this copies zero commit text — the up-to-300 `git
+  // log` lines stay put in `app.sidebar.cache`; `render_section` only rebuilds
+  // the thin padded `Vec<Span>` per visible row, borrowing the span content.
+  // `app` is only read immutably from here on (all mutation already happened
+  // above), so this long borrow is conflict-free. Resolved from the same
+  // `cache_is_current` decision as the length block: the cached payload when it
+  // is authoritative for the current selection, else the loading placeholder
+  // (issue #343) — never `unwrap()`, keeping the render path panic-free per the
+  // house rules.
+  let sections = if cache_is_current {
+    app.sidebar.cache.as_ref().map(|(_, s)| s).unwrap_or(&placeholder)
+  } else {
+    &placeholder
+  };
+  render_section(
+    f,
+    chunks[0],
+    status_pane_title(),
+    SectionBody::with_prefix(&header_line, &sections.worktree),
+    border_color,
+    0,
+    None,
+  );
+  render_section(
+    f,
+    chunks[1],
+    issue_pr_title,
+    SectionBody::new(&issue_pr_lines),
+    border_color,
+    0,
+    None,
+  );
+  if !sections.working_tree.is_empty() {
     render_section(
       f,
-      chunks[0],
-      status_pane_title(),
-      SectionBody::with_prefix(&header_line, &cache.worktree),
+      chunks[2],
+      working_tree_title,
+      SectionBody::new(&sections.working_tree),
       border_color,
       0,
-      None,
-    );
-    render_section(
-      f,
-      chunks[1],
-      issue_pr_title,
-      SectionBody::new(&issue_pr_lines),
-      border_color,
-      0,
-      None,
-    );
-    if !cache.working_tree.is_empty() {
-      render_section(
-        f,
-        chunks[2],
-        working_tree_title,
-        SectionBody::new(&cache.working_tree),
-        border_color,
-        0,
-        working_tree_footer,
-      );
-    }
-    render_section(
-      f,
-      commits_area,
-      panel_title,
-      SectionBody::new(&cache.recent_commits),
-      border_color,
-      scroll,
-      panel_footer.map(ratatui::text::Line::from),
+      working_tree_footer,
     );
   }
+  render_section(
+    f,
+    commits_area,
+    panel_title,
+    SectionBody::new(&sections.recent_commits),
+    border_color,
+    scroll,
+    panel_footer.map(ratatui::text::Line::from),
+  );
 }
 
 /// Borrowed content for one [`render_section`] block (issue #238).
@@ -956,6 +986,24 @@ pub fn build_sidebar_sections(
     working_tree_counts,
     recent_commits: body,
   }
+}
+
+/// Build the full sidebar payload for one worktree — the diff-vs-base stat
+/// plus [`build_sidebar_sections`] — as a single owned, `Send` value (issue
+/// #343). This is the unit of work the async sidebar worker runs off-thread:
+/// every git subprocess the sidebar needs (`git_diff_stat_vs_base`,
+/// `git status --porcelain -z`, `git log`, `git stash list`) fires here, on a
+/// worker, so `terminal.draw` never shells out. The result is stored into
+/// `SidebarState::cache` by `App::drain_task_results`. `trunks` is the active
+/// repo's `doctor.trunks` (the base `gwm pr` targets) captured at spawn.
+pub fn build_sidebar_payload(
+  w: &WorktreeInfo,
+  mode: super::state::sidebar::SidebarMode,
+  trunks: &[String],
+  theme: &Theme,
+) -> SidebarSections {
+  let diff = worktree::git_diff_stat_vs_base(&w.path, trunks).ok().flatten();
+  build_sidebar_sections(w, mode, diff, theme)
 }
 
 /// Number of stash entries shown in `SidebarMode::Stashes`. Set to
