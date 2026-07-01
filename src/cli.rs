@@ -1429,7 +1429,16 @@ fn cmd_clean_workspace(root: &Path, slugs: Vec<String>, profile: Option<String>,
       }
     }
     if !valid {
-      return Err(last_err.expect("open_workspace_repos guarantees a non-empty workspace"));
+      // `last_err` is `Some` whenever the loop over `opened` ran and no repo
+      // validated — and `open_workspace_repos` already rejects an empty
+      // workspace with `EmptyWorkspace`, so `opened` is non-empty and the
+      // `None` arm is unreachable. Return that same error defensively rather
+      // than `expect`-panicking, so a future regression that lets an empty
+      // workspace through fails loud with a `GwmError` instead of a panic
+      // (issue #344).
+      return Err(last_err.unwrap_or_else(|| GwmError::EmptyWorkspace {
+        root: root.display().to_string(),
+      }));
     }
   }
   clean_finish(&reclaims, &skipped, yes)
