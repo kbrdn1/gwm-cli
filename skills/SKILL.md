@@ -8,7 +8,7 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: `0.9.0`; `0.10.0-rc.4` on `dev` (MSRV 1.86). The v0.10 train adds: `gwm exec` / `gwm clean` (fleet command fan-out + build-artifact reclaim, #313), `gwm review <PR#>` (materialise a PR into a worktree, #308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` stack templates (#37), multi-repo `--workspace` mode (#36), embedded PTY overlays for lazygit / shell (#35), a redesigned & fully-rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree file-explorer pane and a current-PR CI indicator (#300 / #299).
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: `1.0.0` (the SemVer milestone; machine contracts frozen — MSRV 1.86). 1.0.0 ships: `gwm exec` / `gwm clean` (fleet command fan-out + build-artifact reclaim, #313), `gwm review <PR#>` (materialise a PR into a worktree, #308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` stack templates (#37), multi-repo `--workspace` mode (#36), embedded PTY overlays for lazygit / shell (#35), a redesigned & fully-rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree file-explorer pane and a current-PR CI indicator (#300 / #299).
 
 ## When to use this skill
 
@@ -57,7 +57,7 @@ cargo install --path .         # → ~/.cargo/bin/gwm
 gwm --version
 ```
 
-No Rust toolchain at hand? `cargo binstall gwm` pulls the prebuilt binary from the matching GitHub Release (via `[package.metadata.binstall]`) and drops it in `~/.cargo/bin/` without compiling `git2`/vendored-libgit2 from source — much faster on first install.
+No Rust toolchain at hand? `cargo binstall gwm-cli` pulls the prebuilt binary from the matching GitHub Release (via `[package.metadata.binstall]`) and drops it in `~/.cargo/bin/` without compiling `git2`/vendored-libgit2 from source — much faster on first install.
 
 Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): https://github.com/kbrdn1/gwm-cli/releases. A Homebrew formula ships under `packaging/homebrew/` and a Nix `flake.nix` is at the repo root.
 

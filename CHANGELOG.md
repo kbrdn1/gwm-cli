@@ -108,6 +108,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#342]: https://github.com/kbrdn1/gwm-cli/issues/342
 
+### Documentation
+
+- **Finished the 1.0.0 documentation sync** ([#339]). The in-repo `docs/`
+  tree and `skills/SKILL.md` still described the v0.10.0 line: fixed the
+  install command (`cargo binstall gwm` → `cargo binstall gwm-cli`; the bare
+  `gwm` crate on crates.io is an unrelated project), added a `cargo install
+  gwm-cli` crates.io channel to the install page, ported the site roadmap to
+  v1.0.0 (with the 1.0 lot #317–#334), and refreshed the test counters to the
+  real 1.0.0 figures (75 `tests/*.rs` files, 1902 `#[test]` markers). EN/FR
+  parity preserved.
+
+[#339]: https://github.com/kbrdn1/gwm-cli/issues/339
+
 ## Past releases
 
 In reverse chronological order:
