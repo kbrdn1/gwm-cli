@@ -48,7 +48,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: zip
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -114,7 +114,7 @@ jobs:
       !contains(github.event.inputs.tag || github.ref_name, '-beta.')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: download all artifacts
         uses: actions/download-artifact@v8
@@ -209,12 +209,12 @@ jobs:
           fi
 
       - name: checkout gwm-cli (template + render script)
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           path: gwm-cli
 
       - name: checkout kbrdn1/homebrew-tap
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: kbrdn1/homebrew-tap
           path: homebrew-tap

@@ -23,7 +23,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -34,7 +34,7 @@ jobs:
     name: clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -50,7 +50,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: configure git identity (libgit2 commit needs one)
@@ -68,7 +68,7 @@ jobs:
     # Cheap regression net for .githooks/pre-commit. Runs in parallel with
     # the heavy `test` job — no Rust toolchain needed, just shell + git.
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: shellcheck pre-commit hook
         uses: ludeeus/action-shellcheck@master
         with:
@@ -108,14 +108,20 @@ jobs:
     name: cargo audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: install cargo-audit
         run: cargo install cargo-audit --locked
+      # `--deny warnings` makes warning-class advisories (unmaintained /
+      # unsound / yanked) fail the job, not just outright vulnerabilities.
+      # Plain `cargo audit` exits 0 on those, which is why RUSTSEC-2025-0068
+      # (serde_yml, unsound + unmaintained) slipped past for ~9 months even
+      # before accounting for `continue-on-error`. Accepted advisories go in
+      # `audit.toml` (`[advisories] ignore = […]`) with a rationale so each
+      # is a conscious decision (issue #340).
       - name: cargo audit
-        run: cargo audit
-        continue-on-error: true
+        run: cargo audit --deny warnings
 
   doctor:
     name: gwm doctor (advisory)
@@ -129,7 +135,7 @@ jobs:
       (github.event_name == 'push' && github.ref == 'refs/heads/dev') ||
       (github.event_name == 'pull_request' && github.base_ref == 'dev')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: configure git identity

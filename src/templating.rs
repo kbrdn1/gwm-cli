@@ -80,7 +80,7 @@ pub fn render_form_markdown(raw: &str, ctx: &TemplateContext, defaults: &FormDef
 }
 
 fn parse_issue_form(raw: &str) -> Result<IssueForm> {
-  serde_yml::from_str(raw).map_err(|e| GwmError::Config(format!("issue template YAML: {}", e)))
+  serde_yaml_ng::from_str(raw).map_err(|e| GwmError::Config(format!("issue template YAML: {}", e)))
 }
 
 fn field_value(item: &IssueFormItem, defaults: &FormDefaults) -> Option<String> {

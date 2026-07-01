@@ -4,15 +4,20 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
 # newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
 # wants 1.80; `std::iter::repeat_n` (existing code in src/tui/ui.rs's
 # countdown bar) wants 1.82; `tui-term 0.3.4` (issue #35 PTY overlay)
 # declares `rust-version = "1.86.0"`. The crate as a whole compiles at
-# 1.86+, so MSRV is set to the higher floor. CI's clippy MSRV lint
-# enforces it.
+# 1.86+, so MSRV is set to the higher floor. CI's clippy job catches an
+# accidental *std-API* regression above this floor (`clippy::incompatible_msrv`
+# is warn-by-default, escalated to a hard error by `-D warnings`), but it does
+# NOT cover language/edition features or a dependency raising its own floor —
+# those are verified locally before an MSRV bump with `cargo msrv verify` (or
+# `cargo +1.86.0 build --all-targets --locked`). See
+# `docs/6.development/3.stability.md` §MSRV policy for the full story.
 rust-version = "1.86"
 description = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 authors = ["Kylian Bardini"]
@@ -65,7 +70,6 @@ crossterm = "0.29"
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "0.0.13"
 toml = "1.1"
 toml_edit = "0.25"
 anyhow = "1"
@@ -90,6 +94,7 @@ tui-term = "0.3"
 # `rm -rf /tmp /` are visually close but semantically different, so
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
+serde_yaml_ng = "0.10.0"
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /

@@ -32,13 +32,16 @@ impl TestDaemon {
   /// `sock_dir` under a 1-char name to stay well under the ~104-byte
   /// `sun_path` limit on macOS.
   fn start(repo_workdir: &Path, sock_dir: &Path, poll: Duration) -> Self {
+    Self::start_with(repo_workdir, sock_dir, poll, |_| {})
+  }
+
+  /// Like [`start`], but lets a test tweak the [`ServeOptions`] DoS guards
+  /// (tiny caps / timeouts) before the daemon binds (issue #341).
+  fn start_with(repo_workdir: &Path, sock_dir: &Path, poll: Duration, tweak: impl FnOnce(&mut ServeOptions)) -> Self {
     let socket = sock_dir.join("s");
     let shutdown = Arc::new(AtomicBool::new(false));
-    let opts = ServeOptions {
-      socket: socket.clone(),
-      repo_workdir: repo_workdir.to_path_buf(),
-      poll_interval: poll,
-    };
+    let mut opts = ServeOptions::new(socket.clone(), repo_workdir.to_path_buf(), poll);
+    tweak(&mut opts);
     let flag = Arc::clone(&shutdown);
     let handle = thread::spawn(move || {
       serve(&opts, flag).expect("serve must bind and run");
@@ -146,11 +149,7 @@ fn serve_refuses_to_unlink_a_non_socket_path() {
   let path = sock_dir.path().join("s");
   std::fs::write(&path, b"precious user data").unwrap();
 
-  let opts = ServeOptions {
-    socket: path.clone(),
-    repo_workdir: dir.path().to_path_buf(),
-    poll_interval: Duration::from_millis(50),
-  };
+  let opts = ServeOptions::new(path.clone(), dir.path().to_path_buf(), Duration::from_millis(50));
   let err = serve(&opts, Arc::new(AtomicBool::new(false))).unwrap_err();
   assert!(
     err.to_string().contains("not a unix socket"),
@@ -389,5 +388,262 @@ fn client_list_once_times_out_on_a_silent_socket() {
   assert!(
     elapsed < Duration::from_secs(2),
     "list_once must give up near the timeout, not block (took {elapsed:?})"
+  );
+}
+
+// --- Issue #341: socket hardening (perms) + DoS guards (caps/timeouts) ------
+
+#[test]
+fn socket_is_created_owner_only_0600() {
+  // On a shared host's `/tmp` fallback the socket must not be cross-user
+  // connectable. Bound under a 0o177 umask + chmod, so the inode is 0600.
+  use std::os::unix::fs::PermissionsExt;
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start(dir.path(), sock_dir.path(), Duration::from_millis(30));
+  let _ = daemon.connect(); // ensure the socket is bound before we stat it
+
+  let mode = std::fs::metadata(&daemon.socket).unwrap().permissions().mode();
+  assert_eq!(
+    mode & 0o777,
+    0o600,
+    "socket must be owner-only (0600), got {:o}",
+    mode & 0o777
+  );
+}
+
+#[test]
+fn refuses_connections_past_the_concurrency_cap() {
+  // With the cap at 1, a held connection occupies the only slot; a second
+  // connection is accepted at the OS level then immediately closed by the
+  // daemon (over cap), so the client reads EOF.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.max_connections = 1;
+  });
+
+  // Hold the only slot with a subscribe stream. Reading its snapshot proves
+  // the daemon has accepted it and acquired the slot BEFORE we race a second
+  // connection in — making the outcome deterministic.
+  let hold = daemon.connect();
+  let mut hw = hold.try_clone().unwrap();
+  let mut hr = BufReader::new(hold);
+  writeln!(hw, r#"{{"method":"subscribe","id":1}}"#).unwrap();
+  hw.flush().unwrap();
+  let mut snap = String::new();
+  hr.read_line(&mut snap).expect("first client gets its snapshot");
+
+  let second = UnixStream::connect(&daemon.socket).expect("OS accepts the connection");
+  second.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+  let mut sr = BufReader::new(second);
+  let mut line = String::new();
+  let n = sr.read_line(&mut line).expect("read on the over-cap connection");
+  assert_eq!(
+    n, 0,
+    "an over-cap connection must be closed immediately (EOF), got: {line:?}"
+  );
+}
+
+#[test]
+fn drops_a_client_sending_an_oversized_line() {
+  // A line longer than `max_line_len` with no newline must stop the daemon
+  // buffering and drop the connection, rather than growing memory unbounded.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.max_line_len = 16;
+  });
+
+  let stream = daemon.connect();
+  let mut writer = stream.try_clone().unwrap();
+  let mut reader = BufReader::new(stream);
+
+  writer.write_all(&[b'x'; 64]).unwrap(); // 64 bytes, no '\n'
+  writer.flush().unwrap();
+
+  let mut line = String::new();
+  let n = reader.read_line(&mut line).expect("read after the oversized line");
+  assert_eq!(n, 0, "an oversized unterminated line must drop the connection (EOF)");
+}
+
+#[test]
+fn reaps_an_idle_client_that_never_sends() {
+  // A client that connects on the request/response path and then stalls
+  // (sends nothing) must be reaped after `read_timeout`, freeing its thread,
+  // instead of pinning it forever.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.read_timeout = Some(Duration::from_millis(200));
+  });
+
+  let stream = daemon.connect();
+  stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+  let mut reader = BufReader::new(stream);
+
+  // Send nothing; the daemon's request-path read times out and drops us.
+  let mut line = String::new();
+  let n = reader.read_line(&mut line).expect("read on the idle connection");
+  assert_eq!(n, 0, "an idle client must be reaped (EOF) after the read timeout");
+}
+
+#[test]
+fn isolates_the_tmp_fallback_socket_in_an_owner_only_dir() {
+  // On the world-writable `/tmp` fallback the socket is nested in a per-user
+  // `gwm-<uid>/` dir created 0700, so cross-user access is blocked even on a
+  // platform that doesn't enforce socket-file perms for connect (issue #341).
+  // `chmod 0600` on the socket alone wouldn't guarantee that.
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  let (dir, _repo) = init_repo();
+  let base = TempDir::new().unwrap();
+  // Same uid the daemon derives from getuid(): the owner of a file we create.
+  let uid = std::fs::metadata(base.path()).unwrap().uid();
+  let priv_dir = base.path().join(format!("gwm-{uid}"));
+  let socket = priv_dir.join("s");
+
+  let shutdown = Arc::new(AtomicBool::new(false));
+  let mut opts = ServeOptions::new(socket.clone(), dir.path().to_path_buf(), Duration::from_millis(30));
+  // The default `/tmp`-fallback resolution sets this; here we simulate it.
+  opts.manage_socket_dir = true;
+  let flag = Arc::clone(&shutdown);
+  let handle = thread::spawn(move || serve(&opts, flag).expect("serve must create the dir and bind"));
+
+  for _ in 0..200 {
+    if UnixStream::connect(&socket).is_ok() {
+      break;
+    }
+    thread::sleep(Duration::from_millis(10));
+  }
+  let mode = std::fs::metadata(&priv_dir).unwrap().permissions().mode();
+  shutdown.store(true, Ordering::Relaxed);
+  handle.join().unwrap();
+
+  assert_eq!(
+    mode & 0o777,
+    0o700,
+    "the gwm-<uid> dir must be owner-only (0700), got {:o}",
+    mode & 0o777
+  );
+}
+
+#[test]
+fn socket_nests_under_a_non_private_base_but_not_a_private_one() {
+  // Issue #341 (review): a base dir that is genuinely owner-only (the XDG /
+  // macOS-TMPDIR case) keeps the documented `<base>/gwm.sock`; a base that
+  // resolves to a shared dir (e.g. `TMPDIR=/tmp`) is isolated under a
+  // per-user `gwm-<uid>/` sub-dir instead of exposing the socket directly.
+  use gwm::daemon::socket_in;
+  use std::os::unix::fs::PermissionsExt;
+
+  // An explicitly owner-only (0700) base keeps the direct, documented path.
+  // (`TempDir::new` honours the umask, so it's typically 0755 — pin 0700.)
+  let private = TempDir::new().unwrap();
+  std::fs::set_permissions(private.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+  assert_eq!(
+    socket_in(private.path()),
+    private.path().join("gwm.sock"),
+    "an owner-only base keeps the direct, documented path"
+  );
+
+  // Loosen one to world-writable: the socket must drop into a gwm-<uid>/ nest.
+  let shared = TempDir::new().unwrap();
+  std::fs::set_permissions(shared.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+  let nested = socket_in(shared.path());
+  assert_eq!(nested.file_name().unwrap(), "gwm.sock");
+  let parent = nested.parent().unwrap();
+  assert_eq!(
+    parent.parent().unwrap(),
+    shared.path(),
+    "nested one level under the shared base"
+  );
+  assert!(
+    parent.file_name().unwrap().to_str().unwrap().starts_with("gwm-"),
+    "the private sub-dir is named gwm-<uid>, got {parent:?}"
+  );
+}
+
+#[test]
+fn reaps_a_slow_loris_dribbling_under_the_read_timeout() {
+  // Issue #341 (review): a client trickling one byte just under the per-read
+  // timeout, never sending a newline, would reset `SO_RCVTIMEO` on each byte
+  // and hold its connection slot. The per-line wall-clock deadline must drop
+  // it regardless. `max_line_len` is large so the DEADLINE (not the size
+  // cap) is what bites.
+  let (dir, _repo) = init_repo();
+  let sock_dir = TempDir::new().unwrap();
+  let daemon = TestDaemon::start_with(dir.path(), sock_dir.path(), Duration::from_millis(30), |o| {
+    o.read_timeout = Some(Duration::from_millis(300));
+    o.max_line_len = 1 << 20;
+  });
+
+  let stream = daemon.connect();
+  stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+  let mut writer = stream.try_clone().unwrap();
+  let mut reader = BufReader::new(stream);
+
+  // Dribble a byte every 100 ms (< the 300 ms per-read budget) with no '\n'.
+  let dribble = thread::spawn(move || {
+    for _ in 0..20 {
+      if writer.write_all(b"x").is_err() || writer.flush().is_err() {
+        return; // server dropped us — stop
+      }
+      thread::sleep(Duration::from_millis(100));
+    }
+  });
+
+  let start = std::time::Instant::now();
+  let mut line = String::new();
+  let n = reader.read_line(&mut line).expect("read on the slow-loris connection");
+  let elapsed = start.elapsed();
+  assert_eq!(
+    n, 0,
+    "a slow-loris dribble must be dropped at the per-line deadline (EOF)"
+  );
+  assert!(
+    elapsed < Duration::from_secs(2),
+    "must be reaped near the 300 ms deadline despite dribbling, took {elapsed:?}"
+  );
+  let _ = dribble.join();
+}
+
+#[test]
+fn user_socket_parent_is_left_untouched_even_when_named_gwm_uid() {
+  // Issue #341 (review): a user `--socket` is taken verbatim — its parent
+  // dir must NOT be hardened, even if its basename coincidentally matches
+  // `gwm-<uid>` (e.g. `~/shared/gwm-501/api.sock`). The gating is the
+  // `manage_socket_dir` flag (false for --socket), not a name match.
+  use std::os::unix::fs::{MetadataExt, PermissionsExt};
+  let (dir, _repo) = init_repo();
+  let base = TempDir::new().unwrap();
+  let uid = std::fs::metadata(base.path()).unwrap().uid();
+  // A pre-existing, deliberately group/other-accessible dir named gwm-<uid>.
+  let user_dir = base.path().join(format!("gwm-{uid}"));
+  std::fs::create_dir(&user_dir).unwrap();
+  std::fs::set_permissions(&user_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+  let socket = user_dir.join("s");
+
+  let shutdown = Arc::new(AtomicBool::new(false));
+  // manage_socket_dir stays false (the --socket path) → serve must not chmod
+  // the parent.
+  let opts = ServeOptions::new(socket.clone(), dir.path().to_path_buf(), Duration::from_millis(30));
+  let flag = Arc::clone(&shutdown);
+  let handle = thread::spawn(move || serve(&opts, flag).expect("serve must bind the user socket"));
+
+  for _ in 0..200 {
+    if UnixStream::connect(&socket).is_ok() {
+      break;
+    }
+    thread::sleep(Duration::from_millis(10));
+  }
+  let mode = std::fs::metadata(&user_dir).unwrap().permissions().mode();
+  shutdown.store(true, Ordering::Relaxed);
+  handle.join().unwrap();
+
+  assert_eq!(
+    mode & 0o777,
+    0o755,
+    "a user --socket parent must be left as-is (not chmod'd to 0700), got {:o}",
+    mode & 0o777
   );
 }

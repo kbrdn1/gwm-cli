@@ -224,6 +224,34 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
   })
 }
 
+/// Decide what a `subscribe` stream should push next, given the previous
+/// snapshot (`None` until the first successful one) and the latest poll
+/// result. Returns `Some(snapshot)` to push, or `None` to stay quiet.
+///
+/// Issue #341: a **transient** `Err` from `run_list` (a flaky git scan, an
+/// index lock contended by a concurrent write) is swallowed — we keep the
+/// last good snapshot and push nothing. The pre-fix code did
+/// `run_list(..).unwrap_or_default()`, turning that `Err` into an **empty**
+/// list, which `worktrees_differ` then read as "everything vanished" and
+/// pushed a phantom `worktrees.changed` (subscribers flicker empty, then
+/// self-heal next poll). A genuine `Ok(empty)` — the last worktree really
+/// removed — is still a real change and IS pushed; only the error path is
+/// skipped. Pure so it can be unit-tested without a live socket.
+pub fn next_subscription_push(
+  last: &Option<Vec<JsonWorktree>>,
+  latest: Result<Vec<JsonWorktree>>,
+) -> Option<Vec<JsonWorktree>> {
+  let now = match latest {
+    Ok(now) => now,
+    Err(_) => return None,
+  };
+  match last {
+    None => Some(now),                                       // first snapshot
+    Some(prev) if worktrees_differ(prev, &now) => Some(now), // genuine change
+    Some(_) => None,                                         // unchanged
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Client side — request lines + response/notification parsers (issue #309).
 // Cross-platform and pure: the statusline consumer and any other client
@@ -390,19 +418,43 @@ mod server {
   use super::*;
   use crate::error::GwmError;
   use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-  use std::os::unix::fs::FileTypeExt;
+  use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
   use std::os::unix::net::{UnixListener, UnixStream};
   use std::path::PathBuf;
-  use std::sync::atomic::{AtomicBool, Ordering};
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
   use std::sync::Arc;
-  use std::time::Duration;
+  use std::time::{Duration, Instant};
+
+  /// RAII counter of live client connections. [`ActiveGuard::try_acquire`]
+  /// increments (refusing past the configured cap); `Drop` decrements — so
+  /// even a panicking connection thread frees its slot (issue #341).
+  struct ActiveGuard(Arc<AtomicUsize>);
+
+  impl ActiveGuard {
+    fn try_acquire(active: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
+      if active.fetch_add(1, Ordering::SeqCst) + 1 > max {
+        active.fetch_sub(1, Ordering::SeqCst);
+        return None;
+      }
+      Some(ActiveGuard(Arc::clone(active)))
+    }
+  }
+
+  impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+      self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+  }
 
   /// How long the accept loop blocks before re-checking the shutdown
   /// flag. Independent of the worktree poll interval; small enough that a
   /// test's `serve` thread tears down promptly.
   const ACCEPT_TICK: Duration = Duration::from_millis(50);
 
-  /// Configuration for [`serve`].
+  /// Configuration for [`serve`]. Construct with [`ServeOptions::new`] for
+  /// the production DoS defaults, then override individual guard fields in
+  /// tests (tiny caps / timeouts make the limits assertable without flaky
+  /// timing — issue #341).
   pub struct ServeOptions {
     /// Path to bind the unix domain socket at.
     pub socket: PathBuf,
@@ -410,18 +462,157 @@ mod server {
     pub repo_workdir: PathBuf,
     /// Interval between worktree-state polls for `subscribe` streams.
     pub poll_interval: Duration,
+    /// Max bytes accepted for a single request line before the connection is
+    /// dropped. Caps memory a client can force the daemon to buffer by never
+    /// sending a newline (DoS guard).
+    pub max_line_len: usize,
+    /// Idle read timeout on the request/response path: a client that opens a
+    /// connection and then stalls (sends nothing, or a partial line) is
+    /// dropped after this, freeing its detached thread (slow-loris guard).
+    /// `None` disables the timeout.
+    pub read_timeout: Option<Duration>,
+    /// Max concurrent client connections. Excess connections are accepted
+    /// then immediately closed, so a connection flood can't exhaust threads
+    /// / file descriptors (DoS guard).
+    pub max_connections: usize,
+    /// Whether [`serve`] owns the socket's parent directory and must create
+    /// it and secure it to `0700`. Set ONLY for the default resolution's
+    /// private `gwm-<uid>/` fallback nest (see [`default_socket`]); never for
+    /// a user-supplied `--socket`, whose parent is left untouched even when
+    /// its name happens to match `gwm-<uid>` (issue #341 review).
+    pub manage_socket_dir: bool,
   }
 
-  /// Resolve the default socket path: `$XDG_RUNTIME_DIR/gwm.sock`, falling
-  /// back to `$TMPDIR`, then `/tmp`. `XDG_RUNTIME_DIR` is unset on macOS,
-  /// so the fallback chain matters on the dev box and the macOS CI runner.
+  impl ServeOptions {
+    /// 64 KiB is far above any real JSON-RPC request line the daemon serves
+    /// (`list` / `path` / `doctor` / `subscribe`), but bounds a malicious
+    /// unterminated line.
+    pub const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024;
+    /// Request/response clients do one short round-trip; 30 s is generous for
+    /// a real client yet promptly reaps a stalled one.
+    pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+    /// One daemon serves one repo's handful of consumers (TUI, statusline,
+    /// the odd `nc`); 128 concurrent connections is comfortably above that.
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
+
+    /// Build options with production DoS defaults. Tests override the guard
+    /// fields directly afterwards.
+    pub fn new(socket: PathBuf, repo_workdir: PathBuf, poll_interval: Duration) -> Self {
+      Self {
+        socket,
+        repo_workdir,
+        poll_interval,
+        max_line_len: Self::DEFAULT_MAX_LINE_LEN,
+        read_timeout: Some(Self::DEFAULT_READ_TIMEOUT),
+        max_connections: Self::DEFAULT_MAX_CONNECTIONS,
+        // Conservative: only the default `/tmp`-fallback resolution opts in.
+        manage_socket_dir: false,
+      }
+    }
+  }
+
+  /// The current real user id. `getuid(2)` is infallible and has no
+  /// preconditions, so the `unsafe` call is sound.
+  fn current_uid() -> u32 {
+    unsafe { libc::getuid() }
+  }
+
+  /// Name of the per-user private dir the `/tmp` fallback nests the socket
+  /// in (`gwm-<uid>`). The uid namespaces it so two users on the same host
+  /// don't collide on one shared `/tmp` dir.
+  fn private_subdir_name() -> String {
+    format!("gwm-{}", current_uid())
+  }
+
+  /// True when `dir` is a real directory we own with no group/other access
+  /// (`0700`-style). Used to decide whether a base dir is safe to drop the
+  /// socket into directly, or whether it needs a private `gwm-<uid>/` nest.
+  /// `symlink_metadata` so a symlinked base isn't trusted on its target.
+  fn is_private_dir(dir: &Path) -> bool {
+    match std::fs::symlink_metadata(dir) {
+      Ok(m) => m.file_type().is_dir() && m.uid() == current_uid() && m.mode() & 0o077 == 0,
+      Err(_) => false,
+    }
+  }
+
+  /// Place the socket directly in `base` when `base` is genuinely owner-only
+  /// (`$XDG_RUNTIME_DIR` per the XDG spec, macOS's per-user `$TMPDIR`) — the
+  /// `<base>/gwm.sock` path the consumer docs advertise. Otherwise (a base
+  /// that resolves to a shared dir like `/tmp`) nest the socket in a per-user
+  /// owner-only `gwm-<uid>/` sub-dir so it stays un-connectable cross-user.
+  pub fn socket_in(base: &Path) -> PathBuf {
+    if is_private_dir(base) {
+      base.join("gwm.sock")
+    } else {
+      base.join(private_subdir_name()).join("gwm.sock")
+    }
+  }
+
+  /// Resolve the default socket path: `$XDG_RUNTIME_DIR` → `$TMPDIR` → `/tmp`
+  /// for the base dir, then [`socket_in`] to decide direct vs. private-nested
+  /// placement based on the base's actual ownership/perms (issue #341). The
+  /// nested `gwm-<uid>/` dir is created + verified in [`serve`]. Pure modulo
+  /// reading the env and stat-ing the base — server and client agree on the
+  /// result since the base's perms are stable across their runs.
   pub fn socket_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-      .filter(|s| !s.is_empty())
-      .or_else(|| std::env::var_os("TMPDIR").filter(|s| !s.is_empty()))
-      .map(PathBuf::from)
-      .unwrap_or_else(|| PathBuf::from("/tmp"));
-    base.join("gwm.sock")
+    if let Some(base) = std::env::var_os("XDG_RUNTIME_DIR").filter(|s| !s.is_empty()) {
+      return socket_in(&PathBuf::from(base));
+    }
+    if let Some(base) = std::env::var_os("TMPDIR").filter(|s| !s.is_empty()) {
+      return socket_in(&PathBuf::from(base));
+    }
+    socket_in(Path::new("/tmp"))
+  }
+
+  /// The default [`socket_path`] plus whether [`serve`] should create +
+  /// secure its parent dir. The flag is `true` only when resolution nested
+  /// the socket in a private `gwm-<uid>/` fallback dir (a shared base);
+  /// `false` for the direct `$XDG_RUNTIME_DIR` / `$TMPDIR` paths. The CLI
+  /// passes a user `--socket` with the flag `false`, so a user-supplied
+  /// parent is never modified — even one coincidentally named `gwm-<uid>`
+  /// (issue #341 review).
+  pub fn default_socket() -> (PathBuf, bool) {
+    let path = socket_path();
+    let managed =
+      path.parent().and_then(|d| d.file_name()).and_then(|n| n.to_str()) == Some(private_subdir_name().as_str());
+    (path, managed)
+  }
+
+  /// Ensure `dir` exists as a directory we own with `0700` perms — creating
+  /// it if absent, tightening it if we own it but it's too permissive, and
+  /// refusing if it's a symlink / not a directory / owned by another user (a
+  /// squat on a shared `/tmp`). Only ever called on the gwm-managed
+  /// `gwm-<uid>` dir, never on a system base dir or a user's `--socket`
+  /// parent (issue #341).
+  fn ensure_private_dir(dir: &Path) -> Result<()> {
+    let meta = match std::fs::symlink_metadata(dir) {
+      Ok(m) => m,
+      Err(_) => {
+        return std::fs::DirBuilder::new()
+          .mode(0o700)
+          .create(dir)
+          .map_err(|e| GwmError::Other(format!("daemon: failed to create private dir {}: {e}", dir.display())));
+      }
+    };
+    if !meta.file_type().is_dir() {
+      return Err(GwmError::Other(format!(
+        "daemon: refusing to use {}: exists and is not a directory",
+        dir.display()
+      )));
+    }
+    if meta.uid() != current_uid() {
+      return Err(GwmError::Other(format!(
+        "daemon: refusing to use {}: not owned by the current user",
+        dir.display()
+      )));
+    }
+    // We own it — tighten loose perms rather than refuse (idempotent on a
+    // dir we created `0700` ourselves on a previous run).
+    if meta.mode() & 0o077 != 0 {
+      std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| GwmError::Other(format!("daemon: failed to restrict perms on {}: {e}", dir.display())))?;
+    }
+    Ok(())
   }
 
   /// If a socket file already exists at `path`, decide whether it's stale.
@@ -462,12 +653,47 @@ mod server {
   /// flag never flips (the process runs until killed); tests pass a flag
   /// they flip on teardown.
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
+    // When we own the socket's parent dir (the `/tmp` fallback's private
+    // `gwm-<uid>/`, flagged by `manage_socket_dir`), create + verify it
+    // `0700` before binding. `chmod 0600` on the socket alone doesn't block
+    // cross-user connect on platforms that don't enforce socket-file perms
+    // (macOS/BSD); an owner-only parent dir does, since directory-traversal
+    // perms are enforced everywhere. We never touch a system base dir or a
+    // user-supplied `--socket` parent — the flag, not a name match, gates
+    // this so a `--socket` path that happens to sit in a `gwm-<uid>` dir is
+    // left alone (issue #341).
+    if opts.manage_socket_dir {
+      if let Some(parent) = opts.socket.parent() {
+        ensure_private_dir(parent)?;
+      }
+    }
     clear_stale_socket(&opts.socket)?;
     let listener = UnixListener::bind(&opts.socket)
       .map_err(|e| GwmError::Other(format!("daemon: failed to bind {}: {e}", opts.socket.display())))?;
+    // Restrict the socket to the owner (`0600`). A unix socket is created
+    // `0777 & ~umask`; the usual `022` umask leaves it group/other-
+    // connectable — and on Linux socket perms ARE enforced for connect, so
+    // on a shared host's `/tmp` fallback another local user could read the
+    // worktree list. `chmod` (not a `umask` twiddle) because `umask` is
+    // process-global and not thread-safe — a daemon under test runs many
+    // `serve`s in parallel. Fail closed: refuse to serve an over-permissive
+    // socket rather than expose it. The brief bind→chmod window is a
+    // negligible exposure for a read-only socket (issue #341).
+    std::fs::set_permissions(&opts.socket, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+      let _ = std::fs::remove_file(&opts.socket);
+      GwmError::Other(format!(
+        "daemon: failed to restrict permissions on {}: {e}",
+        opts.socket.display()
+      ))
+    })?;
     listener
       .set_nonblocking(true)
       .map_err(|e| GwmError::Other(format!("daemon: set_nonblocking failed: {e}")))?;
+
+    // Live-connection counter shared with each connection's `ActiveGuard`,
+    // so a connection flood can't exhaust threads / file descriptors. Kept
+    // per-`serve` (not a global static) so parallel tests don't interfere.
+    let active = Arc::new(AtomicUsize::new(0));
 
     // Announce readiness ONLY now that the socket is bound, so the line
     // can't precede a bind failure and mislead a wrapper that treats it as
@@ -490,15 +716,24 @@ mod server {
             eprintln!("daemon: failed to set connection blocking: {e}");
             continue;
           }
+          // Refuse past the concurrency cap: accept then immediately drop
+          // the stream (closing it) so a flood can't pile up threads.
+          let Some(guard) = ActiveGuard::try_acquire(&active, opts.max_connections) else {
+            continue;
+          };
           let workdir = opts.repo_workdir.clone();
           let poll = opts.poll_interval;
+          let max_line_len = opts.max_line_len;
+          let read_timeout = opts.read_timeout;
           let shutdown = Arc::clone(&shutdown);
           // Detached: a long-running daemon must not accumulate JoinHandles
           // for every short-lived client (`nc`, reconnecting integrations).
           // Each connection thread observes the shared `shutdown` flag and
-          // exits on its own (issue #38 review).
+          // exits on its own (issue #38 review). `guard` rides along and
+          // frees the connection slot when the thread ends.
           std::thread::spawn(move || {
-            handle_connection(stream, &workdir, poll, &shutdown);
+            let _guard = guard;
+            handle_connection(stream, &workdir, poll, max_line_len, read_timeout, &shutdown);
           });
         }
         Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -518,29 +753,102 @@ mod server {
     Ok(())
   }
 
+  /// Read one newline-terminated request line, bounded two ways (issue
+  /// #341): `max_len` caps the bytes buffered (a never-terminated line is
+  /// dropped), and `deadline` caps the WALL time spent on the whole line.
+  /// The deadline is the real slow-loris guard — `SO_RCVTIMEO` alone resets
+  /// on every successful read, so a client dribbling one byte just under the
+  /// timeout could hold its connection slot until the length cap; shrinking
+  /// the socket timeout toward a fixed per-line deadline closes that.
+  ///
+  /// Returns the line bytes (without the trailing `\n`), or `None` on EOF /
+  /// timeout / oversize / error — the caller then drops the connection.
+  fn read_request_line(
+    stream: &UnixStream,
+    reader: &mut BufReader<UnixStream>,
+    max_len: usize,
+    deadline: Option<Instant>,
+  ) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    loop {
+      if let Some(dl) = deadline {
+        match dl.checked_duration_since(Instant::now()) {
+          // Cap the next read at the line's remaining time budget.
+          Some(rem) if !rem.is_zero() => {
+            let _ = stream.set_read_timeout(Some(rem));
+          }
+          _ => return None, // per-line deadline exceeded — slow-loris
+        }
+      }
+      let chunk = match reader.fill_buf() {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+        Err(_) => return None, // timeout / reset / dead link
+      };
+      if chunk.is_empty() {
+        return None; // EOF (a partial line here is an incomplete request)
+      }
+      if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+        if buf.len() + pos > max_len {
+          return None; // oversize before the newline
+        }
+        buf.extend_from_slice(&chunk[..pos]);
+        reader.consume(pos + 1);
+        return Some(buf);
+      }
+      if buf.len() + chunk.len() > max_len {
+        return None; // unterminated line past the cap
+      }
+      let n = chunk.len();
+      buf.extend_from_slice(chunk);
+      reader.consume(n);
+    }
+  }
+
   /// Serve one connection: a loop of request→response lines, until the
   /// client disconnects — or, on a `subscribe`, a switch into a one-way
   /// notification stream.
-  fn handle_connection(stream: UnixStream, workdir: &Path, poll: Duration, shutdown: &AtomicBool) {
+  ///
+  /// Three DoS guards apply on the request/response path (issue #341):
+  /// `read_timeout` reaps a client that opens the connection then stalls and
+  /// bounds the wall time per request line (slow-loris); `max_line_len` caps
+  /// how much an unterminated line can buffer.
+  fn handle_connection(
+    stream: UnixStream,
+    workdir: &Path,
+    poll: Duration,
+    max_line_len: usize,
+    read_timeout: Option<Duration>,
+    shutdown: &AtomicBool,
+  ) {
+    // Baseline blocking/timeout; `read_request_line` shrinks it per read when
+    // a deadline is set. With `read_timeout = None` the read simply blocks.
+    let _ = stream.set_read_timeout(read_timeout);
     let read_half = match stream.try_clone() {
       Ok(s) => s,
       Err(_) => return,
     };
     let mut writer = stream;
-    let reader = BufReader::new(read_half);
+    let mut reader = BufReader::new(read_half);
 
-    for line in reader.lines() {
-      let line = match line {
-        Ok(l) => l,
-        Err(_) => break,
+    loop {
+      // Fresh per-line deadline so each request gets the full budget, but no
+      // single line (and no dribbling client) can outlast it.
+      let deadline = read_timeout.map(|t| Instant::now() + t);
+      let Some(bytes) = read_request_line(&writer, &mut reader, max_line_len, deadline) else {
+        break; // EOF, timeout, oversize, or dead link — drop the connection
       };
-      if line.trim().is_empty() {
+      let line = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.trim(),
+        Err(_) => break, // not a UTF-8 JSON-RPC client
+      };
+      if line.is_empty() {
         continue;
       }
 
       // Peek the method: `subscribe` upgrades the connection to a stream
       // and never returns to request/response mode.
-      let is_subscribe = serde_json::from_str::<RpcRequest>(&line)
+      let is_subscribe = serde_json::from_str::<RpcRequest>(line)
         .map(|r| r.method == "subscribe")
         .unwrap_or(false);
       if is_subscribe {
@@ -549,7 +857,7 @@ mod server {
       }
 
       // A notification (no `id`) returns None — process, send nothing.
-      if let Some(response) = handle_line(workdir, &line) {
+      if let Some(response) = handle_line(workdir, line) {
         if writeln!(writer, "{response}").is_err() || writer.flush().is_err() {
           break;
         }
@@ -571,9 +879,15 @@ mod server {
     if stream.set_read_timeout(Some(poll)).is_err() {
       return;
     }
-    let mut last = run_list(workdir).unwrap_or_default();
-    if send_notification(stream, &last).is_err() {
-      return;
+    // `None` until the first SUCCESSFUL snapshot — so a transient git error
+    // on the very first poll defers the immediate snapshot to the next tick
+    // instead of pushing a phantom-empty one (issue #341).
+    let mut last: Option<Vec<JsonWorktree>> = None;
+    if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
+      if send_notification(stream, &snapshot).is_err() {
+        return;
+      }
+      last = Some(snapshot);
     }
     let mut buf = [0u8; 64];
     loop {
@@ -589,12 +903,11 @@ mod server {
         Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
         Err(_) => return,
       }
-      let now = run_list(workdir).unwrap_or_default();
-      if worktrees_differ(&last, &now) {
-        if send_notification(stream, &now).is_err() {
+      if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
+        if send_notification(stream, &snapshot).is_err() {
           return;
         }
-        last = now;
+        last = Some(snapshot);
       }
     }
   }
@@ -607,4 +920,4 @@ mod server {
 }
 
 #[cfg(all(unix, feature = "daemon"))]
-pub use server::{serve, socket_path, ServeOptions};
+pub use server::{default_socket, serve, socket_in, socket_path, ServeOptions};

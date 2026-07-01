@@ -454,6 +454,68 @@ fn help_rows_link_descriptions_drop_unbound_keys() {
 }
 
 #[test]
+fn help_overlay_documents_every_action() {
+  // #334: the exec / clean overlays were wired into the keymap, the
+  // command palette, and the modal contexts but silently missed the
+  // hand-curated `help_rows` list, so the `?` overlay never documented
+  // `x` / `X` — and no test caught it (CI stayed green). The palette
+  // guards itself with `registry_covers_every_action_variant`; mirror
+  // that for the help overlay so a future `Action` can't land bound and
+  // reachable yet undocumented in `?`.
+  //
+  // Every `Action` carries a default binding (the loop below asserts
+  // it), so each is identified by the chord string the overlay renders.
+  // The list-view (`Worktrees`) context documents the full surface — the
+  // picker context deliberately hides the worktree-mutating verbs.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::{Action, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let km = Keymap::defaults();
+  let rows = help_rows(&km, &ModalKeymap::defaults(), HintContext::Worktrees);
+
+  // The chord(s) each rebindable entry documents, exactly as `help_rows`
+  // renders them (per-chord keys joined by spaces, chords by ", ").
+  let documented: std::collections::HashSet<&str> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Entry { keys, .. } if !keys.is_empty() => Some(keys.as_str()),
+      _ => None,
+    })
+    .collect();
+
+  // Same chord rendering `help_rows` uses internally (its `keys_for`).
+  let keys_for = |action: Action| -> String {
+    km.list()
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| {
+        b.chords
+          .iter()
+          .map(|c| c.iter().map(|k| k.to_string()).collect::<Vec<_>>().join(" "))
+          .collect::<Vec<_>>()
+          .join(", ")
+      })
+      .unwrap_or_default()
+  };
+
+  for action in Action::all() {
+    let keys = keys_for(action);
+    assert!(
+      !keys.is_empty(),
+      "Action::{action:?} has no default binding — the help-completeness guard \
+       identifies actions by their chord; bind it (or document the exception)"
+    );
+    assert!(
+      documented.contains(keys.as_str()),
+      "Action::{action:?} (keys {keys:?}) is not documented in the list-view help \
+       overlay — add an `entry(Action::{action:?}, …)` to `help_rows` (issue #334)"
+    );
+  }
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in

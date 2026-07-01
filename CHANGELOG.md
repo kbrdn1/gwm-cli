@@ -10,12 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_No changes yet — entries land here as PRs merge into `dev`, then move to a per-RC file under `changelogs/pre-releases/` when the next RC is cut._
-
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.0.1`](changelogs/1.0.1.md) — 2026-07-01
 - [`1.0.0`](changelogs/1.0.0.md) — 2026-06-26
 - [`0.9.0`](changelogs/0.9.0.md) — 2026-06-07
 - [`0.8.0`](changelogs/0.8.0.md) — 2026-06-01

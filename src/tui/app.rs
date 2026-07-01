@@ -823,26 +823,58 @@ impl App {
   /// once" contract), so this re-lists the stored metas rather than re-walking
   /// the root.
   fn refresh_workspace(&mut self) {
-    let Some(ws) = self.workspace.as_ref() else {
-      return;
-    };
-    let targets: Vec<(usize, PathBuf)> = ws
-      .repos
-      .iter()
-      .enumerate()
-      .map(|(i, m)| (i, m.workdir.clone()))
-      .collect();
-    let mut worktrees = Vec::new();
-    let mut row_repo = Vec::new();
-    for (idx, workdir) in &targets {
+    let targets = self.workspace_refresh_targets();
+    let rows = Self::list_workspace(&targets);
+    self.apply_workspace_worktrees(rows);
+  }
+
+  /// The `(repo_index, workdir)` targets a workspace re-list walks — every
+  /// repo's stored `workdir` (repos are fixed for the session). Owned `Send`
+  /// data, so the async worker ([`Self::spawn_refresh_workspace`], issue #343)
+  /// can move it across the thread boundary; the synchronous path uses it too.
+  fn workspace_refresh_targets(&self) -> Vec<(usize, PathBuf)> {
+    self
+      .workspace
+      .as_ref()
+      .map(|ws| {
+        ws.repos
+          .iter()
+          .enumerate()
+          .map(|(i, m)| (i, m.workdir.clone()))
+          .collect()
+      })
+      .unwrap_or_default()
+  }
+
+  /// Open + list every workspace target into merged `(worktree, repo_index)`
+  /// rows (issue #343 / #36). A static fn taking owned targets so it runs
+  /// unchanged on the async worker thread or the synchronous path. Per-repo
+  /// open / list errors are swallowed — a broken repo drops its rows, the rest
+  /// still list — matching the pre-#343 synchronous behaviour.
+  fn list_workspace(targets: &[(usize, PathBuf)]) -> Vec<(WorktreeInfo, usize)> {
+    let mut rows = Vec::new();
+    for (idx, workdir) in targets {
       if let Ok(repo) = Repository::open(workdir) {
         if let Ok(trees) = worktree::list(&repo) {
           for t in trees {
-            worktrees.push(t);
-            row_repo.push(*idx);
+            rows.push((t, *idx));
           }
         }
       }
+    }
+    rows
+  }
+
+  /// Apply merged workspace rows: rebuild the row→repo map, swap in the merged
+  /// worktree list, and re-align the active repo (issue #343 / #36). Shared by
+  /// the synchronous [`Self::refresh_workspace`] and the async
+  /// `RefreshWorkspace` drain so the two can never drift.
+  fn apply_workspace_worktrees(&mut self, rows: Vec<(WorktreeInfo, usize)>) {
+    let mut worktrees = Vec::with_capacity(rows.len());
+    let mut row_repo = Vec::with_capacity(rows.len());
+    for (t, idx) in rows {
+      worktrees.push(t);
+      row_repo.push(idx);
     }
     if let Some(ws) = self.workspace.as_mut() {
       ws.row_repo = row_repo;
@@ -939,6 +971,11 @@ impl App {
     // `apply_refreshed_worktrees` so the async drain, which shares that
     // tail, does not re-invalidate the run it just applied.
     self.tasks.invalidate(TaskKind::RefreshWorktrees);
+    // Same for an in-flight async workspace re-list (issue #343): this
+    // synchronous path produces authoritative post-mutation state, so drop the
+    // stale run's generation. (The in-flight *sidebar* rebuild is dropped by
+    // `apply_refreshed_worktrees`, the tail every refresh path shares.)
+    self.tasks.invalidate(TaskKind::RefreshWorkspace);
     if self.is_workspace() {
       // Workspace mode re-lists every repo, not just the active one (#36).
       self.refresh_workspace();
@@ -995,6 +1032,13 @@ impl App {
     self.clamp_selection_to_filter();
     let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
+    // The re-list re-read git state, so any in-flight sidebar rebuild is now
+    // reading *pre-refresh* data — bump its generation so a late result is
+    // dropped by the drain instead of stored under the current key and rendered
+    // as fresh until the next navigation (issue #343). Lives here, in the tail
+    // every refresh path shares, so the OFF-thread drains (`RefreshWorktrees` /
+    // `RefreshWorkspace`) get it too, not just the synchronous `refresh`.
+    self.tasks.invalidate(TaskKind::Sidebar);
     self.status = if spawned > 0 {
       format!(
         "refreshed — {} worktree(s); fetching GitHub status…",
@@ -1013,9 +1057,16 @@ impl App {
   /// result is applied by [`Self::drain_task_results`].
   pub fn request_refresh(&mut self) {
     if self.is_workspace() {
-      // No single-repo async worker in workspace mode — it would clobber the
-      // merged list with one repo's worktrees (#36). Refresh synchronously.
-      let _ = self.refresh();
+      // Workspace mode re-lists every repo off-thread on its own slot (issue
+      // #343): the single-repo worker can't be reused (it would clobber the
+      // merged list with one repo's worktrees, #36), so route through
+      // `RefreshWorkspace` instead of the pre-#343 synchronous `refresh()`.
+      let Some(generation) = self.tasks.request(TaskKind::RefreshWorkspace) else {
+        return;
+      };
+      self.spinner.reset();
+      self.status = TaskKind::RefreshWorkspace.loading_label().into();
+      self.spawn_refresh_workspace(generation);
       return;
     }
     let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
@@ -1042,8 +1093,16 @@ impl App {
     }
     self.last_auto_refresh_at = now;
     if self.is_workspace() {
-      // Synchronous merged refresh in workspace mode (#36) — see `refresh`.
-      let _ = self.refresh();
+      // Off-thread merged refresh in workspace mode (issue #343 / #36): the
+      // per-repo `Repository::open` + `worktree::list` loop no longer freezes
+      // the event loop on a many-repo workspace. Coalesces onto an in-flight
+      // run so a slow relist never stacks.
+      let Some(generation) = self.tasks.request(TaskKind::RefreshWorkspace) else {
+        return false;
+      };
+      self.spinner.reset();
+      self.status = "auto-refreshing worktrees…".into();
+      self.spawn_refresh_workspace(generation);
       return true;
     }
     let Some(generation) = self.tasks.request(TaskKind::RefreshWorktrees) else {
@@ -1072,6 +1131,83 @@ impl App {
         .and_then(|repo| worktree::list(&repo))
         .map_err(|e| e.to_string());
       let _ = tx.send(TaskMsg::RefreshWorktrees(generation, result));
+    });
+  }
+
+  /// Spawn one background workspace re-list worker tagged with `generation`
+  /// (issue #343 / #36). Mirrors [`Self::spawn_refresh`] for workspace mode:
+  /// the owned `(repo_index, workdir)` targets are the only data crossing the
+  /// boundary, and [`Self::list_workspace`] opens each repo + lists off-thread.
+  /// The drain applies the merged rows via [`Self::apply_workspace_worktrees`].
+  fn spawn_refresh_workspace(&self, generation: u64) {
+    let tx = self.task_tx.clone();
+    let targets = self.workspace_refresh_targets();
+    std::thread::spawn(move || {
+      let rows = Self::list_workspace(&targets);
+      let _ = tx.send(TaskMsg::RefreshWorkspace(generation, rows));
+    });
+  }
+
+  /// Keep the details sidebar's git-backed preview off the render path (issue
+  /// #343). Called once per event-loop tick (after `sync_active_repo`, so the
+  /// active repo's `doctor.trunks` are correct in workspace mode). When the
+  /// cached payload was NOT built for the current selection + mode — a cold
+  /// cache, a navigation (`on_navigation` nulled it), a mode toggle, or a
+  /// post-mutation `invalidate` — this spawns one worker to rebuild it, keyed
+  /// to the *currently selected* worktree.
+  ///
+  /// Pure navigation deliberately does NOT [`TaskRunner::invalidate`] the
+  /// `Sidebar` slot, so a held `j` coalesces onto the single in-flight worker
+  /// instead of spawning a thread per row: the render shows the placeholder
+  /// while scrolling and the settled selection is fetched once the burst ends.
+  /// That coalescing IS the debounce — no timer needed. A worker whose
+  /// selection has since moved stores a payload the render key-check ignores;
+  /// the next tick requests the settled one.
+  pub fn maybe_refresh_sidebar(&mut self) {
+    // A hidden sidebar is not drawn (`draw_body` skips `draw_sidebar`), so
+    // rebuilding its preview would run git work for an invisible panel —
+    // restoring the pre-#343 behaviour where hiding the sidebar (`v`) did no
+    // preview work at all. Opening it (`v`) re-arms the fetch on the next tick.
+    if !self.sidebar.open {
+      return;
+    }
+    let Some(w) = self.selected().cloned() else {
+      return;
+    };
+    let mode = self.sidebar.mode;
+    // Already authoritative for this selection + mode → nothing to rebuild.
+    if matches!(&self.sidebar.cache, Some(((p, m), _)) if *p == w.path && *m == mode) {
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::Sidebar) else {
+      // A rebuild is already in flight — coalesce onto it (the debounce).
+      return;
+    };
+    let trunks = self.config.doctor.trunks.clone();
+    let theme = self.theme;
+    self.spawn_sidebar(generation, w, mode, trunks, theme);
+  }
+
+  /// Spawn one background sidebar-rebuild worker tagged with `generation`
+  /// (issue #343). Mirrors [`Self::spawn_refresh`]: only owned `Send` data
+  /// crosses the boundary (the [`WorktreeInfo`], mode, the active repo's
+  /// `trunks`, and the `Copy` [`Theme`]), and the worker runs
+  /// [`crate::tui::ui::build_sidebar_payload`], which fires every sidebar git
+  /// subprocess off-thread. A `send` failure (the `App`/receiver dropped) is
+  /// ignored.
+  fn spawn_sidebar(
+    &self,
+    generation: u64,
+    w: WorktreeInfo,
+    mode: crate::tui::state::sidebar::SidebarMode,
+    trunks: Vec<String>,
+    theme: crate::tui::theme::Theme,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let path = w.path.clone();
+      let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme);
+      let _ = tx.send(TaskMsg::Sidebar(generation, path, mode, sections));
     });
   }
 
@@ -1176,6 +1312,15 @@ impl App {
             Ok(worktrees) => self.apply_refreshed_worktrees(worktrees),
             Err(e) => self.status = format!("refresh failed: {}", e),
           }
+          applied = true;
+          refresh_applied = true;
+        }
+        TaskMsg::RefreshWorkspace(generation, rows) => {
+          if !self.tasks.complete(TaskKind::RefreshWorkspace, generation) {
+            // Late result — a newer run (or a synchronous `refresh`) superseded it.
+            continue;
+          }
+          self.apply_workspace_worktrees(rows);
           applied = true;
           refresh_applied = true;
         }
@@ -1348,6 +1493,21 @@ impl App {
           }
           applied = true;
           refresh_applied = true;
+        }
+        TaskMsg::Sidebar(generation, path, mode, sections) => {
+          // Late result — the selection moved and `refresh` bumped the slot's
+          // generation (a mutation invalidated a pre-mutation rebuild), so this
+          // payload is stale. Drop it; the next tick requests the current one.
+          if !self.tasks.complete(TaskKind::Sidebar, generation) {
+            continue;
+          }
+          // Store keyed by the worktree + mode it was built for. If the
+          // selection has since moved this key won't match the current one, so
+          // the render shows the placeholder and `maybe_refresh_sidebar` fetches
+          // the settled selection next tick — no stale worktree's git preview
+          // is ever shown under the live header.
+          self.sidebar.cache = Some(((path, mode), sections));
+          applied = true;
         }
       }
     }
@@ -2923,6 +3083,12 @@ impl App {
     Ok(())
   }
 
+  // The rename worker takes each piece of the edit as an owned, `Send`
+  // parameter because only owned data may cross the `thread::spawn` boundary
+  // (`self` / `git2::Repository` are not `Send`) — the same flat signature the
+  // other `spawn_*` workers use. Bundling them into a struct would just add an
+  // indirection between the call site and the move-closure for no gain, so the
+  // arg count is deliberate.
   #[allow(clippy::too_many_arguments)]
   fn spawn_edit_worktree(
     &self,
