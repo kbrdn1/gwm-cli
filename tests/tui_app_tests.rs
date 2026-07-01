@@ -6185,6 +6185,63 @@ fn refresh_invalidates_an_inflight_sidebar_rebuild() {
   );
 }
 
+#[test]
+fn drain_async_refresh_invalidates_an_inflight_sidebar_rebuild() {
+  // codex review (PR #351): the ASYNC refresh drains re-read git state via
+  // `apply_refreshed_worktrees`, so an in-flight sidebar rebuild is now reading
+  // pre-refresh data. Its late payload must be dropped — the invalidate lives
+  // in the shared tail, not just the synchronous `refresh()`, else the async
+  // `r` / auto-refresh path would store stale sections under the current key
+  // and render them as fresh until the next navigation.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::SidebarSections;
+  let (_dir, mut app) = make_app();
+  // A sidebar rebuild is in flight...
+  let stale_sidebar = app.tasks.request(TaskKind::Sidebar).unwrap();
+  let path = app.selected().unwrap().path.clone();
+  let mode = app.sidebar.mode;
+  // ...when an async worktree refresh lands and re-lists.
+  let refresh_gen = app.tasks.request(TaskKind::RefreshWorktrees).unwrap();
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorktrees(
+      refresh_gen,
+      Ok(vec![worktree_fixture("alpha")]),
+    ))
+    .unwrap();
+  assert!(app.drain_task_results(), "the async refresh applies");
+
+  // The pre-refresh sidebar worker reports late.
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(stale_sidebar, path, mode, SidebarSections::default()))
+    .unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.sidebar.cache.is_none(),
+    "the async refresh must drop the pre-refresh sidebar payload, not store it as current"
+  );
+}
+
+#[test]
+fn maybe_refresh_sidebar_skips_a_hidden_sidebar() {
+  // codex review (PR #351): a hidden sidebar is not drawn, so rebuilding its
+  // preview would run git work for an invisible panel — the pre-#343 behaviour
+  // was to do none. Guard on `sidebar.open`.
+  use gwm::tui::state::async_task::TaskKind;
+  let (_dir, mut app) = make_app();
+  app.sidebar.open = false;
+  app.sidebar.cache = None; // would otherwise trigger a rebuild
+
+  app.maybe_refresh_sidebar();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sidebar),
+    "a hidden sidebar must do no preview work"
+  );
+}
+
 #[cfg(unix)]
 #[test]
 fn worktree_refresh_fetches_issue_and_pr_status_for_every_linked_worktree() {

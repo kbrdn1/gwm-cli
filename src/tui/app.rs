@@ -971,14 +971,10 @@ impl App {
     // `apply_refreshed_worktrees` so the async drain, which shares that
     // tail, does not re-invalidate the run it just applied.
     self.tasks.invalidate(TaskKind::RefreshWorktrees);
-    // Drop any in-flight sidebar rebuild too (issue #343): it was reading
-    // *pre-mutation* git state, so its late result must not land after this
-    // authoritative re-list. `apply_refreshed_worktrees` also nulls the cache,
-    // so `maybe_refresh_sidebar` re-fetches the post-mutation preview next tick.
-    self.tasks.invalidate(TaskKind::Sidebar);
     // Same for an in-flight async workspace re-list (issue #343): this
     // synchronous path produces authoritative post-mutation state, so drop the
-    // stale run's generation.
+    // stale run's generation. (The in-flight *sidebar* rebuild is dropped by
+    // `apply_refreshed_worktrees`, the tail every refresh path shares.)
     self.tasks.invalidate(TaskKind::RefreshWorkspace);
     if self.is_workspace() {
       // Workspace mode re-lists every repo, not just the active one (#36).
@@ -1036,6 +1032,13 @@ impl App {
     self.clamp_selection_to_filter();
     let spawned = self.refresh_linked_github_statuses_for_worktrees();
     self.invalidate_sidebar_cache();
+    // The re-list re-read git state, so any in-flight sidebar rebuild is now
+    // reading *pre-refresh* data — bump its generation so a late result is
+    // dropped by the drain instead of stored under the current key and rendered
+    // as fresh until the next navigation (issue #343). Lives here, in the tail
+    // every refresh path shares, so the OFF-thread drains (`RefreshWorktrees` /
+    // `RefreshWorkspace`) get it too, not just the synchronous `refresh`.
+    self.tasks.invalidate(TaskKind::Sidebar);
     self.status = if spawned > 0 {
       format!(
         "refreshed — {} worktree(s); fetching GitHub status…",
@@ -1161,6 +1164,13 @@ impl App {
   /// selection has since moved stores a payload the render key-check ignores;
   /// the next tick requests the settled one.
   pub fn maybe_refresh_sidebar(&mut self) {
+    // A hidden sidebar is not drawn (`draw_body` skips `draw_sidebar`), so
+    // rebuilding its preview would run git work for an invisible panel —
+    // restoring the pre-#343 behaviour where hiding the sidebar (`v`) did no
+    // preview work at all. Opening it (`v`) re-arms the fetch on the next tick.
+    if !self.sidebar.open {
+      return;
+    }
     let Some(w) = self.selected().cloned() else {
       return;
     };
