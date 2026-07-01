@@ -209,6 +209,14 @@ fn dir_size(dir: &Path) -> u64 {
 /// Scan one worktree at `path` for each pattern directory, sizing the ones
 /// that exist. Returns a [`WorktreeReclaim`] (possibly with no artifacts when
 /// the worktree is already clean).
+///
+/// **Ungated.** This does NOT apply the [`dir_is_safe_to_clean`] gate — it will
+/// happily size a `dist/` that holds a force-added tracked file. Every
+/// production caller MUST go through [`scan_worktree_safe`], which wraps this
+/// and drops the unsafe artifacts. This raw entry point is public only so the
+/// unit tests in `tests/clean_tests.rs` can exercise the sizing logic in
+/// isolation; treat it as `pub(crate)` by convention (tightening the actual
+/// visibility is tracked with the broader library-surface review in #342).
 pub fn scan_worktree(name: &str, path: &Path, patterns: &[String]) -> WorktreeReclaim {
   let mut artifacts = Vec::new();
   let mut total = 0u64;
@@ -244,6 +252,23 @@ pub fn scan_worktree(name: &str, path: &Path, patterns: &[String]) -> WorktreeRe
 /// of bytes freed (the sum of the scanned sizes). Only the directories named
 /// in `reclaim.artifacts` are touched — anything else in the worktree is left
 /// untouched.
+///
+/// **Ungated — trusts its input.** This re-runs no safety check; it deletes
+/// exactly the artifacts in `reclaim`. The caller MUST build `reclaim` from
+/// [`scan_worktree_safe`] (all real callers — `gwm clean` and the TUI clean
+/// overlay, #325 — do), never a raw [`scan_worktree`], or a tracked
+/// force-added file could be destroyed. Public only for the `tests/clean_tests.rs`
+/// round-trip; treat as `pub(crate)` by convention (see #342 for the surface
+/// review).
+///
+/// There is a narrow **TOCTOU** window between the gate check inside
+/// `scan_worktree_safe` and the `remove_dir_all` here: a path that was
+/// git-ignored-and-untracked at scan time could be `git add`-ed (or replaced)
+/// in the interval and still be deleted. The exposure is bounded — `gwm clean`
+/// is user-initiated against the user's own build dirs, not a privileged or
+/// adversarial context — so the window is documented rather than closed
+/// (closing it would need re-checking the gate under a lock immediately before
+/// each delete, disproportionate to the threat).
 pub fn delete_reclaim(reclaim: &WorktreeReclaim) -> Result<u64> {
   let mut freed = 0u64;
   for a in &reclaim.artifacts {

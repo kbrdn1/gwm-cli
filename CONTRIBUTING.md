@@ -368,6 +368,15 @@ Once the rc is validated and promoted to `main`:
 5. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
 6. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
 
+> ⚠️ **Finalise the crate identity _before_ the tag.** Any change to the
+> crates.io package identity — the `[package] name`, or a `version` bump — must
+> land in the **same commit the tag points at**, so `cargo publish` from that
+> tag is reproducible. The `v1.0.0` tag carried `name = "gwm"`; the rename to
+> `gwm-cli` (the name `gwm` was already taken on crates.io) landed **two commits
+> later**, so the published `gwm-cli@1.0.0` is _not_ reachable by checking out
+> `v1.0.0`. If a rename or identity change is ever needed again, do it in step 2
+> (alongside the `version` bump), before the merge + tag — not after.
+
 Triggering matrix:
 
 | Tag pattern              | Workflow         | `prerelease` flag |
