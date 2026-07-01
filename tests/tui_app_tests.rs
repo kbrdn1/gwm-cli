@@ -6044,6 +6044,147 @@ fn drain_applies_async_refresh_result() {
   );
 }
 
+// ---- sidebar off-thread rebuild (issue #343) -----------------------------
+// The details sidebar's git subprocesses moved off the render path onto the
+// `TaskRunner` (`TaskKind::Sidebar`). These pin the decision + drain contract
+// deterministically — claim the slot / inject a `TaskMsg::Sidebar` / drain,
+// never a real OS worker thread (the #248 flaky trap).
+
+#[test]
+fn maybe_refresh_sidebar_is_a_noop_when_the_cache_is_current() {
+  use gwm::tui::state::async_task::TaskKind;
+  use gwm::tui::SidebarSections;
+  let (_dir, mut app) = make_app();
+  let w = app.selected().expect("a worktree is selected").clone();
+  let mode = app.sidebar.mode;
+  // Cache already built for this selection + mode → nothing to rebuild.
+  app.sidebar.cache = Some(((w.path.clone(), mode), SidebarSections::default()));
+
+  app.maybe_refresh_sidebar();
+
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sidebar),
+    "a cache current for the selection must not spawn a rebuild"
+  );
+}
+
+#[test]
+fn maybe_refresh_sidebar_coalesces_a_held_navigation_onto_one_worker() {
+  // The debounce: while one rebuild is in flight, every subsequent tick (a
+  // held `j` with a stale cache) coalesces onto it instead of claiming a new
+  // generation. Proven by draining the ORIGINAL generation's result — a
+  // re-request would have bumped the generation and this would be dropped.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::SidebarSections;
+  let (_dir, mut app) = make_app();
+  let gen = app
+    .tasks
+    .request(TaskKind::Sidebar)
+    .expect("cold slot claims a generation");
+  app.sidebar.cache = None; // stale → maybe_refresh would want to rebuild
+
+  // Several event-loop ticks fire while the worker runs.
+  app.maybe_refresh_sidebar();
+  app.maybe_refresh_sidebar();
+
+  let path = app.selected().unwrap().path.clone();
+  let mode = app.sidebar.mode;
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(gen, path.clone(), mode, SidebarSections::default()))
+    .unwrap();
+  assert!(
+    app.drain_task_results(),
+    "the original worker's result must still apply — the ticks coalesced, they did not re-request"
+  );
+  assert!(
+    matches!(&app.sidebar.cache, Some(((p, _), _)) if *p == path),
+    "the coalesced worker's payload lands in the cache"
+  );
+}
+
+#[test]
+fn drain_applies_a_sidebar_rebuild_and_clears_the_slot() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::sidebar::SidebarMode;
+  use gwm::tui::SidebarSections;
+  let (_dir, mut app) = make_app();
+  let gen = app.tasks.request(TaskKind::Sidebar).unwrap();
+  let path = PathBuf::from("/tmp/gwm-test/alpha");
+  let mode = SidebarMode::Commits;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(gen, path.clone(), mode, SidebarSections::default()))
+    .unwrap();
+  assert!(app.drain_task_results(), "drain reports it applied the sidebar payload");
+
+  assert!(
+    matches!(&app.sidebar.cache, Some(((p, m), _)) if *p == path && *m == mode),
+    "the payload is stored under the (path, mode) it was built for"
+  );
+  assert!(
+    !app.tasks.is_loading(TaskKind::Sidebar),
+    "the slot is cleared once the result applies"
+  );
+}
+
+#[test]
+fn drain_drops_a_superseded_sidebar_rebuild() {
+  // A selection that moved (or a mutation) bumped the generation mid-flight;
+  // the stale worker's late payload must be discarded, not stored.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::state::sidebar::SidebarMode;
+  use gwm::tui::SidebarSections;
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::Sidebar).unwrap();
+  app.tasks.invalidate(TaskKind::Sidebar); // superseded
+  app.sidebar.cache = None;
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(
+      stale,
+      PathBuf::from("/tmp/gwm-test/ghost"),
+      SidebarMode::Commits,
+      SidebarSections::default(),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.sidebar.cache.is_none(),
+    "a superseded sidebar payload must be dropped, not stored (the #138 guard)"
+  );
+}
+
+#[test]
+fn refresh_invalidates_an_inflight_sidebar_rebuild() {
+  // Advisor #3 / issue #343: a synchronous `refresh()` (create / delete /
+  // sync / report-close) re-lists worktrees, so an in-flight sidebar rebuild
+  // was reading *pre-mutation* git state. `refresh()` must bump the Sidebar
+  // generation so that late payload is dropped by the drain.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  use gwm::tui::SidebarSections;
+  let (_dir, mut app) = make_app();
+  let stale = app.tasks.request(TaskKind::Sidebar).unwrap();
+  let path = app.selected().unwrap().path.clone();
+  let mode = app.sidebar.mode;
+
+  app.refresh().unwrap();
+
+  app
+    .task_result_sender()
+    .send(TaskMsg::Sidebar(stale, path, mode, SidebarSections::default()))
+    .unwrap();
+  app.drain_task_results();
+
+  assert!(
+    app.sidebar.cache.is_none(),
+    "refresh() must drop a pre-mutation sidebar payload so it can't clobber the fresh preview"
+  );
+}
+
 #[cfg(unix)]
 #[test]
 fn worktree_refresh_fetches_issue_and_pr_status_for_every_linked_worktree() {

@@ -939,6 +939,11 @@ impl App {
     // `apply_refreshed_worktrees` so the async drain, which shares that
     // tail, does not re-invalidate the run it just applied.
     self.tasks.invalidate(TaskKind::RefreshWorktrees);
+    // Drop any in-flight sidebar rebuild too (issue #343): it was reading
+    // *pre-mutation* git state, so its late result must not land after this
+    // authoritative re-list. `apply_refreshed_worktrees` also nulls the cache,
+    // so `maybe_refresh_sidebar` re-fetches the post-mutation preview next tick.
+    self.tasks.invalidate(TaskKind::Sidebar);
     if self.is_workspace() {
       // Workspace mode re-lists every repo, not just the active one (#36).
       self.refresh_workspace();
@@ -1072,6 +1077,62 @@ impl App {
         .and_then(|repo| worktree::list(&repo))
         .map_err(|e| e.to_string());
       let _ = tx.send(TaskMsg::RefreshWorktrees(generation, result));
+    });
+  }
+
+  /// Keep the details sidebar's git-backed preview off the render path (issue
+  /// #343). Called once per event-loop tick (after `sync_active_repo`, so the
+  /// active repo's `doctor.trunks` are correct in workspace mode). When the
+  /// cached payload was NOT built for the current selection + mode — a cold
+  /// cache, a navigation (`on_navigation` nulled it), a mode toggle, or a
+  /// post-mutation `invalidate` — this spawns one worker to rebuild it, keyed
+  /// to the *currently selected* worktree.
+  ///
+  /// Pure navigation deliberately does NOT [`TaskRunner::invalidate`] the
+  /// `Sidebar` slot, so a held `j` coalesces onto the single in-flight worker
+  /// instead of spawning a thread per row: the render shows the placeholder
+  /// while scrolling and the settled selection is fetched once the burst ends.
+  /// That coalescing IS the debounce — no timer needed. A worker whose
+  /// selection has since moved stores a payload the render key-check ignores;
+  /// the next tick requests the settled one.
+  pub fn maybe_refresh_sidebar(&mut self) {
+    let Some(w) = self.selected().cloned() else {
+      return;
+    };
+    let mode = self.sidebar.mode;
+    // Already authoritative for this selection + mode → nothing to rebuild.
+    if matches!(&self.sidebar.cache, Some(((p, m), _)) if *p == w.path && *m == mode) {
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::Sidebar) else {
+      // A rebuild is already in flight — coalesce onto it (the debounce).
+      return;
+    };
+    let trunks = self.config.doctor.trunks.clone();
+    let theme = self.theme;
+    self.spawn_sidebar(generation, w, mode, trunks, theme);
+  }
+
+  /// Spawn one background sidebar-rebuild worker tagged with `generation`
+  /// (issue #343). Mirrors [`Self::spawn_refresh`]: only owned `Send` data
+  /// crosses the boundary (the [`WorktreeInfo`], mode, the active repo's
+  /// `trunks`, and the `Copy` [`Theme`]), and the worker runs
+  /// [`crate::tui::ui::build_sidebar_payload`], which fires every sidebar git
+  /// subprocess off-thread. A `send` failure (the `App`/receiver dropped) is
+  /// ignored.
+  fn spawn_sidebar(
+    &self,
+    generation: u64,
+    w: WorktreeInfo,
+    mode: crate::tui::state::sidebar::SidebarMode,
+    trunks: Vec<String>,
+    theme: crate::tui::theme::Theme,
+  ) {
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let path = w.path.clone();
+      let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme);
+      let _ = tx.send(TaskMsg::Sidebar(generation, path, mode, sections));
     });
   }
 
@@ -1348,6 +1409,21 @@ impl App {
           }
           applied = true;
           refresh_applied = true;
+        }
+        TaskMsg::Sidebar(generation, path, mode, sections) => {
+          // Late result — the selection moved and `refresh` bumped the slot's
+          // generation (a mutation invalidated a pre-mutation rebuild), so this
+          // payload is stale. Drop it; the next tick requests the current one.
+          if !self.tasks.complete(TaskKind::Sidebar, generation) {
+            continue;
+          }
+          // Store keyed by the worktree + mode it was built for. If the
+          // selection has since moved this key won't match the current one, so
+          // the render shows the placeholder and `maybe_refresh_sidebar` fetches
+          // the settled selection next tick — no stale worktree's git preview
+          // is ever shown under the live header.
+          self.sidebar.cache = Some(((path, mode), sections));
+          applied = true;
         }
       }
     }

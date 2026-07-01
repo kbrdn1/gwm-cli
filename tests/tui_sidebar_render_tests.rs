@@ -10,10 +10,23 @@
 //! known commit subject — content + order, not a brittle full-ANSI
 //! snapshot.
 
-use gwm::tui::{draw, App};
+use gwm::tui::{build_sidebar_payload, draw, App};
 use ratatui::{backend::TestBackend, Terminal};
 use std::path::Path;
 use tempfile::TempDir;
+
+/// Warm `app.sidebar.cache` the way the async worker + drain would (issue
+/// #343): build the payload for the currently selected worktree + mode and
+/// store it under that key. The render path no longer shells out, so a render
+/// test that wants real git content in the sidebar must seed the cache first —
+/// the deterministic analogue of `maybe_refresh_sidebar` spawning a worker and
+/// `drain_task_results` applying its `TaskMsg::Sidebar`, with no OS thread.
+fn warm_sidebar(app: &mut App) {
+  let w = app.selected().expect("a worktree must be selected").clone();
+  let mode = app.sidebar.mode;
+  let payload = build_sidebar_payload(&w, mode, &app.config.doctor.trunks, &app.theme);
+  app.sidebar.cache = Some(((w.path.clone(), mode), payload));
+}
 
 /// Build a temp git repo with `commit_count` commits whose subjects are
 /// `commit-<i>` so the render test can assert a known subject lands in the
@@ -54,6 +67,27 @@ fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
 }
 
 #[test]
+fn draw_does_not_shell_out_to_git_or_warm_the_sidebar_cache() {
+  // Issue #343: the sidebar's git subprocesses (`git_diff_stat_vs_base`,
+  // `git status --porcelain -z`, `git log`, `git stash list`) must run on the
+  // async worker, never inside `terminal.draw()`. The observable contract:
+  // a draw over a cold cache leaves the cache cold — the render path no longer
+  // computes it, so it can't have shelled out. The worker + drain populate it.
+  let dir = repo_with_commits(3);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  app.sidebar.cache = None; // cold
+
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  assert!(
+    app.sidebar.cache.is_none(),
+    "draw must not run git subprocesses to warm the sidebar cache; the async worker does (issue #343)"
+  );
+}
+
+#[test]
 fn sidebar_renders_header_name_and_commit_subject_on_warm_cache() {
   let dir = repo_with_commits(8);
   // `None` global path keeps construction off the runner's real config.
@@ -65,12 +99,16 @@ fn sidebar_renders_header_name_and_commit_subject_on_warm_cache() {
   let backend = TestBackend::new(120, 40);
   let mut terminal = Terminal::new(backend).unwrap();
 
-  // First draw populates `app.sidebar.cache` (cold → warm).
-  terminal.draw(|f| draw(f, &mut app)).unwrap();
-  assert!(app.sidebar.cache.is_some(), "first draw must warm the sidebar cache");
+  // Issue #343: the render path no longer warms the cache (the async worker
+  // does), so seed it explicitly to render real git content.
+  warm_sidebar(&mut app);
+  assert!(
+    app.sidebar.cache.is_some(),
+    "the warm helper must seed the sidebar cache"
+  );
 
-  // Second draw is the warm-cache path the #238 refactor optimizes — the
-  // visible content must be identical.
+  // Warm-cache render path the #238 refactor optimizes — the visible content
+  // must carry the header name and the most recent commit subject.
   terminal.draw(|f| draw(f, &mut app)).unwrap();
 
   let text = buffer_text(&terminal);
@@ -90,6 +128,7 @@ fn sidebar_warm_cache_render_is_stable_across_frames() {
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
   let backend = TestBackend::new(120, 40);
   let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
 
   terminal.draw(|f| draw(f, &mut app)).unwrap();
   let first = buffer_text(&terminal);
@@ -115,6 +154,7 @@ fn working_tree_section_renders_colored_status_counts_footer() {
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
   let backend = TestBackend::new(120, 40);
   let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
 
   terminal.draw(|f| draw(f, &mut app)).unwrap();
   terminal.draw(|f| draw(f, &mut app)).unwrap();
@@ -143,6 +183,7 @@ fn working_tree_section_renders_file_tree_with_icons() {
   let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
   let backend = TestBackend::new(120, 40);
   let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
   terminal.draw(|f| draw(f, &mut app)).unwrap();
   terminal.draw(|f| draw(f, &mut app)).unwrap();
 
@@ -204,6 +245,7 @@ fn status_pane_renders_diff_vs_base_line_on_a_feature_branch() {
   let mut app = App::new_at_layered(Some(path), None).unwrap();
   let backend = TestBackend::new(120, 40);
   let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
   terminal.draw(|f| draw(f, &mut app)).unwrap();
   terminal.draw(|f| draw(f, &mut app)).unwrap();
 

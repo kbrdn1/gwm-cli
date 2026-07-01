@@ -66,15 +66,15 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
 }
 pub use ui::{
   author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
-  build_sidebar_sections, centered_abs, chip_style, ci_indicator, clean_dir_icon, command_logs_footer_hints,
-  config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints, confirm_buttons_line,
-  confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title, ellipsize_middle,
-  field_input_line, filled_cells_for_progress, footer_line, format_status, freshness_color, github_status_lines,
-  header_line, help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows, help_section_style,
-  hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line, link_open_modal_lines,
-  link_prompt_modal_width, link_target_keys, link_target_line, modal_hint_line, overlay_modal_width,
-  palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color, pr_summary_line,
-  recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
+  build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style, ci_indicator, clean_dir_icon,
+  command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints,
+  confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title,
+  ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, format_status, freshness_color,
+  github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows,
+  help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line,
+  link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line, modal_hint_line,
+  overlay_modal_width, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
+  pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
   status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
   working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
   worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
@@ -261,6 +261,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // (and its config) can't swap under the captured exec/clean target.
     if !app.destructive_overlay_open() {
       app.sync_active_repo();
+      // Issue #343: keep the details sidebar's git preview off the render path.
+      // Runs after `sync_active_repo` so the active repo's `doctor.trunks` are
+      // correct when a workspace-mode rebuild spawns. A no-op when the cache is
+      // already current for the selection; otherwise it spawns one coalesced
+      // worker (the render draws the placeholder until it lands).
+      app.maybe_refresh_sidebar();
     }
 
     terminal.draw(|f| ui::draw(f, &mut app))?;
@@ -305,7 +311,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // Issue #35: tighten the poll cadence while the PTY is open so typed
     // characters and arrow keys feel responsive (< 50 ms round-trip vs.
     // the normal 200 ms status-refresh interval).
-    let poll_ms = if app.view == View::Pty { 50 } else { 200 };
+    // Issue #343: also tighten it while any background task is in flight (the
+    // async sidebar rebuild, the worktree/workspace refresh, a GitHub fetch) so
+    // the result lands within ~50 ms instead of up to a full 200 ms poll — that
+    // is what keeps the sidebar's "loading…" placeholder from lingering after a
+    // fast `j` / `k` on a large repo. Idle (nothing loading) stays at 200 ms.
+    let poll_ms = if app.view == View::Pty || app.is_task_loading() || app.is_github_loading() {
+      50
+    } else {
+      200
+    };
     if !event::poll(Duration::from_millis(poll_ms))? {
       continue;
     }

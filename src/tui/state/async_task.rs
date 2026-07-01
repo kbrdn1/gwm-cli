@@ -37,6 +37,8 @@
 use crate::bootstrap::BootstrapReport;
 use crate::github::{IssueStatus, PrStatus};
 use crate::sync::SyncReport;
+use crate::tui::state::sidebar::SidebarMode;
+use crate::tui::ui::SidebarSections;
 use crate::worktree::WorktreeInfo;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -95,6 +97,16 @@ pub enum TaskKind {
   /// worktree directory on disk (`git worktree move`) so the slug stays in
   /// sync. One global slot — a second `c` submit coalesces.
   EditWorktree,
+  /// Off-thread rebuild of the details sidebar's git-backed sections (issue
+  /// #343): `git_diff_stat_vs_base` + `git status --porcelain -z` + `git log` /
+  /// `git stash list` used to run synchronously inside `terminal.draw()` on
+  /// every selection / mode change, stalling `j` / `k` on a large repo. A
+  /// single global slot keyed to *the currently selected* worktree — pure
+  /// navigation never [`TaskRunner::invalidate`]s it, so a held `j` coalesces
+  /// onto the in-flight worker (one at a time) instead of spawning a thread
+  /// per row; the render key-check discards a result for a since-moved
+  /// selection and the next tick requests the settled one.
+  Sidebar,
 }
 
 impl TaskKind {
@@ -112,6 +124,7 @@ impl TaskKind {
       TaskKind::Pull => "pulling…",
       TaskKind::Push => "pushing…",
       TaskKind::EditWorktree => "renaming worktree…",
+      TaskKind::Sidebar => "loading preview…",
     }
   }
 
@@ -202,6 +215,12 @@ pub enum TaskMsg {
   /// rename outcome (new branch/path/name on success, or a stringified error
   /// from `git branch -m` / `git push` / `git worktree move`).
   EditWorktree(u64, std::result::Result<EditWorktreeResult, String>),
+  /// A rebuilt sidebar payload (issue #343): the worker's generation, the
+  /// worktree `path` and [`SidebarMode`] it was built for (the render key), and
+  /// the pre-rendered [`SidebarSections`]. The drain stores it into
+  /// `SidebarState::cache`; a result whose selection has since moved is dropped
+  /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
+  Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).
