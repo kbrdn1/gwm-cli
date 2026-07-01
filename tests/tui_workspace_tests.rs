@@ -345,3 +345,88 @@ fn workspace_refresh_rebuilds_the_full_merged_list() {
     "row→repo map survives the refresh"
   );
 }
+
+// ---- async workspace re-list (issue #343) --------------------------------
+// `maybe_auto_refresh` / `request_refresh` used to call `refresh_workspace`
+// synchronously in workspace mode, freezing the event loop while every repo
+// was opened + listed. They now ride `TaskKind::RefreshWorkspace`. These pin
+// the async contract deterministically — claim the slot / inject a
+// `TaskMsg::RefreshWorkspace` / drain, never a real OS worker thread.
+
+#[test]
+fn drain_applies_an_async_workspace_relist() {
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  let last = app.worktrees.len() - 1;
+  assert_eq!(app.row_repo_name(0), Some("alpha"));
+  assert_eq!(app.row_repo_name(last), Some("beta"));
+
+  // Claim the slot exactly as `request_refresh` would, then deliver a worker
+  // payload that re-tags every row to repo 0 (alpha) — no OS thread.
+  let generation = app.tasks.request(TaskKind::RefreshWorkspace).unwrap();
+  let rows: Vec<_> = app.worktrees.iter().cloned().map(|w| (w, 0usize)).collect();
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorkspace(generation, rows))
+    .unwrap();
+  assert!(app.drain_task_results(), "drain applies the workspace re-list");
+
+  assert_eq!(app.row_repo_name(0), Some("alpha"));
+  assert_eq!(
+    app.row_repo_name(last),
+    Some("alpha"),
+    "the drain rebuilt the row→repo map from the worker's payload"
+  );
+  assert!(
+    !app.tasks.is_loading(TaskKind::RefreshWorkspace),
+    "the slot is cleared once the result applies"
+  );
+}
+
+#[test]
+fn request_refresh_in_workspace_mode_coalesces_onto_an_inflight_relist() {
+  // Discriminates the async path from the old synchronous one: the pre-#343
+  // code called `refresh()`, which *invalidates* the slot (freeing it); the
+  // async path calls `request(RefreshWorkspace)`, which coalesces (`None`) and
+  // leaves the in-flight run's slot held.
+  use gwm::tui::state::async_task::TaskKind;
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  let _generation = app.tasks.request(TaskKind::RefreshWorkspace).unwrap();
+
+  app.request_refresh(); // a second `r` — coalesces, no second worker
+
+  assert!(
+    app.tasks.is_loading(TaskKind::RefreshWorkspace),
+    "the in-flight workspace re-list is still the one and only run"
+  );
+}
+
+#[test]
+fn refresh_invalidates_an_inflight_async_workspace_relist() {
+  // A synchronous `refresh()` (post-mutation) produces authoritative state, so
+  // an in-flight async workspace re-list is stale — its late payload must be
+  // dropped, not applied on top of the fresh list.
+  use gwm::tui::state::async_task::{TaskKind, TaskMsg};
+  let root = workspace_root();
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  let stale = app.tasks.request(TaskKind::RefreshWorkspace).unwrap();
+
+  app.refresh().unwrap();
+
+  // The stale worker reports late, re-tagging every row to repo 0.
+  let rows: Vec<_> = app.worktrees.iter().cloned().map(|w| (w, 0usize)).collect();
+  app
+    .task_result_sender()
+    .send(TaskMsg::RefreshWorkspace(stale, rows))
+    .unwrap();
+  app.drain_task_results();
+
+  let last = app.worktrees.len() - 1;
+  assert_eq!(
+    app.row_repo_name(last),
+    Some("beta"),
+    "the superseded workspace payload was dropped — the fresh map stands"
+  );
+}
