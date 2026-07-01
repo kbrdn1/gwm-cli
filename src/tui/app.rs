@@ -3083,6 +3083,12 @@ impl App {
     Ok(())
   }
 
+  // The rename worker takes each piece of the edit as an owned, `Send`
+  // parameter because only owned data may cross the `thread::spawn` boundary
+  // (`self` / `git2::Repository` are not `Send`) — the same flat signature the
+  // other `spawn_*` workers use. Bundling them into a struct would just add an
+  // indirection between the call site and the move-closure for no gain, so the
+  // arg count is deliberate.
   #[allow(clippy::too_many_arguments)]
   fn spawn_edit_worktree(
     &self,
