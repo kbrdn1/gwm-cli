@@ -27,7 +27,8 @@
 //! a `required` entry from a schema file, turns the relevant parity test
 //! red (verified during development of #317).
 
-use gwm::cli::build_status_json;
+use clap::Parser;
+use gwm::cli::{build_status_json, Cli, Command};
 use gwm::contract;
 use gwm::github::{BranchLink, CiState, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use gwm::json_api::{JsonCheck, JsonDoctorReport, JsonPath, JsonStatus, JsonWorktree};
@@ -813,4 +814,115 @@ fn status_schema_required_and_types_are_frozen() {
       ("url", "string"),
     ],
   );
+}
+
+// --- 8. exec / clean CLI flag freeze (issue #344) --------------------------
+// `help_prints_subcommands` (cli_binary.rs) pins the subcommand *names*; it
+// does not see flags. The 1.0 exec/clean surface froze `--profile` / `--jobs`
+// (#324) and the global `--workspace` (#36 / #326) as part of the stable CLI
+// contract, so a rename, a removal, or a change to whether a flag takes a value
+// must be a conscious breaking decision, not a silent clap edit. These parse a
+// full invocation and assert each flag lands on the right field with the right
+// arity — renaming `--jobs`, dropping `--profile`, or making `--yes` take a
+// value turns one of them red.
+
+#[test]
+fn exec_flag_surface_is_frozen() {
+  // `--workspace` is a global flag (on `Cli`); `--profile` / `--jobs` are on
+  // the subcommand; the command follows `--`.
+  let cli = Cli::try_parse_from([
+    "gwm",
+    "--workspace",
+    "/tmp/ws",
+    "exec",
+    "--profile",
+    "ci",
+    "--jobs",
+    "4",
+    "--",
+    "cargo",
+    "test",
+  ])
+  .expect("frozen exec flags must still parse");
+
+  assert_eq!(
+    cli.workspace.as_deref(),
+    Some(std::path::Path::new("/tmp/ws")),
+    "`--workspace <DIR>` is a frozen global flag that takes a value"
+  );
+  match cli.command {
+    Some(Command::Exec {
+      profile,
+      jobs,
+      command,
+      slugs,
+    }) => {
+      assert!(slugs.is_empty(), "no slugs before `--`");
+      assert_eq!(
+        profile.as_deref(),
+        Some("ci"),
+        "`--profile <NAME>` frozen, takes a value"
+      );
+      assert_eq!(jobs, Some(4), "`--jobs <N>` frozen, takes an integer value");
+      assert_eq!(
+        command,
+        vec!["cargo".to_string(), "test".to_string()],
+        "`-- <cmd>` forwarded verbatim"
+      );
+    }
+    other => panic!("expected Command::Exec, got {other:?}"),
+  }
+}
+
+#[test]
+fn clean_flag_surface_is_frozen() {
+  let cli = Cli::try_parse_from([
+    "gwm",
+    "--workspace",
+    "/tmp/ws",
+    "clean",
+    "feat-1",
+    "--profile",
+    "rust",
+    "--yes",
+  ])
+  .expect("frozen clean flags must still parse");
+
+  assert_eq!(
+    cli.workspace.as_deref(),
+    Some(std::path::Path::new("/tmp/ws")),
+    "`--workspace <DIR>` is a frozen global flag that takes a value"
+  );
+  match cli.command {
+    Some(Command::Clean { slugs, profile, yes }) => {
+      assert_eq!(slugs, vec!["feat-1".to_string()], "positional slug still accepted");
+      assert_eq!(
+        profile.as_deref(),
+        Some("rust"),
+        "`--profile <NAME>` frozen, takes a value"
+      );
+      assert!(yes, "`--yes` frozen as a boolean flag (no value)");
+    }
+    other => panic!("expected Command::Clean, got {other:?}"),
+  }
+}
+
+#[test]
+fn clean_yes_flag_takes_no_value() {
+  // Guards the arity of `--yes` specifically. With `--yes` as a bool, a
+  // following bare token is NOT consumed as its value — it lands in `slugs`.
+  // If `--yes` were ever changed to take a value, clap would swallow the token
+  // and `slugs` would be empty, turning this red.
+  let cli = Cli::try_parse_from(["gwm", "clean", "--yes", "trailing-token"]).expect("parses with --yes as a boolean");
+  match cli.command {
+    Some(Command::Clean { slugs, yes, .. }) => {
+      assert!(yes, "--yes set");
+      assert_eq!(
+        slugs,
+        vec!["trailing-token".to_string()],
+        "the trailing token is a slug, not a value consumed by --yes"
+      );
+    }
+    other => panic!("expected Command::Clean, got {other:?}"),
+  }
 }
