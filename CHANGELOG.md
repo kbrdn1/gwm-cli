@@ -69,6 +69,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#338]: https://github.com/kbrdn1/gwm-cli/issues/338
 
+- **`gwm clean --workspace` no longer panics on the empty-workspace
+  invariant** ([#344]). When nothing participated and no repo validated the
+  `--profile` (nor reported an error), the workspace-clean handler
+  `expect`-panicked on an invariant `open_workspace_repos` already enforces;
+  it now returns a `GwmError` defensively instead of unwinding.
+
+### Changed
+
+- **1.0.x hardening backlog** ([#344]). Froze the `gwm exec` / `gwm clean`
+  flag surface (`--profile` / `--jobs` / `--yes` / the global `--workspace`)
+  with a `contract_tests` canary — the subcommand-name canary
+  (`help_prints_subcommands`) does not see flags. Reconciled the MSRV
+  enforcement story between `Cargo.toml` and the stability doc: CI's clippy
+  job catches an accidental *std-API* use above the 1.86 floor
+  (`clippy::incompatible_msrv` under `-D warnings`), but **not**
+  language/edition features or a dependency raising its own floor — those stay
+  a local pre-bump check (`cargo msrv verify`). Documented the ungated
+  `clean::scan_worktree` / `delete_reclaim` convention (feed them only a
+  `scan_worktree_safe` reclaim) and their narrow TOCTOU window; justified the
+  remaining `#[allow(clippy::too_many_arguments)]`; and added a release-process
+  note to finalise the crate identity before tagging (the `v1.0.0` tag predated
+  the `gwm` → `gwm-cli` rename, so crates.io `gwm-cli@1.0.0` isn't reachable
+  from the tag).
+
+[#344]: https://github.com/kbrdn1/gwm-cli/issues/344
+
 ## Past releases
 
 In reverse chronological order:
