@@ -311,12 +311,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // Issue #35: tighten the poll cadence while the PTY is open so typed
     // characters and arrow keys feel responsive (< 50 ms round-trip vs.
     // the normal 200 ms status-refresh interval).
-    // Issue #343: also tighten it while any background task is in flight (the
-    // async sidebar rebuild, the worktree/workspace refresh, a GitHub fetch) so
-    // the result lands within ~50 ms instead of up to a full 200 ms poll — that
-    // is what keeps the sidebar's "loading…" placeholder from lingering after a
-    // fast `j` / `k` on a large repo. Idle (nothing loading) stays at 200 ms.
-    let poll_ms = if app.view == View::Pty || app.is_task_loading() || app.is_github_loading() {
+    // Issue #343: also tighten it while a sidebar rebuild is in flight so the
+    // "loading…" placeholder swaps to the real preview within ~50 ms instead of
+    // up to a full 200 ms poll after a fast `j` / `k` on a large repo. Scoped
+    // to the `Sidebar` slot on purpose — a multi-second `sync` / `push` / list
+    // refresh doesn't need the loop spinning at 20 fps for its whole duration.
+    let poll_ms = if app.view == View::Pty || app.tasks.is_loading(TaskKind::Sidebar) {
       50
     } else {
       200

@@ -655,17 +655,6 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // `w`, so it shows instantly on navigation; only the diff figure and the
   // status / commits blocks wait on the worker. The live `● <name>` header and
   // the Issue / PR block are still built per-frame below (no subprocess).
-  let placeholder = SidebarSections {
-    worktree: worktree_identity_lines(&w, None, &theme),
-    working_tree: match active_mode {
-      super::state::sidebar::SidebarMode::Commits => {
-        vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))]
-      }
-      super::state::sidebar::SidebarMode::Stashes => Vec::new(),
-    },
-    working_tree_counts: WorkingTreeCounts::default(),
-    recent_commits: vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))],
-  };
   // Whether the cached payload is authoritative for the current selection.
   // The sections to render are resolved from this at each read site (lengths
   // below, render pass further down) as a direct match so the immutable cache
@@ -675,6 +664,28 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     &app.sidebar.cache,
     Some(((p, m), _)) if *p == w.path && *m == active_mode
   );
+
+  // The loading placeholder, built ONLY when the cache is stale — on the warm
+  // path it stays an empty `default()` (no per-frame identity-line allocation
+  // in what is, after all, a render-perf change). The identity card renders
+  // straight from `w` (no subprocess), so it shows instantly on navigation;
+  // the status / commits blocks read "loading…" until the worker's payload
+  // lands.
+  let placeholder = if cache_is_current {
+    SidebarSections::default()
+  } else {
+    SidebarSections {
+      worktree: worktree_identity_lines(&w, None, &theme),
+      working_tree: match active_mode {
+        super::state::sidebar::SidebarMode::Commits => {
+          vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))]
+        }
+        super::state::sidebar::SidebarMode::Stashes => Vec::new(),
+      },
+      working_tree_counts: WorkingTreeCounts::default(),
+      recent_commits: vec![Line::from(Span::styled("loading…", Style::default().fg(theme.muted)))],
+    }
+  };
 
   // The live header line and the per-frame Issue / PR block are built BEFORE
   // the long cache borrow so they don't overlap it. The header is the only

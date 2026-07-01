@@ -88,6 +88,45 @@ fn draw_does_not_shell_out_to_git_or_warm_the_sidebar_cache() {
 }
 
 #[test]
+fn stale_key_cache_renders_the_loading_placeholder_not_another_worktrees_preview() {
+  // Issue #343: the sidebar cache is a single slot, so "render the last-known
+  // value" on a key-miss would mean showing a *different* worktree's commits
+  // under the live header of the current selection. The render deliberately
+  // shows the muted "loading…" placeholder instead — this guards that
+  // deviation against a future refactor silently reinstating the stale render.
+  use gwm::tui::SidebarSections;
+  use ratatui::text::Line;
+  use std::path::PathBuf;
+
+  let dir = repo_with_commits(4);
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let mode = app.sidebar.mode;
+  // Cache holds a payload keyed to a DIFFERENT worktree (stale key), carrying a
+  // distinctive commit subject that must never surface under the current one.
+  app.sidebar.cache = Some((
+    (PathBuf::from("/tmp/gwm-test/some-other-worktree"), mode),
+    SidebarSections {
+      recent_commits: vec![Line::from("GHOST-COMMIT-XYZ")],
+      ..SidebarSections::default()
+    },
+  ));
+
+  let backend = TestBackend::new(120, 40);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains("loading…"),
+    "a stale-key cache must render the loading placeholder: {text}"
+  );
+  assert!(
+    !text.contains("GHOST-COMMIT-XYZ"),
+    "the other worktree's cached commits must NOT render under the current header: {text}"
+  );
+}
+
+#[test]
 fn sidebar_renders_header_name_and_commit_subject_on_warm_cache() {
   let dir = repo_with_commits(8);
   // `None` global path keeps construction off the runner's real config.
