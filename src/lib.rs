@@ -1,7 +1,19 @@
 //! gwm — git worktree manager (lib root).
 //!
-//! Used both by the `gwm` binary (`src/main.rs`) and by integration tests
-//! under `tests/`. Module surface is intentionally `pub` for testability.
+//! **Internal test seam — NOT a public API.** This library target exists for
+//! one reason: the binary (`src/main.rs`) and the integration tests under
+//! `tests/` share a single module tree, and Rust integration tests can only
+//! reach it through a `pub` lib. The whole crate is therefore `#![doc(hidden)]`
+//! and every `pub` item below carries **no SemVer guarantee** — signatures,
+//! modules, and types here are free to change in any release, major or not.
+//!
+//! Do not `cargo add gwm-cli` to build on `gwm::*`. The published crate ships
+//! this lib only as a byproduct of shipping the `gwm` binary; it is not a
+//! supported dependency. The contracts that *are* stable — the CLI, the
+//! `--format=json` / daemon payloads, and the `.gwm.toml` schema — are
+//! documented in `docs/6.development/3.stability.md` and frozen by
+//! `tests/contract_tests.rs`.
+#![doc(hidden)]
 
 pub mod aliases;
 pub mod bootstrap;
@@ -19,7 +31,9 @@ pub mod github;
 pub mod gitmoji;
 pub mod history;
 pub mod hooks;
-pub mod issue_templates;
+// `issue_templates` is reached only through `crate::issue_templates` from
+// `cli.rs`; no integration test imports it, so it need not be `pub` (#342).
+pub(crate) mod issue_templates;
 pub mod json_api;
 pub mod labels;
 pub mod launcher;
