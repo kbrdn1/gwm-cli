@@ -95,6 +95,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 [#344]: https://github.com/kbrdn1/gwm-cli/issues/344
 
+- **Scoped the published library API as an internal test seam** ([#342]). The
+  `gwm-cli` crate ships a `[lib]` target only so the binary and the `tests/`
+  suite can share one module tree — cargo treats that `pub` surface (~460
+  items) as a de-facto SemVer contract. Rather than gate it with
+  `cargo-semver-checks` (which would force a major bump on every routine
+  internal refactor), the lib is now `#![doc(hidden)]` (nothing is advertised
+  on docs.rs) and explicitly disclaimed: the crate-level docs and
+  `docs/6.development/3.stability.md` state it is **not** a public API and
+  carries no SemVer guarantee. `issue_templates` — the one module no
+  integration test imports — is now `pub(crate)`.
+
+[#342]: https://github.com/kbrdn1/gwm-cli/issues/342
+
 ## Past releases
 
 In reverse chronological order:
