@@ -15,7 +15,7 @@ Type `export PS1="$ " GWM_ALLOW_BOOTSTRAP=1`
 Enter
 Type "cd /Users/kbrdn1/gwm-demo/acme-api"
 Enter
-Type "gwm remove feat-91-rate-limit-alerts --force >/dev/null 2>&1; gwm remove feat-88-rate-limit-alerts --force >/dev/null 2>&1; clear"
+Type "gwm remove feat-91-rate-limit-alerts --force --delete-branch >/dev/null 2>&1; git branch -D 'feat/#91-rate-limit-alerts' 'feat/#88-rate-limit-alerts' >/dev/null 2>&1; git worktree prune >/dev/null 2>&1; clear"
 Enter
 Show
 Sleep 500ms
