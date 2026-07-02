@@ -18,12 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   palette, `?` help overlay, live `/` filter recording, armed
   safety-countdown recording, statusline keybindings) and the CLI
   (`gwm doctor`, the bootstrap step report, the TOFU trust prompt, the
-  first-worktree tour, and the `gcd` shell-init helper). Every capture is
-  wired into both the English pages and their `docs/fr/` mirror. Captures
-  are reproducible: the demo fixture and vhs `.tape` scripts are committed
-  under `docs/_capture/` and regenerable with `docs/_capture/generate.sh`.
-  The `gwm tmux` multiplexer clip and the live GitHub PR-detection shot are
-  deferred (they need a real terminal / a live PR fixture).
+  first-worktree tour, and the `gcd` shell-init helper) plus the live
+  GitHub issue/PR linking pane. Every capture is wired into both the
+  English pages and their `docs/fr/` mirror. Captures are reproducible:
+  the demo fixture and vhs `.tape` scripts are committed under
+  `docs/_capture/` and regenerable with `docs/_capture/generate.sh`. The
+  `gwm tmux` multiplexer clip is deferred (vhs cannot host a tmux client).
 
 ## Past releases
 

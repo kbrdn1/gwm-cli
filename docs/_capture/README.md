@@ -42,10 +42,16 @@ captures read as grey, not the blue-tinted default of a bundled theme. The
 theme-gallery shots are the exception — each preset paints its own background on
 purpose.
 
+## captured off the demo
+
+- `github-linking.tape` runs against the **real gwm-cli repo**, not the
+  acme-api demo — the Issue·PR pane needs a live, `gh`-detectable PR, and the
+  demo has no remote. It is not part of `generate.sh`'s demo-driven loop; run it
+  directly (`vhs docs/_capture/github-linking.tape`) from a checkout whose
+  current branch has an open PR, adjusting the `/206` filter to that PR.
+
 ## not covered here
 
 - `docs/3.cli/3.multiplexer.md` (`gwm tmux --split`) — vhs cannot host a tmux
   client (`open terminal failed: not a terminal`); this one needs a real
   terminal recording.
-- `docs/5.integrations/1.github-linking.md` — needs a repo with a live,
-  `gh`-detectable PR; captured separately against a real repo.
