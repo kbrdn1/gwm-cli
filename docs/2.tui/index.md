@@ -7,6 +7,8 @@ navigation:
 
 # TUI
 
+![gwm TUI — worktree table and details sidebar](./_assets/hero.png)
+
 Bare `gwm` (no arguments) opens the ratatui interface on the current repo. From there you can create, delete, bootstrap, and jump between worktrees without leaving the terminal.
 
 - **[Keybindings](/tui/keybindings)** — the full key map, including the [v0.10 keymap redesign (#290)](/tui/keybindings#v010-rebind-summary) that reshuffled the defaults (e.g. `O` is now the fullscreen terminal, not open-menu; `y` now yanks the branch name, not the path). The keymap is fully configurable via `[tui.keys]`.
