@@ -15,8 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Ship the first screenshot / recording set for the docs tree and the
   README hero (#206). Covers the TUI (hero, details sidebar with
   side-by-side + stacked layouts, four-preset theme gallery, `:` command
-  palette, `?` help overlay, live `/` filter recording, armed
-  safety-countdown recording, statusline keybindings) and the CLI
+  palette, the `?` Keybindings overlay, the Settings-panel Keys tab
+  keymap editor, live `/` filter recording, armed safety-countdown
+  recording) and the CLI
   (`gwm doctor`, the bootstrap step report, the TOFU trust prompt, the
   first-worktree tour, and the `gcd` shell-init helper) plus the live
   GitHub issue/PR linking pane. Every capture is wired into both the

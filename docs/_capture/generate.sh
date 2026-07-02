@@ -22,7 +22,7 @@ fi
 run() { echo "▸ $1"; vhs "$CAP/$1" >/dev/null 2>&1 || { echo "  ✗ vhs failed on $1"; return 1; }; }
 
 # ── still + animated captures that use the default (grey) theme ────────────
-for t in hero sidebar side-by-side narrow palette help keybindings \
+for t in hero sidebar side-by-side narrow  palette keymap keybindings \
          doctor trust-ledger bootstrap \
          filter countdown first-worktree shell-init; do
   [[ -f "$CAP/$t.tape" ]] && run "$t.tape"

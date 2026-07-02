@@ -1,5 +1,7 @@
-# Help overlay — the `?` cheatsheet with key badges.
-Output docs/_capture/.tmp/help.gif
+# Keymap editor — the Settings panel (`4`) on its `Keys` tab: the live keymap
+# editor listing every rebindable global + modal binding with source badges.
+# Tabs cycle Theme → Worktree → TUI → Keys, so three `Tab`s land on Keys.
+Output docs/_capture/.tmp/keymap.gif
 Set Shell "bash"
 Set FontFamily "CaskaydiaCove Nerd Font Mono"
 Set FontSize 15
@@ -20,6 +22,8 @@ Sleep 400ms
 Type "gwm"
 Enter
 Sleep 3s
-Type "?"
+Type "4"
+Sleep 1200ms
+Tab@450ms 3
 Sleep 1500ms
-Screenshot docs/2.tui/_assets/help.png
+Screenshot docs/2.tui/_assets/keymap.png
