@@ -28,6 +28,8 @@ Full install matrix and verification steps: [`docs/getting-started/install.md`](
 
 ## the 30-second tour
 
+![gwm in action — create a worktree with its bootstrap report, then remove it, from the TUI](docs/_capture/demo.gif)
+
 ```bash
 cd /path/to/your/repo
 gwm init                                          # write a default .gwm.toml
