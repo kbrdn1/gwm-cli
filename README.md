@@ -7,6 +7,8 @@
 
 Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2` (vendored — no `gwq` / `git` CLI dependency), per-repo + user-level configurable bootstrap (file copies, regex guards, lifecycle hooks), single binary, portable.
 
+![gwm TUI — worktree table and details sidebar](docs/2.tui/_assets/hero.png)
+
 > **Full documentation lives in [`docs/`](docs/).** This README is the landing page; every feature has a dedicated section in the doc tree.
 
 ## install

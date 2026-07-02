@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- Ship the first screenshot / recording set for the docs tree and the
+  README hero (#206). Covers the TUI (hero, details sidebar with
+  side-by-side + stacked layouts, four-preset theme gallery, `:` command
+  palette, `?` help overlay, live `/` filter recording, armed
+  safety-countdown recording, statusline keybindings) and the CLI
+  (`gwm doctor`, the bootstrap step report, the TOFU trust prompt, the
+  first-worktree tour, and the `gcd` shell-init helper). Every capture is
+  wired into both the English pages and their `docs/fr/` mirror. Captures
+  are reproducible: the demo fixture and vhs `.tape` scripts are committed
+  under `docs/_capture/` and regenerable with `docs/_capture/generate.sh`.
+  The `gwm tmux` multiplexer clip and the live GitHub PR-detection shot are
+  deferred (they need a real terminal / a live PR fixture).
+
 ## Past releases
 
 In reverse chronological order:
