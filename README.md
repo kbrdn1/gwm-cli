@@ -1,3 +1,11 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/_assets/promo.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/_assets/promo-light.png">
+    <img alt="gwm — git worktree manager, a CLI + TUI in Rust. One binary, every worktree, zero runtime deps." src="docs/_assets/promo.png" width="100%">
+  </picture>
+</p>
+
 # gwm — git worktree manager
 
 [![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
