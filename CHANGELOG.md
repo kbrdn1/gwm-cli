@@ -10,7 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- Bumped `crossbeam-epoch` to `0.9.20` to clear
+  [RUSTSEC-2026-0204](https://rustsec.org/advisories/RUSTSEC-2026-0204)
+  (invalid pointer dereference). It reaches the tree only as a dev/bench
+  dependency (`criterion → rayon → crossbeam-deque`); no runtime impact.
+- Added a `SECURITY.md` policy documenting supported versions and a private
+  vulnerability-reporting flow (GitHub private advisories).
 
 ## Past releases
 
