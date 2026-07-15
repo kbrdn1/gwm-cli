@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[tui] clipboard` — OSC52 so yanking works over SSH** (#367, part of #363,
+  reported by [@thachck](https://github.com/thachck)). The host clipboard tools
+  write to the clipboard of the machine gwm runs on; over SSH that failed
+  *silently* — `pbcopy` on a remote macOS host is found, succeeds, and gwm
+  reported success while the text was unreachable. `auto` (the default) now
+  emits an OSC52 escape sequence when an SSH session is detected, handing the
+  text to the terminal emulator instead; `osc52` and `tools` force either path.
+  Under tmux the sequence is wrapped in DCS passthrough (requires
+  `allow-passthrough on`); inside GNU screen gwm falls back to the host tools
+  rather than emit a sequence screen would swallow. Oversized payloads are
+  refused rather than truncated into a corrupt paste.
+
 - **`[tui] sidebar_orientation` — persist the sidebar layout** (#365, part of
   #363, reported by [@thachck](https://github.com/thachck)). The orientation
   (`auto` / `side-by-side` / `stacked`) was runtime-only and reset on every
