@@ -1233,14 +1233,54 @@ fn copy_command_logs_to_clipboard(app: &mut App) {
   copy_text_to_clipboard(app, &text, "copied command logs");
 }
 
-/// Feed `text` to the first available clipboard tool from
-/// [`clipboard_candidates`]. Walks the candidates in order, uses the first
-/// one whose binary is on `$PATH`, and feeds the text through its stdin.
-/// `success` is the status-bar label on a clean copy. Failures and "no tool
-/// found" both surface in the status bar — the TUI must never die on a
-/// clipboard miss.
+/// Put `text` on the clipboard, honouring `[tui] clipboard` (issue #367).
+///
+/// The single chokepoint for every yank action, so routing lives here rather
+/// than in each caller. [`crate::clipboard::plan_clipboard_write`] makes the
+/// decision (it is pure and unit-tested); this function only performs it.
+///
+/// `success` is the status-bar label on a clean copy — suffixed with the path
+/// that actually ran (`(osc52)` / `(pbcopy)`). That suffix is load-bearing:
+/// OSC52 is never acknowledged by the terminal, so when a paste comes back
+/// empty the status line is the only clue about which route was taken.
 fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
+  use crate::clipboard::{plan_clipboard_write, ClipboardPlan};
   use std::io::Write;
+
+  let plan = plan_clipboard_write(
+    text,
+    app.config.tui.clipboard,
+    // `$SSH_TTY` covers an interactive login; `$SSH_CONNECTION` also covers
+    // the cases where no tty was allocated.
+    std::env::var_os("SSH_TTY").is_some() || std::env::var_os("SSH_CONNECTION").is_some(),
+    crate::multiplexer::detect_tmux(std::env::var("TMUX").ok()),
+    std::env::var_os("STY").is_some(),
+  );
+  match plan {
+    ClipboardPlan::Osc52(bytes) => {
+      // The TUI renders to stderr, so the sequence goes to the same fd. It is
+      // an escape sequence, not cells, so ratatui's next draw won't erase it —
+      // but it must be flushed, or it sits in the buffer until the next frame.
+      let mut err = std::io::stderr();
+      match err.write_all(&bytes).and_then(|_| err.flush()) {
+        Ok(()) => app.status = format!("{} (osc52)", success),
+        Err(e) => app.status = format!("osc52 write failed: {}", e),
+      }
+      return;
+    }
+    ClipboardPlan::TooLarge { bytes } => {
+      // Refuse rather than emit a sequence the terminal will truncate into
+      // corrupt paste content.
+      app.status = format!(
+        "too large for osc52 ({} KiB > {} KiB) — set [tui] clipboard = \"tools\"",
+        bytes / 1024,
+        crate::clipboard::MAX_OSC52_BYTES / 1024
+      );
+      return;
+    }
+    ClipboardPlan::Tools => {}
+  }
+
   for (cmd, args) in clipboard_candidates() {
     if which::which(cmd).is_err() {
       continue;
