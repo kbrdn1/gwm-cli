@@ -511,6 +511,54 @@ impl SidebarPosition {
   }
 }
 
+/// How the sidebar is arranged relative to the worktree table (issue
+/// #188). Cycled live with `cycle_sidebar_layout`; seeded from
+/// `[tui] sidebar_orientation` since #365, which is why the enum lives
+/// here next to [`SidebarPosition`] rather than in the TUI state module
+/// (`tui::state::sidebar` re-exports it).
+///
+/// `kebab-case`, not `lowercase`: the latter would spell `SideBySide`
+/// as `sidebyside`. This is the trap [`MacroOpenMode`] hit on PR #292,
+/// and it also keeps the serialised form equal to [`Self::label`], so a
+/// Settings-panel write-back produces a file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarOrientation {
+  /// Width-driven: side-by-side at `>= SIDEBAR_MIN_WIDTH`, stacked
+  /// below it. Restores a usable sidebar on narrow terminals where it
+  /// was previously hidden entirely.
+  Auto,
+  /// Always beside the table (table | sidebar), even when narrow.
+  SideBySide,
+  /// Always stacked (table on top, sidebar below), even when wide.
+  /// Default since issue #217: the status pane reads best under the
+  /// worktrees table, where it gets the full terminal width.
+  #[default]
+  Stacked,
+}
+
+impl SidebarOrientation {
+  /// Status-bar label (`sidebar layout: auto`). Equal to the serialised
+  /// TOML spelling — see the type-level note.
+  pub fn label(self) -> &'static str {
+    match self {
+      SidebarOrientation::Auto => "auto",
+      SidebarOrientation::SideBySide => "side-by-side",
+      SidebarOrientation::Stacked => "stacked",
+    }
+  }
+
+  /// Advance to the next orientation in the cycle
+  /// `Auto → SideBySide → Stacked → Auto`. Drives `cycle_sidebar_layout`.
+  pub fn next(self) -> Self {
+    match self {
+      SidebarOrientation::Auto => SidebarOrientation::SideBySide,
+      SidebarOrientation::SideBySide => SidebarOrientation::Stacked,
+      SidebarOrientation::Stacked => SidebarOrientation::Auto,
+    }
+  }
+}
+
 /// Where a macro command runs when fired from the TUI (#290).
 /// Serialised as snake_case strings in `[tui.macro1]` / `[tui.macro2]`
 /// (`open_in = "pty"` / `open_in = "mux_pane"`) — `snake_case`, not
@@ -586,6 +634,14 @@ pub struct TuiConfig {
   #[serde(default)]
   pub sidebar_position: SidebarPosition,
 
+  /// How the sidebar is arranged relative to the table (issue #365):
+  /// `auto` (width-driven), `side-by-side`, or `stacked`. Default
+  /// `stacked` preserves the #217 launch layout. Cycled live in the TUI
+  /// with `cycle_sidebar_layout`; before #365 that choice was runtime-only
+  /// and reset on every launch.
+  #[serde(default)]
+  pub sidebar_orientation: SidebarOrientation,
+
   /// `[tui.keys]` sub-table (issue #87) — user overrides for the
   /// remappable keymap. Absent → keymap stays at the built-in
   /// defaults. Present → every listed action *replaces* its default
@@ -612,6 +668,7 @@ impl Default for TuiConfig {
       auto_refresh_secs: default_auto_refresh_secs(),
       open: TuiOpenConfig::default(),
       sidebar_position: SidebarPosition::default(),
+      sidebar_orientation: SidebarOrientation::default(),
       keys: TuiKeysConfig::default(),
       macro1: None,
       macro2: None,

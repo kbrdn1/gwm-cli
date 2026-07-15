@@ -587,9 +587,9 @@ impl App {
       edit_original_path: None,
       edit_failure: None,
     };
-    // Seed the sidebar position from `[tui] sidebar_position` (issue
-    // #188). Orientation stays at its `Auto` default — runtime-only.
+    // Seed both sidebar knobs from `[tui]` (issues #188 / #365).
     out.sidebar.position = out.config.tui.sidebar_position;
+    out.sidebar.orientation = out.config.tui.sidebar_orientation;
     out.refresh_link();
     let spawned = out.refresh_linked_github_statuses_for_worktrees();
     if spawned > 0 {
@@ -2607,6 +2607,7 @@ impl App {
       Err(e) => self.status = format!("theme: {}", e),
     }
     self.sidebar.position = self.config.tui.sidebar_position;
+    self.sidebar.orientation = self.config.tui.sidebar_orientation;
     if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
       self.config_panel.rows = rows;
     }

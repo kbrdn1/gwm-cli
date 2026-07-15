@@ -77,6 +77,7 @@ impl SettingsTab {
       ],
       SettingsTab::Tui => &[
         SettingField::SidebarPosition,
+        SettingField::SidebarOrientation,
         SettingField::OpenMode,
         SettingField::ConfirmCountdown,
         SettingField::AutoRefreshSecs,
@@ -254,6 +255,8 @@ pub enum FieldKind {
 }
 
 const SIDEBAR_CHOICES: &[&str] = &["right", "left"];
+/// Mirrors `SidebarOrientation::label()` / its serialised TOML spelling.
+const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &["stacked", "side-by-side", "auto"];
 const OPEN_MODE_CHOICES: &[&str] = &["shell", "editor", "finder"];
 
 /// One editable setting, resolved live against the loaded [`Config`].
@@ -269,6 +272,8 @@ pub enum SettingField {
   WorktreeBranchPattern,
   /// `tui.sidebar_position` — left / right.
   SidebarPosition,
+  /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
+  SidebarOrientation,
   /// `tui.open.mode` — shell / editor / finder.
   OpenMode,
   /// `tui.confirm_countdown_secs` — numeric input.
@@ -290,6 +295,7 @@ impl SettingField {
       SettingField::WorktreePathPattern => "path pattern",
       SettingField::WorktreeBranchPattern => "branch pattern",
       SettingField::SidebarPosition => "sidebar position",
+      SettingField::SidebarOrientation => "sidebar layout",
       SettingField::OpenMode => "open mode",
       SettingField::ConfirmCountdown => "confirm countdown (s)",
       SettingField::AutoRefreshSecs => "auto refresh (s)",
@@ -306,6 +312,7 @@ impl SettingField {
       SettingField::WorktreePathPattern => "worktree.path_pattern",
       SettingField::WorktreeBranchPattern => "worktree.branch_pattern",
       SettingField::SidebarPosition => "tui.sidebar_position",
+      SettingField::SidebarOrientation => "tui.sidebar_orientation",
       SettingField::OpenMode => "tui.open.mode",
       SettingField::ConfirmCountdown => "tui.confirm_countdown_secs",
       SettingField::AutoRefreshSecs => "tui.auto_refresh_secs",
@@ -317,7 +324,10 @@ impl SettingField {
   /// Whether the field is a cyclable choice, a numeric input, or free text.
   pub fn kind(self) -> FieldKind {
     match self {
-      SettingField::ThemePreset | SettingField::SidebarPosition | SettingField::OpenMode => FieldKind::Choice,
+      SettingField::ThemePreset
+      | SettingField::SidebarPosition
+      | SettingField::SidebarOrientation
+      | SettingField::OpenMode => FieldKind::Choice,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
       | SettingField::WorktreePathPattern
@@ -341,6 +351,7 @@ impl SettingField {
     match self {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
+      SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
       _ => &[],
     }
@@ -354,6 +365,7 @@ impl SettingField {
       SettingField::WorktreePathPattern => cfg.worktree.path_pattern.clone(),
       SettingField::WorktreeBranchPattern => cfg.worktree.branch_pattern.clone(),
       SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
+      SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {
         crate::config::TuiOpenMode::Shell => "shell".into(),
         crate::config::TuiOpenMode::Editor => "editor".into(),

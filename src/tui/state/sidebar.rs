@@ -31,9 +31,14 @@
 //!    wraps them with `refresh_link()` in a single `App::on_navigation`
 //!    so the literal triple can't drift back into duplicated copies.
 
-use crate::config::SidebarPosition;
 use crate::tui::ui::SidebarSections;
 use std::path::PathBuf;
+
+/// Re-exported from [`crate::config`], where both sidebar knobs live now
+/// that the orientation is persisted to `.gwm.toml` alongside the
+/// position (issue #365). Kept re-exported here so the state module
+/// still reads as the owner of the sidebar contract.
+pub use crate::config::{SidebarOrientation, SidebarPosition};
 
 /// Minimum total terminal width (in columns) required to render the
 /// sidebar *beside* the worktree table without squeezing the table
@@ -41,46 +46,6 @@ use std::path::PathBuf;
 /// picks the side-by-side split; below it, `Auto` stacks the sidebar
 /// under the table (issue #188) rather than hiding it (pre-#188).
 pub const SIDEBAR_MIN_WIDTH: u16 = 120;
-
-/// How the sidebar is arranged relative to the worktree table (issue
-/// #188). `Auto` is the default: the renderer picks side-by-side on a
-/// wide terminal and stacked on a narrow one. The other two variants
-/// pin the choice regardless of width, set by cycling with `V`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum SidebarOrientation {
-  /// Width-driven: side-by-side at `>= SIDEBAR_MIN_WIDTH`, stacked
-  /// below it. Restores a usable sidebar on narrow terminals where it
-  /// was previously hidden entirely.
-  Auto,
-  /// Always beside the table (table | sidebar), even when narrow.
-  SideBySide,
-  /// Always stacked (table on top, sidebar below), even when wide.
-  /// Default since issue #217: the status pane reads best under the
-  /// worktrees table, where it gets the full terminal width.
-  #[default]
-  Stacked,
-}
-
-impl SidebarOrientation {
-  /// Status-bar label (`sidebar layout: auto`).
-  pub fn label(self) -> &'static str {
-    match self {
-      SidebarOrientation::Auto => "auto",
-      SidebarOrientation::SideBySide => "side-by-side",
-      SidebarOrientation::Stacked => "stacked",
-    }
-  }
-
-  /// Advance to the next orientation in the cycle
-  /// `Auto → SideBySide → Stacked → Auto`. Drives the `V` keybinding.
-  pub fn next(self) -> Self {
-    match self {
-      SidebarOrientation::Auto => SidebarOrientation::SideBySide,
-      SidebarOrientation::SideBySide => SidebarOrientation::Stacked,
-      SidebarOrientation::Stacked => SidebarOrientation::Auto,
-    }
-  }
-}
 
 /// The concrete layout the renderer should draw for the current frame,
 /// resolved from `open` + orientation + position + terminal width by
@@ -163,9 +128,11 @@ pub struct SidebarState {
   /// Ignored by the stacked layout (sidebar always at the bottom).
   pub position: SidebarPosition,
   /// How the sidebar is arranged relative to the table (issue #188).
-  /// Defaults to [`SidebarOrientation::Auto`] (width-driven); cycled
-  /// by [`Self::cycle_orientation`] (`V`). Runtime-only — not persisted
-  /// to `.gwm.toml`, unlike `position`.
+  /// Defaults to [`SidebarOrientation::Stacked`] since #217 — *not*
+  /// `Auto`, which this comment claimed until #365. Seeded from
+  /// `[tui] sidebar_orientation` at `App` construction and re-seeded on
+  /// config reload, exactly like `position`; cycled live by
+  /// [`Self::cycle_orientation`].
   pub orientation: SidebarOrientation,
   /// `true` when keyboard navigation (`j` / `k`) targets the sidebar
   /// (scrolling Recent Commits) instead of the worktree list.
