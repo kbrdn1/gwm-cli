@@ -497,8 +497,16 @@ pub enum SidebarPosition {
 }
 
 impl SidebarPosition {
+  /// Every variant, in Settings-panel cycle order. Lets the panel's choice
+  /// list be derived from the enum instead of restating it — see
+  /// [`SidebarOrientation::ALL`] for the full reasoning.
+  pub const ALL: [SidebarPosition; 2] = [SidebarPosition::Right, SidebarPosition::Left];
+
   /// Human-readable label for the status bar (`sidebar position: left`).
-  pub fn label(self) -> &'static str {
+  /// Also the serialised TOML spelling, and the Settings-panel choice
+  /// string — `const` so the panel's list is built from this `match`
+  /// rather than duplicating it.
+  pub const fn label(self) -> &'static str {
     match self {
       SidebarPosition::Left => "left",
       SidebarPosition::Right => "right",
@@ -538,9 +546,26 @@ pub enum SidebarOrientation {
 }
 
 impl SidebarOrientation {
+  /// Every variant, in Settings-panel cycle order (default first).
+  ///
+  /// The panel's choice list is built from these variants' labels rather than
+  /// restating the strings, so the displayed choices cannot drift from the
+  /// serde spelling — a drift would make the panel write a `.gwm.toml` that
+  /// no longer loads.
+  ///
+  /// Keep in sync when adding a variant. Nothing enforces that statically; the
+  /// exhaustive `match` in [`Self::label`] is what fails to compile and brings
+  /// you here.
+  pub const ALL: [SidebarOrientation; 3] = [
+    SidebarOrientation::Stacked,
+    SidebarOrientation::SideBySide,
+    SidebarOrientation::Auto,
+  ];
+
   /// Status-bar label (`sidebar layout: auto`). Equal to the serialised
-  /// TOML spelling — see the type-level note.
-  pub fn label(self) -> &'static str {
+  /// TOML spelling — see the type-level note. `const` so the Settings-panel
+  /// choice list can be derived from this `match`.
+  pub const fn label(self) -> &'static str {
     match self {
       SidebarOrientation::Auto => "auto",
       SidebarOrientation::SideBySide => "side-by-side",

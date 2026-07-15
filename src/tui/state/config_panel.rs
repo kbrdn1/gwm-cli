@@ -19,7 +19,7 @@
 //! the cursor lives here, `max_scroll` / `max_x_scroll` are republished by
 //! the renderer each frame against the live viewport.
 
-use crate::config::{Config, ConfigRow, ConfigSource};
+use crate::config::{Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition};
 use crate::tui::keymap::{Action, KeyStroke, Keymap};
 use crate::tui::modal_keymap::{ModalAction, ModalKeymap};
 
@@ -254,9 +254,18 @@ pub enum FieldKind {
   Text,
 }
 
-const SIDEBAR_CHOICES: &[&str] = &["right", "left"];
-/// Mirrors `SidebarOrientation::label()` / its serialised TOML spelling.
-const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &["stacked", "side-by-side", "auto"];
+// Derived from the enums' `const fn label()` rather than restated: the choice
+// string is written verbatim into `.gwm.toml`, so a list that drifted from the
+// serde spelling would make the panel produce a file that no longer loads. Going
+// through `label()` makes that drift impossible to express (#365).
+const SIDEBAR_CHOICES: &[&str] = &[SidebarPosition::Right.label(), SidebarPosition::Left.label()];
+const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &[
+  SidebarOrientation::Stacked.label(),
+  SidebarOrientation::SideBySide.label(),
+  SidebarOrientation::Auto.label(),
+];
+// `TuiOpenMode` has no `label()` to derive from; the round-trip test
+// (`every_choice_is_a_value_the_config_can_load_back`) guards it instead.
 const OPEN_MODE_CHOICES: &[&str] = &["shell", "editor", "finder"];
 
 /// One editable setting, resolved live against the loaded [`Config`].

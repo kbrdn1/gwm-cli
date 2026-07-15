@@ -499,3 +499,84 @@ fn field_source_is_looked_up_from_the_resolved_rows() {
   // A field absent from the rows resolves to no source.
   assert_eq!(panel.field_source(SettingField::OpenMode), None);
 }
+
+// ---------------------------------------------------------------------------
+// Choice sets vs the enums they mirror (#365 follow-up)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn every_choice_is_a_value_the_config_can_load_back() {
+  // The Settings panel writes the selected choice string verbatim into
+  // `.gwm.toml`. So every string it can offer must round-trip through a real
+  // layered load — a choice list that drifts from its enum's serde spelling
+  // would let the panel write a file that no longer parses, and the user only
+  // finds out on the next launch.
+  //
+  // Covers every Choice field, not just the sidebar ones: the choice lists are
+  // hand-maintained constants sitting next to the enums, and this is the
+  // property that actually matters for all of them.
+  let dir = tempfile::TempDir::new().unwrap();
+  for field in [
+    SettingField::SidebarPosition,
+    SettingField::SidebarOrientation,
+    SettingField::OpenMode,
+  ] {
+    let key = field.key_path();
+    assert!(!field.choices().is_empty(), "{key} is a Choice field with choices");
+    for choice in field.choices() {
+      let (table, name) = key.split_once('.').unwrap();
+      let toml = match table {
+        "tui" => format!("[tui]\n{name} = \"{choice}\"\n"),
+        _ => format!("[{table}]\n{name} = \"{choice}\"\n"),
+      };
+      std::fs::write(dir.path().join(".gwm.toml"), &toml).unwrap();
+      let cfg = Config::load_layered(dir.path(), None)
+        .unwrap_or_else(|e| panic!("choice {choice:?} for {key} must be loadable, got: {e}"));
+      assert_eq!(
+        field.current(&cfg),
+        *choice,
+        "{key}: writing choice {choice:?} must read back as itself"
+      );
+    }
+  }
+}
+
+#[test]
+fn sidebar_choice_lists_cover_every_variant() {
+  // The other drift direction: the choice list and `ALL` disagreeing — a
+  // variant offered by one but not the other. The round-trip test above only
+  // walks the list, so it cannot see a variant the list omits.
+  //
+  // Honest limit: this pins list ↔ `ALL`, not `ALL` ↔ the enum. A variant added
+  // to the enum but left out of `ALL` still slips past both tests. What stops
+  // that is the exhaustive `match` in `label()`, which fails to compile on a new
+  // variant and forces a visit to the `ALL` right above it. Closing the gap
+  // properly would need a derive (strum); not worth a dependency for two enums.
+  use gwm::config::{SidebarOrientation, SidebarPosition};
+
+  for o in SidebarOrientation::ALL {
+    assert!(
+      SettingField::SidebarOrientation.choices().contains(&o.label()),
+      "{o:?} ({}) is missing from the sidebar orientation choices",
+      o.label()
+    );
+  }
+  assert_eq!(
+    SettingField::SidebarOrientation.choices().len(),
+    SidebarOrientation::ALL.len(),
+    "no stale choice left behind"
+  );
+
+  for p in SidebarPosition::ALL {
+    assert!(
+      SettingField::SidebarPosition.choices().contains(&p.label()),
+      "{p:?} ({}) is missing from the sidebar position choices",
+      p.label()
+    );
+  }
+  assert_eq!(
+    SettingField::SidebarPosition.choices().len(),
+    SidebarPosition::ALL.len(),
+    "no stale choice left behind"
+  );
+}
