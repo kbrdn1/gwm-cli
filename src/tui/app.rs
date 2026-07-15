@@ -587,9 +587,7 @@ impl App {
       edit_original_path: None,
       edit_failure: None,
     };
-    // Seed both sidebar knobs from `[tui]` (issues #188 / #365).
-    out.sidebar.position = out.config.tui.sidebar_position;
-    out.sidebar.orientation = out.config.tui.sidebar_orientation;
+    out.apply_sidebar_config();
     out.refresh_link();
     let spawned = out.refresh_linked_github_statuses_for_worktrees();
     if spawned > 0 {
@@ -700,6 +698,18 @@ impl App {
   /// re-opens the `git2::Repository` from the target workdir and invalidates
   /// the sidebar preview; an open failure keeps the current repo and reports
   /// on the status bar rather than panicking mid-render.
+  /// Apply the `[tui]` sidebar knobs from the live config onto the sidebar
+  /// state. Called from every point where `self.config` becomes authoritative:
+  /// construction, the Settings-panel reload, and the workspace repo swap
+  /// (`sync_active_repo`). Kept as one call rather than open-coded assignments
+  /// so a future knob can't be wired into two of the three and silently drift —
+  /// which is precisely how the repo-swap path came to ignore
+  /// `sidebar_position` (Codex review #366 P2).
+  fn apply_sidebar_config(&mut self) {
+    self.sidebar.position = self.config.tui.sidebar_position;
+    self.sidebar.orientation = self.config.tui.sidebar_orientation;
+  }
+
   pub fn sync_active_repo(&mut self) {
     let Some(ws) = self.workspace.as_ref() else {
       return;
@@ -736,6 +746,10 @@ impl App {
         // newly-active repo's config so a per-repo `[[branch_types]]` override
         // applies to the row being acted on (Codex review #303 P2).
         self.branch_types = self.config.resolved_branch_types().types;
+        // Same reasoning for the sidebar layout: the swap replaced `self.config`
+        // wholesale, so a per-repo `[tui]` sidebar override would otherwise be
+        // ignored until a reload (Codex review #366 P2).
+        self.apply_sidebar_config();
         if let Some(ws) = self.workspace.as_mut() {
           ws.active = target;
         }
@@ -2606,8 +2620,7 @@ impl App {
       Ok(theme) => self.theme = theme,
       Err(e) => self.status = format!("theme: {}", e),
     }
-    self.sidebar.position = self.config.tui.sidebar_position;
-    self.sidebar.orientation = self.config.tui.sidebar_orientation;
+    self.apply_sidebar_config();
     if let Ok(rows) = crate::config::resolved_rows(&self.workdir, self.global_path.as_deref()) {
       self.config_panel.rows = rows;
     }
