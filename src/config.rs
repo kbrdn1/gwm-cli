@@ -484,7 +484,7 @@ fn default_trunks() -> Vec<String> {
 /// TUI layout (issue #188). `Right` preserves the pre-#188 behaviour and
 /// is the default. In the stacked (narrow-terminal) layout the sidebar
 /// always sits at the bottom, so this preference only governs the
-/// side-by-side split. Toggled live with `H`; persisted here so the
+/// side-by-side split. Toggled live with `v`; persisted here so the
 /// choice survives across launches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -497,8 +497,16 @@ pub enum SidebarPosition {
 }
 
 impl SidebarPosition {
+  /// Every variant, in Settings-panel cycle order. Lets the panel's choice
+  /// list be derived from the enum instead of restating it — see
+  /// [`SidebarOrientation::ALL`] for the full reasoning.
+  pub const ALL: [SidebarPosition; 2] = [SidebarPosition::Right, SidebarPosition::Left];
+
   /// Human-readable label for the status bar (`sidebar position: left`).
-  pub fn label(self) -> &'static str {
+  /// Also the serialised TOML spelling, and the Settings-panel choice
+  /// string — `const` so the panel's list is built from this `match`
+  /// rather than duplicating it.
+  pub const fn label(self) -> &'static str {
     match self {
       SidebarPosition::Left => "left",
       SidebarPosition::Right => "right",
@@ -508,6 +516,115 @@ impl SidebarPosition {
   /// `true` when the sidebar should be drawn to the left of the table.
   pub fn is_left(self) -> bool {
     matches!(self, SidebarPosition::Left)
+  }
+}
+
+/// How the TUI puts yanked text on the clipboard (issue #367).
+///
+/// The host binaries (`pbcopy`, `wl-copy`, `xclip`, …) write to the
+/// clipboard of the machine gwm runs on. Over SSH that is the *remote*
+/// machine: `pbcopy` is found, succeeds, reports success — and the text is
+/// unreachable from the user's actual desktop. OSC52 instead hands the text
+/// to the terminal emulator, which owns the real clipboard.
+///
+/// `lowercase` is enough here (unlike [`SidebarOrientation`]): every variant
+/// is a single word, so there is no `sidebyside`-style trap to dodge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardMode {
+  /// OSC52 when an SSH session is detected, host tools otherwise. Default:
+  /// fixes the SSH case with no configuration, and keeps the host tools
+  /// (which are universally supported) for the local case.
+  #[default]
+  Auto,
+  /// Always emit the OSC52 escape sequence. For local terminals that support
+  /// it, or when the host tools are unwanted.
+  Osc52,
+  /// Always use the host binaries — the pre-#367 behaviour. The escape hatch
+  /// when a terminal mangles or ignores OSC52, and for `$SSH_*` false
+  /// positives (a tmux pane can carry a stale `SSH_CONNECTION`).
+  Tools,
+}
+
+impl ClipboardMode {
+  /// Every variant, in Settings-panel cycle order (default first).
+  /// Keep in sync when adding a variant — the exhaustive `match` in
+  /// [`Self::label`] is what fails to compile and brings you here.
+  pub const ALL: [ClipboardMode; 3] = [ClipboardMode::Auto, ClipboardMode::Osc52, ClipboardMode::Tools];
+
+  /// Status-bar label, equal to the serialised TOML spelling. `const` so the
+  /// Settings-panel choice list is derived from this `match` (#365).
+  pub const fn label(self) -> &'static str {
+    match self {
+      ClipboardMode::Auto => "auto",
+      ClipboardMode::Osc52 => "osc52",
+      ClipboardMode::Tools => "tools",
+    }
+  }
+}
+
+/// How the sidebar is arranged relative to the worktree table (issue
+/// #188). Cycled live with `cycle_sidebar_layout`; seeded from
+/// `[tui] sidebar_orientation` since #365, which is why the enum lives
+/// here next to [`SidebarPosition`] rather than in the TUI state module
+/// (`tui::state::sidebar` re-exports it).
+///
+/// `kebab-case`, not `lowercase`: the latter would spell `SideBySide`
+/// as `sidebyside`. This is the trap [`MacroOpenMode`] hit on PR #292,
+/// and it also keeps the serialised form equal to [`Self::label`], so a
+/// Settings-panel write-back produces a file that still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SidebarOrientation {
+  /// Width-driven: side-by-side at `>= SIDEBAR_MIN_WIDTH`, stacked
+  /// below it. Restores a usable sidebar on narrow terminals where it
+  /// was previously hidden entirely.
+  Auto,
+  /// Always beside the table (table | sidebar), even when narrow.
+  SideBySide,
+  /// Always stacked (table on top, sidebar below), even when wide.
+  /// Default since issue #217: the status pane reads best under the
+  /// worktrees table, where it gets the full terminal width.
+  #[default]
+  Stacked,
+}
+
+impl SidebarOrientation {
+  /// Every variant, in Settings-panel cycle order (default first).
+  ///
+  /// The panel's choice list is built from these variants' labels rather than
+  /// restating the strings, so the displayed choices cannot drift from the
+  /// serde spelling — a drift would make the panel write a `.gwm.toml` that
+  /// no longer loads.
+  ///
+  /// Keep in sync when adding a variant. Nothing enforces that statically; the
+  /// exhaustive `match` in [`Self::label`] is what fails to compile and brings
+  /// you here.
+  pub const ALL: [SidebarOrientation; 3] = [
+    SidebarOrientation::Stacked,
+    SidebarOrientation::SideBySide,
+    SidebarOrientation::Auto,
+  ];
+
+  /// Status-bar label (`sidebar layout: auto`). Equal to the serialised
+  /// TOML spelling — see the type-level note. `const` so the Settings-panel
+  /// choice list can be derived from this `match`.
+  pub const fn label(self) -> &'static str {
+    match self {
+      SidebarOrientation::Auto => "auto",
+      SidebarOrientation::SideBySide => "side-by-side",
+      SidebarOrientation::Stacked => "stacked",
+    }
+  }
+
+  /// Advance to the next orientation in the cycle
+  /// `Auto → SideBySide → Stacked → Auto`. Drives `cycle_sidebar_layout`.
+  pub fn next(self) -> Self {
+    match self {
+      SidebarOrientation::Auto => SidebarOrientation::SideBySide,
+      SidebarOrientation::SideBySide => SidebarOrientation::Stacked,
+      SidebarOrientation::Stacked => SidebarOrientation::Auto,
+    }
   }
 }
 
@@ -580,11 +697,26 @@ pub struct TuiConfig {
 
   /// Which side the worktree-details sidebar sits on in the side-by-side
   /// layout (issue #188). Default `right` preserves pre-#188 behaviour;
-  /// `left` flips the split. Toggled live in the TUI with `H`. Ignored by
+  /// `left` flips the split. Toggled live in the TUI with `v`. Ignored by
   /// the stacked (narrow-terminal) layout, where the sidebar is always at
   /// the bottom.
   #[serde(default)]
   pub sidebar_position: SidebarPosition,
+
+  /// How the sidebar is arranged relative to the table (issue #365):
+  /// `auto` (width-driven), `side-by-side`, or `stacked`. Default
+  /// `stacked` preserves the #217 launch layout. Cycled live in the TUI
+  /// with `cycle_sidebar_layout`; before #365 that choice was runtime-only
+  /// and reset on every launch.
+  #[serde(default)]
+  pub sidebar_orientation: SidebarOrientation,
+
+  /// How yanked text reaches the clipboard (issue #367): `auto` (OSC52 over
+  /// SSH, host tools otherwise), `osc52`, or `tools`. Default `auto` fixes
+  /// yanking over SSH — where `pbcopy` & co. silently write to the *remote*
+  /// clipboard — without needing configuration.
+  #[serde(default)]
+  pub clipboard: ClipboardMode,
 
   /// `[tui.keys]` sub-table (issue #87) — user overrides for the
   /// remappable keymap. Absent → keymap stays at the built-in
@@ -612,6 +744,8 @@ impl Default for TuiConfig {
       auto_refresh_secs: default_auto_refresh_secs(),
       open: TuiOpenConfig::default(),
       sidebar_position: SidebarPosition::default(),
+      sidebar_orientation: SidebarOrientation::default(),
+      clipboard: ClipboardMode::default(),
       keys: TuiKeysConfig::default(),
       macro1: None,
       macro2: None,

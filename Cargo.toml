@@ -4,7 +4,7 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.0.3"
+version = "1.1.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
 # newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
@@ -66,7 +66,10 @@ daemon = []
 clap = { version = "4.5", features = ["derive", "color"] }
 clap_complete = "4.5"
 ratatui = "0.30"
-crossterm = "0.29"
+# `osc52` pulls crossterm's `clipboard` module (`CopyToClipboard`) and, with it,
+# base64 — the encoder OSC52 needs. Using the framing crossterm already ships,
+# and which its own tests pin, beats hand-rolling the sequence here (#367).
+crossterm = { version = "0.29", features = ["osc52"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

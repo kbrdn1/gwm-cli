@@ -234,16 +234,45 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # auto_refresh_secs = 60
 
-# --- TUI sidebar position (issue #188) ---------------------------------------
-# Which side the worktree-details preview sidebar sits on in the side-by-side
-# layout: "right" (default, pre-#188 behaviour) or "left". Toggle it live in
-# the TUI with `H`. The narrow-terminal stacked layout (table on top, sidebar
-# below) ignores this — there the sidebar is always at the bottom. Cycle the
-# orientation (auto / side-by-side / stacked) live with `V`; "auto" picks
-# side-by-side on a wide terminal and stacks on a narrow one.
+# --- TUI sidebar layout (issues #188 / #365) ---------------------------------
+# `sidebar_position` — which side the worktree-details preview sidebar sits on
+# in the side-by-side layout: "right" (default, pre-#188 behaviour) or "left".
+# Toggle it live in the TUI with `v`. The stacked layout ignores this: there the
+# sidebar is always at the bottom.
+#
+# `sidebar_orientation` — how the sidebar is arranged relative to the table:
+#   "stacked"       table on top, sidebar below (default since #217)
+#   "side-by-side"  always beside the table, even on a narrow terminal
+#   "auto"          side-by-side at >= 120 columns, stacked below that
+# Cycle it live with `Space`. Before #365 this reset on every launch; set it here to
+# make the choice stick. An unknown value is a hard error at load time.
 #
 # [tui]
-# sidebar_position = "left"
+# sidebar_position    = "left"
+# sidebar_orientation = "side-by-side"
+
+# --- TUI clipboard (issue #367) ----------------------------------------------
+# How yanked text (path / branch / worktree name / command logs) reaches the
+# clipboard:
+#   "auto"   OSC52 when an SSH session is detected, host tools otherwise (default)
+#   "osc52"  always emit the OSC52 escape sequence
+#   "tools"  always use pbcopy / wl-copy / xclip / xsel / clip.exe
+#
+# Why "auto" matters over SSH: the host tools write to the clipboard of the
+# machine gwm runs on. On a remote host `pbcopy` is found, succeeds, and reports
+# success — while the text lands in the *remote* clipboard, out of reach. OSC52
+# hands the text to your terminal emulator instead.
+#
+# Caveats, because OSC52 is never acknowledged by the terminal:
+#   - Under tmux, gwm wraps the sequence in DCS passthrough, but tmux needs
+#     `set -g allow-passthrough on` (off by default since tmux 3.3).
+#   - Inside GNU screen ($STY), gwm falls back to the host tools rather than
+#     emit a sequence screen would silently swallow.
+#   - Terminal support varies (kitty / WezTerm / Alacritty / iTerm2 yes,
+#     Terminal.app no). Use "tools" if your terminal drops it.
+#
+# [tui]
+# clipboard = "auto"
 
 # --- TUI keymap: `[tui.keys]` (issues #87 / #219 / #294) ---------------------
 # Remap any TUI key. An override REPLACES the default for that verb; an empty
