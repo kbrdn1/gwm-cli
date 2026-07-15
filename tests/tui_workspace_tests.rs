@@ -133,6 +133,53 @@ fn sync_active_repo_reresolves_branch_types_from_the_selected_repo() {
 }
 
 #[test]
+fn sync_active_repo_reapplies_both_sidebar_knobs_from_the_selected_repo() {
+  // Codex review #366 P2: `sync_active_repo` swapped `self.config` but left the
+  // live sidebar on the previous repo's layout, so a per-repo `[tui]` sidebar
+  // override was ignored until a reload or relaunch. The finding named
+  // `sidebar_orientation` (#365, new); `sidebar_position` had the identical hole
+  // since workspace mode landed (#36). Both are pinned here — the fix is one
+  // shared apply, so one test guards both against drift.
+  use gwm::config::{SidebarOrientation, SidebarPosition};
+
+  let root = TempDir::new().unwrap();
+  init_repo_at(&root.path().join("alpha"));
+  init_repo_at(&root.path().join("beta"));
+  fs::write(
+    root.path().join("beta").join(".gwm.toml"),
+    "[tui]\nsidebar_orientation = \"side-by-side\"\nsidebar_position = \"left\"\n",
+  )
+  .unwrap();
+
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  // alpha (row 0) has no override → the built-in defaults.
+  assert_eq!(app.sidebar.orientation, SidebarOrientation::Stacked);
+  assert_eq!(app.sidebar.position, SidebarPosition::Right);
+
+  let last = app.worktrees.len() - 1; // beta's main
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "beta", "swapped to beta");
+  assert_eq!(
+    app.sidebar.orientation,
+    SidebarOrientation::SideBySide,
+    "orientation follows the newly-active repo's config"
+  );
+  assert_eq!(
+    app.sidebar.position,
+    SidebarPosition::Left,
+    "position follows the newly-active repo's config"
+  );
+
+  // ...and swapping back restores alpha's defaults rather than sticking on beta.
+  app.list_state.select(Some(0));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "alpha", "swapped back to alpha");
+  assert_eq!(app.sidebar.orientation, SidebarOrientation::Stacked);
+  assert_eq!(app.sidebar.position, SidebarPosition::Right);
+}
+
+#[test]
 fn failed_repo_activation_marks_the_selection_stale_then_recovers() {
   // A repo that was listed but then vanished on disk must not silently leave
   // the active context pointing at the previous repo: the selection is flagged

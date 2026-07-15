@@ -10,7 +10,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **`[tui] sidebar_orientation` — persist the sidebar layout** (#365, part of
+  #363, reported by [@thachck](https://github.com/thachck)). The orientation
+  (`auto` / `side-by-side` / `stacked`) was runtime-only and reset on every
+  launch; only `sidebar_position` survived a restart. It is now a first-class
+  config key, seeded at startup and on config reload, and editable from the
+  Settings panel's TUI tab next to `sidebar position`. Default stays `stacked`
+  (the #217 launch layout). An unknown value is a hard error at load time,
+  consistent with `sidebar_position` and `tui.open.mode`.
+
+### Fixed
+
+- **`SidebarState::orientation` doc-comment claimed the default was `auto`**
+  (#365). It has been `stacked` since #217. The stale comment was live
+  documentation of a default that did not exist.
 
 ## Past releases
 
