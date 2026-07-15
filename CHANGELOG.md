@@ -10,39 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **`[tui] clipboard` — OSC52 so yanking works over SSH** (#367, part of #363,
-  reported by [@thachck](https://github.com/thachck)). The host clipboard tools
-  write to the clipboard of the machine gwm runs on; over SSH that failed
-  *silently* — `pbcopy` on a remote macOS host is found, succeeds, and gwm
-  reported success while the text was unreachable. `auto` (the default) now
-  emits an OSC52 escape sequence when an SSH session is detected, handing the
-  text to the terminal emulator instead; `osc52` and `tools` force either path.
-  Under tmux the sequence is wrapped in DCS passthrough (requires
-  `allow-passthrough on`); inside GNU screen gwm falls back to the host tools
-  rather than emit a sequence screen would swallow. Oversized payloads are
-  refused rather than truncated into a corrupt paste.
-
-- **`[tui] sidebar_orientation` — persist the sidebar layout** (#365, part of
-  #363, reported by [@thachck](https://github.com/thachck)). The orientation
-  (`auto` / `side-by-side` / `stacked`) was runtime-only and reset on every
-  launch; only `sidebar_position` survived a restart. It is now a first-class
-  config key, seeded at startup and on config reload, and editable from the
-  Settings panel's TUI tab next to `sidebar position`. Default stays `stacked`
-  (the #217 launch layout). An unknown value is a hard error at load time,
-  consistent with `sidebar_position` and `tui.open.mode`.
-
-### Fixed
-
-- **`SidebarState::orientation` doc-comment claimed the default was `auto`**
-  (#365). It has been `stacked` since #217. The stale comment was live
-  documentation of a default that did not exist.
+_Nothing yet._
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.1.0`](changelogs/1.1.0.md) — 2026-07-15
 - [`1.0.3`](changelogs/1.0.3.md) — 2026-07-09
 - [`1.0.2`](changelogs/1.0.2.md) — 2026-07-06
 - [`1.0.1`](changelogs/1.0.1.md) — 2026-07-01
