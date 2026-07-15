@@ -156,12 +156,14 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → sidebar position / sidebar layout / open / countdown / auto
-  // refresh in order.
+  // Tui tab → sidebar position / sidebar layout / clipboard / open / countdown
+  // / auto refresh in order.
   panel.tab = SettingsTab::Tui;
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarOrientation));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::Clipboard));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::OpenMode));
   panel.select_next();
@@ -519,6 +521,7 @@ fn every_choice_is_a_value_the_config_can_load_back() {
   for field in [
     SettingField::SidebarPosition,
     SettingField::SidebarOrientation,
+    SettingField::Clipboard,
     SettingField::OpenMode,
   ] {
     let key = field.key_path();
@@ -552,7 +555,7 @@ fn sidebar_choice_lists_cover_every_variant() {
   // that is the exhaustive `match` in `label()`, which fails to compile on a new
   // variant and forces a visit to the `ALL` right above it. Closing the gap
   // properly would need a derive (strum); not worth a dependency for two enums.
-  use gwm::config::{SidebarOrientation, SidebarPosition};
+  use gwm::config::{ClipboardMode, SidebarOrientation, SidebarPosition};
 
   for o in SidebarOrientation::ALL {
     assert!(
@@ -577,6 +580,19 @@ fn sidebar_choice_lists_cover_every_variant() {
   assert_eq!(
     SettingField::SidebarPosition.choices().len(),
     SidebarPosition::ALL.len(),
+    "no stale choice left behind"
+  );
+
+  for m in ClipboardMode::ALL {
+    assert!(
+      SettingField::Clipboard.choices().contains(&m.label()),
+      "{m:?} ({}) is missing from the clipboard choices",
+      m.label()
+    );
+  }
+  assert_eq!(
+    SettingField::Clipboard.choices().len(),
+    ClipboardMode::ALL.len(),
     "no stale choice left behind"
   );
 }

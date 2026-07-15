@@ -1,6 +1,6 @@
 use gwm::config::{
-  expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, Config, ConfigRow, ConfigSource,
-  MacroOpenMode, SidebarOrientation, SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
+  expand_placeholders, resolved_rows, review_tool_preset, BranchTypesSource, ClipboardMode, Config, ConfigRow,
+  ConfigSource, MacroOpenMode, SidebarOrientation, SidebarPosition, TuiOpenMode, WorktreeConfig, CONFIG_FILE,
 };
 use tempfile::TempDir;
 
@@ -2471,4 +2471,51 @@ dirs = [".."]
   )
   .expect_err("escaping dir must fail validation");
   assert!(err.to_string().contains(".."), "{err}");
+}
+
+// ---- [tui] clipboard (issue #367) ------------------------------------------
+
+#[test]
+fn tui_clipboard_defaults_to_auto() {
+  // `auto` is what makes the SSH fix work without configuration; a default of
+  // `tools` would leave the reported bug in place for everyone who never edits
+  // their config.
+  assert_eq!(Config::default().tui.clipboard, ClipboardMode::Auto);
+}
+
+#[test]
+fn tui_clipboard_absent_keeps_auto() {
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nconfirm_countdown_secs = 2\n").unwrap();
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(cfg.tui.clipboard, ClipboardMode::Auto);
+}
+
+#[test]
+fn tui_clipboard_parses_every_mode() {
+  for (text, expected) in [
+    ("auto", ClipboardMode::Auto),
+    ("osc52", ClipboardMode::Osc52),
+    ("tools", ClipboardMode::Tools),
+  ] {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join(CONFIG_FILE), format!("[tui]\nclipboard = \"{text}\"\n")).unwrap();
+    let cfg = Config::load_layered(dir.path(), None).unwrap();
+    assert_eq!(cfg.tui.clipboard, expected, "{text:?} parses");
+    assert_eq!(
+      cfg.tui.clipboard.label(),
+      text,
+      "label round-trips to the TOML spelling"
+    );
+  }
+}
+
+#[test]
+fn tui_clipboard_invalid_value_errors_at_parse_time() {
+  // Same hard-error contract as the other [tui] enums — silently falling back
+  // would leave the user unsure which clipboard path is live, and this one is
+  // already hard to observe (OSC52 never acknowledges).
+  let dir = TempDir::new().unwrap();
+  std::fs::write(dir.path().join(CONFIG_FILE), "[tui]\nclipboard = \"osc-52\"\n").unwrap();
+  assert!(Config::load_layered(dir.path(), None).is_err());
 }
