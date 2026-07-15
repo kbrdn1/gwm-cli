@@ -234,16 +234,22 @@ when = "glob_exists:src/**/*.rs && !env_set:CI"
 #
 # auto_refresh_secs = 60
 
-# --- TUI sidebar position (issue #188) ---------------------------------------
-# Which side the worktree-details preview sidebar sits on in the side-by-side
-# layout: "right" (default, pre-#188 behaviour) or "left". Toggle it live in
-# the TUI with `H`. The narrow-terminal stacked layout (table on top, sidebar
-# below) ignores this — there the sidebar is always at the bottom. Cycle the
-# orientation (auto / side-by-side / stacked) live with `V`; "auto" picks
-# side-by-side on a wide terminal and stacks on a narrow one.
+# --- TUI sidebar layout (issues #188 / #365) ---------------------------------
+# `sidebar_position` — which side the worktree-details preview sidebar sits on
+# in the side-by-side layout: "right" (default, pre-#188 behaviour) or "left".
+# Toggle it live in the TUI with `H`. The stacked layout ignores this: there the
+# sidebar is always at the bottom.
+#
+# `sidebar_orientation` — how the sidebar is arranged relative to the table:
+#   "stacked"       table on top, sidebar below (default since #217)
+#   "side-by-side"  always beside the table, even on a narrow terminal
+#   "auto"          side-by-side at >= 120 columns, stacked below that
+# Cycle it live with `V`. Before #365 this reset on every launch; set it here to
+# make the choice stick. An unknown value is a hard error at load time.
 #
 # [tui]
-# sidebar_position = "left"
+# sidebar_position    = "left"
+# sidebar_orientation = "side-by-side"
 
 # --- TUI keymap: `[tui.keys]` (issues #87 / #219 / #294) ---------------------
 # Remap any TUI key. An override REPLACES the default for that verb; an empty
