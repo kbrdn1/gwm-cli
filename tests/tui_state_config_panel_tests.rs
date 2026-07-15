@@ -12,6 +12,18 @@ use gwm::tui::keymap::{Action, KeyStroke, Keymap};
 use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
 use gwm::tui::{build_key_rows, ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer, SettingsTab};
 
+/// Index of `field` within the Settings TUI tab. Looked up rather than
+/// hardcoded: inserting a field (as #365 did with `sidebar_orientation`)
+/// shifts every literal index below it, silently pointing these tests at
+/// the wrong row.
+fn tui_idx(field: SettingField) -> usize {
+  SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == field)
+    .unwrap_or_else(|| panic!("{field:?} is not exposed in the Settings TUI tab"))
+}
+
 fn sample_row() -> ConfigRow {
   ConfigRow {
     key: "worktree.base".into(),
@@ -132,7 +144,7 @@ fn prev_tab_wraps_backwards() {
 fn switching_tab_resets_selection_and_edit_buffer() {
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
-  panel.selected = 2;
+  panel.selected = tui_idx(SettingField::ConfirmCountdown);
   panel.editing = Some("4".into());
   panel.next_tab();
   assert_eq!(panel.selected, 0, "selection resets on tab change");
@@ -144,9 +156,12 @@ fn selected_field_follows_the_tab() {
   let mut panel = ConfigPanel::new();
   // Theme tab → theme preset.
   assert_eq!(panel.selected_field(), Some(SettingField::ThemePreset));
-  // Tui tab → sidebar / open / countdown / auto refresh in order.
+  // Tui tab → sidebar position / sidebar layout / open / countdown / auto
+  // refresh in order.
   panel.tab = SettingsTab::Tui;
   assert_eq!(panel.selected_field(), Some(SettingField::SidebarPosition));
+  panel.select_next();
+  assert_eq!(panel.selected_field(), Some(SettingField::SidebarOrientation));
   panel.select_next();
   assert_eq!(panel.selected_field(), Some(SettingField::OpenMode));
   panel.select_next();
@@ -162,11 +177,12 @@ fn selected_field_follows_the_tab() {
 #[test]
 fn select_next_clamps_to_the_last_field() {
   let mut panel = ConfigPanel::new();
-  panel.tab = SettingsTab::Tui; // 6 fields
-  for _ in 0..10 {
+  panel.tab = SettingsTab::Tui;
+  let last = SettingsTab::Tui.fields().len() - 1;
+  for _ in 0..(last + 5) {
     panel.select_next();
   }
-  assert_eq!(panel.selected, 5, "never selects past the last field");
+  assert_eq!(panel.selected, last, "never selects past the last field");
 }
 
 #[test]
@@ -189,7 +205,7 @@ fn begin_edit_only_arms_for_a_uint_field() {
   assert!(panel.editing.is_none(), "choice fields are not text-edited");
   // Confirm countdown is a Uint → arms the buffer.
   panel.tab = SettingsTab::Tui;
-  panel.selected = 2;
+  panel.selected = tui_idx(SettingField::ConfirmCountdown);
   assert_eq!(panel.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
   panel.begin_edit("4");
   assert_eq!(panel.editing.as_deref(), Some("4"));
@@ -199,7 +215,7 @@ fn begin_edit_only_arms_for_a_uint_field() {
 fn edit_buffer_takes_digits_only_and_commits() {
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
-  panel.selected = 2;
+  panel.selected = tui_idx(SettingField::ConfirmCountdown);
   panel.begin_edit("");
   panel.push_edit_char('3');
   panel.push_edit_char('x'); // ignored — not a digit
@@ -215,7 +231,7 @@ fn edit_buffer_takes_digits_only_and_commits() {
 fn auto_refresh_secs_accepts_four_plus_digit_intervals() {
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
-  panel.selected = 3;
+  panel.selected = tui_idx(SettingField::AutoRefreshSecs);
   assert_eq!(panel.selected_field(), Some(SettingField::AutoRefreshSecs));
   assert_eq!(panel.selected_field().map(SettingField::kind), Some(FieldKind::Uint));
   panel.begin_edit("");
@@ -231,7 +247,7 @@ fn take_edit_returns_the_raw_buffer() {
   // empty numeric buffer to "0" (an empty text buffer stays empty).
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
-  panel.selected = 2;
+  panel.selected = tui_idx(SettingField::ConfirmCountdown);
   panel.begin_edit("");
   assert_eq!(
     panel.take_edit().as_deref(),
@@ -259,7 +275,7 @@ fn text_fields_accept_non_digit_characters() {
 fn cancel_edit_discards_the_buffer() {
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
-  panel.selected = 2;
+  panel.selected = tui_idx(SettingField::ConfirmCountdown);
   panel.begin_edit("4");
   panel.push_edit_char('2');
   panel.cancel_edit();
@@ -428,10 +444,11 @@ fn switching_tab_clears_an_armed_capture() {
 fn select_is_inert_while_editing() {
   let mut panel = ConfigPanel::new();
   panel.tab = SettingsTab::Tui;
-  panel.selected = 2;
+  let armed = tui_idx(SettingField::ConfirmCountdown);
+  panel.selected = armed;
   panel.begin_edit("4");
   panel.select_prev();
-  assert_eq!(panel.selected, 2, "navigation is suppressed while typing");
+  assert_eq!(panel.selected, armed, "navigation is suppressed while typing");
 }
 
 #[test]

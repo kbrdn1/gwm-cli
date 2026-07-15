@@ -53,6 +53,18 @@ fn make_app() -> (tempfile::TempDir, App) {
   (dir, app)
 }
 
+/// Index of `field` within the Settings TUI tab. Looked up rather than
+/// hardcoded: inserting a field (as #365 did with `sidebar_orientation`)
+/// silently shifts every literal index below it, which is how two numeric-
+/// input tests started editing the wrong row.
+fn tui_field_index(field: gwm::tui::SettingField) -> usize {
+  gwm::tui::SettingsTab::Tui
+    .fields()
+    .iter()
+    .position(|f| *f == field)
+    .unwrap_or_else(|| panic!("{field:?} is not exposed in the Settings TUI tab"))
+}
+
 #[test]
 fn focus_status_opens_and_focuses_the_sidebar() {
   // Issue #217: pressing `2` (focus_status) must open the sidebar if it was
@@ -7033,14 +7045,86 @@ fn activate_choice_setting_persists_project_layer_and_applies_live() {
 }
 
 #[test]
-fn committing_numeric_input_persists_the_typed_value() {
-  use gwm::config::Config;
-  use gwm::tui::SettingsTab;
+fn sidebar_orientation_is_seeded_from_config_at_construction() {
+  // #365: `[tui] sidebar_orientation` drives the launch layout. Without
+  // the seed the key parses but the TUI ignores it, which is the bug the
+  // issue reports.
+  use gwm::config::SidebarOrientation;
+
+  let (repo, _) = init_repo();
+  std::fs::write(
+    repo.path().join(".gwm.toml"),
+    r#"
+[tui]
+sidebar_orientation = "side-by-side"
+"#,
+  )
+  .unwrap();
+
+  let app = App::new_at_layered(Some(repo.path()), None).unwrap();
+  assert_eq!(
+    app.sidebar.orientation,
+    SidebarOrientation::SideBySide,
+    "config orientation must reach the live sidebar state"
+  );
+}
+
+#[test]
+fn sidebar_orientation_defaults_to_stacked_without_config() {
+  // Guards the #217 launch layout against an accidental flip while
+  // wiring the knob up (#365).
+  use gwm::config::SidebarOrientation;
+
+  let (_dir, app) = make_app();
+  assert_eq!(app.sidebar.orientation, SidebarOrientation::Stacked);
+}
+
+#[test]
+fn activate_sidebar_orientation_setting_persists_and_reseeds_live() {
+  use gwm::config::{Config, SidebarOrientation};
+  use gwm::tui::{SettingField, SettingsTab};
 
   let (dir, mut app) = make_app();
   app.enter_config_panel();
   app.config_panel.tab = SettingsTab::Tui;
-  app.config_panel.selected = 2; // confirm countdown (Uint input)
+  app.config_panel.selected = tui_field_index(SettingField::SidebarOrientation);
+  assert_eq!(app.config.tui.sidebar_orientation, SidebarOrientation::Stacked);
+
+  // Cycle the choice: the write-back must round-trip through a fresh load
+  // *and* re-seed the live sidebar, same contract as sidebar_position.
+  app.activate_selected_setting();
+
+  assert_ne!(
+    app.config.tui.sidebar_orientation,
+    SidebarOrientation::Stacked,
+    "live config updated"
+  );
+  assert_eq!(
+    app.sidebar.orientation, app.config.tui.sidebar_orientation,
+    "live sidebar orientation re-seeded from the edited config"
+  );
+
+  let written = std::fs::read_to_string(dir.path().join(".gwm.toml")).unwrap();
+  assert!(
+    written.contains("sidebar_orientation"),
+    "edit persisted to .gwm.toml: {written}"
+  );
+  let cfg = Config::load_layered(dir.path(), None).unwrap();
+  assert_eq!(
+    cfg.tui.sidebar_orientation, app.config.tui.sidebar_orientation,
+    "edit round-trips through a fresh layered load"
+  );
+}
+
+#[test]
+fn committing_numeric_input_persists_the_typed_value() {
+  use gwm::config::Config;
+  use gwm::tui::{SettingField, SettingsTab};
+
+  let (dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = tui_field_index(SettingField::ConfirmCountdown);
 
   // Arm the input, retype "5", commit.
   app.activate_selected_setting();
@@ -7060,12 +7144,12 @@ fn committing_numeric_input_persists_the_typed_value() {
 #[test]
 fn committing_auto_refresh_secs_persists_the_typed_value() {
   use gwm::config::Config;
-  use gwm::tui::SettingsTab;
+  use gwm::tui::{SettingField, SettingsTab};
 
   let (dir, mut app) = make_app();
   app.enter_config_panel();
   app.config_panel.tab = SettingsTab::Tui;
-  app.config_panel.selected = 3; // auto refresh (Uint input)
+  app.config_panel.selected = tui_field_index(SettingField::AutoRefreshSecs);
 
   app.activate_selected_setting();
   assert!(
