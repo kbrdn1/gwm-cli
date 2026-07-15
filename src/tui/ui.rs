@@ -3234,18 +3234,33 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   }
   let header_lines = vec![title, subtitle, Line::from(String::new()), Line::from(tab_spans)];
 
-  // Body depends on the active tab. The Keys tab (issue #294) also reports the
-  // line index of the selected row so the renderer can scroll it into view (it
-  // has ~100 rows, unlike the short field tabs).
-  let mut keys_selected_line: Option<usize> = None;
+  // Body depends on the active tab. Every tab with a selection reports the line
+  // index of the selected row so the renderer can scroll it into view.
+  //
+  // This used to be Keys-only, on the reasoning that "the field tabs are short
+  // enough to never need this". That was wrong on any short terminal: the modal
+  // is 60% of the height, so 24 lines leave ~6 body rows, and the TUI tab has
+  // had more fields than that since well before #367 added an 8th. The result
+  // was a selection that walked off screen — the user cycling or editing a row
+  // they cannot see (Codex review #368 P2).
+  //
+  // `settings_fields_lines` renders exactly one line per field, so the field
+  // index *is* the line index.
+  let mut selected_line: Option<usize> = None;
   let body_lines = match tab {
     SettingsTab::All => settings_all_lines(app),
     SettingsTab::Keys => {
       let (lines, sel) = settings_keys_lines(app);
-      keys_selected_line = sel;
+      selected_line = sel;
       lines
     }
-    other => settings_fields_lines(app, other.fields()),
+    other => {
+      let fields = other.fields();
+      if !fields.is_empty() {
+        selected_line = Some(app.config_panel.selected.min(fields.len().saturating_sub(1)));
+      }
+      settings_fields_lines(app, fields)
+    }
   };
 
   // Footer hints — flat accent-bind + muted-action (issue #279), dynamic to
@@ -3277,9 +3292,9 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
   // Publish scroll bounds against the BODY viewport only (issue #279).
   let body_viewport = body_area.height as usize;
   app.config_panel.max_scroll = (body_lines.len().saturating_sub(body_viewport)) as u16;
-  // Keys tab (issue #294): follow the selected row so it stays on screen as
-  // selection moves (the field tabs are short enough to never need this).
-  if let Some(sel) = keys_selected_line {
+  // Follow the selected row so it stays on screen as the selection moves —
+  // every tab that has a selection, not just Keys (see the note above).
+  if let Some(sel) = selected_line {
     let scroll = app.config_panel.scroll as usize;
     if sel < scroll {
       app.config_panel.scroll = sel as u16;

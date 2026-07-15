@@ -647,3 +647,50 @@ fn clean_modal_renders_title_report_and_hints() {
   // (width − borders − padding), so the unit suffix is never clipped.
   assert_present(&buf, "KiB", "size unit not clipped on the right edge");
 }
+
+// ---------------------------------------------------------------------------
+// Settings panel: the selected field must be on screen (Codex review #368 P2)
+// ---------------------------------------------------------------------------
+
+/// Render `app` at an explicit size — the module default (100×40) is roomy
+/// enough to hide every clipping bug, and this case is about a short terminal.
+fn render_at(app: &mut App, w: u16, h: u16) -> Buffer {
+  let backend = TestBackend::new(w, h);
+  let mut terminal = Terminal::new(backend).unwrap();
+  terminal.draw(|f| draw(f, app)).unwrap();
+  terminal.backend().buffer().clone()
+}
+
+#[test]
+fn settings_tui_tab_keeps_the_selected_field_visible_on_a_short_terminal() {
+  // The Settings modal is 60% of the terminal height, so a 24-line terminal —
+  // an entirely ordinary size — leaves only a handful of body lines. The TUI
+  // tab now has 8 fields, and the renderer only scrolled the selection into
+  // view for the Keys tab: every other tab moved `selected` without touching
+  // `scroll`, so the last fields could be selected, cycled and edited while
+  // off screen. The user edits a setting they cannot see.
+  //
+  // #367 added the 8th field and is what pushed this over the edge on a
+  // 24-line terminal, but the gap is older — the guard is written against the
+  // property (selected ⇒ visible) rather than against a field count, so it
+  // holds as fields come and go.
+  use gwm::tui::SettingsTab;
+
+  let (_dir, mut app) = make_app();
+  app.enter_config_panel();
+  app.config_panel.tab = SettingsTab::Tui;
+
+  let fields = SettingsTab::Tui.fields();
+  for (idx, field) in fields.iter().enumerate() {
+    app.config_panel.selected = idx;
+    let buf = render_at(&mut app, 100, 24);
+    let rows = row_strings(&buf);
+    let label = field.label();
+    assert!(
+      rows.iter().any(|r| r.contains(label)),
+      "selected field {field:?} ({label:?}) is off screen on a 24-line terminal — \
+       the user can edit a row they cannot see.\nRendered:\n{}",
+      rows.join("\n")
+    );
+  }
+}

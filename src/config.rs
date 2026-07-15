@@ -519,6 +519,50 @@ impl SidebarPosition {
   }
 }
 
+/// How the TUI puts yanked text on the clipboard (issue #367).
+///
+/// The host binaries (`pbcopy`, `wl-copy`, `xclip`, …) write to the
+/// clipboard of the machine gwm runs on. Over SSH that is the *remote*
+/// machine: `pbcopy` is found, succeeds, reports success — and the text is
+/// unreachable from the user's actual desktop. OSC52 instead hands the text
+/// to the terminal emulator, which owns the real clipboard.
+///
+/// `lowercase` is enough here (unlike [`SidebarOrientation`]): every variant
+/// is a single word, so there is no `sidebyside`-style trap to dodge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardMode {
+  /// OSC52 when an SSH session is detected, host tools otherwise. Default:
+  /// fixes the SSH case with no configuration, and keeps the host tools
+  /// (which are universally supported) for the local case.
+  #[default]
+  Auto,
+  /// Always emit the OSC52 escape sequence. For local terminals that support
+  /// it, or when the host tools are unwanted.
+  Osc52,
+  /// Always use the host binaries — the pre-#367 behaviour. The escape hatch
+  /// when a terminal mangles or ignores OSC52, and for `$SSH_*` false
+  /// positives (a tmux pane can carry a stale `SSH_CONNECTION`).
+  Tools,
+}
+
+impl ClipboardMode {
+  /// Every variant, in Settings-panel cycle order (default first).
+  /// Keep in sync when adding a variant — the exhaustive `match` in
+  /// [`Self::label`] is what fails to compile and brings you here.
+  pub const ALL: [ClipboardMode; 3] = [ClipboardMode::Auto, ClipboardMode::Osc52, ClipboardMode::Tools];
+
+  /// Status-bar label, equal to the serialised TOML spelling. `const` so the
+  /// Settings-panel choice list is derived from this `match` (#365).
+  pub const fn label(self) -> &'static str {
+    match self {
+      ClipboardMode::Auto => "auto",
+      ClipboardMode::Osc52 => "osc52",
+      ClipboardMode::Tools => "tools",
+    }
+  }
+}
+
 /// How the sidebar is arranged relative to the worktree table (issue
 /// #188). Cycled live with `cycle_sidebar_layout`; seeded from
 /// `[tui] sidebar_orientation` since #365, which is why the enum lives
@@ -667,6 +711,13 @@ pub struct TuiConfig {
   #[serde(default)]
   pub sidebar_orientation: SidebarOrientation,
 
+  /// How yanked text reaches the clipboard (issue #367): `auto` (OSC52 over
+  /// SSH, host tools otherwise), `osc52`, or `tools`. Default `auto` fixes
+  /// yanking over SSH — where `pbcopy` & co. silently write to the *remote*
+  /// clipboard — without needing configuration.
+  #[serde(default)]
+  pub clipboard: ClipboardMode,
+
   /// `[tui.keys]` sub-table (issue #87) — user overrides for the
   /// remappable keymap. Absent → keymap stays at the built-in
   /// defaults. Present → every listed action *replaces* its default
@@ -694,6 +745,7 @@ impl Default for TuiConfig {
       open: TuiOpenConfig::default(),
       sidebar_position: SidebarPosition::default(),
       sidebar_orientation: SidebarOrientation::default(),
+      clipboard: ClipboardMode::default(),
       keys: TuiKeysConfig::default(),
       macro1: None,
       macro2: None,

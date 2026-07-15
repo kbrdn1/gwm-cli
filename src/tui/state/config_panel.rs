@@ -19,7 +19,7 @@
 //! the cursor lives here, `max_scroll` / `max_x_scroll` are republished by
 //! the renderer each frame against the live viewport.
 
-use crate::config::{Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition};
+use crate::config::{ClipboardMode, Config, ConfigRow, ConfigSource, SidebarOrientation, SidebarPosition};
 use crate::tui::keymap::{Action, KeyStroke, Keymap};
 use crate::tui::modal_keymap::{ModalAction, ModalKeymap};
 
@@ -78,6 +78,7 @@ impl SettingsTab {
       SettingsTab::Tui => &[
         SettingField::SidebarPosition,
         SettingField::SidebarOrientation,
+        SettingField::Clipboard,
         SettingField::OpenMode,
         SettingField::ConfirmCountdown,
         SettingField::AutoRefreshSecs,
@@ -267,6 +268,11 @@ const SIDEBAR_ORIENTATION_CHOICES: &[&str] = &[
 // `TuiOpenMode` has no `label()` to derive from; the round-trip test
 // (`every_choice_is_a_value_the_config_can_load_back`) guards it instead.
 const OPEN_MODE_CHOICES: &[&str] = &["shell", "editor", "finder"];
+const CLIPBOARD_CHOICES: &[&str] = &[
+  ClipboardMode::Auto.label(),
+  ClipboardMode::Osc52.label(),
+  ClipboardMode::Tools.label(),
+];
 
 /// One editable setting, resolved live against the loaded [`Config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -283,6 +289,8 @@ pub enum SettingField {
   SidebarPosition,
   /// `tui.sidebar_orientation` — stacked / side-by-side / auto.
   SidebarOrientation,
+  /// `tui.clipboard` — auto / osc52 / tools.
+  Clipboard,
   /// `tui.open.mode` — shell / editor / finder.
   OpenMode,
   /// `tui.confirm_countdown_secs` — numeric input.
@@ -305,6 +313,7 @@ impl SettingField {
       SettingField::WorktreeBranchPattern => "branch pattern",
       SettingField::SidebarPosition => "sidebar position",
       SettingField::SidebarOrientation => "sidebar layout",
+      SettingField::Clipboard => "clipboard",
       SettingField::OpenMode => "open mode",
       SettingField::ConfirmCountdown => "confirm countdown (s)",
       SettingField::AutoRefreshSecs => "auto refresh (s)",
@@ -322,6 +331,7 @@ impl SettingField {
       SettingField::WorktreeBranchPattern => "worktree.branch_pattern",
       SettingField::SidebarPosition => "tui.sidebar_position",
       SettingField::SidebarOrientation => "tui.sidebar_orientation",
+      SettingField::Clipboard => "tui.clipboard",
       SettingField::OpenMode => "tui.open.mode",
       SettingField::ConfirmCountdown => "tui.confirm_countdown_secs",
       SettingField::AutoRefreshSecs => "tui.auto_refresh_secs",
@@ -336,6 +346,7 @@ impl SettingField {
       SettingField::ThemePreset
       | SettingField::SidebarPosition
       | SettingField::SidebarOrientation
+      | SettingField::Clipboard
       | SettingField::OpenMode => FieldKind::Choice,
       SettingField::ConfirmCountdown | SettingField::AutoRefreshSecs => FieldKind::Uint,
       SettingField::WorktreeBase
@@ -361,6 +372,7 @@ impl SettingField {
       SettingField::ThemePreset => crate::tui::theme::preset_names(),
       SettingField::SidebarPosition => SIDEBAR_CHOICES,
       SettingField::SidebarOrientation => SIDEBAR_ORIENTATION_CHOICES,
+      SettingField::Clipboard => CLIPBOARD_CHOICES,
       SettingField::OpenMode => OPEN_MODE_CHOICES,
       _ => &[],
     }
@@ -375,6 +387,7 @@ impl SettingField {
       SettingField::WorktreeBranchPattern => cfg.worktree.branch_pattern.clone(),
       SettingField::SidebarPosition => cfg.tui.sidebar_position.label().into(),
       SettingField::SidebarOrientation => cfg.tui.sidebar_orientation.label().into(),
+      SettingField::Clipboard => cfg.tui.clipboard.label().into(),
       SettingField::OpenMode => match cfg.tui.open.mode {
         crate::config::TuiOpenMode::Shell => "shell".into(),
         crate::config::TuiOpenMode::Editor => "editor".into(),
