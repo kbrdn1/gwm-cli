@@ -484,7 +484,7 @@ fn default_trunks() -> Vec<String> {
 /// TUI layout (issue #188). `Right` preserves the pre-#188 behaviour and
 /// is the default. In the stacked (narrow-terminal) layout the sidebar
 /// always sits at the bottom, so this preference only governs the
-/// side-by-side split. Toggled live with `H`; persisted here so the
+/// side-by-side split. Toggled live with `v`; persisted here so the
 /// choice survives across launches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -628,7 +628,7 @@ pub struct TuiConfig {
 
   /// Which side the worktree-details sidebar sits on in the side-by-side
   /// layout (issue #188). Default `right` preserves pre-#188 behaviour;
-  /// `left` flips the split. Toggled live in the TUI with `H`. Ignored by
+  /// `left` flips the split. Toggled live in the TUI with `v`. Ignored by
   /// the stacked (narrow-terminal) layout, where the sidebar is always at
   /// the bottom.
   #[serde(default)]
