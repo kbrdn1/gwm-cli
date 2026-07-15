@@ -1270,10 +1270,12 @@ fn copy_text_to_clipboard(app: &mut App, text: &str, success: &str) {
     }
     ClipboardPlan::TooLarge { bytes } => {
       // Refuse rather than emit a sequence the terminal will truncate into
-      // corrupt paste content.
+      // corrupt paste content. Round the reported size *up*: truncating
+      // division renders 65_537 bytes as "64 KiB > 64 KiB", which reads as a
+      // bug in the check rather than as a reason for the refusal.
       app.status = format!(
         "too large for osc52 ({} KiB > {} KiB) — set [tui] clipboard = \"tools\"",
-        bytes / 1024,
+        bytes.div_ceil(1024),
         crate::clipboard::MAX_OSC52_BYTES / 1024
       );
       return;
