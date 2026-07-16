@@ -14,9 +14,39 @@
 //!     a hard config error surfaced by `Config::load_for_repo`.
 
 use gwm::aliases::{self, BUILT_IN_ALIASES};
-use gwm::config::{Config, CONFIG_FILE};
+use gwm::config::{resolve_gwm_config_file, Config, CONFIG_FILE};
 use gwm::error::GwmError;
 use tempfile::TempDir;
+
+// ---- User-level file location (#374) ------------------------------------
+
+#[test]
+fn user_alias_file_resolves_under_dotconfig() {
+  // The user-level `aliases.toml` must be read from the documented
+  // `~/.config/gwm/aliases.toml` on every platform — same fix as the global
+  // config (#372/#374), not only where `dirs::config_dir()` == `~/.config`.
+  // `default_user_path` delegates to this shared resolver with `var_os`, so
+  // pinning the resolver for `aliases.toml` pins the user-level location.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap(); // stand-in for Application Support
+  let dir = home.path().join(".config").join("gwm");
+  std::fs::create_dir_all(&dir).unwrap();
+  let aliases_file = dir.join("aliases.toml");
+  std::fs::write(&aliases_file, "").unwrap();
+
+  let resolved = resolve_gwm_config_file(
+    "aliases.toml",
+    None, // $XDG_CONFIG_HOME unset
+    Some(home.path()),
+    Some(platform.path()),
+    |p| p.exists(),
+  );
+  assert_eq!(
+    resolved,
+    Some(aliases_file),
+    "user aliases at the documented ~/.config path must be honoured"
+  );
+}
 
 // ---- Parsing ------------------------------------------------------------
 
