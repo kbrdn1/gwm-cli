@@ -94,6 +94,23 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash.ToLower()
           Set-Content -Path "dist/$STAGE.zip.sha256" -Encoding ascii -Value "$hash  $STAGE.zip"
 
+      # Native Linux packages (issues #377 / #378). cargo-deb and
+      # cargo-generate-rpm rewrite the `target/release` asset prefix to the
+      # per-target dir when `--target` is passed, so they package the binary
+      # the (cross-)build step above already produced — no rebuild. `--no-build`
+      # (deb) keeps it from recompiling; the explicit `depends`/`auto-req = no`
+      # in Cargo.toml skip dpkg-shlibdeps / rpm dep-detection, which can't run
+      # against the cross-built aarch64 binary on an x86_64 runner.
+      - name: package (linux .deb / .rpm)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cargo install cargo-deb cargo-generate-rpm --locked
+          cargo deb --no-build --target ${{ matrix.target }} --output dist/
+          cargo generate-rpm --target ${{ matrix.target }} --output dist/
+          ( cd dist && for f in *.deb *.rpm; do shasum -a 256 "$f" > "$f.sha256"; done )
+          ls -la dist
+
       - name: upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -103,6 +120,18 @@ jobs:
             dist/*.tar.gz.sha256
             dist/*.zip
             dist/*.zip.sha256
+          if-no-files-found: error
+
+      - name: upload artifacts (linux packages)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gwm-linux-packages-${{ matrix.target }}
+          path: |
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.rpm
+            dist/*.rpm.sha256
           if-no-files-found: error
 
   release:
@@ -172,7 +201,11 @@ jobs:
             dist/*.tar.gz \
             dist/*.tar.gz.sha256 \
             dist/*.zip \
-            dist/*.zip.sha256
+            dist/*.zip.sha256 \
+            dist/*.deb \
+            dist/*.deb.sha256 \
+            dist/*.rpm \
+            dist/*.rpm.sha256
 
   homebrew-tap-update:
     name: update homebrew tap

@@ -42,6 +42,47 @@ bin-dir = "gwm-v{ version }-{ target }/{ bin }"
 pkg-url = "{ repo }/releases/download/v{ version }/gwm-v{ version }-{ target }.zip"
 pkg-fmt = "zip"
 
+# `.deb` packages (issue #377) — built + attached to each stable Release by
+# `release.yml` via `cargo deb --no-build --target <triple>`. The package name
+# is the crate name (`gwm-cli`, not `gwm`) to avoid colliding with Debian's
+# unrelated `gwm` window-manager package; the installed command stays `gwm`.
+# `depends = "libc6"` is set explicitly (not `$auto`) so cargo-deb skips
+# `dpkg-shlibdeps` — the binary vendors libgit2 statically and needs only
+# glibc, and skipping shlibdeps is what lets the aarch64 (cross-built) package
+# be produced from an x86_64 runner.
+[package.metadata.deb]
+maintainer = "Kylian Bardini <onepiecekylian@gmail.com>"
+copyright = "2026 Kylian Bardini"
+license-file = ["LICENSE.md", "0"]
+extended-description = """
+git worktree manager — a terminal UI and CLI over git worktrees. Native
+libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle
+hooks), and a ratatui TUI. The installed command is `gwm`."""
+section = "utils"
+priority = "optional"
+depends = "libc6"
+assets = [
+  ["target/release/gwm", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/gwm-cli/README.md", "644"],
+  ["CHANGELOG.md", "usr/share/doc/gwm-cli/CHANGELOG.md", "644"],
+]
+
+# `.rpm` packages (issue #378) — built + attached by `release.yml` via
+# `cargo generate-rpm --target <triple>`. `auto-req = "no"` disables rpm's
+# dependency auto-detection (it needs the target's rpm tooling, unavailable
+# when cross-packaging aarch64 from an x86_64 runner); the statically-vendored
+# binary needs only glibc, present on every target.
+[package.metadata.generate-rpm]
+summary = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+license = "MIT"
+auto-req = "no"
+assets = [
+  { source = "target/release/gwm", dest = "/usr/bin/gwm", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/gwm-cli/README.md", mode = "644" },
+  { source = "LICENSE.md", dest = "/usr/share/doc/gwm-cli/LICENSE.md", mode = "644" },
+  { source = "CHANGELOG.md", dest = "/usr/share/doc/gwm-cli/CHANGELOG.md", mode = "644" },
+]
+
 [lib]
 name = "gwm"
 path = "src/lib.rs"
