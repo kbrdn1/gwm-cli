@@ -266,3 +266,88 @@ jobs:
           fi
           git commit -m "gwm ${TAG#v} (${TAG})"
           git push
+
+  scoop-bucket-update:
+    name: update scoop bucket
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `scoop install gwm`,
+    # otherwise users tracking the bucket would silently move to a pre-release.
+    # Same reasoning as homebrew-tap-update above (the whole workflow is
+    # implicitly tag-scoped via the upstream jobs).
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
+    # While SCOOP_BUCKET_TOKEN is being provisioned the first time, a missing
+    # secret would fail this job. Keep it advisory so the GitHub release still
+    # lands and the bucket refresh can be re-driven manually via
+    # workflow_dispatch once the secret exists. Flip to false after the first
+    # successful sync (see CONTRIBUTING.md > Releases > Scoop bucket).
+    continue-on-error: true
+    steps:
+      - name: verify SCOOP_BUCKET_TOKEN is configured
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [ -z "${SCOOP_BUCKET_TOKEN:-}" ]; then
+            echo "::error::SCOOP_BUCKET_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > Scoop bucket setup."
+            exit 1
+          fi
+
+      - name: checkout gwm-cli (template + render script)
+        uses: actions/checkout@v7
+        with:
+          path: gwm-cli
+
+      - name: checkout kbrdn1/scoop-gwm
+        uses: actions/checkout@v7
+        with:
+          repository: kbrdn1/scoop-gwm
+          path: scoop-gwm
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+
+      - name: fetch sha256 sidecar from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p sha
+          gh release download "$TAG" \
+            --repo kbrdn1/gwm-cli \
+            --pattern "gwm-${TAG}-x86_64-pc-windows-msvc.zip.sha256" \
+            --dir sha
+          ls -la sha
+
+      - name: render bucket/gwm.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          SHA_X86_64=$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-pc-windows-msvc.zip.sha256")
+          mkdir -p scoop-gwm/bucket
+          sh gwm-cli/.github/scripts/render-scoop-manifest.sh \
+            "$TAG" "$VERSION" "$SHA_X86_64" \
+            gwm-cli/packaging/scoop/gwm.json.template \
+            > scoop-gwm/bucket/gwm.json
+          echo "=== rendered bucket/gwm.json ==="
+          cat scoop-gwm/bucket/gwm.json
+
+      - name: commit + push to bucket
+        working-directory: scoop-gwm
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name  "gwm-cli release bot"
+          git config user.email "release-bot@gwm-cli.local"
+          git add bucket/gwm.json
+          if git diff --cached --quiet; then
+            echo "bucket/gwm.json unchanged — nothing to push."
+            exit 0
+          fi
+          git commit -m "gwm ${TAG#v} (${TAG})"
+          git push

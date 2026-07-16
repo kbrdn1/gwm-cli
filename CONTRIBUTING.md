@@ -416,6 +416,28 @@ gh workflow run release.yml --ref <tag>   # e.g. v0.5.0
 
 The `workflow_dispatch` path is gated to the same stable-only condition; rc/alpha/beta will skip the tap step automatically.
 
+### Scoop bucket (`scoop install gwm`)
+
+Stable releases automatically refresh [`kbrdn1/scoop-gwm`](https://github.com/kbrdn1/scoop-gwm) (`bucket/gwm.json`) via the `scoop-bucket-update` job in [`release.yml`](.github/workflows/release.yml), mirroring the Homebrew tap. Pre-releases are filtered out so `scoop install gwm` always tracks the latest stable. End users add the bucket once:
+
+```powershell
+scoop bucket add gwm https://github.com/kbrdn1/scoop-gwm
+scoop install gwm
+```
+
+The canonical manifest source lives at [`packaging/scoop/gwm.json.template`](packaging/scoop/gwm.json.template); the render + Scoop-autoupdate contract is pinned by [`tests/scoop_manifest_tests.rs`](tests/scoop_manifest_tests.rs). Only the `__FOO__` placeholders are substituted at release time — the Scoop `$version` / `$url` autoupdate variables are left verbatim so Scoop's maintainer-side `checkver`/excavator tooling can regenerate the manifest. End users get new versions from `scoop update gwm` once the `scoop-bucket-update` job pushes the refreshed `bucket/gwm.json`, so keep the job green (that is what the client actually pulls).
+
+#### One-time bootstrap (maintainer)
+
+Same shape as the Homebrew tap:
+
+1. Create the `kbrdn1/scoop-gwm` repo (a `bucket/gwm.json` + README).
+2. Generate a fine-grained PAT scoped to `kbrdn1/scoop-gwm` only, **Contents → Read and write**.
+3. Add it as the `SCOOP_BUCKET_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
+4. Flip `continue-on-error: true` to `false` on the `scoop-bucket-update` job after the first successful sync.
+
+Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
+
 ---
 
 By contributing, you agree your changes are licensed under the MIT License (see `LICENSE.md`).
