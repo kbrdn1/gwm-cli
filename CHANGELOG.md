@@ -13,12 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Scoop install channel for Windows** — `scoop bucket add gwm
-  https://github.com/kbrdn1/scoop-gwm && scoop install gwm`. A new
+  https://github.com/kbrdn1/scoop-gwm; scoop install gwm`. A new
   `scoop-bucket-update` job in `release.yml` renders
   `packaging/scoop/gwm.json.template` and pushes `bucket/gwm.json` to the
   `kbrdn1/scoop-gwm` bucket on every stable release (mirroring the Homebrew
   tap; pre-releases filtered out). `scoop update gwm` picks up each new
   version once the release job pushes the refreshed manifest. (#376)
+- **`.deb` packages for Debian / Ubuntu** — `x86_64` and `aarch64`, built by
+  `cargo-deb` and attached to every stable release (`sudo dpkg -i
+  gwm-cli_<ver>-1_amd64.deb`). The package is named `gwm-cli` to avoid
+  Debian's unrelated `gwm` window-manager package; the command stays `gwm`.
+  (#377)
+- **`.rpm` packages for Fedora / RHEL / openSUSE** — `x86_64` and `aarch64`,
+  built by `cargo-generate-rpm` and attached to every stable release (`sudo
+  rpm -i gwm-cli-<ver>-1.x86_64.rpm`). (#378)
 
 ## Past releases
 
