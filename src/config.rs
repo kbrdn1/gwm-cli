@@ -1396,7 +1396,10 @@ pub fn global_config_path() -> Option<PathBuf> {
   if crate::trust::env_truthy("GWM_NO_GLOBAL_CONFIG") {
     return None;
   }
-  let xdg = std::env::var("XDG_CONFIG_HOME").ok().filter(|s| !s.is_empty());
+  // `var_os`, not `var`: a non-UTF-8 `$XDG_CONFIG_HOME` (valid on Unix) must
+  // still win outright. Reading it as a `String` would drop it, letting a
+  // `~/.config` file silently mask an explicit XDG config home.
+  let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty());
   let home = dirs::home_dir();
   let platform = dirs::config_dir();
   resolve_global_config_path(

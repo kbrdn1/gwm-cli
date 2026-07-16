@@ -172,6 +172,43 @@ fn gwm_no_global_config_env_forces_repo_only() {
   }
 }
 
+#[cfg(unix)]
+#[test]
+fn non_utf8_xdg_config_home_still_wins_outright() {
+  // Regression (#372 review): a valid-but-non-UTF-8 $XDG_CONFIG_HOME (legal on
+  // Unix) must be honoured, not dropped by a `String`-only read that would let
+  // a `~/.config` file mask the explicit config home. `global_config_path`
+  // reads via `var_os`, so the raw `OsString` survives.
+  use std::os::unix::ffi::OsStrExt;
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prev_flag = std::env::var_os("GWM_NO_GLOBAL_CONFIG");
+  let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+
+  // 0xFF is not valid UTF-8, so `std::env::var` would report this path absent.
+  let raw = std::ffi::OsStr::from_bytes(b"/tmp/xdg-\xff-home");
+  let expected = Path::new(raw).join("gwm").join("config.toml");
+
+  // SAFETY: env mutation is serialised by `env_lock()`; restored below.
+  unsafe {
+    std::env::remove_var("GWM_NO_GLOBAL_CONFIG");
+    std::env::set_var("XDG_CONFIG_HOME", raw);
+  }
+  let got = global_config_path();
+
+  // SAFETY: restoration paired with the mutations above, still guarded.
+  unsafe {
+    match prev_flag {
+      Some(v) => std::env::set_var("GWM_NO_GLOBAL_CONFIG", v),
+      None => std::env::remove_var("GWM_NO_GLOBAL_CONFIG"),
+    }
+    match prev_xdg {
+      Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+      None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+  }
+  assert_eq!(got, Some(expected), "non-UTF-8 XDG must win outright, not be dropped");
+}
+
 #[test]
 fn no_files_resolve_to_default() {
   let repo = TempDir::new().unwrap();
