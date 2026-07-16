@@ -27,6 +27,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.rpm` packages for Fedora / RHEL / openSUSE** — `x86_64` and `aarch64`,
   built by `cargo-generate-rpm` and attached to every stable release (`sudo
   rpm -i gwm-cli-<ver>-1.x86_64.rpm`). (#378)
+- **AUR package for Arch Linux** — `yay -S gwm-cli-bin` (or `paru`). A new
+  `aur-publish` job in `release.yml` renders `packaging/aur/PKGBUILD.template`
+  and pushes the `gwm-cli-bin` prebuilt-binary package to the AUR on every
+  stable release (via the SHA-pinned `KSXGitHub/github-actions-deploy-aur`
+  action, which regenerates `.SRCINFO` and runs `makepkg` + `namcap` against
+  the real binary). Installs `gwm` + license + bash/zsh/fish completions;
+  `provides`/`conflicts` `gwm-cli` and `gwm`. Pre-releases filtered out. (#379)
 
 ## Past releases
 
