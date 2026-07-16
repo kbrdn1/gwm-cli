@@ -29,6 +29,8 @@ Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2`
 | Homebrew (macOS) | `brew tap kbrdn1/tap && brew install gwm`                            |
 | Scoop (Windows)  | `scoop bucket add gwm https://github.com/kbrdn1/scoop-gwm; scoop install gwm` |
 | Nix flake        | `nix profile install github:kbrdn1/gwm-cli`                          |
+| Debian / Ubuntu  | `.deb` from [Releases](https://github.com/kbrdn1/gwm-cli/releases) → `sudo dpkg -i gwm-cli_<ver>-1_amd64.deb` |
+| Fedora / RHEL    | `.rpm` from [Releases](https://github.com/kbrdn1/gwm-cli/releases) → `sudo rpm -i gwm-cli-<ver>-1.x86_64.rpm` |
 | Prebuilt         | <https://github.com/kbrdn1/gwm-cli/releases> (Linux / macOS / Windows) |
 
 The crate is published as **`gwm-cli`** (the bare `gwm` name on crates.io belongs to an unrelated project) — the installed command is still `gwm`. `cargo binstall gwm-cli` grabs the prebuilt binary from the matching GitHub Release instead of compiling `git2`/vendored-libgit2 from source — no Rust toolchain needed at install time.

@@ -891,6 +891,7 @@ dependencies = [
  "git2",
  "glob",
  "libc",
+ "libz-sys",
  "nucleo-matcher",
  "portable-pty",
  "predicates",
