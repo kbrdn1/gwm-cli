@@ -48,6 +48,41 @@ fn asset_sources(block: &toml::Value) -> Vec<String> {
     .collect()
 }
 
+// ---- release.yml wiring (#377/#378) -------------------------------------
+//
+// The metadata blocks above are inert without the release job that invokes
+// `cargo deb` / `cargo generate-rpm` and attaches the results. Deleting or
+// mistyping those lines would break the next stable release while leaving the
+// metadata tests green — so the critical wiring is pinned here too.
+
+fn release_yml() -> String {
+  let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(".github/workflows/release.yml");
+  std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+#[test]
+fn release_workflow_builds_both_linux_packages() {
+  let yml = release_yml();
+  // `--no-strip` is load-bearing: without it cargo-deb runs the host strip on
+  // the cross-built aarch64 ELF and the arm64 job fails (see #385 review).
+  assert!(
+    yml.contains("cargo deb --no-build --no-strip --target"),
+    "release.yml must build the .deb with --no-build --no-strip --target"
+  );
+  assert!(
+    yml.contains("cargo generate-rpm --target"),
+    "release.yml must build the .rpm per target"
+  );
+}
+
+#[test]
+fn release_workflow_publishes_both_linux_packages() {
+  let yml = release_yml();
+  for glob in ["dist/*.deb", "dist/*.deb.sha256", "dist/*.rpm", "dist/*.rpm.sha256"] {
+    assert!(yml.contains(glob), "the release upload step must publish {glob}");
+  }
+}
+
 // ---- .deb (#377) --------------------------------------------------------
 
 #[test]
