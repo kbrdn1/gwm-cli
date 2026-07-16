@@ -10,26 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- The user-level global config is now read from the documented
-  `~/.config/gwm/config.toml` on **every** platform. Previously macOS (and
-  Windows) resolved only `dirs::config_dir()` — `~/Library/Application
-  Support/gwm/config.toml` — so a config placed at the documented `~/.config`
-  path was silently ignored unless `$XDG_CONFIG_HOME` was set. Resolution is
-  now: an explicit `$XDG_CONFIG_HOME` wins outright, otherwise the first
-  existing of `~/.config` then the platform dir — keeping an existing
-  `Application Support` config working. A non-UTF-8 `$XDG_CONFIG_HOME` is read
-  via `var_os` so it can no longer be masked by `~/.config`. (#372)
-- The user-level alias file (`~/.config/gwm/aliases.toml`) now resolves the
-  same way as the global config, so it is read from the documented `~/.config`
-  path on macOS and Windows instead of only `dirs::config_dir()`. Both files
-  share one resolver (`resolve_gwm_config_file`) so they can't drift. (#374)
+_Nothing yet._
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.1.1`](changelogs/1.1.1.md) — 2026-07-16
 - [`1.1.0`](changelogs/1.1.0.md) — 2026-07-15
 - [`1.0.3`](changelogs/1.0.3.md) — 2026-07-09
 - [`1.0.2`](changelogs/1.0.2.md) — 2026-07-06
