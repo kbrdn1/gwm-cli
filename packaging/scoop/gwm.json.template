@@ -1,0 +1,26 @@
+{
+  "version": "__VERSION__",
+  "description": "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap",
+  "homepage": "https://github.com/kbrdn1/gwm-cli",
+  "license": "MIT",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/kbrdn1/gwm-cli/releases/download/__TAG__/gwm-__TAG__-x86_64-pc-windows-msvc.zip",
+      "hash": "__SHA256_X86_64__",
+      "extract_dir": "gwm-__TAG__-x86_64-pc-windows-msvc"
+    }
+  },
+  "bin": "gwm.exe",
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/kbrdn1/gwm-cli/releases/download/v$version/gwm-v$version-x86_64-pc-windows-msvc.zip",
+        "extract_dir": "gwm-v$version-x86_64-pc-windows-msvc"
+      }
+    },
+    "hash": {
+      "url": "$url.sha256"
+    }
+  }
+}
