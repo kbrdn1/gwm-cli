@@ -438,6 +438,27 @@ Same shape as the Homebrew tap:
 
 Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
 
+### AUR (`yay -S gwm-cli-bin`)
+
+Stable releases automatically refresh the [`gwm-cli-bin`](https://aur.archlinux.org/packages/gwm-cli-bin) AUR package via the `aur-publish` job in [`release.yml`](.github/workflows/release.yml). It renders [`packaging/aur/PKGBUILD.template`](packaging/aur/PKGBUILD.template), then hands the result to the SHA-pinned [`KSXGitHub/github-actions-deploy-aur`](https://github.com/KSXGitHub/github-actions-deploy-aur) action, which regenerates `.SRCINFO` (via `makepkg`), builds the package with `makepkg` against the real release binary (`test: true` — this verifies the source download + `sha256sums` on the actual artifact), and pushes to the AUR over SSH. Pre-releases are filtered out. End users install with any AUR helper:
+
+```bash
+yay -S gwm-cli-bin   # or: paru -S gwm-cli-bin
+```
+
+`gwm-cli-bin` is a prebuilt-binary package (downloads the linux-gnu tarball, verifies its `sha256`, installs the binary + license + bash/zsh/fish completions). The render + release wiring contract is pinned by [`tests/aur_pkgbuild_tests.rs`](tests/aur_pkgbuild_tests.rs). The CI `test: true` step runs `makepkg` only, **not** `namcap` — the PKGBUILD is `namcap`-linted locally (`makepkg` + `namcap` in an `archlinux` container). The `x86_64→$CARCH` `namcap` warning on the arch-suffixed `source_*` arrays is a known false positive (`$CARCH` is illegal in an array *name*). `namcap`-clean on the real statically-linked binary (its only dynamic deps are `glibc`/`gcc-libs` — `zlib` and `libgit2` are vendored statically) is confirmed at the first stable AUR push.
+
+#### One-time bootstrap (maintainer)
+
+AUR authenticates by SSH key, not a PAT — so the key is split in two:
+
+1. Register an [AUR account](https://aur.archlinux.org/register) and paste your SSH **public** key into *My Account → SSH Public Key* (`~/.ssh/aur.pub`). Route the host to that key in `~/.ssh/config` (`Host aur.archlinux.org` / `IdentityFile ~/.ssh/aur` / `User aur`).
+2. Add the matching **private** key as the `AUR_SSH_PRIVATE_KEY` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>. This is the only secret the job needs — the commit identity (`kbrdn1` / `onepiecekylian@gmail.com`) is hardcoded in the job.
+3. The first release push creates the `gwm-cli-bin` package on the AUR (it does not exist until then).
+4. Flip `continue-on-error: true` to `false` on the `aur-publish` job after the first successful sync.
+
+Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
+
 ---
 
 By contributing, you agree your changes are licensed under the MIT License (see `LICENSE.md`).
