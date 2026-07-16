@@ -7,7 +7,9 @@
 //! `$XDG_CONFIG_HOME` (env-independence rule). `global_config_path_in`
 //! pins the on-disk location separately.
 
-use gwm::config::{global_config_path, global_config_path_in, Config};
+use gwm::config::{
+  global_config_path, global_config_path_in, resolve_global_config_path, resolve_gwm_config_file, Config,
+};
 use std::path::Path;
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -38,6 +40,127 @@ fn write_global(dir: &Path, contents: &str) -> std::path::PathBuf {
 fn global_config_path_lives_under_gwm_config_toml() {
   let home = Path::new("/tmp/xdg-home");
   assert_eq!(global_config_path_in(home), home.join("gwm").join("config.toml"));
+}
+
+// --- issue #372: the documented `~/.config` path is honoured across
+// platforms, not just where `dirs::config_dir()` happens to be `~/.config`.
+// These drive the pure resolver seam (existence injected) so the contract
+// holds identically on every runner OS, per the env-independence rule.
+
+/// Build a `.../gwm/config.toml` under `home/.config` and `touch` it.
+fn touch_dotconfig(home: &Path) -> std::path::PathBuf {
+  let dir = home.join(".config").join("gwm");
+  std::fs::create_dir_all(&dir).unwrap();
+  let cfg = dir.join("config.toml");
+  std::fs::write(&cfg, "").unwrap();
+  cfg
+}
+
+#[test]
+fn resolver_prefers_dotconfig_when_it_exists() {
+  // A macOS user who followed the docs and put their config at
+  // ~/.config/gwm/config.toml must be honoured even though the platform
+  // config dir (Application Support) differs from ~/.config (issue #372).
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap(); // stand-in for Application Support
+  let cfg = touch_dotconfig(home.path());
+
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(platform.path()), |p| p.exists());
+  assert_eq!(
+    resolved,
+    Some(cfg),
+    "the documented ~/.config path must win when present"
+  );
+}
+
+#[test]
+fn resolver_falls_back_to_platform_dir_when_only_it_exists() {
+  // Back-compat: a config already living at the platform dir keeps working
+  // when ~/.config has none.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+  let cfg = global_config_path_in(platform.path());
+  std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+  std::fs::write(&cfg, "").unwrap();
+
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(platform.path()), |p| p.exists());
+  assert_eq!(
+    resolved,
+    Some(cfg),
+    "an existing platform-dir config must still resolve"
+  );
+}
+
+#[test]
+fn resolver_returns_canonical_dotconfig_when_nothing_exists() {
+  // Neither present → point doctor / callers at the documented location.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(platform.path()), |_| false);
+  assert_eq!(
+    resolved,
+    Some(global_config_path_in(&home.path().join(".config"))),
+    "with nothing on disk the canonical ~/.config path is reported"
+  );
+}
+
+#[test]
+fn resolver_honours_xdg_outright_even_when_dotconfig_exists() {
+  // An explicit $XDG_CONFIG_HOME wins over both candidates and is returned
+  // whether or not the file exists — the pre-#372 contract.
+  let xdg = TempDir::new().unwrap();
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+  touch_dotconfig(home.path()); // present, yet XDG must still win
+
+  let resolved = resolve_global_config_path(Some(xdg.path()), Some(home.path()), Some(platform.path()), |p| {
+    p.exists()
+  });
+  assert_eq!(resolved, Some(global_config_path_in(xdg.path())));
+}
+
+#[test]
+fn resolver_linux_dotconfig_equals_platform_dir_is_unchanged() {
+  // On Linux dirs::config_dir() == ~/.config, so both candidates coincide
+  // and resolution is byte-for-byte pre-#372 whether or not the file exists.
+  let home = TempDir::new().unwrap();
+  let platform = home.path().join(".config"); // simulate the Linux equality
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(&platform), |_| false);
+  assert_eq!(resolved, Some(global_config_path_in(&platform)));
+}
+
+#[test]
+fn shared_resolver_honours_filename_and_dotconfig() {
+  // The resolver is parameterised by filename so config.toml and aliases.toml
+  // share one ~/.config-first contract (issue #374). Exercise it with a
+  // non-config filename to pin the plumbing.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+  let dir = home.path().join(".config").join("gwm");
+  std::fs::create_dir_all(&dir).unwrap();
+  let cfg = dir.join("aliases.toml");
+  std::fs::write(&cfg, "").unwrap();
+
+  let resolved = resolve_gwm_config_file("aliases.toml", None, Some(home.path()), Some(platform.path()), |p| {
+    p.exists()
+  });
+  assert_eq!(
+    resolved,
+    Some(cfg),
+    "an arbitrary filename resolves under ~/.config when present"
+  );
+
+  // XDG still wins outright, carrying the requested filename.
+  let xdg = TempDir::new().unwrap();
+  let via_xdg = resolve_gwm_config_file(
+    "aliases.toml",
+    Some(xdg.path()),
+    Some(home.path()),
+    Some(platform.path()),
+    |p| p.exists(),
+  );
+  assert_eq!(via_xdg, Some(xdg.path().join("gwm").join("aliases.toml")));
 }
 
 #[test]
@@ -82,6 +205,43 @@ fn gwm_no_global_config_env_forces_repo_only() {
       None => std::env::remove_var("XDG_CONFIG_HOME"),
     }
   }
+}
+
+#[cfg(unix)]
+#[test]
+fn non_utf8_xdg_config_home_still_wins_outright() {
+  // Regression (#372 review): a valid-but-non-UTF-8 $XDG_CONFIG_HOME (legal on
+  // Unix) must be honoured, not dropped by a `String`-only read that would let
+  // a `~/.config` file mask the explicit config home. `global_config_path`
+  // reads via `var_os`, so the raw `OsString` survives.
+  use std::os::unix::ffi::OsStrExt;
+  let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prev_flag = std::env::var_os("GWM_NO_GLOBAL_CONFIG");
+  let prev_xdg = std::env::var_os("XDG_CONFIG_HOME");
+
+  // 0xFF is not valid UTF-8, so `std::env::var` would report this path absent.
+  let raw = std::ffi::OsStr::from_bytes(b"/tmp/xdg-\xff-home");
+  let expected = Path::new(raw).join("gwm").join("config.toml");
+
+  // SAFETY: env mutation is serialised by `env_lock()`; restored below.
+  unsafe {
+    std::env::remove_var("GWM_NO_GLOBAL_CONFIG");
+    std::env::set_var("XDG_CONFIG_HOME", raw);
+  }
+  let got = global_config_path();
+
+  // SAFETY: restoration paired with the mutations above, still guarded.
+  unsafe {
+    match prev_flag {
+      Some(v) => std::env::set_var("GWM_NO_GLOBAL_CONFIG", v),
+      None => std::env::remove_var("GWM_NO_GLOBAL_CONFIG"),
+    }
+    match prev_xdg {
+      Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+      None => std::env::remove_var("XDG_CONFIG_HOME"),
+    }
+  }
+  assert_eq!(got, Some(expected), "non-UTF-8 XDG must win outright, not be dropped");
 }
 
 #[test]

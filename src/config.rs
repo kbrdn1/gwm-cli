@@ -1336,12 +1336,71 @@ pub fn global_config_path_in(config_home: &Path) -> PathBuf {
   config_home.join("gwm").join("config.toml")
 }
 
-/// Resolve the user-level global config path, honouring
-/// `$XDG_CONFIG_HOME` first and falling back to `dirs::config_dir()` —
-/// the same resolution order as `~/.config/gwm/aliases.toml` and the
-/// trust ledger. Returns `None` on systems where neither resolves
-/// (sandboxed CI / containers without `$HOME`), in which case loading
-/// degrades to repo-only. Issue #190.
+/// Pure resolver for a user-level `gwm/<filename>` file (`config.toml`,
+/// `aliases.toml`, …): given the candidate config homes and an existence
+/// predicate, pick the effective path. Shared by the global config (#372)
+/// and the user-level alias file (#374) so the two can't drift.
+///
+/// Precedence:
+///   1. `$XDG_CONFIG_HOME/gwm/<filename>` — an explicit user override wins
+///      outright, whether or not it exists (mirrors the pre-#372 contract).
+///   2. `~/.config/gwm/<filename>` — the documented cross-platform path.
+///   3. `dirs::config_dir()/gwm/<filename>` — the platform fallback
+///      (`Application Support` on macOS, `%APPDATA%` on Windows).
+///
+/// With no `$XDG_CONFIG_HOME`, #2 and #3 are the candidate set: the first
+/// that EXISTS wins, so a macOS user who put their file at the documented
+/// `~/.config` path is finally honoured, while an existing `Application
+/// Support` file keeps working. When neither exists the canonical `~/.config`
+/// path is returned so doctor / error messages point at the documented
+/// location. On Linux #2 and #3 coincide, so resolution is byte-for-byte the
+/// pre-#372 behaviour.
+///
+/// Pure (existence is injected) so the OS-dependent contract is unit-testable
+/// against a tempdir without touching the runner's real `$HOME`. Issues #372,
+/// #374.
+pub fn resolve_gwm_config_file(
+  filename: &str,
+  xdg_config_home: Option<&Path>,
+  home_dir: Option<&Path>,
+  platform_config_dir: Option<&Path>,
+  exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+  let join = |home: &Path| home.join("gwm").join(filename);
+  // An explicit $XDG_CONFIG_HOME is an intentional user choice — honour it
+  // outright, existent or not (callers treat an absent file as unset).
+  if let Some(xdg) = xdg_config_home {
+    return Some(join(xdg));
+  }
+  let dotconfig = home_dir.map(|h| join(&h.join(".config")));
+  let platform = platform_config_dir.map(join);
+  // First existing candidate wins (documented ~/.config before the platform
+  // fallback); else the canonical ~/.config path, else the platform dir.
+  if let Some(p) = dotconfig.as_ref().filter(|p| exists(p)) {
+    return Some(p.clone());
+  }
+  if let Some(p) = platform.as_ref().filter(|p| exists(p)) {
+    return Some(p.clone());
+  }
+  dotconfig.or(platform)
+}
+
+/// Pure resolver behind [`global_config_path`] — the `config.toml`
+/// specialisation of [`resolve_gwm_config_file`]. Issue #372.
+pub fn resolve_global_config_path(
+  xdg_config_home: Option<&Path>,
+  home_dir: Option<&Path>,
+  platform_config_dir: Option<&Path>,
+  exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+  resolve_gwm_config_file("config.toml", xdg_config_home, home_dir, platform_config_dir, exists)
+}
+
+/// Resolve the user-level global config path, honouring `$XDG_CONFIG_HOME`
+/// first, then the documented `~/.config/gwm/config.toml`, then the platform
+/// config dir (`dirs::config_dir()`). Returns `None` on systems where none
+/// resolves (sandboxed CI / containers without `$HOME`), in which case
+/// loading degrades to repo-only. Issues #190, #372.
 pub fn global_config_path() -> Option<PathBuf> {
   // Opt-out: `GWM_NO_GLOBAL_CONFIG=1` reports no global path, forcing
   // repo-only loading. `load_for_repo` reads the real user-level file,
@@ -1352,12 +1411,18 @@ pub fn global_config_path() -> Option<PathBuf> {
   if crate::trust::env_truthy("GWM_NO_GLOBAL_CONFIG") {
     return None;
   }
-  if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-    if !xdg.is_empty() {
-      return Some(global_config_path_in(Path::new(&xdg)));
-    }
-  }
-  dirs::config_dir().map(|p| global_config_path_in(&p))
+  // `var_os`, not `var`: a non-UTF-8 `$XDG_CONFIG_HOME` (valid on Unix) must
+  // still win outright. Reading it as a `String` would drop it, letting a
+  // `~/.config` file silently mask an explicit XDG config home.
+  let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty());
+  let home = dirs::home_dir();
+  let platform = dirs::config_dir();
+  resolve_global_config_path(
+    xdg.as_deref().map(Path::new),
+    home.as_deref(),
+    platform.as_deref(),
+    |p| p.exists(),
+  )
 }
 
 impl Config {
