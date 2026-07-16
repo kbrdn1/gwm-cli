@@ -7,7 +7,9 @@
 //! `$XDG_CONFIG_HOME` (env-independence rule). `global_config_path_in`
 //! pins the on-disk location separately.
 
-use gwm::config::{global_config_path, global_config_path_in, resolve_global_config_path, Config};
+use gwm::config::{
+  global_config_path, global_config_path_in, resolve_global_config_path, resolve_gwm_config_file, Config,
+};
 use std::path::Path;
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -126,6 +128,39 @@ fn resolver_linux_dotconfig_equals_platform_dir_is_unchanged() {
   let platform = home.path().join(".config"); // simulate the Linux equality
   let resolved = resolve_global_config_path(None, Some(home.path()), Some(&platform), |_| false);
   assert_eq!(resolved, Some(global_config_path_in(&platform)));
+}
+
+#[test]
+fn shared_resolver_honours_filename_and_dotconfig() {
+  // The resolver is parameterised by filename so config.toml and aliases.toml
+  // share one ~/.config-first contract (issue #374). Exercise it with a
+  // non-config filename to pin the plumbing.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+  let dir = home.path().join(".config").join("gwm");
+  std::fs::create_dir_all(&dir).unwrap();
+  let cfg = dir.join("aliases.toml");
+  std::fs::write(&cfg, "").unwrap();
+
+  let resolved = resolve_gwm_config_file("aliases.toml", None, Some(home.path()), Some(platform.path()), |p| {
+    p.exists()
+  });
+  assert_eq!(
+    resolved,
+    Some(cfg),
+    "an arbitrary filename resolves under ~/.config when present"
+  );
+
+  // XDG still wins outright, carrying the requested filename.
+  let xdg = TempDir::new().unwrap();
+  let via_xdg = resolve_gwm_config_file(
+    "aliases.toml",
+    Some(xdg.path()),
+    Some(home.path()),
+    Some(platform.path()),
+    |p| p.exists(),
+  );
+  assert_eq!(via_xdg, Some(xdg.path().join("gwm").join("aliases.toml")));
 }
 
 #[test]

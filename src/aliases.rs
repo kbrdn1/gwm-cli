@@ -326,18 +326,29 @@ fn first_byte_is_dash(token: &std::ffi::OsStr) -> bool {
   token.as_encoded_bytes().first() == Some(&b'-')
 }
 
-/// Default location of the user-level alias file. Mirrors the
-/// trust-ledger pattern (`~/.config/gwm/trust.toml`): honour
-/// `$XDG_CONFIG_HOME` first, fall back to `dirs::config_dir()` —
-/// returns `None` on systems where neither resolves (sandboxed CI,
-/// containers without `$HOME`).
+/// Default location of the user-level alias file, resolved the same way as
+/// the global config (`~/.config/gwm/config.toml`, issues #372/#374): an
+/// explicit `$XDG_CONFIG_HOME` wins outright, otherwise the first existing of
+/// the documented `~/.config/gwm/aliases.toml` then the platform config dir
+/// (`Application Support` on macOS, `%APPDATA%` on Windows); the canonical
+/// `~/.config` path when neither exists. Returns `None` on systems where no
+/// home resolves (sandboxed CI, containers without `$HOME`). Delegates to the
+/// shared [`crate::config::resolve_gwm_config_file`] so the alias and config
+/// resolvers can't drift.
+///
+/// `var_os`, not `var`: a non-UTF-8 `$XDG_CONFIG_HOME` (legal on Unix) must
+/// still win outright rather than be dropped and masked by `~/.config`.
 fn default_user_path() -> Option<PathBuf> {
-  if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-    if !xdg.is_empty() {
-      return Some(PathBuf::from(xdg).join("gwm").join("aliases.toml"));
-    }
-  }
-  dirs::config_dir().map(|p| p.join("gwm").join("aliases.toml"))
+  let xdg = std::env::var_os("XDG_CONFIG_HOME").filter(|s| !s.is_empty());
+  let home = dirs::home_dir();
+  let platform = dirs::config_dir();
+  crate::config::resolve_gwm_config_file(
+    "aliases.toml",
+    xdg.as_deref().map(Path::new),
+    home.as_deref(),
+    platform.as_deref(),
+    |p| p.exists(),
+  )
 }
 
 /// Internal shape of the user-level alias file. Mirrors the

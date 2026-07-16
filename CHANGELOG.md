@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing of `~/.config` then the platform dir — keeping an existing
   `Application Support` config working. A non-UTF-8 `$XDG_CONFIG_HOME` is read
   via `var_os` so it can no longer be masked by `~/.config`. (#372)
+- The user-level alias file (`~/.config/gwm/aliases.toml`) now resolves the
+  same way as the global config, so it is read from the documented `~/.config`
+  path on macOS and Windows instead of only `dirs::config_dir()`. Both files
+  share one resolver (`resolve_gwm_config_file`) so they can't drift. (#374)
 
 ## Past releases
 
