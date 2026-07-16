@@ -10,7 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- The user-level global config is now read from the documented
+  `~/.config/gwm/config.toml` on **every** platform. Previously macOS (and
+  Windows) resolved only `dirs::config_dir()` — `~/Library/Application
+  Support/gwm/config.toml` — so a config placed at the documented `~/.config`
+  path was silently ignored unless `$XDG_CONFIG_HOME` was set. Resolution is
+  now `$XDG_CONFIG_HOME` → `~/.config` → platform dir (first existing wins),
+  keeping an existing `Application Support` config working. (#372)
 
 ## Past releases
 
