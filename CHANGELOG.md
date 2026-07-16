@@ -10,7 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+
+- **Scoop install channel for Windows** — `scoop bucket add gwm
+  https://github.com/kbrdn1/scoop-gwm && scoop install gwm`. A new
+  `scoop-bucket-update` job in `release.yml` renders
+  `packaging/scoop/gwm.json.template` and pushes `bucket/gwm.json` to the
+  `kbrdn1/scoop-gwm` bucket on every stable release (mirroring the Homebrew
+  tap; pre-releases filtered out). The manifest carries Scoop autoupdate
+  metadata so `scoop update gwm` works between pushes. (#376)
 
 ## Past releases
 
