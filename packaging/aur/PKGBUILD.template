@@ -14,7 +14,10 @@ pkgdesc="git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap 
 arch=('x86_64' 'aarch64')
 url="https://github.com/kbrdn1/gwm-cli"
 license=('MIT')
-depends=('glibc' 'gcc-libs')
+# `git` is a runtime dependency: gwm shells out to `git` for sync, worktree
+# rename, clean, and TUI previews (not just the vendored libgit2). glibc +
+# gcc-libs cover the dynamic library deps.
+depends=('glibc' 'gcc-libs' 'git')
 provides=('gwm-cli' 'gwm')
 conflicts=('gwm-cli' 'gwm')
 # The release binary is already stripped (`strip = true` in the release

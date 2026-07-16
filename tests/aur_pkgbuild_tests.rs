@@ -106,6 +106,16 @@ fn renders_a_complete_pkgbuild() {
     "must conflict on both the base name and the binary name (owns /usr/bin/gwm): {out}"
   );
 
+  // `git` is a runtime dependency — gwm shells out to it (sync, rename, clean,
+  // TUI previews), so the package must declare it or those features break on a
+  // minimal Arch install.
+  let depends = out
+    .lines()
+    .find(|l| l.trim_start().starts_with("depends="))
+    .unwrap_or_else(|| panic!("PKGBUILD must declare depends: {out}"));
+  assert!(depends.contains("'git'"), "depends must include git: {depends}");
+  assert!(depends.contains("'glibc'"), "depends must include glibc: {depends}");
+
   // Both architectures are packaged from the versioned linux-gnu tarballs.
   assert!(
     out.contains("arch=('x86_64' 'aarch64')"),
