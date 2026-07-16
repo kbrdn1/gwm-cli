@@ -106,7 +106,11 @@ jobs:
         shell: bash
         run: |
           cargo install cargo-deb cargo-generate-rpm --locked
-          cargo deb --no-build --target ${{ matrix.target }} --output dist/
+          # `--no-strip`: the release profile already strips (`strip = true`),
+          # AND cargo-deb's default strip runs the HOST `strip` — which can't
+          # process the aarch64 ELF that `cross` built, failing the arm64 job.
+          # cargo-generate-rpm does not strip, so it needs no such flag.
+          cargo deb --no-build --no-strip --target ${{ matrix.target }} --output dist/
           cargo generate-rpm --target ${{ matrix.target }} --output dist/
           ( cd dist && for f in *.deb *.rpm; do shasum -a 256 "$f" > "$f.sha256"; done )
           ls -la dist
