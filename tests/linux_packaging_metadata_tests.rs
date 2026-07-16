@@ -73,16 +73,18 @@ fn deb_ships_the_binary_under_usr_bin() {
 }
 
 #[test]
-fn deb_skips_shlibdeps_with_an_explicit_depends() {
+fn deb_declares_glibc_with_a_version_floor() {
   let deb = metadata("deb");
-  let depends = deb.get("depends").and_then(|v| v.as_str());
+  let depends = deb
+    .get("depends")
+    .and_then(|v| v.as_str())
+    .expect("depends is a string");
   // Explicit (not `$auto`) so cargo-deb never runs dpkg-shlibdeps — required
-  // to package the cross-built aarch64 binary from an x86_64 runner.
-  assert_eq!(
-    depends,
-    Some("libc6"),
-    "depends must be the explicit glibc dep, not $auto"
-  );
+  // to package the cross-built aarch64 binary from an x86_64 runner — AND
+  // carries a glibc floor so dpkg refuses cleanly on too-old distros instead
+  // of installing then crashing at load.
+  assert!(depends.starts_with("libc6"), "glibc is the sole dynamic dep: {depends}");
+  assert!(depends.contains(">= 2.34"), "depends must pin a glibc floor: {depends}");
 }
 
 // ---- .rpm (#378) --------------------------------------------------------
@@ -124,9 +126,13 @@ fn rpm_declares_glibc_requirement() {
   // libgit2 and zlib are statically linked — must be declared explicitly.
   let rpm = metadata("generate-rpm");
   let requires = rpm.get("requires").expect("rpm requires table is present");
+  let glibc = requires
+    .get("glibc")
+    .and_then(|v| v.as_str())
+    .expect("glibc requirement present");
   assert!(
-    requires.get("glibc").is_some(),
-    "rpm must require glibc explicitly, got: {requires:?}"
+    glibc.contains(">= 2.34"),
+    "rpm glibc requirement must pin a floor, got: {glibc}"
   );
 }
 

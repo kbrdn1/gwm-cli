@@ -64,7 +64,13 @@ libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle
 hooks), and a ratatui TUI. The installed command is `gwm`."""
 section = "utils"
 priority = "optional"
-depends = "libc6"
+# `>= 2.34`: the binaries are built on `ubuntu-latest`, whose CRT objects pull
+# GLIBC_2.34, so this is a definite lower bound. Declaring it makes dpkg refuse
+# cleanly on older glibc (RHEL 8 = 2.28, Ubuntu 20.04 = 2.31) instead of
+# installing then failing at load. It is a conservative floor, not the exact
+# per-arch ABI floor — computing that from the ELF in CI (and doing the same for
+# the tarballs) is tracked as a follow-up (#386).
+depends = "libc6 (>= 2.34)"
 conflicts = "gwm"
 assets = [
   ["target/release/gwm", "usr/bin/", "755"],
@@ -83,7 +89,7 @@ assets = [
 summary = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 license = "MIT"
 auto-req = "no"
-requires = { glibc = "*" }
+requires = { glibc = ">= 2.34" }
 assets = [
   { source = "target/release/gwm", dest = "/usr/bin/gwm", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/gwm-cli/README.md", mode = "644" },
