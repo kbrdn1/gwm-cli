@@ -107,6 +107,30 @@ fn rpm_ships_the_binary_under_usr_bin() {
 }
 
 #[test]
+fn deb_conflicts_with_debian_gwm_window_manager() {
+  // Debian ships an unrelated `gwm` window manager that also owns
+  // `/usr/bin/gwm`; without Conflicts, dpkg errors on the file clash at unpack.
+  let deb = metadata("deb");
+  assert_eq!(
+    deb.get("conflicts").and_then(|v| v.as_str()),
+    Some("gwm"),
+    "deb must declare Conflicts: gwm"
+  );
+}
+
+#[test]
+fn rpm_declares_glibc_requirement() {
+  // With auto-req off (cross-packaging), the sole dynamic dep — glibc, since
+  // libgit2 and zlib are statically linked — must be declared explicitly.
+  let rpm = metadata("generate-rpm");
+  let requires = rpm.get("requires").expect("rpm requires table is present");
+  assert!(
+    requires.get("glibc").is_some(),
+    "rpm must require glibc explicitly, got: {requires:?}"
+  );
+}
+
+#[test]
 fn rpm_disables_auto_req() {
   let rpm = metadata("generate-rpm");
   // Cross-packaging aarch64 from an x86_64 runner can't run rpm's dependency
