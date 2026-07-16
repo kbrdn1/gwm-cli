@@ -54,8 +54,9 @@ fn template_exists_and_carries_all_placeholders() {
       t.display()
     );
   }
-  // The Scoop autoupdate variables must live in the template verbatim so
-  // `scoop update` can bump versions on its own — they must NOT be rendered.
+  // The Scoop autoupdate variables must survive rendering so Scoop's
+  // maintainer-side checkver/excavator tooling can regenerate the manifest —
+  // they must NOT be substituted.
   assert!(
     body.contains("$version"),
     "template missing the Scoop $version autoupdate var"

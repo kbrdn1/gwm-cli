@@ -17,8 +17,9 @@
 # Exit 1 on usage / validation errors, with a message on stderr.
 #
 # Only the `__FOO__` placeholders are substituted; the Scoop autoupdate
-# variables (`$version`, `$url`) are left verbatim so `scoop update` can bump
-# versions on its own between our pushes.
+# variables (`$version`, `$url`) are left verbatim so Scoop's maintainer-side
+# checkver/excavator tooling can regenerate the manifest. (Client `scoop update
+# gwm` pulls whatever bucket/gwm.json this job has already pushed.)
 
 set -eu
 

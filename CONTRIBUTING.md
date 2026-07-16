@@ -425,7 +425,7 @@ scoop bucket add gwm https://github.com/kbrdn1/scoop-gwm
 scoop install gwm
 ```
 
-The canonical manifest source lives at [`packaging/scoop/gwm.json.template`](packaging/scoop/gwm.json.template); the render + Scoop-autoupdate contract is pinned by [`tests/scoop_manifest_tests.rs`](tests/scoop_manifest_tests.rs). Only the `__FOO__` placeholders are substituted at release time — the Scoop `$version` / `$url` autoupdate variables are left verbatim so `scoop update` keeps working between pushes.
+The canonical manifest source lives at [`packaging/scoop/gwm.json.template`](packaging/scoop/gwm.json.template); the render + Scoop-autoupdate contract is pinned by [`tests/scoop_manifest_tests.rs`](tests/scoop_manifest_tests.rs). Only the `__FOO__` placeholders are substituted at release time — the Scoop `$version` / `$url` autoupdate variables are left verbatim so Scoop's maintainer-side `checkver`/excavator tooling can regenerate the manifest. End users get new versions from `scoop update gwm` once the `scoop-bucket-update` job pushes the refreshed `bucket/gwm.json`, so keep the job green (that is what the client actually pulls).
 
 #### One-time bootstrap (maintainer)
 

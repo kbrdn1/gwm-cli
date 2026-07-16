@@ -17,8 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scoop-bucket-update` job in `release.yml` renders
   `packaging/scoop/gwm.json.template` and pushes `bucket/gwm.json` to the
   `kbrdn1/scoop-gwm` bucket on every stable release (mirroring the Homebrew
-  tap; pre-releases filtered out). The manifest carries Scoop autoupdate
-  metadata so `scoop update gwm` works between pushes. (#376)
+  tap; pre-releases filtered out). `scoop update gwm` picks up each new
+  version once the release job pushes the refreshed manifest. (#376)
 
 ## Past releases
 

@@ -27,7 +27,7 @@ Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2`
 | Cargo (source)   | `cargo install --path .`                                             |
 | cargo-binstall   | `cargo binstall gwm-cli`                                             |
 | Homebrew (macOS) | `brew tap kbrdn1/tap && brew install gwm`                            |
-| Scoop (Windows)  | `scoop bucket add gwm https://github.com/kbrdn1/scoop-gwm && scoop install gwm` |
+| Scoop (Windows)  | `scoop bucket add gwm https://github.com/kbrdn1/scoop-gwm; scoop install gwm` |
 | Nix flake        | `nix profile install github:kbrdn1/gwm-cli`                          |
 | Prebuilt         | <https://github.com/kbrdn1/gwm-cli/releases> (Linux / macOS / Windows) |
 
