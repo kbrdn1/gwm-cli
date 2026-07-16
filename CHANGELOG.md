@@ -31,9 +31,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `aur-publish` job in `release.yml` renders `packaging/aur/PKGBUILD.template`
   and pushes the `gwm-cli-bin` prebuilt-binary package to the AUR on every
   stable release (via the SHA-pinned `KSXGitHub/github-actions-deploy-aur`
-  action, which regenerates `.SRCINFO` and runs `makepkg` + `namcap` against
-  the real binary). Installs `gwm` + license + bash/zsh/fish completions;
-  `provides`/`conflicts` `gwm-cli` and `gwm`. Pre-releases filtered out. (#379)
+  action, which regenerates `.SRCINFO` and builds the package with `makepkg`
+  against the real binary). Installs `gwm` + license + bash/zsh/fish
+  completions; `depends` on `git` (gwm shells out to it); `provides`/`conflicts`
+  `gwm-cli` and `gwm`. Pre-releases filtered out. (#379)
+
+### Fixed
+
+- **`.deb` / `.rpm` packages now depend on `git`** — gwm shells out to the
+  `git` binary (sync, worktree rename, clean, TUI previews) beyond the vendored
+  libgit2, so a minimal Debian/Fedora install without git would break those
+  features. `git` is now declared in `Depends` / `Requires`. (#388)
 
 ## Past releases
 

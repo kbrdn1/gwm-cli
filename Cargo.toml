@@ -48,12 +48,13 @@ pkg-fmt = "zip"
 # `conflicts = "gwm"` is still needed because Debian's unrelated `gwm`
 # window-manager package also owns `/usr/bin/gwm`, so the two can't coexist —
 # dpkg refuses cleanly instead of erroring on the file clash at unpack time.
-# `depends = "libc6"` is set explicitly (not `$auto`) so cargo-deb skips
-# `dpkg-shlibdeps` — the binary vendors both libgit2 AND zlib statically (see
-# the libz-sys dep above), so glibc is its only dynamic dependency. Skipping
-# shlibdeps is what lets the cross-built aarch64 package be produced from an
-# x86_64 runner. glibc is not version-pinned (that needs per-arch symbol
-# analysis we can't run cross); the same implicit floor applies to the tarballs.
+# `depends` is set explicitly (not `$auto`) so cargo-deb skips `dpkg-shlibdeps`
+# — the binary vendors both libgit2 AND zlib statically (see the libz-sys dep
+# above), so glibc is its only dynamic *library* dependency. Skipping shlibdeps
+# is what lets the cross-built aarch64 package be produced from an x86_64
+# runner. `git` is added as a runtime dependency because gwm shells out to the
+# `git` binary (sync, worktree rename, clean, TUI previews) beyond the vendored
+# libgit2 — shlibdeps would never catch an exec dependency (#388).
 [package.metadata.deb]
 maintainer = "Kylian Bardini <onepiecekylian@gmail.com>"
 copyright = "2026 Kylian Bardini"
@@ -70,7 +71,7 @@ priority = "optional"
 # installing then failing at load. It is a conservative floor, not the exact
 # per-arch ABI floor — computing that from the ELF in CI (and doing the same for
 # the tarballs) is tracked as a follow-up (#386).
-depends = "libc6 (>= 2.34)"
+depends = "libc6 (>= 2.34), git"
 conflicts = "gwm"
 assets = [
   ["target/release/gwm", "usr/bin/", "755"],
@@ -82,14 +83,17 @@ assets = [
 # `cargo generate-rpm --target <triple>`. `auto-req = "no"` disables rpm's
 # dependency auto-detection (it needs the target's rpm tooling, unavailable
 # when cross-packaging aarch64 from an x86_64 runner). With libgit2 and zlib
-# both statically linked, glibc is the only dynamic dependency, declared
-# explicitly via `requires` so a minimal Fedora/RHEL still pulls it. (No `gwm`
-# window-manager package exists on Fedora, so no rpm `conflicts` is needed.)
+# both statically linked, glibc is the only dynamic *library* dependency; `git`
+# is added as a runtime dependency because gwm shells out to the `git` binary
+# (sync, worktree rename, clean, TUI previews) beyond the vendored libgit2
+# (#388). Both are declared explicitly via `requires` so a minimal Fedora/RHEL
+# still pulls them. (No `gwm` window-manager package exists on Fedora, so no
+# rpm `conflicts` is needed.)
 [package.metadata.generate-rpm]
 summary = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
 license = "MIT"
 auto-req = "no"
-requires = { glibc = ">= 2.34" }
+requires = { glibc = ">= 2.34", git = "*" }
 assets = [
   { source = "target/release/gwm", dest = "/usr/bin/gwm", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/gwm-cli/README.md", mode = "644" },

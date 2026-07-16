@@ -118,8 +118,31 @@ fn deb_declares_glibc_with_a_version_floor() {
   // to package the cross-built aarch64 binary from an x86_64 runner — AND
   // carries a glibc floor so dpkg refuses cleanly on too-old distros instead
   // of installing then crashing at load.
-  assert!(depends.starts_with("libc6"), "glibc is the sole dynamic dep: {depends}");
+  assert!(depends.starts_with("libc6"), "libc6 leads the depends list: {depends}");
   assert!(depends.contains(">= 2.34"), "depends must pin a glibc floor: {depends}");
+}
+
+#[test]
+fn deb_and_rpm_declare_git_as_a_runtime_dep() {
+  // gwm shells out to the `git` binary (sync, worktree rename, clean, TUI
+  // previews) beyond the vendored libgit2, so the distro packages must pull
+  // git — shlibdeps / rpm auto-req would never catch an exec dependency (#388).
+  let deb = metadata("deb");
+  let depends = deb
+    .get("depends")
+    .and_then(|v| v.as_str())
+    .expect("depends is a string");
+  assert!(
+    depends.split(',').any(|d| d.trim() == "git"),
+    "deb depends must include git: {depends}"
+  );
+
+  let rpm = metadata("generate-rpm");
+  let requires = rpm.get("requires").expect("rpm requires table is present");
+  assert!(
+    requires.get("git").is_some(),
+    "rpm requires must include git: {requires:?}"
+  );
 }
 
 // ---- .rpm (#378) --------------------------------------------------------
