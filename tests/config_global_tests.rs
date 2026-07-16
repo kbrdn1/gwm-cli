@@ -7,7 +7,7 @@
 //! `$XDG_CONFIG_HOME` (env-independence rule). `global_config_path_in`
 //! pins the on-disk location separately.
 
-use gwm::config::{global_config_path, global_config_path_in, Config};
+use gwm::config::{global_config_path, global_config_path_in, resolve_global_config_path, Config};
 use std::path::Path;
 use std::sync::Mutex;
 use tempfile::TempDir;
@@ -38,6 +38,94 @@ fn write_global(dir: &Path, contents: &str) -> std::path::PathBuf {
 fn global_config_path_lives_under_gwm_config_toml() {
   let home = Path::new("/tmp/xdg-home");
   assert_eq!(global_config_path_in(home), home.join("gwm").join("config.toml"));
+}
+
+// --- issue #372: the documented `~/.config` path is honoured across
+// platforms, not just where `dirs::config_dir()` happens to be `~/.config`.
+// These drive the pure resolver seam (existence injected) so the contract
+// holds identically on every runner OS, per the env-independence rule.
+
+/// Build a `.../gwm/config.toml` under `home/.config` and `touch` it.
+fn touch_dotconfig(home: &Path) -> std::path::PathBuf {
+  let dir = home.join(".config").join("gwm");
+  std::fs::create_dir_all(&dir).unwrap();
+  let cfg = dir.join("config.toml");
+  std::fs::write(&cfg, "").unwrap();
+  cfg
+}
+
+#[test]
+fn resolver_prefers_dotconfig_when_it_exists() {
+  // A macOS user who followed the docs and put their config at
+  // ~/.config/gwm/config.toml must be honoured even though the platform
+  // config dir (Application Support) differs from ~/.config (issue #372).
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap(); // stand-in for Application Support
+  let cfg = touch_dotconfig(home.path());
+
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(platform.path()), |p| p.exists());
+  assert_eq!(
+    resolved,
+    Some(cfg),
+    "the documented ~/.config path must win when present"
+  );
+}
+
+#[test]
+fn resolver_falls_back_to_platform_dir_when_only_it_exists() {
+  // Back-compat: a config already living at the platform dir keeps working
+  // when ~/.config has none.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+  let cfg = global_config_path_in(platform.path());
+  std::fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+  std::fs::write(&cfg, "").unwrap();
+
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(platform.path()), |p| p.exists());
+  assert_eq!(
+    resolved,
+    Some(cfg),
+    "an existing platform-dir config must still resolve"
+  );
+}
+
+#[test]
+fn resolver_returns_canonical_dotconfig_when_nothing_exists() {
+  // Neither present → point doctor / callers at the documented location.
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(platform.path()), |_| false);
+  assert_eq!(
+    resolved,
+    Some(global_config_path_in(&home.path().join(".config"))),
+    "with nothing on disk the canonical ~/.config path is reported"
+  );
+}
+
+#[test]
+fn resolver_honours_xdg_outright_even_when_dotconfig_exists() {
+  // An explicit $XDG_CONFIG_HOME wins over both candidates and is returned
+  // whether or not the file exists — the pre-#372 contract.
+  let xdg = TempDir::new().unwrap();
+  let home = TempDir::new().unwrap();
+  let platform = TempDir::new().unwrap();
+  touch_dotconfig(home.path()); // present, yet XDG must still win
+
+  let resolved = resolve_global_config_path(Some(xdg.path()), Some(home.path()), Some(platform.path()), |p| {
+    p.exists()
+  });
+  assert_eq!(resolved, Some(global_config_path_in(xdg.path())));
+}
+
+#[test]
+fn resolver_linux_dotconfig_equals_platform_dir_is_unchanged() {
+  // On Linux dirs::config_dir() == ~/.config, so both candidates coincide
+  // and resolution is byte-for-byte pre-#372 whether or not the file exists.
+  let home = TempDir::new().unwrap();
+  let platform = home.path().join(".config"); // simulate the Linux equality
+  let resolved = resolve_global_config_path(None, Some(home.path()), Some(&platform), |_| false);
+  assert_eq!(resolved, Some(global_config_path_in(&platform)));
 }
 
 #[test]
