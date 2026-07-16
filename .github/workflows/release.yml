@@ -472,3 +472,44 @@ jobs:
           commit_message: "gwm-cli-bin ${{ github.ref_name }}"
           ssh_keyscan_types: rsa,ecdsa,ed25519
           test: true
+
+  winget-publish:
+    name: publish kbrdn1.gwm to winget
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `winget install
+    # kbrdn1.gwm`. Same reasoning as the homebrew/scoop/aur jobs above (the
+    # whole workflow is implicitly tag-scoped via the upstream jobs).
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
+    # Advisory until WINGET_TOKEN is provisioned AND the initial manifest is
+    # merged into microsoft/winget-pkgs (winget-releaser UPDATES an existing
+    # package — the first `kbrdn1.gwm` submission is manual, see CONTRIBUTING).
+    # Flip to false after the first successful automated submission.
+    continue-on-error: true
+    steps:
+      - name: verify WINGET_TOKEN is configured
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "${WINGET_TOKEN:-}" ]; then
+            echo "::error::WINGET_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > winget setup."
+            exit 1
+          fi
+
+      # Third-party action — pinned to a commit SHA (v2) because it is trusted
+      # with WINGET_TOKEN. It runs komac to build the manifest for the new
+      # version from the release's Windows .zip and opens a PR to
+      # microsoft/winget-pkgs from the kbrdn1/winget-pkgs fork. `version`
+      # defaults to the tag minus the `v` prefix (v1.1.1 -> 1.1.1), matching the
+      # winget PackageVersion. The default installers-regex only matches
+      # exe/msi/msix, so it is overridden to our nested-zip asset.
+      - name: publish to winget
+        uses: vedantmgoyal9/winget-releaser@4ffc7888bffd451b357355dc214d43bb9f23917e # v2
+        with:
+          identifier: kbrdn1.gwm
+          installers-regex: 'gwm-.*-x86_64-pc-windows-msvc\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
