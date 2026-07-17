@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `git` binary (sync, worktree rename, clean, TUI previews) beyond the vendored
   libgit2, so a minimal Debian/Fedora install without git would break those
   features. `git` is now declared in `Depends` / `Requires`. (#388)
+- **The Nix flake reports the right version** — it advertised `0.3.0-rc.3`
+  while the code was at `1.1.1`, so `nix profile list`, `nix flake show` and
+  the store path all named a release eight versions old. The built binary was
+  always correct (`gwm --version` reported `1.1.1`), so this was mislabelling
+  rather than a broken build, which is why it went unnoticed. The version is
+  now read out of `Cargo.toml` at eval time instead of being restated in
+  `flake.nix`, making the drift impossible rather than merely fixed. (#393)
 
 ## Past releases
 
