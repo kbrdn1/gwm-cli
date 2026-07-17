@@ -45,17 +45,35 @@ fn release_workflow_publishes_to_winget() {
 }
 
 #[test]
-fn komac_is_pinned_and_checksum_verified() {
+fn komac_is_pinned_and_digest_anchored() {
   let job = winget_job();
   // The tool that runs with WINGET_TOKEN must be a fixed version, not "latest".
   assert!(
     job.contains("KOMAC_VERSION: 2.16.0"),
     "komac must be pinned to an explicit version"
   );
-  // ...and its download must be checksum-verified against the release SHA256SUMS.
+  // The expected digest must live in THIS repo: verifying against a SHA256SUMS
+  // fetched from the same upstream release would still pass if that release
+  // were compromised (both artifacts swapped together).
+  let digest = job
+    .split_once("KOMAC_SHA256:")
+    .expect("komac must be pinned to an expected sha256")
+    .1
+    .split_whitespace()
+    .next()
+    .expect("KOMAC_SHA256 has a value");
+  assert_eq!(digest.len(), 64, "KOMAC_SHA256 must be a 64-hex sha256, got `{digest}`");
   assert!(
-    job.contains("SHA256SUMS") && job.contains("sha256sum -c"),
-    "the pinned komac download must be checksum-verified"
+    digest.chars().all(|c| c.is_ascii_hexdigit()),
+    "KOMAC_SHA256 must be hex, got `{digest}`"
+  );
+  assert!(
+    job.contains("sha256sum -c"),
+    "the pinned komac download must be checked against KOMAC_SHA256"
+  );
+  assert!(
+    !job.contains("--pattern SHA256SUMS"),
+    "must not re-fetch upstream SHA256SUMS — that is not an independent anchor"
   );
 }
 

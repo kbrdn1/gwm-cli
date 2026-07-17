@@ -490,9 +490,12 @@ jobs:
     # false after the first successful automated submission.
     continue-on-error: true
     env:
-      # Pinned so the exact tool that runs with WINGET_TOKEN is fixed. Bump
-      # deliberately (and keep the SHA256SUMS check) rather than tracking latest.
+      # Pinned AND digest-anchored: the expected sha256 lives here, in this
+      # repo, rather than being fetched from the same upstream release as the
+      # binary — a release whose artifacts and SHA256SUMS were both swapped
+      # would otherwise still verify. Bump the two together, deliberately.
       KOMAC_VERSION: 2.16.0
+      KOMAC_SHA256: 7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d
     steps:
       - name: verify WINGET_TOKEN is configured
         env:
@@ -504,22 +507,22 @@ jobs:
             exit 1
           fi
 
-      # Run komac directly from a pinned, checksum-verified release binary
-      # instead of the `winget-releaser` action. That action pulls
+      # Run komac directly from a pinned, digest-anchored release binary instead
+      # of the `winget-releaser` action. That action pulls
       # `cargo-bins/cargo-binstall@main` (a mutable ref) and installs the latest
       # komac at runtime, so a compromise of either would run with WINGET_TOKEN
       # in scope — a SHA pin on the action alone would not protect the secret.
       # Pinning the one tool that touches the token is the same posture as the
       # SHA-pinned deploy-aur job above.
-      - name: install komac (pinned + checksum-verified)
+      - name: install komac (pinned + digest-anchored)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tarball="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           gh release download "v${KOMAC_VERSION}" --repo russellbanks/Komac \
-            --pattern "$tarball" --pattern SHA256SUMS --dir /tmp/komac
-          ( cd /tmp/komac && grep " ${tarball}\$" SHA256SUMS | sha256sum -c - )
+            --pattern "$tarball" --dir /tmp/komac
+          echo "${KOMAC_SHA256}  /tmp/komac/${tarball}" | sha256sum -c -
           tar -C /tmp/komac -xzf "/tmp/komac/${tarball}"
           echo /tmp/komac >> "$GITHUB_PATH"
 
