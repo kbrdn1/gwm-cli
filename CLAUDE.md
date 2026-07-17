@@ -63,6 +63,15 @@ exception; codify the manual test as an integration test.
 
 ## Other house rules
 
+- **`main` is protected: there is no direct push, for anyone.** PRs are
+  required, seven status checks must be green, and `enforce_admins` is
+  on, so `git push origin main` is rejected for the maintainer too and
+  there is no override. `dev` reaches `main` through a PR, hotfixes
+  included; the tag is pushed after the merge (tags are not covered by
+  the protection). Do not plan a release around a local `dev` → `main`
+  merge, which is how v1.0.2 and v1.1.1 were cut: it will now be
+  rejected. Rules and rationale in
+  [CONTRIBUTING.md §Branch protection](CONTRIBUTING.md#branch-protection).
 - **Reconcile open PRs before any tag.** Before cutting an RC or a
   stable, run `gh pr list --state open` and account for every open
   PR: either it's in the changeset, intentionally deferred, or
