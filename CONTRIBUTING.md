@@ -285,6 +285,51 @@ Suffix the type with `!` and add a `BREAKING CHANGE:` footer:
 BREAKING CHANGE: configs using the old keys must migrate to the new schema.
 ```
 
+### Signing (preferred)
+
+Commits on a PR should show up as **`Verified`** on GitHub. GPG is preferred;
+SSH signing is equally accepted (GitHub verifies both the same way).
+
+This is a preference, not a gate: nothing in CI or branch protection enforces
+it, and a PR will not be rejected for unsigned commits. It is asked for because
+a signed history is worth having, not because tooling demands it.
+
+Signing a commit and getting it **verified** are two different things. GitHub
+shows `Verified` only when *both* hold:
+
+- the **public** key is registered on your GitHub account
+  (Settings → SSH and GPG keys)
+- the **committer email** matches a uid on the key **and** a verified email on
+  your account
+
+The second one is what usually bites. A commit signed with a perfectly good key
+whose uid does not match the committer email stays `Unverified` forever. If you
+use different `user.email` values across repos, check before you push:
+
+```bash
+git config user.email                  # the committer email git will stamp
+gpg --list-secret-keys --keyid-format=long   # the uid(s) on your key
+```
+
+To turn signing on for this repo only:
+
+```bash
+git config user.signingkey <KEY_ID>
+git config commit.gpgsign true
+# SSH instead of GPG:
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/id_ed25519.pub
+```
+
+Verify what GitHub actually thinks, which is the only opinion that counts here
+(local `git log --show-signature` can disagree with it, e.g. on a keyring it
+cannot read):
+
+```bash
+gh api /repos/<owner>/<repo>/commits/<sha> \
+  --jq '.commit.verification | "\(.verified) \(.reason)"'   # want: true valid
+```
+
 ## Labels
 
 See [`.github/LABELS.md`](.github/LABELS.md) for the full matrix. Quick reference:
@@ -300,6 +345,7 @@ Before opening a PR:
 - [ ] `cargo fmt`
 - [ ] `cargo clippy -- -D warnings`
 - [ ] `cargo test` (all green)
+- [ ] Commits show as `Verified` on GitHub (preferred, see [Signing](#signing-preferred))
 - [ ] CHANGELOG.md updated under `## [Unreleased]`
 - [ ] If the public CLI changed: the `docs/3.cli` section updated (the README is a landing page that delegates to `docs/`)
 - [ ] If the config schema changed: `examples/gwm.toml.example` and the `docs/4.configuration` section updated
