@@ -472,3 +472,72 @@ jobs:
           commit_message: "gwm-cli-bin ${{ github.ref_name }}"
           ssh_keyscan_types: rsa,ecdsa,ed25519
           test: true
+
+  winget-publish:
+    name: publish kbrdn1.gwm to winget
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `winget install
+    # kbrdn1.gwm`. Same reasoning as the homebrew/scoop/aur jobs above (the
+    # whole workflow is implicitly tag-scoped via the upstream jobs).
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
+    # Advisory until WINGET_TOKEN is provisioned AND the initial `kbrdn1.gwm`
+    # manifest is merged into microsoft/winget-pkgs — komac UPDATES an existing
+    # package, so the first submission is manual (see CONTRIBUTING). Flip to
+    # false after the first successful automated submission.
+    continue-on-error: true
+    env:
+      # Pinned AND digest-anchored: the expected sha256 lives here, in this
+      # repo, rather than being fetched from the same upstream release as the
+      # binary — a release whose artifacts and SHA256SUMS were both swapped
+      # would otherwise still verify. Bump the two together, deliberately.
+      KOMAC_VERSION: 2.16.0
+      KOMAC_SHA256: 7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d
+    steps:
+      - name: verify WINGET_TOKEN is configured
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "${WINGET_TOKEN:-}" ]; then
+            echo "::error::WINGET_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > winget setup."
+            exit 1
+          fi
+
+      # Run komac directly from a pinned, digest-anchored release binary instead
+      # of the `winget-releaser` action. That action pulls
+      # `cargo-bins/cargo-binstall@main` (a mutable ref) and installs the latest
+      # komac at runtime, so a compromise of either would run with WINGET_TOKEN
+      # in scope — a SHA pin on the action alone would not protect the secret.
+      # Pinning the one tool that touches the token is the same posture as the
+      # SHA-pinned deploy-aur job above.
+      - name: install komac (pinned + digest-anchored)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tarball="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          gh release download "v${KOMAC_VERSION}" --repo russellbanks/Komac \
+            --pattern "$tarball" --dir /tmp/komac
+          echo "${KOMAC_SHA256}  /tmp/komac/${tarball}" | sha256sum -c -
+          tar -C /tmp/komac -xzf "/tmp/komac/${tarball}"
+          echo /tmp/komac >> "$GITHUB_PATH"
+
+      # `komac update` bases the new version on the existing `kbrdn1.gwm`
+      # manifest (nested-portable zip), swapping in the new version, URL, and
+      # sha256, then opens a PR from the kbrdn1/winget-pkgs fork. The tag's `v`
+      # prefix is stripped to match the winget PackageVersion (v1.1.1 -> 1.1.1).
+      - name: submit the manifest update to winget-pkgs
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_FORK_OWNER: kbrdn1
+          KOMAC_CREATED_WITH: gwm-cli release.yml
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          url="https://github.com/kbrdn1/gwm-cli/releases/download/${TAG}/gwm-${TAG}-x86_64-pc-windows-msvc.zip"
+          komac update kbrdn1.gwm --version "$version" --urls "$url" --submit

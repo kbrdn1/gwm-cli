@@ -35,6 +35,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the real binary). Installs `gwm` + license + bash/zsh/fish
   completions; `depends` on `git` (gwm shells out to it); `provides`/`conflicts`
   `gwm-cli` and `gwm`. Pre-releases filtered out. (#379)
+- **winget publishing automation** — a new `winget-publish` job in
+  `release.yml` opens a manifest PR to `microsoft/winget-pkgs` (`kbrdn1.gwm`)
+  for each stable release, building the manifest from the Windows `.zip` with a
+  pinned, checksum-verified `komac` (run directly rather than via an action that
+  installs tooling from mutable refs at runtime with the token in scope). The
+  initial manifest is submitted manually; the job takes over from the next
+  version. `winget install kbrdn1.gwm` becomes available once Microsoft merges
+  the manifest. Pre-releases filtered out. (#381)
 
 ### Fixed
 

@@ -459,6 +459,25 @@ AUR authenticates by SSH key, not a PAT — so the key is split in two:
 
 Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
 
+### winget (`winget install kbrdn1.gwm`)
+
+Stable releases automatically open a manifest PR to [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) via the `winget-publish` job in [`release.yml`](.github/workflows/release.yml). It runs [`komac`](https://github.com/russellbanks/Komac) directly — from a **pinned, digest-anchored** release binary — to build the manifest for the new version from the release's Windows `.zip` (`InstallerType: zip`, `NestedInstallerType: portable`) and push a PR from your `winget-pkgs` fork. The tag's `v` prefix is stripped to match the winget `PackageVersion`. Pre-releases are filtered out. The release-wiring contract is pinned by [`tests/winget_release_tests.rs`](tests/winget_release_tests.rs).
+
+> **Why not the `winget-releaser` action?** It pulls `cargo-bins/cargo-binstall@main` and installs the latest `komac` at runtime — both mutable refs that would run with `WINGET_TOKEN` in scope, so a SHA pin on the action alone wouldn't protect the token. Pinning the one tool that touches the secret is the same posture as the SHA-pinned `deploy-aur` job.
+>
+> The expected komac digest (`KOMAC_SHA256`) is stored **in this repo**, not fetched from the same upstream release as the binary — a release whose artifacts *and* its `SHA256SUMS` were both swapped would otherwise still verify. To upgrade komac, bump `KOMAC_VERSION` and `KOMAC_SHA256` together and re-derive the digest yourself (`shasum -a 256 komac-<ver>-x86_64-unknown-linux-gnu.tar.gz`).
+
+**komac only updates an existing package** — the job runs `komac update`, not `komac new`. The **first** `kbrdn1.gwm` manifest is submitted manually (`komac new` / `komac submit`); the job takes over from the next version onward. Every submission then goes through Microsoft's moderated validation (schema + a Windows sandbox install), which is external to this repo.
+
+#### One-time bootstrap (maintainer)
+
+1. Fork [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) under your account (komac pushes its branch there): `gh repo fork microsoft/winget-pkgs --clone=false`.
+2. Submit the **initial** `kbrdn1.gwm` manifest manually and get it merged.
+3. Create a **classic** PAT with the `public_repo` scope — komac's fork + cross-repo-PR flow needs a classic token; new fine-grained PATs don't work here. Add it as the `WINGET_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
+4. Flip `continue-on-error: true` to `false` on the `winget-publish` job after the first successful automated submission.
+
+Re-drive a failed submission the same way: `gh workflow run release.yml --ref <tag>`.
+
 ---
 
 By contributing, you agree your changes are licensed under the MIT License (see `LICENSE.md`).
