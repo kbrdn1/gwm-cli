@@ -8,8 +8,14 @@
 
   outputs = { self, nixpkgs, flake-utils }:
     let
-      # Bumped in lockstep with `Cargo.toml` `version` at release time.
-      version = "0.3.0-rc.3";
+      # Read straight out of `Cargo.toml` rather than restated here: a literal
+      # silently drifted for eight releases (#393) because the comment claiming
+      # it was "bumped in lockstep at release time" was enforced by nothing.
+      #
+      # Only the version is derived. `Cargo.toml` names the crate `gwm-cli`
+      # (the bare `gwm` name was taken on crates.io) while the binary, and so
+      # the package, is `gwm` — see `pname` below.
+      version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;
     in
     flake-utils.lib.eachDefaultSystem (system:
       let
