@@ -24,9 +24,54 @@ fn has_field_at_indent(s: &str, name: &str, indent: usize) -> bool {
   s.lines().any(|line| line.starts_with(&prefix))
 }
 
+// True iff a line assigns a *literal* version, e.g. `version = "0.3.0-rc.3";`.
+// A derived version (`version = (builtins.fromTOML ...).package.version;`) has
+// no opening quote, and an interpolated one does not start with a digit, so
+// neither trips this.
+fn has_hardcoded_version_literal(s: &str) -> bool {
+  s.lines().any(|line| {
+    line
+      .trim()
+      .strip_prefix("version = \"")
+      .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+  })
+}
+
 #[test]
 fn flake_exists_at_repo_root() {
   assert!(flake_path().exists(), "flake.nix must exist at the repo root");
+}
+
+#[test]
+fn flake_derives_its_version_from_cargo_toml() {
+  // Issue #393: the flake advertised `0.3.0-rc.3` while Cargo.toml was at
+  // 1.1.1 — eight releases of drift. The root cause was not the number but a
+  // comment ("Bumped in lockstep with Cargo.toml at release time") asserting
+  // an invariant that nothing enforced. `nix flake check` never caught it:
+  // the version is metadata, so the build stayed green and `gwm --version`
+  // stayed correct while the store path, `nix flake show` and
+  // `nix profile list` all lied.
+  //
+  // Deriving the version makes the drift structurally impossible, so this
+  // test pins the mechanism rather than comparing two numbers (which would be
+  // tautological once derived). It fails if someone later "simplifies" the
+  // expression back into a literal.
+  let s = read_flake();
+  assert!(
+    !has_hardcoded_version_literal(&s),
+    "flake.nix must not hardcode a version literal — derive it with \
+     `version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).package.version;` \
+     so it cannot drift from Cargo.toml again (#393)"
+  );
+  assert!(
+    s.contains("fromTOML") && s.contains("./Cargo.toml"),
+    "flake.nix must read its version out of Cargo.toml"
+  );
+  // Only the *version* is derived. Cargo.toml's `name` is `gwm-cli` (the bare
+  // `gwm` crate name was taken on crates.io) while the binary — and so the
+  // package — is `gwm`. `flake_exposes_gwm_package_via_build_rust_package`
+  // pins `pname = "gwm"`, which is what stops a well-meaning "derive
+  // everything from Cargo.toml" from renaming the package.
 }
 
 #[test]
