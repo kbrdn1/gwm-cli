@@ -18,8 +18,11 @@ fn help_prints_subcommands() {
   // the description. A loose `contains("cd")` would also match prose like
   // "to cd into it" in another subcommand's description.
   // `cd` is now a visible alias of `path` (clap renders it as
-  // `path  ...  [aliases: cd]`), so we assert the alias marker
-  // rather than a separate `  cd ` row.
+  // `path  ...  [alias: cd]`), so we assert the alias marker rather than a
+  // separate `  cd ` row. The regex tolerates clap's singular/plural churn:
+  // 4.6.1 printed `[aliases: cd]`, 4.6.2 prints `[alias: cd]` for a lone
+  // alias — `alias(es)?` matches both so a cosmetic upstream change to the
+  // help formatter can't break the test again.
   cmd
     .assert()
     .success()
@@ -33,7 +36,7 @@ fn help_prints_subcommands() {
     // Issue #308: materialise an existing PR into a worktree (inbound review).
     .stdout(predicate::str::contains("  review "))
     .stdout(predicate::str::contains("  path "))
-    .stdout(predicate::str::contains("[aliases: cd]"))
+    .stdout(predicate::str::is_match(r"\[alias(es)?: cd\]").unwrap())
     .stdout(predicate::str::contains("  bootstrap "))
     // Issue #24: fetch + rebase/merge a worktree onto its upstream.
     .stdout(predicate::str::contains("  sync "))
@@ -627,13 +630,15 @@ fn switch_alias_s_resolves_to_switch() {
 #[test]
 fn top_level_help_advertises_switch_alias() {
   // The visible alias must show up in the top-level help summary so users
-  // discover `gwm s` without reading the subcommand-specific page.
+  // discover `gwm s` without reading the subcommand-specific page. `aliases?`
+  // tolerates clap's singular/plural rendering (4.6.1 `[aliases: s]`, 4.6.2
+  // `[alias: s]`).
   let mut cmd = Command::cargo_bin("gwm").unwrap();
   cmd.arg("--help");
   cmd
     .assert()
     .success()
-    .stdout(predicate::str::contains("switch").and(predicate::str::contains("[aliases: s]")));
+    .stdout(predicate::str::contains("switch").and(predicate::str::is_match(r"\[alias(es)?: s\]").unwrap()));
 }
 
 #[test]
