@@ -12,6 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **aqua install channel** — `aqua g -i kbrdn1/gwm-cli`. gwm is registered in
+  the aqua **standard registry**
+  ([aquaproj/aqua-registry#57117](https://github.com/aquaproj/aqua-registry/pull/57117)),
+  so no custom registry wiring is needed. aqua pulls the prebuilt binary for
+  the platform from the matching GitHub Release and verifies its `sha256`
+  against the published `.sha256` sidecar; Linux, macOS and Windows are
+  covered on both Intel and ARM, with Windows-on-ARM falling back to the x64
+  build under emulation. Requires standard registry `v4.539.0` or newer. (#380)
 - **Scoop install channel for Windows** — `scoop bucket add gwm
   https://github.com/kbrdn1/scoop-gwm; scoop install gwm`. A new
   `scoop-bucket-update` job in `release.yml` renders
