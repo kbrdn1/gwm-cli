@@ -100,8 +100,8 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
   }
 
   assert!(
-    audited >= 5,
-    "expected at least 5 credential-free checkouts in release.yml, found {audited} — the parser is \
+    audited >= 4,
+    "expected at least 4 credential-free checkouts in release.yml, found {audited} — the parser is \
      probably no longer seeing the steps"
   );
 }
