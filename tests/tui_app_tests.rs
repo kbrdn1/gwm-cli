@@ -6321,24 +6321,21 @@ fn worktree_refresh_fetches_issue_and_pr_status_for_every_linked_worktree() {
     .unwrap();
   assert!(app.drain_task_results(), "the worktree refresh result must apply");
 
-  assert!(
-    app.tasks.is_loading(TaskKind::GithubIssue(42)),
-    "worktree refresh must fetch the selected issue"
-  );
-  assert!(
-    app.tasks.is_loading(TaskKind::GithubPr(61)),
-    "worktree refresh must fetch the selected PR"
-  );
-  assert!(
-    app.tasks.is_loading(TaskKind::GithubIssue(283)),
-    "worktree refresh must fetch issues from non-selected rows too"
-  );
-  assert!(
-    app.tasks.is_loading(TaskKind::GithubPr(286)),
-    "worktree refresh must fetch PRs from non-selected rows too"
-  );
+  // Issue #425: do NOT assert `tasks.is_loading(GithubIssue(42))` here. Applying
+  // the refresh requests four fetches, each spawning a worker that runs the
+  // `fake_gh` shell script above. On an idle runner those workers can finish and
+  // have their results consumed inside the very `drain_task_results()` call
+  // above, so the tasks are already out of `running` by the time the assertion
+  // reads it — the test would be racing the workers it just spawned. Whether a
+  // task is still in `running` at an arbitrary instant is an implementation
+  // timing detail, not a contract.
+  //
+  // The contract ("refresh fetches issue and PR status for every linked
+  // worktree") is asserted below, and asserted more strongly: the marker colours
+  // and the persisted link titles/states can only be right if every fetch was
+  // both requested and completed, on the non-selected row as well.
 
-  for _ in 0..50 {
+  for _ in 0..200 {
     if !app.tasks.is_loading(TaskKind::GithubIssue(42))
       && !app.tasks.is_loading(TaskKind::GithubPr(61))
       && !app.tasks.is_loading(TaskKind::GithubIssue(283))
