@@ -13,9 +13,20 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.md)
 [![rust](https://img.shields.io/badge/rust-1.86%2B-orange?logo=rust)](https://www.rust-lang.org/)
 
-Rust CLI + ratatui TUI to manage git worktrees across projects. Native `libgit2` (vendored — no `gwq` / `git` CLI dependency), per-repo + user-level configurable bootstrap (file copies, regex guards, lifecycle hooks), single binary, portable.
+**One binary to manage every git worktree in every repo, with the setup already done.**
 
-![gwm TUI — worktree table and details sidebar](docs/2.tui/_assets/hero.png)
+`gwm create feat 42 user-auth` branches it, places it on disk, copies the files you told it to, runs the setup commands you configured, and links GitHub issue #42. Then bare `gwm` opens a TUI over all of them.
+
+![gwm in action: create a worktree with its bootstrap report, then remove it, from the TUI](docs/_capture/demo.gif)
+
+Written in Rust on vendored `libgit2`, so there is no `git` CLI to shell out to and nothing to install alongside it. Installs from Cargo, Homebrew, Scoop, Nix, aqua, the AUR, `.deb` and `.rpm`.
+
+**What you get that a `git worktree add` wrapper doesn't:**
+
+- **Bootstrap that actually runs your project.** File copies with deny-list regexes (born from a real "AWS RDS credentials in a copied `.env`" incident), six lifecycle hook phases, stack presets for Laravel / Node / Rust / Go / Python.
+- **A TUI you can live in.** Embedded lazygit and shell overlays, a details sidebar with CI state and working-tree file explorer, remappable keys, themes, command palette.
+- **A machine surface, not just a human one.** `--format=json`, a JSON-RPC daemon with a push stream, and `gwm statusline` for your prompt. The schemas are frozen under SemVer.
+- **Undo.** `gwm undo` and `gwm history` recover a worktree you removed by mistake, without `git reflog`.
 
 > **Full documentation lives in [`docs/`](docs/).** This README is the landing page; every feature has a dedicated section in the doc tree.
 
@@ -41,7 +52,7 @@ Full install matrix and verification steps: [`docs/getting-started/install.md`](
 
 ## the 30-second tour
 
-![gwm in action — create a worktree with its bootstrap report, then remove it, from the TUI](docs/_capture/demo.gif)
+![gwm TUI: worktree table and details sidebar](docs/2.tui/_assets/hero.png)
 
 ```bash
 cd /path/to/your/repo
@@ -80,7 +91,7 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 
 ## documentation
 
-The full tree lives under [`docs/`](docs/) — structured for [Nuxt Content](https://content.nuxt.com/) (numeric prefixes for sidebar order, frontmatter on every page) and ready to drop into the future static site.
+The full tree lives under [`docs/`](docs/): 39 pages in English, mirrored in French under [`docs/fr/`](docs/fr/). Numeric prefixes drive the sidebar order and every page carries frontmatter, so the tree renders as-is into a static site ([#423](https://github.com/kbrdn1/gwm-cli/issues/423) tracks publishing it). The in-repo tree is the source of truth.
 
 | Section                                                         | Read this when …                                                              |
 |:----------------------------------------------------------------|:------------------------------------------------------------------------------|
