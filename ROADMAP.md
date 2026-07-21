@@ -130,14 +130,15 @@ freeze #319 and its additive follow-ons #324 / #325 / #326) all shipped to the
 stable line. See the [Shipped highlights](#shipped-highlights) table above and
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes.
 
-With the machine surface frozen under SemVer, the next minor (`1.1.0`) is the
-home for additive work — new subcommands / flags, new opt-in `.gwm.toml`
-sections, additive JSON fields under the same `SCHEMA_VERSION`. Anything that
-would break a frozen surface waits for a future major.
+With the machine surface frozen under SemVer, every minor since is the home for
+additive work — new subcommands / flags, new opt-in `.gwm.toml` sections,
+additive JSON fields under the same `SCHEMA_VERSION`. Anything that would break
+a frozen surface waits for a future major.
 
-The 1.1.x line is queued from a comparative read of the field (`chmouel/lazyworktree`
-and `d-kuro/gwq`) against the actual gwm codebase. Four capability gaps came out
-of it, and they are ordered by what they unlock rather than by size.
+The next feature line is queued from a comparative read of the field
+(`chmouel/lazyworktree` and `d-kuro/gwq`) against the actual gwm codebase. Four
+capability gaps came out of it, and they are ordered by what they unlock rather
+than by size.
 
 ### 1. Agent session pane ([#408](https://github.com/kbrdn1/gwm-cli/issues/408))
 
@@ -227,7 +228,7 @@ the daemon's "concrete first consumer" as `gwm statusline` (#309) in rc.3, and
 the fan-out / disk-hygiene candidates from the post-rc.2 gap review as
 `gwm exec` and `gwm clean` (#313) in the in-progress `[Unreleased]` delta.
 
-Two of the 1.1.x items above qualify as ambitious rather than incremental, and
+Two of the queued items above qualify as ambitious rather than incremental, and
 both have a concrete first consumer, which is why they are queued rather than
 parked here:
 

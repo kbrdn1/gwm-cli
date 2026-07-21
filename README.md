@@ -17,7 +17,7 @@
 
 `gwm create feat 42 user-auth` branches it, places it on disk, copies the files you told it to, runs the setup commands you configured, and links GitHub issue #42. Then bare `gwm` opens a TUI over all of them.
 
-![gwm in action: create a worktree with its bootstrap report, then remove it, from the TUI](docs/_capture/demo.gif)
+![gwm TUI: worktree table and details sidebar](docs/2.tui/_assets/hero.png)
 
 Written in Rust on vendored `libgit2`, so there is no `git` CLI to shell out to and nothing to install alongside it. Installs from Cargo, Homebrew, Scoop, Nix, aqua, the AUR, `.deb` and `.rpm`.
 
@@ -52,7 +52,7 @@ Full install matrix and verification steps: [`docs/getting-started/install.md`](
 
 ## the 30-second tour
 
-![gwm TUI: worktree table and details sidebar](docs/2.tui/_assets/hero.png)
+![gwm in action: create a worktree with its bootstrap report, then remove it, from the TUI](docs/_capture/demo.gif)
 
 ```bash
 cd /path/to/your/repo
