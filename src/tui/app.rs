@@ -112,6 +112,12 @@ pub enum View {
   /// [`App::create_form`] plus [`App::edit_original_branch`] /
   /// [`App::edit_original_path`].
   Edit,
+  /// Generic detail overlay (issue #408). A centred row-list modal — its
+  /// first consumer is the agent-session view (`a` on the worktree list);
+  /// the content contract is deliberately generic so the planned rich
+  /// PR/Issue view reuses it. State lives on [`App::detail_overlay`]; keys
+  /// resolve through [`crate::tui::modal_keymap::KeyContext::Detail`].
+  DetailOverlay,
 }
 
 /// What the run loop must do after [`App::handle_exec_picker_key`]
@@ -479,6 +485,10 @@ pub struct App {
   /// before an armed reclaim fires (Codex #333 review).
   clean_overlay_countdown_secs: u32,
 
+  /// Generic detail overlay content (issue #408) — filled by
+  /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
+  pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -594,6 +604,7 @@ impl App {
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
+      detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -1997,6 +2008,8 @@ impl App {
       View::ExecPicker => HintContext::ExecPicker,
       View::CleanReport => HintContext::Clean,
       View::Edit => HintContext::Rename,
+      // Issue #408: the detail overlay advertises its close/scroll keys.
+      View::DetailOverlay => HintContext::Detail,
       View::List => self.pane_hint_context(),
     }
   }
@@ -2427,6 +2440,28 @@ impl App {
   /// [`View::CleanReport`]. Refuses (status-bar message, no transition) when
   /// nothing is selected. A scan that finds nothing safe still opens — the
   /// report says so.
+  /// Open the agent-session detail overlay for the selected worktree
+  /// (issue #408, `a`). Rows come from the pure
+  /// [`crate::tui::state::detail_overlay::agent_detail_rows`] mapping over
+  /// the last completed snapshot — a session-less worktree opens with an
+  /// explicit "no agent session found" row, never blank.
+  pub fn open_agent_overlay(&mut self) {
+    let Some(sel) = self.selected() else {
+      self.status = "nothing selected".into();
+      return;
+    };
+    let name = sel.name.clone();
+    let agents = self.agents_for(&sel.clone());
+    let rows = crate::tui::state::detail_overlay::agent_detail_rows(agents, std::time::SystemTime::now());
+    self.detail_overlay.open(format!("agent sessions — {name}"), rows);
+    self.view = View::DetailOverlay;
+  }
+
+  /// Close the detail overlay back to the list, leaving list state as it was.
+  pub fn close_detail_overlay(&mut self) {
+    self.view = View::List;
+  }
+
   pub fn enter_clean_overlay(&mut self) {
     let Some(sel) = self.selected() else {
       self.status = "nothing selected".into();

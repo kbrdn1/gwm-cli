@@ -172,6 +172,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CleanReport => draw_clean_overlay(f, app),
     // #290: branch-rename inline modal renders over the list.
     View::Edit => draw_edit_worktree(f, app),
+    // #408: generic detail overlay (agent sessions) as a centred modal.
+    View::DetailOverlay => draw_detail_overlay(f, app),
     View::List => {}
   }
 }
@@ -705,12 +707,18 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // line that is rebuilt fresh each frame (issue #73) — it's prefixed onto
   // the cached worktree section at render time instead of being spliced into
   // a cloned vec.
-  let header_line = sidebar_header_line(&w, app);
+  let mut prefix_lines = vec![sidebar_header_line(&w, app)];
+  // Issue #408: the agent summary is per-frame like the header — a pure
+  // snapshot lookup, no subprocess — and absent when no session matched.
+  if let Some(line) = agent_summary_line(app.agents_for(&w), std::time::SystemTime::now(), &theme) {
+    prefix_lines.push(line);
+  }
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
 
   // Read the resolved section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
-  // worktree section gains +1 row for the live header prefix.
+  // worktree section gains the live prefix rows (header + optional agent
+  // summary).
   let (worktree_len, working_tree_len, working_tree_counts, commits_len) = {
     let s = if cache_is_current {
       app.sidebar.cache.as_ref().map(|(_, s)| s).unwrap_or(&placeholder)
@@ -718,7 +726,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       &placeholder
     };
     (
-      s.worktree.len() + 1,
+      s.worktree.len() + prefix_lines.len(),
       s.working_tree.len(),
       s.working_tree_counts,
       s.recent_commits.len() as u16,
@@ -815,7 +823,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     f,
     chunks[0],
     status_pane_title(),
-    SectionBody::with_prefix(&header_line, &sections.worktree),
+    SectionBody::with_prefix(&prefix_lines, &sections.worktree),
     border_color,
     0,
     None,
@@ -861,7 +869,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 /// section; it's rebuilt fresh per frame anyway, so passing it separately
 /// costs nothing and keeps the cached `worktree` vec immutable.
 struct SectionBody<'a> {
-  prefix: Option<&'a Line<'a>>,
+  prefix: &'a [Line<'a>],
   lines: &'a [Line<'a>],
 }
 
@@ -869,16 +877,14 @@ impl<'a> SectionBody<'a> {
   /// Section body with no leading live line (Issue / PR, Working Tree,
   /// Recent Commits, and the `(nothing selected)` placeholder).
   fn new(lines: &'a [Line<'a>]) -> Self {
-    Self { prefix: None, lines }
+    Self { prefix: &[], lines }
   }
 
-  /// Section body whose first row is a per-frame live line — the worktree
-  /// identity block, led by the `● <name>` status-dot header.
-  fn with_prefix(prefix: &'a Line<'a>, lines: &'a [Line<'a>]) -> Self {
-    Self {
-      prefix: Some(prefix),
-      lines,
-    }
+  /// Section body whose first rows are per-frame live lines — the worktree
+  /// identity block, led by the `● <name>` status-dot header (and, since
+  /// issue #408, an optional agent summary line).
+  fn with_prefix(prefix: &'a [Line<'a>], lines: &'a [Line<'a>]) -> Self {
+    Self { prefix, lines }
   }
 }
 
@@ -919,7 +925,7 @@ fn render_section(
     spans.extend(l.spans.iter().map(|s| Span::styled(s.content.as_ref(), s.style)));
     Line::from(spans)
   }
-  let padded: Vec<Line<'_>> = prefix.into_iter().chain(lines.iter()).map(pad).collect();
+  let padded: Vec<Line<'_>> = prefix.iter().chain(lines.iter()).map(pad).collect();
   // No `Wrap`: every section now relies on ratatui's view-level hard-clip,
   // matching lazygit's commits panel and ensuring 1 logical row = 1 visual
   // row (so the layout's `Constraint::Length` always matches what we draw).
@@ -931,6 +937,38 @@ fn render_section(
 /// the linked PR / issue state. Rendered fresh every frame (not cached)
 /// so the dot reflects the live fetch result without invalidating the
 /// expensive git preview cache underneath.
+/// Per-frame Status-pane summary of a worktree's agent sessions (issue
+/// #408): the most recent agent with its freshness, plus a `+N` overflow
+/// count when more sessions are attached. `None` (no snapshot / no session)
+/// keeps the pane exactly as before the feature. Pure — pinned by
+/// `tests/tui_app_tests.rs::agent_status_pane_line`.
+pub fn agent_summary_line(
+  agents: Option<&crate::agent_sessions::WorktreeAgents>,
+  now: std::time::SystemTime,
+  theme: &Theme,
+) -> Option<Line<'static>> {
+  let agents = agents?;
+  let top = agents.top()?;
+  let freshness = crate::agent_sessions::Freshness::classify(top.last_activity, top.ended, now);
+  let (word, color) = match freshness {
+    crate::agent_sessions::Freshness::Active => ("active", theme.clean),
+    crate::agent_sessions::Freshness::Idle => ("idle", theme.muted),
+  };
+  let mut spans = vec![
+    Span::styled("Agent: ", Style::default().fg(theme.muted)),
+    Span::styled(
+      top.kind.display().to_string(),
+      Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ),
+    Span::styled(format!(" · {word}"), Style::default().fg(color)),
+  ];
+  let extra = agents.sessions.len().saturating_sub(1);
+  if extra > 0 {
+    spans.push(Span::styled(format!(" · +{extra}"), Style::default().fg(theme.muted)));
+  }
+  Some(Line::from(spans))
+}
+
 fn sidebar_header_line(w: &WorktreeInfo, app: &App) -> Line<'static> {
   let (dot, dot_color) = sidebar_status_dot(app);
   Line::from(vec![
@@ -1903,6 +1941,9 @@ pub enum HintContext {
   Clean,
   /// Branch-rename modal (`View::Edit`, #290).
   Rename,
+  /// Generic detail overlay (issue #408): scroll / close. Agent sessions
+  /// today, the rich PR/Issue view tomorrow.
+  Detail,
 }
 
 impl HintContext {
@@ -1925,6 +1966,7 @@ impl HintContext {
       HintContext::ExecPicker => "exec",
       HintContext::Clean => "clean",
       HintContext::Rename => "rename",
+      HintContext::Detail => "agents",
     }
   }
 
@@ -2036,6 +2078,11 @@ impl HintContext {
       // modal keymap; the scroll/pan pairs stay literal (no single resolved
       // key captures `j/k` / `h/l`, matching the Create/Confirm convention).
       HintContext::Report => &[Hint::Modal(ModalAction::ReportClose, "close")],
+      // #408: detail overlay — scroll pair stays literal like Help's.
+      HintContext::Detail => &[
+        Hint::Lit("j/k", "scroll"),
+        Hint::Modal(ModalAction::DetailClose, "close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2106,6 +2153,7 @@ impl HintContext {
       HintContext::CommandPalette => KeyContext::CommandPalette,
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
+      HintContext::Detail => KeyContext::Detail,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -2663,6 +2711,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(
       Action::CleanOverlay,
       "preview and reclaim build artifacts (with confirm)",
+    ));
+    rows.push(entry(
+      Action::AgentSessions,
+      "show the agent sessions attached to this worktree",
     ));
   }
   rows.push(entry(
@@ -4337,6 +4389,53 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   push_modal_hint(
     &mut lines,
     HintContext::ExecPicker,
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+  );
+  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let area = centered_abs(width, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Render the generic detail overlay (issue #408). A centred modal listing
+/// `(label, value)` rows with theme-mapped roles — agent sessions today, the
+/// rich PR/Issue view tomorrow. Content is prebuilt state
+/// ([`crate::tui::state::detail_overlay::DetailOverlay`]); this function
+/// only paints it, so the render path stays pure.
+fn draw_detail_overlay(f: &mut Frame, app: &App) {
+  use crate::tui::state::detail_overlay::DetailRole;
+  let accent = app.theme.accent;
+  let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let mut lines = overlay_title_lines(&app.detail_overlay.title, accent);
+  let label_w = app
+    .detail_overlay
+    .rows
+    .iter()
+    .map(|r| r.label.chars().count())
+    .max()
+    .unwrap_or(0);
+  let skip = app.detail_overlay.scroll as usize;
+  let max_visible = (term.height as usize).saturating_sub(8).max(3);
+  for row in app.detail_overlay.rows.iter().skip(skip).take(max_visible) {
+    let (label_color, value_style) = match row.role {
+      DetailRole::Active => (
+        app.theme.clean,
+        Style::default().fg(app.theme.clean).add_modifier(Modifier::BOLD),
+      ),
+      DetailRole::Muted => (app.theme.muted, Style::default().fg(app.theme.muted)),
+      DetailRole::Normal => (app.theme.name, Style::default().fg(app.theme.name)),
+    };
+    lines.push(Line::from(vec![
+      Span::styled(format!("{:label_w$}  ", row.label), Style::default().fg(label_color)),
+      Span::styled(row.value.clone(), value_style),
+    ]));
+  }
+  push_modal_hint(
+    &mut lines,
+    HintContext::Detail,
     &app.keymap,
     &app.modal_keymap,
     &app.theme,

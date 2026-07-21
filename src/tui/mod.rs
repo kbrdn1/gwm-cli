@@ -65,21 +65,21 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  agent_cell_label, author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
-  build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style, ci_indicator, clean_dir_icon,
-  command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints,
-  confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title,
-  ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, format_status, freshness_color,
-  github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style, help_lines, help_rows,
-  help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title, issue_summary_line,
-  link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line, modal_hint_line,
-  overlay_modal_width, palette_name_style, pane_counter, panel_border_color, picker_window, pr_badge_color,
-  pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color, rename_buttons_line, status_line,
-  status_pane_title, table_marker, tilde_compress_with_home, type_selector_line, working_tree_counts_footer,
-  working_tree_pane_title, working_tree_status_counts, working_tree_status_line, worktree_name_style,
-  worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections, WorkingTreeCounts,
-  COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON, WT_DELETED_ICON,
-  WT_MODIFIED_ICON,
+  agent_cell_label, agent_summary_line, author_initials, badge_group_width, bootstrap_report_lines, branch_name_color,
+  branch_status_color, build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style, ci_indicator,
+  clean_dir_icon, command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints,
+  config_nav_footer_hints, confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line,
+  delete_worktree_title, ellipsize_middle, field_input_line, filled_cells_for_progress, footer_line, format_status,
+  freshness_color, github_status_lines, header_line, help_body_section_color, help_entry_line, help_label_style,
+  help_lines, help_rows, help_section_style, hint_key_style, hint_label_style, issue_badge_color, issue_pr_pane_title,
+  issue_summary_line, link_open_modal_lines, link_prompt_modal_width, link_target_keys, link_target_line,
+  modal_hint_line, overlay_modal_width, palette_name_style, pane_counter, panel_border_color, picker_window,
+  pr_badge_color, pr_summary_line, recent_commits_lines, recent_items_pane_title, reclaim_size_color,
+  rename_buttons_line, status_line, status_pane_title, table_marker, tilde_compress_with_home, type_selector_line,
+  working_tree_counts_footer, working_tree_pane_title, working_tree_status_counts, working_tree_status_line,
+  worktree_name_style, worktree_path_style, worktrees_pane_title, HelpRow, HintContext, SidebarSections,
+  WorkingTreeCounts, COMMIT_HASH_DISPLAY_LEN, ISSUE_ICON, PR_ICON, RECENT_COMMITS_LIMIT, WT_CREATED_ICON,
+  WT_DELETED_ICON, WT_MODIFIED_ICON,
 };
 
 /// The single TUI render entry point. **Not part of the public SemVer
@@ -662,6 +662,18 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // `confirm` arms / fires the safety countdown, `cancel` aborts, j/k
       // cycle the `[clean.profiles]` picker (re-scanning each time). The
       // countdown auto-fire is driven by the tick block above.
+      // Detail overlay (issue #408): scroll / close, plus the bound global
+      // `agent_sessions` key (default `a`) toggling it shut even rebound.
+      View::DetailOverlay => match app.resolve_modal(KeyContext::Detail, key) {
+        Some(ModalAction::DetailClose) => app.close_detail_overlay(),
+        Some(ModalAction::DetailScrollDown) => {
+          let max = app.detail_overlay.rows.len().saturating_sub(1) as u16;
+          app.detail_overlay.scroll_down(max);
+        }
+        Some(ModalAction::DetailScrollUp) => app.detail_overlay.scroll_up(),
+        _ if app.key_matches_action(key, Action::AgentSessions) => app.close_detail_overlay(),
+        _ => {}
+      },
       View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {
         Some(ModalAction::CleanCancel) => app.close_clean_overlay(),
         Some(ModalAction::CleanConfirm) => {
@@ -941,6 +953,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     // Issue #325: `X` opens the clean reclaim overlay. Picker-gated — it
     // deletes from the selected worktree, a focus-mode action.
     Action::CleanOverlay if !app.picker_mode => app.enter_clean_overlay(),
+    // Issue #408: `a` opens the agent-session detail overlay. Read-only, but
+    // picker-gated like the other overlays — the stripped-down `gwm switch`
+    // picker advertises pick/cancel only.
+    Action::AgentSessions if !app.picker_mode => app.open_agent_overlay(),
     // Picker-mode-gated actions fall through to no-op when the
     // guard fails (i.e. the user pressed them inside `gwm switch`).
     // Same fallthrough catches future actions not yet wired into

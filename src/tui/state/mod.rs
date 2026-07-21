@@ -21,6 +21,7 @@ pub mod command_logs;
 pub mod config_panel;
 pub mod confirm;
 pub mod create_form;
+pub mod detail_overlay;
 pub mod exec_picker;
 pub mod filter;
 pub mod github_fetch;

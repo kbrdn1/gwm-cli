@@ -8189,3 +8189,159 @@ mod agent_sessions_pane {
     assert_eq!(app.agents_for(&w).unwrap().top().unwrap().id, "s1");
   }
 }
+
+// -- Agent detail overlay (issue #408, US2) --------------------------------
+
+mod agent_detail_overlay {
+  use super::*;
+  use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
+  use gwm::tui::state::detail_overlay::{agent_detail_rows, DetailRole};
+  use gwm::tui::{TaskKind, View};
+  use std::collections::BTreeMap;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn seeded_app_with_sessions() -> (tempfile::TempDir, App) {
+    let (dir, mut app) = make_app();
+    let now = SystemTime::now();
+    let path = app.worktrees[0].path.to_string_lossy().to_string();
+    let mut map = BTreeMap::new();
+    map.insert(
+      path.clone(),
+      WorktreeAgents {
+        sessions: vec![
+          AgentSession {
+            kind: AgentKind::ClaudeCode,
+            cwd: PathBuf::from(&path),
+            last_activity: now - Duration::from_secs(10),
+            ended: false,
+            id: "newest-session".into(),
+          },
+          AgentSession {
+            kind: AgentKind::Codex,
+            cwd: PathBuf::from(&path),
+            last_activity: now - Duration::from_secs(4000),
+            ended: false,
+            id: "older-session".into(),
+          },
+        ],
+      },
+    );
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(generation, map));
+    (dir, app)
+  }
+
+  #[test]
+  fn open_lists_sessions_most_recent_first() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    assert_eq!(app.view, View::DetailOverlay);
+    let rows = &app.detail_overlay.rows;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].label, "claude");
+    assert_eq!(rows[0].role, DetailRole::Active);
+    assert_eq!(rows[1].label, "codex");
+    assert_eq!(rows[1].role, DetailRole::Muted);
+    // Value carries freshness + a human-readable recency, not raw timestamps.
+    assert!(rows[0].value.contains("active"));
+    assert!(rows[1].value.contains("idle"));
+    assert!(app.detail_overlay.title.contains(&app.worktrees[0].name));
+  }
+
+  #[test]
+  fn open_on_sessionless_worktree_states_it_rather_than_empty() {
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    assert_eq!(app.view, View::DetailOverlay);
+    let rows = &app.detail_overlay.rows;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].value.contains("no agent session found"));
+    assert_eq!(rows[0].role, DetailRole::Muted);
+  }
+
+  #[test]
+  fn close_restores_the_list_untouched() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    let selected_before = app.list_state.selected();
+    app.open_agent_overlay();
+    app.close_detail_overlay();
+    assert_eq!(app.view, View::List);
+    assert_eq!(app.list_state.selected(), selected_before);
+  }
+
+  #[test]
+  fn detail_rows_are_generic_label_value_role_triples() {
+    // The mapping is pure and content-agnostic: any consumer can build rows.
+    let rows = agent_detail_rows(None, SystemTime::now());
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    // The triple shape is the reuse contract for the future rich view.
+    let _label: &String = &row.label;
+    let _value: &String = &row.value;
+    let _role: &DetailRole = &row.role;
+  }
+}
+
+// -- Status pane agent summary (issue #408, US2) ---------------------------
+
+mod agent_status_pane_line {
+  use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
+  use gwm::tui::agent_summary_line;
+  use gwm::tui::theme::Theme;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn line_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+  }
+
+  #[test]
+  fn summary_line_names_the_top_agent_and_freshness() {
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind: AgentKind::ClaudeCode,
+        cwd: PathBuf::from("/w/one"),
+        last_activity: now - Duration::from_secs(10),
+        ended: false,
+        id: "s1".into(),
+      }],
+    };
+    let line = agent_summary_line(Some(&agents), now, &Theme::default()).unwrap();
+    let text = line_text(&line);
+    assert!(text.contains("claude"), "got: {text}");
+    assert!(text.contains("active"), "got: {text}");
+  }
+
+  #[test]
+  fn summary_line_absent_without_sessions() {
+    let now = SystemTime::now();
+    assert!(agent_summary_line(None, now, &Theme::default()).is_none());
+    let empty = WorktreeAgents::default();
+    assert!(agent_summary_line(Some(&empty), now, &Theme::default()).is_none());
+  }
+
+  #[test]
+  fn summary_line_counts_extra_sessions() {
+    let now = SystemTime::now();
+    let mk = |kind, age, id: &str| AgentSession {
+      kind,
+      cwd: PathBuf::from("/w/one"),
+      last_activity: now - Duration::from_secs(age),
+      ended: false,
+      id: id.into(),
+    };
+    let agents = WorktreeAgents {
+      sessions: vec![
+        mk(AgentKind::ClaudeCode, 5, "a"),
+        mk(AgentKind::Codex, 500, "b"),
+        mk(AgentKind::Vibe, 900, "c"),
+      ],
+    };
+    let line = agent_summary_line(Some(&agents), now, &Theme::default()).unwrap();
+    let text = line_text(&line);
+    assert!(text.contains("claude"), "got: {text}");
+    assert!(text.contains("+2"), "got: {text}");
+  }
+}
