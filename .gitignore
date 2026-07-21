@@ -10,3 +10,6 @@ Cargo.lock.bak
 # Local agent/tool state
 .claude/
 .serena/
+
+# Local working notes (analysis, strategy, open questions)
+.notes/
