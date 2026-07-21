@@ -536,30 +536,42 @@ Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
 
 ### AUR (`yay -S gwm-cli-bin`)
 
-Stable releases automatically refresh the [`gwm-cli-bin`](https://aur.archlinux.org/packages/gwm-cli-bin) AUR package via the `aur-publish` job in [`release.yml`](.github/workflows/release.yml). It renders [`packaging/aur/PKGBUILD.template`](packaging/aur/PKGBUILD.template), then hands the result to the SHA-pinned [`KSXGitHub/github-actions-deploy-aur`](https://github.com/KSXGitHub/github-actions-deploy-aur) action, which regenerates `.SRCINFO` (via `makepkg`), builds the package with `makepkg` against the real release binary (`test: true` — this verifies the source download + `sha256sums` on the actual artifact), and pushes to the AUR over SSH. Pre-releases are filtered out. End users install with any AUR helper:
+**This channel is manual, and the package is not ours.** [`gwm-cli-bin`](https://aur.archlinux.org/packages/gwm-cli-bin) was submitted to the AUR on 2026-07-16 by a third-party packager, so we have no push rights on it. There is no `aur-publish` job in [`release.yml`](.github/workflows/release.yml): one existed briefly, but a job that cannot push is a job that fails silently on every tag, which is worse than no job at all (#430). AUR joins Nixpkgs and aqua as a channel we feed by hand.
+
+End users install with any AUR helper:
 
 ```bash
 yay -S gwm-cli-bin   # or: paru -S gwm-cli-bin
 ```
 
-`gwm-cli-bin` is a prebuilt-binary package (downloads the linux-gnu tarball, verifies its `sha256`, installs the binary + license + bash/zsh/fish completions). The render + release wiring contract is pinned by [`tests/aur_pkgbuild_tests.rs`](tests/aur_pkgbuild_tests.rs). The CI `test: true` step runs `makepkg` only, **not** `namcap` — the PKGBUILD is `namcap`-linted locally (`makepkg` + `namcap` in an `archlinux` container). The `x86_64→$CARCH` `namcap` warning on the arch-suffixed `source_*` arrays is a known false positive (`$CARCH` is illegal in an array *name*). `namcap`-clean on the real statically-linked binary (its only dynamic deps are `glibc`/`gcc-libs` — `zlib` and `libgit2` are vendored statically) is confirmed at the first stable AUR push.
+`gwm-cli-bin` is a prebuilt-binary package (downloads the linux-gnu tarball, verifies its `sha256`, installs the binary + license + bash/zsh/fish completions).
 
-#### One-time bootstrap (maintainer)
+#### Refreshing the package after a stable release
 
-AUR authenticates by SSH key, not a PAT — so the key is split in two:
+Render the PKGBUILD from the release's checksums and hand it over:
 
-1. Register an [AUR account](https://aur.archlinux.org/register) and paste your SSH **public** key into *My Account → SSH Public Key* (`~/.ssh/aur.pub`). Route the host to that key in `~/.ssh/config` (`Host aur.archlinux.org` / `IdentityFile ~/.ssh/aur` / `User aur`).
-2. Add the matching **private** key as the `AUR_SSH_PRIVATE_KEY` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>. This is the only secret the job needs — the commit identity (`kbrdn1` / `onepiecekylian@gmail.com`) is hardcoded in the job.
-3. The first release push creates the `gwm-cli-bin` package on the AUR (it does not exist until then).
-4. Flip `continue-on-error: true` to `false` on the `aur-publish` job after the first successful sync.
+```bash
+TAG=v1.2.0   # the stable tag you just pushed
 
-Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
+mkdir -p sha aur
+gh release download "$TAG" --pattern 'gwm-*-unknown-linux-gnu.tar.gz.sha256' --dir sha
+sh .github/scripts/render-aur-pkgbuild.sh \
+  "${TAG#v}" \
+  "$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256")" \
+  "$(awk '{print $1}' "sha/gwm-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")" \
+  packaging/aur/PKGBUILD.template \
+  > aur/PKGBUILD
+```
+
+The script writes to stdout, hence the redirect; `aur/` is scratch space, not tracked. The render contract is pinned by [`tests/aur_pkgbuild_tests.rs`](tests/aur_pkgbuild_tests.rs), so the output is trustworthy even though nothing in CI consumes it any more. Lint `aur/PKGBUILD` locally before sending (`makepkg` + `namcap` in an `archlinux` container). The `x86_64→$CARCH` `namcap` warning on the arch-suffixed `source_*` arrays is a known false positive (`$CARCH` is illegal in an array *name*).
+
+If co-maintenance of `gwm-cli-bin` is ever granted, the job can come back: the template, the render script and its tests all survived the removal intact. That conversation is tracked in #430.
 
 ### winget (`winget install kbrdn1.gwm`)
 
 Stable releases automatically open a manifest PR to [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) via the `winget-publish` job in [`release.yml`](.github/workflows/release.yml). It runs [`komac`](https://github.com/russellbanks/Komac) directly — from a **pinned, digest-anchored** release binary — to build the manifest for the new version from the release's Windows `.zip` (`InstallerType: zip`, `NestedInstallerType: portable`) and push a PR from your `winget-pkgs` fork. The tag's `v` prefix is stripped to match the winget `PackageVersion`. Pre-releases are filtered out. The release-wiring contract is pinned by [`tests/winget_release_tests.rs`](tests/winget_release_tests.rs).
 
-> **Why not the `winget-releaser` action?** It pulls `cargo-bins/cargo-binstall@main` and installs the latest `komac` at runtime — both mutable refs that would run with `WINGET_TOKEN` in scope, so a SHA pin on the action alone wouldn't protect the token. Pinning the one tool that touches the secret is the same posture as the SHA-pinned `deploy-aur` job.
+> **Why not the `winget-releaser` action?** It pulls `cargo-bins/cargo-binstall@main` and installs the latest `komac` at runtime — both mutable refs that would run with `WINGET_TOKEN` in scope, so a SHA pin on the action alone wouldn't protect the token. Pinning the one tool that touches the secret is the rule for every third-party binary the release workflow trusts with a credential.
 >
 > The expected komac digest (`KOMAC_SHA256`) is stored **in this repo**, not fetched from the same upstream release as the binary — a release whose artifacts *and* its `SHA256SUMS` were both swapped would otherwise still verify. To upgrade komac, bump `KOMAC_VERSION` and `KOMAC_SHA256` together and re-derive the digest yourself (`shasum -a 256 komac-<ver>-x86_64-unknown-linux-gnu.tar.gz`).
 

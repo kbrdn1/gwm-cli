@@ -1,11 +1,15 @@
-# Maintainer: Kylian Bardini <onepiecekylian@gmail.com>
+# Contributor: Kylian Bardini <onepiecekylian@gmail.com>
 
 # PKGBUILD template for `gwm-cli-bin` — the prebuilt binary of gwm, a git
 # worktree manager (TUI + CLI). Rendered by
-# `.github/scripts/render-aur-pkgbuild.sh` at release time: the version and
-# sha256 placeholders are filled from the GitHub Release tarballs, and the
-# result is pushed to the AUR by `release.yml > aur-publish`. Do NOT hand-edit
-# the rendered PKGBUILD on the AUR — change this template instead.
+# `.github/scripts/render-aur-pkgbuild.sh` after a stable release: the version
+# and sha256 placeholders are filled from the GitHub Release tarballs.
+#
+# `gwm-cli-bin` is maintained on the AUR by a third-party packager, not by this
+# project (#430), which is why the header above says Contributor and leaves the
+# maintainer line to whoever owns the package. The rendered PKGBUILD is
+# handed to them by hand; nothing in CI pushes it. See CONTRIBUTING.md >
+# Releases > AUR. Fixes belong in this template, not in the rendered output.
 
 pkgname=gwm-cli-bin
 pkgver=__VERSION__
