@@ -4,7 +4,7 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
 # newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
@@ -42,6 +42,65 @@ bin-dir = "gwm-v{ version }-{ target }/{ bin }"
 pkg-url = "{ repo }/releases/download/v{ version }/gwm-v{ version }-{ target }.zip"
 pkg-fmt = "zip"
 
+# `.deb` packages (issue #377) — built + attached to each stable Release by
+# `release.yml` via `cargo deb --no-build --target <triple>`. The package name
+# is the crate name (`gwm-cli`, not `gwm`); the installed command stays `gwm`.
+# `conflicts = "gwm"` is still needed because Debian's unrelated `gwm`
+# window-manager package also owns `/usr/bin/gwm`, so the two can't coexist —
+# dpkg refuses cleanly instead of erroring on the file clash at unpack time.
+# `depends` is set explicitly (not `$auto`) so cargo-deb skips `dpkg-shlibdeps`
+# — the binary vendors both libgit2 AND zlib statically (see the libz-sys dep
+# above), so glibc is its only dynamic *library* dependency. Skipping shlibdeps
+# is what lets the cross-built aarch64 package be produced from an x86_64
+# runner. `git` is added as a runtime dependency because gwm shells out to the
+# `git` binary (sync, worktree rename, clean, TUI previews) beyond the vendored
+# libgit2 — shlibdeps would never catch an exec dependency (#388).
+[package.metadata.deb]
+maintainer = "Kylian Bardini <onepiecekylian@gmail.com>"
+copyright = "2026 Kylian Bardini"
+license-file = ["LICENSE.md", "0"]
+extended-description = """
+git worktree manager — a terminal UI and CLI over git worktrees. Native
+libgit2, per-repo .gwm.toml bootstrap (file copies, regex guards, lifecycle
+hooks), and a ratatui TUI. The installed command is `gwm`."""
+section = "utils"
+priority = "optional"
+# `>= 2.34`: the binaries are built on `ubuntu-latest`, whose CRT objects pull
+# GLIBC_2.34, so this is a definite lower bound. Declaring it makes dpkg refuse
+# cleanly on older glibc (RHEL 8 = 2.28, Ubuntu 20.04 = 2.31) instead of
+# installing then failing at load. It is a conservative floor, not the exact
+# per-arch ABI floor — computing that from the ELF in CI (and doing the same for
+# the tarballs) is tracked as a follow-up (#386).
+depends = "libc6 (>= 2.34), git"
+conflicts = "gwm"
+assets = [
+  ["target/release/gwm", "usr/bin/", "755"],
+  ["README.md", "usr/share/doc/gwm-cli/README.md", "644"],
+  ["CHANGELOG.md", "usr/share/doc/gwm-cli/CHANGELOG.md", "644"],
+]
+
+# `.rpm` packages (issue #378) — built + attached by `release.yml` via
+# `cargo generate-rpm --target <triple>`. `auto-req = "no"` disables rpm's
+# dependency auto-detection (it needs the target's rpm tooling, unavailable
+# when cross-packaging aarch64 from an x86_64 runner). With libgit2 and zlib
+# both statically linked, glibc is the only dynamic *library* dependency; `git`
+# is added as a runtime dependency because gwm shells out to the `git` binary
+# (sync, worktree rename, clean, TUI previews) beyond the vendored libgit2
+# (#388). Both are declared explicitly via `requires` so a minimal Fedora/RHEL
+# still pulls them. (No `gwm` window-manager package exists on Fedora, so no
+# rpm `conflicts` is needed.)
+[package.metadata.generate-rpm]
+summary = "git worktree manager — TUI + CLI, native libgit2, per-repo bootstrap"
+license = "MIT"
+auto-req = "no"
+requires = { glibc = ">= 2.34", git = "*" }
+assets = [
+  { source = "target/release/gwm", dest = "/usr/bin/gwm", mode = "755" },
+  { source = "README.md", dest = "/usr/share/doc/gwm-cli/README.md", mode = "644" },
+  { source = "LICENSE.md", dest = "/usr/share/doc/gwm-cli/LICENSE.md", mode = "644" },
+  { source = "CHANGELOG.md", dest = "/usr/share/doc/gwm-cli/CHANGELOG.md", mode = "644" },
+]
+
 [lib]
 name = "gwm"
 path = "src/lib.rs"
@@ -71,6 +130,15 @@ ratatui = "0.30"
 # and which its own tests pin, beats hand-rolling the sequence here (#367).
 crossterm = { version = "0.29", features = ["osc52"] }
 git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+# Force a statically-linked zlib (issue #377/#378 review). git2 pulls libz-sys,
+# which by default links the system `libz.so.1` dynamically — so the release
+# binary, and the .deb/.rpm built from it, would need a zlib runtime package too.
+# Static-linking it means everything depends only on glibc, so the packages can
+# declare accurate deps without per-distro zlib package names (zlib1g / zlib /
+# zlib-ng) or arch-specific sonames, and the cross-built aarch64 package is
+# correct too. Applied as a Cargo feature so it propagates inside the `cross`
+# container without env passthrough.
+libz-sys = { version = "1", features = ["static"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1.1"

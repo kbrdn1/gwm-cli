@@ -94,6 +94,27 @@ jobs:
           $hash = (Get-FileHash -Algorithm SHA256 "dist/$STAGE.zip").Hash.ToLower()
           Set-Content -Path "dist/$STAGE.zip.sha256" -Encoding ascii -Value "$hash  $STAGE.zip"
 
+      # Native Linux packages (issues #377 / #378). cargo-deb and
+      # cargo-generate-rpm rewrite the `target/release` asset prefix to the
+      # per-target dir when `--target` is passed, so they package the binary
+      # the (cross-)build step above already produced — no rebuild. `--no-build`
+      # (deb) keeps it from recompiling; the explicit `depends`/`auto-req = no`
+      # in Cargo.toml skip dpkg-shlibdeps / rpm dep-detection, which can't run
+      # against the cross-built aarch64 binary on an x86_64 runner.
+      - name: package (linux .deb / .rpm)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          cargo install cargo-deb cargo-generate-rpm --locked
+          # `--no-strip`: the release profile already strips (`strip = true`),
+          # AND cargo-deb's default strip runs the HOST `strip` — which can't
+          # process the aarch64 ELF that `cross` built, failing the arm64 job.
+          # cargo-generate-rpm does not strip, so it needs no such flag.
+          cargo deb --no-build --no-strip --target ${{ matrix.target }} --output dist/
+          cargo generate-rpm --target ${{ matrix.target }} --output dist/
+          ( cd dist && for f in *.deb *.rpm; do shasum -a 256 "$f" > "$f.sha256"; done )
+          ls -la dist
+
       - name: upload artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -103,6 +124,18 @@ jobs:
             dist/*.tar.gz.sha256
             dist/*.zip
             dist/*.zip.sha256
+          if-no-files-found: error
+
+      - name: upload artifacts (linux packages)
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: gwm-linux-packages-${{ matrix.target }}
+          path: |
+            dist/*.deb
+            dist/*.deb.sha256
+            dist/*.rpm
+            dist/*.rpm.sha256
           if-no-files-found: error
 
   release:
@@ -172,7 +205,11 @@ jobs:
             dist/*.tar.gz \
             dist/*.tar.gz.sha256 \
             dist/*.zip \
-            dist/*.zip.sha256
+            dist/*.zip.sha256 \
+            dist/*.deb \
+            dist/*.deb.sha256 \
+            dist/*.rpm \
+            dist/*.rpm.sha256
 
   homebrew-tap-update:
     name: update homebrew tap
@@ -266,3 +303,241 @@ jobs:
           fi
           git commit -m "gwm ${TAG#v} (${TAG})"
           git push
+
+  scoop-bucket-update:
+    name: update scoop bucket
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `scoop install gwm`,
+    # otherwise users tracking the bucket would silently move to a pre-release.
+    # Same reasoning as homebrew-tap-update above (the whole workflow is
+    # implicitly tag-scoped via the upstream jobs).
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
+    # While SCOOP_BUCKET_TOKEN is being provisioned the first time, a missing
+    # secret would fail this job. Keep it advisory so the GitHub release still
+    # lands and the bucket refresh can be re-driven manually via
+    # workflow_dispatch once the secret exists. Flip to false after the first
+    # successful sync (see CONTRIBUTING.md > Releases > Scoop bucket).
+    continue-on-error: true
+    steps:
+      - name: verify SCOOP_BUCKET_TOKEN is configured
+        env:
+          SCOOP_BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+        run: |
+          if [ -z "${SCOOP_BUCKET_TOKEN:-}" ]; then
+            echo "::error::SCOOP_BUCKET_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > Scoop bucket setup."
+            exit 1
+          fi
+
+      - name: checkout gwm-cli (template + render script)
+        uses: actions/checkout@v7
+        with:
+          path: gwm-cli
+
+      - name: checkout kbrdn1/scoop-gwm
+        uses: actions/checkout@v7
+        with:
+          repository: kbrdn1/scoop-gwm
+          path: scoop-gwm
+          token: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+
+      - name: fetch sha256 sidecar from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p sha
+          gh release download "$TAG" \
+            --repo kbrdn1/gwm-cli \
+            --pattern "gwm-${TAG}-x86_64-pc-windows-msvc.zip.sha256" \
+            --dir sha
+          ls -la sha
+
+      - name: render bucket/gwm.json
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          SHA_X86_64=$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-pc-windows-msvc.zip.sha256")
+          mkdir -p scoop-gwm/bucket
+          sh gwm-cli/.github/scripts/render-scoop-manifest.sh \
+            "$TAG" "$VERSION" "$SHA_X86_64" \
+            gwm-cli/packaging/scoop/gwm.json.template \
+            > scoop-gwm/bucket/gwm.json
+          echo "=== rendered bucket/gwm.json ==="
+          cat scoop-gwm/bucket/gwm.json
+
+      - name: commit + push to bucket
+        working-directory: scoop-gwm
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name  "gwm-cli release bot"
+          git config user.email "release-bot@gwm-cli.local"
+          git add bucket/gwm.json
+          if git diff --cached --quiet; then
+            echo "bucket/gwm.json unchanged — nothing to push."
+            exit 0
+          fi
+          git commit -m "gwm ${TAG#v} (${TAG})"
+          git push
+
+  aur-publish:
+    name: publish gwm-cli-bin to the AUR
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `yay -S gwm-cli-bin`,
+    # otherwise Arch users would silently move to a pre-release. Same reasoning
+    # as homebrew-tap-update / scoop-bucket-update above (the whole workflow is
+    # implicitly tag-scoped via the upstream jobs).
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
+    # While AUR_SSH_PRIVATE_KEY is being provisioned the first time, a missing
+    # secret would fail this job. Keep it advisory so the GitHub release still
+    # lands and the AUR push can be re-driven manually via workflow_dispatch
+    # once the secret exists. Flip to false after the first successful sync
+    # (see CONTRIBUTING.md > Releases > AUR).
+    continue-on-error: true
+    steps:
+      - name: verify AUR_SSH_PRIVATE_KEY is configured
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
+            echo "::error::AUR_SSH_PRIVATE_KEY secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > AUR setup."
+            exit 1
+          fi
+
+      - name: checkout gwm-cli (template + render script)
+        uses: actions/checkout@v7
+
+      - name: fetch sha256 sidecars from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p sha
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            gh release download "$TAG" \
+              --repo kbrdn1/gwm-cli \
+              --pattern "gwm-${TAG}-${target}.tar.gz.sha256" \
+              --dir sha
+          done
+          ls -la sha
+
+      - name: render aur/PKGBUILD
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          SHA_X86_64=$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256")
+          SHA_ARM64=$(awk '{print $1}' "sha/gwm-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")
+          mkdir -p aur
+          sh .github/scripts/render-aur-pkgbuild.sh \
+            "$VERSION" "$SHA_X86_64" "$SHA_ARM64" \
+            packaging/aur/PKGBUILD.template \
+            > aur/PKGBUILD
+          echo "=== rendered aur/PKGBUILD ==="
+          cat aur/PKGBUILD
+
+      # Third-party action — pinned to a commit SHA (v4.2.0) because it is
+      # trusted with AUR_SSH_PRIVATE_KEY. It clones the AUR repo, drops in our
+      # rendered PKGBUILD, regenerates .SRCINFO via makepkg, and pushes.
+      # `test: true` runs `makepkg` in an Arch container against the real
+      # release binary — it builds the package (verifying the source download
+      # and sha256sums on the actual statically-linked artifact), so a broken
+      # PKGBUILD or a bad checksum fails the job here rather than shipping to
+      # the AUR. It does NOT run namcap; the PKGBUILD was namcap-linted locally
+      # (see the PR / packaging/aur/PKGBUILD.template).
+      - name: publish to the AUR
+        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
+        with:
+          pkgname: gwm-cli-bin
+          pkgbuild: aur/PKGBUILD
+          commit_username: kbrdn1
+          commit_email: onepiecekylian@gmail.com
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          commit_message: "gwm-cli-bin ${{ github.ref_name }}"
+          ssh_keyscan_types: rsa,ecdsa,ed25519
+          test: true
+
+  winget-publish:
+    name: publish kbrdn1.gwm to winget
+    needs: [release]
+    runs-on: ubuntu-latest
+    # Stable releases only — rc/alpha/beta must never reach `winget install
+    # kbrdn1.gwm`. Same reasoning as the homebrew/scoop/aur jobs above (the
+    # whole workflow is implicitly tag-scoped via the upstream jobs).
+    if: |
+      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
+      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
+    # Advisory until WINGET_TOKEN is provisioned AND the initial `kbrdn1.gwm`
+    # manifest is merged into microsoft/winget-pkgs — komac UPDATES an existing
+    # package, so the first submission is manual (see CONTRIBUTING). Flip to
+    # false after the first successful automated submission.
+    continue-on-error: true
+    env:
+      # Pinned AND digest-anchored: the expected sha256 lives here, in this
+      # repo, rather than being fetched from the same upstream release as the
+      # binary — a release whose artifacts and SHA256SUMS were both swapped
+      # would otherwise still verify. Bump the two together, deliberately.
+      KOMAC_VERSION: 2.16.0
+      KOMAC_SHA256: 7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d
+    steps:
+      - name: verify WINGET_TOKEN is configured
+        env:
+          WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          if [ -z "${WINGET_TOKEN:-}" ]; then
+            echo "::error::WINGET_TOKEN secret is not configured."
+            echo "Bootstrap: see CONTRIBUTING.md > Releases > winget setup."
+            exit 1
+          fi
+
+      # Run komac directly from a pinned, digest-anchored release binary instead
+      # of the `winget-releaser` action. That action pulls
+      # `cargo-bins/cargo-binstall@main` (a mutable ref) and installs the latest
+      # komac at runtime, so a compromise of either would run with WINGET_TOKEN
+      # in scope — a SHA pin on the action alone would not protect the secret.
+      # Pinning the one tool that touches the token is the same posture as the
+      # SHA-pinned deploy-aur job above.
+      - name: install komac (pinned + digest-anchored)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tarball="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          gh release download "v${KOMAC_VERSION}" --repo russellbanks/Komac \
+            --pattern "$tarball" --dir /tmp/komac
+          echo "${KOMAC_SHA256}  /tmp/komac/${tarball}" | sha256sum -c -
+          tar -C /tmp/komac -xzf "/tmp/komac/${tarball}"
+          echo /tmp/komac >> "$GITHUB_PATH"
+
+      # `komac update` bases the new version on the existing `kbrdn1.gwm`
+      # manifest (nested-portable zip), swapping in the new version, URL, and
+      # sha256, then opens a PR from the kbrdn1/winget-pkgs fork. The tag's `v`
+      # prefix is stripped to match the winget PackageVersion (v1.1.1 -> 1.1.1).
+      - name: submit the manifest update to winget-pkgs
+        env:
+          GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+          KOMAC_FORK_OWNER: kbrdn1
+          KOMAC_CREATED_WITH: gwm-cli release.yml
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          url="https://github.com/kbrdn1/gwm-cli/releases/download/${TAG}/gwm-${TAG}-x86_64-pc-windows-msvc.zip"
+          komac update kbrdn1.gwm --version "$version" --urls "$url" --submit

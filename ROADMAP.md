@@ -130,13 +130,89 @@ freeze #319 and its additive follow-ons #324 / #325 / #326) all shipped to the
 stable line. See the [Shipped highlights](#shipped-highlights) table above and
 [`changelogs/1.0.0.md`](changelogs/1.0.0.md) for the consolidated notes.
 
-With the machine surface frozen under SemVer, the next minor (`1.1.0`) is the
-home for additive work — new subcommands / flags, new opt-in `.gwm.toml`
-sections, additive JSON fields under the same `SCHEMA_VERSION`. Anything that
-would break a frozen surface waits for a future major.
+With the machine surface frozen under SemVer, every minor since is the home for
+additive work — new subcommands / flags, new opt-in `.gwm.toml` sections,
+additive JSON fields under the same `SCHEMA_VERSION`. Anything that would break
+a frozen surface waits for a future major.
 
-No new directed feature work is queued here yet — the next item lands once an
-issue with a concrete scope is filed.
+The next feature line is queued from a comparative read of the field
+(`chmouel/lazyworktree` and `d-kuro/gwq`) against the actual gwm codebase. Four
+capability gaps came out of it, and they are ordered by what they unlock rather
+than by size.
+
+### 1. Agent session pane ([#408](https://github.com/kbrdn1/gwm-cli/issues/408))
+
+Surface which worktrees have an AI agent working in them, and what that agent
+has been doing. This is the highest-value gap: it is the one capability a
+competitor has that gwm does not, and "one isolated worktree per agent" is the
+workflow people are actually adopting in 2026.
+
+Detection reads on-disk session artifacts rather than scanning processes, so it
+stays cross-platform (Windows included, which the reference implementation drops)
+and testable against a `TempDir`. Four agent CLIs were inspected and their storage
+schemas share nothing but the concept, which is what justifies a trait:
+
+- [#409](https://github.com/kbrdn1/gwm-cli/issues/409) — spike: pin down the Claude Code cwd-slug convention (blocks the Claude backend only)
+- [#410](https://github.com/kbrdn1/gwm-cli/issues/410) — `SessionSource` trait + backends for Claude Code, Codex, opencode and Mistral Vibe
+- [#411](https://github.com/kbrdn1/gwm-cli/issues/411) — generic detail overlay (shell + block renderer), shared with the rich PR/Issue view
+- [#412](https://github.com/kbrdn1/gwm-cli/issues/412) — TUI surface: agent column, Status pane section, `a` opens the overlay
+- [#413](https://github.com/kbrdn1/gwm-cli/issues/413) — daemon + `statusline` exposure (counters and states only, never transcript content)
+- [#414](https://github.com/kbrdn1/gwm-cli/issues/414) — process-level liveness on macOS/Linux, deferred until the mtime badge has been seen in use
+
+### 2. Multi-forge support ([#419](https://github.com/kbrdn1/gwm-cli/issues/419))
+
+A `Forge` trait plus a GitLab (`glab`) backend. This does not improve discovery
+on GitHub; it widens the addressable audience to communities that are
+consistently underserved by this class of tooling. The abstraction is already
+half-built: the parsed types are forge-agnostic and the parsers are pure, so the
+work is concentrated on CI state vocabulary, PR/MR terminology, and explicit
+forge selection for self-hosted instances.
+
+Lands before the rich PR/Issue view, so that view is born multi-forge instead of
+being rewritten later.
+
+### 3. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) → [#418](https://github.com/kbrdn1/gwm-cli/issues/418))
+
+`gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
+way to name a worktree freely. Working through this surfaced a real defect
+rather than just a missing feature:
+
+`worktree.branch_pattern` is configurable and editable live from the Settings
+panel, and `BranchSpec::branch_name` honours it. But `parse_branch` matches a
+hardcoded regex instead. A user who customises the pattern silently loses
+issue/PR auto-linking, gitmoji, and the branch-convention check, with no warning
+connecting cause to effect.
+
+Sequenced cheapest-first, each step shippable on its own:
+
+- [#415](https://github.com/kbrdn1/gwm-cli/issues/415) — warn in `doctor` / `config validate` when the pattern is customised (turns a silent failure into a stated one)
+- [#416](https://github.com/kbrdn1/gwm-cli/issues/416) — free-form naming via `gwm create --name`, additive and contract-safe
+- [#417](https://github.com/kbrdn1/gwm-cli/issues/417) — derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
+- [#418](https://github.com/kbrdn1/gwm-cli/issues/418) — token-driven create form with a live branch/path preview
+
+### 4. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
+
+Read a pull request or issue in full without leaving the TUI: description,
+individual checks, reviews, conversation, and inline review comments. Modelled
+on `snacks.nvim`'s `snacks.gh`, whose key lesson is that inline diff comments are
+reachable only through GraphQL, not through `gh --json`.
+
+Comes last of the four, and inherits the detail overlay paid for by the agent
+pane. Where gwm can beat the reference: `snacks.gh` has no notion of a worktree,
+so the user picks from a flat list; gwm already knows the
+worktree → branch → PR → issue chain and can open on the current row directly.
+
+### Deferred
+
+- [#421](https://github.com/kbrdn1/gwm-cli/issues/421) — **container execution**: a `container:` block on the existing `exec` / aliases surface. Low cost (it wraps `docker run`, and anything exposing a Docker-compatible socket works for free), but no observed demand yet, so it waits until after the discovery push.
+
+### Visibility
+
+Not feature work, but tracked here because it gates whether any of the above is
+seen:
+
+- [#422](https://github.com/kbrdn1/gwm-cli/issues/422) — comparison page covering gwm, gwq and lazyworktree (gwq is the incumbent by star count and has been dormant since May)
+- [#423](https://github.com/kbrdn1/gwm-cli/issues/423) — sync `docs/` to the Astro docs site, with the in-repo tree as the source of truth
 
 Housekeeping:
 
@@ -150,9 +226,17 @@ first consumer. The previous "Ambitious" items all shipped in the v0.10.0 rc
 trains above: config presets (#37) and the JSON-RPC API + daemon (#38) in rc.2,
 the daemon's "concrete first consumer" as `gwm statusline` (#309) in rc.3, and
 the fan-out / disk-hygiene candidates from the post-rc.2 gap review as
-`gwm exec` and `gwm clean` (#313) in the in-progress `[Unreleased]` delta. No
-new large bets are queued here yet — they land once an issue with a concrete
-first consumer is filed.
+`gwm exec` and `gwm clean` (#313) in the in-progress `[Unreleased]` delta.
+
+Two of the queued items above qualify as ambitious rather than incremental, and
+both have a concrete first consumer, which is why they are queued rather than
+parked here:
+
+- the **agent session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) is a new detection subsystem with four backends, and its first consumer is the TUI plus `gwm statusline` through the daemon.
+- the **`Forge` trait** ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)) is a structural change to the GitHub layer, and its first consumer is the GitLab backend it exists to enable.
+
+No other large bets are queued. They land once an issue with a concrete first
+consumer is filed.
 
 ## How to contribute
 

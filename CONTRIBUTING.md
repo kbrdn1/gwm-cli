@@ -13,6 +13,7 @@ Thanks for your interest in `gwm` — a Rust CLI / TUI for managing git worktree
 - [Labels](#labels)
 - [Pull Requests](#pull-requests)
 - [Merge strategy](#merge-strategy)
+- [Branch protection](#branch-protection)
 - [Releases](#releases)
 
 ## About this repository
@@ -285,6 +286,51 @@ Suffix the type with `!` and add a `BREAKING CHANGE:` footer:
 BREAKING CHANGE: configs using the old keys must migrate to the new schema.
 ```
 
+### Signing (preferred)
+
+Commits on a PR should show up as **`Verified`** on GitHub. GPG is preferred;
+SSH signing is equally accepted (GitHub verifies both the same way).
+
+This is a preference, not a gate: nothing in CI or branch protection enforces
+it, and a PR will not be rejected for unsigned commits. It is asked for because
+a signed history is worth having, not because tooling demands it.
+
+Signing a commit and getting it **verified** are two different things. GitHub
+shows `Verified` only when *both* hold:
+
+- the **public** key is registered on your GitHub account
+  (Settings → SSH and GPG keys)
+- the **committer email** matches a uid on the key **and** a verified email on
+  your account
+
+The second one is what usually bites. A commit signed with a perfectly good key
+whose uid does not match the committer email stays `Unverified` forever. If you
+use different `user.email` values across repos, check before you push:
+
+```bash
+git config user.email                  # the committer email git will stamp
+gpg --list-secret-keys --keyid-format=long   # the uid(s) on your key
+```
+
+To turn signing on for this repo only:
+
+```bash
+git config user.signingkey <KEY_ID>
+git config commit.gpgsign true
+# SSH instead of GPG:
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/id_ed25519.pub
+```
+
+Verify what GitHub actually thinks, which is the only opinion that counts here
+(local `git log --show-signature` can disagree with it, e.g. on a keyring it
+cannot read):
+
+```bash
+gh api /repos/<owner>/<repo>/commits/<sha> \
+  --jq '.commit.verification | "\(.verified) \(.reason)"'   # want: true valid
+```
+
 ## Labels
 
 See [`.github/LABELS.md`](.github/LABELS.md) for the full matrix. Quick reference:
@@ -300,6 +346,7 @@ Before opening a PR:
 - [ ] `cargo fmt`
 - [ ] `cargo clippy -- -D warnings`
 - [ ] `cargo test` (all green)
+- [ ] Commits show as `Verified` on GitHub (preferred, see [Signing](#signing-preferred))
 - [ ] CHANGELOG.md updated under `## [Unreleased]`
 - [ ] If the public CLI changed: the `docs/3.cli` section updated (the README is a landing page that delegates to `docs/`)
 - [ ] If the config schema changed: `examples/gwm.toml.example` and the `docs/4.configuration` section updated
@@ -314,6 +361,49 @@ Use the PR template (`.github/PULL_REQUEST_TEMPLATE.md`).
 ```bash
 gh pr merge <num> --merge   # NOT --squash, NOT --delete-branch
 ```
+
+## Branch protection
+
+`main` is protected. Nothing reaches it except through a pull request with green
+checks, and **that includes the maintainer**: `enforce_admins` is on, so
+`git push origin main` is rejected outright and there is no admin override. The
+only way to lift it is to disable the protection by hand, which should be a
+deliberate, visible act rather than a reflex.
+
+Active rules (read them with `gh api repos/kbrdn1/gwm-cli/branches/main/protection`):
+
+| Rule | Value |
+|------|-------|
+| Require a pull request | yes, **0 approvals** |
+| Required status checks | `rustfmt`, `clippy`, `test (ubuntu-latest)`, `test (macos-latest)`, `test (windows-latest)`, `pre-commit hook smoke`, `cargo audit` |
+| Require branches up to date (`strict`) | no |
+| Enforce for admins | **yes** |
+| Require linear history | no |
+| Force pushes / deletions | blocked |
+
+Three of those are counter-intuitive and are set that way on purpose:
+
+- **0 required approvals**, not 1. This is a single-maintainer repo and GitHub
+  forbids approving your own pull request, so requiring one approval would be a
+  permanent lockout. The status checks are the real gate; the PR is the rail
+  that makes sure they run.
+- **Linear history off.** Turning it on would force squash or rebase merges and
+  break [Merge strategy](#merge-strategy). The atomic commit history is the
+  artefact, so merge commits have to stay legal.
+- **`gwm doctor (advisory)`, CodeRabbit and GitGuardian are not required.** The
+  first is advisory by design; the other two are third-party and can stop
+  reporting. A required check that never reports blocks the branch forever, so
+  only checks we own and that always run are in the list.
+
+`strict` is off because `main` gains a merge commit that `dev` does not have on
+every release; requiring "up to date" would force a back-merge into `dev` before
+each cut, for no added safety since the checks re-run on the PR anyway.
+
+This does not affect releases mechanically: `release.yml` and `pre-release.yml`
+are triggered by **tags**, and protection guards branch refs, not tags. It does
+change how `dev` reaches `main` (see below), and it means a **hotfix cannot go
+straight to `main` either** (see [Step 0](#step-0--reconcile-open-prs-applies-to-every-tag)):
+branch off `main`, open a PR back into it, let the checks run.
 
 ## Releases
 
@@ -364,8 +454,14 @@ Once the rc is validated and promoted to `main`:
 1. **Step 0 first** — see above.
 2. Update `Cargo.toml` `version`.
 3. Move the `## [Unreleased]` section out of `CHANGELOG.md` into a new file `changelogs/<version>.md` (e.g. `changelogs/0.3.0.md`), rename its heading to `# [<version>] - YYYY-MM-DD`, and add a one-line entry at the bottom of `CHANGELOG.md`'s `## Past releases` index pointing to the new file. `CHANGELOG.md` at the root then only carries the next `## [Unreleased]` section. (See [`changelogs/0.2.0.md`](changelogs/0.2.0.md) for the expected layout.)
-4. Merge `dev` → `main` (regular merge, never squash; see [Merge strategy](#merge-strategy)).
-5. Tag: `git tag -a v0.x.y -m "v0.x.y" && git push --tags`.
+4. Open a PR from `dev` to `main`, wait for the required checks, then merge it with a **merge commit** (never squash; see [Merge strategy](#merge-strategy)). `main` is [protected](#branch-protection): a local `git push origin main` is rejected, including for the maintainer, so there is no direct-merge path.
+
+   ```bash
+   gh pr create --base main --head dev --title "Release v0.x.y" --body "…"
+   gh pr merge <num> --merge   # once the 7 checks are green
+   ```
+
+5. Tag the merge commit on `main`: `git checkout main && git pull && git tag -a v0.x.y -m "v0.x.y" && git push --tags`. Tags are not covered by the branch protection, so this push goes through as-is.
 6. GitHub Actions (`release.yml`) builds binaries and publishes the stable release. The release body is populated from `changelogs/<version>.md` via `--notes-file` (run `gh release edit v0.x.y --notes-file changelogs/<version>.md` after the workflow if needed).
 
 > ⚠️ **Finalise the crate identity _before_ the tag.** Any change to the
@@ -415,6 +511,68 @@ gh workflow run release.yml --ref <tag>   # e.g. v0.5.0
 ```
 
 The `workflow_dispatch` path is gated to the same stable-only condition; rc/alpha/beta will skip the tap step automatically.
+
+### Scoop bucket (`scoop install gwm`)
+
+Stable releases automatically refresh [`kbrdn1/scoop-gwm`](https://github.com/kbrdn1/scoop-gwm) (`bucket/gwm.json`) via the `scoop-bucket-update` job in [`release.yml`](.github/workflows/release.yml), mirroring the Homebrew tap. Pre-releases are filtered out so `scoop install gwm` always tracks the latest stable. End users add the bucket once:
+
+```powershell
+scoop bucket add gwm https://github.com/kbrdn1/scoop-gwm
+scoop install gwm
+```
+
+The canonical manifest source lives at [`packaging/scoop/gwm.json.template`](packaging/scoop/gwm.json.template); the render + Scoop-autoupdate contract is pinned by [`tests/scoop_manifest_tests.rs`](tests/scoop_manifest_tests.rs). Only the `__FOO__` placeholders are substituted at release time — the Scoop `$version` / `$url` autoupdate variables are left verbatim so Scoop's maintainer-side `checkver`/excavator tooling can regenerate the manifest. End users get new versions from `scoop update gwm` once the `scoop-bucket-update` job pushes the refreshed `bucket/gwm.json`, so keep the job green (that is what the client actually pulls).
+
+#### One-time bootstrap (maintainer)
+
+Same shape as the Homebrew tap:
+
+1. Create the `kbrdn1/scoop-gwm` repo (a `bucket/gwm.json` + README).
+2. Generate a fine-grained PAT scoped to `kbrdn1/scoop-gwm` only, **Contents → Read and write**.
+3. Add it as the `SCOOP_BUCKET_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
+4. Flip `continue-on-error: true` to `false` on the `scoop-bucket-update` job after the first successful sync.
+
+Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
+
+### AUR (`yay -S gwm-cli-bin`)
+
+Stable releases automatically refresh the [`gwm-cli-bin`](https://aur.archlinux.org/packages/gwm-cli-bin) AUR package via the `aur-publish` job in [`release.yml`](.github/workflows/release.yml). It renders [`packaging/aur/PKGBUILD.template`](packaging/aur/PKGBUILD.template), then hands the result to the SHA-pinned [`KSXGitHub/github-actions-deploy-aur`](https://github.com/KSXGitHub/github-actions-deploy-aur) action, which regenerates `.SRCINFO` (via `makepkg`), builds the package with `makepkg` against the real release binary (`test: true` — this verifies the source download + `sha256sums` on the actual artifact), and pushes to the AUR over SSH. Pre-releases are filtered out. End users install with any AUR helper:
+
+```bash
+yay -S gwm-cli-bin   # or: paru -S gwm-cli-bin
+```
+
+`gwm-cli-bin` is a prebuilt-binary package (downloads the linux-gnu tarball, verifies its `sha256`, installs the binary + license + bash/zsh/fish completions). The render + release wiring contract is pinned by [`tests/aur_pkgbuild_tests.rs`](tests/aur_pkgbuild_tests.rs). The CI `test: true` step runs `makepkg` only, **not** `namcap` — the PKGBUILD is `namcap`-linted locally (`makepkg` + `namcap` in an `archlinux` container). The `x86_64→$CARCH` `namcap` warning on the arch-suffixed `source_*` arrays is a known false positive (`$CARCH` is illegal in an array *name*). `namcap`-clean on the real statically-linked binary (its only dynamic deps are `glibc`/`gcc-libs` — `zlib` and `libgit2` are vendored statically) is confirmed at the first stable AUR push.
+
+#### One-time bootstrap (maintainer)
+
+AUR authenticates by SSH key, not a PAT — so the key is split in two:
+
+1. Register an [AUR account](https://aur.archlinux.org/register) and paste your SSH **public** key into *My Account → SSH Public Key* (`~/.ssh/aur.pub`). Route the host to that key in `~/.ssh/config` (`Host aur.archlinux.org` / `IdentityFile ~/.ssh/aur` / `User aur`).
+2. Add the matching **private** key as the `AUR_SSH_PRIVATE_KEY` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>. This is the only secret the job needs — the commit identity (`kbrdn1` / `onepiecekylian@gmail.com`) is hardcoded in the job.
+3. The first release push creates the `gwm-cli-bin` package on the AUR (it does not exist until then).
+4. Flip `continue-on-error: true` to `false` on the `aur-publish` job after the first successful sync.
+
+Re-drive a failed sync the same way: `gh workflow run release.yml --ref <tag>`.
+
+### winget (`winget install kbrdn1.gwm`)
+
+Stable releases automatically open a manifest PR to [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) via the `winget-publish` job in [`release.yml`](.github/workflows/release.yml). It runs [`komac`](https://github.com/russellbanks/Komac) directly — from a **pinned, digest-anchored** release binary — to build the manifest for the new version from the release's Windows `.zip` (`InstallerType: zip`, `NestedInstallerType: portable`) and push a PR from your `winget-pkgs` fork. The tag's `v` prefix is stripped to match the winget `PackageVersion`. Pre-releases are filtered out. The release-wiring contract is pinned by [`tests/winget_release_tests.rs`](tests/winget_release_tests.rs).
+
+> **Why not the `winget-releaser` action?** It pulls `cargo-bins/cargo-binstall@main` and installs the latest `komac` at runtime — both mutable refs that would run with `WINGET_TOKEN` in scope, so a SHA pin on the action alone wouldn't protect the token. Pinning the one tool that touches the secret is the same posture as the SHA-pinned `deploy-aur` job.
+>
+> The expected komac digest (`KOMAC_SHA256`) is stored **in this repo**, not fetched from the same upstream release as the binary — a release whose artifacts *and* its `SHA256SUMS` were both swapped would otherwise still verify. To upgrade komac, bump `KOMAC_VERSION` and `KOMAC_SHA256` together and re-derive the digest yourself (`shasum -a 256 komac-<ver>-x86_64-unknown-linux-gnu.tar.gz`).
+
+**komac only updates an existing package** — the job runs `komac update`, not `komac new`. The **first** `kbrdn1.gwm` manifest is submitted manually (`komac new` / `komac submit`); the job takes over from the next version onward. Every submission then goes through Microsoft's moderated validation (schema + a Windows sandbox install), which is external to this repo.
+
+#### One-time bootstrap (maintainer)
+
+1. Fork [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) under your account (komac pushes its branch there): `gh repo fork microsoft/winget-pkgs --clone=false`.
+2. Submit the **initial** `kbrdn1.gwm` manifest manually and get it merged.
+3. Create a **classic** PAT with the `public_repo` scope — komac's fork + cross-repo-PR flow needs a classic token; new fine-grained PATs don't work here. Add it as the `WINGET_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
+4. Flip `continue-on-error: true` to `false` on the `winget-publish` job after the first successful automated submission.
+
+Re-drive a failed submission the same way: `gh workflow run release.yml --ref <tag>`.
 
 ---
 
