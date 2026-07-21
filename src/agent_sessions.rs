@@ -120,8 +120,7 @@ impl CodexSource {
         let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with("rollout-") || path.extension().and_then(|e| e.to_str()) != Some("jsonl")
-        {
+        if !name.starts_with("rollout-") || path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
           continue; // legacy .json (real 2025 data) and strangers are skipped
         }
         let Some(mtime) = file_mtime(&path) else {
@@ -212,9 +211,7 @@ impl VibeSource {
     let mut out = Vec::new();
     for entry in entries.flatten() {
       let dir = entry.path();
-      if !dir.is_dir()
-        || !entry.file_name().to_string_lossy().starts_with("session_")
-      {
+      if !dir.is_dir() || !entry.file_name().to_string_lossy().starts_with("session_") {
         continue;
       }
       let meta_path = dir.join("meta.json");
@@ -237,9 +234,7 @@ impl VibeSource {
       // comes from messages.jsonl mtime (meta.json mtime as fallback);
       // end_time is only ever inspected for null-ness.
       let ended = v.get("end_time").is_some_and(|t| !t.is_null());
-      let Some(last_activity) =
-        file_mtime(&dir.join("messages.jsonl")).or_else(|| file_mtime(&meta_path))
-      else {
+      let Some(last_activity) = file_mtime(&dir.join("messages.jsonl")).or_else(|| file_mtime(&meta_path)) else {
         continue;
       };
       if !within_scan_window(last_activity, now) {
@@ -345,6 +340,80 @@ fn subdirs_flat(dirs: &[PathBuf]) -> Vec<PathBuf> {
   out
 }
 
+/// All sessions matched to one worktree, most recent first.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorktreeAgents {
+  pub sessions: Vec<AgentSession>,
+}
+
+impl WorktreeAgents {
+  /// The most recently active session — what compact surfaces display.
+  pub fn top(&self) -> Option<&AgentSession> {
+    self.sessions.first()
+  }
+}
+
+/// Match sessions to worktrees through an injected canonicalizer (same seam
+/// as `statusline::active_index_with`: both sides are canonicalised, tests
+/// pass a deterministic stub, production passes fs canonicalisation with a
+/// lexical fallback for paths that no longer exist).
+pub fn summarize_with<F>(
+  sessions: &[AgentSession],
+  worktrees: &[(String, std::path::PathBuf)],
+  canonicalize: F,
+) -> std::collections::BTreeMap<String, WorktreeAgents>
+where
+  F: Fn(&Path) -> PathBuf,
+{
+  let keyed: Vec<(&String, String)> = worktrees
+    .iter()
+    .map(|(id, path)| (id, comparison_key(&canonicalize(path))))
+    .collect();
+  let mut map = std::collections::BTreeMap::<String, WorktreeAgents>::new();
+  for s in sessions {
+    let skey = comparison_key(&canonicalize(&s.cwd));
+    for (id, wkey) in &keyed {
+      if &skey == wkey {
+        map.entry((*id).clone()).or_default().sessions.push(s.clone());
+      }
+    }
+  }
+  for agents in map.values_mut() {
+    agents.sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+  }
+  map
+}
+
+/// Path comparison key: trailing separators are normalised away by component
+/// iteration; case folds on the platforms whose filesystems are
+/// case-insensitive by default (Windows, macOS), stays exact on Linux.
+fn comparison_key(path: &Path) -> String {
+  let joined = path
+    .components()
+    .map(|c| c.as_os_str().to_string_lossy())
+    .collect::<Vec<_>>()
+    .join("\u{1f}");
+  #[cfg(any(windows, target_os = "macos"))]
+  {
+    joined.to_lowercase()
+  }
+  #[cfg(not(any(windows, target_os = "macos")))]
+  {
+    joined
+  }
+}
+
+/// Production entry: fs canonicalisation with lexical fallback (a session may
+/// reference a worktree that was since removed — it must simply not match).
+pub fn summarize(
+  sessions: &[AgentSession],
+  worktrees: &[(String, std::path::PathBuf)],
+) -> std::collections::BTreeMap<String, WorktreeAgents> {
+  summarize_with(sessions, worktrees, |p| {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+  })
+}
+
 /// mtime of a file, or `None` when unreadable (degrade, don't error).
 fn file_mtime(path: &Path) -> Option<SystemTime> {
   std::fs::metadata(path).and_then(|m| m.modified()).ok()
@@ -371,9 +440,7 @@ impl Freshness {
     }
     // duration_since errs when last_activity > now (clock skew) — that is
     // "just happened", so it clamps to zero elapsed and reads Active.
-    let elapsed = now
-      .duration_since(last_activity)
-      .unwrap_or(Duration::ZERO);
+    let elapsed = now.duration_since(last_activity).unwrap_or(Duration::ZERO);
     if elapsed <= ACTIVE_WINDOW {
       Freshness::Active
     } else {

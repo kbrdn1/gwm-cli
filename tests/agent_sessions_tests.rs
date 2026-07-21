@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gwm::agent_sessions::{
-  claude_slug, AgentKind, ClaudeCodeSource, CodexSource, Freshness, OpencodeSource, VibeSource,
+  claude_slug, summarize_with, AgentKind, AgentSession, ClaudeCodeSource, CodexSource, Freshness, OpencodeSource,
+  VibeSource,
 };
 
 /// Write a file, creating parents.
@@ -106,7 +107,7 @@ fn claude_scan_yields_one_session_per_jsonl_in_matched_slug_dir() {
   write(&dir.join("bbbb-2222.jsonl"), "{}");
 
   let now = SystemTime::now();
-  let sessions = ClaudeCodeSource.scan(&base, &[wt.clone()], now);
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), now);
   assert_eq!(sessions.len(), 2);
   for s in &sessions {
     assert_eq!(s.kind, AgentKind::ClaudeCode);
@@ -144,11 +145,9 @@ fn claude_scan_missing_base_or_unmatched_worktree_is_empty() {
   let base2 = tmp.path().join("projects");
   fs::create_dir_all(&base2).unwrap();
   let unmatched = PathBuf::from("/Users/x/never-opened");
-  assert!(
-    ClaudeCodeSource
-      .scan(&base2, &[unmatched], SystemTime::now())
-      .is_empty()
-  );
+  assert!(ClaudeCodeSource
+    .scan(&base2, &[unmatched], SystemTime::now())
+    .is_empty());
 }
 
 // -- Codex backend (research.md D3) --
@@ -180,10 +179,7 @@ fn codex_scan_skips_legacy_json_and_malformed_first_lines() {
   write(&base.join("2025/04/19/rollout-2025-04-19-old.json"), CODEX_META);
   // Malformed first line → skipped silently, must not hide the valid one.
   write(&base.join("2026/07/21/rollout-broken.jsonl"), "not json at all\n");
-  write(
-    &base.join("2026/07/21/rollout-good.jsonl"),
-    &format!("{CODEX_META}\n"),
-  );
+  write(&base.join("2026/07/21/rollout-good.jsonl"), &format!("{CODEX_META}\n"));
 
   let sessions = CodexSource.scan(&base, SystemTime::now());
   assert_eq!(sessions.len(), 1);
@@ -238,10 +234,7 @@ fn opencode_scan_recovers_worktree_and_updated_time() {
   assert_eq!(s.kind, AgentKind::Opencode);
   assert_eq!(s.cwd, PathBuf::from("/work/front"));
   assert_eq!(s.id, "d4d5e31c");
-  assert_eq!(
-    s.last_activity,
-    SystemTime::UNIX_EPOCH + Duration::from_millis(updated)
-  );
+  assert_eq!(s.last_activity, SystemTime::UNIX_EPOCH + Duration::from_millis(updated));
   assert!(!s.ended);
 }
 
@@ -265,10 +258,7 @@ fn opencode_scan_falls_back_to_created_then_mtime() {
   let now = SystemTime::now();
   let created = epoch_ms(now - Duration::from_secs(120));
   // No "updated" → falls back to "created".
-  write(
-    &base.join("aa.json"),
-    &opencode_project("aa", "/work/a", created, None),
-  );
+  write(&base.join("aa.json"), &opencode_project("aa", "/work/a", created, None));
   // No "time" at all → falls back to file mtime (fresh, so within window).
   write(&base.join("bb.json"), r#"{"id":"bb","worktree":"/work/b"}"#);
 
@@ -366,14 +356,83 @@ fn vibe_scan_skips_malformed_meta_and_bounds_by_recency() {
   assert_eq!(sessions[0].id, "eeee-5555");
 }
 
+// -- summarize: session → worktree matching (research.md D7) --
+
+fn session(kind: AgentKind, cwd: &str, age_secs: u64, id: &str) -> AgentSession {
+  AgentSession {
+    kind,
+    cwd: PathBuf::from(cwd),
+    last_activity: SystemTime::now() - Duration::from_secs(age_secs),
+    ended: false,
+    id: id.to_string(),
+  }
+}
+
+fn wt(id: &str, path: &str) -> (String, PathBuf) {
+  (id.to_string(), PathBuf::from(path))
+}
+
+/// Identity canonicalizer — matching is then purely lexical.
+fn ident(p: &Path) -> PathBuf {
+  p.to_path_buf()
+}
+
+#[test]
+fn summarize_matches_ignoring_trailing_separator() {
+  let sessions = [session(AgentKind::Codex, "/work/one/", 10, "s1")];
+  let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);
+  assert_eq!(map.get("one").unwrap().sessions.len(), 1);
+}
+
+#[test]
+fn summarize_matches_through_the_injected_canonicalizer() {
+  // Symlink equivalence is the canonicalizer's job (statusline pattern):
+  // both sides go through it before comparison.
+  let canon = |p: &Path| {
+    let s = p.to_string_lossy().replace("/link/", "/real/");
+    PathBuf::from(s)
+  };
+  let sessions = [session(AgentKind::Opencode, "/link/proj", 10, "s1")];
+  let map = summarize_with(&sessions, &[wt("proj", "/real/proj")], canon);
+  assert_eq!(map.get("proj").unwrap().sessions.len(), 1);
+}
+
+#[test]
+fn summarize_case_sensitivity_follows_the_platform() {
+  let sessions = [session(AgentKind::Codex, "/Work/One", 10, "s1")];
+  let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);
+  #[cfg(any(windows, target_os = "macos"))]
+  assert_eq!(map.get("one").unwrap().sessions.len(), 1);
+  #[cfg(not(any(windows, target_os = "macos")))]
+  assert!(map.get("one").is_none());
+}
+
+#[test]
+fn summarize_drops_unmatched_sessions_without_error() {
+  let sessions = [session(AgentKind::Vibe, "/somewhere/else", 10, "s1")];
+  let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);
+  assert!(map.is_empty());
+}
+
+#[test]
+fn summarize_orders_most_recent_first_and_top_is_most_recent() {
+  let sessions = [
+    session(AgentKind::Codex, "/work/one", 500, "older"),
+    session(AgentKind::ClaudeCode, "/work/one", 10, "newest"),
+    session(AgentKind::Vibe, "/work/one", 100, "middle"),
+  ];
+  let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);
+  let agents = map.get("one").unwrap();
+  let ids: Vec<&str> = agents.sessions.iter().map(|s| s.id.as_str()).collect();
+  assert_eq!(ids, ["newest", "middle", "older"]);
+  assert_eq!(agents.top().unwrap().id, "newest");
+  assert_eq!(agents.top().unwrap().kind, AgentKind::ClaudeCode);
+}
+
 #[test]
 fn codex_scan_missing_base_is_empty() {
   let tmp = tempfile::TempDir::new().unwrap();
-  assert!(
-    CodexSource
-      .scan(&tmp.path().join("nope"), SystemTime::now())
-      .is_empty()
-  );
+  assert!(CodexSource.scan(&tmp.path().join("nope"), SystemTime::now()).is_empty());
 }
 
 #[test]
