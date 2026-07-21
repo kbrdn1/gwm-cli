@@ -1856,6 +1856,9 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     // worktree — unlike `names`, a JSON consumer wants the full picture
     // (an editor statusbar resolves the active worktree from the set).
     let mut dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
+    // Agent sessions (issue #408): the shared `attach_agents` pass keeps
+    // this surface byte-identical to the daemon's `list`.
+    json_api::attach_agents(&mut dto);
     if detect_pr {
       // When detection RAN for a row its result is authoritative — apply
       // it even when `None` (clears a stale persisted PR). When it did NOT
@@ -1998,7 +2001,7 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       #[serde(flatten)]
       worktree: json_api::JsonWorktree,
     }
-    let dto: Vec<WorkspaceJsonWorktree> = rows
+    let mut worktree_rows: Vec<json_api::JsonWorktree> = rows
       .iter()
       .enumerate()
       .map(|(i, row)| {
@@ -2009,10 +2012,17 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
         if let Some(pr) = detected_prs.get(i).copied().flatten() {
           worktree.pr = pr;
         }
-        WorkspaceJsonWorktree {
-          repo: &row.repo_name,
-          worktree,
-        }
+        worktree
+      })
+      .collect();
+    // Issue #408: same shared agents pass as single-repo list / daemon.
+    json_api::attach_agents(&mut worktree_rows);
+    let dto: Vec<WorkspaceJsonWorktree> = rows
+      .iter()
+      .zip(worktree_rows)
+      .map(|(row, worktree)| WorkspaceJsonWorktree {
+        repo: &row.repo_name,
+        worktree,
       })
       .collect();
     println!("{}", serde_json::to_string_pretty(&dto)?);

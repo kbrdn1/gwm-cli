@@ -34,6 +34,7 @@ fn sample(name: &str) -> JsonWorktree {
     age_seconds: Some(10),
     issue: None,
     pr: None,
+    agents: None,
   }
 }
 

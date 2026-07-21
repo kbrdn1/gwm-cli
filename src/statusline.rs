@@ -112,6 +112,14 @@ pub fn render(worktrees: &[JsonWorktree], active: Option<usize>) -> String {
     if let Some(pr) = w.pr {
       parts.push(format!("PR #{pr}"));
     }
+
+    // Agent indicator (issue #408): only an ACTIVE session earns a segment
+    // on the most compact surface — idle leftovers stay in the TUI overlay.
+    if let Some(agents) = &w.agents {
+      if agents.top.freshness == "active" {
+        parts.push(agents.top.kind.clone());
+      }
+    }
   }
 
   parts.join(" · ")

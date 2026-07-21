@@ -174,6 +174,7 @@ fn json_worktree_serialize_deserialize_round_trips() {
     age_seconds: Some(42),
     issue: Some(309),
     pr: Some(310),
+    agents: None,
   };
   let line = serde_json::to_string(&wt).unwrap();
   let back: JsonWorktree = serde_json::from_str(&line).unwrap();

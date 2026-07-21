@@ -72,6 +72,59 @@ pub struct JsonWorktree {
   pub issue: Option<u64>,
   /// Linked PR number (inferred, explicit, or auto-detected), if any.
   pub pr: Option<u64>,
+  /// Agent sessions matched to this worktree (issue #408). **Experimental
+  /// tier** — additive, omitted entirely (never `null`) when no session
+  /// matched, so pre-#408 payloads are byte-identical. See
+  /// `docs/schema/README.md` for the tier rules.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agents: Option<JsonWorktreeAgents>,
+}
+
+/// The agent-session summary of one worktree row (issue #408).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonWorktreeAgents {
+  /// The most recently active session — what compact surfaces display.
+  pub top: JsonAgentSession,
+  /// Every matched session, most recent first.
+  pub sessions: Vec<JsonAgentSession>,
+}
+
+/// One detected agent session on the wire (issue #408).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonAgentSession {
+  /// Stable lowercase agent name: `claude` | `codex` | `opencode` | `vibe`.
+  pub kind: String,
+  /// `active` | `idle`.
+  pub freshness: String,
+  /// Last artefact activity, epoch seconds UTC.
+  pub last_activity: u64,
+  /// Backend-stable session identifier.
+  pub id: String,
+}
+
+impl JsonWorktreeAgents {
+  /// Wire shape of a detection summary, `None` when no session matched —
+  /// feeding `skip_serializing_if` so empty rows stay byte-identical.
+  pub fn from_summary(agents: &crate::agent_sessions::WorktreeAgents, now: std::time::SystemTime) -> Option<Self> {
+    let to_wire = |s: &crate::agent_sessions::AgentSession| JsonAgentSession {
+      kind: s.kind.display().to_string(),
+      freshness: match crate::agent_sessions::Freshness::classify(s.last_activity, s.ended, now) {
+        crate::agent_sessions::Freshness::Active => "active".to_string(),
+        crate::agent_sessions::Freshness::Idle => "idle".to_string(),
+      },
+      last_activity: s
+        .last_activity
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0),
+      id: s.id.clone(),
+    };
+    let top = agents.top()?;
+    Some(Self {
+      top: to_wire(top),
+      sessions: agents.sessions.iter().map(to_wire).collect(),
+    })
+  }
 }
 
 impl From<&WorktreeInfo> for JsonWorktree {
@@ -89,6 +142,9 @@ impl From<&WorktreeInfo> for JsonWorktree {
       age_seconds: w.age.map(|d| d.as_secs()),
       issue: w.link.issue,
       pr: w.link.pr,
+      // Filled by the list assembly when detection ran (issue #408); a bare
+      // conversion carries no session info.
+      agents: None,
     }
   }
 }
@@ -165,5 +221,28 @@ impl From<&DoctorReport> for JsonDoctorReport {
 /// `gwm list --format=json` and the daemon's `list` RPC method so both
 /// surfaces stay byte-identical.
 pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
-  Ok(worktree::list(repo)?.iter().map(JsonWorktree::from).collect())
+  let mut rows: Vec<JsonWorktree> = worktree::list(repo)?.iter().map(JsonWorktree::from).collect();
+  attach_agents(&mut rows);
+  Ok(rows)
+}
+
+/// Populate the experimental `agents` field on already-built rows (issue
+/// #408): one detection pass over the whole set, keyed back by `path`. The
+/// single shared implementation for every surface (CLI list, daemon,
+/// workspace rows) so they cannot drift. No home directory → no-op (FR-009).
+pub fn attach_agents(rows: &mut [JsonWorktree]) {
+  let Some(home) = dirs::home_dir() else {
+    return;
+  };
+  let now = std::time::SystemTime::now();
+  let keyed: Vec<(String, std::path::PathBuf)> = rows
+    .iter()
+    .map(|r| (r.path.clone(), std::path::PathBuf::from(&r.path)))
+    .collect();
+  let summary = crate::agent_sessions::detect_all(&home, &keyed, now);
+  for row in rows.iter_mut() {
+    row.agents = summary
+      .get(&row.path)
+      .and_then(|a| JsonWorktreeAgents::from_summary(a, now));
+  }
 }
