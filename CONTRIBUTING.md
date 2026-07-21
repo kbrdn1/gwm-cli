@@ -551,15 +551,19 @@ yay -S gwm-cli-bin   # or: paru -S gwm-cli-bin
 Render the PKGBUILD from the release's checksums and hand it over:
 
 ```bash
+TAG=v1.2.0   # the stable tag you just pushed
+
+mkdir -p sha aur
 gh release download "$TAG" --pattern 'gwm-*-unknown-linux-gnu.tar.gz.sha256' --dir sha
 sh .github/scripts/render-aur-pkgbuild.sh \
   "${TAG#v}" \
   "$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256")" \
   "$(awk '{print $1}' "sha/gwm-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")" \
-  packaging/aur/PKGBUILD.template
+  packaging/aur/PKGBUILD.template \
+  > aur/PKGBUILD
 ```
 
-The render contract is pinned by [`tests/aur_pkgbuild_tests.rs`](tests/aur_pkgbuild_tests.rs), so the output is trustworthy even though nothing in CI consumes it any more. Lint it locally before sending (`makepkg` + `namcap` in an `archlinux` container). The `x86_64→$CARCH` `namcap` warning on the arch-suffixed `source_*` arrays is a known false positive (`$CARCH` is illegal in an array *name*).
+The script writes to stdout, hence the redirect; `aur/` is scratch space, not tracked. The render contract is pinned by [`tests/aur_pkgbuild_tests.rs`](tests/aur_pkgbuild_tests.rs), so the output is trustworthy even though nothing in CI consumes it any more. Lint `aur/PKGBUILD` locally before sending (`makepkg` + `namcap` in an `archlinux` container). The `x86_64→$CARCH` `namcap` warning on the arch-suffixed `source_*` arrays is a known false positive (`$CARCH` is illegal in an array *name*).
 
 If co-maintenance of `gwm-cli-bin` is ever granted, the job can come back: the template, the render script and its tests all survived the removal intact. That conversation is tracked in #430.
 

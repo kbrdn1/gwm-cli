@@ -2,8 +2,9 @@
 # render-aur-pkgbuild.sh — substitute placeholders in the AUR PKGBUILD template
 # and emit the rendered PKGBUILD on stdout.
 #
-# Used by .github/workflows/release.yml > aur-publish to refresh the
-# `gwm-cli-bin` package on the AUR after every stable release.
+# `gwm-cli-bin` is maintained on the AUR by a third party (#430), so nothing in
+# CI consumes this: it is run by hand after a stable release to produce the
+# PKGBUILD handed to the packager. See CONTRIBUTING.md > Releases > AUR.
 #
 # Usage:
 #   render-aur-pkgbuild.sh VERSION SHA256_X86_64 SHA256_ARM64 TEMPLATE
