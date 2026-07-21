@@ -133,6 +133,38 @@ fn release_workflow_publishing_checkouts_keep_their_token() {
   }
 }
 
+/// The AUR publish automation was removed in #430: `gwm-cli-bin` is maintained
+/// on the AUR by a third party, so the job never had push rights on it. Being
+/// advisory, it failed silently on every stable tag while the release run
+/// reported success, which is the worst of both worlds: the docs read as
+/// automated and nobody sees the failure.
+///
+/// `AUR_SSH_PRIVATE_KEY` is pinned alongside the job because the secret was
+/// malformed to begin with (`invalid format` at the v1.2.0 tag). Resurrecting
+/// a reference to it by copy-paste would fail the same way, quietly.
+///
+/// If co-maintenance of the package is ever granted, deleting this test is the
+/// correct first step of the change that brings the job back, not a workaround
+/// for it. The template, render script and their tests were kept intact for
+/// exactly that.
+#[test]
+fn release_workflow_carries_no_aur_publish_automation() {
+  let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
+
+  for needle in [
+    "aur-publish",
+    "AUR_SSH_PRIVATE_KEY",
+    "github-actions-deploy-aur",
+    "gwm-cli-bin",
+  ] {
+    assert!(
+      !workflow.contains(needle),
+      "release.yml must not reference `{needle}`: the AUR package is maintained by a third party \
+       (#430) and is refreshed by hand, see CONTRIBUTING.md > Releases > AUR"
+    );
+  }
+}
+
 #[test]
 fn prerelease_workflow_does_not_match_stable_tags() {
   let workflow = fs::read_to_string(".github/workflows/pre-release.yml").unwrap();
