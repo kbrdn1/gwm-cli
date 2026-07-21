@@ -10,7 +10,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- The release workflow's read-only checkouts no longer persist the
+  auto-injected token in `.git/config`. Only the two checkouts that push
+  (the Homebrew tap and the Scoop bucket) keep a credential, and both sides
+  of that split are pinned by a test. (#429)
 
 ## Past releases
 
