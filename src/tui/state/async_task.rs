@@ -117,6 +117,12 @@ pub enum TaskKind {
   /// per row; the render key-check discards a result for a since-moved
   /// selection and the next tick requests the settled one.
   Sidebar,
+  /// Off-thread agent-session detection (issue #408): the four artefact
+  /// scans under the user's home (`agent_sessions::detect_all`) touch the
+  /// filesystem and must never run inside `terminal.draw()`. A single global
+  /// slot — a tick that finds a run in flight coalesces; the render reads
+  /// the last completed snapshot only.
+  AgentSessions,
 }
 
 impl TaskKind {
@@ -136,6 +142,7 @@ impl TaskKind {
       TaskKind::EditWorktree => "renaming worktree…",
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
+      TaskKind::AgentSessions => "detecting agent sessions…",
     }
   }
 
@@ -238,6 +245,14 @@ pub enum TaskMsg {
   /// `SidebarState::cache`; a result whose selection has since moved is dropped
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
+  /// An agent-session detection result (issue #408): the worker's generation
+  /// and the per-worktree-path summary. The drain replaces the app snapshot
+  /// atomically; a superseded late result is dropped by
+  /// [`TaskRunner::complete`].
+  AgentSessions(
+    u64,
+    std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+  ),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).

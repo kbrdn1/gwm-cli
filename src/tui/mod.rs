@@ -65,7 +65,7 @@ pub fn clipboard_candidates() -> Vec<(&'static str, Vec<&'static str>)> {
   }
 }
 pub use ui::{
-  author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
+  agent_cell_label, author_initials, badge_group_width, bootstrap_report_lines, branch_name_color, branch_status_color,
   build_sidebar_payload, build_sidebar_sections, centered_abs, chip_style, ci_indicator, clean_dir_icon,
   command_logs_footer_hints, config_capture_footer_hints, config_edit_footer_hints, config_nav_footer_hints,
   confirm_buttons_line, confirm_delete_branch_line, confirm_detail_line, create_buttons_line, delete_worktree_title,
@@ -267,6 +267,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // already current for the selection; otherwise it spawns one coalesced
       // worker (the render draws the placeholder until it lands).
       app.maybe_refresh_sidebar();
+      // Agent-session detection (issue #408): same off-thread + coalesce
+      // discipline as the sidebar — a no-op while the snapshot is fresh.
+      app.maybe_refresh_agent_sessions();
     }
 
     terminal.draw(|f| ui::draw(f, &mut app))?;

@@ -491,15 +491,25 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
   header_cells.push(Cell::from("STATUS"));
+  header_cells.push(Cell::from("AGENT"));
   header_cells.push(Cell::from("PATH"));
   let header = Row::new(header_cells).style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
+
+  // Agent cells resolved up front (issue #408) for the same borrow reason as
+  // `repo_names`: `agents_for` reads `app` immutably, `list_state` is borrowed
+  // mutably at render time. Pure snapshot lookups — no I/O on the render path.
+  let now = std::time::SystemTime::now();
+  let agent_cells: Vec<Option<(&'static str, crate::agent_sessions::Freshness)>> = visible
+    .iter()
+    .map(|w| agent_cell_label(app.agents_for(w), now))
+    .collect();
 
   let rows: Vec<Row> = visible
     .iter()
     .enumerate()
     .map(|(vi, w)| {
       let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
-      build_row(w, repo, name_w, branch_w, status_w, &theme)
+      build_row(w, repo, name_w, branch_w, status_w, agent_cells[vi], &theme)
     })
     .collect();
 
@@ -527,6 +537,9 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
+    // AGENT (issue #408): hard length sized to the longest agent name
+    // ("opencode"), so the solver never starves it into ambiguity.
+    Constraint::Length(8),
     Constraint::Fill(1),
   ]);
 
@@ -1688,6 +1701,19 @@ pub fn help_label_style(theme: &Theme) -> Style {
   Style::default().fg(theme.name)
 }
 
+/// Label + freshness for a worktree's AGENT cell (issue #408). `None` — for
+/// a missing snapshot (startup) or a session-less worktree — renders an empty
+/// cell, indistinguishable from today (spec US1 scenario 5). Pure so the
+/// contract is pinned ratatui-free by `tests/tui_app_tests.rs`.
+pub fn agent_cell_label(
+  agents: Option<&crate::agent_sessions::WorktreeAgents>,
+  now: std::time::SystemTime,
+) -> Option<(&'static str, crate::agent_sessions::Freshness)> {
+  let top = agents?.top()?;
+  let freshness = crate::agent_sessions::Freshness::classify(top.last_activity, top.ended, now);
+  Some((top.kind.display(), freshness))
+}
+
 /// Build one worktree table row. In workspace mode (issue #36) `repo` is
 /// `Some((name, width))` and a leading `REPO` cell is inserted after the age
 /// column, painted in the `accent` role; in single-repo mode it is `None` and
@@ -1698,6 +1724,7 @@ fn build_row(
   name_w: u16,
   branch_w: u16,
   status_w: u16,
+  agent: Option<(&'static str, crate::agent_sessions::Freshness)>,
   theme: &Theme,
 ) -> Row<'static> {
   let marker = table_marker(w, theme);
@@ -1741,6 +1768,16 @@ fn build_row(
   cells.push(name_cell);
   cells.push(branch_cell);
   cells.push(status_cell);
+  // AGENT (issue #408): the most recently active session's agent, coloured by
+  // freshness — `clean` (active) vs `muted` (idle). No session → empty cell,
+  // visually identical to the pre-feature table.
+  cells.push(match agent {
+    Some((label, crate::agent_sessions::Freshness::Active)) => {
+      Cell::from(label).style(Style::default().fg(theme.clean).add_modifier(Modifier::BOLD))
+    }
+    Some((label, crate::agent_sessions::Freshness::Idle)) => Cell::from(label).style(Style::default().fg(theme.muted)),
+    None => Cell::from(""),
+  });
   cells.push(path_cell);
   Row::new(cells)
 }

@@ -414,6 +414,24 @@ pub fn summarize(
   })
 }
 
+/// Production entry point: resolve the four artefact roots under `home`, run
+/// every backend, and summarize per worktree. Pure given its inputs — the TUI
+/// worker passes `dirs::home_dir()`, tests pass a seeded `TempDir`.
+pub fn detect_all(
+  home: &Path,
+  worktrees: &[(String, PathBuf)],
+  now: SystemTime,
+) -> std::collections::BTreeMap<String, WorktreeAgents> {
+  let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
+  let mut sessions = ClaudeCodeSource.scan(&home.join(".claude/projects"), &paths, now);
+  sessions.extend(CodexSource.scan(&home.join(".codex/sessions"), now));
+  // opencode's own cross-platform convention is home-relative .local/share
+  // (research.md D4), so no per-OS data-dir split here.
+  sessions.extend(OpencodeSource.scan(&home.join(".local/share/opencode/storage/project"), now));
+  sessions.extend(VibeSource.scan(&home.join(".vibe/logs/session"), now));
+  summarize(&sessions, worktrees)
+}
+
 /// mtime of a file, or `None` when unreadable (degrade, don't error).
 fn file_mtime(path: &Path) -> Option<SystemTime> {
   std::fs::metadata(path).and_then(|m| m.modified()).ok()

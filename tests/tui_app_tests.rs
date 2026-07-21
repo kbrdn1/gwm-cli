@@ -8076,3 +8076,116 @@ fn clean_overlay_real_profile_change_disarms_the_countdown() {
     "changing the target re-requires confirmation"
   );
 }
+
+// -- Agent session pane (issue #408) --------------------------------------
+
+mod agent_sessions_pane {
+  use super::*;
+  use gwm::agent_sessions::{AgentKind, AgentSession, Freshness, WorktreeAgents};
+  use gwm::tui::{agent_cell_label, TaskKind};
+  use std::collections::BTreeMap;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn snapshot_for(path: &str, kind: AgentKind, age_secs: u64) -> BTreeMap<String, WorktreeAgents> {
+    let mut map = BTreeMap::new();
+    map.insert(
+      path.to_string(),
+      WorktreeAgents {
+        sessions: vec![AgentSession {
+          kind,
+          cwd: PathBuf::from(path),
+          last_activity: SystemTime::now() - Duration::from_secs(age_secs),
+          ended: false,
+          id: "s1".into(),
+        }],
+      },
+    );
+    map
+  }
+
+  #[test]
+  fn agent_snapshot_applies_on_live_generation_and_coalesces() {
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    // A second request while one is in flight coalesces (the debounce).
+    assert!(app.tasks.request(TaskKind::AgentSessions).is_none());
+    let map = snapshot_for("/w/one", AgentKind::ClaudeCode, 10);
+    assert!(app.apply_agent_snapshot(generation, map.clone()));
+    assert_eq!(app.agent_snapshot.as_ref(), Some(&map));
+  }
+
+  #[test]
+  fn agent_snapshot_stale_generation_is_dropped() {
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    let live = snapshot_for("/w/one", AgentKind::Codex, 10);
+    assert!(app.apply_agent_snapshot(generation, live.clone()));
+    // A new run starts, then a refresh invalidates it mid-flight.
+    let stale = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.tasks.invalidate(TaskKind::AgentSessions);
+    assert!(!app.apply_agent_snapshot(stale, BTreeMap::new()));
+    // The last authoritative snapshot survives.
+    assert_eq!(app.agent_snapshot.as_ref(), Some(&live));
+  }
+
+  #[test]
+  fn agent_cell_is_empty_without_snapshot_or_sessions() {
+    // No snapshot yet (startup) and no matched sessions both render nothing —
+    // no placeholder noise (spec US1 scenario 5).
+    assert!(agent_cell_label(None, SystemTime::now()).is_none());
+    let empty = WorktreeAgents::default();
+    assert!(agent_cell_label(Some(&empty), SystemTime::now()).is_none());
+  }
+
+  #[test]
+  fn agent_cell_shows_top_agent_with_freshness() {
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: vec![
+        AgentSession {
+          kind: AgentKind::ClaudeCode,
+          cwd: PathBuf::from("/w/one"),
+          last_activity: now - Duration::from_secs(10),
+          ended: false,
+          id: "new".into(),
+        },
+        AgentSession {
+          kind: AgentKind::Vibe,
+          cwd: PathBuf::from("/w/one"),
+          last_activity: now - Duration::from_secs(4000),
+          ended: false,
+          id: "old".into(),
+        },
+      ],
+    };
+    let (label, freshness) = agent_cell_label(Some(&agents), now).unwrap();
+    assert_eq!(label, "claude");
+    assert_eq!(freshness, Freshness::Active);
+
+    let idle_only = WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind: AgentKind::Opencode,
+        cwd: PathBuf::from("/w/one"),
+        last_activity: now - Duration::from_secs(4000),
+        ended: false,
+        id: "old".into(),
+      }],
+    };
+    let (label, freshness) = agent_cell_label(Some(&idle_only), now).unwrap();
+    assert_eq!(label, "opencode");
+    assert_eq!(freshness, Freshness::Idle);
+  }
+
+  #[test]
+  fn agents_for_looks_up_by_worktree_path() {
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    let path = app.worktrees[0].path.to_string_lossy().to_string();
+    let map = snapshot_for(&path, AgentKind::ClaudeCode, 10);
+    assert!(app.apply_agent_snapshot(generation, map));
+    let w = app.worktrees[0].clone();
+    assert!(app.agents_for(&w).is_some());
+    assert_eq!(app.agents_for(&w).unwrap().top().unwrap().id, "s1");
+  }
+}

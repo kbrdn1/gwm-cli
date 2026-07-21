@@ -284,6 +284,16 @@ pub struct App {
   /// against it.
   pub sidebar: SidebarState,
 
+  /// Last completed agent-session snapshot, keyed by worktree path string
+  /// (issue #408). `None` until the first detection lands — the table then
+  /// renders without agent cells, no placeholder noise. Replaced atomically
+  /// by [`Self::apply_agent_snapshot`]; the render path only reads it.
+  pub agent_snapshot: Option<std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>>,
+  /// When the current snapshot was taken — drives the periodic re-detection
+  /// in [`Self::maybe_refresh_agent_sessions`] so freshness colours do not
+  /// fossilise at their startup value.
+  pub agent_snapshot_at: Option<std::time::Instant>,
+
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
   // it directly. Now a *mirror* of [`Self::pending_chord`] —
@@ -552,6 +562,8 @@ impl App {
       help_max_scroll: 0,
       help_max_x_scroll: 0,
       sidebar: SidebarState::new(),
+      agent_snapshot: None,
+      agent_snapshot_at: None,
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -1053,6 +1065,11 @@ impl App {
     // every refresh path shares, so the OFF-thread drains (`RefreshWorktrees` /
     // `RefreshWorkspace`) get it too, not just the synchronous `refresh`.
     self.tasks.invalidate(TaskKind::Sidebar);
+    // Same staleness reasoning for the agent snapshot (issue #408): the
+    // worktree set may have changed, so an in-flight detection matched
+    // against the old set is dropped and the next tick re-detects.
+    self.tasks.invalidate(TaskKind::AgentSessions);
+    self.agent_snapshot_at = None;
     self.status = if spawned > 0 {
       format!(
         "refreshed — {} worktree(s); fetching GitHub status…",
@@ -1223,6 +1240,62 @@ impl App {
       let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme);
       let _ = tx.send(TaskMsg::Sidebar(generation, path, mode, sections));
     });
+  }
+
+  /// Keep agent-session detection off the render path (issue #408). Called
+  /// once per event-loop tick, next to [`Self::maybe_refresh_sidebar`]: a
+  /// cold snapshot (startup, or nulled by a refresh) or one older than the
+  /// re-detection period spawns one worker; a tick that finds a run already
+  /// in flight coalesces onto it — same no-timer debounce as the sidebar.
+  pub fn maybe_refresh_agent_sessions(&mut self) {
+    const REDETECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+    let fresh = self.agent_snapshot_at.is_some_and(|at| at.elapsed() < REDETECT_PERIOD);
+    if fresh {
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
+      return; // detection already in flight — coalesce
+    };
+    let rows: Vec<(String, PathBuf)> = self
+      .worktrees
+      .iter()
+      .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
+      .collect();
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let map = match dirs::home_dir() {
+        Some(home) => crate::agent_sessions::detect_all(&home, &rows, std::time::SystemTime::now()),
+        None => Default::default(), // no home: detection degrades to empty (FR-009)
+      };
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map));
+    });
+  }
+
+  /// Store a completed detection snapshot if its generation is still
+  /// authoritative (issue #408). Returns `true` when applied; a late result
+  /// superseded by [`TaskRunner::invalidate`] is dropped and the previous
+  /// snapshot survives. Extracted from the drain so the state contract is
+  /// pinned ratatui-free by `tests/tui_app_tests.rs`.
+  pub fn apply_agent_snapshot(
+    &mut self,
+    generation: u64,
+    map: std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+  ) -> bool {
+    if !self.tasks.complete(TaskKind::AgentSessions, generation) {
+      return false;
+    }
+    self.agent_snapshot = Some(map);
+    self.agent_snapshot_at = Some(std::time::Instant::now());
+    true
+  }
+
+  /// The agent sessions matched to `w`, if a snapshot has landed and holds
+  /// any (issue #408). Pure lookup — the render path's only entry point.
+  pub fn agents_for(&self, w: &crate::worktree::WorktreeInfo) -> Option<&crate::agent_sessions::WorktreeAgents> {
+    self
+      .agent_snapshot
+      .as_ref()
+      .and_then(|map| map.get(w.path.to_string_lossy().as_ref()))
   }
 
   /// Off-thread `gwm sync` of the selected worktree for the `S` key (issue
@@ -1522,6 +1595,13 @@ impl App {
           // is ever shown under the live header.
           self.sidebar.cache = Some(((path, mode), sections));
           applied = true;
+        }
+        TaskMsg::AgentSessions(generation, map) => {
+          // Late-drop + store live in `apply_agent_snapshot` so the state
+          // contract is pinned ratatui-free (issue #408). Deliberately does
+          // NOT set `applied`: agent detection reads no git state, so there
+          // is nothing for the post-drain refresh bookkeeping to do.
+          self.apply_agent_snapshot(generation, map);
         }
       }
     }
