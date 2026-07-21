@@ -19,7 +19,7 @@
 
 ![gwm TUI: worktree table and details sidebar](docs/2.tui/_assets/hero.png)
 
-Written in Rust on vendored `libgit2`, so there is no `git` CLI to shell out to and nothing to install alongside it. Installs from Cargo, Homebrew, Scoop, Nix, aqua, the AUR, `.deb` and `.rpm`.
+Written in Rust on vendored `libgit2`, so worktree operations are native rather than shelled out, and there is no `gwq` to install. `git` itself is still required on `PATH` for the operations that call it. Installs from Cargo, Homebrew, Scoop, Nix, aqua, the AUR, `.deb` and `.rpm`.
 
 **What you get that a `git worktree add` wrapper doesn't:**
 
@@ -91,7 +91,7 @@ Step-by-step walkthrough: [`docs/getting-started/first-worktree.md`](docs/1.gett
 
 ## documentation
 
-The full tree lives under [`docs/`](docs/): 39 pages in English, mirrored in French under [`docs/fr/`](docs/fr/). Numeric prefixes drive the sidebar order and every page carries frontmatter, so the tree renders as-is into a static site ([#423](https://github.com/kbrdn1/gwm-cli/issues/423) tracks publishing it). The in-repo tree is the source of truth.
+The full tree lives under [`docs/`](docs/): 39 pages in English, with 36 of them translated in French under [`docs/fr/`](docs/fr/). Numeric prefixes drive the sidebar order and every page carries frontmatter, so the tree renders as-is into a static site ([#423](https://github.com/kbrdn1/gwm-cli/issues/423) tracks publishing it). The in-repo tree is the source of truth.
 
 | Section                                                         | Read this when …                                                              |
 |:----------------------------------------------------------------|:------------------------------------------------------------------------------|
