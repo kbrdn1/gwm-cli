@@ -64,6 +64,21 @@ fn template_exists_and_carries_all_placeholders() {
   for ph in ["__VERSION__", "__SHA256_X86_64__", "__SHA256_ARM64__"] {
     assert!(body.contains(ph), "template missing placeholder {ph}: {}", t.display());
   }
+
+  // The rendered PKGBUILD is handed to a third-party packager (#430), so it
+  // must not claim maintainership of a package we do not own. AUR convention
+  // puts the packaging author on `# Contributor:` and leaves `# Maintainer:`
+  // to whoever owns it.
+  assert!(
+    body.contains("# Contributor: Kylian Bardini"),
+    "template must credit the packaging author as Contributor: {}",
+    t.display()
+  );
+  assert!(
+    !body.contains("# Maintainer:"),
+    "template must not claim the `# Maintainer:` line: `gwm-cli-bin` is maintained on the AUR by a \
+     third party (#430)"
+  );
 }
 
 #[test]
