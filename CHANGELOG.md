@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- The `aur-publish` job. `gwm-cli-bin` is maintained on the AUR by a third
+  party, so the job never had push rights: being advisory, it failed silently
+  on every stable tag while the release reported success. The AUR is now fed
+  by hand, like Nixpkgs and aqua. The `PKGBUILD` template, its render script
+  and their tests are unchanged, so the handover stays a one-liner. (#430)
+
 ### Changed
 
 - The release workflow's read-only checkouts no longer persist the
