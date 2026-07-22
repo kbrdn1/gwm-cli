@@ -669,6 +669,30 @@ fn vibe_meta(session_id: &str, cwd: &str, end_time: Option<&str>) -> String {
 }
 
 #[test]
+fn vibe_ids_neutralise_control_characters_too() {
+  // Codex review round H: every other backend routes its ids through
+  // `clean_id`; a malformed Vibe `session_id` carrying ESC/newline must
+  // not reach the terminal either — same for the dir-name fallback.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("session");
+  let dir = base.join("session_20260722_100000_evil");
+  write(
+    &dir.join("meta.json"),
+    r#"{"session_id":"evil\u001b[31m-vibe","start_time":"2026-07-22T10:00:00.000000","end_time":null,"environment":{"working_directory":"/work/one"}}"#,
+  );
+  write(&dir.join("messages.jsonl"), "{}\n");
+
+  let sessions = VibeSource.scan(&base, SystemTime::now());
+  assert_eq!(sessions.len(), 1);
+  assert!(
+    !sessions[0].id.chars().any(|c| c.is_control()),
+    "control characters stripped: {:?}",
+    sessions[0].id
+  );
+  assert!(sessions[0].id.contains("evil"));
+}
+
+#[test]
 fn vibe_scan_recovers_working_directory_and_liveness() {
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join("session");

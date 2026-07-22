@@ -601,11 +601,16 @@ impl VibeSource {
       // comes from messages.jsonl mtime (meta.json mtime as fallback);
       // end_time is only ever inspected for null-ness.
       let ended = v.get("end_time").is_some_and(|t| !t.is_null());
-      let id = v
+      // Same id hygiene as every other backend (Codex review round H):
+      // both the recorded id and the dir-name fallback go through clean_id.
+      let Some(id) = v
         .get("session_id")
         .and_then(|s| s.as_str())
-        .map(str::to_string)
-        .unwrap_or_else(|| entry.file_name().to_string_lossy().into_owned());
+        .and_then(clean_id)
+        .or_else(|| clean_id(&entry.file_name().to_string_lossy()))
+      else {
+        continue;
+      };
       out.push(AgentSession {
         kind: AgentKind::Vibe,
         cwd: PathBuf::from(cwd),
