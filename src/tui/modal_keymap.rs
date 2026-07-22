@@ -142,6 +142,7 @@ impl KeyContext {
       Create,
       Confirm,
       Help,
+      Detail,
       CommandLogs,
       Config,
       ConfigEdit,
@@ -225,8 +226,10 @@ define_modal_actions! {
   }
   Detail {
     DetailClose      => "close"       [ "Esc", "q" ],
-    DetailScrollDown => "scroll_down" [ "Down", "j" ],
-    DetailScrollUp   => "scroll_up"   [ "Up", "k" ],
+    DetailSelectNext => "select_next" [ "Down", "j" ],
+    DetailSelectPrev => "select_prev" [ "Up", "k" ],
+    DetailAttach     => "attach"      [ "a" ],
+    DetailDetach     => "detach"      [ "d" ],
   }
   CommandLogs {
     CommandLogsClose        => "close"         [ "Esc", "q" ],

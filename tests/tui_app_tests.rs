@@ -8098,6 +8098,7 @@ mod agent_sessions_pane {
           last_activity: SystemTime::now() - Duration::from_secs(age_secs),
           ended: false,
           id: "s1".into(),
+          name: None,
         }],
       },
     );
@@ -8149,6 +8150,7 @@ mod agent_sessions_pane {
           last_activity: now - Duration::from_secs(10),
           ended: false,
           id: "new".into(),
+          name: None,
         },
         AgentSession {
           kind: AgentKind::Vibe,
@@ -8156,6 +8158,7 @@ mod agent_sessions_pane {
           last_activity: now - Duration::from_secs(4000),
           ended: false,
           id: "old".into(),
+          name: None,
         },
       ],
     };
@@ -8170,6 +8173,7 @@ mod agent_sessions_pane {
         last_activity: now - Duration::from_secs(4000),
         ended: false,
         id: "old".into(),
+        name: None,
       }],
     };
     let (label, freshness) = agent_cell_label(Some(&idle_only), now).unwrap();
@@ -8216,6 +8220,7 @@ mod agent_detail_overlay {
             last_activity: now - Duration::from_secs(10),
             ended: false,
             id: "newest-session".into(),
+            name: None,
           },
           AgentSession {
             kind: AgentKind::Codex,
@@ -8223,6 +8228,7 @@ mod agent_detail_overlay {
             last_activity: now - Duration::from_secs(4000),
             ended: false,
             id: "older-session".into(),
+            name: None,
           },
         ],
       },
@@ -8243,10 +8249,19 @@ mod agent_detail_overlay {
     assert_eq!(rows[0].role, DetailRole::Active);
     assert_eq!(rows[1].label, "codex");
     assert_eq!(rows[1].role, DetailRole::Muted);
-    // Value carries freshness + a human-readable recency, not raw timestamps.
+    // Value carries freshness + a human-readable recency, not raw timestamps,
+    // and the FULL id (user feedback: 8-char truncation was useless for attach).
     assert!(rows[0].value.contains("active"));
     assert!(rows[1].value.contains("idle"));
-    assert!(app.detail_overlay.title.contains(&app.worktrees[0].name));
+    assert!(
+      rows[0].value.contains("newest-session"),
+      "full id expected: {}",
+      rows[0].value
+    );
+    // meta carries the session id for attach/detach on the selected row.
+    assert_eq!(rows[0].meta.as_deref(), Some("newest-session"));
+    // User feedback 2026-07-22: capitalized title, no worktree name suffix.
+    assert_eq!(app.detail_overlay.title, "Agent Sessions");
   }
 
   #[test]
@@ -8273,13 +8288,85 @@ mod agent_detail_overlay {
   #[test]
   fn detail_rows_are_generic_label_value_role_triples() {
     // The mapping is pure and content-agnostic: any consumer can build rows.
-    let rows = agent_detail_rows(None, SystemTime::now());
+    let rows = agent_detail_rows(None, None, SystemTime::now());
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     // The triple shape is the reuse contract for the future rich view.
     let _label: &String = &row.label;
     let _value: &String = &row.value;
     let _role: &DetailRole = &row.role;
+    let _meta: &Option<String> = &row.meta;
+  }
+
+  #[test]
+  fn selection_starts_at_zero_moves_and_clamps() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    assert_eq!(app.detail_overlay.selected, 0);
+    app.detail_overlay.select_next();
+    assert_eq!(app.detail_overlay.selected, 1);
+    app.detail_overlay.select_next(); // clamps at last row
+    assert_eq!(app.detail_overlay.selected, 1);
+    app.detail_overlay.select_prev();
+    app.detail_overlay.select_prev(); // clamps at zero
+    assert_eq!(app.detail_overlay.selected, 0);
+  }
+
+  #[test]
+  fn rows_prefer_the_session_name_over_the_id() {
+    // User feedback: a named session displays its name, not the uuid.
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind: AgentKind::ClaudeCode,
+        cwd: PathBuf::from("/w/one"),
+        last_activity: now - Duration::from_secs(10),
+        ended: false,
+        id: "a7820111-8232".into(),
+        name: Some("fix the login timeout bug".into()),
+      }],
+    };
+    let rows = agent_detail_rows(Some(&agents), None, now);
+    assert!(
+      rows[0].value.contains("fix the login timeout bug"),
+      "got {}",
+      rows[0].value
+    );
+    assert!(
+      !rows[0].value.contains("a7820111"),
+      "id must yield to the name: {}",
+      rows[0].value
+    );
+    // The id still rides meta for attach.
+    assert_eq!(rows[0].meta.as_deref(), Some("a7820111-8232"));
+  }
+
+  #[test]
+  fn attach_pins_the_selected_session_and_marks_the_row() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    app.detail_overlay.select_next(); // select "older-session"
+    app.attach_selected_agent();
+    // Pin persisted in branch config for the target worktree's branch.
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    let pin = gwm::github::agent_pin(&app.repo, &branch).unwrap();
+    assert_eq!(pin.as_deref(), Some("older-session"));
+    // The row now carries the pinned marker.
+    let row = &app.detail_overlay.rows[app.detail_overlay.selected];
+    assert!(row.value.contains("pinned"), "got {}", row.value);
+  }
+
+  #[test]
+  fn detach_clears_the_pin() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    app.attach_selected_agent();
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert!(gwm::github::agent_pin(&app.repo, &branch).unwrap().is_some());
+    app.detach_selected_agent();
+    assert!(gwm::github::agent_pin(&app.repo, &branch).unwrap().is_none());
+    let row = &app.detail_overlay.rows[0];
+    assert!(!row.value.contains("pinned"), "got {}", row.value);
   }
 }
 
@@ -8306,6 +8393,7 @@ mod agent_status_pane_line {
         last_activity: now - Duration::from_secs(10),
         ended: false,
         id: "s1".into(),
+        name: None,
       }],
     };
     let line = agent_summary_line(Some(&agents), now, &Theme::default()).unwrap();
@@ -8331,6 +8419,7 @@ mod agent_status_pane_line {
       last_activity: now - Duration::from_secs(age),
       ended: false,
       id: id.into(),
+      name: None,
     };
     let agents = WorktreeAgents {
       sessions: vec![

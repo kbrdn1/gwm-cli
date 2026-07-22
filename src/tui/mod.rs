@@ -662,16 +662,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // `confirm` arms / fires the safety countdown, `cancel` aborts, j/k
       // cycle the `[clean.profiles]` picker (re-scanning each time). The
       // countdown auto-fire is driven by the tick block above.
-      // Detail overlay (issue #408): scroll / close, plus the bound global
-      // `agent_sessions` key (default `a`) toggling it shut even rebound.
+      // Detail overlay (issue #408): j/k move the selection, `a` pins the
+      // selected session, `d` unpins (user feedback 2026-07-22 — `a` no
+      // longer toggles the overlay shut; Esc/q close).
       View::DetailOverlay => match app.resolve_modal(KeyContext::Detail, key) {
         Some(ModalAction::DetailClose) => app.close_detail_overlay(),
-        Some(ModalAction::DetailScrollDown) => {
-          let max = app.detail_overlay.rows.len().saturating_sub(1) as u16;
-          app.detail_overlay.scroll_down(max);
-        }
-        Some(ModalAction::DetailScrollUp) => app.detail_overlay.scroll_up(),
-        _ if app.key_matches_action(key, Action::AgentSessions) => app.close_detail_overlay(),
+        Some(ModalAction::DetailSelectNext) => app.detail_overlay.select_next(),
+        Some(ModalAction::DetailSelectPrev) => app.detail_overlay.select_prev(),
+        Some(ModalAction::DetailAttach) => app.attach_selected_agent(),
+        Some(ModalAction::DetailDetach) => app.detach_selected_agent(),
         _ => {}
       },
       View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {

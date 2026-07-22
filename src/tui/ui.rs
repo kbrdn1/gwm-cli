@@ -4409,28 +4409,43 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let accent = app.theme.accent;
   let term = f.area();
   let width = overlay_modal_width(term.width);
-  let mut lines = overlay_title_lines(&app.detail_overlay.title, accent);
-  let label_w = app
-    .detail_overlay
-    .rows
-    .iter()
-    .map(|r| r.label.chars().count())
-    .max()
-    .unwrap_or(0);
-  let skip = app.detail_overlay.scroll as usize;
-  let max_visible = (term.height as usize).saturating_sub(8).max(3);
-  for row in app.detail_overlay.rows.iter().skip(skip).take(max_visible) {
-    let (label_color, value_style) = match row.role {
-      DetailRole::Active => (
-        app.theme.clean,
-        Style::default().fg(app.theme.clean).add_modifier(Modifier::BOLD),
-      ),
-      DetailRole::Muted => (app.theme.muted, Style::default().fg(app.theme.muted)),
-      DetailRole::Normal => (app.theme.name, Style::default().fg(app.theme.name)),
+  let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
+  let ov = &app.detail_overlay;
+  let total = ov.rows.len();
+  // The modal height is derived from the VISIBLE row count, which is
+  // constant while navigating — scrolling must never resize the frame
+  // (user feedback 2026-07-22). The window follows the selection.
+  let max_visible = (term.height as usize).saturating_sub(10).max(3);
+  let visible = total.min(max_visible);
+  let (start, end) = picker_window(total, ov.selected, visible);
+
+  let label_w = ov.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
+  let mut lines = overlay_title_lines(&ov.title, accent);
+  for (i, row) in ov.rows.iter().enumerate().take(end).skip(start) {
+    let (label_color, value_color, value_bold) = match row.role {
+      DetailRole::Active => (app.theme.clean, app.theme.clean, true),
+      DetailRole::Muted => (app.theme.muted, app.theme.muted, false),
+      DetailRole::Normal => (app.theme.name, app.theme.name, false),
     };
+    // Selection paints a full-width bar (picker convention): pad the row
+    // out to the modal's inner width so the highlight reads as one block.
+    let text_cols = label_w + 2 + row.value.chars().count();
+    let pad = inner.saturating_sub(text_cols);
+    let mut label_style = Style::default().fg(label_color);
+    let mut value_style = Style::default().fg(value_color);
+    if value_bold {
+      value_style = value_style.add_modifier(Modifier::BOLD);
+    }
+    let mut pad_style = Style::default();
+    if i == ov.selected {
+      label_style = label_style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+      value_style = value_style.bg(app.theme.selection_bg);
+      pad_style = pad_style.bg(app.theme.selection_bg);
+    }
     lines.push(Line::from(vec![
-      Span::styled(format!("{:label_w$}  ", row.label), Style::default().fg(label_color)),
+      Span::styled(format!("{:label_w$}  ", row.label), label_style),
       Span::styled(row.value.clone(), value_style),
+      Span::styled(" ".repeat(pad), pad_style),
     ]));
   }
   push_modal_hint(
@@ -4440,10 +4455,19 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     &app.modal_keymap,
     &app.theme,
   );
-  let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+  let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  // Scrollbar over the rows sub-area (right padding column) when the list
+  // overflows — the missing affordance from the feedback.
+  let rows_rect = Rect {
+    x: area.x + 1,
+    y: area.y + 2 /* border + padding */ + 2, /* title lines */
+    width: area.width.saturating_sub(2),
+    height: visible as u16,
+  };
+  let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
 }
 
 /// Render the clean reclaim overlay (issue #325). A centred modal showing

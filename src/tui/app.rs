@@ -489,6 +489,11 @@ pub struct App {
   /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
   pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
 
+  /// The worktree the open detail overlay was built for — `(path, branch)`
+  /// captured at open so attach/detach pin against it even if an
+  /// auto-refresh drifts the live selection (clean-overlay pattern).
+  detail_overlay_target: Option<(PathBuf, Option<String>)>,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -605,6 +610,7 @@ impl App {
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
+      detail_overlay_target: None,
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -1273,16 +1279,24 @@ impl App {
       .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
       .collect();
     // Manual pins are read on the main thread (`Repository` is not `Send`)
-    // and moved into the worker as plain strings (issue #408 US4).
-    let pins: Vec<(String, String)> = self
-      .worktrees
-      .iter()
-      .filter_map(|w| {
-        let branch = w.branch.as_deref()?;
-        let sid = crate::github::agent_pin(&self.repo, branch).ok().flatten()?;
-        Some((w.path.to_string_lossy().to_string(), sid))
-      })
-      .collect();
+    // and moved into the worker as plain strings (issue #408 US4). In
+    // workspace mode the merged rows span several repos while `self.repo` is
+    // only the active one — a same-named branch in another repo would leak
+    // the wrong pin (Codex review round A), so pins stay single-repo-only,
+    // the same ceiling as the CLI/JSON workspace surfaces.
+    let pins: Vec<(String, String)> = if self.is_workspace() {
+      Vec::new()
+    } else {
+      self
+        .worktrees
+        .iter()
+        .filter_map(|w| {
+          let branch = w.branch.as_deref()?;
+          let sid = crate::github::agent_pin(&self.repo, branch).ok().flatten()?;
+          Some((w.path.to_string_lossy().to_string(), sid))
+        })
+        .collect()
+    };
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
       let map = match crate::agent_sessions::agents_home() {
@@ -2457,19 +2471,81 @@ impl App {
   /// the last completed snapshot — a session-less worktree opens with an
   /// explicit "no agent session found" row, never blank.
   pub fn open_agent_overlay(&mut self) {
-    let Some(sel) = self.selected() else {
+    let Some(sel) = self.selected().cloned() else {
       self.status = "nothing selected".into();
       return;
     };
-    let name = sel.name.clone();
-    let agents = self.agents_for(&sel.clone());
-    let rows = crate::tui::state::detail_overlay::agent_detail_rows(agents, std::time::SystemTime::now());
-    self.detail_overlay.open(format!("agent sessions — {name}"), rows);
+    // Capture the target now (clean-overlay pattern, Codex #333): an
+    // auto-refresh can drift the live selection while the overlay is open,
+    // and attach/detach must pin against THIS worktree's branch.
+    self.detail_overlay_target = Some((sel.path.clone(), sel.branch.clone()));
+    let rows = self.build_agent_rows(&sel);
+    self.detail_overlay.open("Agent Sessions".into(), rows);
     self.view = View::DetailOverlay;
+  }
+
+  /// Rows for the captured worktree: sessions from the snapshot, the manual
+  /// pin marked (issue #408 US4 + user feedback 2026-07-22).
+  fn build_agent_rows(&self, w: &crate::worktree::WorktreeInfo) -> Vec<crate::tui::state::detail_overlay::DetailRow> {
+    let pinned = w
+      .branch
+      .as_deref()
+      .and_then(|b| crate::github::agent_pin(&self.repo, b).ok().flatten());
+    crate::tui::state::detail_overlay::agent_detail_rows(
+      self.agents_for(w),
+      pinned.as_deref(),
+      std::time::SystemTime::now(),
+    )
+  }
+
+  /// Pin the selected overlay row's session to the overlay's target worktree
+  /// (`a` inside the modal). Auto-detection stays the default; the pin only
+  /// adds (issue #408 US4).
+  pub fn attach_selected_agent(&mut self) {
+    let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
+      self.status = "cannot pin: worktree has no branch (detached HEAD)".into();
+      return;
+    };
+    let Some(sid) = self.detail_overlay.selected_meta().map(str::to_string) else {
+      self.status = "no session selected to pin".into();
+      return;
+    };
+    if let Err(e) = crate::github::set_agent_pin(&self.repo, &branch, &sid) {
+      self.status = format!("pin failed: {e}");
+      return;
+    }
+    self.status = format!("pinned {sid}");
+    self.refresh_agent_overlay_rows(&path);
+  }
+
+  /// Remove the target worktree's pin (`d` inside the modal).
+  pub fn detach_selected_agent(&mut self) {
+    let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
+      self.status = "cannot detach: worktree has no branch (detached HEAD)".into();
+      return;
+    };
+    if let Err(e) = crate::github::clear_agent_pin(&self.repo, &branch) {
+      self.status = format!("detach failed: {e}");
+      return;
+    }
+    self.status = "agent pin removed".into();
+    self.refresh_agent_overlay_rows(&path);
+  }
+
+  /// Rebuild the open overlay's rows after a pin change and push the new
+  /// pin state to every other surface (snapshot re-detection).
+  fn refresh_agent_overlay_rows(&mut self, path: &Path) {
+    if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
+      let rows = self.build_agent_rows(&w);
+      self.detail_overlay.set_rows(rows);
+    }
+    self.tasks.invalidate(TaskKind::AgentSessions);
+    self.agent_snapshot_at = None;
   }
 
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
+    self.detail_overlay_target = None;
     self.view = View::List;
   }
 
