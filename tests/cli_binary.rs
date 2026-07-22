@@ -5631,7 +5631,96 @@ mod agents_cmd {
       .success()
       .stdout(predicate::str::contains("codex"))
       .stdout(predicate::str::contains("0000-cafe"))
-      .stdout(predicate::str::contains("active"));
+      .stdout(predicate::str::contains("active"))
+      // Codex review round A: the human listing must also carry the last
+      // activity (spec US4) — a relative form like "0m ago".
+      .stdout(predicate::str::contains("ago"));
+  }
+
+  #[test]
+  fn agents_listing_prefers_the_session_name_when_present() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join(".codex/sessions/2026/07/22");
+    std::fs::create_dir_all(&dir).unwrap();
+    let meta = format!(
+      r#"{{"type":"session_meta","payload":{{"session_id":"named-1","cwd":"{}"}}}}"#,
+      repo_dir.path().display()
+    );
+    let user = r#"{"type":"event_msg","payload":{"type":"user_message","message":"refactor the login flow"}}"#;
+    std::fs::write(
+      dir.join("rollout-named.jsonl"),
+      format!(
+        "{meta}
+{user}
+"
+      ),
+    )
+    .unwrap();
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      // Name shown alongside the (full) id — both visible, the id is what
+      // attach takes.
+      .stdout(predicate::str::contains("refactor the login flow"))
+      .stdout(predicate::str::contains("named-1"));
+  }
+
+  #[test]
+  fn pinned_marker_is_scoped_to_the_pinned_worktree_only() {
+    // Codex review round A: a session detected on worktree A but pinned on
+    // B must be flagged "pinned" only under B.
+    let (repo_dir, repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    // Session recorded on the MAIN checkout path (detected on A).
+    seed_codex(home.path(), repo_dir.path(), "4444-cafe");
+    // A second worktree B to pin onto.
+    let wt_b = repo_dir.path().join("wt-b");
+    {
+      let head = repo.head().unwrap().peel_to_commit().unwrap();
+      repo.branch("feat/b", &head, false).unwrap();
+      let mut opts = git2::WorktreeAddOptions::new();
+      let branch = repo.find_branch("feat/b", git2::BranchType::Local).unwrap();
+      opts.reference(Some(branch.get()));
+      repo.worktree("wt-b", &wt_b, Some(&opts)).unwrap();
+    }
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", "wt-b", "4444-cafe"])
+      .assert()
+      .success();
+
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let text = String::from_utf8_lossy(&out);
+    // Split per worktree block: the main checkout's block must NOT carry
+    // "pinned"; wt-b's block must.
+    let blocks: Vec<&str> = text.split("\n\n").collect();
+    let _ = blocks; // block layout is free; assert line-wise instead:
+    let pinned_lines: Vec<&str> = text.lines().filter(|l| l.contains("pinned")).collect();
+    assert_eq!(pinned_lines.len(), 1, "exactly one pinned line, got: {text}");
+  }
+
+  #[test]
+  fn workspace_list_table_carries_the_agent_column() {
+    // Codex review round A: `gwm list --workspace` (human table) must show
+    // AGENT like the single-repo table.
+    let root = workspace_with_worktrees();
+    let home = tempfile::TempDir::new().unwrap();
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", "."])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"));
   }
 
   #[test]

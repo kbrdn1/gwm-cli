@@ -32,7 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   worktree when the recorded directory is not enough — auto-detection stays
   the default, the pin (git branch config `gwm-agent-pin`, one per worktree)
   only adds, and every surface honours it. `GWM_AGENTS_HOME` overrides the
-  scanned home for deterministic tests/CI.
+  scanned home for deterministic tests/CI. Sessions carry a human-readable
+  **name** when their artefacts have one (first prompt, or Vibe's title) —
+  shown in the overlay and `gwm agents`, and exposed as an optional `name`
+  on the wire. The TUI overlay is interactive: `j`/`k` select a session
+  (highlight + scrollbar, stable frame), `a` pins it, `d` unpins. Daemon
+  detection is cached for 30 s per poll loop; a live session always beats a
+  freshly-ended one for the compact indicator.
 
 ### Removed
 

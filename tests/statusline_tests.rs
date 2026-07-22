@@ -237,6 +237,7 @@ mod agent_indicator {
       freshness: freshness.into(),
       last_activity: 1_784_480_000,
       id: "s1".into(),
+      name: None,
     };
     JsonWorktreeAgents {
       top: s.clone(),

@@ -100,6 +100,10 @@ pub struct JsonAgentSession {
   pub last_activity: u64,
   /// Backend-stable session identifier.
   pub id: String,
+  /// Human-readable session name when the artefacts carry one (first user
+  /// prompt or recorded title). Omitted when unavailable.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
 }
 
 impl JsonWorktreeAgents {
@@ -118,6 +122,7 @@ impl JsonWorktreeAgents {
         .map(|d| d.as_secs())
         .unwrap_or(0),
       id: s.id.clone(),
+      name: s.name.clone(),
     };
     let top = agents.top()?;
     Some(Self {
@@ -259,10 +264,50 @@ pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
     .iter()
     .map(|r| (r.path.clone(), std::path::PathBuf::from(&r.path)))
     .collect();
-  let summary = crate::agent_sessions::detect_all(&home, &keyed, pins, now);
+  let summary = detect_cached(&home, &keyed, pins, now);
   for row in rows.iter_mut() {
     row.agents = summary
       .get(&row.path)
       .and_then(|a| JsonWorktreeAgents::from_summary(a, now));
   }
+}
+
+/// Detection result cache for the daemon's poll loop (Codex review round A):
+/// `subscribe` consumers make the daemon re-list every poll tick (1 s by
+/// default, once per subscriber), and re-walking the Codex/opencode/Vibe
+/// stores each time is real disk churn. Same inputs within the TTL reuse the
+/// last summary — the TUI's own 30 s re-detection cadence, applied here.
+/// ponytail: one process-global slot guarded by a Mutex; per-input LRU only
+/// if a real multi-repo daemon setup ever needs it.
+fn detect_cached(
+  home: &std::path::Path,
+  keyed: &[(String, std::path::PathBuf)],
+  pins: &[(String, String)],
+  now: std::time::SystemTime,
+) -> std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents> {
+  const TTL: std::time::Duration = std::time::Duration::from_secs(30);
+  type CacheKey = (std::path::PathBuf, Vec<(String, String)>, Vec<String>);
+  type CacheSlot = Option<(
+    std::time::Instant,
+    CacheKey,
+    std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+  )>;
+  static CACHE: std::sync::Mutex<CacheSlot> = std::sync::Mutex::new(None);
+
+  let key: CacheKey = (
+    home.to_path_buf(),
+    pins.to_vec(),
+    keyed.iter().map(|(k, _)| k.clone()).collect(),
+  );
+  // A poisoned mutex here would mean a panic mid-detection; recover by
+  // recomputing rather than propagating the poison.
+  let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+  if let Some((at, cached_key, summary)) = slot.as_ref() {
+    if *cached_key == key && at.elapsed() < TTL {
+      return summary.clone();
+    }
+  }
+  let summary = crate::agent_sessions::detect_all(home, keyed, pins, now);
+  *slot = Some((std::time::Instant::now(), key, summary.clone()));
+  summary
 }

@@ -187,6 +187,10 @@
         "id": {
           "type": "string",
           "description": "Backend-stable session identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable session name when the artefacts carry one (first user prompt or recorded title). Omitted when unavailable."
         }
       }
     }

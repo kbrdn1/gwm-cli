@@ -6,7 +6,7 @@
 
 use gwm::doctor::{Check, DoctorReport};
 use gwm::github::BranchLink;
-use gwm::json_api::{check_status_str, JsonDoctorReport, JsonPath, JsonStatus, JsonWorktree};
+use gwm::json_api::{self, check_status_str, JsonDoctorReport, JsonPath, JsonStatus, JsonWorktree};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -194,4 +194,62 @@ fn json_worktree_vec_decodes_from_a_daemon_list_result() {
   assert_eq!(wts.len(), 1);
   assert!(wts[0].is_main);
   assert!(wts[0].status.unknown);
+}
+
+// -- Agent detection cache (issue #408, Codex review round A) ---------------
+
+/// The daemon re-lists every poll tick; identical inputs within the TTL must
+/// reuse the last detection instead of re-walking the artefact stores. The
+/// probe: seed a session, attach once, delete the artefacts, attach again —
+/// a cache hit still carries the agents (staleness ≤ 30 s is the documented
+/// trade-off). Runs in its own process-global slot; this file has no other
+/// attach_agents caller, so the env var and the cache stay uncontended.
+#[test]
+fn attach_agents_reuses_detection_within_the_ttl() {
+  let home = tempfile::TempDir::new().unwrap();
+  // SAFETY-of-intent: single test touching this var in this binary.
+  std::env::set_var("GWM_AGENTS_HOME", home.path());
+  let dir = home.path().join(".codex/sessions/2026/07/22");
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(
+    dir.join("rollout-cache.jsonl"),
+    r#"{"type":"session_meta","payload":{"session_id":"cache-1","cwd":"/work/cached"}}
+"#,
+  )
+  .unwrap();
+
+  let row = || JsonWorktree {
+    name: "cached".into(),
+    id: "cached".into(),
+    path: "/work/cached".into(),
+    branch: Some("main".into()),
+    head: None,
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: JsonStatus {
+      is_dirty: false,
+      has_upstream: false,
+      ahead: 0,
+      behind: 0,
+      unknown: false,
+    },
+    age_seconds: None,
+    issue: None,
+    pr: None,
+    agents: None,
+  };
+
+  let mut rows = vec![row()];
+  json_api::attach_agents(&mut rows, &[]);
+  assert!(rows[0].agents.is_some(), "seeded session must be detected");
+
+  // Remove the artefacts: a cache hit still serves the previous summary.
+  std::fs::remove_dir_all(home.path().join(".codex")).unwrap();
+  let mut rows2 = vec![row()];
+  json_api::attach_agents(&mut rows2, &[]);
+  assert!(
+    rows2[0].agents.is_some(),
+    "within the TTL the cached detection must be reused (no re-walk)"
+  );
 }

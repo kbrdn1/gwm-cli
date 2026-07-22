@@ -945,6 +945,7 @@ mod agent_sessions_field {
       freshness: freshness.into(),
       last_activity: ts,
       id: id.into(),
+      name: Some("fix the login flow".into()),
     };
     JsonWorktreeAgents {
       top: s("claude", "active", 1_784_480_000, "a7820111"),
@@ -997,6 +998,7 @@ mod agent_sessions_field {
         ("freshness", "string"),
         ("last_activity", "integer"),
         ("id", "string"),
+        ("name", "string"),
       ],
     );
   }

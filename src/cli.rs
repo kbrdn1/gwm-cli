@@ -1861,7 +1861,15 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
       }
-      let pinned_ids: std::collections::BTreeSet<&str> = pins.iter().map(|(_, sid)| sid.as_str()).collect();
+      // The pinned marker is scoped per (worktree, session): a session
+      // detected on A but pinned on B is flagged only under B (Codex
+      // review round A).
+      let pinned_pairs: std::collections::BTreeSet<(&str, &str)> =
+        pins.iter().map(|(path, sid)| (path.as_str(), sid.as_str())).collect();
+      let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
       let mut any = false;
       for row in &rows {
         let Some(agents) = &row.agents else {
@@ -1870,12 +1878,21 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
         any = true;
         println!("{}", row.name);
         for s in &agents.sessions {
-          let pin_mark = if pinned_ids.contains(s.id.as_str()) {
+          let pin_mark = if pinned_pairs.contains(&(row.path.as_str(), s.id.as_str())) {
             "  pinned"
           } else {
             ""
           };
-          println!("  {:<9} {:<7} {}{}", s.kind, s.freshness, s.id, pin_mark);
+          // Relative last activity (spec US4): the human table must let old
+          // sessions be told apart at a glance.
+          let ago = worktree::format_relative_duration(std::time::Duration::from_secs(
+            now_epoch.saturating_sub(s.last_activity),
+          ));
+          let name_part = s.name.as_deref().map(|n| format!("  {n}")).unwrap_or_default();
+          println!(
+            "  {:<9} {:<7} {:>4} ago  {}{}{}",
+            s.kind, s.freshness, ago, s.id, name_part, pin_mark
+          );
         }
       }
       if !any {
@@ -2221,6 +2238,26 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
   }
 
   let repo_w = rows.iter().map(|r| r.repo_name.len()).max().unwrap_or(4).clamp(4, 30);
+  // AGENT parity with the single-repo table (Codex review round A): one
+  // detection pass over the merged rows, no pins (same workspace ceiling as
+  // the JSON branch above).
+  let agent_w = 8;
+  let agent_cells: Vec<String> = {
+    let mut cells = vec!["-".to_string(); rows.len()];
+    if let Some(home) = crate::agent_sessions::agents_home() {
+      let keyed: Vec<(String, PathBuf)> = rows
+        .iter()
+        .map(|r| (r.info.path.to_string_lossy().to_string(), r.info.path.clone()))
+        .collect();
+      let map = crate::agent_sessions::detect_all(&home, &keyed, &[], std::time::SystemTime::now());
+      for (i, r) in rows.iter().enumerate() {
+        if let Some(top) = map.get(r.info.path.to_string_lossy().as_ref()).and_then(|a| a.top()) {
+          cells[i] = top.kind.display().to_string();
+        }
+      }
+    }
+    cells
+  };
   let name_w = rows.iter().map(|r| r.info.name.len()).max().unwrap_or(4).clamp(4, 40);
   let branch_w = rows
     .iter()
@@ -2233,29 +2270,33 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
 
   if detect_pr {
     println!(
-      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {:<aw$}  PATH",
       "REPO",
       "NAME",
       "BRANCH",
       "STATUS",
       "PR",
+      "AGENT",
       rw = repo_w,
       nw = name_w,
       bw = branch_w,
       sw = status_w,
       pw = pr_w,
+      aw = agent_w,
     );
   } else {
     println!(
-      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<aw$}  PATH",
       "REPO",
       "NAME",
       "BRANCH",
       "STATUS",
+      "AGENT",
       rw = repo_w,
       nw = name_w,
       bw = branch_w,
       sw = status_w,
+      aw = agent_w,
     );
   }
   for (i, row) in rows.iter().enumerate() {
@@ -2268,33 +2309,37 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
-        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {:<aw$}  {}",
         mark,
         row.repo_name,
         w.name,
         branch,
         status,
         pr_cell,
+        agent_cells[i],
         w.path.display(),
         rw = repo_w,
         nw = name_w,
         bw = branch_w,
         sw = status_w,
         pw = pr_w,
+        aw = agent_w,
       );
     } else {
       println!(
-        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<aw$}  {}",
         mark,
         row.repo_name,
         w.name,
         branch,
         status,
+        agent_cells[i],
         w.path.display(),
         rw = repo_w,
         nw = name_w,
         bw = branch_w,
         sw = status_w,
+        aw = agent_w,
       );
     }
   }
