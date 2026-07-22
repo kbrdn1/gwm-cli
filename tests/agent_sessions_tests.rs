@@ -318,6 +318,66 @@ fn command_name_titles_are_capped_like_any_other_name() {
   assert!(name.starts_with("/c"), "still the command name: {name:?}");
 }
 
+// -- opencode SQLite backend (user feedback 2026-07-22) --
+
+/// Build the opencode home layout with an `opencode.db` (schema subset of
+/// the real one — only the queried columns). Skips silently when the
+/// `sqlite3` CLI is unavailable (Windows CI) — the JSON fallback tests
+/// cover that path.
+fn seed_opencode_db(home: &Path, rows: &str) -> bool {
+  if std::process::Command::new("sqlite3").arg("--version").output().is_err() {
+    return false;
+  }
+  let dir = home.join(".local/share/opencode");
+  fs::create_dir_all(dir.join("storage/project")).unwrap();
+  let sql = format!(
+    "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer); {rows}"
+  );
+  let status = std::process::Command::new("sqlite3")
+    .arg(dir.join("opencode.db"))
+    .arg(&sql)
+    .status()
+    .unwrap();
+  assert!(status.success());
+  true
+}
+
+#[test]
+fn opencode_scan_reads_the_sqlite_db_when_present() {
+  // opencode ≥ 1.x migrated `storage/project/*.json` into `opencode.db`
+  // (`storage/migration` marker); the stale JSON made every new session
+  // invisible (user feedback 2026-07-22). The db is authoritative when
+  // present: `directory` is the cwd, `title` the name (renames show),
+  // `time_updated` (epoch ms) the activity, `time_archived` the end.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let now_ms = SystemTime::now()
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .unwrap()
+    .as_millis();
+  let old_ms = now_ms - 40 * 24 * 3600 * 1000; // outside the 30-day window
+  let rows = format!(
+    "INSERT INTO session VALUES ('ses_live', NULL, '/work/one', 'Rename test-opencode', {now_ms}, NULL); \
+     INSERT INTO session VALUES ('ses_done', NULL, '/work/one', 'archived one', {now_ms}, {now_ms}); \
+     INSERT INTO session VALUES ('ses_old', NULL, '/work/one', 'too old', {old_ms}, NULL); \
+     INSERT INTO session VALUES ('ses_child', 'ses_live', '/work/one', 'subagent', {now_ms}, NULL);"
+  );
+  if !seed_opencode_db(tmp.path(), &rows) {
+    return; // no sqlite3 CLI here — fallback path covered elsewhere
+  }
+
+  let base = tmp.path().join(".local/share/opencode/storage/project");
+  let sessions = OpencodeSource.scan(&base, SystemTime::now());
+  let mut ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+  ids.sort_unstable();
+  assert_eq!(ids, ["ses_done", "ses_live"], "recent top-level only: {ids:?}");
+  let live = sessions.iter().find(|s| s.id == "ses_live").unwrap();
+  assert_eq!(live.cwd, PathBuf::from("/work/one"));
+  assert_eq!(live.name.as_deref(), Some("Rename test-opencode"));
+  assert!(!live.ended);
+  let done = sessions.iter().find(|s| s.id == "ses_done").unwrap();
+  assert!(done.ended, "time_archived marks the session ended");
+}
+
 // -- Codex backend (research.md D3) --
 
 const CODEX_META: &str = r#"{"timestamp":"2026-07-21T10:00:00.000Z","type":"session_meta","payload":{"session_id":"019f6b95-b01a-7d30-a28a-68d9813e2248","cwd":"/work/one","originator":"codex_exec"}}"#;
@@ -337,6 +397,130 @@ fn codex_scan_recovers_cwd_from_first_line_session_meta() {
   assert_eq!(s.cwd, PathBuf::from("/work/one"));
   assert_eq!(s.id, "019f6b95-b01a-7d30-a28a-68d9813e2248");
   assert!(!s.ended);
+}
+
+#[test]
+fn codex_thread_name_beats_the_first_prompt() {
+  // User feedback 2026-07-22: `codex` renames land in
+  // `~/.codex/session_index.jsonl` ({id, thread_name, updated_at}, one
+  // JSON per line, append-only — later lines win). Same precedence as the
+  // Claude live registry: the recorded name beats the first-prompt
+  // heuristic, and a session absent from the index keeps the fallback.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("sessions");
+  let named = r#"{"type":"session_meta","payload":{"session_id":"019f89bb-0dcd-7e60-9717-b3745ed8343d","cwd":"/work/one"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"first prompt text"}}"#;
+  write(&base.join("2026/07/22/rollout-a.jsonl"), named);
+  let unnamed = r#"{"type":"session_meta","payload":{"session_id":"0199dddd-0000-0000-0000-000000000000","cwd":"/work/two"}}
+{"type":"event_msg","payload":{"type":"user_message","message":"plain prompt"}}"#;
+  write(&base.join("2026/07/22/rollout-b.jsonl"), unnamed);
+  write(
+    &tmp.path().join("session_index.jsonl"),
+    concat!(
+      "{\"id\":\"019f89bb-0dcd-7e60-9717-b3745ed8343d\",\"thread_name\":\"old-name\",\"updated_at\":\"2026-07-22T10:00:00Z\"}\n",
+      "not json — a corrupt line must not poison the rest\n",
+      "{\"id\":\"019f89bb-0dcd-7e60-9717-b3745ed8343d\",\"thread_name\":\"test-rename\",\"updated_at\":\"2026-07-22T12:09:47Z\"}\n",
+    ),
+  );
+
+  let sessions = CodexSource.scan(&base, SystemTime::now());
+  let by_id = |id: &str| sessions.iter().find(|s| s.id == id).unwrap();
+  assert_eq!(
+    by_id("019f89bb-0dcd-7e60-9717-b3745ed8343d").name.as_deref(),
+    Some("test-rename"),
+    "the LAST index entry wins"
+  );
+  assert_eq!(
+    by_id("0199dddd-0000-0000-0000-000000000000").name.as_deref(),
+    Some("plain prompt"),
+    "absent from the index -> first-prompt fallback"
+  );
+}
+
+#[test]
+fn session_ids_neutralise_control_characters() {
+  // Codex review round G: ids print raw on the human surfaces (CLI listing,
+  // TUI rows) — a malformed artefact id carrying ESC/newline could forge
+  // lines or drive the terminal. Ids are sanitised at ingestion so display,
+  // pins and JSON stay consistent.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("sessions");
+  let meta = r#"{"type":"session_meta","payload":{"session_id":"evil[31m-id","cwd":"/work/one"}}"#;
+  write(&base.join("2026/07/22/rollout-evil.jsonl"), &format!("{meta}\n"));
+
+  let sessions = CodexSource.scan(&base, SystemTime::now());
+  assert_eq!(sessions.len(), 1);
+  assert!(
+    !sessions[0].id.chars().any(|c| c.is_control()),
+    "control characters stripped from the id: {:?}",
+    sessions[0].id
+  );
+  assert!(sessions[0].id.contains("evil"), "visible text survives");
+}
+
+#[test]
+fn codex_first_line_longer_than_the_cap_is_rejected() {
+  // Codex review round G: `read_line` allocates the WHOLE first line, so a
+  // corrupt multi-hundred-MB artefact could exhaust the process. The read
+  // is capped; a first line that big is skipped (FR-009 degradation) even
+  // when it would parse as valid meta.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("sessions");
+  let padding = "x".repeat(100 * 1024);
+  let meta =
+    format!(r#"{{"type":"session_meta","payload":{{"session_id":"huge-1","cwd":"/work/one","pad":"{padding}"}}}}"#);
+  write(&base.join("2026/07/22/rollout-huge.jsonl"), &format!("{meta}\n"));
+
+  let sessions = CodexSource.scan(&base, SystemTime::now());
+  assert!(sessions.is_empty(), "oversized first line must be skipped");
+}
+
+#[test]
+fn detect_all_defers_codex_names_but_keeps_matched_and_pinned_ones() {
+  // Codex review round G: on the summary surfaces, foreign Codex rollouts
+  // must not pay the 64 KiB name read (`summarize` drops them anyway) —
+  // but a rollout matched to a worktree, or pinned to one, keeps its name.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".codex/sessions/2026/07/22");
+  let mk = |sid: &str, cwd: &str, prompt: &str| {
+    format!(
+      "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{sid}\",\"cwd\":\"{cwd}\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{prompt}\"}}}}\n"
+    )
+  };
+  // A REAL worktree dir (canonical matching needs it on disk).
+  let wt = tmp.path().join("wt");
+  fs::create_dir_all(&wt).unwrap();
+  write(
+    &base.join("rollout-m.jsonl"),
+    &mk("matched-cx", &wt.display().to_string(), "matched work"),
+  );
+  write(
+    &base.join("rollout-f.jsonl"),
+    &mk("foreign-cx", "/somewhere/else", "foreign work"),
+  );
+  write(
+    &base.join("rollout-p.jsonl"),
+    &mk("pinned-cx", "/another/place", "pinned work"),
+  );
+
+  let keyed = [("wt".to_string(), wt)];
+  let pins = [("wt".to_string(), "pinned-cx".to_string())];
+  let map = gwm::agent_sessions::detect_all(tmp.path(), &keyed, &pins, SystemTime::now());
+  let agents = map.get("wt").expect("matched + pinned sessions");
+  let name_of = |id: &str| {
+    agents
+      .sessions
+      .iter()
+      .find(|s| s.id == id)
+      .and_then(|s| s.name.as_deref().map(str::to_string))
+  };
+  assert_eq!(name_of("matched-cx").as_deref(), Some("matched work"));
+  assert_eq!(
+    name_of("pinned-cx").as_deref(),
+    Some("pinned work"),
+    "a pin keeps its name"
+  );
+  assert!(!agents.sessions.iter().any(|s| s.id == "foreign-cx"));
 }
 
 #[test]

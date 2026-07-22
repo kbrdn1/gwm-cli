@@ -57,8 +57,10 @@ pub struct AgentSession {
   pub ended: bool,
   pub id: String,
   /// Human-readable session name when the artefacts carry one: the first
-  /// user prompt (Claude Code / Codex, bounded read) or the recorded title
-  /// (Vibe). `None` when the store has nothing usable (opencode).
+  /// user prompt (Claude Code / Codex, bounded read), the recorded title
+  /// (Vibe, opencode's `opencode.db`), or the tool's own registry (Claude
+  /// live sessions, Codex `session_index.jsonl` — renames show). `None`
+  /// when the store has nothing usable (legacy opencode JSON).
   pub name: Option<String>,
 }
 
@@ -79,6 +81,34 @@ fn clean_session_name(raw: &str) -> Option<String> {
     }
   }
   collapse_and_cap(raw)
+}
+
+/// Session-id hygiene at ingestion (Codex review round G): ids print raw
+/// on the human surfaces (CLI listing, TUI rows), so control characters
+/// are stripped — sanitising at the source keeps display, pins and JSON
+/// consistent (a pin written for a sanitised id round-trips). `None` when
+/// nothing printable remains.
+fn clean_id(raw: &str) -> Option<String> {
+  let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
+  if cleaned.is_empty() {
+    None
+  } else {
+    Some(cleaned)
+  }
+}
+
+/// Bounded whole-file read: `None` when the file is missing, unreadable,
+/// or larger than `cap` — an oversized artefact degrades instead of
+/// exhausting the process (Codex review round G).
+fn read_capped(path: &Path, cap: u64) -> Option<String> {
+  use std::io::Read;
+  let file = std::fs::File::open(path).ok()?;
+  let mut buf = String::new();
+  file.take(cap.saturating_add(1)).read_to_string(&mut buf).ok()?;
+  if buf.len() as u64 > cap {
+    return None;
+  }
+  Some(buf)
 }
 
 /// Shared name hygiene for every extraction path (first prompt, live
@@ -162,7 +192,7 @@ fn claude_live_names(projects_base: &Path) -> std::collections::HashMap<String, 
     return map;
   };
   for entry in entries.flatten() {
-    let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+    let Some(raw) = read_capped(&entry.path(), NAME_SCAN_BYTES) else {
       continue;
     };
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -271,12 +301,15 @@ fn scan_claude_dir(
     let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
       continue;
     };
+    let Some(id) = clean_id(stem) else {
+      continue;
+    };
     out.push(AgentSession {
       kind: AgentKind::ClaudeCode,
       cwd: cwd.to_path_buf(),
       last_activity: mtime,
       ended: false,
-      id: stem.to_string(),
+      id,
       name: live_names.get(stem).cloned().or_else(|| first_user_text(&path)),
     });
   }
@@ -286,8 +319,51 @@ fn scan_claude_dir(
 /// `session_meta` JSON event carrying `payload.cwd`.
 pub struct CodexSource;
 
+/// Codex thread names from `~/.codex/session_index.jsonl` (user feedback
+/// 2026-07-22): one `{id, thread_name, updated_at}` JSON per line,
+/// append-only — a rename appends a new line, so LATER entries win.
+/// Missing file or corrupt lines degrade to an empty/partial map (FR-009);
+/// names are sanitised like every other extraction path.
+fn codex_thread_names(sessions_base: &Path) -> std::collections::HashMap<String, String> {
+  let mut map = std::collections::HashMap::new();
+  let Some(index) = sessions_base.parent().map(|p| p.join("session_index.jsonl")) else {
+    return map;
+  };
+  // 8 MiB cap: ~120 B per line, so even 10k+ sessions fit; anything
+  // bigger is treated as corrupt and degrades to no names.
+  let Some(contents) = read_capped(&index, 8 * 1024 * 1024) else {
+    return map;
+  };
+  for line in contents.lines() {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+      continue;
+    };
+    if let (Some(id), Some(name)) = (
+      v.get("id").and_then(|x| x.as_str()),
+      v.get("thread_name").and_then(|x| x.as_str()),
+    ) {
+      if let Some(clean) = clean_session_name(name) {
+        map.insert(id.to_string(), clean);
+      }
+    }
+  }
+  map
+}
+
 impl CodexSource {
+  /// Full scan with names for every session — the pool semantics.
   pub fn scan(&self, base: &Path, now: SystemTime) -> Vec<AgentSession> {
+    self.scan_naming(base, now, &|_, _| true)
+  }
+
+  /// `want_name(cwd, id)` gates the expensive per-rollout name extraction
+  /// (`first_user_text` reads up to [`NAME_SCAN_BYTES`] each — Codex
+  /// review round G): the summary surfaces only name the sessions a
+  /// worktree will claim, or a pin references; foreign rollouts are
+  /// dropped by `summarize` anyway. The cheap meta/index lookups still
+  /// run for every rollout (cwd + id are needed for the filtering).
+  fn scan_naming(&self, base: &Path, now: SystemTime, want_name: &dyn Fn(&Path, &str) -> bool) -> Vec<AgentSession> {
+    let thread_names = codex_thread_names(base);
     // ponytail: full YYYY/MM/DD walk + per-file mtime filter instead of
     // date-name pruning — a rollout appended today in a 40-day-old day dir
     // must still be found (appends touch the file mtime, not the dir's;
@@ -321,13 +397,20 @@ impl CodexSource {
         let Some((cwd, id)) = codex_first_line_meta(&path) else {
           continue; // malformed first line: skip, never hide the others
         };
+        let name = thread_names.get(&id).cloned().or_else(|| {
+          if want_name(&cwd, &id) {
+            first_user_text(&path)
+          } else {
+            None
+          }
+        });
         out.push(AgentSession {
           kind: AgentKind::Codex,
           cwd,
           last_activity: mtime,
           ended: false,
           id,
-          name: first_user_text(&path),
+          name,
         });
       }
     }
@@ -341,6 +424,22 @@ pub struct OpencodeSource;
 
 impl OpencodeSource {
   pub fn scan(&self, base: &Path, now: SystemTime) -> Vec<AgentSession> {
+    // opencode ≥ 1.x migrated `storage/project/*.json` into a SQLite
+    // `opencode.db` two levels up (`storage/migration` marker on disk) —
+    // the stale JSON made every new session invisible (user feedback
+    // 2026-07-22). The db is authoritative when present and readable; the
+    // legacy JSON scan below stays as the fallback for old installs and
+    // for hosts without a `sqlite3` CLI (FR-009 degradation).
+    if let Some(db) = base
+      .parent()
+      .and_then(|p| p.parent())
+      .map(|p| p.join("opencode.db"))
+      .filter(|p| p.exists())
+    {
+      if let Some(sessions) = opencode_scan_db(&db, now) {
+        return sessions;
+      }
+    }
     let Ok(entries) = std::fs::read_dir(base) else {
       return Vec::new();
     };
@@ -350,7 +449,7 @@ impl OpencodeSource {
       if path.extension().and_then(|e| e.to_str()) != Some("json") {
         continue;
       }
-      let Ok(raw) = std::fs::read_to_string(&path) else {
+      let Some(raw) = read_capped(&path, NAME_SCAN_BYTES) else {
         continue;
       };
       let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -382,18 +481,79 @@ impl OpencodeSource {
       if !within_scan_window(last_activity, now) {
         continue;
       }
+      let Some(id) = clean_id(id) else {
+        continue;
+      };
       out.push(AgentSession {
         kind: AgentKind::Opencode,
         cwd: PathBuf::from(worktree),
         last_activity,
         ended: false,
-        id: id.to_string(),
+        id,
         // The opencode project index records no prompt or title.
         name: None,
       });
     }
     out
   }
+}
+
+/// Query `opencode.db` through the `sqlite3` CLI (read-only, JSON output).
+/// `None` = the db could not be read (no CLI, locked, old sqlite3 without
+/// `-json`) → the caller falls back to the legacy JSON layout. `Some(vec)`
+/// — even empty — is authoritative. No Rust sqlite dependency: the CLI
+/// ships with macOS and virtually every Linux; Windows installs without it
+/// degrade to the legacy scan (documented ceiling — wire `rusqlite` only
+/// if Windows opencode users actually ask).
+fn opencode_scan_db(db: &Path, now: SystemTime) -> Option<Vec<AgentSession>> {
+  let cutoff_ms = now
+    .duration_since(SystemTime::UNIX_EPOCH)
+    .ok()?
+    .saturating_sub(SCAN_WINDOW)
+    .as_millis();
+  // Top-level sessions only: children (`parent_id`) are subagent runs.
+  let query = format!(
+    "SELECT id, directory, title, time_updated, time_archived FROM session \
+     WHERE parent_id IS NULL AND time_updated >= {cutoff_ms};"
+  );
+  let out = std::process::Command::new("sqlite3")
+    .arg("-readonly")
+    .arg("-json")
+    .arg(db)
+    .arg(&query)
+    .output()
+    .ok()?;
+  if !out.status.success() {
+    return None;
+  }
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  let trimmed = stdout.trim();
+  // sqlite3 -json prints NOTHING (not `[]`) for an empty result set.
+  let rows: Vec<serde_json::Value> = if trimmed.is_empty() {
+    Vec::new()
+  } else {
+    serde_json::from_str(trimmed).ok()?
+  };
+  Some(
+    rows
+      .iter()
+      .filter_map(|r| {
+        let id = clean_id(r.get("id")?.as_str()?)?;
+        let dir = r.get("directory")?.as_str()?;
+        let ms = r.get("time_updated")?.as_u64()?;
+        let last_activity = SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(ms))?;
+        let ended = r.get("time_archived").is_some_and(|v| !v.is_null());
+        Some(AgentSession {
+          kind: AgentKind::Opencode,
+          cwd: PathBuf::from(dir),
+          last_activity,
+          ended,
+          id,
+          name: r.get("title").and_then(|t| t.as_str()).and_then(clean_session_name),
+        })
+      })
+      .collect(),
+  )
 }
 
 /// Mistral Vibe backend: `<base>/session_<ts>_<id>/meta.json` carries
@@ -422,7 +582,7 @@ impl VibeSource {
       if !within_scan_window(last_activity, now) {
         continue;
       }
-      let Ok(raw) = std::fs::read_to_string(&meta_path) else {
+      let Some(raw) = read_capped(&meta_path, NAME_SCAN_BYTES) else {
         continue;
       };
       let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
@@ -507,10 +667,19 @@ impl SessionSource for VibeSource {
 /// Parse the first line of a rollout file: `payload.cwd` (+ session id).
 /// Reads one line only — rollout files grow large.
 fn codex_first_line_meta(path: &Path) -> Option<(PathBuf, String)> {
-  use std::io::BufRead;
+  use std::io::{BufRead, Read};
+  // Bounded read (Codex review round G): `read_line` allocates the WHOLE
+  // line, so a corrupt artefact with a giant first line could exhaust the
+  // process. A meta line is <1 KiB in practice; anything without a newline
+  // inside the cap is skipped (FR-009 degradation).
   let file = std::fs::File::open(path).ok()?;
   let mut line = String::new();
-  std::io::BufReader::new(file).read_line(&mut line).ok()?;
+  std::io::BufReader::new(file.take(NAME_SCAN_BYTES))
+    .read_line(&mut line)
+    .ok()?;
+  if !line.ends_with('\n') && line.len() as u64 >= NAME_SCAN_BYTES {
+    return None;
+  }
   let v: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
   let payload = v.get("payload")?;
   let cwd = payload.get("cwd")?.as_str()?;
@@ -523,8 +692,8 @@ fn codex_first_line_meta(path: &Path) -> Option<(PathBuf, String)> {
     .get("session_id")
     .or_else(|| payload.get("id"))
     .and_then(|s| s.as_str())
-    .map(str::to_string)
-    .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))?;
+    .and_then(clean_id)
+    .or_else(|| path.file_stem().and_then(|s| clean_id(&s.to_string_lossy())))?;
   Some((PathBuf::from(cwd), id))
 }
 
@@ -640,7 +809,8 @@ pub fn detect_all(
   now: SystemTime,
 ) -> std::collections::BTreeMap<String, WorktreeAgents> {
   let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
-  let mut sessions = collect_with(home, &paths, now, false);
+  let pinned_ids: std::collections::BTreeSet<&str> = pins.iter().map(|(_, sid)| sid.as_str()).collect();
+  let mut sessions = collect_with(home, &paths, now, false, &pinned_ids);
   sessions.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
   let mut map = summarize(&sessions, worktrees);
   overlay_pins(&mut map, &sessions, pins, home, now);
@@ -653,10 +823,16 @@ pub fn detect_all(
 /// exactly the one worth pinning manually). Includes the Claude
 /// foreign-dir sweep — the bounded name reads are the price of the pool.
 pub fn collect_sessions(home: &Path, worktree_paths: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
-  collect_with(home, worktree_paths, now, true)
+  collect_with(home, worktree_paths, now, true, &std::collections::BTreeSet::new())
 }
 
-fn collect_with(home: &Path, worktree_paths: &[PathBuf], now: SystemTime, sweep: bool) -> Vec<AgentSession> {
+fn collect_with(
+  home: &Path,
+  worktree_paths: &[PathBuf],
+  now: SystemTime,
+  sweep: bool,
+  pinned_ids: &std::collections::BTreeSet<&str>,
+) -> Vec<AgentSession> {
   let claude = ClaudeCodeSource;
   let base = home.join(".claude/projects");
   let mut sessions = if sweep {
@@ -664,7 +840,25 @@ fn collect_with(home: &Path, worktree_paths: &[PathBuf], now: SystemTime, sweep:
   } else {
     claude.scan_matched(&base, worktree_paths, now)
   };
-  sessions.extend(CodexSource.scan(&home.join(".codex/sessions"), now));
+  let codex_base = home.join(".codex/sessions");
+  if sweep {
+    sessions.extend(CodexSource.scan(&codex_base, now));
+  } else {
+    // Summary surfaces: only name the rollouts a worktree will claim or a
+    // pin references (Codex review round G) — same canonical comparison as
+    // `summarize`, so an eager skip can't drop a name summarize would show.
+    let keys: std::collections::BTreeSet<String> = worktree_paths
+      .iter()
+      .map(|p| comparison_key(&p.canonicalize().unwrap_or_else(|_| p.to_path_buf())))
+      .collect();
+    let want = |cwd: &Path, id: &str| {
+      pinned_ids.contains(id)
+        || keys.contains(&comparison_key(
+          &cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()),
+        ))
+    };
+    sessions.extend(CodexSource.scan_naming(&codex_base, now, &want));
+  }
   // opencode's own cross-platform convention is home-relative .local/share
   // (research.md D4), so no per-OS data-dir split here.
   sessions.extend(OpencodeSource.scan(&home.join(".local/share/opencode/storage/project"), now));
@@ -742,7 +936,7 @@ fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<Agent
       cwd: dir.path(),
       last_activity: mtime,
       ended: false,
-      id: sid.to_string(),
+      id: clean_id(sid)?,
       name: live_names.get(sid).cloned().or_else(|| first_user_text(&path)),
     });
   }
