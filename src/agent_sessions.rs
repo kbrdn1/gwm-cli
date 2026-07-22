@@ -67,7 +67,11 @@ impl ClaudeCodeSource {
   pub fn scan(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
     let mut out = Vec::new();
     for wt in worktrees {
-      let dir = base.join(claude_slug(wt));
+      // Normalise before slugging: libgit2 reports the main checkout with a
+      // trailing '/', which would grow a trailing '-' the recorded cwd never
+      // has. `components()` drops redundant separators lexically.
+      let normalized: PathBuf = wt.components().collect();
+      let dir = base.join(claude_slug(&normalized));
       let Ok(entries) = std::fs::read_dir(&dir) else {
         continue; // unmatched worktree or missing base: no sessions (FR-009)
       };

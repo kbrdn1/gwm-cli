@@ -453,3 +453,21 @@ fn claude_scan_skips_sessions_older_than_the_scan_window() {
   assert_eq!(sessions.len(), 1);
   assert_eq!(sessions[0].id, "recent");
 }
+
+#[test]
+fn claude_scan_matches_a_worktree_path_with_trailing_separator() {
+  // libgit2 reports the main checkout with a trailing '/' (seen live on
+  // `gwm list`); the slug lookup must normalise it away or the dir misses.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("projects");
+  let clean = PathBuf::from("/Users/x/proj");
+  let dir = base.join(claude_slug(&clean));
+  write(&dir.join("aaaa-1111.jsonl"), "{}");
+
+  let trailing = PathBuf::from("/Users/x/proj/");
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&trailing), SystemTime::now());
+  assert_eq!(sessions.len(), 1);
+  // The session's cwd carries the worktree path as given (summarize
+  // normalises separators itself).
+  assert_eq!(sessions[0].cwd, trailing);
+}
