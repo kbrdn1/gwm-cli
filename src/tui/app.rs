@@ -2518,8 +2518,14 @@ impl App {
   /// Rows for the captured worktree: sessions from the snapshot, the manual
   /// pins marked (issue #408 US4 + user feedback 2026-07-22 — multi-pin).
   fn build_agent_rows(&self, w: &crate::worktree::WorktreeInfo) -> Vec<crate::tui::state::detail_overlay::DetailRow> {
-    let pinned = crate::github::pinnable_branch(w.branch.as_deref())
-      .map(|b| crate::github::agent_pins(&self.repo, b).unwrap_or_default())
+    // Pins must come from the worktree's OWNING repo, not `self.repo`: in
+    // workspace mode an auto-refresh can swap the active repo under the
+    // open overlay, and a same-named branch there would yield absent or
+    // wrong markers (Codex review round N). `read_agent_pins` resolves
+    // owners via `row_repo`.
+    let pinned = self
+      .read_agent_pins()
+      .remove(w.path.to_string_lossy().as_ref())
       .unwrap_or_default();
     crate::tui::state::detail_overlay::agent_detail_rows(self.agents_for(w), &pinned, std::time::SystemTime::now())
   }
