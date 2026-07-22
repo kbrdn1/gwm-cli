@@ -621,6 +621,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       Constraint::Length(h(placeholder.len())),
       Constraint::Length(h(issue_pr_lines.len())),
       Constraint::Length(0),
+      Constraint::Length(0),
       Constraint::Min(3),
     ];
     let chunks = Layout::default()
@@ -649,7 +650,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     );
     render_section(
       f,
-      chunks[3],
+      chunks[4],
       recent_items_pane_title(active_mode, &app.keymap),
       SectionBody::new(&[]),
       border_color,
@@ -707,13 +708,11 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // line that is rebuilt fresh each frame (issue #73) — it's prefixed onto
   // the cached worktree section at render time instead of being spliced into
   // a cloned vec.
-  let mut prefix_lines = vec![sidebar_header_line(&w, app)];
-  // Issue #408: the agent summary is per-frame like the header — a pure
-  // snapshot lookup, no subprocess — and absent when no session matched.
-  if let Some(line) = agent_summary_line(app.agents_for(&w), std::time::SystemTime::now(), &theme) {
-    prefix_lines.push(line);
-  }
+  let prefix_lines = vec![sidebar_header_line(&w, app)];
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
+  // Agents pane body (issue #408): per-frame pure snapshot lookup, its
+  // bordered block collapses to zero height when no session matched.
+  let agent_lines = agent_pane_lines(app.agents_for(&w), std::time::SystemTime::now(), &theme);
 
   // Read the resolved section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
@@ -742,9 +741,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // bordered void.
   let h = |lines: usize| (lines as u16).saturating_add(2);
   let working_tree_height = if working_tree_len == 0 { 0 } else { h(working_tree_len) };
+  let agents_height = if agent_lines.is_empty() {
+    0
+  } else {
+    h(agent_lines.len())
+  };
   let constraints = [
     Constraint::Length(h(worktree_len)),
     Constraint::Length(h(issue_pr_lines.len())),
+    Constraint::Length(agents_height),
     Constraint::Length(working_tree_height),
     Constraint::Min(3),
   ];
@@ -756,7 +761,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // Recent Commits is the only scrollable section. Clamp the scroll
   // offset to its visible area so `j` / `k` can't scroll past the end.
   // Done before the render borrow so no mutable `app` access overlaps it.
-  let commits_area = chunks[3];
+  let commits_area = chunks[4];
   let commits_visible = commits_area.height.saturating_sub(2);
   app.sidebar.max_scroll = commits_len.saturating_sub(commits_visible);
   if app.sidebar.scroll > app.sidebar.max_scroll {
@@ -837,10 +842,21 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     0,
     None,
   );
-  if !sections.working_tree.is_empty() {
+  if !agent_lines.is_empty() {
     render_section(
       f,
       chunks[2],
+      agents_pane_title(&app.keymap),
+      SectionBody::new(&agent_lines),
+      border_color,
+      0,
+      None,
+    );
+  }
+  if !sections.working_tree.is_empty() {
+    render_section(
+      f,
+      chunks[3],
       working_tree_title,
       SectionBody::new(&sections.working_tree),
       border_color,
@@ -937,36 +953,60 @@ fn render_section(
 /// the linked PR / issue state. Rendered fresh every frame (not cached)
 /// so the dot reflects the live fetch result without invalidating the
 /// expensive git preview cache underneath.
-/// Per-frame Status-pane summary of a worktree's agent sessions (issue
-/// #408): the most recent agent with its freshness, plus a `+N` overflow
-/// count when more sessions are attached. `None` (no snapshot / no session)
-/// keeps the pane exactly as before the feature. Pure — pinned by
-/// `tests/tui_app_tests.rs::agent_status_pane_line`.
-pub fn agent_summary_line(
+/// Title of the Agents sidebar pane (issue #408, user feedback 2026-07-22):
+/// advertises the overlay key like `Issue / PR [F]` does its fetch key.
+pub fn agents_pane_title(keymap: &Keymap) -> String {
+  format!(" Agents [{}] ", action_chord(keymap, Action::AgentSessions, "a"))
+}
+
+/// Per-frame body of the Agents sidebar pane: one line per session (capped
+/// at three, most recent first) — agent kind coloured by freshness, a
+/// human-readable recency, and the session name (full id when unnamed).
+/// Empty when no session matched, so the bordered block collapses like the
+/// Working Tree pane does in stashes mode. Pure — pinned by
+/// `tests/tui_app_tests.rs::agent_pane`.
+pub fn agent_pane_lines(
   agents: Option<&crate::agent_sessions::WorktreeAgents>,
   now: std::time::SystemTime,
   theme: &Theme,
-) -> Option<Line<'static>> {
-  let agents = agents?;
-  let top = agents.top()?;
-  let freshness = crate::agent_sessions::Freshness::classify(top.last_activity, top.ended, now);
-  let (word, color) = match freshness {
-    crate::agent_sessions::Freshness::Active => ("active", theme.clean),
-    crate::agent_sessions::Freshness::Idle => ("idle", theme.muted),
+) -> Vec<Line<'static>> {
+  const MAX_ROWS: usize = 3;
+  let Some(agents) = agents else {
+    return Vec::new();
   };
-  let mut spans = vec![
-    Span::styled("Agent: ", Style::default().fg(theme.muted)),
-    Span::styled(
-      top.kind.display().to_string(),
-      Style::default().fg(color).add_modifier(Modifier::BOLD),
-    ),
-    Span::styled(format!(" · {word}"), Style::default().fg(color)),
-  ];
-  let extra = agents.sessions.len().saturating_sub(1);
+  let mut lines: Vec<Line<'static>> = agents
+    .sessions
+    .iter()
+    .take(MAX_ROWS)
+    .map(|s| {
+      let freshness = crate::agent_sessions::Freshness::classify(s.last_activity, s.ended, now);
+      let (word, color) = match freshness {
+        crate::agent_sessions::Freshness::Active => ("active", theme.clean),
+        crate::agent_sessions::Freshness::Idle => ("idle", theme.muted),
+      };
+      let ago = now
+        .duration_since(s.last_activity)
+        .map(worktree::format_relative_duration)
+        .unwrap_or_else(|_| "now".into());
+      let identity = s.name.as_deref().unwrap_or(&s.id);
+      Line::from(vec![
+        Span::styled(
+          s.kind.display().to_string(),
+          Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" · {word} · {ago} ago · "), Style::default().fg(theme.muted)),
+        Span::styled(identity.to_string(), Style::default().fg(theme.name)),
+      ])
+    })
+    .collect();
+  let extra = agents.sessions.len().saturating_sub(MAX_ROWS);
   if extra > 0 {
-    spans.push(Span::styled(format!(" · +{extra}"), Style::default().fg(theme.muted)));
+    lines.push(Line::from(Span::styled(
+      format!("+{extra} more"),
+      Style::default().fg(theme.muted),
+    )));
   }
-  Some(Line::from(spans))
+  lines
 }
 
 fn sidebar_header_line(w: &WorktreeInfo, app: &App) -> Line<'static> {

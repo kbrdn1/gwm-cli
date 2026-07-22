@@ -8370,12 +8370,12 @@ mod agent_detail_overlay {
   }
 }
 
-// -- Status pane agent summary (issue #408, US2) ---------------------------
+// -- Agents sidebar pane (issue #408, user feedback 2026-07-22) ------------
 
-mod agent_status_pane_line {
+mod agent_pane {
   use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
-  use gwm::tui::agent_summary_line;
   use gwm::tui::theme::Theme;
+  use gwm::tui::{agent_pane_lines, agents_pane_title};
   use std::path::PathBuf;
   use std::time::{Duration, SystemTime};
 
@@ -8383,54 +8383,65 @@ mod agent_status_pane_line {
     line.spans.iter().map(|s| s.content.as_ref()).collect()
   }
 
-  #[test]
-  fn summary_line_names_the_top_agent_and_freshness() {
-    let now = SystemTime::now();
-    let agents = WorktreeAgents {
-      sessions: vec![AgentSession {
-        kind: AgentKind::ClaudeCode,
-        cwd: PathBuf::from("/w/one"),
-        last_activity: now - Duration::from_secs(10),
-        ended: false,
-        id: "s1".into(),
-        name: None,
-      }],
-    };
-    let line = agent_summary_line(Some(&agents), now, &Theme::default()).unwrap();
-    let text = line_text(&line);
-    assert!(text.contains("claude"), "got: {text}");
-    assert!(text.contains("active"), "got: {text}");
-  }
-
-  #[test]
-  fn summary_line_absent_without_sessions() {
-    let now = SystemTime::now();
-    assert!(agent_summary_line(None, now, &Theme::default()).is_none());
-    let empty = WorktreeAgents::default();
-    assert!(agent_summary_line(Some(&empty), now, &Theme::default()).is_none());
-  }
-
-  #[test]
-  fn summary_line_counts_extra_sessions() {
-    let now = SystemTime::now();
-    let mk = |kind, age, id: &str| AgentSession {
+  fn mk(kind: AgentKind, age: u64, id: &str, name: Option<&str>) -> AgentSession {
+    AgentSession {
       kind,
       cwd: PathBuf::from("/w/one"),
-      last_activity: now - Duration::from_secs(age),
+      last_activity: SystemTime::now() - Duration::from_secs(age),
       ended: false,
       id: id.into(),
-      name: None,
-    };
+      name: name.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn pane_lists_sessions_preferring_names() {
+    let now = SystemTime::now();
     let agents = WorktreeAgents {
       sessions: vec![
-        mk(AgentKind::ClaudeCode, 5, "a"),
-        mk(AgentKind::Codex, 500, "b"),
-        mk(AgentKind::Vibe, 900, "c"),
+        mk(AgentKind::ClaudeCode, 10, "uuid-1", Some("fix login bug")),
+        mk(AgentKind::Codex, 400, "uuid-2", None),
       ],
     };
-    let line = agent_summary_line(Some(&agents), now, &Theme::default()).unwrap();
-    let text = line_text(&line);
-    assert!(text.contains("claude"), "got: {text}");
-    assert!(text.contains("+2"), "got: {text}");
+    let lines = agent_pane_lines(Some(&agents), now, &Theme::default());
+    assert_eq!(lines.len(), 2);
+    let first = line_text(&lines[0]);
+    assert!(first.contains("claude"), "got {first}");
+    assert!(first.contains("active"), "got {first}");
+    assert!(first.contains("fix login bug"), "got {first}");
+    assert!(!first.contains("uuid-1"), "name must replace the id: {first}");
+    let second = line_text(&lines[1]);
+    assert!(second.contains("codex"), "got {second}");
+    assert!(second.contains("uuid-2"), "id fallback expected: {second}");
+  }
+
+  #[test]
+  fn pane_caps_at_three_sessions_with_an_overflow_line() {
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: (0..5)
+        .map(|i| mk(AgentKind::ClaudeCode, 1000 + i, &format!("uuid-{i}"), None))
+        .collect(),
+    };
+    let lines = agent_pane_lines(Some(&agents), now, &Theme::default());
+    assert_eq!(lines.len(), 4, "3 sessions + overflow line");
+    let overflow = line_text(&lines[3]);
+    assert!(overflow.contains("+2"), "got {overflow}");
+  }
+
+  #[test]
+  fn pane_is_empty_without_sessions_so_the_block_collapses() {
+    let now = SystemTime::now();
+    assert!(agent_pane_lines(None, now, &Theme::default()).is_empty());
+    let empty = WorktreeAgents::default();
+    assert!(agent_pane_lines(Some(&empty), now, &Theme::default()).is_empty());
+  }
+
+  #[test]
+  fn pane_title_advertises_the_overlay_key() {
+    let km = gwm::tui::keymap::Keymap::defaults();
+    let title = agents_pane_title(&km);
+    assert!(title.contains("Agents"), "got {title}");
+    assert!(title.contains('a'), "resolved overlay key expected: {title}");
   }
 }
