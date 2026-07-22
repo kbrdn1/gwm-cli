@@ -5694,6 +5694,43 @@ mod agents_cmd {
   }
 
   #[test]
+  fn opencode_detection_honors_xdg_data_home() {
+    // Codex review round O (P2): with `XDG_DATA_HOME` set, opencode keeps
+    // `opencode.db` under `$XDG_DATA_HOME/opencode` — the hardcoded
+    // `~/.local/share` base made every session invisible there.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let xdg = tempfile::TempDir::new().unwrap();
+    let dir = xdg.path().join("opencode");
+    std::fs::create_dir_all(dir.join("storage/project")).unwrap();
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::SystemTime::UNIX_EPOCH)
+      .unwrap()
+      .as_millis() as i64;
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn
+      .execute_batch(
+        "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer);",
+      )
+      .unwrap();
+    conn
+      .execute(
+        "INSERT INTO session VALUES (?1, NULL, ?2, ?3, ?4, NULL)",
+        rusqlite::params!["oc-xdg", repo_dir.path().display().to_string(), "xdg session", now_ms],
+      )
+      .unwrap();
+    drop(conn);
+
+    gwm_in(repo_dir.path(), home.path())
+      .env("XDG_DATA_HOME", xdg.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("opencode"))
+      .stdout(predicate::str::contains("xdg session"));
+  }
+
+  #[test]
   fn agents_lists_detected_sessions_per_worktree() {
     let (repo_dir, _repo) = init_repo();
     let home = tempfile::TempDir::new().unwrap();

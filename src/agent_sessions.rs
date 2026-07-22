@@ -978,9 +978,16 @@ fn collect_with(
     };
     sessions.extend(CodexSource.scan_naming(&codex_base, now, &want));
   }
-  // opencode's own cross-platform convention is home-relative .local/share
-  // (research.md D4), so no per-OS data-dir split here.
-  sessions.extend(OpencodeSource.scan(&home.join(".local/share/opencode/storage/project"), now));
+  // opencode follows the XDG base-dir convention on every platform
+  // (research.md D4): `$XDG_DATA_HOME/opencode` when the variable is set
+  // (absolute per spec — a relative value is ignored), else the
+  // home-relative `.local/share/opencode` (Codex review round O).
+  let opencode_base = std::env::var_os("XDG_DATA_HOME")
+    .map(PathBuf::from)
+    .filter(|p| p.is_absolute())
+    .unwrap_or_else(|| home.join(".local/share"))
+    .join("opencode/storage/project");
+  sessions.extend(OpencodeSource.scan(&opencode_base, now));
   sessions.extend(VibeSource.scan(&home.join(".vibe/logs/session"), now));
   sessions
 }
