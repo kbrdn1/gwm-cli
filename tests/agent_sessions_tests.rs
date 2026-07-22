@@ -324,22 +324,14 @@ fn command_name_titles_are_capped_like_any_other_name() {
 /// the real one — only the queried columns). Skips silently when the
 /// `sqlite3` CLI is unavailable (Windows CI) — the JSON fallback tests
 /// cover that path.
-fn seed_opencode_db(home: &Path, rows: &str) -> bool {
-  if std::process::Command::new("sqlite3").arg("--version").output().is_err() {
-    return false;
-  }
+fn seed_opencode_db(home: &Path, rows: &str) {
   let dir = home.join(".local/share/opencode");
   fs::create_dir_all(dir.join("storage/project")).unwrap();
+  let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
   let sql = format!(
     "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer); {rows}"
   );
-  let status = std::process::Command::new("sqlite3")
-    .arg(dir.join("opencode.db"))
-    .arg(&sql)
-    .status()
-    .unwrap();
-  assert!(status.success());
-  true
+  conn.execute_batch(&sql).unwrap();
 }
 
 #[test]
@@ -361,9 +353,7 @@ fn opencode_scan_reads_the_sqlite_db_when_present() {
      INSERT INTO session VALUES ('ses_old', NULL, '/work/one', 'too old', {old_ms}, NULL); \
      INSERT INTO session VALUES ('ses_child', 'ses_live', '/work/one', 'subagent', {now_ms}, NULL);"
   );
-  if !seed_opencode_db(tmp.path(), &rows) {
-    return; // no sqlite3 CLI here — fallback path covered elsewhere
-  }
+  seed_opencode_db(tmp.path(), &rows);
 
   let base = tmp.path().join(".local/share/opencode/storage/project");
   let sessions = OpencodeSource.scan(&base, SystemTime::now());

@@ -498,58 +498,54 @@ impl OpencodeSource {
   }
 }
 
-/// Query `opencode.db` through the `sqlite3` CLI (read-only, JSON output).
-/// `None` = the db could not be read (no CLI, locked, old sqlite3 without
-/// `-json`) → the caller falls back to the legacy JSON layout. `Some(vec)`
-/// — even empty — is authoritative. No Rust sqlite dependency: the CLI
-/// ships with macOS and virtually every Linux; Windows installs without it
-/// degrade to the legacy scan (documented ceiling — wire `rusqlite` only
-/// if Windows opencode users actually ask).
+/// Query `opencode.db` in-process via `rusqlite` (read-only). `None` = the
+/// db could not be opened or queried (locked, corrupt, unexpected schema) →
+/// the caller falls back to the legacy JSON layout. `Some(vec)` — even
+/// empty — is authoritative. In-process because Windows rarely ships a
+/// `sqlite3` CLI: shelling out silently hid every opencode ≥ 1.x session
+/// there (Codex review round I).
 fn opencode_scan_db(db: &Path, now: SystemTime) -> Option<Vec<AgentSession>> {
   let cutoff_ms = now
     .duration_since(SystemTime::UNIX_EPOCH)
     .ok()?
     .saturating_sub(SCAN_WINDOW)
-    .as_millis();
+    .as_millis() as i64;
+  let conn = rusqlite::Connection::open_with_flags(
+    db,
+    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+  )
+  .ok()?;
   // Top-level sessions only: children (`parent_id`) are subagent runs.
-  let query = format!(
-    "SELECT id, directory, title, time_updated, time_archived FROM session \
-     WHERE parent_id IS NULL AND time_updated >= {cutoff_ms};"
-  );
-  let out = std::process::Command::new("sqlite3")
-    .arg("-readonly")
-    .arg("-json")
-    .arg(db)
-    .arg(&query)
-    .output()
+  let mut stmt = conn
+    .prepare(
+      "SELECT id, directory, title, time_updated, time_archived FROM session \
+       WHERE parent_id IS NULL AND time_updated >= ?1",
+    )
     .ok()?;
-  if !out.status.success() {
-    return None;
-  }
-  let stdout = String::from_utf8_lossy(&out.stdout);
-  let trimmed = stdout.trim();
-  // sqlite3 -json prints NOTHING (not `[]`) for an empty result set.
-  let rows: Vec<serde_json::Value> = if trimmed.is_empty() {
-    Vec::new()
-  } else {
-    serde_json::from_str(trimmed).ok()?
-  };
+  let rows = stmt
+    .query_map([cutoff_ms], |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, Option<String>>(2)?,
+        r.get::<_, i64>(3)?,
+        !matches!(r.get_ref(4)?, rusqlite::types::ValueRef::Null),
+      ))
+    })
+    .ok()?;
   Some(
     rows
-      .iter()
-      .filter_map(|r| {
-        let id = clean_id(r.get("id")?.as_str()?)?;
-        let dir = r.get("directory")?.as_str()?;
-        let ms = r.get("time_updated")?.as_u64()?;
-        let last_activity = SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(ms))?;
-        let ended = r.get("time_archived").is_some_and(|v| !v.is_null());
+      .filter_map(|row| {
+        let (id, dir, title, ms, ended) = row.ok()?;
+        let id = clean_id(&id)?;
+        let last_activity = SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(u64::try_from(ms).ok()?))?;
         Some(AgentSession {
           kind: AgentKind::Opencode,
           cwd: PathBuf::from(dir),
           last_activity,
           ended,
           id,
-          name: r.get("title").and_then(|t| t.as_str()).and_then(clean_session_name),
+          name: title.as_deref().and_then(clean_session_name),
         })
       })
       .collect(),

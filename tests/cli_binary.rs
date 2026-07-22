@@ -5622,6 +5622,48 @@ mod agents_cmd {
   }
 
   #[test]
+  fn opencode_db_sessions_are_read_without_a_sqlite3_cli() {
+    // Codex review round I (P1): Windows rarely ships a `sqlite3` CLI, so
+    // shelling out silently degraded every opencode ≥ 1.x install to the
+    // dead legacy JSON. The db must be read in-process — strip PATH so any
+    // external sqlite3 is unreachable and the session must still surface.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join(".local/share/opencode");
+    std::fs::create_dir_all(dir.join("storage/project")).unwrap();
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::SystemTime::UNIX_EPOCH)
+      .unwrap()
+      .as_millis() as i64;
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn
+      .execute_batch(
+        "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer);",
+      )
+      .unwrap();
+    conn
+      .execute(
+        "INSERT INTO session VALUES (?1, NULL, ?2, ?3, ?4, NULL)",
+        rusqlite::params![
+          "oc-nocli",
+          repo_dir.path().display().to_string(),
+          "db without cli",
+          now_ms
+        ],
+      )
+      .unwrap();
+    drop(conn);
+
+    gwm_in(repo_dir.path(), home.path())
+      .env("PATH", "")
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("opencode"))
+      .stdout(predicate::str::contains("db without cli"));
+  }
+
+  #[test]
   fn agents_lists_detected_sessions_per_worktree() {
     let (repo_dir, _repo) = init_repo();
     let home = tempfile::TempDir::new().unwrap();
