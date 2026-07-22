@@ -5606,9 +5606,11 @@ mod agents_cmd {
   fn seed_codex(home: &Path, cwd: &Path, sid: &str) {
     let dir = home.join(".codex/sessions/2026/07/22");
     std::fs::create_dir_all(&dir).unwrap();
+    // Windows paths carry backslashes — escape them or the JSON line is
+    // invalid and the session is silently dropped.
+    let cwd = cwd.display().to_string().replace('\\', "\\\\");
     let line = format!(
-      r#"{{"timestamp":"2026-07-22T10:00:00.000Z","type":"session_meta","payload":{{"session_id":"{sid}","cwd":"{}"}}}}"#,
-      cwd.display()
+      r#"{{"timestamp":"2026-07-22T10:00:00.000Z","type":"session_meta","payload":{{"session_id":"{sid}","cwd":"{cwd}"}}}}"#,
     );
     std::fs::write(dir.join(format!("rollout-{sid}.jsonl")), format!("{line}\n")).unwrap();
   }
@@ -5702,10 +5704,8 @@ mod agents_cmd {
     let home = tempfile::TempDir::new().unwrap();
     let dir = home.path().join(".codex/sessions/2026/07/22");
     std::fs::create_dir_all(&dir).unwrap();
-    let meta = format!(
-      r#"{{"type":"session_meta","payload":{{"session_id":"named-1","cwd":"{}"}}}}"#,
-      repo_dir.path().display()
-    );
+    let cwd = repo_dir.path().display().to_string().replace('\\', "\\\\");
+    let meta = format!(r#"{{"type":"session_meta","payload":{{"session_id":"named-1","cwd":"{cwd}"}}}}"#);
     let user = r#"{"type":"event_msg","payload":{"type":"user_message","message":"refactor the login flow"}}"#;
     std::fs::write(
       dir.join("rollout-named.jsonl"),
