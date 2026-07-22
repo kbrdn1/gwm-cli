@@ -56,6 +56,78 @@ pub struct AgentSession {
   /// Only Vibe can observe a terminated session (non-null `end_time`).
   pub ended: bool,
   pub id: String,
+  /// Human-readable session name when the artefacts carry one: the first
+  /// user prompt (Claude Code / Codex, bounded read) or the recorded title
+  /// (Vibe). `None` when the store has nothing usable (opencode).
+  pub name: Option<String>,
+}
+
+/// Longest session name surfaces display before truncation.
+const NAME_MAX_CHARS: usize = 60;
+/// Bound on how much of a session artefact is read to find its name.
+const NAME_SCAN_BYTES: u64 = 64 * 1024;
+
+/// Collapse whitespace, resolve Claude's `<command-message>` envelopes to the
+/// command name, and truncate — the shape every surface displays.
+fn clean_session_name(raw: &str) -> Option<String> {
+  // A slash-command prompt is XML-ish noise; its `<command-name>` is the name.
+  if let Some(rest) = raw.split("<command-name>").nth(1) {
+    if let Some(cmd) = rest.split("</command-name>").next() {
+      let cmd = cmd.trim();
+      if !cmd.is_empty() {
+        return Some(cmd.to_string());
+      }
+    }
+  }
+  let collapsed: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+  if collapsed.is_empty() {
+    return None;
+  }
+  Some(collapsed.chars().take(NAME_MAX_CHARS).collect())
+}
+
+/// First user-prompt text found in the opening lines of a session artefact
+/// (Claude project jsonl or Codex rollout), reading at most
+/// [`NAME_SCAN_BYTES`]. Total: any miss or parse failure yields `None`.
+fn first_user_text(path: &Path) -> Option<String> {
+  use std::io::{BufRead, Read};
+  let file = std::fs::File::open(path).ok()?;
+  let mut reader = std::io::BufReader::new(file.take(NAME_SCAN_BYTES));
+  let mut line = String::new();
+  loop {
+    line.clear();
+    let n = reader.read_line(&mut line).ok()?;
+    if n == 0 {
+      return None;
+    }
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line.trim()) else {
+      continue;
+    };
+    // Claude Code: {"type":"user","message":{"content": <str | [{text}]>}}
+    if v.get("type").and_then(|t| t.as_str()) == Some("user") {
+      let content = v.get("message").and_then(|m| m.get("content"));
+      let text = match content {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Array(parts)) => parts.iter().find_map(|p| {
+          (p.get("type").and_then(|t| t.as_str()) == Some("text"))
+            .then(|| p.get("text").and_then(|t| t.as_str()).map(str::to_string))
+            .flatten()
+        }),
+        _ => None,
+      };
+      if let Some(t) = text.as_deref().and_then(clean_session_name) {
+        return Some(t);
+      }
+    }
+    // Codex: {"type":"event_msg","payload":{"type":"user_message","message":"…"}}
+    if let Some(p) = v.get("payload") {
+      if p.get("type").and_then(|t| t.as_str()) == Some("user_message") {
+        if let Some(t) = p.get("message").and_then(|m| m.as_str()).and_then(clean_session_name) {
+          return Some(t);
+        }
+      }
+    }
+  }
 }
 
 /// Claude Code backend: `<base>/<slug(worktree)>/**.jsonl`, one session per
@@ -65,13 +137,22 @@ pub struct ClaudeCodeSource;
 
 impl ClaudeCodeSource {
   pub fn scan(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
+    // Normalise before slugging: libgit2 reports the main checkout with a
+    // trailing '/', which would grow a trailing '-' the recorded cwd never
+    // has. `components()` drops redundant separators lexically.
+    let slugs: Vec<String> = worktrees
+      .iter()
+      .map(|wt| claude_slug(&wt.components().collect::<PathBuf>()))
+      .collect();
     let mut out = Vec::new();
-    for wt in worktrees {
-      // Normalise before slugging: libgit2 reports the main checkout with a
-      // trailing '/', which would grow a trailing '-' the recorded cwd never
-      // has. `components()` drops redundant separators lexically.
-      let normalized: PathBuf = wt.components().collect();
-      let dir = base.join(claude_slug(&normalized));
+    for (wt, slug) in worktrees.iter().zip(&slugs) {
+      // The slug is lossy: /a/b-c and /a/b/c collide. Assigning one dir's
+      // sessions to both worktrees would fabricate a phantom session, so an
+      // ambiguous slug is skipped outright (FR-009 degradation).
+      if slugs.iter().filter(|s| *s == slug).count() > 1 {
+        continue;
+      }
+      let dir = base.join(slug);
       let Ok(entries) = std::fs::read_dir(&dir) else {
         continue; // unmatched worktree or missing base: no sessions (FR-009)
       };
@@ -95,6 +176,7 @@ impl ClaudeCodeSource {
           last_activity: mtime,
           ended: false,
           id: stem.to_string(),
+          name: first_user_text(&path),
         });
       }
     }
@@ -142,6 +224,7 @@ impl CodexSource {
           last_activity: mtime,
           ended: false,
           id,
+          name: first_user_text(&path),
         });
       }
     }
@@ -196,6 +279,8 @@ impl OpencodeSource {
         last_activity,
         ended: false,
         id: id.to_string(),
+        // The opencode project index records no prompt or title.
+        name: None,
       });
     }
     out
@@ -255,6 +340,7 @@ impl VibeSource {
         last_activity,
         ended,
         id,
+        name: v.get("title").and_then(|t| t.as_str()).and_then(clean_session_name),
       });
     }
     out
@@ -383,7 +469,9 @@ where
     }
   }
   for agents in map.values_mut() {
-    agents.sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+    agents
+      .sessions
+      .sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
   }
   map
 }
@@ -461,7 +549,9 @@ pub fn detect_all(
     let agents = map.entry(wt_id.clone()).or_default();
     if !agents.sessions.iter().any(|s| &s.id == sid) {
       agents.sessions.push(session);
-      agents.sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+      agents
+        .sessions
+        .sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
     }
   }
   map
@@ -487,6 +577,7 @@ fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<Agent
       last_activity: mtime,
       ended: false,
       id: sid.to_string(),
+      name: first_user_text(&path),
     });
   }
   None

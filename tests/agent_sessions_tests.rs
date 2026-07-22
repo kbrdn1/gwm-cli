@@ -365,6 +365,7 @@ fn session(kind: AgentKind, cwd: &str, age_secs: u64, id: &str) -> AgentSession 
     last_activity: SystemTime::now() - Duration::from_secs(age_secs),
     ended: false,
     id: id.to_string(),
+    name: None,
   }
 }
 
@@ -536,5 +537,134 @@ mod pins {
     let agents = map.get("mine").expect("id sweep must find the pinned claude session");
     assert_eq!(agents.sessions[0].kind, AgentKind::ClaudeCode);
     assert_eq!(agents.sessions[0].id, "deadbeef-cafe");
+  }
+}
+
+// -- Session names (user feedback 2026-07-22) ------------------------------
+
+mod session_names {
+  use super::*;
+
+  #[test]
+  fn claude_name_comes_from_the_first_user_message() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("projects");
+    let wt = PathBuf::from("/Users/x/proj");
+    let dir = base.join(claude_slug(&wt));
+    let lines = concat!(
+      r#"{"type":"last-prompt","leafUuid":"x"}"#,
+      "\n",
+      r#"{"type":"mode","mode":"normal"}"#,
+      "\n",
+      r#"{"type":"user","message":{"role":"user","content":"fix the login timeout bug"}}"#,
+      "\n",
+    );
+    write(&dir.join("aaaa-1111.jsonl"), lines);
+    let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+    assert_eq!(sessions[0].name.as_deref(), Some("fix the login timeout bug"));
+  }
+
+  #[test]
+  fn claude_command_message_collapses_to_the_command_name() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("projects");
+    let wt = PathBuf::from("/Users/x/proj");
+    let dir = base.join(claude_slug(&wt));
+    let content = r#"{"type":"user","message":{"role":"user","content":"<command-message>speckit.specify</command-message>\n<command-name>/speckit.specify</command-name>\n<command-args>https://x</command-args>"}}"#;
+    write(&dir.join("bbbb-2222.jsonl"), &format!("{content}\n"));
+    let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+    assert_eq!(sessions[0].name.as_deref(), Some("/speckit.specify"));
+  }
+
+  #[test]
+  fn codex_name_comes_from_the_first_user_message_event() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("sessions");
+    let lines = concat!(
+      r#"{"timestamp":"t","type":"session_meta","payload":{"session_id":"sid-1","cwd":"/work/one"}}"#,
+      "\n",
+      r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
+      "\n",
+      r#"{"type":"event_msg","payload":{"type":"user_message","message":"review the feature flags branch"}}"#,
+      "\n",
+    );
+    write(&base.join("2026/07/22/rollout-a.jsonl"), lines);
+    let sessions = CodexSource.scan(&base, SystemTime::now());
+    assert_eq!(sessions[0].name.as_deref(), Some("review the feature flags branch"));
+  }
+
+  #[test]
+  fn vibe_name_comes_from_the_title_field() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("session");
+    let dir = base.join("session_20260722_100000_aaaa1111");
+    write(
+      &dir.join("meta.json"),
+      r#"{"session_id":"v1","end_time":null,"title":"le plan PRO mistral","environment":{"working_directory":"/work/v"}}"#,
+    );
+    write(&dir.join("messages.jsonl"), "{}\n");
+    let sessions = VibeSource.scan(&base, SystemTime::now());
+    assert_eq!(sessions[0].name.as_deref(), Some("le plan PRO mistral"));
+  }
+
+  #[test]
+  fn names_are_truncated_and_whitespace_collapsed() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("projects");
+    let wt = PathBuf::from("/Users/x/proj");
+    let dir = base.join(claude_slug(&wt));
+    let long = "a ".repeat(100);
+    let content = format!(r#"{{"type":"user","message":{{"role":"user","content":"{long}"}}}}"#);
+    write(&dir.join("cccc-3333.jsonl"), &format!("{content}\n"));
+    let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+    let name = sessions[0].name.as_deref().unwrap();
+    assert!(name.chars().count() <= 60, "got {} chars", name.chars().count());
+    assert!(!name.contains('\n'));
+  }
+}
+
+// -- Codex review round A fixes --------------------------------------------
+
+mod review_round_a {
+  use super::*;
+
+  #[test]
+  fn top_prefers_a_live_session_over_a_more_recent_ended_one() {
+    // A Vibe session that just ENDED has the freshest mtime; the still-live
+    // codex session must win the compact surfaces (review finding).
+    let now = SystemTime::now();
+    let mk = |kind, age, ended, id: &str| AgentSession {
+      kind,
+      cwd: PathBuf::from("/work/one"),
+      last_activity: now - Duration::from_secs(age),
+      ended,
+      id: id.into(),
+      name: None,
+    };
+    let sessions = [
+      mk(AgentKind::Vibe, 5, true, "ended-fresh"),
+      mk(AgentKind::Codex, 60, false, "live-older"),
+    ];
+    let map = summarize_with(&sessions, &[wt("one", "/work/one")], |p| p.to_path_buf());
+    assert_eq!(map.get("one").unwrap().top().unwrap().id, "live-older");
+  }
+
+  #[test]
+  fn ambiguous_claude_slugs_are_skipped_not_duplicated() {
+    // /a/b-c and /a/b/c collide on the lossy slug: assigning the same dir's
+    // sessions to both worktrees would fabricate a phantom session.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base = tmp.path().join("projects");
+    let wt1 = PathBuf::from("/a/b-c");
+    let wt2 = PathBuf::from("/a/b/c");
+    assert_eq!(claude_slug(&wt1), claude_slug(&wt2));
+    write(&base.join(claude_slug(&wt1)).join("dddd-4444.jsonl"), "{}");
+
+    let sessions = ClaudeCodeSource.scan(&base, &[wt1, wt2], SystemTime::now());
+    assert!(
+      sessions.is_empty(),
+      "colliding slugs must be skipped, got {} sessions",
+      sessions.len()
+    );
   }
 }
