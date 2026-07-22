@@ -73,13 +73,26 @@ fn clean_session_name(raw: &str) -> Option<String> {
   // A slash-command prompt is XML-ish noise; its `<command-name>` is the name.
   if let Some(rest) = raw.split("<command-name>").nth(1) {
     if let Some(cmd) = rest.split("</command-name>").next() {
-      let cmd = cmd.trim();
-      if !cmd.is_empty() {
-        return Some(cmd.to_string());
+      if let Some(clean) = collapse_and_cap(cmd) {
+        return Some(clean);
       }
     }
   }
-  let collapsed: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+  collapse_and_cap(raw)
+}
+
+/// Shared name hygiene for every extraction path (first prompt, live
+/// registry, `<command-name>`, Vibe title): non-whitespace control
+/// characters are blanked BEFORE whitespace collapsing — artefacts are
+/// untrusted input, and a raw ESC would smuggle ANSI/OSC sequences into
+/// `gwm agents` output and the TUI (Codex review round D) — then the
+/// result is length-capped.
+fn collapse_and_cap(raw: &str) -> Option<String> {
+  let stripped: String = raw
+    .chars()
+    .map(|c| if c.is_control() && !c.is_whitespace() { ' ' } else { c })
+    .collect();
+  let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
   if collapsed.is_empty() {
     return None;
   }
@@ -258,8 +271,13 @@ impl CodexSource {
   pub fn scan(&self, base: &Path, now: SystemTime) -> Vec<AgentSession> {
     // ponytail: full YYYY/MM/DD walk + per-file mtime filter instead of
     // date-name pruning — a rollout appended today in a 40-day-old day dir
-    // must still be found (appends touch the file mtime, not the dir's).
-    // Switch to name-based pruning only if real stores make this walk slow.
+    // must still be found (appends touch the file mtime, not the dir's;
+    // `codex resume` does exactly this). SCAN_WINDOW bounds the result,
+    // the walk cost is one read_dir per dir + one stat per file: measured
+    // 2.9 ms on a real store (31 dirs / 11 files, 2026-07-22), and the
+    // 30 s detection cache absorbs repeat daemon/TUI polls. Switch to
+    // name-based pruning (breaking the resume case beyond the slack) only
+    // if a real store ever makes this walk slow.
     let years = subdirs_flat(&[base.to_path_buf()]);
     let months = subdirs_flat(&years);
     let days = subdirs_flat(&months);

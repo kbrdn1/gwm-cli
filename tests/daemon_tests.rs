@@ -181,11 +181,12 @@ fn worktrees_differ_detects_real_changes() {
 }
 
 #[test]
-fn worktrees_differ_notices_agent_changes_but_not_activity_churn() {
-  // Codex review round C: subscribers must hear a session appear, vanish,
-  // or flip active→idle — but the raw last_activity mtime moves on every
-  // poll while an agent works, and comparing it would fire a spurious
-  // `worktrees.changed` each tick (the age_seconds lesson again).
+fn worktrees_differ_notices_agent_changes_including_fresh_activity() {
+  // Codex review rounds C+D: subscribers must hear a session appear,
+  // vanish, flip active↔idle — AND receive fresh `last_activity`. Unlike
+  // `age_seconds` (recomputed from the clock every poll), `last_activity`
+  // only moves on real agent writes, and push frequency is bounded by the
+  // 30 s detection cache, so comparing it whole is spam-safe.
   use gwm::json_api::{JsonAgentSession, JsonWorktreeAgents};
   use std::slice::from_ref;
   let session = JsonAgentSession {
@@ -213,16 +214,19 @@ fn worktrees_differ_notices_agent_changes_but_not_activity_churn() {
   }
   assert!(worktrees_differ(from_ref(&with), from_ref(&idle)));
 
-  // Activity-timestamp churn ALONE is not a change.
-  let mut churn = with.clone();
-  if let Some(a) = churn.agents.as_mut() {
+  // Fresh real activity on the same session pushes too.
+  let mut fresh = with.clone();
+  if let Some(a) = fresh.agents.as_mut() {
     a.top.last_activity += 5;
     a.sessions[0].last_activity += 5;
   }
   assert!(
-    !worktrees_differ(from_ref(&with), from_ref(&churn)),
-    "mtime churn must stay quiet"
+    worktrees_differ(from_ref(&with), from_ref(&fresh)),
+    "fresh activity is a real change"
   );
+
+  // Identical snapshots stay quiet.
+  assert!(!worktrees_differ(from_ref(&with), from_ref(&with)));
 }
 
 #[test]

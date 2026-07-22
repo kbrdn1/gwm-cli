@@ -98,7 +98,7 @@ impl DetailOverlay {
 /// Display favours the session *name* when the artefacts carry one (user
 /// feedback 2026-07-22); the full id otherwise — never truncated, it is
 /// what `gwm agents attach` takes.
-pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: Option<&str>, now: SystemTime) -> Vec<DetailRow> {
+pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: &[String], now: SystemTime) -> Vec<DetailRow> {
   let sessions = agents.map(|a| a.sessions.as_slice()).unwrap_or_default();
   if sessions.is_empty() {
     return vec![DetailRow {
@@ -121,7 +121,7 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: Option<&str>, 
         .map(crate::worktree::format_relative_duration)
         .unwrap_or_else(|_| "now".into());
       let identity = s.name.as_deref().unwrap_or(&s.id);
-      let pin_mark = if pinned == Some(s.id.as_str()) {
+      let pin_mark = if pinned.iter().any(|p| p == &s.id) {
         " · pinned"
       } else {
         ""

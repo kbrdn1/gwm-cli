@@ -194,6 +194,69 @@ fn swept_foreign_claude_sessions_never_join_a_worktree_summary() {
   assert!(map.is_empty(), "but no worktree claims it: {map:?}");
 }
 
+#[test]
+fn session_names_neutralise_control_characters() {
+  // Codex review round D: a hostile or corrupt artefact must not smuggle
+  // ANSI escapes into the terminal through `gwm agents` / the TUI. ESC is
+  // not whitespace, so `split_whitespace` alone keeps it.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(
+    &base.join(claude_slug(&wt)).join("evil-1.jsonl"),
+    "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"\\u001b[31mevil\\u001b[0m name\"}}",
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  let name = sessions[0].name.as_deref().expect("a name is extracted");
+  assert!(
+    !name.chars().any(|c| c.is_control()),
+    "control characters must be stripped: {name:?}"
+  );
+  assert!(name.contains("evil"), "the visible text survives: {name:?}");
+}
+
+#[test]
+fn live_session_names_are_sanitised_too() {
+  // The live registry (`~/.claude/sessions/<pid>.json`) is another
+  // untrusted input: same stripping, same length cap.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("aaaa-1111.jsonl"), "{}");
+  let long = "x".repeat(80);
+  write(
+    &tmp.path().join(".claude/sessions/99.json"),
+    &format!("{{\"sessionId\":\"aaaa-1111\",\"name\":\"\\u001b]0;t\\u0007{long}\"}}"),
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  let name = sessions[0].name.as_deref().expect("a name is extracted");
+  assert!(!name.chars().any(|c| c.is_control()), "sanitised: {name:?}");
+  assert!(name.chars().count() <= 60, "capped: {} chars", name.chars().count());
+}
+
+#[test]
+fn command_name_titles_are_capped_like_any_other_name() {
+  // The `<command-name>` fast path must apply the same cap + stripping as
+  // the plain-prompt branch (Codex review round D).
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  let long_cmd = "c".repeat(100);
+  write(
+    &base.join(claude_slug(&wt)).join("bbbb-2222.jsonl"),
+    &format!(
+      r#"{{"type":"user","message":{{"role":"user","content":"<command-name>/{long_cmd}</command-name> args"}}}}"#
+    ),
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  let name = sessions[0].name.as_deref().expect("a name is extracted");
+  assert!(name.chars().count() <= 60, "capped: {} chars", name.chars().count());
+  assert!(name.starts_with("/c"), "still the command name: {name:?}");
+}
+
 // -- Codex backend (research.md D3) --
 
 const CODEX_META: &str = r#"{"timestamp":"2026-07-21T10:00:00.000Z","type":"session_meta","payload":{"session_id":"019f6b95-b01a-7d30-a28a-68d9813e2248","cwd":"/work/one","originator":"codex_exec"}}"#;

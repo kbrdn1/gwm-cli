@@ -1226,3 +1226,29 @@ fn pinnable_branch_rejects_none_and_literal_head() {
   assert_eq!(pinnable_branch(Some("feat/#408-x")), Some("feat/#408-x"));
   assert_eq!(pinnable_branch(Some("main")), Some("main"));
 }
+
+/// User feedback 2026-07-22: a worktree can host several agent sessions at
+/// once, so pins are a multi-valued branch-config key — attach accumulates,
+/// detach removes one specific pin, clear drops them all.
+#[test]
+fn agent_pins_accumulate_and_detach_individually() {
+  use gwm::github::{add_agent_pin, agent_pins, clear_agent_pins, remove_agent_pin};
+  let (_dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+  assert!(agent_pins(&repo, &branch).unwrap().is_empty());
+  add_agent_pin(&repo, &branch, "sid-one").unwrap();
+  add_agent_pin(&repo, &branch, "sid-two").unwrap();
+  // Re-attaching the same id is a no-op, not a duplicate.
+  add_agent_pin(&repo, &branch, "sid-one").unwrap();
+  assert_eq!(agent_pins(&repo, &branch).unwrap(), vec!["sid-one", "sid-two"]);
+
+  // Detach removes exactly the named pin.
+  assert!(remove_agent_pin(&repo, &branch, "sid-one").unwrap());
+  assert_eq!(agent_pins(&repo, &branch).unwrap(), vec!["sid-two"]);
+  // Removing an absent pin reports false, never errors.
+  assert!(!remove_agent_pin(&repo, &branch, "sid-one").unwrap());
+
+  clear_agent_pins(&repo, &branch).unwrap();
+  assert!(agent_pins(&repo, &branch).unwrap().is_empty());
+}

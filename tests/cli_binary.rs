@@ -5638,6 +5638,35 @@ mod agents_cmd {
   }
 
   #[test]
+  fn list_hides_the_agent_column_without_any_detected_session() {
+    // Codex review round D: with no agent tooling / no session, the human
+    // table must be byte-identical to the pre-#408 layout — no AGENT
+    // header squeezing NAME/BRANCH/PATH.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("list")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT").not());
+  }
+
+  #[test]
+  fn list_shows_the_agent_column_when_a_session_is_detected() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "1111-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("list")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"))
+      .stdout(predicate::str::contains("codex"));
+  }
+
+  #[test]
   fn agents_lists_unmatched_sessions_in_a_dedicated_section() {
     // Codex review round C: the attach error says "run `gwm agents` to see
     // the detected ids", so a session matched to NO worktree — precisely
@@ -5738,9 +5767,87 @@ mod agents_cmd {
   }
 
   #[test]
+  fn attach_accumulates_pins_and_detach_removes_one_or_all() {
+    // User feedback 2026-07-22: several agents can work one worktree —
+    // attach ADDS a pin, `detach <wt> <id>` removes that one, bare
+    // `detach <wt>` clears them all.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "aaaa-multi");
+    seed_codex(home.path(), repo_dir.path(), "bbbb-multi");
+
+    for sid in ["aaaa-multi", "bbbb-multi"] {
+      gwm_in(repo_dir.path(), home.path())
+        .args(["agents", "attach", ".", sid])
+        .assert()
+        .success();
+    }
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let text = String::from_utf8_lossy(&out);
+    let pinned = text.lines().filter(|l| l.contains("pinned")).count();
+    assert_eq!(pinned, 2, "both pins marked, got: {text}");
+
+    // Targeted detach removes exactly one pin.
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "detach", ".", "aaaa-multi"])
+      .assert()
+      .success();
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let text = String::from_utf8_lossy(&out);
+    assert_eq!(text.lines().filter(|l| l.contains("pinned")).count(), 1, "got: {text}");
+    assert!(
+      text.lines().any(|l| l.contains("bbbb-multi") && l.contains("pinned")),
+      "the other pin survives: {text}"
+    );
+
+    // Bare detach clears the rest.
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "detach", "."])
+      .assert()
+      .success();
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    assert!(!String::from_utf8_lossy(&out).contains("pinned"));
+  }
+
+  #[test]
   fn workspace_list_table_carries_the_agent_column() {
     // Codex review round A: `gwm list --workspace` (human table) must show
-    // AGENT like the single-repo table.
+    // AGENT like the single-repo table — and like it, only when a session
+    // was actually detected (round D conditional).
+    let root = workspace_with_worktrees();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), &root.path().join("alpha-wt"), "aaaa-ws");
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", "."])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"))
+      .stdout(predicate::str::contains("codex"));
+  }
+
+  #[test]
+  fn workspace_list_table_hides_the_agent_column_without_sessions() {
     let root = workspace_with_worktrees();
     let home = tempfile::TempDir::new().unwrap();
     let mut cmd = Command::cargo_bin("gwm").unwrap();
@@ -5750,7 +5857,7 @@ mod agents_cmd {
       .args(["list", "--workspace", "."])
       .assert()
       .success()
-      .stdout(predicate::str::contains("AGENT"));
+      .stdout(predicate::str::contains("AGENT").not());
   }
 
   #[test]

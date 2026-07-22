@@ -489,11 +489,17 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   if is_workspace {
     header_cells.push(Cell::from("REPO"));
   }
+  // AGENT column only when at least one session is detected (Codex review
+  // round D): a no-agent setup keeps the exact pre-#408 table instead of an
+  // empty fixed column squeezing NAME/BRANCH/PATH on narrow terminals.
+  let show_agent = app.any_agent_sessions();
   header_cells.push(Cell::from("I/P"));
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
   header_cells.push(Cell::from("STATUS"));
-  header_cells.push(Cell::from("AGENT"));
+  if show_agent {
+    header_cells.push(Cell::from("AGENT"));
+  }
   header_cells.push(Cell::from("PATH"));
   let header = Row::new(header_cells).style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
 
@@ -511,7 +517,8 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     .enumerate()
     .map(|(vi, w)| {
       let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
-      build_row(w, repo, name_w, branch_w, status_w, agent_cells[vi], &theme)
+      let agent = show_agent.then_some(agent_cells[vi]);
+      build_row(w, repo, name_w, branch_w, status_w, agent, &theme)
     })
     .collect();
 
@@ -539,11 +546,13 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
+  ]);
+  if show_agent {
     // AGENT (issue #408): hard length sized to the longest agent name
     // ("opencode"), so the solver never starves it into ambiguity.
-    Constraint::Length(8),
-    Constraint::Fill(1),
-  ]);
+    widths.push(Constraint::Length(8));
+  }
+  widths.push(Constraint::Fill(1));
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
@@ -710,9 +719,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // a cloned vec.
   let prefix_lines = vec![sidebar_header_line(&w, app)];
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
-  // Agents pane body (issue #408): per-frame pure snapshot lookup, its
-  // bordered block collapses to zero height when no session matched.
-  let agent_lines = agent_pane_lines(app.agents_for(&w), std::time::SystemTime::now(), &theme);
+  // Agents pane body (issue #408): per-frame pure snapshot + pins lookup
+  // (no config I/O — `app.agent_pins` is refreshed off-render), its
+  // bordered block collapses to zero height when nothing is pinned.
+  let agent_pins: &[String] = app
+    .agent_pins
+    .get(w.path.to_string_lossy().as_ref())
+    .map(|v| v.as_slice())
+    .unwrap_or(&[]);
+  let agent_lines = agent_pane_lines(app.agents_for(&w), agent_pins, std::time::SystemTime::now(), &theme);
 
   // Read the resolved section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
@@ -959,14 +974,16 @@ pub fn agents_pane_title(keymap: &Keymap) -> String {
   format!(" Agents [{}] ", action_chord(keymap, Action::AgentSessions, "a"))
 }
 
-/// Per-frame body of the Agents sidebar pane: one line per session (capped
-/// at three, most recent first) — agent kind coloured by freshness, a
-/// human-readable recency, and the session name (full id when unnamed).
-/// Empty when no session matched, so the bordered block collapses like the
-/// Working Tree pane does in stashes mode. Pure — pinned by
-/// `tests/tui_app_tests.rs::agent_pane`.
+/// Per-frame body of the Agents sidebar pane: one line per **pinned**
+/// session (user feedback 2026-07-22 — the pane is the deliberate view;
+/// the full detected list lives in the `a` overlay), capped at three —
+/// agent kind coloured by freshness, a human-readable recency, and the
+/// session name (full id when unnamed). Empty when nothing is pinned, so
+/// the bordered block collapses like the Working Tree pane does in stashes
+/// mode. Pure — pinned by `tests/tui_app_tests.rs::agent_pane`.
 pub fn agent_pane_lines(
   agents: Option<&crate::agent_sessions::WorktreeAgents>,
+  pinned: &[String],
   now: std::time::SystemTime,
   theme: &Theme,
 ) -> Vec<Line<'static>> {
@@ -974,8 +991,12 @@ pub fn agent_pane_lines(
   let Some(agents) = agents else {
     return Vec::new();
   };
-  let mut lines: Vec<Line<'static>> = agents
+  let shown: Vec<&crate::agent_sessions::AgentSession> = agents
     .sessions
+    .iter()
+    .filter(|s| pinned.iter().any(|p| p == &s.id))
+    .collect();
+  let mut lines: Vec<Line<'static>> = shown
     .iter()
     .take(MAX_ROWS)
     .map(|s| {
@@ -999,7 +1020,7 @@ pub fn agent_pane_lines(
       ])
     })
     .collect();
-  let extra = agents.sessions.len().saturating_sub(MAX_ROWS);
+  let extra = shown.len().saturating_sub(MAX_ROWS);
   if extra > 0 {
     lines.push(Line::from(Span::styled(
       format!("+{extra} more"),
@@ -1802,7 +1823,9 @@ fn build_row(
   name_w: u16,
   branch_w: u16,
   status_w: u16,
-  agent: Option<(&'static str, crate::agent_sessions::Freshness)>,
+  // Outer `Option` = is the AGENT column shown at all (round D:
+  // conditional on any detected session); inner = this row's top agent.
+  agent: Option<Option<(&'static str, crate::agent_sessions::Freshness)>>,
   theme: &Theme,
 ) -> Row<'static> {
   let marker = table_marker(w, theme);
@@ -1847,15 +1870,19 @@ fn build_row(
   cells.push(branch_cell);
   cells.push(status_cell);
   // AGENT (issue #408): the most recently active session's agent, coloured by
-  // freshness — `clean` (active) vs `muted` (idle). No session → empty cell,
-  // visually identical to the pre-feature table.
-  cells.push(match agent {
-    Some((label, crate::agent_sessions::Freshness::Active)) => {
-      Cell::from(label).style(Style::default().fg(theme.clean).add_modifier(Modifier::BOLD))
-    }
-    Some((label, crate::agent_sessions::Freshness::Idle)) => Cell::from(label).style(Style::default().fg(theme.muted)),
-    None => Cell::from(""),
-  });
+  // freshness — `clean` (active) vs `muted` (idle). Sessionless row in a
+  // shown column → empty cell; column hidden → no cell at all (round D).
+  if let Some(agent) = agent {
+    cells.push(match agent {
+      Some((label, crate::agent_sessions::Freshness::Active)) => {
+        Cell::from(label).style(Style::default().fg(theme.clean).add_modifier(Modifier::BOLD))
+      }
+      Some((label, crate::agent_sessions::Freshness::Idle)) => {
+        Cell::from(label).style(Style::default().fg(theme.muted))
+      }
+      None => Cell::from(""),
+    });
+  }
   cells.push(path_cell);
   Row::new(cells)
 }

@@ -423,20 +423,74 @@ pub fn pinnable_branch(branch: Option<&str>) -> Option<&str> {
   }
 }
 
-/// The manual agent-session pin on `branch`, if any (issue #408 US4).
-pub fn agent_pin(repo: &Repository, branch: &str) -> Result<Option<String>> {
-  read_branch_string(repo, branch, AGENT_PIN_CONFIG_KEY)
+/// Every manual agent-session pin on `branch` (issue #408 US4). The key is
+/// **multi-valued** (user feedback 2026-07-22): several agents can work one
+/// worktree at once, so attach accumulates instead of replacing.
+pub fn agent_pins(repo: &Repository, branch: &str) -> Result<Vec<String>> {
+  let cfg = repo.config()?;
+  let key = config_key(branch, AGENT_PIN_CONFIG_KEY);
+  let mut out = Vec::new();
+  let result = match cfg.multivar(&key, None) {
+    Ok(entries) => {
+      entries
+        .for_each(|e| {
+          if let Ok(v) = e.value() {
+            out.push(v.to_string());
+          }
+        })
+        .map_err(GwmError::Git)?;
+      Ok(out)
+    }
+    Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(out),
+    Err(e) => Err(GwmError::Git(e)),
+  };
+  result
 }
 
-/// Pin `session_id` to `branch`'s worktree (`gwm agents attach`). One pin
-/// per worktree — a second attach overwrites the first.
-pub fn set_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Result<()> {
-  write_branch_string(repo, branch, AGENT_PIN_CONFIG_KEY, session_id)
+/// Pin `session_id` to `branch`'s worktree (`gwm agents attach`). Appends
+/// to the multi-valued key; re-attaching an already-pinned id is a no-op.
+pub fn add_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Result<()> {
+  if agent_pins(repo, branch)?.iter().any(|p| p == session_id) {
+    return Ok(());
+  }
+  let mut cfg = repo.config()?;
+  // The never-matching regex makes libgit2 append a new value instead of
+  // replacing an existing one (the documented multivar-append idiom).
+  cfg.set_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), "^$", session_id)?;
+  Ok(())
 }
 
-/// Remove the pin (`gwm agents detach`). A no-op when none is set.
-pub fn clear_agent_pin(repo: &Repository, branch: &str) -> Result<()> {
-  remove_branch_key(repo, branch, AGENT_PIN_CONFIG_KEY)
+/// Remove exactly the `session_id` pin (`gwm agents detach <wt> <id>` / `d`
+/// on a pinned row). Returns whether it was present; absent is not an error.
+pub fn remove_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Result<bool> {
+  if !agent_pins(repo, branch)?.iter().any(|p| p == session_id) {
+    return Ok(false);
+  }
+  let mut cfg = repo.config()?;
+  // Escape regex metacharacters so an id is matched literally, anchored.
+  let escaped: String = session_id
+    .chars()
+    .flat_map(|c| {
+      if c.is_ascii_alphanumeric() {
+        vec![c]
+      } else {
+        vec!['\\', c]
+      }
+    })
+    .collect();
+  cfg.remove_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), &format!("^{escaped}$"))?;
+  Ok(true)
+}
+
+/// Remove every pin on `branch` (bare `gwm agents detach <wt>`). A no-op
+/// when none is set.
+pub fn clear_agent_pins(repo: &Repository, branch: &str) -> Result<()> {
+  let mut cfg = repo.config()?;
+  match cfg.remove_multivar(&config_key(branch, AGENT_PIN_CONFIG_KEY), ".*") {
+    Ok(()) => Ok(()),
+    Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(()),
+    Err(e) => Err(GwmError::Git(e)),
+  }
 }
 
 fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> {

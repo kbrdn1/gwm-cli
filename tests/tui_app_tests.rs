@@ -8300,7 +8300,7 @@ mod agent_detail_overlay {
   #[test]
   fn detail_rows_are_generic_label_value_role_triples() {
     // The mapping is pure and content-agnostic: any consumer can build rows.
-    let rows = agent_detail_rows(None, None, SystemTime::now());
+    let rows = agent_detail_rows(None, &[], SystemTime::now());
     assert_eq!(rows.len(), 1);
     let row = &rows[0];
     // The triple shape is the reuse contract for the future rich view.
@@ -8338,7 +8338,7 @@ mod agent_detail_overlay {
         name: Some("fix the login timeout bug".into()),
       }],
     };
-    let rows = agent_detail_rows(Some(&agents), None, now);
+    let rows = agent_detail_rows(Some(&agents), &[], now);
     assert!(
       rows[0].value.contains("fix the login timeout bug"),
       "got {}",
@@ -8361,11 +8361,39 @@ mod agent_detail_overlay {
     app.attach_selected_agent();
     // Pin persisted in branch config for the target worktree's branch.
     let branch = app.worktrees[0].branch.clone().unwrap();
-    let pin = gwm::github::agent_pin(&app.repo, &branch).unwrap();
-    assert_eq!(pin.as_deref(), Some("older-session"));
+    let pins = gwm::github::agent_pins(&app.repo, &branch).unwrap();
+    assert_eq!(pins, vec!["older-session"]);
     // The row now carries the pinned marker.
     let row = &app.detail_overlay.rows[app.detail_overlay.selected];
     assert!(row.value.contains("pinned"), "got {}", row.value);
+  }
+
+  #[test]
+  fn attach_accumulates_pins_and_detach_removes_only_the_selected_one() {
+    // User feedback 2026-07-22: several agents can work one worktree, so a
+    // second attach ADDS a pin (it used to replace), and `d` unpins only
+    // the selected session.
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    app.attach_selected_agent(); // pin "newest-session"
+    app.detail_overlay.select_next();
+    app.attach_selected_agent(); // pin "older-session" TOO
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert_eq!(
+      gwm::github::agent_pins(&app.repo, &branch).unwrap(),
+      vec!["newest-session", "older-session"]
+    );
+    // Both rows carry the marker.
+    assert!(app.detail_overlay.rows.iter().all(|r| r.value.contains("pinned")));
+
+    // Detach on the selected (older) row removes only that pin.
+    app.detach_selected_agent();
+    assert_eq!(
+      gwm::github::agent_pins(&app.repo, &branch).unwrap(),
+      vec!["newest-session"]
+    );
+    assert!(app.detail_overlay.rows[0].value.contains("pinned"));
+    assert!(!app.detail_overlay.rows[1].value.contains("pinned"));
   }
 
   #[test]
@@ -8374,9 +8402,9 @@ mod agent_detail_overlay {
     app.open_agent_overlay();
     app.attach_selected_agent();
     let branch = app.worktrees[0].branch.clone().unwrap();
-    assert!(gwm::github::agent_pin(&app.repo, &branch).unwrap().is_some());
+    assert!(!gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
     app.detach_selected_agent();
-    assert!(gwm::github::agent_pin(&app.repo, &branch).unwrap().is_none());
+    assert!(gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
     let row = &app.detail_overlay.rows[0];
     assert!(!row.value.contains("pinned"), "got {}", row.value);
   }
@@ -8407,7 +8435,10 @@ mod agent_pane {
   }
 
   #[test]
-  fn pane_lists_sessions_preferring_names() {
+  fn pane_lists_only_pinned_sessions_preferring_names() {
+    // User feedback 2026-07-22: the sidebar pane is the *deliberate* view —
+    // only pinned sessions show there; the full detected list lives in the
+    // `a` overlay.
     let now = SystemTime::now();
     let agents = WorktreeAgents {
       sessions: vec![
@@ -8415,38 +8446,41 @@ mod agent_pane {
         mk(AgentKind::Codex, 400, "uuid-2", None),
       ],
     };
-    let lines = agent_pane_lines(Some(&agents), now, &Theme::default());
-    assert_eq!(lines.len(), 2);
+    let pinned = ["uuid-1".to_string()];
+    let lines = agent_pane_lines(Some(&agents), &pinned, now, &Theme::default());
+    assert_eq!(lines.len(), 1, "only the pinned session shows");
     let first = line_text(&lines[0]);
     assert!(first.contains("claude"), "got {first}");
     assert!(first.contains("active"), "got {first}");
     assert!(first.contains("fix login bug"), "got {first}");
     assert!(!first.contains("uuid-1"), "name must replace the id: {first}");
-    let second = line_text(&lines[1]);
-    assert!(second.contains("codex"), "got {second}");
-    assert!(second.contains("uuid-2"), "id fallback expected: {second}");
   }
 
   #[test]
-  fn pane_caps_at_three_sessions_with_an_overflow_line() {
+  fn pane_caps_at_three_pinned_sessions_with_an_overflow_line() {
     let now = SystemTime::now();
     let agents = WorktreeAgents {
       sessions: (0..5)
         .map(|i| mk(AgentKind::ClaudeCode, 1000 + i, &format!("uuid-{i}"), None))
         .collect(),
     };
-    let lines = agent_pane_lines(Some(&agents), now, &Theme::default());
-    assert_eq!(lines.len(), 4, "3 sessions + overflow line");
+    let pinned: Vec<String> = (0..5).map(|i| format!("uuid-{i}")).collect();
+    let lines = agent_pane_lines(Some(&agents), &pinned, now, &Theme::default());
+    assert_eq!(lines.len(), 4, "3 pinned sessions + overflow line");
     let overflow = line_text(&lines[3]);
     assert!(overflow.contains("+2"), "got {overflow}");
   }
 
   #[test]
-  fn pane_is_empty_without_sessions_so_the_block_collapses() {
+  fn pane_is_empty_without_pins_so_the_block_collapses() {
     let now = SystemTime::now();
-    assert!(agent_pane_lines(None, now, &Theme::default()).is_empty());
-    let empty = WorktreeAgents::default();
-    assert!(agent_pane_lines(Some(&empty), now, &Theme::default()).is_empty());
+    assert!(agent_pane_lines(None, &[], now, &Theme::default()).is_empty());
+    // Detected-but-unpinned sessions do NOT surface in the pane (user
+    // feedback 2026-07-22) — they stay in the overlay until pinned.
+    let agents = WorktreeAgents {
+      sessions: vec![mk(AgentKind::ClaudeCode, 10, "uuid-1", None)],
+    };
+    assert!(agent_pane_lines(Some(&agents), &[], now, &Theme::default()).is_empty());
   }
 
   #[test]
@@ -8564,8 +8598,8 @@ mod agent_overlay_input {
     // Back to the list, pin persisted for the target worktree's branch.
     assert_eq!(app.detail_overlay.mode, DetailMode::List);
     let branch = app.worktrees[0].branch.clone().unwrap();
-    let pin = gwm::github::agent_pin(&app.repo, &branch).unwrap();
-    assert_eq!(pin.as_deref(), Some("pool-42"));
+    let pins = gwm::github::agent_pins(&app.repo, &branch).unwrap();
+    assert_eq!(pins, vec!["pool-42"]);
   }
 
   #[test]
@@ -8577,7 +8611,7 @@ mod agent_overlay_input {
     app.agent_input_cancel();
     assert_eq!(app.detail_overlay.mode, DetailMode::List);
     let branch = app.worktrees[0].branch.clone().unwrap();
-    assert!(gwm::github::agent_pin(&app.repo, &branch).unwrap().is_none());
+    assert!(gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
   }
 
   #[test]

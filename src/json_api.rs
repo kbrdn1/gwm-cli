@@ -238,10 +238,11 @@ pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
 pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Vec<(String, String)> {
   rows
     .iter()
-    .filter_map(|r| {
-      let branch = crate::github::pinnable_branch(r.branch.as_deref())?;
-      let sid = crate::github::agent_pin(repo, branch).ok().flatten()?;
-      Some((r.path.clone(), sid))
+    .flat_map(|r| {
+      let pins = crate::github::pinnable_branch(r.branch.as_deref())
+        .map(|branch| crate::github::agent_pins(repo, branch).unwrap_or_default())
+        .unwrap_or_default();
+      pins.into_iter().map(move |sid| (r.path.clone(), sid))
     })
     .collect()
 }

@@ -71,18 +71,21 @@ pub struct Cli {
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum AgentsAction {
   /// Pin session SESSION_ID to the worktree matching PATTERN. The pin
-  /// overlays auto-detection (one pin per worktree; attach again to
-  /// replace it).
+  /// overlays auto-detection and ACCUMULATES — several sessions can be
+  /// pinned to one worktree.
   Attach {
     /// Worktree name (substring match), or `.` for the enclosing worktree.
     pattern: String,
     /// Session id as shown by `gwm agents`.
     session_id: String,
   },
-  /// Remove the pin from the worktree matching PATTERN.
+  /// Remove pin(s) from the worktree matching PATTERN: the one named by
+  /// SESSION_ID, or every pin when omitted.
   Detach {
     /// Worktree name (substring match), or `.` for the enclosing worktree.
     pattern: String,
+    /// Specific pinned session id to remove (all pins when omitted).
+    session_id: Option<String>,
   },
 }
 
@@ -1959,11 +1962,11 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
           "no agent session with id '{session_id}' — run `gwm agents` to see the detected ids"
         )));
       }
-      github::set_agent_pin(&repo, &branch, &session_id)?;
+      github::add_agent_pin(&repo, &branch, &session_id)?;
       println!("pinned {session_id} to {}", target.name);
       Ok(())
     }
-    Some(AgentsAction::Detach { pattern }) => {
+    Some(AgentsAction::Detach { pattern, session_id }) => {
       let target = resolve_agents_worktree(&trees, &pattern)?;
       let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
         return Err(GwmError::Config(format!(
@@ -1971,8 +1974,21 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
           target.name
         )));
       };
-      github::clear_agent_pin(&repo, &branch)?;
-      println!("detached agent pin from {}", target.name);
+      match session_id {
+        Some(sid) => {
+          if !github::remove_agent_pin(&repo, &branch, &sid)? {
+            return Err(GwmError::Config(format!(
+              "no pin '{sid}' on {} — run `gwm agents` to see the pinned ids",
+              target.name
+            )));
+          }
+          println!("detached {sid} from {}", target.name);
+        }
+        None => {
+          github::clear_agent_pins(&repo, &branch)?;
+          println!("detached every agent pin from {}", target.name);
+        }
+      }
       Ok(())
     }
   }
@@ -2098,10 +2114,12 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
         .collect();
       let pins: Vec<(String, String)> = trees
         .iter()
-        .filter_map(|w| {
-          let branch = github::pinnable_branch(w.branch.as_deref())?;
-          let sid = github::agent_pin(&repo, branch).ok().flatten()?;
-          Some((w.path.to_string_lossy().to_string(), sid))
+        .flat_map(|w| {
+          let pins = github::pinnable_branch(w.branch.as_deref())
+            .map(|b| github::agent_pins(&repo, b).unwrap_or_default())
+            .unwrap_or_default();
+          let path = w.path.to_string_lossy().to_string();
+          pins.into_iter().map(move |sid| (path.clone(), sid))
         })
         .collect();
       let map = crate::agent_sessions::detect_all(&home, &keyed, &pins, std::time::SystemTime::now());
@@ -2113,32 +2131,41 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     }
     cells
   };
+  // Column shown only when a session was detected (Codex review round D):
+  // a no-agent setup keeps the exact pre-#408 table layout. The pre-padded
+  // fragment (cell + separator, or nothing) keeps one format string per row.
+  let show_agent = agent_cells.iter().any(|c| c != "-");
+  let agent_col = |cell: &str| {
+    if show_agent {
+      format!("{cell:<agent_w$}  ")
+    } else {
+      String::new()
+    }
+  };
 
   if detect_pr {
     println!(
-      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {:<aw$}  PATH",
+      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}PATH",
       "NAME",
       "BRANCH",
       "STATUS",
       "PR",
-      "AGENT",
+      agent_col("AGENT"),
       nw = name_w,
       bw = branch_w,
       sw = status_w,
       pw = pr_w,
-      aw = agent_w,
     );
   } else {
     println!(
-      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<aw$}  PATH",
+      "  {:<nw$}  {:<bw$}  {:<sw$}  {}PATH",
       "NAME",
       "BRANCH",
       "STATUS",
-      "AGENT",
+      agent_col("AGENT"),
       nw = name_w,
       bw = branch_w,
       sw = status_w,
-      aw = agent_w,
     );
   }
   for (i, w) in trees.iter().enumerate() {
@@ -2151,33 +2178,31 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
       let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
-        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {:<aw$}  {}",
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}{}",
         mark,
         w.name,
         branch,
         status,
         pr_cell,
-        agent_cells[i],
+        agent_col(&agent_cells[i]),
         w.path.display(),
         nw = name_w,
         bw = branch_w,
         sw = status_w,
         pw = pr_w,
-        aw = agent_w,
       );
     } else {
       println!(
-        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<aw$}  {}",
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {}{}",
         mark,
         w.name,
         branch,
         status,
-        agent_cells[i],
+        agent_col(&agent_cells[i]),
         w.path.display(),
         nw = name_w,
         bw = branch_w,
         sw = status_w,
-        aw = agent_w,
       );
     }
   }
@@ -2290,6 +2315,15 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     }
     cells
   };
+  // Same conditional column as the single-repo table (round D).
+  let show_agent = agent_cells.iter().any(|c| c != "-");
+  let agent_col = |cell: &str| {
+    if show_agent {
+      format!("{cell:<agent_w$}  ")
+    } else {
+      String::new()
+    }
+  };
   let name_w = rows.iter().map(|r| r.info.name.len()).max().unwrap_or(4).clamp(4, 40);
   let branch_w = rows
     .iter()
@@ -2302,33 +2336,31 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
 
   if detect_pr {
     println!(
-      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {:<aw$}  PATH",
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}PATH",
       "REPO",
       "NAME",
       "BRANCH",
       "STATUS",
       "PR",
-      "AGENT",
+      agent_col("AGENT"),
       rw = repo_w,
       nw = name_w,
       bw = branch_w,
       sw = status_w,
       pw = pr_w,
-      aw = agent_w,
     );
   } else {
     println!(
-      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<aw$}  PATH",
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}PATH",
       "REPO",
       "NAME",
       "BRANCH",
       "STATUS",
-      "AGENT",
+      agent_col("AGENT"),
       rw = repo_w,
       nw = name_w,
       bw = branch_w,
       sw = status_w,
-      aw = agent_w,
     );
   }
   for (i, row) in rows.iter().enumerate() {
