@@ -668,3 +668,46 @@ mod review_round_a {
     );
   }
 }
+
+#[test]
+fn opencode_scan_never_panics_on_an_extreme_timestamp() {
+  // Codex review round B: a corrupt `time.updated` large enough to overflow
+  // the platform time representation (Windows FILETIME) must skip the
+  // record via checked_add, never panic in `UNIX_EPOCH + Duration`. On
+  // 64-bit-seconds platforms the same value clamps to "the future", which
+  // the freshness rules already treat as active — both outcomes are fine;
+  // panicking is not.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("project");
+  write(
+    &base.join("corrupt.json"),
+    &format!(
+      r#"{{"id":"corrupt","worktree":"/work/c","time":{{"created":1,"updated":{}}}}}"#,
+      u64::MAX
+    ),
+  );
+  let sessions = OpencodeSource.scan(&base, SystemTime::now());
+  assert!(sessions.len() <= 1, "at most the one record, got {}", sessions.len());
+}
+
+#[test]
+fn claude_live_session_name_beats_the_first_prompt() {
+  // User feedback: Claude Code names live sessions in
+  // ~/.claude/sessions/<pid>.json ({sessionId, name}); that name is what
+  // the app shows, so it wins over the first-prompt heuristic.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  let dir = base.join(claude_slug(&wt));
+  write(
+    &dir.join("aaaa-1111.jsonl"),
+    "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"/speckit.install\"}}\n",
+  );
+  write(
+    &tmp.path().join(".claude/sessions/3831.json"),
+    r#"{"pid":3831,"sessionId":"aaaa-1111","name":"feat-408-agent-session-pane","status":"busy"}"#,
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  assert_eq!(sessions[0].name.as_deref(), Some("feat-408-agent-session-pane"));
+}

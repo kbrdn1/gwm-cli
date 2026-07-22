@@ -411,6 +411,18 @@ fn write_branch_string(repo: &Repository, branch: &str, leaf: &str, value: &str)
   Ok(())
 }
 
+/// Normalise a worktree's branch for pin storage (issue #408): libgit2
+/// surfaces a detached HEAD either as `None` or as the literal `"HEAD"`
+/// (the same trap the statusline handles), and a `branch.HEAD.*` config key
+/// would silently share one pin across every detached worktree. Every pin
+/// read/write goes through this guard.
+pub fn pinnable_branch(branch: Option<&str>) -> Option<&str> {
+  match branch {
+    None | Some("HEAD") => None,
+    other => other,
+  }
+}
+
 /// The manual agent-session pin on `branch`, if any (issue #408 US4).
 pub fn agent_pin(repo: &Repository, branch: &str) -> Result<Option<String>> {
   read_branch_string(repo, branch, AGENT_PIN_CONFIG_KEY)

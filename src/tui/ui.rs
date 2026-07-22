@@ -2125,6 +2125,7 @@ impl HintContext {
         Hint::Lit("j/k", "select"),
         Hint::Modal(ModalAction::DetailAttach, "attach"),
         Hint::Modal(ModalAction::DetailDetach, "detach"),
+        Hint::Modal(ModalAction::DetailInput, "by id"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
       HintContext::Help => &[
@@ -4449,12 +4450,74 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
 /// ([`crate::tui::state::detail_overlay::DetailOverlay`]); this function
 /// only paints it, so the render path stays pure.
 fn draw_detail_overlay(f: &mut Frame, app: &App) {
-  use crate::tui::state::detail_overlay::DetailRole;
+  use crate::tui::state::detail_overlay::{DetailMode, DetailRole};
   let accent = app.theme.accent;
   let term = f.area();
   let width = overlay_modal_width(term.width);
   let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
   let ov = &app.detail_overlay;
+
+  // Attach-by-id prompt (user feedback 2026-07-22): palette-style query
+  // over every detected session; Enter pins the highlighted candidate.
+  if ov.mode == DetailMode::Input {
+    let candidates = app.agent_input_candidates();
+    let max_visible = (term.height as usize).saturating_sub(12).max(3);
+    let visible = candidates.len().min(max_visible);
+    let (start, end) = picker_window(candidates.len(), ov.input_selected, visible.max(1));
+    let now = std::time::SystemTime::now();
+
+    let mut lines = overlay_title_lines("Attach a session", accent);
+    lines.push(Line::from(vec![
+      Span::styled("id: ", Style::default().fg(app.theme.muted)),
+      Span::styled(
+        ov.input.clone(),
+        Style::default().fg(app.theme.name).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled("▏", Style::default().fg(accent)),
+    ]));
+    lines.push(Line::from(String::new()));
+    if candidates.is_empty() {
+      lines.push(Line::from(Span::styled(
+        "no matching session",
+        Style::default().fg(app.theme.muted),
+      )));
+    }
+    for (i, sess) in candidates.iter().enumerate().take(end).skip(start) {
+      let freshness = crate::agent_sessions::Freshness::classify(sess.last_activity, sess.ended, now);
+      let color = match freshness {
+        crate::agent_sessions::Freshness::Active => app.theme.clean,
+        crate::agent_sessions::Freshness::Idle => app.theme.muted,
+      };
+      let identity = sess.name.as_deref().unwrap_or(&sess.id);
+      let text = format!("{:<9} {}", sess.kind.display(), identity);
+      let pad = inner.saturating_sub(text.chars().count());
+      let mut style = Style::default().fg(color);
+      let mut pad_style = Style::default();
+      if i == ov.input_selected {
+        style = style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+        pad_style = pad_style.bg(app.theme.selection_bg);
+      }
+      lines.push(Line::from(vec![
+        Span::styled(text, style),
+        Span::styled(" ".repeat(pad), pad_style),
+      ]));
+    }
+    lines.push(Line::from(String::new()));
+    lines.push(modal_hint_line(
+      &[
+        ("type", "filter"),
+        ("↑/↓", "pick"),
+        ("Enter", "attach"),
+        ("Esc", "back"),
+      ],
+      &app.theme,
+    ));
+    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_abs(width, height, term);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    return;
+  }
   let total = ov.rows.len();
   // The modal height is derived from the VISIBLE row count, which is
   // constant while navigating — scrolling must never resize the frame

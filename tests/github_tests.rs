@@ -1211,3 +1211,18 @@ fn gh_command_line_uses_the_program_basename_and_joins_args() {
     "gh issue view 226 --json title,body"
   );
 }
+
+// -- Agent pin branch guard (issue #408, Codex review round B) --------------
+
+/// libgit2 surfaces a detached HEAD either as `None` or as the literal
+/// `Some("HEAD")` (same trap the statusline handles). Writing
+/// `branch.HEAD.gwm-agent-pin` would share one pin across every detached
+/// worktree, so `"HEAD"` must read as "no branch".
+#[test]
+fn pinnable_branch_rejects_none_and_literal_head() {
+  use gwm::github::pinnable_branch;
+  assert_eq!(pinnable_branch(None), None);
+  assert_eq!(pinnable_branch(Some("HEAD")), None);
+  assert_eq!(pinnable_branch(Some("feat/#408-x")), Some("feat/#408-x"));
+  assert_eq!(pinnable_branch(Some("main")), Some("main"));
+}

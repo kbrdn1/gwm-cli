@@ -8112,7 +8112,7 @@ mod agent_sessions_pane {
     // A second request while one is in flight coalesces (the debounce).
     assert!(app.tasks.request(TaskKind::AgentSessions).is_none());
     let map = snapshot_for("/w/one", AgentKind::ClaudeCode, 10);
-    assert!(app.apply_agent_snapshot(generation, map.clone()));
+    assert!(app.apply_agent_snapshot(generation, map.clone(), Vec::new()));
     assert_eq!(app.agent_snapshot.as_ref(), Some(&map));
   }
 
@@ -8121,11 +8121,11 @@ mod agent_sessions_pane {
     let (_d, mut app) = make_app();
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
     let live = snapshot_for("/w/one", AgentKind::Codex, 10);
-    assert!(app.apply_agent_snapshot(generation, live.clone()));
+    assert!(app.apply_agent_snapshot(generation, live.clone(), Vec::new()));
     // A new run starts, then a refresh invalidates it mid-flight.
     let stale = app.tasks.request(TaskKind::AgentSessions).unwrap();
     app.tasks.invalidate(TaskKind::AgentSessions);
-    assert!(!app.apply_agent_snapshot(stale, BTreeMap::new()));
+    assert!(!app.apply_agent_snapshot(stale, BTreeMap::new(), Vec::new()));
     // The last authoritative snapshot survives.
     assert_eq!(app.agent_snapshot.as_ref(), Some(&live));
   }
@@ -8187,7 +8187,7 @@ mod agent_sessions_pane {
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
     let path = app.worktrees[0].path.to_string_lossy().to_string();
     let map = snapshot_for(&path, AgentKind::ClaudeCode, 10);
-    assert!(app.apply_agent_snapshot(generation, map));
+    assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
     let w = app.worktrees[0].clone();
     assert!(app.agents_for(&w).is_some());
     assert_eq!(app.agents_for(&w).unwrap().top().unwrap().id, "s1");
@@ -8234,7 +8234,7 @@ mod agent_detail_overlay {
       },
     );
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
-    assert!(app.apply_agent_snapshot(generation, map));
+    assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
     (dir, app)
   }
 
@@ -8469,5 +8469,115 @@ mod agent_overlay_hints {
     // The resolved default keys ride along.
     assert!(text.contains('a'), "attach key expected: {text}");
     assert!(text.contains('d'), "detach key expected: {text}");
+  }
+}
+
+// -- Overlay refresh + attach-by-id input (user feedback 2026-07-22 #2) ----
+
+mod agent_overlay_input {
+  use super::*;
+  use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
+  use gwm::tui::state::detail_overlay::{filter_sessions, DetailMode};
+  use gwm::tui::TaskKind;
+  use std::collections::BTreeMap;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn session(kind: AgentKind, id: &str, name: Option<&str>) -> AgentSession {
+    AgentSession {
+      kind,
+      cwd: PathBuf::from("/elsewhere"),
+      last_activity: SystemTime::now() - Duration::from_secs(10),
+      ended: false,
+      id: id.into(),
+      name: name.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn snapshot_landing_rebuilds_the_open_overlay_rows() {
+    // User feedback: after attach/detach the async re-detection lands but
+    // the open overlay kept its stale rows until reopened.
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    assert!(app.detail_overlay.rows[0].value.contains("no agent session"));
+
+    let path = app.worktrees[0].path.to_string_lossy().to_string();
+    let mut map = BTreeMap::new();
+    map.insert(
+      path,
+      WorktreeAgents {
+        sessions: vec![session(AgentKind::Codex, "fresh-1", None)],
+      },
+    );
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
+    assert_eq!(app.detail_overlay.rows.len(), 1);
+    assert!(app.detail_overlay.rows[0].value.contains("fresh-1"));
+  }
+
+  #[test]
+  fn filter_matches_id_name_and_kind_case_insensitively() {
+    let all = vec![
+      session(AgentKind::Codex, "019f6b95-abcd", Some("review feature flags")),
+      session(AgentKind::ClaudeCode, "a7820111-uuid", Some("fix login")),
+      session(AgentKind::Vibe, "vibe-1", None),
+    ];
+    let ids = |q: &str| -> Vec<String> { filter_sessions(&all, q).into_iter().map(|s| s.id.clone()).collect() };
+    assert_eq!(ids("019f"), ["019f6b95-abcd"]);
+    assert_eq!(ids("LOGIN"), ["a7820111-uuid"]);
+    assert_eq!(ids("vibe"), ["vibe-1"]);
+    assert_eq!(ids("").len(), 3, "empty query lists everything");
+    assert!(ids("zzz").is_empty());
+  }
+
+  #[test]
+  fn input_mode_attaches_the_highlighted_candidate() {
+    let (_d, mut app) = make_app();
+    // Seed the global session pool with an unmatched session.
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(
+      generation,
+      BTreeMap::new(),
+      vec![session(AgentKind::Codex, "pool-42", Some("refactor auth"))],
+    ));
+    app.open_agent_overlay();
+    app.open_agent_input();
+    assert_eq!(app.detail_overlay.mode, DetailMode::Input);
+    app.agent_input_push('p');
+    app.agent_input_push('o');
+    app.agent_input_push('o');
+    app.agent_input_push('l');
+    app.agent_input_submit();
+    // Back to the list, pin persisted for the target worktree's branch.
+    assert_eq!(app.detail_overlay.mode, DetailMode::List);
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    let pin = gwm::github::agent_pin(&app.repo, &branch).unwrap();
+    assert_eq!(pin.as_deref(), Some("pool-42"));
+  }
+
+  #[test]
+  fn input_mode_escape_returns_to_list_without_pinning() {
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    app.agent_input_push('x');
+    app.agent_input_cancel();
+    assert_eq!(app.detail_overlay.mode, DetailMode::List);
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert!(gwm::github::agent_pin(&app.repo, &branch).unwrap().is_none());
+  }
+
+  #[test]
+  fn input_mode_unknown_id_reports_and_stays_in_input() {
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    for c in "nope".chars() {
+      app.agent_input_push(c);
+    }
+    app.agent_input_submit();
+    assert_eq!(app.detail_overlay.mode, DetailMode::Input, "stay for correction");
+    assert!(app.status.contains("no agent session"), "got {}", app.status);
   }
 }

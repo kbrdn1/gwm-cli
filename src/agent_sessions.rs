@@ -135,8 +135,41 @@ fn first_user_text(path: &Path) -> Option<String> {
 /// paths and looks their slugs up — O(#worktrees), no directory sweep.
 pub struct ClaudeCodeSource;
 
+/// Live-session names from `<.claude>/sessions/*.json` — Claude Code's own
+/// registry of running sessions (`{sessionId, name, status}`). The name it
+/// carries is what the app displays, so it beats the first-prompt heuristic
+/// (user feedback 2026-07-22). Missing dir → empty map (dead sessions fall
+/// back to their first prompt).
+fn claude_live_names(projects_base: &Path) -> std::collections::HashMap<String, String> {
+  let mut map = std::collections::HashMap::new();
+  let Some(sessions_dir) = projects_base.parent().map(|p| p.join("sessions")) else {
+    return map;
+  };
+  let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+    return map;
+  };
+  for entry in entries.flatten() {
+    let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+      continue;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+      continue;
+    };
+    if let (Some(sid), Some(name)) = (
+      v.get("sessionId").and_then(|x| x.as_str()),
+      v.get("name").and_then(|x| x.as_str()),
+    ) {
+      if let Some(clean) = clean_session_name(name) {
+        map.insert(sid.to_string(), clean);
+      }
+    }
+  }
+  map
+}
+
 impl ClaudeCodeSource {
   pub fn scan(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
+    let live_names = claude_live_names(base);
     // Normalise before slugging: libgit2 reports the main checkout with a
     // trailing '/', which would grow a trailing '-' the recorded cwd never
     // has. `components()` drops redundant separators lexically.
@@ -176,7 +209,7 @@ impl ClaudeCodeSource {
           last_activity: mtime,
           ended: false,
           id: stem.to_string(),
-          name: first_user_text(&path),
+          name: live_names.get(stem).cloned().or_else(|| first_user_text(&path)),
         });
       }
     }
@@ -263,8 +296,14 @@ impl OpencodeSource {
         .get("time")
         .and_then(|t| t.get("updated").or_else(|| t.get("created")))
         .and_then(|n| n.as_u64());
+      // checked_add: a corrupt epoch-ms large enough to overflow the
+      // platform time representation must skip the record, not panic
+      // (Codex review round B — FILETIME on Windows overflows first).
       let last_activity = match recorded_ms {
-        Some(ms) => SystemTime::UNIX_EPOCH + Duration::from_millis(ms),
+        Some(ms) => match SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(ms)) {
+          Some(t) => t,
+          None => continue,
+        },
         None => match file_mtime(&path) {
           Some(t) => t,
           None => continue,
@@ -304,6 +343,15 @@ impl VibeSource {
         continue;
       }
       let meta_path = dir.join("meta.json");
+      // Recency gate BEFORE reading/parsing any content (Codex review
+      // round B): with years of sessions, opening every meta.json made the
+      // scan linear in the whole history despite the 30-day bound.
+      let Some(last_activity) = file_mtime(&dir.join("messages.jsonl")).or_else(|| file_mtime(&meta_path)) else {
+        continue;
+      };
+      if !within_scan_window(last_activity, now) {
+        continue;
+      }
       let Ok(raw) = std::fs::read_to_string(&meta_path) else {
         continue;
       };
@@ -323,12 +371,6 @@ impl VibeSource {
       // comes from messages.jsonl mtime (meta.json mtime as fallback);
       // end_time is only ever inspected for null-ness.
       let ended = v.get("end_time").is_some_and(|t| !t.is_null());
-      let Some(last_activity) = file_mtime(&dir.join("messages.jsonl")).or_else(|| file_mtime(&meta_path)) else {
-        continue;
-      };
-      if !within_scan_window(last_activity, now) {
-        continue;
-      }
       let id = v
         .get("session_id")
         .and_then(|s| s.as_str())
@@ -525,13 +567,32 @@ pub fn detect_all(
   pins: &[(String, String)],
   now: SystemTime,
 ) -> std::collections::BTreeMap<String, WorktreeAgents> {
-  let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
-  let mut sessions = ClaudeCodeSource.scan(&home.join(".claude/projects"), &paths, now);
+  detect_with_sessions(home, worktrees, pins, now).0
+}
+
+/// Every session the four backends can see right now — the raw pool behind
+/// [`detect_all`], also consumed by the TUI's attach-by-id prompt (a session
+/// matched to no worktree is exactly the one worth pinning manually).
+pub fn collect_sessions(home: &Path, worktree_paths: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
+  let mut sessions = ClaudeCodeSource.scan(&home.join(".claude/projects"), worktree_paths, now);
   sessions.extend(CodexSource.scan(&home.join(".codex/sessions"), now));
   // opencode's own cross-platform convention is home-relative .local/share
   // (research.md D4), so no per-OS data-dir split here.
   sessions.extend(OpencodeSource.scan(&home.join(".local/share/opencode/storage/project"), now));
   sessions.extend(VibeSource.scan(&home.join(".vibe/logs/session"), now));
+  sessions
+}
+
+/// [`detect_all`] variant returning the per-worktree summary AND the raw
+/// session pool from one single scan pass (the TUI worker needs both).
+pub fn detect_with_sessions(
+  home: &Path,
+  worktrees: &[(String, PathBuf)],
+  pins: &[(String, String)],
+  now: SystemTime,
+) -> (std::collections::BTreeMap<String, WorktreeAgents>, Vec<AgentSession>) {
+  let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
+  let sessions = collect_sessions(home, &paths, now);
   let mut map = summarize(&sessions, worktrees);
 
   for (wt_id, sid) in pins {
@@ -554,7 +615,7 @@ pub fn detect_all(
         .sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
     }
   }
-  map
+  (map, sessions)
 }
 
 /// Id sweep over every Claude project dir — only reached for a pin whose id
@@ -562,6 +623,7 @@ pub fn detect_all(
 /// lossy slug, which is fine: a pinned session's assignment comes from the
 /// pin, so `cwd` carries the slug dir path purely as provenance.
 fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<AgentSession> {
+  let live_names = claude_live_names(base);
   let entries = std::fs::read_dir(base).ok()?;
   for dir in entries.flatten() {
     let path = dir.path().join(format!("{sid}.jsonl"));
@@ -577,7 +639,7 @@ fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<Agent
       last_activity: mtime,
       ended: false,
       id: sid.to_string(),
-      name: first_user_text(&path),
+      name: live_names.get(sid).cloned().or_else(|| first_user_text(&path)),
     });
   }
   None

@@ -663,14 +663,29 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // cycle the `[clean.profiles]` picker (re-scanning each time). The
       // countdown auto-fire is driven by the tick block above.
       // Detail overlay (issue #408): j/k move the selection, `a` pins the
-      // selected session, `d` unpins (user feedback 2026-07-22 — `a` no
-      // longer toggles the overlay shut; Esc/q close).
+      // selected session, `d` unpins, `i` opens the attach-by-id prompt
+      // (user feedback 2026-07-22). While the prompt is active, keys are
+      // captured as query input (palette convention): printable chars type,
+      // Backspace pops, arrows move the candidate highlight, Enter
+      // attaches, Esc falls back to the list.
+      View::DetailOverlay if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input => {
+        match key.code {
+          KeyCode::Esc => app.agent_input_cancel(),
+          KeyCode::Enter => app.agent_input_submit(),
+          KeyCode::Backspace => app.agent_input_pop(),
+          KeyCode::Down => app.agent_input_next(),
+          KeyCode::Up => app.agent_input_prev(),
+          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.agent_input_push(c),
+          _ => {}
+        }
+      }
       View::DetailOverlay => match app.resolve_modal(KeyContext::Detail, key) {
         Some(ModalAction::DetailClose) => app.close_detail_overlay(),
         Some(ModalAction::DetailSelectNext) => app.detail_overlay.select_next(),
         Some(ModalAction::DetailSelectPrev) => app.detail_overlay.select_prev(),
         Some(ModalAction::DetailAttach) => app.attach_selected_agent(),
         Some(ModalAction::DetailDetach) => app.detach_selected_agent(),
+        Some(ModalAction::DetailInput) => app.open_agent_input(),
         _ => {}
       },
       View::CleanReport => match app.resolve_modal(KeyContext::Clean, key) {

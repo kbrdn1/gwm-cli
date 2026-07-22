@@ -299,6 +299,9 @@ pub struct App {
   /// in [`Self::maybe_refresh_agent_sessions`] so freshness colours do not
   /// fossilise at their startup value.
   pub agent_snapshot_at: Option<std::time::Instant>,
+  /// Every session the last detection saw, matched or not — the candidate
+  /// pool of the overlay's attach-by-id prompt (user feedback 2026-07-22).
+  pub agent_all_sessions: Vec<crate::agent_sessions::AgentSession>,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
@@ -579,6 +582,7 @@ impl App {
       sidebar: SidebarState::new(),
       agent_snapshot: None,
       agent_snapshot_at: None,
+      agent_all_sessions: Vec::new(),
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -1291,7 +1295,7 @@ impl App {
         .worktrees
         .iter()
         .filter_map(|w| {
-          let branch = w.branch.as_deref()?;
+          let branch = crate::github::pinnable_branch(w.branch.as_deref())?;
           let sid = crate::github::agent_pin(&self.repo, branch).ok().flatten()?;
           Some((w.path.to_string_lossy().to_string(), sid))
         })
@@ -1299,11 +1303,11 @@ impl App {
     };
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let map = match crate::agent_sessions::agents_home() {
-        Some(home) => crate::agent_sessions::detect_all(&home, &rows, &pins, std::time::SystemTime::now()),
+      let (map, all) = match crate::agent_sessions::agents_home() {
+        Some(home) => crate::agent_sessions::detect_with_sessions(&home, &rows, &pins, std::time::SystemTime::now()),
         None => Default::default(), // no home: detection degrades to empty (FR-009)
       };
-      let _ = tx.send(TaskMsg::AgentSessions(generation, map));
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map, all));
     });
   }
 
@@ -1316,12 +1320,24 @@ impl App {
     &mut self,
     generation: u64,
     map: std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+    all: Vec<crate::agent_sessions::AgentSession>,
   ) -> bool {
     if !self.tasks.complete(TaskKind::AgentSessions, generation) {
       return false;
     }
     self.agent_snapshot = Some(map);
     self.agent_snapshot_at = Some(std::time::Instant::now());
+    self.agent_all_sessions = all;
+    // A landing detection refreshes the open overlay in place (user
+    // feedback: attach/detach used to leave stale rows until reopened).
+    if self.view == View::DetailOverlay {
+      if let Some((path, _)) = self.detail_overlay_target.clone() {
+        if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
+          let rows = self.build_agent_rows(&w);
+          self.detail_overlay.set_rows(rows);
+        }
+      }
+    }
     true
   }
 
@@ -1632,12 +1648,12 @@ impl App {
           self.sidebar.cache = Some(((path, mode), sections));
           applied = true;
         }
-        TaskMsg::AgentSessions(generation, map) => {
+        TaskMsg::AgentSessions(generation, map, all) => {
           // Late-drop + store live in `apply_agent_snapshot` so the state
           // contract is pinned ratatui-free (issue #408). Deliberately does
           // NOT set `applied`: agent detection reads no git state, so there
           // is nothing for the post-drain refresh bookkeeping to do.
-          self.apply_agent_snapshot(generation, map);
+          self.apply_agent_snapshot(generation, map, all);
         }
       }
     }
@@ -2478,7 +2494,10 @@ impl App {
     // Capture the target now (clean-overlay pattern, Codex #333): an
     // auto-refresh can drift the live selection while the overlay is open,
     // and attach/detach must pin against THIS worktree's branch.
-    self.detail_overlay_target = Some((sel.path.clone(), sel.branch.clone()));
+    self.detail_overlay_target = Some((
+      sel.path.clone(),
+      crate::github::pinnable_branch(sel.branch.as_deref()).map(str::to_string),
+    ));
     let rows = self.build_agent_rows(&sel);
     self.detail_overlay.open("Agent Sessions".into(), rows);
     self.view = View::DetailOverlay;
@@ -2487,9 +2506,7 @@ impl App {
   /// Rows for the captured worktree: sessions from the snapshot, the manual
   /// pin marked (issue #408 US4 + user feedback 2026-07-22).
   fn build_agent_rows(&self, w: &crate::worktree::WorktreeInfo) -> Vec<crate::tui::state::detail_overlay::DetailRow> {
-    let pinned = w
-      .branch
-      .as_deref()
+    let pinned = crate::github::pinnable_branch(w.branch.as_deref())
       .and_then(|b| crate::github::agent_pin(&self.repo, b).ok().flatten());
     crate::tui::state::detail_overlay::agent_detail_rows(
       self.agents_for(w),
@@ -2502,24 +2519,105 @@ impl App {
   /// (`a` inside the modal). Auto-detection stays the default; the pin only
   /// adds (issue #408 US4).
   pub fn attach_selected_agent(&mut self) {
-    let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
-      self.status = "cannot pin: worktree has no branch (detached HEAD)".into();
-      return;
-    };
     let Some(sid) = self.detail_overlay.selected_meta().map(str::to_string) else {
       self.status = "no session selected to pin".into();
       return;
     };
-    if let Err(e) = crate::github::set_agent_pin(&self.repo, &branch, &sid) {
+    self.attach_agent_by_id(&sid);
+  }
+
+  /// Pin `sid` to the overlay's target worktree — shared by the row action
+  /// and the attach-by-id prompt. Returns `true` when the pin was written.
+  fn attach_agent_by_id(&mut self, sid: &str) -> bool {
+    if self.is_workspace() {
+      // Pins are single-repo (same ceiling as the CLI surfaces): in
+      // workspace mode `sync_active_repo` may swap `self.repo` under the
+      // open overlay, which would write the pin into the wrong repo's
+      // config (Codex review round B).
+      self.status = "agent pins are per-repo — not available in workspace mode".into();
+      return false;
+    }
+    let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
+      self.status = "cannot pin: worktree has no branch (detached HEAD)".into();
+      return false;
+    };
+    if let Err(e) = crate::github::set_agent_pin(&self.repo, &branch, sid) {
       self.status = format!("pin failed: {e}");
-      return;
+      return false;
     }
     self.status = format!("pinned {sid}");
     self.refresh_agent_overlay_rows(&path);
+    true
+  }
+
+  /// Enter the attach-by-id prompt (`i` in the overlay): palette-style
+  /// query over EVERY detected session — a session matched to no worktree
+  /// is exactly the one worth pinning manually.
+  pub fn open_agent_input(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
+    self.detail_overlay.input.clear();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn agent_input_push(&mut self, c: char) {
+    self.detail_overlay.input.push(c);
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn agent_input_pop(&mut self) {
+    self.detail_overlay.input.pop();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn agent_input_next(&mut self) {
+    let len = self.agent_input_candidates().len();
+    self.detail_overlay.input_selected = (self.detail_overlay.input_selected + 1).min(len.saturating_sub(1));
+  }
+
+  pub fn agent_input_prev(&mut self) {
+    self.detail_overlay.input_selected = self.detail_overlay.input_selected.saturating_sub(1);
+  }
+
+  pub fn agent_input_cancel(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::List;
+    self.detail_overlay.input.clear();
+  }
+
+  /// The prompt's filtered candidate pool (owned clones — the borrow of
+  /// `agent_all_sessions` must not outlive `&mut self` call sites).
+  pub fn agent_input_candidates(&self) -> Vec<crate::agent_sessions::AgentSession> {
+    crate::tui::state::detail_overlay::filter_sessions(&self.agent_all_sessions, &self.detail_overlay.input)
+      .into_iter()
+      .cloned()
+      .collect()
+  }
+
+  /// Attach the highlighted candidate (or the literal query when nothing
+  /// matches a known session — validated before persisting). Unknown id
+  /// keeps the prompt open for correction.
+  pub fn agent_input_submit(&mut self) {
+    let candidates = self.agent_input_candidates();
+    let sid = candidates
+      .get(self.detail_overlay.input_selected)
+      .map(|s| s.id.clone())
+      .unwrap_or_else(|| self.detail_overlay.input.trim().to_string());
+    let known = candidates.iter().any(|s| s.id == sid);
+    if sid.is_empty() || !known {
+      self.status = format!("no agent session matching '{sid}' — run gwm agents for ids");
+      return;
+    }
+    if self.attach_agent_by_id(&sid) {
+      self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::List;
+      self.detail_overlay.input.clear();
+    }
   }
 
   /// Remove the target worktree's pin (`d` inside the modal).
   pub fn detach_selected_agent(&mut self) {
+    if self.is_workspace() {
+      self.status = "agent pins are per-repo — not available in workspace mode".into();
+      return;
+    }
     let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
       self.status = "cannot detach: worktree has no branch (detached HEAD)".into();
       return;

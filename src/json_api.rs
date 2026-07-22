@@ -239,7 +239,7 @@ pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Ve
   rows
     .iter()
     .filter_map(|r| {
-      let branch = r.branch.as_deref()?;
+      let branch = crate::github::pinnable_branch(r.branch.as_deref())?;
       let sid = crate::github::agent_pin(repo, branch).ok().flatten()?;
       Some((r.path.clone(), sid))
     })

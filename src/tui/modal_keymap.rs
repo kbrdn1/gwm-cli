@@ -225,11 +225,12 @@ define_modal_actions! {
     HelpScrollBottom => "scroll_bottom" [ "End", "G" ],
   }
   Detail {
-    DetailClose      => "close"       [ "Esc", "q" ],
-    DetailSelectNext => "select_next" [ "Down", "j" ],
-    DetailSelectPrev => "select_prev" [ "Up", "k" ],
-    DetailAttach     => "attach"      [ "a" ],
-    DetailDetach     => "detach"      [ "d" ],
+    DetailClose      => "close"        [ "Esc", "q" ],
+    DetailSelectNext => "select_next"  [ "Down", "j" ],
+    DetailSelectPrev => "select_prev"  [ "Up", "k" ],
+    DetailAttach     => "attach"       [ "a" ],
+    DetailDetach     => "detach"       [ "d" ],
+    DetailInput      => "attach_by_id" [ "i" ],
   }
   CommandLogs {
     CommandLogsClose        => "close"         [ "Esc", "q" ],

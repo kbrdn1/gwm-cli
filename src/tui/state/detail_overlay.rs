@@ -8,8 +8,18 @@
 //! per-row payload for consumer actions (the session id for attach/detach).
 //! Pinned by `tests/tui_app_tests.rs::agent_detail_overlay`.
 
-use crate::agent_sessions::{Freshness, WorktreeAgents};
+use crate::agent_sessions::{AgentSession, Freshness, WorktreeAgents};
 use std::time::SystemTime;
+
+/// What the overlay is currently doing: browsing the worktree's sessions,
+/// or typing a query to attach one by id (palette-style — user feedback
+/// 2026-07-22).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DetailMode {
+  #[default]
+  List,
+  Input,
+}
 
 /// Semantic style role of a detail row — mapped to theme colours at render
 /// time so the state stays ratatui-free and theme-agnostic.
@@ -41,6 +51,12 @@ pub struct DetailOverlay {
   /// Selection cursor (user feedback 2026-07-22: rows are selectable, the
   /// render highlights this row and keeps it inside the visible window).
   pub selected: usize,
+  /// Browsing vs attach-by-id input (palette-style).
+  pub mode: DetailMode,
+  /// The attach-by-id query buffer while [`DetailMode::Input`] is active.
+  pub input: String,
+  /// Highlight inside the filtered candidate list of the input mode.
+  pub input_selected: usize,
 }
 
 impl DetailOverlay {
@@ -49,6 +65,9 @@ impl DetailOverlay {
     self.title = title;
     self.rows = rows;
     self.selected = 0;
+    self.mode = DetailMode::List;
+    self.input.clear();
+    self.input_selected = 0;
   }
 
   /// Replace the rows in place (post-action rebuild), clamping the cursor.
@@ -113,6 +132,23 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: Option<&str>, 
         role,
         meta: Some(s.id.clone()),
       }
+    })
+    .collect()
+}
+
+/// Fuzzy-ish filter for the attach-by-id prompt: case-insensitive substring
+/// match on the session id, its name, and the agent kind. An empty query
+/// lists the whole pool. Pure — pinned by
+/// `tests/tui_app_tests.rs::agent_overlay_input`.
+pub fn filter_sessions<'a>(all: &'a [AgentSession], query: &str) -> Vec<&'a AgentSession> {
+  let q = query.to_lowercase();
+  all
+    .iter()
+    .filter(|s| {
+      q.is_empty()
+        || s.id.to_lowercase().contains(&q)
+        || s.name.as_deref().is_some_and(|n| n.to_lowercase().contains(&q))
+        || s.kind.display().contains(&q)
     })
     .collect()
 }

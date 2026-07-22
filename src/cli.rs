@@ -1902,7 +1902,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
     }
     Some(AgentsAction::Attach { pattern, session_id }) => {
       let target = resolve_agents_worktree(&trees, &pattern)?;
-      let Some(branch) = target.branch.clone() else {
+      let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
         return Err(GwmError::Config(format!(
           "worktree '{}' has no branch (detached HEAD) — a pin lives in branch config",
           target.name
@@ -1933,7 +1933,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
     }
     Some(AgentsAction::Detach { pattern }) => {
       let target = resolve_agents_worktree(&trees, &pattern)?;
-      let Some(branch) = target.branch.clone() else {
+      let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
         return Err(GwmError::Config(format!(
           "worktree '{}' has no branch (detached HEAD) — nothing to detach",
           target.name
@@ -2067,7 +2067,7 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
       let pins: Vec<(String, String)> = trees
         .iter()
         .filter_map(|w| {
-          let branch = w.branch.as_deref()?;
+          let branch = github::pinnable_branch(w.branch.as_deref())?;
           let sid = github::agent_pin(&repo, branch).ok().flatten()?;
           Some((w.path.to_string_lossy().to_string(), sid))
         })
