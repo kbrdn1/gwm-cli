@@ -28,6 +28,8 @@ fn help_prints_subcommands() {
     .success()
     .stdout(predicate::str::contains("  init "))
     .stdout(predicate::str::contains("  list "))
+    // Issue #408: agent-session surface (list / attach / detach).
+    .stdout(predicate::str::contains("  agents "))
     .stdout(predicate::str::contains("  create "))
     // Issue #83: create an issue from repo templates, then create the worktree.
     .stdout(predicate::str::contains("  new "))
@@ -5588,4 +5590,152 @@ fn workspace_refuses_a_still_unsupported_subcommand() {
     .failure()
     .code(1)
     .stderr(predicate::str::contains("--workspace is only supported"));
+}
+
+// -- gwm agents (issue #408, US4) ------------------------------------------
+//
+// Detection is hermetic here: GWM_AGENTS_HOME points every scan at a seeded
+// TempDir, so no test depends on the runner's real home or installed agents.
+
+mod agents_cmd {
+  use super::*;
+  use common::init_repo;
+  use std::path::Path;
+
+  /// Seed a codex session recorded at `cwd` under `home`.
+  fn seed_codex(home: &Path, cwd: &Path, sid: &str) {
+    let dir = home.join(".codex/sessions/2026/07/22");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = format!(
+      r#"{{"timestamp":"2026-07-22T10:00:00.000Z","type":"session_meta","payload":{{"session_id":"{sid}","cwd":"{}"}}}}"#,
+      cwd.display()
+    );
+    std::fs::write(dir.join(format!("rollout-{sid}.jsonl")), format!("{line}\n")).unwrap();
+  }
+
+  fn gwm_in(dir: &Path, home: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd.current_dir(dir).env("GWM_AGENTS_HOME", home);
+    cmd
+  }
+
+  #[test]
+  fn agents_lists_detected_sessions_per_worktree() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "0000-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("codex"))
+      .stdout(predicate::str::contains("0000-cafe"))
+      .stdout(predicate::str::contains("active"));
+  }
+
+  #[test]
+  fn agents_json_returns_the_wire_shape() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "1111-cafe");
+
+    let out = gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "--format=json"])
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let rows = v.as_array().expect("array of worktrees");
+    let with = rows
+      .iter()
+      .find(|r| r["agents"].is_object())
+      .expect("one row carries agents");
+    assert_eq!(with["agents"]["top"]["kind"], "codex");
+    assert_eq!(with["agents"]["top"]["id"], "1111-cafe");
+  }
+
+  #[test]
+  fn agents_with_nothing_detected_says_so_and_exits_zero() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("no agent session"));
+  }
+
+  #[test]
+  fn attach_pins_an_unmatched_session_and_detach_restores_detection() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    // Session recorded elsewhere: pure detection matches nothing.
+    seed_codex(home.path(), Path::new("/somewhere/else"), "2222-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", ".", "2222-cafe"])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("2222-cafe"));
+
+    // The pin is honoured by `agents` AND by the list JSON surface.
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("codex"))
+      .stdout(predicate::str::contains("pinned"));
+    let out = gwm_in(repo_dir.path(), home.path())
+      .args(["list", "--format=json"])
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(
+      v.as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["agents"]["top"]["id"] == "2222-cafe"),
+      "pinned session must ride the list JSON"
+    );
+
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "detach", "."])
+      .assert()
+      .success();
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("no agent session"));
+  }
+
+  #[test]
+  fn attach_unknown_session_id_fails_with_a_hint() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", ".", "nope-nope"])
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("gwm agents"));
+  }
+
+  #[test]
+  fn plain_list_table_carries_the_agent_column() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "3333-cafe");
+    gwm_in(repo_dir.path(), home.path())
+      .arg("list")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"))
+      .stdout(predicate::str::contains("codex"));
+  }
 }

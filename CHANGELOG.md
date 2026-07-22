@@ -25,6 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   active-agent segment in `gwm statusline`. Detection runs off-thread with a
   30 s re-check and a 30-day artefact scan window; missing or malformed
   artefact stores degrade silently to "no sessions".
+- **`gwm agents` + manual pinning** (#408). A dedicated CLI surface for the
+  same detection: `gwm agents` lists sessions per worktree (human or
+  `--format=json`), the plain `gwm list` table gains an AGENT column, and
+  `gwm agents attach <worktree> <session-id>` / `detach` pin a session to a
+  worktree when the recorded directory is not enough — auto-detection stays
+  the default, the pin (git branch config `gwm-agent-pin`, one per worktree)
+  only adds, and every surface honours it. `GWM_AGENTS_HOME` overrides the
+  scanned home for deterministic tests/CI.
 
 ### Removed
 

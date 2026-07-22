@@ -222,16 +222,36 @@ impl From<&DoctorReport> for JsonDoctorReport {
 /// surfaces stay byte-identical.
 pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
   let mut rows: Vec<JsonWorktree> = worktree::list(repo)?.iter().map(JsonWorktree::from).collect();
-  attach_agents(&mut rows);
+  let pins = agent_pins_for_rows(repo, &rows);
+  attach_agents(&mut rows, &pins);
   Ok(rows)
 }
 
+/// Manual agent pins for already-built rows: `(path key, session id)` pairs
+/// read from each row's branch config (issue #408 US4). Rows without a
+/// branch (detached) cannot carry a pin.
+pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Vec<(String, String)> {
+  rows
+    .iter()
+    .filter_map(|r| {
+      let branch = r.branch.as_deref()?;
+      let sid = crate::github::agent_pin(repo, branch).ok().flatten()?;
+      Some((r.path.clone(), sid))
+    })
+    .collect()
+}
+
 /// Populate the experimental `agents` field on already-built rows (issue
-/// #408): one detection pass over the whole set, keyed back by `path`. The
-/// single shared implementation for every surface (CLI list, daemon,
-/// workspace rows) so they cannot drift. No home directory → no-op (FR-009).
-pub fn attach_agents(rows: &mut [JsonWorktree]) {
-  let Some(home) = dirs::home_dir() else {
+/// #408): one detection pass over the whole set, keyed back by `path`, with
+/// manual `pins` overlaid. The single shared implementation for every
+/// surface (CLI list, daemon, workspace rows) so they cannot drift. No home
+/// directory → no-op (FR-009).
+///
+/// ponytail: workspace mode passes empty pins (each row belongs to a
+/// different repo whose config we don't open here); wire per-repo pins if
+/// workspace users ask.
+pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
+  let Some(home) = crate::agent_sessions::agents_home() else {
     return;
   };
   let now = std::time::SystemTime::now();
@@ -239,7 +259,7 @@ pub fn attach_agents(rows: &mut [JsonWorktree]) {
     .iter()
     .map(|r| (r.path.clone(), std::path::PathBuf::from(&r.path)))
     .collect();
-  let summary = crate::agent_sessions::detect_all(&home, &keyed, now);
+  let summary = crate::agent_sessions::detect_all(&home, &keyed, pins, now);
   for row in rows.iter_mut() {
     row.agents = summary
       .get(&row.path)

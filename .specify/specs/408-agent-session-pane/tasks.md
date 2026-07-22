@@ -100,3 +100,18 @@ Pure module, base-dir injection everywhere (never `$HOME`), per research.md D2�
 MVP = Phase 1 + 2 + 3 (US1): demoable agent column. Then US2, then US3, then
 polish. Stop at any checkpoint to validate independently (quickstart.md). Commit
 after each RED→GREEN pair or logical group, Gitmoji + Conventional, `refs #408`.
+
+## Phase 7: User Story 4 — CLI surface + manual pinning (convergence 2026-07-22)
+
+**Goal**: `gwm agents` (list / attach / detach), AGENT column in plain `gwm list`, pins in git branch config overlaying auto-detection.
+
+- [X] T034 [US4] RED: pin overlay tests in tests/agent_sessions_tests.rs — a pinned session id is assigned to the pinned worktree even when its cwd matches nothing; unknown pin id is ignored silently; a pin on an already-cwd-matched session does not duplicate it
+- [X] T035 [US4] GREEN: pins parameter threaded through detect_all (+ pure apply step), agents_home() env seam (GWM_AGENTS_HOME → dirs::home_dir) at the single production resolution point
+- [X] T036 [US4] RED: cli_binary tests — `gwm agents` lists seeded sessions per worktree (human + --format=json), `help_prints_subcommands` canary gains `agents`
+- [X] T037 [US4] GREEN: `gwm agents [pattern]` subcommand (list default)
+- [X] T038 [US4] RED: cli_binary tests — attach by id makes an unmatched session appear (agents + list --format=json), detach restores detection, unknown id exits 1 with hint
+- [X] T039 [US4] GREEN: `gwm agents attach <pattern> <session-id>` / `gwm agents detach <pattern>` + branch-config persistence (gwm-agent-pin, one pin per worktree)
+- [X] T040 [US4] RED: cli_binary test — plain `gwm list` table carries the AGENT column with the compact indicator
+- [X] T041 [US4] GREEN: AGENT column in the human list table
+- [X] T042 [US4] Docs EN/FR (CLI reference + keybindings/sidebar cross-refs + schema README pinned note) + CHANGELOG update
+- [X] T043 [US4] Full gates: fmt, clippy, cargo test, stripped-PATH run

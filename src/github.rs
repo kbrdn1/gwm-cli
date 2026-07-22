@@ -38,6 +38,10 @@ const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
 const ISSUE_STATE_CONFIG_KEY: &str = "gwm-issue-state";
 const PR_STATE_CONFIG_KEY: &str = "gwm-pr-state";
 const DETECTED_PR_STATE_CONFIG_KEY: &str = "gwm-pr-detected-state";
+/// Manual agent-session pin (issue #408 US4): the session id the user
+/// attached to this branch's worktree with `gwm agents attach`. One pin per
+/// worktree; auto-detection stays the default and the pin only adds.
+const AGENT_PIN_CONFIG_KEY: &str = "gwm-agent-pin";
 
 /// Where the issue or PR number came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,6 +409,22 @@ fn write_branch_string(repo: &Repository, branch: &str, leaf: &str, value: &str)
   let mut cfg = repo.config()?;
   cfg.set_str(&config_key(branch, leaf), value)?;
   Ok(())
+}
+
+/// The manual agent-session pin on `branch`, if any (issue #408 US4).
+pub fn agent_pin(repo: &Repository, branch: &str) -> Result<Option<String>> {
+  read_branch_string(repo, branch, AGENT_PIN_CONFIG_KEY)
+}
+
+/// Pin `session_id` to `branch`'s worktree (`gwm agents attach`). One pin
+/// per worktree — a second attach overwrites the first.
+pub fn set_agent_pin(repo: &Repository, branch: &str, session_id: &str) -> Result<()> {
+  write_branch_string(repo, branch, AGENT_PIN_CONFIG_KEY, session_id)
+}
+
+/// Remove the pin (`gwm agents detach`). A no-op when none is set.
+pub fn clear_agent_pin(repo: &Repository, branch: &str) -> Result<()> {
+  remove_branch_key(repo, branch, AGENT_PIN_CONFIG_KEY)
 }
 
 fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> {

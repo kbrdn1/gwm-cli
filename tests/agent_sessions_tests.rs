@@ -471,3 +471,70 @@ fn claude_scan_matches_a_worktree_path_with_trailing_separator() {
   // normalises separators itself).
   assert_eq!(sessions[0].cwd, trailing);
 }
+
+// -- Manual pins overlaying auto-detection (US4, convergence) --------------
+
+mod pins {
+  use super::*;
+  use gwm::agent_sessions::detect_all;
+
+  /// Seed a codex session whose cwd matches nothing we manage.
+  fn seed_unmatched_codex(home: &Path) {
+    write(
+      &home.join(".codex/sessions/2026/07/22/rollout-x.jsonl"),
+      &format!("{CODEX_META}\n"), // cwd = /work/one
+    );
+  }
+
+  #[test]
+  fn pin_assigns_an_unmatched_session_to_the_pinned_worktree() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    seed_unmatched_codex(home);
+    let wts = [wt("mine", "/repo/mine")];
+    let pins = [("mine".to_string(), "019f6b95-b01a-7d30-a28a-68d9813e2248".to_string())];
+
+    let map = detect_all(home, &wts, &pins, SystemTime::now());
+    let agents = map.get("mine").expect("pin must attach the session");
+    assert_eq!(agents.sessions.len(), 1);
+    assert_eq!(agents.sessions[0].kind, AgentKind::Codex);
+  }
+
+  #[test]
+  fn pin_with_unknown_id_is_ignored_silently() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let wts = [wt("mine", "/repo/mine")];
+    let pins = [("mine".to_string(), "does-not-exist".to_string())];
+    let map = detect_all(tmp.path(), &wts, &pins, SystemTime::now());
+    assert!(map.is_empty());
+  }
+
+  #[test]
+  fn pin_on_an_already_matched_session_does_not_duplicate_it() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    // cwd matches the worktree — auto-detection already assigns it.
+    let wts = [wt("one", "/work/one")];
+    seed_unmatched_codex(home); // cwd IS /work/one here
+    let pins = [("one".to_string(), "019f6b95-b01a-7d30-a28a-68d9813e2248".to_string())];
+    let map = detect_all(home, &wts, &pins, SystemTime::now());
+    assert_eq!(map.get("one").unwrap().sessions.len(), 1);
+  }
+
+  #[test]
+  fn pinned_claude_session_outside_any_worktree_is_found_by_id_sweep() {
+    // A claude project dir that matches NO managed worktree slug is normally
+    // invisible (forward matching); a pin by id must still find it.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let home = tmp.path();
+    let foreign = home.join(".claude/projects/-Users-x-somewhere-else");
+    write(&foreign.join("deadbeef-cafe.jsonl"), "{}");
+    let wts = [wt("mine", "/repo/mine")];
+    let pins = [("mine".to_string(), "deadbeef-cafe".to_string())];
+
+    let map = detect_all(home, &wts, &pins, SystemTime::now());
+    let agents = map.get("mine").expect("id sweep must find the pinned claude session");
+    assert_eq!(agents.sessions[0].kind, AgentKind::ClaudeCode);
+    assert_eq!(agents.sessions[0].id, "deadbeef-cafe");
+  }
+}

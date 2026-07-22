@@ -108,6 +108,43 @@ nothing.
 
 ---
 
+
+### User Story 4 - Drive it from the CLI, pin when detection is not enough (Priority: P2, added by convergence 2026-07-22)
+
+Scripting or working outside the TUI, the developer lists the detected
+sessions per worktree with a dedicated command, sees the same agent indicator
+in the plain `gwm list` table, and — when a session's recorded directory does
+not match the worktree it really serves (agent launched from a subdirectory,
+a moved worktree) — manually pins that session to the right worktree.
+Auto-detection stays the default; a pin is a per-worktree override.
+
+**Why this priority**: closes the human-CLI gap (the machine surface shipped
+with US3) and covers the real mismatch cases passive detection cannot.
+
+**Independent Test**: with seeded artefacts, `gwm agents` lists sessions per
+worktree (human and `--format=json`); `gwm agents attach <wt> <session-id>`
+makes an unmatched session appear on that worktree across every surface;
+`gwm agents detach <wt>` restores pure detection; `gwm list` shows an AGENT
+column.
+
+**Acceptance Scenarios**:
+
+1. **Given** seeded sessions, **When** the user runs `gwm agents`, **Then**
+   each worktree lists its sessions (agent, freshness, last activity, id),
+   and `--format=json` returns the same data machine-readably.
+2. **Given** a session whose recorded directory matches no worktree,
+   **When** the user attaches it to a worktree by id, **Then** it appears on
+   that worktree in `gwm agents`, `gwm list --format=json`, the TUI and the
+   statusline, marked as pinned where the surface shows detail.
+3. **Given** a pinned session, **When** the user detaches it, **Then** the
+   worktree returns to pure auto-detection.
+4. **Given** an unknown session id, **When** the user attaches it, **Then**
+   the command fails with a clear message and a hint to run `gwm agents`.
+5. **Given** the plain `gwm list` table, **Then** it carries an AGENT column
+   with the same compact indicator as the TUI.
+
+---
+
 ### Edge Cases
 
 - Two worktrees whose paths differ only by a trailing separator, or reach the
@@ -162,6 +199,13 @@ nothing.
 - **FR-011**: Session detection MUST never block interactive rendering; the
   interface stays responsive regardless of artefact volume, showing the last
   known result until a refresh completes.
+- **FR-012** *(convergence 2026-07-22)*: A dedicated CLI command MUST list
+  detected sessions per worktree, human-readably and as JSON.
+- **FR-013** *(convergence)*: The user MUST be able to pin a detected session
+  to a worktree by id, and to remove that pin; a pin overlays auto-detection
+  (which remains the default) and is honoured by every surface.
+- **FR-014** *(convergence)*: The plain `gwm list` table MUST show the same
+  compact agent indicator as the TUI table.
 
 ### Key Entities
 

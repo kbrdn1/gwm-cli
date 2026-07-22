@@ -1272,10 +1272,21 @@ impl App {
       .iter()
       .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
       .collect();
+    // Manual pins are read on the main thread (`Repository` is not `Send`)
+    // and moved into the worker as plain strings (issue #408 US4).
+    let pins: Vec<(String, String)> = self
+      .worktrees
+      .iter()
+      .filter_map(|w| {
+        let branch = w.branch.as_deref()?;
+        let sid = crate::github::agent_pin(&self.repo, branch).ok().flatten()?;
+        Some((w.path.to_string_lossy().to_string(), sid))
+      })
+      .collect();
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
-      let map = match dirs::home_dir() {
-        Some(home) => crate::agent_sessions::detect_all(&home, &rows, std::time::SystemTime::now()),
+      let map = match crate::agent_sessions::agents_home() {
+        Some(home) => crate::agent_sessions::detect_all(&home, &rows, &pins, std::time::SystemTime::now()),
         None => Default::default(), // no home: detection degrades to empty (FR-009)
       };
       let _ = tx.send(TaskMsg::AgentSessions(generation, map));

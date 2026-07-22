@@ -418,12 +418,23 @@ pub fn summarize(
   })
 }
 
+/// The artefact-root base for production surfaces: `GWM_AGENTS_HOME` when set
+/// (a deterministic seam for tests and CI), else the real home directory.
+pub fn agents_home() -> Option<PathBuf> {
+  std::env::var_os("GWM_AGENTS_HOME")
+    .map(PathBuf::from)
+    .or_else(dirs::home_dir)
+}
+
 /// Production entry point: resolve the four artefact roots under `home`, run
-/// every backend, and summarize per worktree. Pure given its inputs — the TUI
-/// worker passes `dirs::home_dir()`, tests pass a seeded `TempDir`.
+/// every backend, summarize per worktree, then overlay the manual `pins`
+/// (`(worktree id, session id)` pairs — auto-detection stays the default,
+/// a pin only *adds* the named session to the named worktree). Pure given
+/// its inputs — production passes [`agents_home`], tests a seeded `TempDir`.
 pub fn detect_all(
   home: &Path,
   worktrees: &[(String, PathBuf)],
+  pins: &[(String, String)],
   now: SystemTime,
 ) -> std::collections::BTreeMap<String, WorktreeAgents> {
   let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
@@ -433,7 +444,52 @@ pub fn detect_all(
   // (research.md D4), so no per-OS data-dir split here.
   sessions.extend(OpencodeSource.scan(&home.join(".local/share/opencode/storage/project"), now));
   sessions.extend(VibeSource.scan(&home.join(".vibe/logs/session"), now));
-  summarize(&sessions, worktrees)
+  let mut map = summarize(&sessions, worktrees);
+
+  for (wt_id, sid) in pins {
+    // Resolve the pinned session: usually already collected; a Claude
+    // session whose project dir matches no managed worktree is invisible to
+    // forward matching, so fall back to an id sweep of the project dirs.
+    let found = sessions
+      .iter()
+      .find(|s| &s.id == sid)
+      .cloned()
+      .or_else(|| claude_session_by_id(&home.join(".claude/projects"), sid, now));
+    let Some(session) = found else {
+      continue; // unknown id: a stale pin degrades silently (FR-009 spirit)
+    };
+    let agents = map.entry(wt_id.clone()).or_default();
+    if !agents.sessions.iter().any(|s| &s.id == sid) {
+      agents.sessions.push(session);
+      agents.sessions.sort_by_key(|s| std::cmp::Reverse(s.last_activity));
+    }
+  }
+  map
+}
+
+/// Id sweep over every Claude project dir — only reached for a pin whose id
+/// no cwd-matched scan produced. The recorded cwd is unrecoverable from the
+/// lossy slug, which is fine: a pinned session's assignment comes from the
+/// pin, so `cwd` carries the slug dir path purely as provenance.
+fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<AgentSession> {
+  let entries = std::fs::read_dir(base).ok()?;
+  for dir in entries.flatten() {
+    let path = dir.path().join(format!("{sid}.jsonl"));
+    let Some(mtime) = file_mtime(&path) else {
+      continue;
+    };
+    if !within_scan_window(mtime, now) {
+      continue;
+    }
+    return Some(AgentSession {
+      kind: AgentKind::ClaudeCode,
+      cwd: dir.path(),
+      last_activity: mtime,
+      ended: false,
+      id: sid.to_string(),
+    });
+  }
+  None
 }
 
 /// mtime of a file, or `None` when unreadable (degrade, don't error).
