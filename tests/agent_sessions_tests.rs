@@ -9,8 +9,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gwm::agent_sessions::{
-  claude_slug, summarize_with, AgentKind, AgentSession, ClaudeCodeSource, CodexSource, Freshness, OpencodeSource,
-  VibeSource,
+  claude_slug, codex_day_dir, summarize_with, AgentKind, AgentSession, ClaudeCodeSource, CodexSource, Freshness,
+  OpencodeSource, VibeSource,
 };
 
 /// Write a file, creating parents.
@@ -376,7 +376,9 @@ const CODEX_META: &str = r#"{"timestamp":"2026-07-21T10:00:00.000Z","type":"sess
 fn codex_scan_recovers_cwd_from_first_line_session_meta() {
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join("sessions");
-  let file = base.join("2026/07/21/rollout-2026-07-21T10-00-00-019f6b95.jsonl");
+  let file = base
+    .join(codex_day_dir(SystemTime::now()))
+    .join("rollout-2026-07-21T10-00-00-019f6b95.jsonl");
   // Second line is a huge unrelated event — only the first line may be read.
   write(&file, &format!("{CODEX_META}\n{{\"type\":\"other\"}}\n"));
 
@@ -400,10 +402,16 @@ fn codex_thread_name_beats_the_first_prompt() {
   let base = tmp.path().join("sessions");
   let named = r#"{"type":"session_meta","payload":{"session_id":"019f89bb-0dcd-7e60-9717-b3745ed8343d","cwd":"/work/one"}}
 {"type":"event_msg","payload":{"type":"user_message","message":"first prompt text"}}"#;
-  write(&base.join("2026/07/22/rollout-a.jsonl"), named);
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-a.jsonl"),
+    named,
+  );
   let unnamed = r#"{"type":"session_meta","payload":{"session_id":"0199dddd-0000-0000-0000-000000000000","cwd":"/work/two"}}
 {"type":"event_msg","payload":{"type":"user_message","message":"plain prompt"}}"#;
-  write(&base.join("2026/07/22/rollout-b.jsonl"), unnamed);
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-b.jsonl"),
+    unnamed,
+  );
   write(
     &tmp.path().join("session_index.jsonl"),
     concat!(
@@ -436,7 +444,10 @@ fn session_ids_neutralise_control_characters() {
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join("sessions");
   let meta = r#"{"type":"session_meta","payload":{"session_id":"evil[31m-id","cwd":"/work/one"}}"#;
-  write(&base.join("2026/07/22/rollout-evil.jsonl"), &format!("{meta}\n"));
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-evil.jsonl"),
+    &format!("{meta}\n"),
+  );
 
   let sessions = CodexSource.scan(&base, SystemTime::now());
   assert_eq!(sessions.len(), 1);
@@ -459,7 +470,10 @@ fn codex_first_line_longer_than_the_cap_is_rejected() {
   let padding = "x".repeat(100 * 1024);
   let meta =
     format!(r#"{{"type":"session_meta","payload":{{"session_id":"huge-1","cwd":"/work/one","pad":"{padding}"}}}}"#);
-  write(&base.join("2026/07/22/rollout-huge.jsonl"), &format!("{meta}\n"));
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-huge.jsonl"),
+    &format!("{meta}\n"),
+  );
 
   let sessions = CodexSource.scan(&base, SystemTime::now());
   assert!(sessions.is_empty(), "oversized first line must be skipped");
@@ -471,7 +485,10 @@ fn detect_all_defers_codex_names_but_keeps_matched_and_pinned_ones() {
   // must not pay the 64 KiB name read (`summarize` drops them anyway) —
   // but a rollout matched to a worktree, or pinned to one, keeps its name.
   let tmp = tempfile::TempDir::new().unwrap();
-  let base = tmp.path().join(".codex/sessions/2026/07/22");
+  let base = tmp
+    .path()
+    .join(".codex/sessions")
+    .join(codex_day_dir(SystemTime::now()));
   // Windows worktree paths carry backslashes — escape for JSON embedding
   // (raw interpolation made the meta line unparseable on windows-latest).
   let mk = |sid: &str, cwd: &str, prompt: &str| {
@@ -526,7 +543,9 @@ fn codex_scan_reads_the_newer_payload_id_field() {
   let base = tmp.path().join("sessions");
   let meta = r#"{"type":"session_meta","payload":{"id":"0199aaaa-bbbb-cccc-dddd-eeeeffff0000","cwd":"/work/two"}}"#;
   write(
-    &base.join("2026/07/22/rollout-2026-07-22T09-00-00-0199aaaa.jsonl"),
+    &base
+      .join(codex_day_dir(SystemTime::now()))
+      .join("rollout-2026-07-22T09-00-00-0199aaaa.jsonl"),
     &format!("{meta}\n"),
   );
 
@@ -542,8 +561,14 @@ fn codex_scan_skips_legacy_json_and_malformed_first_lines() {
   // Legacy pre-jsonl format seen in real data: .json extension → skipped.
   write(&base.join("2025/04/19/rollout-2025-04-19-old.json"), CODEX_META);
   // Malformed first line → skipped silently, must not hide the valid one.
-  write(&base.join("2026/07/21/rollout-broken.jsonl"), "not json at all\n");
-  write(&base.join("2026/07/21/rollout-good.jsonl"), &format!("{CODEX_META}\n"));
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-broken.jsonl"),
+    "not json at all\n",
+  );
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-good.jsonl"),
+    &format!("{CODEX_META}\n"),
+  );
 
   let sessions = CodexSource.scan(&base, SystemTime::now());
   assert_eq!(sessions.len(), 1);
@@ -555,7 +580,10 @@ fn codex_scan_bounds_by_recency_window() {
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join("sessions");
   let now = SystemTime::now();
-  write(&base.join("2026/07/21/rollout-now.jsonl"), &format!("{CODEX_META}\n"));
+  write(
+    &base.join(codex_day_dir(SystemTime::now())).join("rollout-now.jsonl"),
+    &format!("{CODEX_META}\n"),
+  );
   write_aged(
     &base.join("2020/01/01/rollout-ancient.jsonl"),
     &format!("{CODEX_META}\n"),
@@ -565,6 +593,42 @@ fn codex_scan_bounds_by_recency_window() {
   let sessions = CodexSource.scan(&base, now);
   assert_eq!(sessions.len(), 1);
   assert_eq!(sessions[0].id, "019f6b95-b01a-7d30-a28a-68d9813e2248");
+}
+
+#[test]
+fn codex_walk_prunes_day_dirs_beyond_the_resume_slack() {
+  // Codex review round I (P2): a multi-year store must not be enumerated
+  // wholesale on every detection — day dirs dated beyond SCAN_WINDOW +
+  // RESUME_SLACK are pruned by NAME, so even a fresh mtime inside one
+  // (impossible outside a resume, and resumes that old are out of the
+  // documented slack) cannot resurrect the walk.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("sessions");
+  write(
+    &base.join("2000/01/01/rollout-ancient-fresh.jsonl"),
+    &format!("{CODEX_META}\n"),
+  );
+
+  let sessions = CodexSource.scan(&base, SystemTime::now());
+  assert!(sessions.is_empty(), "ancient day dir pruned by name, got {sessions:?}");
+}
+
+#[test]
+fn codex_resume_within_the_slack_is_still_detected() {
+  // The prune must NOT break `codex resume`: appending to a rollout in a
+  // day dir older than SCAN_WINDOW but within RESUME_SLACK refreshes the
+  // file mtime, and that session must still surface.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("sessions");
+  let now = SystemTime::now();
+  let resumed_day = codex_day_dir(now - Duration::from_secs(40 * 24 * 60 * 60));
+  write(
+    &base.join(resumed_day).join("rollout-resumed.jsonl"),
+    &format!("{CODEX_META}\n"),
+  );
+
+  let sessions = CodexSource.scan(&base, now);
+  assert_eq!(sessions.len(), 1, "40-day-old dir with a fresh append stays visible");
 }
 
 // -- opencode backend (research.md D4) --
@@ -889,7 +953,10 @@ mod pins {
   /// Seed a codex session whose cwd matches nothing we manage.
   fn seed_unmatched_codex(home: &Path) {
     write(
-      &home.join(".codex/sessions/2026/07/22/rollout-x.jsonl"),
+      &home
+        .join(".codex/sessions")
+        .join(codex_day_dir(SystemTime::now()))
+        .join("rollout-x.jsonl"),
       &format!("{CODEX_META}\n"), // cwd = /work/one
     );
   }
@@ -995,7 +1062,10 @@ mod session_names {
       r#"{"type":"event_msg","payload":{"type":"user_message","message":"review the feature flags branch"}}"#,
       "\n",
     );
-    write(&base.join("2026/07/22/rollout-a.jsonl"), lines);
+    write(
+      &base.join(codex_day_dir(SystemTime::now())).join("rollout-a.jsonl"),
+      lines,
+    );
     let sessions = CodexSource.scan(&base, SystemTime::now());
     assert_eq!(sessions[0].name.as_deref(), Some("review the feature flags branch"));
   }

@@ -24,6 +24,15 @@ pub const ACTIVE_WINDOW: Duration = Duration::from_secs(300);
 /// "artefact store is huge").
 pub const SCAN_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
+/// Extra slack behind [`SCAN_WINDOW`] for the codex day-dir prune: `codex
+/// resume` appends to the ORIGINAL rollout file, so a session created up to
+/// this long before the window and resumed today (fresh mtime, old dir
+/// date) must still be walked. Sessions older than window + slack are
+/// pruned by dir name without statting their files — the documented
+/// ceiling that keeps the walk bounded on multi-year stores (Codex review
+/// round I).
+const RESUME_SLACK: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
 /// A supported coding agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentKind {
@@ -364,18 +373,12 @@ impl CodexSource {
   /// run for every rollout (cwd + id are needed for the filtering).
   fn scan_naming(&self, base: &Path, now: SystemTime, want_name: &dyn Fn(&Path, &str) -> bool) -> Vec<AgentSession> {
     let thread_names = codex_thread_names(base);
-    // ponytail: full YYYY/MM/DD walk + per-file mtime filter instead of
-    // date-name pruning — a rollout appended today in a 40-day-old day dir
-    // must still be found (appends touch the file mtime, not the dir's;
-    // `codex resume` does exactly this). SCAN_WINDOW bounds the result,
-    // the walk cost is one read_dir per dir + one stat per file: measured
-    // 2.9 ms on a real store (31 dirs / 11 files, 2026-07-22), and the
-    // 30 s detection cache absorbs repeat daemon/TUI polls. Switch to
-    // name-based pruning (breaking the resume case beyond the slack) only
-    // if a real store ever makes this walk slow.
-    let years = subdirs_flat(&[base.to_path_buf()]);
-    let months = subdirs_flat(&years);
-    let days = subdirs_flat(&months);
+    // Day dirs older than SCAN_WINDOW + RESUME_SLACK are pruned by NAME
+    // (see `codex_day_dirs`) so the walk stays bounded on multi-year
+    // stores; the per-file mtime filter below still decides membership,
+    // which keeps `codex resume` working — an append refreshes the file
+    // mtime inside its original (possibly out-of-window, in-slack) day dir.
+    let days = codex_day_dirs(base, now);
     let mut out = Vec::new();
     for day_dir in days {
       let Ok(entries) = std::fs::read_dir(&day_dir) else {
@@ -713,6 +716,84 @@ fn subdirs_flat(dirs: &[PathBuf]) -> Vec<PathBuf> {
     }
   }
   out
+}
+
+/// Civil (proleptic Gregorian) date for a count of days since 1970-01-01.
+/// Howard Hinnant's `civil_from_days` — exact over the whole i64 range we
+/// can meet here.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+  let z = z + 719_468;
+  let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+  let doe = z - era * 146_097; // [0, 146096]
+  let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+  let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+  let mp = (5 * doy + 2) / 153; // [0, 11]
+  let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+  let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+  let y = yoe + era * 400 + i64::from(m <= 2);
+  (y, m, d)
+}
+
+/// Civil date of `t` (UTC), or `None` before the epoch.
+fn civil_date(t: SystemTime) -> Option<(i64, u32, u32)> {
+  let days = t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() / 86_400;
+  Some(civil_from_days(days as i64))
+}
+
+/// The `YYYY/MM/DD` day-dir fragment codex files a rollout under for the
+/// day of `t` (UTC — codex may use the local date, a ±1 day drift the
+/// 30-day [`RESUME_SLACK`] absorbs). Public so test fixtures build their
+/// store with the exact layout the pruned walk expects.
+pub fn codex_day_dir(t: SystemTime) -> PathBuf {
+  let (y, m, d) = civil_date(t).unwrap_or((1970, 1, 1));
+  PathBuf::from(format!("{y:04}/{m:02}/{d:02}"))
+}
+
+/// Numeric value of a path's file name (`"07"` → 7), `None` when the dir is
+/// not date-shaped — such dirs are conservatively kept and walked.
+fn dir_num(p: &Path) -> Option<i64> {
+  p.file_name()?.to_str()?.parse().ok()
+}
+
+/// The codex `YYYY/MM/DD` day dirs under `base` worth walking: dirs whose
+/// name-date is older than `SCAN_WINDOW + RESUME_SLACK` are pruned without
+/// reading them, so the walk stays bounded on multi-year stores. Comparison
+/// is per-level and only when the components parse — anything non-numeric
+/// is kept (defensive against layout drift).
+fn codex_day_dirs(base: &Path, now: SystemTime) -> Vec<PathBuf> {
+  let cutoff = civil_date(
+    now
+      .checked_sub(SCAN_WINDOW + RESUME_SLACK)
+      .unwrap_or(SystemTime::UNIX_EPOCH),
+  );
+  let Some((cy, cm, cd)) = cutoff else {
+    return subdirs_flat(&subdirs_flat(&subdirs_flat(&[base.to_path_buf()])));
+  };
+  let mut days = Vec::new();
+  for ydir in subdirs_flat(&[base.to_path_buf()]) {
+    let y = dir_num(&ydir);
+    if y.is_some_and(|y| y < cy) {
+      continue;
+    }
+    for mdir in subdirs_flat(&[ydir]) {
+      let m = dir_num(&mdir);
+      if y.zip(m).is_some_and(|(y, m)| (y, m) < (cy, i64::from(cm))) {
+        continue;
+      }
+      for ddir in subdirs_flat(&[mdir]) {
+        let d = dir_num(&ddir);
+        if y
+          .zip(m)
+          .zip(d)
+          .is_some_and(|((y, m), d)| (y, m, d) < (cy, i64::from(cm), i64::from(cd)))
+        {
+          continue;
+        }
+        days.push(ddir);
+      }
+    }
+  }
+  days
 }
 
 /// All sessions matched to one worktree, most recent first.

@@ -209,7 +209,10 @@ fn attach_agents_reuses_detection_within_the_ttl() {
   let home = tempfile::TempDir::new().unwrap();
   // SAFETY-of-intent: single test touching this var in this binary.
   std::env::set_var("GWM_AGENTS_HOME", home.path());
-  let dir = home.path().join(".codex/sessions/2026/07/22");
+  let dir = home
+    .path()
+    .join(".codex/sessions")
+    .join(gwm::agent_sessions::codex_day_dir(std::time::SystemTime::now()));
   std::fs::create_dir_all(&dir).unwrap();
   std::fs::write(
     dir.join("rollout-cache.jsonl"),

@@ -5604,7 +5604,9 @@ mod agents_cmd {
 
   /// Seed a codex session recorded at `cwd` under `home`.
   fn seed_codex(home: &Path, cwd: &Path, sid: &str) {
-    let dir = home.join(".codex/sessions/2026/07/22");
+    let dir = home
+      .join(".codex/sessions")
+      .join(gwm::agent_sessions::codex_day_dir(std::time::SystemTime::now()));
     std::fs::create_dir_all(&dir).unwrap();
     // Windows paths carry backslashes — escape them or the JSON line is
     // invalid and the session is silently dropped.
@@ -5744,7 +5746,10 @@ mod agents_cmd {
   fn agents_listing_prefers_the_session_name_when_present() {
     let (repo_dir, _repo) = init_repo();
     let home = tempfile::TempDir::new().unwrap();
-    let dir = home.path().join(".codex/sessions/2026/07/22");
+    let dir = home
+      .path()
+      .join(".codex/sessions")
+      .join(gwm::agent_sessions::codex_day_dir(std::time::SystemTime::now()));
     std::fs::create_dir_all(&dir).unwrap();
     let cwd = repo_dir.path().display().to_string().replace('\\', "\\\\");
     let meta = format!(r#"{{"type":"session_meta","payload":{{"session_id":"named-1","cwd":"{cwd}"}}}}"#);
