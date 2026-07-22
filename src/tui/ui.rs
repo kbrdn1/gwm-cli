@@ -2118,9 +2118,13 @@ impl HintContext {
       // modal keymap; the scroll/pan pairs stay literal (no single resolved
       // key captures `j/k` / `h/l`, matching the Create/Confirm convention).
       HintContext::Report => &[Hint::Modal(ModalAction::ReportClose, "close")],
-      // #408: detail overlay — scroll pair stays literal like Help's.
+      // #408: detail overlay — selection pair stays literal like Help's;
+      // attach / detach / close resolve through the modal keymap so a
+      // rebind shows through.
       HintContext::Detail => &[
-        Hint::Lit("j/k", "scroll"),
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::DetailAttach, "attach"),
+        Hint::Modal(ModalAction::DetailDetach, "detach"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
       HintContext::Help => &[
@@ -2351,7 +2355,7 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   hints
 }
 
-fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
+pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   let resolved = ctx.resolve(keymap, modal);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)

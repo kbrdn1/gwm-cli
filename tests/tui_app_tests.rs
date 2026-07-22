@@ -8445,3 +8445,29 @@ mod agent_pane {
     assert!(title.contains('a'), "resolved overlay key expected: {title}");
   }
 }
+
+// -- Detail overlay footer hints (user feedback 2026-07-22) ----------------
+
+mod agent_overlay_hints {
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::theme::Theme;
+  use gwm::tui::{modal_hint_for_context, HintContext};
+
+  #[test]
+  fn detail_footer_advertises_select_attach_detach_close() {
+    let line = modal_hint_for_context(
+      HintContext::Detail,
+      &Keymap::defaults(),
+      &ModalKeymap::defaults(),
+      &Theme::default(),
+    );
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    for needle in ["select", "attach", "detach", "close"] {
+      assert!(text.contains(needle), "hint must advertise '{needle}', got: {text}");
+    }
+    // The resolved default keys ride along.
+    assert!(text.contains('a'), "attach key expected: {text}");
+    assert!(text.contains('d'), "detach key expected: {text}");
+  }
+}
