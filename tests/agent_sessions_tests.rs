@@ -482,7 +482,10 @@ fn detect_all_defers_codex_names_but_keeps_matched_and_pinned_ones() {
   // but a rollout matched to a worktree, or pinned to one, keeps its name.
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join(".codex/sessions/2026/07/22");
+  // Windows worktree paths carry backslashes — escape for JSON embedding
+  // (raw interpolation made the meta line unparseable on windows-latest).
   let mk = |sid: &str, cwd: &str, prompt: &str| {
+    let cwd = cwd.replace('\\', "\\\\");
     format!(
       "{{\"type\":\"session_meta\",\"payload\":{{\"session_id\":\"{sid}\",\"cwd\":\"{cwd}\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"{prompt}\"}}}}\n"
     )
