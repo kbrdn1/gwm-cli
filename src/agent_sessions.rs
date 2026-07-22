@@ -565,10 +565,29 @@ impl VibeSource {
     let Ok(entries) = std::fs::read_dir(base) else {
       return Vec::new();
     };
+    let cutoff = civil_date(
+      now
+        .checked_sub(SCAN_WINDOW + RESUME_SLACK)
+        .unwrap_or(SystemTime::UNIX_EPOCH),
+    );
     let mut out = Vec::new();
     for entry in entries.flatten() {
+      let name = entry.file_name();
+      let name = name.to_string_lossy();
+      if !name.starts_with("session_") {
+        continue;
+      }
+      // Prune by the start date embedded in the dir name BEFORE any stat —
+      // same bound + resume slack as the codex day-dir prune, so the walk
+      // stays bounded on multi-year stores (Codex review round J). A
+      // non-date-shaped name is conservatively kept.
+      if let (Some(cut), Some(start)) = (cutoff, vibe_dir_date(&name)) {
+        if start < cut {
+          continue;
+        }
+      }
       let dir = entry.path();
-      if !dir.is_dir() || !entry.file_name().to_string_lossy().starts_with("session_") {
+      if !dir.is_dir() {
         continue;
       }
       let meta_path = dir.join("meta.json");
@@ -753,6 +772,20 @@ pub fn codex_day_dir(t: SystemTime) -> PathBuf {
 /// not date-shaped — such dirs are conservatively kept and walked.
 fn dir_num(p: &Path) -> Option<i64> {
   p.file_name()?.to_str()?.parse().ok()
+}
+
+/// Start date embedded in a Vibe session dir name (`session_YYYYMMDD_…`),
+/// `None` when the name is not date-shaped — such dirs are kept and walked.
+fn vibe_dir_date(name: &str) -> Option<(i64, u32, u32)> {
+  let date = name.strip_prefix("session_")?.get(0..8)?;
+  if !date.bytes().all(|b| b.is_ascii_digit()) {
+    return None;
+  }
+  Some((
+    date[0..4].parse().ok()?,
+    date[4..6].parse().ok()?,
+    date[6..8].parse().ok()?,
+  ))
 }
 
 /// The codex `YYYY/MM/DD` day dirs under `base` worth walking: dirs whose
@@ -1003,6 +1036,12 @@ fn overlay_pins(
 /// lossy slug, which is fine: a pinned session's assignment comes from the
 /// pin, so `cwd` carries the slug dir path purely as provenance.
 fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<AgentSession> {
+  // The sid becomes a file name below — a path separator would let a pin
+  // like `/tmp/foo` escape the store through `Path::join` and read any
+  // fresh `.jsonl` on disk (Codex review round J).
+  if sid.contains(['/', '\\']) {
+    return None;
+  }
   let live_names = claude_live_names(base);
   let entries = std::fs::read_dir(base).ok()?;
   for dir in entries.flatten() {

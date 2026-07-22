@@ -233,6 +233,29 @@ fn detect_all_still_resolves_an_unmatched_claude_pin_without_the_sweep() {
 }
 
 #[test]
+fn claude_by_id_pin_never_escapes_the_store() {
+  // Codex review round J (P2): the pinned id becomes a file name in the
+  // by-id sweep (`<project dir>/<sid>.jsonl`) — an id carrying a path
+  // separator would make `Path::join` escape the store, so
+  // `gwm agents attach <wt> /tmp/foo` could pin and read any fresh
+  // `.jsonl` on disk. Separator-carrying ids must resolve to nothing.
+  let tmp = tempfile::TempDir::new().unwrap();
+  write(
+    &tmp.path().join("outside.jsonl"),
+    r#"{"type":"user","message":{"role":"user","content":"pwned"}}"#,
+  );
+  fs::create_dir_all(tmp.path().join(".claude/projects/-Users-x-proj")).unwrap();
+  let keyed = [("wt".to_string(), PathBuf::from("/Users/x/proj"))];
+  let evil = tmp.path().join("outside").display().to_string();
+  let pins = [("wt".to_string(), evil)];
+  let map = gwm::agent_sessions::detect_all(tmp.path(), &keyed, &pins, SystemTime::now());
+  assert!(
+    map.get("wt").is_none_or(|a| a.sessions.is_empty()),
+    "a path-shaped pin id must not resolve: {map:?}"
+  );
+}
+
+#[test]
 fn session_pool_is_sorted_live_first() {
   // User feedback 2026-07-22: the attach-by-id prompt and every listing fed
   // by the raw pool must offer ACTIVE sessions first — the pool used to be
@@ -715,6 +738,14 @@ fn opencode_scan_bounds_by_recency_window() {
 
 // -- Mistral Vibe backend (research.md D5) --
 
+/// A Vibe session dir name whose embedded start date lies `days_ago` back
+/// from now — fixtures must never hardcode a date the name-prune expires.
+fn vibe_dir(days_ago: u64, hms_and_id: &str) -> String {
+  let t = SystemTime::now() - Duration::from_secs(days_ago * 24 * 60 * 60);
+  let day = codex_day_dir(t).display().to_string().replace('/', "");
+  format!("session_{day}_{hms_and_id}")
+}
+
 fn vibe_meta(session_id: &str, cwd: &str, end_time: Option<&str>) -> String {
   let end = match end_time {
     Some(t) => format!(r#""{t}""#),
@@ -726,13 +757,44 @@ fn vibe_meta(session_id: &str, cwd: &str, end_time: Option<&str>) -> String {
 }
 
 #[test]
+fn vibe_walk_prunes_session_dirs_beyond_the_resume_slack() {
+  // Codex review round J (P2): with years of Vibe sessions the walk
+  // statted every historical dir before the recency gate. Dir names embed
+  // the start date (`session_YYYYMMDD_...`) — dirs dated beyond
+  // SCAN_WINDOW + the resume slack are pruned by NAME, fresh mtimes or
+  // not, before any metadata call.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("session");
+  let ancient = base.join("session_20000101_000000_zzzz9999");
+  write(&ancient.join("meta.json"), &vibe_meta("zzzz9999", "/work/one", None));
+  write(&ancient.join("messages.jsonl"), "{}\n"); // fresh mtime
+
+  let sessions = VibeSource.scan(&base, SystemTime::now());
+  assert!(sessions.is_empty(), "ancient-dated dir pruned by name: {sessions:?}");
+}
+
+#[test]
+fn vibe_session_started_before_the_window_but_in_slack_stays_visible() {
+  // The prune must not hide a long-lived session: started 40 days ago
+  // (outside SCAN_WINDOW, inside the slack) with fresh activity, it stays.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("session");
+  let dir = base.join(vibe_dir(40, "120000_aaaa1111"));
+  write(&dir.join("meta.json"), &vibe_meta("aaaa1111", "/work/one", None));
+  write(&dir.join("messages.jsonl"), "{}\n");
+
+  let sessions = VibeSource.scan(&base, SystemTime::now());
+  assert_eq!(sessions.len(), 1, "40-day-old start with fresh activity stays visible");
+}
+
+#[test]
 fn vibe_ids_neutralise_control_characters_too() {
   // Codex review round H: every other backend routes its ids through
   // `clean_id`; a malformed Vibe `session_id` carrying ESC/newline must
   // not reach the terminal either — same for the dir-name fallback.
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join("session");
-  let dir = base.join("session_20260722_100000_evil");
+  let dir = base.join(vibe_dir(0, "100000_evil"));
   write(
     &dir.join("meta.json"),
     r#"{"session_id":"evil\u001b[31m-vibe","start_time":"2026-07-22T10:00:00.000000","end_time":null,"environment":{"working_directory":"/work/one"}}"#,
@@ -754,11 +816,11 @@ fn vibe_scan_recovers_working_directory_and_liveness() {
   let tmp = tempfile::TempDir::new().unwrap();
   let base = tmp.path().join("session");
   // Running session: end_time is null.
-  let live = base.join("session_20260721_100000_aaaa1111");
+  let live = base.join(vibe_dir(1, "100000_aaaa1111"));
   write(&live.join("meta.json"), &vibe_meta("aaaa-1111", "/work/live", None));
   write(&live.join("messages.jsonl"), "{}\n");
   // Terminated session: end_time set → ended, regardless of fresh mtimes.
-  let done = base.join("session_20260721_090000_bbbb2222");
+  let done = base.join(vibe_dir(1, "090000_bbbb2222"));
   write(
     &done.join("meta.json"),
     &vibe_meta("bbbb-2222", "/work/done", Some("2026-07-21T09:30:00.000000")),
@@ -782,7 +844,7 @@ fn vibe_scan_skips_malformed_meta_and_bounds_by_recency() {
   let base = tmp.path().join("session");
   let now = SystemTime::now();
   // Malformed meta.json → skipped silently.
-  let broken = base.join("session_20260721_080000_cccc3333");
+  let broken = base.join(vibe_dir(1, "080000_cccc3333"));
   write(&broken.join("meta.json"), "not json");
   // Ancient session (messages.jsonl mtime beyond window) → skipped.
   let old = base.join("session_20250101_000000_dddd4444");
@@ -799,7 +861,7 @@ fn vibe_scan_skips_malformed_meta_and_bounds_by_recency() {
     now - Duration::from_secs(200 * 24 * 60 * 60),
   );
   // One good one.
-  let good = base.join("session_20260721_110000_eeee5555");
+  let good = base.join(vibe_dir(1, "110000_eeee5555"));
   write(&good.join("meta.json"), &vibe_meta("eeee-5555", "/work/good", None));
   write(&good.join("messages.jsonl"), "{}\n");
 
@@ -1074,7 +1136,7 @@ mod session_names {
   fn vibe_name_comes_from_the_title_field() {
     let tmp = tempfile::TempDir::new().unwrap();
     let base = tmp.path().join("session");
-    let dir = base.join("session_20260722_100000_aaaa1111");
+    let dir = base.join(super::vibe_dir(0, "100000_aaaa1111"));
     write(
       &dir.join("meta.json"),
       r#"{"session_id":"v1","end_time":null,"title":"le plan PRO mistral","environment":{"working_directory":"/work/v"}}"#,
