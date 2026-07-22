@@ -1994,9 +1994,11 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
   }
 }
 
-/// Resolve `pattern` against the full worktree set — unlike
-/// [`worktree::find_fuzzy`] this includes the main checkout (a pin on it is
-/// legitimate) and accepts `.` for the worktree enclosing the cwd.
+/// Resolve `pattern` against the full worktree set with
+/// [`worktree::find_fuzzy`]'s tiering — exact name, then exact id, then
+/// case-insensitive substring (Codex review round K) — but unlike it the
+/// main checkout is included (a pin on it is legitimate) and `.` selects
+/// the worktree enclosing the cwd.
 fn resolve_agents_worktree(trees: &[worktree::WorktreeInfo], pattern: &str) -> Result<worktree::WorktreeInfo> {
   if pattern == "." {
     let cwd = std::env::current_dir()?;
@@ -2011,7 +2013,34 @@ fn resolve_agents_worktree(trees: &[worktree::WorktreeInfo], pattern: &str) -> R
       .cloned()
       .ok_or_else(|| GwmError::WorktreeNotFound(".".into()));
   }
-  let matches: Vec<&worktree::WorktreeInfo> = trees.iter().filter(|w| w.name.contains(pattern)).collect();
+  let exact: Vec<&worktree::WorktreeInfo> = trees.iter().filter(|w| w.name == pattern).collect();
+  match exact.as_slice() {
+    [one] => {
+      // find_fuzzy: a token that is one worktree's display name and
+      // another's stable id must not silently pick the name match.
+      if let Some(by_id) = trees.iter().find(|w| w.id == pattern && w.id != one.id) {
+        return Err(GwmError::Other(format!(
+          "'{}' is ambiguous: the display name of '{}' and the id of '{}'; target one by its unique id",
+          pattern, one.id, by_id.id
+        )));
+      }
+      return Ok((*one).clone());
+    }
+    [] => {
+      if let Some(by_id) = trees.iter().find(|w| w.id == pattern) {
+        return Ok(by_id.clone());
+      }
+    }
+    many => {
+      let ids = many.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(", ");
+      return Err(GwmError::Other(format!(
+        "name '{pattern}' is ambiguous ({} worktrees share it); target one by id: {ids}",
+        many.len()
+      )));
+    }
+  }
+  let pat = pattern.to_lowercase();
+  let matches: Vec<&worktree::WorktreeInfo> = trees.iter().filter(|w| w.name.to_lowercase().contains(&pat)).collect();
   match matches.as_slice() {
     [one] => Ok((*one).clone()),
     [] => Err(GwmError::WorktreeNotFound(pattern.into())),

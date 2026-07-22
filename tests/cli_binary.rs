@@ -5666,6 +5666,34 @@ mod agents_cmd {
   }
 
   #[test]
+  fn attach_resolves_exact_names_before_substrings() {
+    // Codex review round K (P2): the agents worktree matcher did a bare
+    // case-sensitive substring match, so with worktrees `foo` and
+    // `foo-extra`, `gwm agents attach foo <id>` errored as ambiguous
+    // instead of selecting the exact name — `find_fuzzy`'s tiering (exact
+    // name, exact id, then case-insensitive substring) applies here too.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let side = tempfile::TempDir::new().unwrap();
+    let foo = side.path().join("foo");
+    let foo_extra = side.path().join("foo-extra");
+    git_at(
+      repo_dir.path(),
+      &["worktree", "add", "-b", "b-foo", foo.to_str().unwrap()],
+    );
+    git_at(
+      repo_dir.path(),
+      &["worktree", "add", "-b", "b-foo-extra", foo_extra.to_str().unwrap()],
+    );
+    seed_codex(home.path(), &foo, "ffff-exact");
+
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", "foo", "ffff-exact"])
+      .assert()
+      .success();
+  }
+
+  #[test]
   fn agents_lists_detected_sessions_per_worktree() {
     let (repo_dir, _repo) = init_repo();
     let home = tempfile::TempDir::new().unwrap();
