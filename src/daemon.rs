@@ -221,6 +221,25 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
       || a.status != b.status
       || a.issue != b.issue
       || a.pr != b.pr
+      || agents_signature(&a.agents) != agents_signature(&b.agents)
+  })
+}
+
+/// The subscriber-relevant projection of a worktree's agent sessions: a
+/// session appearing, vanishing, or flipping active↔idle must push, but
+/// `last_activity` moves on every poll while an agent works — comparing it
+/// raw would fire a spurious `worktrees.changed` each tick, the same trap
+/// `age_seconds` documents above. `top` is derived from `sessions`, so the
+/// session list covers it.
+#[allow(clippy::type_complexity)] // a one-shot comparison key, not an API type
+fn agents_signature(
+  agents: &Option<crate::json_api::JsonWorktreeAgents>,
+) -> Option<Vec<(&str, &str, &str, Option<&str>)>> {
+  agents.as_ref().map(|a| {
+    a.sessions
+      .iter()
+      .map(|s| (s.kind.as_str(), s.freshness.as_str(), s.id.as_str(), s.name.as_deref()))
+      .collect()
   })
 }
 

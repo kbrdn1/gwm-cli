@@ -8276,6 +8276,18 @@ mod agent_detail_overlay {
   }
 
   #[test]
+  fn attach_on_an_empty_list_falls_through_to_the_by_id_prompt() {
+    // User feedback 2026-07-22: with "no agent session found" there is
+    // nothing to select, so `a` must open the attach-by-id prompt instead
+    // of dead-ending on a status error.
+    use gwm::tui::state::detail_overlay::DetailMode;
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.attach_selected_agent();
+    assert_eq!(app.detail_overlay.mode, DetailMode::Input);
+  }
+
+  #[test]
   fn close_restores_the_list_untouched() {
     let (_d, mut app) = seeded_app_with_sessions();
     let selected_before = app.list_state.selected();

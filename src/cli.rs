@@ -1856,7 +1856,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
     None => {
       let mut rows: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
       let pins = json_api::agent_pins_for_rows(&repo, &rows);
-      json_api::attach_agents(&mut rows, &pins);
+      let pool = json_api::attach_agents(&mut rows, &pins);
       if format == AgentsFormat::Json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -1892,6 +1892,38 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
           println!(
             "  {:<9} {:<7} {:>4} ago  {}{}{}",
             s.kind, s.freshness, ago, s.id, name_part, pin_mark
+          );
+        }
+      }
+      // Sessions no worktree matched (Codex review round C): the attach
+      // error points here for ids, so the ones worth attaching — launched
+      // in another repo, a subdirectory, an old path — must be visible.
+      let shown: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter_map(|r| r.agents.as_ref())
+        .flat_map(|a| a.sessions.iter().map(|s| s.id.as_str()))
+        .collect();
+      let mut unmatched: Vec<&crate::agent_sessions::AgentSession> =
+        pool.iter().filter(|s| !shown.contains(s.id.as_str())).collect();
+      unmatched.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+      if !unmatched.is_empty() {
+        any = true;
+        let now_sys = std::time::SystemTime::now();
+        println!("unmatched");
+        for s in &unmatched {
+          let word = match crate::agent_sessions::Freshness::classify(s.last_activity, s.ended, now_sys) {
+            crate::agent_sessions::Freshness::Active => "active",
+            crate::agent_sessions::Freshness::Idle => "idle",
+          };
+          let ago = worktree::format_relative_duration(now_sys.duration_since(s.last_activity).unwrap_or_default());
+          let name_part = s.name.as_deref().map(|n| format!("  {n}")).unwrap_or_default();
+          println!(
+            "  {:<9} {:<7} {:>4} ago  {}{}",
+            s.kind.display(),
+            word,
+            ago,
+            s.id,
+            name_part
           );
         }
       }

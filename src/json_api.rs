@@ -255,21 +255,25 @@ pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Ve
 /// ponytail: workspace mode passes empty pins (each row belongs to a
 /// different repo whose config we don't open here); wire per-repo pins if
 /// workspace users ask.
-pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
+/// Returns the raw session pool from the same scan pass, so `gwm agents`
+/// can also list the sessions no worktree matched — precisely the ones
+/// worth attaching manually (Codex review round C).
+pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) -> Vec<crate::agent_sessions::AgentSession> {
   let Some(home) = crate::agent_sessions::agents_home() else {
-    return;
+    return Vec::new();
   };
   let now = std::time::SystemTime::now();
   let keyed: Vec<(String, std::path::PathBuf)> = rows
     .iter()
     .map(|r| (r.path.clone(), std::path::PathBuf::from(&r.path)))
     .collect();
-  let summary = detect_cached(&home, &keyed, pins, now);
+  let (summary, pool) = detect_cached(&home, &keyed, pins, now);
   for row in rows.iter_mut() {
     row.agents = summary
       .get(&row.path)
       .and_then(|a| JsonWorktreeAgents::from_summary(a, now));
   }
+  pool
 }
 
 /// Detection result cache for the daemon's poll loop (Codex review round A):
@@ -284,14 +288,17 @@ fn detect_cached(
   keyed: &[(String, std::path::PathBuf)],
   pins: &[(String, String)],
   now: std::time::SystemTime,
-) -> std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents> {
+) -> (
+  std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+  Vec<crate::agent_sessions::AgentSession>,
+) {
   const TTL: std::time::Duration = std::time::Duration::from_secs(30);
   type CacheKey = (std::path::PathBuf, Vec<(String, String)>, Vec<String>);
-  type CacheSlot = Option<(
-    std::time::Instant,
-    CacheKey,
+  type Detection = (
     std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
-  )>;
+    Vec<crate::agent_sessions::AgentSession>,
+  );
+  type CacheSlot = Option<(std::time::Instant, CacheKey, Detection)>;
   static CACHE: std::sync::Mutex<CacheSlot> = std::sync::Mutex::new(None);
 
   let key: CacheKey = (
@@ -302,12 +309,12 @@ fn detect_cached(
   // A poisoned mutex here would mean a panic mid-detection; recover by
   // recomputing rather than propagating the poison.
   let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-  if let Some((at, cached_key, summary)) = slot.as_ref() {
+  if let Some((at, cached_key, detection)) = slot.as_ref() {
     if *cached_key == key && at.elapsed() < TTL {
-      return summary.clone();
+      return detection.clone();
     }
   }
-  let summary = crate::agent_sessions::detect_all(home, keyed, pins, now);
-  *slot = Some((std::time::Instant::now(), key, summary.clone()));
-  summary
+  let detection = crate::agent_sessions::detect_with_sessions(home, keyed, pins, now);
+  *slot = Some((std::time::Instant::now(), key, detection.clone()));
+  detection
 }

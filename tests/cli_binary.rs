@@ -5638,6 +5638,36 @@ mod agents_cmd {
   }
 
   #[test]
+  fn agents_lists_unmatched_sessions_in_a_dedicated_section() {
+    // Codex review round C: the attach error says "run `gwm agents` to see
+    // the detected ids", so a session matched to NO worktree — precisely
+    // the one worth attaching — must be listed too, under `unmatched`.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), Path::new("/somewhere/else"), "9999-lost");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("unmatched"))
+      .stdout(predicate::str::contains("9999-lost"));
+  }
+
+  #[test]
+  fn agents_omits_the_unmatched_section_when_every_session_is_matched() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "0000-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("unmatched").not());
+  }
+
+  #[test]
   fn agents_listing_prefers_the_session_name_when_present() {
     let (repo_dir, _repo) = init_repo();
     let home = tempfile::TempDir::new().unwrap();
@@ -5797,11 +5827,16 @@ mod agents_cmd {
       .args(["agents", "detach", "."])
       .assert()
       .success();
+    // Codex review round C: with the pin gone the session is no longer
+    // attributed to any worktree, but it stays discoverable — listed under
+    // `unmatched` (unpinned) instead of vanishing from the output.
     gwm_in(repo_dir.path(), home.path())
       .arg("agents")
       .assert()
       .success()
-      .stdout(predicate::str::contains("no agent session"));
+      .stdout(predicate::str::contains("unmatched"))
+      .stdout(predicate::str::contains("2222-cafe"))
+      .stdout(predicate::str::contains("pinned").not());
   }
 
   #[test]

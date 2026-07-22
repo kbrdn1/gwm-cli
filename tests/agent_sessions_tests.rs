@@ -150,6 +150,50 @@ fn claude_scan_missing_base_or_unmatched_worktree_is_empty() {
     .is_empty());
 }
 
+#[test]
+fn claude_scan_sweeps_unmatched_project_dirs_into_the_pool() {
+  // A Claude session launched in a project that is no managed worktree
+  // (another repo, a subdirectory, an old path) must still reach the raw
+  // pool, otherwise the attach-by-id prompt can never pin it (Codex review
+  // round C — the prompt exists precisely for unmatched sessions).
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("matched-1.jsonl"), "{}");
+  let foreign = base.join("-Users-x-other-project");
+  write(
+    &foreign.join("foreign-1.jsonl"),
+    r#"{"type":"user","message":{"role":"user","content":"other work"}}"#,
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  let mut ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+  ids.sort_unstable();
+  assert_eq!(ids, ["foreign-1", "matched-1"]);
+  let f = sessions.iter().find(|s| s.id == "foreign-1").unwrap();
+  // The lossy slug cannot be reversed to a cwd, so the swept session
+  // carries the project dir purely as provenance.
+  assert_eq!(f.cwd, foreign);
+  assert_eq!(f.name.as_deref(), Some("other work"));
+}
+
+#[test]
+fn swept_foreign_claude_sessions_never_join_a_worktree_summary() {
+  // The sweep feeds the pool only: its provenance cwd (a dir under the
+  // Claude base) can never forward-match a real worktree path, so the
+  // per-worktree summary stays exactly what the slug matching produced.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join("-Users-x-other-project").join("foreign-1.jsonl"), "{}");
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  assert_eq!(sessions.len(), 1, "the swept session is in the pool");
+  let keyed = [("wt".to_string(), wt)];
+  let map = gwm::agent_sessions::summarize(&sessions, &keyed);
+  assert!(map.is_empty(), "but no worktree claims it: {map:?}");
+}
+
 // -- Codex backend (research.md D3) --
 
 const CODEX_META: &str = r#"{"timestamp":"2026-07-21T10:00:00.000Z","type":"session_meta","payload":{"session_id":"019f6b95-b01a-7d30-a28a-68d9813e2248","cwd":"/work/one","originator":"codex_exec"}}"#;
@@ -660,12 +704,14 @@ mod review_round_a {
     assert_eq!(claude_slug(&wt1), claude_slug(&wt2));
     write(&base.join(claude_slug(&wt1)).join("dddd-4444.jsonl"), "{}");
 
-    let sessions = ClaudeCodeSource.scan(&base, &[wt1, wt2], SystemTime::now());
-    assert!(
-      sessions.is_empty(),
-      "colliding slugs must be skipped, got {} sessions",
-      sessions.len()
-    );
+    let sessions = ClaudeCodeSource.scan(&base, &[wt1.clone(), wt2.clone()], SystemTime::now());
+    // The dir still reaches the raw pool ONCE (swept, attachable by id) —
+    // but with provenance cwd only, never attributed to either worktree.
+    assert_eq!(sessions.len(), 1, "swept once, not duplicated");
+    assert_eq!(sessions[0].cwd, base.join(claude_slug(&wt1)));
+    let keyed = [("a".to_string(), wt1), ("b".to_string(), wt2)];
+    let map = gwm::agent_sessions::summarize(&sessions, &keyed);
+    assert!(map.is_empty(), "no worktree claims the ambiguous dir: {map:?}");
   }
 }
 

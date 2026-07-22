@@ -178,42 +178,75 @@ impl ClaudeCodeSource {
       .map(|wt| claude_slug(&wt.components().collect::<PathBuf>()))
       .collect();
     let mut out = Vec::new();
+    let mut claimed: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for (wt, slug) in worktrees.iter().zip(&slugs) {
       // The slug is lossy: /a/b-c and /a/b/c collide. Assigning one dir's
       // sessions to both worktrees would fabricate a phantom session, so an
-      // ambiguous slug is skipped outright (FR-009 degradation).
+      // ambiguous slug is skipped outright (FR-009 degradation) — its dir
+      // is swept below instead, where sessions claim no worktree.
       if slugs.iter().filter(|s| *s == slug).count() > 1 {
         continue;
       }
-      let dir = base.join(slug);
-      let Ok(entries) = std::fs::read_dir(&dir) else {
-        continue; // unmatched worktree or missing base: no sessions (FR-009)
-      };
+      claimed.insert(slug.as_str());
+      scan_claude_dir(&base.join(slug), wt, &live_names, now, &mut out);
+    }
+    // Sweep the project dirs no managed worktree claimed (Codex review
+    // round C): a session launched in another repo, a subdirectory, or an
+    // old path must still reach the raw pool — the attach-by-id prompt
+    // exists precisely for these. The lossy slug cannot be reversed to a
+    // cwd, so the dir path rides `cwd` purely as provenance; it can never
+    // forward-match a worktree in `summarize`.
+    if let Ok(entries) = std::fs::read_dir(base) {
       for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
-          continue; // real dirs hold a `memory/` subdir and other non-session files
+        let dir = entry.path();
+        if !dir.is_dir() {
+          continue; // sessions/registry files at the base level
         }
-        let Some(mtime) = file_mtime(&path) else {
-          continue;
-        };
-        if !within_scan_window(mtime, now) {
+        let name = entry.file_name();
+        if claimed.contains(name.to_string_lossy().as_ref()) {
           continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-          continue;
-        };
-        out.push(AgentSession {
-          kind: AgentKind::ClaudeCode,
-          cwd: wt.clone(),
-          last_activity: mtime,
-          ended: false,
-          id: stem.to_string(),
-          name: live_names.get(stem).cloned().or_else(|| first_user_text(&path)),
-        });
+        scan_claude_dir(&dir, &dir, &live_names, now, &mut out);
       }
     }
     out
+  }
+}
+
+/// One Claude project dir → sessions. `cwd` is the worktree for a
+/// slug-matched dir, or the dir itself (provenance only) for a swept one.
+fn scan_claude_dir(
+  dir: &Path,
+  cwd: &Path,
+  live_names: &std::collections::HashMap<String, String>,
+  now: SystemTime,
+  out: &mut Vec<AgentSession>,
+) {
+  let Ok(entries) = std::fs::read_dir(dir) else {
+    return; // unmatched worktree or missing base: no sessions (FR-009)
+  };
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+      continue; // real dirs hold a `memory/` subdir and other non-session files
+    }
+    let Some(mtime) = file_mtime(&path) else {
+      continue;
+    };
+    if !within_scan_window(mtime, now) {
+      continue;
+    }
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+      continue;
+    };
+    out.push(AgentSession {
+      kind: AgentKind::ClaudeCode,
+      cwd: cwd.to_path_buf(),
+      last_activity: mtime,
+      ended: false,
+      id: stem.to_string(),
+      name: live_names.get(stem).cloned().or_else(|| first_user_text(&path)),
+    });
   }
 }
 

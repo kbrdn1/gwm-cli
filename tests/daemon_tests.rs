@@ -181,6 +181,51 @@ fn worktrees_differ_detects_real_changes() {
 }
 
 #[test]
+fn worktrees_differ_notices_agent_changes_but_not_activity_churn() {
+  // Codex review round C: subscribers must hear a session appear, vanish,
+  // or flip active→idle — but the raw last_activity mtime moves on every
+  // poll while an agent works, and comparing it would fire a spurious
+  // `worktrees.changed` each tick (the age_seconds lesson again).
+  use gwm::json_api::{JsonAgentSession, JsonWorktreeAgents};
+  use std::slice::from_ref;
+  let session = JsonAgentSession {
+    kind: "claude".into(),
+    freshness: "active".into(),
+    last_activity: 100,
+    id: "s1".into(),
+    name: None,
+  };
+  let base = sample("x");
+  let mut with = base.clone();
+  with.agents = Some(JsonWorktreeAgents {
+    top: session.clone(),
+    sessions: vec![session],
+  });
+
+  // Appearing / vanishing.
+  assert!(worktrees_differ(from_ref(&base), from_ref(&with)));
+  assert!(worktrees_differ(from_ref(&with), from_ref(&base)));
+
+  // active → idle flip.
+  let mut idle = with.clone();
+  if let Some(a) = idle.agents.as_mut() {
+    a.sessions[0].freshness = "idle".into();
+  }
+  assert!(worktrees_differ(from_ref(&with), from_ref(&idle)));
+
+  // Activity-timestamp churn ALONE is not a change.
+  let mut churn = with.clone();
+  if let Some(a) = churn.agents.as_mut() {
+    a.top.last_activity += 5;
+    a.sessions[0].last_activity += 5;
+  }
+  assert!(
+    !worktrees_differ(from_ref(&with), from_ref(&churn)),
+    "mtime churn must stay quiet"
+  );
+}
+
+#[test]
 fn subscription_push_skips_phantom_empty_on_transient_error() {
   // Issue #341: a transient `run_list` error must NOT push an empty
   // `worktrees.changed`. The pre-fix `unwrap_or_default()` turned the Err

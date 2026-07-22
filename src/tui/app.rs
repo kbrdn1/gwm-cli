@@ -2520,7 +2520,10 @@ impl App {
   /// adds (issue #408 US4).
   pub fn attach_selected_agent(&mut self) {
     let Some(sid) = self.detail_overlay.selected_meta().map(str::to_string) else {
-      self.status = "no session selected to pin".into();
+      // Only the "no agent session found" placeholder carries no id: with
+      // nothing to select, `a` falls through to the attach-by-id prompt
+      // instead of dead-ending (user feedback 2026-07-22).
+      self.open_agent_input();
       return;
     };
     self.attach_agent_by_id(&sid);
