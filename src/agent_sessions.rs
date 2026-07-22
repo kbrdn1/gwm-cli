@@ -643,7 +643,11 @@ pub fn detect_with_sessions(
   now: SystemTime,
 ) -> (std::collections::BTreeMap<String, WorktreeAgents>, Vec<AgentSession>) {
   let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
-  let sessions = collect_sessions(home, &paths, now);
+  let mut sessions = collect_sessions(home, &paths, now);
+  // Live-first pool (user feedback 2026-07-22): every consumer of the raw
+  // pool — the TUI attach-by-id prompt, `gwm agents`' unmatched section —
+  // must offer active sessions first, not backend concatenation order.
+  sessions.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
   let mut map = summarize(&sessions, worktrees);
 
   for (wt_id, sid) in pins {

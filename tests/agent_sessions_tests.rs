@@ -195,6 +195,29 @@ fn swept_foreign_claude_sessions_never_join_a_worktree_summary() {
 }
 
 #[test]
+fn session_pool_is_sorted_live_first() {
+  // User feedback 2026-07-22: the attach-by-id prompt and every listing fed
+  // by the raw pool must offer ACTIVE sessions first — the pool used to be
+  // raw backend concatenation order.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  let dir = base.join(claude_slug(&wt));
+  let now = SystemTime::now();
+  write_aged(&dir.join("old-idle.jsonl"), "{}", now - Duration::from_secs(4000));
+  write(&dir.join("fresh-active.jsonl"), "{}");
+
+  let keyed = [("wt".to_string(), wt)];
+  let (_map, pool) = gwm::agent_sessions::detect_with_sessions(tmp.path(), &keyed, &[], now);
+  let ids: Vec<&str> = pool.iter().map(|s| s.id.as_str()).collect();
+  assert_eq!(
+    ids,
+    ["fresh-active", "old-idle"],
+    "most recent (active) first in the pool"
+  );
+}
+
+#[test]
 fn session_names_neutralise_control_characters() {
   // Codex review round D: a hostile or corrupt artefact must not smuggle
   // ANSI escapes into the terminal through `gwm agents` / the TUI. ESC is

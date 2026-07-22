@@ -2373,37 +2373,35 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
-        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {:<aw$}  {}",
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}{}",
         mark,
         row.repo_name,
         w.name,
         branch,
         status,
         pr_cell,
-        agent_cells[i],
+        agent_col(&agent_cells[i]),
         w.path.display(),
         rw = repo_w,
         nw = name_w,
         bw = branch_w,
         sw = status_w,
         pw = pr_w,
-        aw = agent_w,
       );
     } else {
       println!(
-        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<aw$}  {}",
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}{}",
         mark,
         row.repo_name,
         w.name,
         branch,
         status,
-        agent_cells[i],
+        agent_col(&agent_cells[i]),
         w.path.display(),
         rw = repo_w,
         nw = name_w,
         bw = branch_w,
         sw = status_w,
-        aw = agent_w,
       );
     }
   }

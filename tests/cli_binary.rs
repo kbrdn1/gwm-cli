@@ -5857,7 +5857,11 @@ mod agents_cmd {
       .args(["list", "--workspace", "."])
       .assert()
       .success()
-      .stdout(predicate::str::contains("AGENT").not());
+      .stdout(predicate::str::contains("AGENT").not())
+      // Codex review round E: the DATA rows must drop the 8-wide `-`
+      // placeholder cell too, not just the header — otherwise the table
+      // grows a headerless column that shifts PATH.
+      .stdout(predicate::str::is_match(r"clean\s+-\s+/").unwrap().not());
   }
 
   #[test]

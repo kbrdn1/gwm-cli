@@ -185,6 +185,10 @@ find_feature_dir_by_prefix() {
     fi
 }
 
+# Sets REPO_ROOT / CURRENT_BRANCH / HAS_GIT / FEATURE_* directly in the
+# calling shell — callers just invoke `get_feature_paths`, never
+# `eval $(get_feature_paths)`: a branch name containing a quote is a valid
+# git ref, and eval'ing it as shell text was an injection vector.
 get_feature_paths() {
     local repo_root=$(get_repo_root)
 
@@ -219,19 +223,28 @@ get_feature_paths() {
         fi
     fi
 
-    cat <<EOF
-REPO_ROOT='$repo_root'
-CURRENT_BRANCH='$current_branch'
-HAS_GIT='$has_git_repo'
-FEATURE_DIR='$feature_dir'
-FEATURE_SPEC='$feature_dir/spec.md'
-IMPL_PLAN='$feature_dir/plan.md'
-TASKS='$feature_dir/tasks.md'
-RESEARCH='$feature_dir/research.md'
-DATA_MODEL='$feature_dir/data-model.md'
-QUICKSTART='$feature_dir/quickstart.md'
-CONTRACTS_DIR='$feature_dir/contracts'
-EOF
+    REPO_ROOT="$repo_root"
+    CURRENT_BRANCH="$current_branch"
+    HAS_GIT="$has_git_repo"
+    FEATURE_DIR="$feature_dir"
+    FEATURE_SPEC="$feature_dir/spec.md"
+    IMPL_PLAN="$feature_dir/plan.md"
+    TASKS="$feature_dir/tasks.md"
+    RESEARCH="$feature_dir/research.md"
+    DATA_MODEL="$feature_dir/data-model.md"
+    QUICKSTART="$feature_dir/quickstart.md"
+    CONTRACTS_DIR="$feature_dir/contracts"
+}
+
+# Escape a string for embedding inside a JSON double-quoted value.
+json_escape() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    s=${s//$'\n'/\\n}
+    s=${s//$'\t'/\\t}
+    s=${s//$'\r'/\\r}
+    printf '%s' "$s"
 }
 
 check_file() { [[ -f "$1" ]] && echo "  ✓ $2" || echo "  ✗ $2"; }
