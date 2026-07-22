@@ -932,6 +932,41 @@ fn summarize_compares_exactly_after_canonicalisation() {
 }
 
 #[test]
+fn summarize_converges_case_variants_on_case_insensitive_volumes() {
+  // Codex review round L (P1, discarded with proof): the finding claimed
+  // `canonicalize()` keeps the caller's casing on macOS, so an agent
+  // recording `/x/PROJ` and libgit2 handing `/x/proj` would never match.
+  // Rust's canonicalize does NOT use libc realpath semantics: it resolves
+  // to the ON-DISK casing (`F_GETPATH` on macOS, final-path-by-handle on
+  // Windows), so both sides converge and the round-F exact comparison
+  // matches. Pinned end-to-end through the real `summarize`; on a
+  // case-sensitive volume the variant path does not exist and the test
+  // degrades to a skip (round-F semantics own that world).
+  let tmp = tempfile::TempDir::new().unwrap();
+  let real = tmp.path().join("proj");
+  fs::create_dir_all(&real).unwrap();
+  let variant = tmp.path().join("PROJ");
+  if fs::metadata(&variant).is_err() {
+    return; // case-sensitive volume
+  }
+  let sessions = [AgentSession {
+    kind: AgentKind::Codex,
+    cwd: variant,
+    last_activity: SystemTime::now(),
+    ended: false,
+    id: "case-var".into(),
+    name: None,
+  }];
+  let keyed = [("wt".to_string(), real)];
+  let map = gwm::agent_sessions::summarize(&sessions, &keyed);
+  assert_eq!(
+    map.get("wt").map(|a| a.sessions.len()),
+    Some(1),
+    "canonicalize converges casing on this volume: {map:?}"
+  );
+}
+
+#[test]
 fn summarize_never_merges_case_distinct_worktrees() {
   // /repo/Foo and /repo/foo can be two REAL dirs on case-sensitive APFS /
   // any Linux fs: a session recorded in Foo must never surface on foo.

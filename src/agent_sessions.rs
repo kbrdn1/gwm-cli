@@ -877,11 +877,15 @@ where
 
 /// Path comparison key: trailing separators are normalised away by component
 /// iteration; the comparison stays case-EXACT on every platform (Codex
-/// review round F). Case handling belongs to the canonicalizer: on a
-/// case-insensitive volume `canonicalize` converges both sides to the
-/// on-disk casing, so exact comparison still matches — while a platform-wide
-/// fold would MERGE two genuinely distinct worktrees on a case-sensitive
-/// APFS/NTFS volume, fabricating a session match.
+/// review round F). Case handling belongs to the canonicalizer: Rust's
+/// `canonicalize` is NOT libc `realpath` — it resolves to the ON-DISK
+/// casing (`F_GETPATH` on macOS, final-path-by-handle on Windows; verified
+/// on a case-insensitive APFS volume 2026-07-22: `/users/KBRDN1/…` in →
+/// `/Users/kbrdn1/…` out), so case-variant references to one directory
+/// converge before this key is built and exact comparison matches (pinned
+/// by `summarize_converges_case_variants_on_case_insensitive_volumes`).
+/// A platform-wide fold instead would MERGE two genuinely distinct
+/// worktrees on a case-sensitive APFS/NTFS volume, fabricating a match.
 fn comparison_key(path: &Path) -> String {
   path
     .components()
