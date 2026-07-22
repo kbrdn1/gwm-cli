@@ -404,7 +404,7 @@ fn summarize_case_sensitivity_follows_the_platform() {
   #[cfg(any(windows, target_os = "macos"))]
   assert_eq!(map.get("one").unwrap().sessions.len(), 1);
   #[cfg(not(any(windows, target_os = "macos")))]
-  assert!(map.get("one").is_none());
+  assert!(!map.contains_key("one"));
 }
 
 #[test]
