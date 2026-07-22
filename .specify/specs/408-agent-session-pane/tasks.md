@@ -115,3 +115,11 @@ after each RED→GREEN pair or logical group, Gitmoji + Conventional, `refs #408
 - [X] T041 [US4] GREEN: AGENT column in the human list table
 - [X] T042 [US4] Docs EN/FR (CLI reference + keybindings/sidebar cross-refs + schema README pinned note) + CHANGELOG update
 - [X] T043 [US4] Full gates: fmt, clippy, cargo test, stripped-PATH run
+
+## Phase 9: UX feedback + Codex review round A (2026-07-22)
+
+- [X] T044 Session names (claude first prompt / codex user_message / vibe title, bounded 64 KiB read, 60-char cap) + full ids everywhere
+- [X] T045 Interactive overlay: capitalized fixed title, selection highlight + scrollbar + stable frame, `a`/`d` pin/unpin on the selected session
+- [X] T046 Dedicated `Agents [a]` sidebar pane (≤3 sessions + overflow, collapses when empty) replacing the Status-pane summary line
+- [X] T047 Round A fixes: KeyContext::all() registration, live-before-ended top(), per-worktree pinned marker, `gwm agents` last-activity+name, ambiguous-slug guard, 30 s daemon detection cache, workspace pins ceiling (TUI), workspace AGENT column
+- [X] T048 Wire: optional `name` on agent sessions (schema + contract baseline) ; docs EN/FR ; gates fmt/clippy/tests/stripped
