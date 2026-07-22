@@ -181,7 +181,23 @@ fn claude_live_names(projects_base: &Path) -> std::collections::HashMap<String, 
 }
 
 impl ClaudeCodeSource {
+  /// Full scan: slug-matched worktree dirs PLUS the unclaimed-dir sweep —
+  /// the pool semantics. The sweep reads up to [`NAME_SCAN_BYTES`] of every
+  /// recent foreign artefact for its name, so summary-only surfaces use
+  /// [`Self::scan_matched`] instead (Codex review round F: the sweep took
+  /// `gwm list` from ~0.15 s to ~1.1 s on a busy store).
   pub fn scan(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
+    self.scan_impl(base, worktrees, now, true)
+  }
+
+  /// Matched-only scan: just the managed worktrees' slug dirs. Feeds the
+  /// per-worktree summary (`gwm list`, daemon polls, TUI table), where
+  /// foreign sessions can never appear anyway.
+  pub fn scan_matched(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
+    self.scan_impl(base, worktrees, now, false)
+  }
+
+  fn scan_impl(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime, sweep: bool) -> Vec<AgentSession> {
     let live_names = claude_live_names(base);
     // Normalise before slugging: libgit2 reports the main checkout with a
     // trailing '/', which would grow a trailing '-' the recorded cwd never
@@ -202,6 +218,9 @@ impl ClaudeCodeSource {
       }
       claimed.insert(slug.as_str());
       scan_claude_dir(&base.join(slug), wt, &live_names, now, &mut out);
+    }
+    if !sweep {
+      return out;
     }
     // Sweep the project dirs no managed worktree claimed (Codex review
     // round C): a session launched in another repo, a subdirectory, or an
@@ -498,8 +517,11 @@ fn codex_first_line_meta(path: &Path) -> Option<(PathBuf, String)> {
   if cwd.is_empty() {
     return None;
   }
+  // `session_id` is the historical field; Codex 0.138+ writes `id`
+  // (review round F). The file stem is the last-resort fallback only.
   let id = payload
     .get("session_id")
+    .or_else(|| payload.get("id"))
     .and_then(|s| s.as_str())
     .map(str::to_string)
     .or_else(|| path.file_stem().map(|s| s.to_string_lossy().into_owned()))?;
@@ -570,22 +592,18 @@ where
 }
 
 /// Path comparison key: trailing separators are normalised away by component
-/// iteration; case folds on the platforms whose filesystems are
-/// case-insensitive by default (Windows, macOS), stays exact on Linux.
+/// iteration; the comparison stays case-EXACT on every platform (Codex
+/// review round F). Case handling belongs to the canonicalizer: on a
+/// case-insensitive volume `canonicalize` converges both sides to the
+/// on-disk casing, so exact comparison still matches — while a platform-wide
+/// fold would MERGE two genuinely distinct worktrees on a case-sensitive
+/// APFS/NTFS volume, fabricating a session match.
 fn comparison_key(path: &Path) -> String {
-  let joined = path
+  path
     .components()
     .map(|c| c.as_os_str().to_string_lossy())
     .collect::<Vec<_>>()
-    .join("\u{1f}");
-  #[cfg(any(windows, target_os = "macos"))]
-  {
-    joined.to_lowercase()
-  }
-  #[cfg(not(any(windows, target_os = "macos")))]
-  {
-    joined
-  }
+    .join("\u{1f}")
 }
 
 /// Production entry: fs canonicalisation with lexical fallback (a session may
@@ -607,25 +625,45 @@ pub fn agents_home() -> Option<PathBuf> {
     .or_else(dirs::home_dir)
 }
 
-/// Production entry point: resolve the four artefact roots under `home`, run
-/// every backend, summarize per worktree, then overlay the manual `pins`
-/// (`(worktree id, session id)` pairs — auto-detection stays the default,
-/// a pin only *adds* the named session to the named worktree). Pure given
-/// its inputs — production passes [`agents_home`], tests a seeded `TempDir`.
+/// Production entry point for the SUMMARY surfaces (`gwm list`, daemon
+/// polls, the TUI table): resolve the four artefact roots under `home`, run
+/// every backend **matched-only** (no foreign-dir sweep — Codex review
+/// round F: reading every recent foreign artefact's name took `gwm list`
+/// from ~0.15 s to ~1.1 s on a busy store), summarize per worktree, then
+/// overlay the manual `pins` — a foreign pinned Claude session resolves
+/// through the targeted by-id sweep, so pins lose nothing. Pure given its
+/// inputs — production passes [`agents_home`], tests a seeded `TempDir`.
 pub fn detect_all(
   home: &Path,
   worktrees: &[(String, PathBuf)],
   pins: &[(String, String)],
   now: SystemTime,
 ) -> std::collections::BTreeMap<String, WorktreeAgents> {
-  detect_with_sessions(home, worktrees, pins, now).0
+  let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
+  let mut sessions = collect_with(home, &paths, now, false);
+  sessions.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+  let mut map = summarize(&sessions, worktrees);
+  overlay_pins(&mut map, &sessions, pins, home, now);
+  map
 }
 
 /// Every session the four backends can see right now — the raw pool behind
-/// [`detect_all`], also consumed by the TUI's attach-by-id prompt (a session
-/// matched to no worktree is exactly the one worth pinning manually).
+/// [`detect_with_sessions`], consumed by the TUI's attach-by-id prompt and
+/// `gwm agents`' unmatched section (a session matched to no worktree is
+/// exactly the one worth pinning manually). Includes the Claude
+/// foreign-dir sweep — the bounded name reads are the price of the pool.
 pub fn collect_sessions(home: &Path, worktree_paths: &[PathBuf], now: SystemTime) -> Vec<AgentSession> {
-  let mut sessions = ClaudeCodeSource.scan(&home.join(".claude/projects"), worktree_paths, now);
+  collect_with(home, worktree_paths, now, true)
+}
+
+fn collect_with(home: &Path, worktree_paths: &[PathBuf], now: SystemTime, sweep: bool) -> Vec<AgentSession> {
+  let claude = ClaudeCodeSource;
+  let base = home.join(".claude/projects");
+  let mut sessions = if sweep {
+    claude.scan(&base, worktree_paths, now)
+  } else {
+    claude.scan_matched(&base, worktree_paths, now)
+  };
   sessions.extend(CodexSource.scan(&home.join(".codex/sessions"), now));
   // opencode's own cross-platform convention is home-relative .local/share
   // (research.md D4), so no per-OS data-dir split here.
@@ -635,7 +673,8 @@ pub fn collect_sessions(home: &Path, worktree_paths: &[PathBuf], now: SystemTime
 }
 
 /// [`detect_all`] variant returning the per-worktree summary AND the raw
-/// session pool from one single scan pass (the TUI worker needs both).
+/// session pool from one single scan pass — the pool surfaces (TUI worker,
+/// `gwm agents`). This is the path that pays for the foreign-dir sweep.
 pub fn detect_with_sessions(
   home: &Path,
   worktrees: &[(String, PathBuf)],
@@ -649,7 +688,18 @@ pub fn detect_with_sessions(
   // must offer active sessions first, not backend concatenation order.
   sessions.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
   let mut map = summarize(&sessions, worktrees);
+  overlay_pins(&mut map, &sessions, pins, home, now);
+  (map, sessions)
+}
 
+/// Overlay manual pins onto a summary (shared by both detection entries).
+fn overlay_pins(
+  map: &mut std::collections::BTreeMap<String, WorktreeAgents>,
+  sessions: &[AgentSession],
+  pins: &[(String, String)],
+  home: &Path,
+  now: SystemTime,
+) {
   for (wt_id, sid) in pins {
     // Resolve the pinned session: usually already collected; a Claude
     // session whose project dir matches no managed worktree is invisible to
@@ -670,7 +720,6 @@ pub fn detect_with_sessions(
         .sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
     }
   }
-  (map, sessions)
 }
 
 /// Id sweep over every Claude project dir — only reached for a pin whose id

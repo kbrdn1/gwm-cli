@@ -256,10 +256,27 @@ pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Ve
 /// ponytail: workspace mode passes empty pins (each row belongs to a
 /// different repo whose config we don't open here); wire per-repo pins if
 /// workspace users ask.
-/// Returns the raw session pool from the same scan pass, so `gwm agents`
-/// can also list the sessions no worktree matched — precisely the ones
-/// worth attaching manually (Codex review round C).
-pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) -> Vec<crate::agent_sessions::AgentSession> {
+pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
+  attach_agents_inner(rows, pins, false);
+}
+
+/// [`attach_agents`] variant that also returns the raw session pool, so
+/// `gwm agents` can list the sessions no worktree matched — precisely the
+/// ones worth attaching manually (Codex review round C). Split from the
+/// plain call because the pool costs the Claude foreign-dir sweep (round
+/// F): `gwm list` and daemon polls must not pay it.
+pub fn attach_agents_with_pool(
+  rows: &mut [JsonWorktree],
+  pins: &[(String, String)],
+) -> Vec<crate::agent_sessions::AgentSession> {
+  attach_agents_inner(rows, pins, true)
+}
+
+fn attach_agents_inner(
+  rows: &mut [JsonWorktree],
+  pins: &[(String, String)],
+  want_pool: bool,
+) -> Vec<crate::agent_sessions::AgentSession> {
   let Some(home) = crate::agent_sessions::agents_home() else {
     return Vec::new();
   };
@@ -268,7 +285,7 @@ pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) -> Ve
     .iter()
     .map(|r| (r.path.clone(), std::path::PathBuf::from(&r.path)))
     .collect();
-  let (summary, pool) = detect_cached(&home, &keyed, pins, now);
+  let (summary, pool) = detect_cached(&home, &keyed, pins, now, want_pool);
   for row in rows.iter_mut() {
     row.agents = summary
       .get(&row.path)
@@ -284,11 +301,17 @@ pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) -> Ve
 /// last summary — the TUI's own 30 s re-detection cadence, applied here.
 /// ponytail: one process-global slot guarded by a Mutex; per-input LRU only
 /// if a real multi-repo daemon setup ever needs it.
+/// `want_pool` selects the detection depth (round F): `false` = summary
+/// only, matched-only Claude scan, empty pool returned; `true` = full
+/// sweep + raw pool. A cached full detection serves BOTH shapes (the
+/// summary is identical — swept sessions never summarize); a cached
+/// summary-only entry cannot serve a pool request and is recomputed.
 fn detect_cached(
   home: &std::path::Path,
   keyed: &[(String, std::path::PathBuf)],
   pins: &[(String, String)],
   now: std::time::SystemTime,
+  want_pool: bool,
 ) -> (
   std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
   Vec<crate::agent_sessions::AgentSession>,
@@ -299,7 +322,7 @@ fn detect_cached(
     std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
     Vec<crate::agent_sessions::AgentSession>,
   );
-  type CacheSlot = Option<(std::time::Instant, CacheKey, Detection)>;
+  type CacheSlot = Option<(std::time::Instant, CacheKey, bool, Detection)>;
   static CACHE: std::sync::Mutex<CacheSlot> = std::sync::Mutex::new(None);
 
   let key: CacheKey = (
@@ -310,12 +333,16 @@ fn detect_cached(
   // A poisoned mutex here would mean a panic mid-detection; recover by
   // recomputing rather than propagating the poison.
   let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-  if let Some((at, cached_key, detection)) = slot.as_ref() {
-    if *cached_key == key && at.elapsed() < TTL {
+  if let Some((at, cached_key, has_pool, detection)) = slot.as_ref() {
+    if *cached_key == key && at.elapsed() < TTL && (*has_pool || !want_pool) {
       return detection.clone();
     }
   }
-  let detection = crate::agent_sessions::detect_with_sessions(home, keyed, pins, now);
-  *slot = Some((std::time::Instant::now(), key, detection.clone()));
+  let detection = if want_pool {
+    crate::agent_sessions::detect_with_sessions(home, keyed, pins, now)
+  } else {
+    (crate::agent_sessions::detect_all(home, keyed, pins, now), Vec::new())
+  };
+  *slot = Some((std::time::Instant::now(), key, want_pool, detection.clone()));
   detection
 }

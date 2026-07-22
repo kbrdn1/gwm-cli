@@ -195,6 +195,44 @@ fn swept_foreign_claude_sessions_never_join_a_worktree_summary() {
 }
 
 #[test]
+fn scan_matched_never_visits_foreign_project_dirs() {
+  // Codex review round F: the global sweep costs a bounded read of every
+  // recent foreign artefact (names), so the summary-only surfaces
+  // (`gwm list`, daemon polls) use the matched-only scan; only the pool
+  // surfaces (`gwm agents`, the attach-by-id prompt) pay for the sweep.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("matched-1.jsonl"), "{}");
+  write(&base.join("-Users-x-other").join("foreign-1.jsonl"), "{}");
+
+  let sessions = ClaudeCodeSource.scan_matched(&base, std::slice::from_ref(&wt), SystemTime::now());
+  let ids: Vec<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
+  assert_eq!(ids, ["matched-1"], "no foreign session in the matched scan");
+}
+
+#[test]
+fn detect_all_still_resolves_an_unmatched_claude_pin_without_the_sweep() {
+  // Guard for the round-F split: the summary path drops the global sweep,
+  // so a pin on a foreign Claude session must resolve through the by-id
+  // sweep fallback — pins keep working on every surface.
+  let tmp = tempfile::TempDir::new().unwrap();
+  write(
+    &tmp
+      .path()
+      .join(".claude/projects/-Users-x-other")
+      .join("pinned-far.jsonl"),
+    r#"{"type":"user","message":{"role":"user","content":"far away"}}"#,
+  );
+  let keyed = [("wt".to_string(), PathBuf::from("/Users/x/proj"))];
+  let pins = [("wt".to_string(), "pinned-far".to_string())];
+  let map = gwm::agent_sessions::detect_all(tmp.path(), &keyed, &pins, SystemTime::now());
+  let agents = map.get("wt").expect("the pin materialises the session");
+  assert_eq!(agents.sessions.len(), 1);
+  assert_eq!(agents.sessions[0].id, "pinned-far");
+}
+
+#[test]
 fn session_pool_is_sorted_live_first() {
   // User feedback 2026-07-22: the attach-by-id prompt and every listing fed
   // by the raw pool must offer ACTIVE sessions first — the pool used to be
@@ -299,6 +337,25 @@ fn codex_scan_recovers_cwd_from_first_line_session_meta() {
   assert_eq!(s.cwd, PathBuf::from("/work/one"));
   assert_eq!(s.id, "019f6b95-b01a-7d30-a28a-68d9813e2248");
   assert!(!s.ended);
+}
+
+#[test]
+fn codex_scan_reads_the_newer_payload_id_field() {
+  // Codex review round F: rollouts from newer Codex versions (0.138+)
+  // carry `payload.id` instead of `payload.session_id`. Falling back to
+  // the file stem there leaked `rollout-<date>-<uuid>` ids, breaking the
+  // documented session-UUID contract for pins and JSON consumers.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join("sessions");
+  let meta = r#"{"type":"session_meta","payload":{"id":"0199aaaa-bbbb-cccc-dddd-eeeeffff0000","cwd":"/work/two"}}"#;
+  write(
+    &base.join("2026/07/22/rollout-2026-07-22T09-00-00-0199aaaa.jsonl"),
+    &format!("{meta}\n"),
+  );
+
+  let sessions = CodexSource.scan(&base, SystemTime::now());
+  assert_eq!(sessions.len(), 1);
+  assert_eq!(sessions[0].id, "0199aaaa-bbbb-cccc-dddd-eeeeffff0000");
 }
 
 #[test]
@@ -529,13 +586,32 @@ fn summarize_matches_through_the_injected_canonicalizer() {
 }
 
 #[test]
-fn summarize_case_sensitivity_follows_the_platform() {
+fn summarize_compares_exactly_after_canonicalisation() {
+  // Codex review round F: case handling belongs to the CANONICALIZER, not
+  // a lexical fold. On a case-insensitive volume `canonicalize` converges
+  // both sides to the on-disk casing, so exact comparison still matches;
+  // a platform-wide lowercase fold would MERGE two genuinely distinct
+  // worktrees on a case-sensitive volume (fabricated match — worse than a
+  // missed one).
   let sessions = [session(AgentKind::Codex, "/Work/One", 10, "s1")];
   let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);
-  #[cfg(any(windows, target_os = "macos"))]
+  assert!(map.is_empty(), "identity canon + different case = no match");
+
+  // A case-folding canonicalizer (what a case-insensitive volume gives)
+  // still matches through the injected fn.
+  let fold = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+  let map = summarize_with(&sessions, &[wt("one", "/work/one")], fold);
   assert_eq!(map.get("one").unwrap().sessions.len(), 1);
-  #[cfg(not(any(windows, target_os = "macos")))]
-  assert!(!map.contains_key("one"));
+}
+
+#[test]
+fn summarize_never_merges_case_distinct_worktrees() {
+  // /repo/Foo and /repo/foo can be two REAL dirs on case-sensitive APFS /
+  // any Linux fs: a session recorded in Foo must never surface on foo.
+  let sessions = [session(AgentKind::Codex, "/repo/Foo", 10, "s1")];
+  let map = summarize_with(&sessions, &[wt("upper", "/repo/Foo"), wt("lower", "/repo/foo")], ident);
+  assert_eq!(map.get("upper").unwrap().sessions.len(), 1);
+  assert!(!map.contains_key("lower"), "no phantom match: {map:?}");
 }
 
 #[test]

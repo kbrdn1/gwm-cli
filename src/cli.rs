@@ -1859,7 +1859,7 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
     None => {
       let mut rows: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
       let pins = json_api::agent_pins_for_rows(&repo, &rows);
-      let pool = json_api::attach_agents(&mut rows, &pins);
+      let pool = json_api::attach_agents_with_pool(&mut rows, &pins);
       if format == AgentsFormat::Json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
