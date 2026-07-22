@@ -202,6 +202,14 @@ pane. Where gwm can beat the reference: `snacks.gh` has no notion of a worktree,
 so the user picks from a flat list; gwm already knows the
 worktree → branch → PR → issue chain and can open on the current row directly.
 
+### TUI polish
+
+Smaller Status-pane items, independent of the four capability gaps above:
+
+- [#436](https://github.com/kbrdn1/gwm-cli/issues/436), **CI checks overlay**: with the Status pane focused, `c` lists the current PR's individual checks (the #299 indicator only shows the collapsed rollup); `Enter` opens a check in the browser. Reuses the #411 detail overlay shell.
+- [#437](https://github.com/kbrdn1/gwm-cli/issues/437), **Working Tree scroll**: `Shift+J` / `Shift+K` from the Status context scroll the file tree (#300), which is currently clamped with no way to reach overflow.
+- [#438](https://github.com/kbrdn1/gwm-cli/issues/438), **responsive sidebar heights**: Agents / Working Tree / Recent Commits share the column with a 5-line minimum per visible section instead of first-come `Length(content)`. Blocked by #412 (the Agents pane).
+
 ### Deferred
 
 - [#421](https://github.com/kbrdn1/gwm-cli/issues/421) — **container execution**: a `container:` block on the existing `exec` / aliases surface. Low cost (it wraps `docker run`, and anything exposing a Docker-compatible socket works for free), but no observed demand yet, so it waits until after the discovery push.
