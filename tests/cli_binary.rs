@@ -5907,6 +5907,43 @@ mod agents_cmd {
   }
 
   #[test]
+  fn workspace_listings_honor_per_repo_pins() {
+    // Codex review round I (P2): a session pinned in a child repo vanished
+    // from every workspace surface — the workspace pass handed detection an
+    // empty pin list instead of opening each row's owning repo.
+    let root = workspace_with_worktrees();
+    let home = tempfile::TempDir::new().unwrap();
+    // Recorded OUTSIDE any workspace path: only the pin can surface it.
+    seed_codex(home.path(), &home.path().join("elsewhere"), "cccc-wspin");
+    let alpha_wt = root.path().join("alpha-wt");
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(&alpha_wt)
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["agents", "attach", ".", "cccc-wspin"])
+      .assert()
+      .success();
+
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", ".", "--format=json"])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("cccc-wspin"));
+    // Human table too: the pinned session drives the AGENT column.
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", "."])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("codex"));
+  }
+
+  #[test]
   fn agents_json_returns_the_wire_shape() {
     let (repo_dir, _repo) = init_repo();
     let home = tempfile::TempDir::new().unwrap();

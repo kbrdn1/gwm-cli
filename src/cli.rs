@@ -2255,6 +2255,22 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     Vec::new()
   };
 
+  // Pins live in each row's OWNING repo branch config — open it per row
+  // (`agent_pins_for_rows` is single-repo; a workspace spans several). A
+  // session pinned in a child repo must survive on every workspace surface
+  // (Codex review round I).
+  let agent_pins: Vec<(String, String)> = rows
+    .iter()
+    .filter_map(|row| {
+      let repo = Repository::open(&row.repo_path).ok()?;
+      let branch = github::pinnable_branch(row.info.branch.as_deref())?;
+      let pins = github::agent_pins(&repo, branch).ok()?;
+      let path = row.info.path.to_string_lossy().to_string();
+      Some(pins.into_iter().map(move |sid| (path.clone(), sid)).collect::<Vec<_>>())
+    })
+    .flatten()
+    .collect();
+
   if format == ListFormat::Json {
     // Workspace JSON tags each worktree with its owning `repo` so a
     // cross-repo consumer can disambiguate (issue #36 + #38).
@@ -2278,10 +2294,9 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
         worktree
       })
       .collect();
-    // Issue #408: same shared agents pass as single-repo list / daemon.
-    // ponytail: no pins in workspace mode (rows span repos whose configs
-    // aren't opened here) — wire per-repo pins if workspace users ask.
-    json_api::attach_agents(&mut worktree_rows, &[]);
+    // Issue #408: same shared agents pass as single-repo list / daemon,
+    // with each row's own repo pins overlaid (round I).
+    json_api::attach_agents(&mut worktree_rows, &agent_pins);
     let dto: Vec<WorkspaceJsonWorktree> = rows
       .iter()
       .zip(worktree_rows)
@@ -2296,8 +2311,8 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
 
   let repo_w = rows.iter().map(|r| r.repo_name.len()).max().unwrap_or(4).clamp(4, 30);
   // AGENT parity with the single-repo table (Codex review round A): one
-  // detection pass over the merged rows, no pins (same workspace ceiling as
-  // the JSON branch above).
+  // detection pass over the merged rows, each row's own repo pins overlaid
+  // (round I).
   let agent_w = 8;
   let agent_cells: Vec<String> = {
     let mut cells = vec!["-".to_string(); rows.len()];
@@ -2306,7 +2321,7 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
         .iter()
         .map(|r| (r.info.path.to_string_lossy().to_string(), r.info.path.clone()))
         .collect();
-      let map = crate::agent_sessions::detect_all(&home, &keyed, &[], std::time::SystemTime::now());
+      let map = crate::agent_sessions::detect_all(&home, &keyed, &agent_pins, std::time::SystemTime::now());
       for (i, r) in rows.iter().enumerate() {
         if let Some(top) = map.get(r.info.path.to_string_lossy().as_ref()).and_then(|a| a.top()) {
           cells[i] = top.kind.display().to_string();

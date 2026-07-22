@@ -1291,10 +1291,9 @@ impl App {
       .collect();
     // Manual pins are read on the main thread (`Repository` is not `Send`)
     // and moved into the worker as plain strings (issue #408 US4). In
-    // workspace mode the merged rows span several repos while `self.repo` is
-    // only the active one — a same-named branch in another repo would leak
-    // the wrong pin (Codex review round A), so pins stay single-repo-only,
-    // the same ceiling as the CLI/JSON workspace surfaces.
+    // workspace mode each row reads from its owning repo via `row_repo`
+    // (Codex review round I — the round-A single-repo ceiling hid pins set
+    // in child repos).
     self.agent_pins = self.read_agent_pins();
     let pins: Vec<(String, String)> = self
       .agent_pins
@@ -2526,11 +2525,27 @@ impl App {
   }
 
   /// Fresh pins per worktree path from branch config — event-path only
-  /// (the render reads the [`Self::agent_pins`] copy). Empty in workspace
-  /// mode: the merged rows span repos whose configs aren't opened here.
+  /// (the render reads the [`Self::agent_pins`] copy). In workspace mode
+  /// each row reads from its OWNING repo (`row_repo` mapping) so a pin set
+  /// in a child repo survives, and a same-named branch in another repo
+  /// cannot leak its pins (Codex review rounds A + I).
   fn read_agent_pins(&self) -> std::collections::BTreeMap<String, Vec<String>> {
-    if self.is_workspace() {
-      return std::collections::BTreeMap::new();
+    if let Some(ws) = &self.workspace {
+      return self
+        .worktrees
+        .iter()
+        .enumerate()
+        .filter_map(|(i, w)| {
+          let branch = crate::github::pinnable_branch(w.branch.as_deref())?;
+          let meta = ws.repos.get(*ws.row_repo.get(i)?)?;
+          let repo = Repository::open(&meta.workdir).ok()?;
+          let pins = crate::github::agent_pins(&repo, branch).ok()?;
+          if pins.is_empty() {
+            return None;
+          }
+          Some((w.path.to_string_lossy().to_string(), pins))
+        })
+        .collect();
     }
     self
       .worktrees

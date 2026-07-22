@@ -477,3 +477,29 @@ fn refresh_invalidates_an_inflight_async_workspace_relist() {
     "the superseded workspace payload was dropped — the fresh map stands"
   );
 }
+
+#[test]
+fn workspace_pins_are_read_from_each_rows_own_repo() {
+  // Codex review round I (P2): a session pinned in a child repo was
+  // invisible in TUI workspace mode — `read_agent_pins` returned an empty
+  // map instead of opening each row's owning repo, so the Agents pane
+  // (pinned-only) never showed it.
+  let root = workspace_root();
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  gwm::github::add_agent_pin(&alpha, "main", "sid-ws-alpha").unwrap();
+
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  app.maybe_refresh_agent_sessions();
+
+  let alpha_row = app
+    .worktrees
+    .iter()
+    .find(|w| w.path.ends_with("alpha"))
+    .expect("alpha's main checkout is a row");
+  let key = alpha_row.path.to_string_lossy().to_string();
+  assert_eq!(
+    app.agent_pins.get(&key).map(Vec::as_slice),
+    Some(&["sid-ws-alpha".to_string()][..]),
+    "the pin set in alpha's branch config reaches the render-side map"
+  );
+}

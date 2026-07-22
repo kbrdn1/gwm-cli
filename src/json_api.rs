@@ -253,9 +253,8 @@ pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Ve
 /// surface (CLI list, daemon, workspace rows) so they cannot drift. No home
 /// directory → no-op (FR-009).
 ///
-/// ponytail: workspace mode passes empty pins (each row belongs to a
-/// different repo whose config we don't open here); wire per-repo pins if
-/// workspace users ask.
+/// Workspace callers open each row's owning repo to build `pins` (Codex
+/// review round I) — this pass itself stays repo-agnostic.
 pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
   attach_agents_inner(rows, pins, false);
 }
