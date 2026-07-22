@@ -3312,6 +3312,12 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
 fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   // No daemon transport in this build: the statusline has no source, so it
   // degrades to the documented empty line (exit 0) rather than erroring.
+  // EVERY segment inherits this ceiling — branch, flags, issue/PR and the
+  // #408 agent indicator alike (docs carry the Unix-only caveat). The
+  // statusline is deliberately daemon-fed (#309: a prompt path must never
+  // open the repo or scan artefact stores itself); lighting it up on
+  // Windows means a named-pipe daemon transport, a follow-up to #38, not a
+  // local-detection fallback here.
   let _ = (socket, watch);
   let cwd = std::env::current_dir().unwrap_or_default();
   print_statusline(&[], &cwd);
