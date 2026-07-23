@@ -10,13 +10,11 @@ mod common;
 
 use common::init_repo;
 use gwm::daemon::{client, serve, ServeOptions};
-use gwm::worktree;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use tempfile::TempDir;
 
 /// A unique pipe name per test: pipe names are machine-global (no tempdir
 /// isolation like unix socket paths), so each test namespaces its own with
@@ -70,9 +68,8 @@ impl Drop for TestDaemon {
 
 #[test]
 fn list_once_round_trips_over_the_named_pipe() {
-  let tmp = TempDir::new().unwrap();
-  let repo = init_repo(tmp.path());
-  let workdir = repo.workdir().unwrap().to_path_buf();
+  let (dir, _repo) = init_repo();
+  let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "list", Duration::from_millis(50));
 
   let worktrees = client::list_once(&daemon.pipe).expect("list must round-trip");
@@ -84,9 +81,8 @@ fn list_once_round_trips_over_the_named_pipe() {
 
 #[test]
 fn subscribe_delivers_the_initial_snapshot() {
-  let tmp = TempDir::new().unwrap();
-  let repo = init_repo(tmp.path());
-  let workdir = repo.workdir().unwrap().to_path_buf();
+  let (dir, _repo) = init_repo();
+  let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "subscribe", Duration::from_millis(50));
 
   let mut snapshots = 0u32;
@@ -109,9 +105,8 @@ fn list_once_errors_when_no_daemon_is_listening() {
 
 #[test]
 fn a_second_daemon_on_the_same_pipe_is_refused() {
-  let tmp = TempDir::new().unwrap();
-  let repo = init_repo(tmp.path());
-  let workdir = repo.workdir().unwrap().to_path_buf();
+  let (dir, _repo) = init_repo();
+  let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "dup", Duration::from_millis(50));
 
   let opts = ServeOptions::new(daemon.pipe.clone(), workdir, Duration::from_millis(50));
@@ -126,9 +121,8 @@ fn statusline_render_shape_survives_the_pipe() {
   // End-to-end through the public binary surface: `gwm statusline` against
   // the pipe daemon must print a non-empty segment line for the repo cwd.
   use std::process::Command;
-  let tmp = TempDir::new().unwrap();
-  let repo = init_repo(tmp.path());
-  let workdir = repo.workdir().unwrap().to_path_buf();
+  let (dir, _repo) = init_repo();
+  let workdir = dir.path().to_path_buf();
   let daemon = TestDaemon::start(&workdir, "statusline", Duration::from_millis(50));
 
   let out = Command::new(env!("CARGO_BIN_EXE_gwm"))
