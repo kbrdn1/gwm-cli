@@ -1465,7 +1465,10 @@ pub mod client {
       if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
         return Err(deny("cannot open the process token"));
       }
-      let mut user_buf = [0u8; 256];
+      // u64 storage so the buffer is 8-aligned: casting a byte array to
+      // TOKEN_USER trips Rust's misaligned-dereference abort (witnessed
+      // in CI as STATUS_STACK_BUFFER_OVERRUN).
+      let mut user_buf = [0u64; 32];
       let mut len = 0u32;
       // SAFETY: advapi fills a TOKEN_USER into the (large enough) buffer.
       let got = unsafe {
@@ -1473,7 +1476,7 @@ pub mod client {
           token,
           TokenUser,
           user_buf.as_mut_ptr().cast(),
-          user_buf.len() as u32,
+          (user_buf.len() * 8) as u32,
           &mut len,
         )
       };
@@ -1492,8 +1495,8 @@ pub mod client {
       // An elevated daemon's objects can be owned by BUILTIN\Administrators
       // rather than the user SID. Accepting that group opens nothing to an
       // unprivileged attacker — a local admin already controls the machine.
-      let mut admin_buf = [0u8; SECURITY_MAX_SID_SIZE as usize];
-      let mut admin_len = admin_buf.len() as u32;
+      let mut admin_buf = [0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
+      let mut admin_len = (admin_buf.len() * 8) as u32;
       // SAFETY: CreateWellKnownSid fills the (max-sized) buffer.
       let admin_ok = unsafe {
         CreateWellKnownSid(
