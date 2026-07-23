@@ -273,10 +273,44 @@ pub fn delete_reclaim(reclaim: &WorktreeReclaim) -> Result<u64> {
   let mut freed = 0u64;
   for a in &reclaim.artifacts {
     let target = reclaim.path.join(&a.rel);
-    std::fs::remove_dir_all(&target)?;
+    remove_dir_all_tolerant(&target, |p| std::fs::remove_dir_all(p))?;
     freed = freed.saturating_add(a.bytes);
   }
   Ok(freed)
+}
+
+/// Bounded-retry wrapper around a recursive directory removal (issue #440).
+///
+/// `gwm clean --yes` races concurrent writers: a watcher such as
+/// rust-analyzer can recreate a file inside `target/` after `remove_dir_all`
+/// emptied a subdirectory but before it removed the parent, and the whole
+/// command then fails with ENOTEMPTY even though the reclaim mostly worked.
+/// One more pass deletes the freshly written files, so `DirectoryNotEmpty`
+/// is retried (bounded, so a writer that never stops cannot spin the command
+/// forever). A `NotFound` means someone else already reclaimed the directory
+/// — that is a success, not an error. Every other error propagates on the
+/// first hit.
+///
+/// The removal primitive is injected so `tests/clean_tests.rs` can pin the
+/// retry contract deterministically (the real race is timing dependent);
+/// production callers go through [`delete_reclaim`], which passes
+/// `std::fs::remove_dir_all`. Public for that test seam only — treat as
+/// `pub(crate)` by convention (see #342 for the surface review).
+pub fn remove_dir_all_tolerant<F>(target: &Path, mut remove: F) -> std::io::Result<()>
+where
+  F: FnMut(&Path) -> std::io::Result<()>,
+{
+  const REMOVE_ATTEMPTS: u32 = 3;
+  let mut attempt = 0;
+  loop {
+    attempt += 1;
+    match remove(target) {
+      Ok(()) => return Ok(()),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+      Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty && attempt < REMOVE_ATTEMPTS => continue,
+      Err(e) => return Err(e),
+    }
+  }
 }
 
 /// Format `bytes` as a human-readable size with a binary unit (`B`, `KiB`,
