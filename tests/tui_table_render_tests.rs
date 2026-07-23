@@ -79,7 +79,7 @@ fn agent_column_appears_once_a_session_lands() {
     },
   );
   let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
-  assert!(app.apply_agent_snapshot(generation, map, Vec::new(), Default::default()));
+  assert!(app.apply_agent_snapshot(generation, map, None, Default::default()));
 
   let text = draw_once(&mut app);
   assert!(text.contains("AGENT"), "a landed session must surface the column");

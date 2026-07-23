@@ -554,7 +554,7 @@ fn overlay_pin_markers_survive_an_active_repo_swap() {
   // with the active repo drifted to beta, alpha's pin is in the sources.
   let pins = gwm::tui::read_pins_from_sources(&app.agent_pin_sources());
   let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
-  assert!(app.apply_agent_snapshot(generation, map, Vec::new(), pins));
+  assert!(app.apply_agent_snapshot(generation, map, None, pins));
   assert!(
     app.detail_overlay.rows.iter().any(|r| r.value.contains("pinned")),
     "the pin from alpha's own repo marks the row: {:?}",

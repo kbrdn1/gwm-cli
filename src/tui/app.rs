@@ -1073,7 +1073,11 @@ impl App {
   /// the synchronous [`Self::refresh`] and by the off-thread drain in
   /// [`Self::drain_task_results`].
   fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
-    let old_paths: std::collections::BTreeSet<PathBuf> = self.worktrees.iter().map(|w| w.path.clone()).collect();
+    let old_keys: std::collections::BTreeSet<(PathBuf, Option<String>)> = self
+      .worktrees
+      .iter()
+      .map(|w| (w.path.clone(), w.branch.clone()))
+      .collect();
     // The carry-over preserves this session's in-memory fetched issue/PR state
     // across a re-list, keyed by number. In workspace mode that key collides
     // across repos (two repos can both own `#1`), so skip it: the freshly
@@ -1117,15 +1121,21 @@ impl App {
     // every refresh path shares, so the OFF-thread drains (`RefreshWorktrees` /
     // `RefreshWorkspace`) get it too, not just the synchronous `refresh`.
     self.tasks.invalidate(TaskKind::Sidebar);
-    // Agent staleness is keyed to the SET of worktree paths, not to the
-    // refresh itself (Codex review round P): invalidating unconditionally
-    // freed the in-flight slot while its scan thread kept running, so an
-    // auto-refresh faster than the scan piled up concurrent scans whose
-    // results were each dropped as stale — no snapshot ever landed. A
-    // same-set refresh keeps the in-flight run (the 30 s TTL owns
-    // freshness); only a genuinely different set drops it.
-    let new_paths: std::collections::BTreeSet<PathBuf> = self.worktrees.iter().map(|w| w.path.clone()).collect();
-    if old_paths != new_paths {
+    // Agent staleness is keyed to the SET of (path, branch) pairs, not to
+    // the refresh itself (Codex review rounds P + Q): invalidating
+    // unconditionally freed the in-flight slot while its scan thread kept
+    // running, so an auto-refresh faster than the scan piled up concurrent
+    // scans whose results were each dropped as stale — no snapshot ever
+    // landed. The branch is part of the key because pins live in BRANCH
+    // config: a same-path checkout that switched branch must drop the old
+    // branch's pins instead of showing them for up to 30 s. A same-keys
+    // refresh keeps the in-flight run (the 30 s TTL owns freshness).
+    let new_keys: std::collections::BTreeSet<(PathBuf, Option<String>)> = self
+      .worktrees
+      .iter()
+      .map(|w| (w.path.clone(), w.branch.clone()))
+      .collect();
+    if old_keys != new_keys {
       self.tasks.invalidate(TaskKind::AgentSessions);
       self.agent_snapshot_at = None;
     }
@@ -1333,11 +1343,45 @@ impl App {
         .iter()
         .flat_map(|(path, sids)| sids.iter().map(move |sid| (path.clone(), sid.clone())))
         .collect();
+      // Summary-only: the matched-per-worktree scan, NOT the full
+      // foreign-dir sweep — that one is linear in the whole artefact
+      // history and runs only when the attach prompt opens (round Q).
+      let map = match crate::agent_sessions::agents_home() {
+        Some(home) => crate::agent_sessions::detect_all(&home, &rows, &pins, std::time::SystemTime::now()),
+        None => Default::default(), // no home: detection degrades to empty (FR-009)
+      };
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map, None, pins_map));
+    });
+  }
+
+  /// Spawn the FULL detection — foreign-dir sweep included — to feed the
+  /// attach prompt's candidate pool. Prompt-open only (round Q): the sweep
+  /// costs a bounded read of every recent foreign artefact and must not
+  /// ride the 30 s periodic tick. Drops a coalescing in-flight periodic
+  /// run: this result supersedes it anyway.
+  fn refresh_agent_pool(&mut self) {
+    self.tasks.invalidate(TaskKind::AgentSessions);
+    let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
+      return;
+    };
+    let rows: Vec<(String, PathBuf)> = self
+      .worktrees
+      .iter()
+      .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
+      .collect();
+    let pin_sources = self.agent_pin_sources();
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let pins_map = read_pins_from_sources(&pin_sources);
+      let pins: Vec<(String, String)> = pins_map
+        .iter()
+        .flat_map(|(path, sids)| sids.iter().map(move |sid| (path.clone(), sid.clone())))
+        .collect();
       let (map, all) = match crate::agent_sessions::agents_home() {
         Some(home) => crate::agent_sessions::detect_with_sessions(&home, &rows, &pins, std::time::SystemTime::now()),
         None => Default::default(), // no home: detection degrades to empty (FR-009)
       };
-      let _ = tx.send(TaskMsg::AgentSessions(generation, map, all, pins_map));
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map, Some(all), pins_map));
     });
   }
 
@@ -1371,7 +1415,7 @@ impl App {
     &mut self,
     generation: u64,
     map: std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
-    all: Vec<crate::agent_sessions::AgentSession>,
+    all: Option<Vec<crate::agent_sessions::AgentSession>>,
     pins: std::collections::BTreeMap<String, Vec<String>>,
   ) -> bool {
     if !self.tasks.complete(TaskKind::AgentSessions, generation) {
@@ -1379,7 +1423,11 @@ impl App {
     }
     self.agent_snapshot = Some(map);
     self.agent_snapshot_at = Some(std::time::Instant::now());
-    self.agent_all_sessions = all;
+    // `None` = summary-only run: the previous pool survives so an open
+    // attach prompt keeps its candidates (round Q).
+    if let Some(all) = all {
+      self.agent_all_sessions = all;
+    }
     // The worker read the pins from each row's owning repo (round P);
     // store them before the overlay rebuild below reads the map.
     self.agent_pins = pins;
@@ -2641,6 +2689,10 @@ impl App {
     self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
     self.detail_overlay.input.clear();
     self.detail_overlay.input_selected = 0;
+    // The candidate pool needs the full sweep — refreshed on open, not on
+    // the periodic tick (round Q); until it lands the prompt filters the
+    // last landed pool.
+    self.refresh_agent_pool();
   }
 
   pub fn agent_input_push(&mut self, c: char) {

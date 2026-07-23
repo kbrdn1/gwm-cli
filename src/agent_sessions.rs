@@ -868,11 +868,18 @@ where
     }
   }
   for agents in map.values_mut() {
-    agents
-      .sessions
-      .sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+    agents.sessions.sort_by_key(session_sort_key);
   }
   map
+}
+
+/// Deterministic session ordering: live first, most recent first, then
+/// `kind` + `id` as stable tiebreakers — equal mtimes are common on
+/// low-resolution filesystems, and a read_dir-order flip between two scans
+/// would fake a `worktrees.changed` daemon push and shuffle `top` (Codex
+/// review round Q).
+fn session_sort_key(s: &AgentSession) -> (bool, std::cmp::Reverse<SystemTime>, AgentKind, String) {
+  (s.ended, std::cmp::Reverse(s.last_activity), s.kind, s.id.clone())
 }
 
 /// Path comparison key: trailing separators are normalised away by component
@@ -930,7 +937,7 @@ pub fn detect_all(
   let paths: Vec<PathBuf> = worktrees.iter().map(|(_, p)| p.clone()).collect();
   let pinned_ids: std::collections::BTreeSet<&str> = pins.iter().map(|(_, sid)| sid.as_str()).collect();
   let mut sessions = collect_with(home, &paths, now, false, &pinned_ids);
-  sessions.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+  sessions.sort_by_key(session_sort_key);
   let mut map = summarize(&sessions, worktrees);
   overlay_pins(&mut map, &sessions, pins, home, now);
   map
@@ -1006,7 +1013,7 @@ pub fn detect_with_sessions(
   // Live-first pool (user feedback 2026-07-22): every consumer of the raw
   // pool — the TUI attach-by-id prompt, `gwm agents`' unmatched section —
   // must offer active sessions first, not backend concatenation order.
-  sessions.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+  sessions.sort_by_key(session_sort_key);
   let mut map = summarize(&sessions, worktrees);
   overlay_pins(&mut map, &sessions, pins, home, now);
   (map, sessions)
@@ -1035,9 +1042,7 @@ fn overlay_pins(
     let agents = map.entry(wt_id.clone()).or_default();
     if !agents.sessions.iter().any(|s| &s.id == sid) {
       agents.sessions.push(session);
-      agents
-        .sessions
-        .sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+      agents.sessions.sort_by_key(session_sort_key);
     }
   }
 }

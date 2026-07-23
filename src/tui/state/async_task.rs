@@ -252,7 +252,12 @@ pub enum TaskMsg {
   AgentSessions(
     u64,
     std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
-    Vec<crate::agent_sessions::AgentSession>,
+    // The raw session pool, `Some` only when the worker ran the full
+    // foreign-dir sweep (the attach-prompt path); the periodic
+    // summary-only detection sends `None` and the previous pool survives
+    // (round Q — the sweep is linear in the whole artefact history and
+    // must not run every 30 s).
+    Option<Vec<crate::agent_sessions::AgentSession>>,
     // Pins per worktree path, read in the worker from each row's owning
     // repo — branch-config I/O stays off the event loop (round P).
     std::collections::BTreeMap<String, Vec<String>>,

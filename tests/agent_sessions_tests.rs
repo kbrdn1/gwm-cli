@@ -977,6 +977,46 @@ fn summarize_never_merges_case_distinct_worktrees() {
 }
 
 #[test]
+fn equal_timestamps_sort_deterministically_by_kind_then_id() {
+  // Codex review round Q (P2): with `ended` and mtime equal (common on
+  // low-resolution filesystems), the order used to be whatever read_dir
+  // produced — `top` and the JSON order could flip between two scans and
+  // fake a `worktrees.changed` daemon push. kind + id break the tie.
+  let t = SystemTime::UNIX_EPOCH + Duration::from_secs(1_784_000_000);
+  let mk = |kind: AgentKind, id: &str| AgentSession {
+    kind,
+    cwd: PathBuf::from("/work/one"),
+    last_activity: t,
+    ended: false,
+    id: id.into(),
+    name: None,
+  };
+  let keyed = [("one".to_string(), PathBuf::from("/work/one"))];
+  let shuffled = [
+    mk(AgentKind::Codex, "bbb"),
+    mk(AgentKind::Codex, "aaa"),
+    mk(AgentKind::ClaudeCode, "zzz"),
+  ];
+  let reversed = [
+    mk(AgentKind::ClaudeCode, "zzz"),
+    mk(AgentKind::Codex, "aaa"),
+    mk(AgentKind::Codex, "bbb"),
+  ];
+  let ids = |sessions: &[AgentSession]| -> Vec<String> {
+    summarize_with(sessions, &keyed, ident)
+      .get("one")
+      .unwrap()
+      .sessions
+      .iter()
+      .map(|s| s.id.clone())
+      .collect()
+  };
+  let a = ids(&shuffled);
+  assert_eq!(a, ids(&reversed), "input order never leaks into the output");
+  assert_eq!(a, ["zzz", "aaa", "bbb"], "tie broken by kind (claude < codex) then id");
+}
+
+#[test]
 fn summarize_drops_unmatched_sessions_without_error() {
   let sessions = [session(AgentKind::Vibe, "/somewhere/else", 10, "s1")];
   let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);
