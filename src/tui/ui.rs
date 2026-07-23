@@ -4488,9 +4488,11 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // over every detected session; Enter pins the highlighted candidate.
   if ov.mode == DetailMode::Input {
     let candidates = app.agent_input_candidates();
-    let max_visible = (term.height as usize).saturating_sub(12).max(3);
-    let visible = candidates.len().min(max_visible);
-    let (start, end) = picker_window(candidates.len(), ov.input_selected, visible.max(1));
+    // FIXED listing height (issue #445): the window is sized by the
+    // terminal alone, never by the filtered candidate count — typing must
+    // not resize the frame. Short lists blank-pad the remaining rows.
+    let list_h = (term.height as usize).saturating_sub(12).max(3);
+    let (start, end) = picker_window(candidates.len(), ov.input_selected, list_h);
     let now = std::time::SystemTime::now();
 
     let mut lines = overlay_title_lines("Attach a session", accent);
@@ -4529,6 +4531,12 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         Span::styled(" ".repeat(pad), pad_style),
       ]));
     }
+    // Blank-pad up to the fixed window so the frame height is constant
+    // whatever the filter matched (the empty-state line counts as one row).
+    let shown = if candidates.is_empty() { 1 } else { end - start };
+    for _ in shown..list_h {
+      lines.push(Line::from(String::new()));
+    }
     lines.push(Line::from(String::new()));
     lines.push(modal_hint_line(
       &[
@@ -4543,6 +4551,15 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let area = centered_abs(width, height, term);
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    // Scrollbar over the listing sub-area when the candidates overflow the
+    // fixed window — same affordance as the detail mode below (issue #445).
+    let list_rect = Rect {
+      x: area.x + 1,
+      y: area.y + 2 /* border + padding */ + 2 /* title */ + 2, /* id line + blank */
+      width: area.width.saturating_sub(2),
+      height: list_h as u16,
+    };
+    let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
     return;
   }
   let total = ov.rows.len();
