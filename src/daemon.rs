@@ -1335,7 +1335,12 @@ mod server_win {
         }
         match reader.read(&mut buf) {
           Ok(0) => return, // peer closed
-          Ok(_) => {}      // unexpected client chatter on a push stream — ignore
+          // Client chatter ENDS the subscription here, unlike on unix
+          // (which ignores it): the pipe client cannot close its recv
+          // half from another thread the way a unix client's fd drop
+          // does, so writing anything IS the client's hang-up signal —
+          // the close then unblocks its reader thread via EOF (#439).
+          Ok(_) => return,
           Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
           Err(e) if e.kind() == ErrorKind::Interrupted => {}
           Err(_) => return, // dead link
@@ -1435,33 +1440,29 @@ pub mod client {
     parse_list_result(line.trim())
   }
 
-  /// Poll cadence of the subscribe reader's nonblocking line loop.
-  const READER_TICK: Duration = Duration::from_millis(15);
-
   /// Subscribe to `worktrees.changed` — same contract as the unix client:
   /// the first snapshot is bounded by [`CLIENT_TIMEOUT`], later pushes wait
   /// indefinitely, and a stream that closes before any snapshot errors so
   /// the caller's degradation branch fires (issue #312).
   ///
-  /// Shape (Codex review #439): the WHOLE connect + handshake + read loop
-  /// lives on a helper thread, so the first `recv_timeout` bounds the
-  /// connect too — a wedged daemon whose pipe accepts no instance must
-  /// degrade `statusline --watch` within the deadline, not hang it. The
-  /// thread owns both stream halves and reads NONBLOCKING under a cancel
-  /// flag: when `on_snapshot` asks to stop, flipping the flag makes the
-  /// thread exit within a tick and drop both halves — actually closing
-  /// the pipe and freeing the server's connection slot (a blocking
-  /// `read_line` would keep both alive until the next push, potentially
-  /// forever).
+  /// Shape (Codex review #439): connect + handshake + the BLOCKING read
+  /// loop all live on a helper thread, so the first `recv_timeout` bounds
+  /// the connect too — a wedged daemon whose pipe accepts no instance
+  /// degrades `statusline --watch` within the deadline instead of hanging
+  /// it. Reads stay blocking on purpose: client-side nonblocking mode on a
+  /// named pipe is `PIPE_NOWAIT`, which Microsoft deprecates and which
+  /// surfaces empty-pipe reads as fatal-looking errors (witnessed in CI).
+  /// Ending the stream is a PROTOCOL affair instead: the send half is
+  /// handed back to this thread, and when `on_snapshot` asks to stop we
+  /// write a hang-up line — the pipe server closes the connection on any
+  /// client chatter, which unblocks the reader thread via EOF and frees
+  /// the daemon's connection slot. If the daemon is wedged and never
+  /// reads, the reader thread leaks until the short-lived CLI process
+  /// exits — the same accepted cost as `list_once`'s timeout path.
   pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use std::time::Instant;
-
     let socket = socket.to_path_buf();
-    let cancel = Arc::new(AtomicBool::new(false));
-    let flag = Arc::clone(&cancel);
     let (tx, rx) = mpsc::channel::<Result<String>>();
+    let (half_tx, half_rx) = mpsc::channel();
     std::thread::spawn(move || {
       let stream = match connect(&socket) {
         Ok(s) => s,
@@ -1470,74 +1471,23 @@ pub mod client {
           return;
         }
       };
-      if let Err(e) = stream.set_nonblocking(true) {
+      let (recv, mut send) = stream.split();
+      if let Err(e) = writeln!(send, "{SUBSCRIBE_REQUEST}").and_then(|()| send.flush()) {
         let _ = tx.send(Err(GwmError::Other(format!("daemon: {e}"))));
         return;
       }
-      let (recv, mut send) = stream.split();
-      // The handshake write races an empty kernel buffer at worst — retry
-      // WouldBlock briefly rather than treating it as fatal.
-      let frame = format!("{SUBSCRIBE_REQUEST}\n").into_bytes();
-      let deadline = Instant::now() + CLIENT_TIMEOUT;
-      let mut written = 0usize;
-      while written < frame.len() {
-        if flag.load(Ordering::Relaxed) || Instant::now() >= deadline {
-          return; // both halves drop here — the pipe closes
-        }
-        match send.write(&frame[written..]) {
-          Ok(0) => return,
-          Ok(n) => written += n,
-          Err(e)
-            if matches!(
-              e.kind(),
-              std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ) =>
-          {
-            std::thread::sleep(READER_TICK);
-          }
-          Err(e) => {
-            let _ = tx.send(Err(GwmError::Other(format!("daemon: {e}"))));
-            return;
-          }
-        }
-      }
-      // Nonblocking line loop: accumulate until '\n', ship each line. On
-      // cancel or a dead link, fall off the end — dropping BOTH halves
-      // closes the pipe (the whole point of the flag).
-      let mut reader = std::io::BufReader::new(recv);
-      let mut buf: Vec<u8> = Vec::new();
+      // Hand the send half to the consumer so it can hang up (see above).
+      let _ = half_tx.send(send);
+      let mut reader = BufReader::new(recv);
       loop {
-        if flag.load(Ordering::Relaxed) {
-          return;
-        }
-        let chunk = match reader.fill_buf() {
-          Ok(c) => c,
-          Err(e)
-            if matches!(
-              e.kind(),
-              std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
-            ) =>
-          {
-            std::thread::sleep(READER_TICK);
-            continue;
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+          Ok(0) | Err(_) => break, // EOF or dead link — dropping tx ends the stream
+          Ok(_) => {
+            if tx.send(Ok(line)).is_err() {
+              break; // consumer stopped listening
+            }
           }
-          Err(_) => return, // dead link — dropping tx ends the consumer loop
-        };
-        if chunk.is_empty() {
-          return; // EOF — peer closed
-        }
-        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
-          buf.extend_from_slice(&chunk[..pos]);
-          reader.consume(pos + 1);
-          let line = String::from_utf8_lossy(&buf).into_owned();
-          buf.clear();
-          if tx.send(Ok(line)).is_err() {
-            return; // consumer stopped listening
-          }
-        } else {
-          let n = chunk.len();
-          buf.extend_from_slice(chunk);
-          reader.consume(n);
         }
       }
     });
@@ -1575,9 +1525,13 @@ pub mod client {
         }
       }
     }
-    // Wake and end the reader thread so it drops both halves promptly —
-    // closing the pipe and freeing the daemon's connection slot.
-    cancel.store(true, Ordering::Relaxed);
+    // Hang up: any client line makes the pipe server close this
+    // connection, which unblocks the reader thread via EOF so both halves
+    // drop and the daemon's slot frees. Best effort — a dead daemon
+    // already ended the stream.
+    if let Ok(mut send) = half_rx.try_recv() {
+      let _ = writeln!(send, "bye").and_then(|()| send.flush());
+    }
     result?;
     if !delivered_any {
       return Err(GwmError::Other(
