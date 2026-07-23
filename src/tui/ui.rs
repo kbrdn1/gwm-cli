@@ -4488,9 +4488,13 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   // over every detected session; Enter pins the highlighted candidate.
   if ov.mode == DetailMode::Input {
     let candidates = app.agent_input_candidates();
-    let max_visible = (term.height as usize).saturating_sub(12).max(3);
-    let visible = candidates.len().min(max_visible);
-    let (start, end) = picker_window(candidates.len(), ov.input_selected, visible.max(1));
+    // FIXED listing height (issue #445): the window is sized by the
+    // terminal alone, never by the filtered candidate count — typing must
+    // not resize the frame. Short lists blank-pad the remaining rows.
+    // Capped at 10 rows: a full-terminal prompt reads as a takeover, not
+    // a palette (user feedback 2026-07-23); the scrollbar covers the rest.
+    let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
+    let (start, end) = picker_window(candidates.len(), ov.input_selected, list_h);
     let now = std::time::SystemTime::now();
 
     let mut lines = overlay_title_lines("Attach a session", accent);
@@ -4529,6 +4533,12 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
         Span::styled(" ".repeat(pad), pad_style),
       ]));
     }
+    // Blank-pad up to the fixed window so the frame height is constant
+    // whatever the filter matched (the empty-state line counts as one row).
+    let shown = if candidates.is_empty() { 1 } else { end - start };
+    for _ in shown..list_h {
+      lines.push(Line::from(String::new()));
+    }
     lines.push(Line::from(String::new()));
     lines.push(modal_hint_line(
       &[
@@ -4543,6 +4553,21 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let area = centered_abs(width, height, term);
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    // Scrollbar over the listing sub-area when the candidates overflow the
+    // fixed window — same affordance as the detail mode below (issue #445).
+    // Intersected with the modal's real area: on a tiny terminal
+    // `centered_abs` clamps the frame, and an un-clipped rect would render
+    // past the ratatui buffer and panic (Codex review #445).
+    let list_rect = Rect {
+      x: area.x + 1,
+      y: area.y + 2 /* border + padding */ + 2 /* title */ + 2, /* id line + blank */
+      width: area.width.saturating_sub(2),
+      height: list_h as u16,
+    }
+    .intersection(area);
+    if list_rect.height > 0 {
+      let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
+    }
     return;
   }
   let total = ov.rows.len();
@@ -4595,13 +4620,18 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
   // Scrollbar over the rows sub-area (right padding column) when the list
   // overflows — the missing affordance from the feedback.
+  // Intersected with the modal's real area for the same tiny-terminal
+  // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
     y: area.y + 2 /* border + padding */ + 2, /* title lines */
     width: area.width.saturating_sub(2),
     height: visible as u16,
-  };
-  let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
+  }
+  .intersection(area);
+  if rows_rect.height > 0 {
+    let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
+  }
 }
 
 /// Render the clean reclaim overlay (issue #325). A centred modal showing

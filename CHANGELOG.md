@@ -64,6 +64,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The "Attach a session" prompt of the agent detail overlay keeps a fixed
+  frame while typing: the candidate window is sized by the terminal alone
+  (short lists blank-pad), so the modal no longer resizes on every
+  keystroke, and an overflowing list now shows the same scrollbar as the
+  detail mode. (#445)
 - `gwm clean --yes` no longer fails wholesale when a concurrent writer (a
   watcher such as rust-analyzer regenerating files inside `target/`) races
   the removal: a transient ENOTEMPTY is retried with a bounded budget, and a
