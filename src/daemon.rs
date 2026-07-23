@@ -962,10 +962,12 @@ pub fn pipe_user_fragment(raw: &str) -> String {
 // the unix module's #341 hardening is battle-tested and stays byte-
 // identical, and the two transports differ exactly where a generic
 // abstraction would be the most contorted —
-// - `interprocess`'s sync streams have no read/write timeouts, so every
-//   guard unix gets from `set_read_timeout` (slow-loris line deadline,
-//   subscription poll tick, dead-peer detection) is rebuilt here on
-//   NONBLOCKING streams plus bounded sleep-retry loops;
+// - `interprocess`'s sync streams have no read/write timeouts, and its
+//   NOWAIT mode is unusable (an empty-pipe read is downgraded to a fake
+//   EOF — see `peek_available`), so every guard unix gets from
+//   `set_read_timeout` (slow-loris line deadline, subscription poll tick,
+//   dead-peer detection) is rebuilt here on BLOCKING streams polled with
+//   `PeekNamedPipe` before every read;
 // - the cross-user barrier is the pipe's owner-only security descriptor,
 //   the named-pipe analogue of `chmod 0600` + the private socket dir
 //   (`\\.\pipe\` has no directories to restrict).
@@ -977,16 +979,18 @@ pub fn pipe_user_fragment(raw: &str) -> String {
 mod server_win {
   use super::*;
   use crate::error::GwmError;
-  use interprocess::local_socket::{
-    prelude::*, GenericNamespaced, ListenerNonblockingMode, ListenerOptions, RecvHalf, SendHalf, Stream,
-  };
-  use interprocess::os::windows::local_socket::ListenerOptionsExt;
+  use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
+  use interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions, PipeMode, PipeStream};
   use interprocess::os::windows::security_descriptor::SecurityDescriptor;
   use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+  use std::os::windows::io::{AsHandle, AsRawHandle};
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
   use std::sync::Arc;
   use std::time::{Duration, Instant};
+
+  /// The accepted duplex byte stream this server speaks over.
+  type Conn = PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>;
 
   /// RAII counter of live client connections — duplicated from the unix
   /// module (see the section comment above).
@@ -1012,28 +1016,10 @@ mod server_win {
   /// shutdown flag — same value and role as the unix module's.
   const ACCEPT_TICK: Duration = Duration::from_millis(50);
 
-  /// Sleep quantum of every nonblocking retry loop (reads, writes, the
+  /// Sleep quantum of the peek-driven wait loops (request reads, the
   /// subscription tick). Small enough that deadlines land promptly, large
   /// enough that an idle connection costs a negligible wakeup rate.
   const NB_TICK: Duration = Duration::from_millis(15);
-
-  /// Raw `ERROR_NO_DATA` (232). In `PIPE_NOWAIT` mode an empty pipe read
-  /// (and some full-buffer writes) surfaces as this raw code, which std
-  /// maps to `ErrorKind::BrokenPipe` — indistinguishable BY KIND from a
-  /// really broken pipe (`ERROR_BROKEN_PIPE`, 109). Every nonblocking
-  /// retry loop below must therefore match on the raw code (Codex review
-  /// #439: kind-only matching closed every idle connection and ended
-  /// subscriptions at their first empty poll tick).
-  const ERROR_NO_DATA: i32 = 232;
-
-  /// Whether this I/O error means "try again later" on a `PIPE_NOWAIT`
-  /// stream: the portable kinds plus the raw `ERROR_NO_DATA` mapping.
-  fn is_transient(e: &std::io::Error) -> bool {
-    matches!(
-      e.kind(),
-      ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-    ) || e.raw_os_error() == Some(ERROR_NO_DATA)
-  }
 
   /// Configuration for [`serve`] — same shape as the unix module's so the
   /// CLI builds it identically on both platforms. `socket` holds the PIPE
@@ -1050,9 +1036,10 @@ mod server_win {
     /// Max bytes accepted for a single request line before the connection
     /// is dropped (memory-bounding DoS guard, as on unix).
     pub max_line_len: usize,
-    /// Per-request-line wall-time budget, and the write budget for pushes.
-    /// Rebuilt on nonblocking I/O since the transport has no socket-level
-    /// timeout. `None` disables the deadline.
+    /// Per-request-line wall-time budget, rebuilt on `PeekNamedPipe`
+    /// polling since the transport has no socket-level timeout. `None`
+    /// disables the deadline. Writes are BLOCKING and unbudgeted, matching
+    /// the unix server's `writeln!`.
     pub read_timeout: Option<Duration>,
     /// Max concurrent client connections (thread-bounding DoS guard).
     pub max_connections: usize,
@@ -1118,13 +1105,43 @@ mod server_win {
       .map_err(|e| GwmError::Other(format!("daemon: cannot build the pipe security descriptor: {e}")))
   }
 
-  /// Resolve `opts.socket` into a namespaced local-socket name.
+  /// Resolve `opts.socket` into a namespaced local-socket name (probe side).
   fn ns_name(socket: &Path) -> Result<interprocess::local_socket::Name<'static>> {
     let name_str = socket.to_string_lossy().into_owned();
     name_str
       .clone()
       .to_ns_name::<GenericNamespaced>()
       .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {name_str}: {e}")))
+  }
+
+  /// Bytes currently readable on the connection, or `None` when the peer
+  /// is gone. `PeekNamedPipe` is the canonical non-blocking poll for a
+  /// BLOCKING named pipe — and blocking streams are a hard requirement
+  /// here: in `PIPE_NOWAIT` mode an empty-pipe read surfaces raw
+  /// `ERROR_NO_DATA`, whose kind is `BrokenPipe`, and interprocess's
+  /// `downgrade_eof` then converts it to `Ok(0)` — indistinguishable from
+  /// a real EOF, which silently closed idle connections and ended every
+  /// subscription at its first empty poll (Codex review #439, witnessed in
+  /// CI). Peeking sidesteps the whole NOWAIT minefield.
+  fn peek_available(conn: &Conn) -> Option<usize> {
+    let mut avail: u32 = 0;
+    // SAFETY: PeekNamedPipe with a null buffer only queries the available
+    // byte count; the handle is borrowed from `conn` and outlives the call.
+    let ok = unsafe {
+      windows_sys::Win32::System::Pipes::PeekNamedPipe(
+        conn.as_handle().as_raw_handle(),
+        std::ptr::null_mut(),
+        0,
+        std::ptr::null_mut(),
+        &mut avail,
+        std::ptr::null_mut(),
+      )
+    };
+    if ok == 0 {
+      None // broken / disconnected peer
+    } else {
+      Some(avail as usize)
+    }
   }
 
   /// Bind the pipe and serve connections until `shutdown` flips — the
@@ -1134,15 +1151,14 @@ mod server_win {
     // unix stale-socket check (pipes need no stale cleanup: they vanish
     // with their process). BOUNDED by an EXTERNAL deadline (Codex review
     // #439, twice): `ConnectOptions::wait_mode` is silently ignored by
-    // interprocess 2.4.2's Windows local-socket adapter (`from_options`
-    // calls `connect_by_path` unbounded), so the connect runs on a helper
-    // thread and the wait is taken on the channel — a squatted pipe with
-    // no available instance must never hang `gwm daemon` startup. The
-    // parked helper thread leaks in that case; a one-off thread at daemon
-    // startup is an accepted cost. The probe is not the real guard —
-    // `create_sync` claims the name with `FILE_FLAG_FIRST_PIPE_INSTANCE`,
-    // so an occupied name fails the bind below even when the probe timed
-    // out.
+    // interprocess 2.4.2's Windows local-socket adapter, so the connect
+    // runs on a helper thread and the wait is taken on the channel — a
+    // squatted pipe with no available instance must never hang `gwm
+    // daemon` startup. The parked helper thread leaks in that case; a
+    // one-off thread at daemon startup is an accepted cost. The probe is
+    // not the real guard — the first listener instance is created with
+    // `FILE_FLAG_FIRST_PIPE_INSTANCE`, so an occupied name fails the bind
+    // below even when the probe timed out.
     {
       let probe_name = opts.socket.clone();
       let (ptx, prx) = std::sync::mpsc::channel();
@@ -1159,22 +1175,24 @@ mod server_win {
         )));
       }
     }
-    let listener = ListenerOptions::new()
-      .name(ns_name(&opts.socket)?)
-      .security_descriptor(owner_only_descriptor()?)
-      .create_sync()
-      .map_err(|e| {
-        GwmError::Other(format!(
-          "daemon: failed to bind pipe {} (a name that is already claimed is refused — first-instance guard): {e}",
-          opts.socket.display()
-        ))
-      })?;
-    // Nonblocking on BOTH sides: `accept` so this loop can poll the
-    // shutdown flag (as on unix), and the accepted streams because every
-    // per-connection deadline below is a sleep-retry loop over
-    // `WouldBlock` — the transport has no `set_read_timeout` to lean on.
+    let path = widestring::U16CString::from_str(format!("\\\\.\\pipe\\{}", opts.socket.display()))
+      .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {}: {e}", opts.socket.display())))?;
+    let mut options = PipeListenerOptions::new();
+    options.path = std::borrow::Cow::Owned(path);
+    options.mode = PipeMode::Bytes;
+    options.security_descriptor = Some(owner_only_descriptor()?);
+    let listener = options.create_duplex::<pipe_mode::Bytes>().map_err(|e| {
+      GwmError::Other(format!(
+        "daemon: failed to bind pipe {} (a name that is already claimed is refused — first-instance guard): {e}",
+        opts.socket.display()
+      ))
+    })?;
+    // Nonblocking ACCEPT so this loop can poll the shutdown flag (as on
+    // unix). The listener flag also marks the accepted streams
+    // nonblocking, so each one is flipped back to BLOCKING right after
+    // accept — see `peek_available` for why NOWAIT streams are unusable.
     listener
-      .set_nonblocking(ListenerNonblockingMode::Both)
+      .set_nonblocking(true)
       .map_err(|e| GwmError::Other(format!("daemon: set_nonblocking failed: {e}")))?;
 
     let active = Arc::new(AtomicUsize::new(0));
@@ -1185,7 +1203,11 @@ mod server_win {
         break;
       }
       match listener.accept() {
-        Ok(stream) => {
+        Ok(conn) => {
+          if let Err(e) = conn.set_nonblocking(false) {
+            eprintln!("daemon: failed to set connection blocking: {e}");
+            continue;
+          }
           let Some(guard) = ActiveGuard::try_acquire(&active, opts.max_connections) else {
             continue;
           };
@@ -1196,7 +1218,7 @@ mod server_win {
           let shutdown = Arc::clone(&shutdown);
           std::thread::spawn(move || {
             let _guard = guard;
-            handle_connection(stream, &workdir, poll, max_line_len, read_timeout, &shutdown);
+            handle_connection(&conn, &workdir, poll, max_line_len, read_timeout, &shutdown);
           });
         }
         Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
@@ -1211,13 +1233,16 @@ mod server_win {
     Ok(())
   }
 
-  /// Read one newline-terminated request line from the nonblocking stream:
-  /// the unix `read_request_line` with the socket timeout replaced by a
-  /// sleep-retry loop bounded by `deadline` (slow-loris guard) and the
-  /// shutdown flag. Same return contract: `None` on EOF / deadline /
+  /// Read one newline-terminated request line: the unix `read_request_line`
+  /// with the socket timeout replaced by a `PeekNamedPipe` wait loop
+  /// bounded by `deadline` (slow-loris guard) and the shutdown flag. The
+  /// peek only runs when the BufReader holds nothing — buffered bytes must
+  /// drain first, or a pipelined second line would wait on a peek that can
+  /// never see it. Same return contract: `None` on EOF / deadline /
   /// oversize / error, and the caller drops the connection.
   fn read_request_line(
-    reader: &mut BufReader<RecvHalf>,
+    conn: &Conn,
+    reader: &mut BufReader<&Conn>,
     max_len: usize,
     deadline: Option<Instant>,
     shutdown: &AtomicBool,
@@ -1232,12 +1257,19 @@ mod server_win {
           return None; // per-line deadline exceeded — slow-loris
         }
       }
+      if reader.buffer().is_empty() {
+        match peek_available(conn) {
+          None => return None, // peer gone
+          Some(0) => {
+            std::thread::sleep(NB_TICK);
+            continue;
+          }
+          Some(_) => {} // bytes ready — the blocking fill below won't block
+        }
+      }
       let chunk = match reader.fill_buf() {
         Ok(c) => c,
-        Err(e) if is_transient(&e) => {
-          std::thread::sleep(NB_TICK);
-          continue;
-        }
+        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
         Err(_) => return None, // reset / dead link
       };
       if chunk.is_empty() {
@@ -1260,55 +1292,29 @@ mod server_win {
     }
   }
 
-  /// `write_all` + `flush` over the nonblocking half, bounded by `budget`.
-  /// The unix server relies on blocking writes here; on a nonblocking pipe
-  /// a full kernel buffer surfaces as `WouldBlock`, so the loop retries —
-  /// and the budget reaps a subscriber that never drains its end.
-  fn write_all_nb(send: &mut SendHalf, bytes: &[u8], budget: Option<Duration>) -> std::io::Result<()> {
-    let deadline = budget.map(|t| Instant::now() + t);
-    let expired = |deadline: Option<Instant>| deadline.is_some_and(|dl| Instant::now() >= dl);
-    let mut written = 0usize;
-    while written < bytes.len() {
-      if expired(deadline) {
-        return Err(std::io::Error::from(ErrorKind::TimedOut));
-      }
-      match send.write(&bytes[written..]) {
-        // A full PIPE_NOWAIT byte-mode buffer reports a SUCCESSFUL write
-        // of zero bytes, not WouldBlock (Codex review #439) — that is
-        // backpressure to retry under the deadline, not a dead sink.
-        Ok(0) => std::thread::sleep(NB_TICK),
-        Ok(n) => written += n,
-        Err(e) if is_transient(&e) => std::thread::sleep(NB_TICK),
-        Err(e) => return Err(e),
-      }
-    }
-    loop {
-      if expired(deadline) {
-        return Err(std::io::Error::from(ErrorKind::TimedOut));
-      }
-      match send.flush() {
-        Ok(()) => return Ok(()),
-        Err(e) if is_transient(&e) => std::thread::sleep(NB_TICK),
-        Err(e) => return Err(e),
-      }
-    }
+  /// Blocking `write_all` + `flush` of one newline-terminated frame — the
+  /// pipe counterpart of the unix server's `writeln!`. Blocking and
+  /// unbudgeted on purpose: a subscriber that never drains its end parks
+  /// only its own connection thread, exactly as on unix.
+  fn write_frame(mut conn: &Conn, bytes: &[u8]) -> std::io::Result<()> {
+    conn.write_all(bytes)?;
+    conn.flush()
   }
 
-  /// Serve one connection — the unix `handle_connection` on split
-  /// nonblocking halves. Same guards, same `subscribe` upgrade.
+  /// Serve one connection — the unix `handle_connection` on a blocking
+  /// duplex pipe stream. Same guards, same `subscribe` upgrade.
   fn handle_connection(
-    stream: Stream,
+    conn: &Conn,
     workdir: &Path,
     poll: Duration,
     max_line_len: usize,
     read_timeout: Option<Duration>,
     shutdown: &AtomicBool,
   ) {
-    let (recv, mut send) = stream.split();
-    let mut reader = BufReader::new(recv);
+    let mut reader = BufReader::new(conn);
     loop {
       let deadline = read_timeout.map(|t| Instant::now() + t);
-      let Some(bytes) = read_request_line(&mut reader, max_line_len, deadline, shutdown) else {
+      let Some(bytes) = read_request_line(conn, &mut reader, max_line_len, deadline, shutdown) else {
         return; // EOF, deadline, oversize, or dead link — drop the connection
       };
       let line = match std::str::from_utf8(&bytes) {
@@ -1322,13 +1328,13 @@ mod server_win {
         .map(|r| r.method == "subscribe")
         .unwrap_or(false);
       if is_subscribe {
-        stream_subscription(&mut send, &mut reader, workdir, poll, read_timeout, shutdown);
+        stream_subscription(conn, &mut reader, workdir, poll, shutdown);
         return;
       }
       if let Some(response) = handle_line(workdir, line) {
         let mut frame = response.into_bytes();
         frame.push(b'\n');
-        if write_all_nb(&mut send, &frame, read_timeout).is_err() {
+        if write_frame(conn, &frame).is_err() {
           return;
         }
       }
@@ -1336,41 +1342,43 @@ mod server_win {
   }
 
   /// Push `worktrees.changed` notifications — the unix `stream_subscription`
-  /// with the timeout-as-poll-tick replaced by an explicit sliced sleep:
-  /// each tick sleeps in `NB_TICK` steps while probing the (nonblocking)
-  /// read half, so a closed peer and the shutdown flag are noticed promptly.
+  /// with the timeout-as-poll-tick replaced by a sliced `PeekNamedPipe`
+  /// wait: each tick sleeps in `NB_TICK` steps while probing the peer, so
+  /// a closed pipe and the shutdown flag are noticed promptly.
   fn stream_subscription(
-    send: &mut SendHalf,
-    reader: &mut BufReader<RecvHalf>,
+    conn: &Conn,
+    reader: &mut BufReader<&Conn>,
     workdir: &Path,
     poll: Duration,
-    write_budget: Option<Duration>,
     shutdown: &AtomicBool,
   ) {
     let mut last: Option<Vec<JsonWorktree>> = None;
     if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
-      if send_notification(send, &snapshot, write_budget).is_err() {
+      if send_notification(conn, &snapshot).is_err() {
         return;
       }
       last = Some(snapshot);
     }
-    let mut buf = [0u8; 64];
     loop {
       let tick_end = Instant::now() + poll;
       loop {
         if shutdown.load(Ordering::Relaxed) {
           return;
         }
-        match reader.read(&mut buf) {
-          Ok(0) => return, // peer closed
-          // Client chatter ENDS the subscription here, unlike on unix
-          // (which ignores it): the pipe client cannot close its recv
-          // half from another thread the way a unix client's fd drop
-          // does, so writing anything IS the client's hang-up signal —
-          // the close then unblocks its reader thread via EOF (#439).
-          Ok(_) => return,
-          Err(e) if is_transient(&e) => {}
-          Err(_) => return, // dead link
+        // Client chatter ENDS the subscription here, unlike on unix
+        // (which ignores it): the pipe client cannot close its recv half
+        // from another thread the way a unix client's fd drop does, so
+        // writing anything IS the client's hang-up signal — the close
+        // then unblocks its reader thread via EOF (#439). Bytes may sit
+        // in the BufReader (pipelined after the subscribe line) or on
+        // the pipe itself.
+        if !reader.buffer().is_empty() {
+          return;
+        }
+        match peek_available(conn) {
+          None => return,    // peer closed or dead link
+          Some(0) => {}      // idle — keep ticking
+          Some(_) => return, // chatter — hang up
         }
         let now = Instant::now();
         if now >= tick_end {
@@ -1379,7 +1387,7 @@ mod server_win {
         std::thread::sleep(NB_TICK.min(tick_end - now));
       }
       if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
-        if send_notification(send, &snapshot, write_budget).is_err() {
+        if send_notification(conn, &snapshot).is_err() {
           return;
         }
         last = Some(snapshot);
@@ -1387,17 +1395,12 @@ mod server_win {
     }
   }
 
-  fn send_notification(
-    send: &mut SendHalf,
-    worktrees: &[JsonWorktree],
-    budget: Option<Duration>,
-  ) -> std::io::Result<()> {
+  fn send_notification(conn: &Conn, worktrees: &[JsonWorktree]) -> std::io::Result<()> {
     let mut frame = worktrees_changed_notification(worktrees).to_string().into_bytes();
     frame.push(b'\n');
-    write_all_nb(send, &frame, budget)
+    write_frame(conn, &frame)
   }
 }
-
 #[cfg(all(windows, feature = "daemon"))]
 pub use server_win::{default_socket, serve, socket_path, ServeOptions};
 

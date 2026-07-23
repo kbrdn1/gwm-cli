@@ -366,22 +366,25 @@ pub enum Command {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
   },
-  /// Run a long-running JSON-RPC 2.0 daemon over a unix domain socket.
+  /// Run a long-running JSON-RPC 2.0 daemon over a local transport.
   ///
   /// Editors, statusbars, and tooling connect once and call `list` /
   /// `doctor` / `path`, or `subscribe` for pushed `worktrees.changed`
   /// notifications — instead of spawning `gwm` per query (issue #38).
   /// Newline-delimited JSON, one request and one response per line.
   ///
-  /// Unix-only and built behind the default-on `daemon` feature; on other
-  /// platforms / `--no-default-features` builds the command exits with an
+  /// The transport is a unix domain socket on unix and a named pipe under
+  /// `\\.\pipe\` on Windows (issue #439). Built behind the default-on
+  /// `daemon` feature; a `--no-default-features` build exits with an
   /// explanatory error.
   Daemon {
-    /// Socket path to bind. Defaults to `$XDG_RUNTIME_DIR/gwm.sock`,
-    /// falling back to `$TMPDIR`, then `/tmp`. When the chosen base dir is
-    /// not owner-only (e.g. the shared `/tmp` last resort), the socket is
-    /// isolated in a per-user `<base>/gwm-<uid>/gwm.sock` instead, so it
-    /// stays un-connectable cross-user.
+    /// Where to bind. On unix: a socket path, defaulting to
+    /// `$XDG_RUNTIME_DIR/gwm.sock`, falling back to `$TMPDIR`, then
+    /// `/tmp` — isolated in a per-user `<base>/gwm-<uid>/gwm.sock` when
+    /// the base dir is not owner-only. On Windows: the pipe NAME under
+    /// `\\.\pipe\` (not a filesystem path), defaulting to
+    /// `gwm-<user>.sock`, restricted to the owner by its security
+    /// descriptor.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Worktree-state poll interval in milliseconds for `subscribe` push
@@ -395,7 +398,8 @@ pub enum Command {
   /// Print a compact one-line worktree summary for shell prompts (issue #309).
   ///
   /// The first real consumer of `gwm daemon`: it connects to the daemon's
-  /// unix socket, asks for the worktree set, and renders a single line —
+  /// transport (unix socket, or a named pipe on Windows, issue #439), asks
+  /// for the worktree set, and renders a single line —
   /// active branch, worktree count, dirty / ahead / behind, linked issue /
   /// PR — suitable for a tmux / starship / zsh statusline. With `--watch`
   /// it subscribes to the daemon's `worktrees.changed` stream and reprints
@@ -406,10 +410,11 @@ pub enum Command {
   /// nothing instead of erroring. A CI rollup is intentionally not shown —
   /// it is not part of the daemon's stable schema.
   Statusline {
-    /// Daemon socket path. Defaults to the same resolution as `gwm daemon`:
-    /// `$XDG_RUNTIME_DIR/gwm.sock`, then `$TMPDIR`, then `/tmp` — isolated in
-    /// a per-user `<base>/gwm-<uid>/gwm.sock` when the base dir isn't
-    /// owner-only (the shared `/tmp` fallback).
+    /// Daemon socket path (unix) or pipe name (Windows). Defaults to the
+    /// same resolution as `gwm daemon`: `$XDG_RUNTIME_DIR/gwm.sock`, then
+    /// `$TMPDIR`, then `/tmp` — isolated in a per-user
+    /// `<base>/gwm-<uid>/gwm.sock` when the base dir isn't owner-only —
+    /// and `gwm-<user>.sock` under `\\.\pipe\` on Windows.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Stream live updates: subscribe to `worktrees.changed` and reprint

@@ -930,6 +930,7 @@ dependencies = [
  "tui-term",
  "which",
  "widestring",
+ "windows-sys",
 ]
 
 [[package]]

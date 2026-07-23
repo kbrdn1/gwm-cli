@@ -168,7 +168,19 @@ fn a_stopped_subscription_frees_its_server_connection_slot() {
     thread::sleep(Duration::from_millis(10));
   }
 
-  client::subscribe(&daemon.pipe, |_| false).expect("one snapshot then stop");
+  // The readiness list_once above may still hold the single slot for a
+  // beat after its handle closed (the server thread has to observe the
+  // EOF and drop the guard) — retry the subscribe instead of racing it
+  // (Codex review #439).
+  let mut subscribed = false;
+  for _ in 0..100 {
+    if client::subscribe(&daemon.pipe, |_| false).is_ok() {
+      subscribed = true;
+      break;
+    }
+    thread::sleep(Duration::from_millis(20));
+  }
+  assert!(subscribed, "the subscription must eventually claim the freed slot");
   // The reader thread exits within a tick; give it a moment, then the
   // single slot must be usable again.
   let mut freed = false;
