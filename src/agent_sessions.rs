@@ -245,13 +245,32 @@ fn claude_live_registry(projects_base: &Path) -> std::collections::HashMap<Strin
     let Some(sid) = v.get("sessionId").and_then(|x| x.as_str()) else {
       continue;
     };
-    map.insert(
-      sid.to_string(),
-      LiveEntry {
-        name: v.get("name").and_then(|x| x.as_str()).and_then(clean_session_name),
-        dead: v.get("pid").and_then(|x| x.as_u64()).is_some_and(|p| !pid_is_alive(p)),
-      },
-    );
+    let incoming = LiveEntry {
+      name: v.get("name").and_then(|x| x.as_str()).and_then(clean_session_name),
+      dead: v.get("pid").and_then(|x| x.as_u64()).is_some_and(|p| !pid_is_alive(p)),
+    };
+    // A killed-then-resumed session leaves BOTH registry files behind with
+    // the same sessionId (stale dead PID + fresh live one), and read_dir
+    // order is undefined — so merge instead of last-write-wins: a live PID
+    // always beats a dead one; at equal liveness the first entry stays,
+    // only filling a missing name (Codex review #441).
+    match map.entry(sid.to_string()) {
+      std::collections::hash_map::Entry::Vacant(slot) => {
+        slot.insert(incoming);
+      }
+      std::collections::hash_map::Entry::Occupied(mut slot) => {
+        let current = slot.get_mut();
+        if current.dead && !incoming.dead {
+          let kept_name = incoming.name.or_else(|| current.name.take());
+          *current = LiveEntry {
+            name: kept_name,
+            dead: false,
+          };
+        } else if current.dead == incoming.dead && current.name.is_none() {
+          current.name = incoming.name;
+        }
+      }
+    }
   }
   map
 }

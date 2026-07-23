@@ -1463,3 +1463,37 @@ fn a_registry_entry_without_a_pid_stays_artefact_only() {
     "no process signal → keep the artefact-only classification"
   );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_stale_dead_registry_entry_does_not_shadow_the_live_one() {
+  // A session killed then resumed leaves BOTH registry files behind with
+  // the same sessionId (old dead PID + new live one). read_dir order is
+  // undefined, so the merge must let a live PID win regardless of which
+  // file is read last.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("aaaa-1111.jsonl"), "{}");
+  write(
+    &tmp.path().join(".claude/sessions/40004.json"),
+    &format!(
+      r#"{{"pid":{},"sessionId":"aaaa-1111","name":"live","status":"busy"}}"#,
+      std::process::id()
+    ),
+  );
+  // Several dead entries around the live one so an unfavourable read_dir
+  // order is overwhelmingly likely to present a dead file last.
+  for (i, dead) in [reaped_pid(), reaped_pid(), reaped_pid()].into_iter().enumerate() {
+    write(
+      &tmp.path().join(format!(".claude/sessions/9000{i}.json")),
+      &format!(r#"{{"pid":{dead},"sessionId":"aaaa-1111","name":"stale","status":"busy"}}"#),
+    );
+  }
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  assert!(
+    !sessions[0].ended,
+    "a live registry PID must win over stale dead entries for the same sessionId"
+  );
+}
