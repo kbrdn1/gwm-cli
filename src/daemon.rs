@@ -979,9 +979,9 @@ pub fn pipe_user_fragment(raw: &str) -> String {
 mod server_win {
   use super::*;
   use crate::error::GwmError;
-  use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
   use interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions, PipeMode, PipeStream};
   use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+  use interprocess::ConnectWaitMode;
   use std::io::{BufRead, BufReader, ErrorKind, Write};
   use std::os::windows::io::{AsHandle, AsRawHandle};
   use std::path::PathBuf;
@@ -1105,15 +1105,6 @@ mod server_win {
       .map_err(|e| GwmError::Other(format!("daemon: cannot build the pipe security descriptor: {e}")))
   }
 
-  /// Resolve `opts.socket` into a namespaced local-socket name (probe side).
-  fn ns_name(socket: &Path) -> Result<interprocess::local_socket::Name<'static>> {
-    let name_str = socket.to_string_lossy().into_owned();
-    name_str
-      .clone()
-      .to_ns_name::<GenericNamespaced>()
-      .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {name_str}: {e}")))
-  }
-
   /// Bytes currently readable on the connection, or `None` when the peer
   /// is gone. `PeekNamedPipe` is the canonical non-blocking poll for a
   /// BLOCKING named pipe — and blocking streams are a hard requirement
@@ -1149,34 +1140,23 @@ mod server_win {
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
     // Courtesy probe for a clear "already in use" message, mirroring the
     // unix stale-socket check (pipes need no stale cleanup: they vanish
-    // with their process). BOUNDED by an EXTERNAL deadline (Codex review
-    // #439, twice): `ConnectOptions::wait_mode` is silently ignored by
-    // interprocess 2.4.2's Windows local-socket adapter, so the connect
-    // runs on a helper thread and the wait is taken on the channel — a
-    // squatted pipe with no available instance must never hang `gwm
-    // daemon` startup. The parked helper thread leaks in that case; a
-    // one-off thread at daemon startup is an accepted cost. The probe is
-    // not the real guard — the first listener instance is created with
+    // with their process). BOUNDED for real this time (Codex review #439,
+    // twice): the `local_socket` adapter silently ignores
+    // `ConnectOptions::wait_mode`, but the native API honours it — a
+    // squatted pipe with no available instance times out instead of
+    // hanging `gwm daemon` startup. The probe is not the real guard —
+    // the first listener instance is created with
     // `FILE_FLAG_FIRST_PIPE_INSTANCE`, so an occupied name fails the bind
     // below even when the probe timed out.
-    {
-      let probe_name = opts.socket.clone();
-      let (ptx, prx) = std::sync::mpsc::channel();
-      std::thread::spawn(move || {
-        let alive = ns_name(&probe_name)
-          .map(|n| Stream::connect(n).is_ok())
-          .unwrap_or(false);
-        let _ = ptx.send(alive);
-      });
-      if prx.recv_timeout(Duration::from_secs(1)) == Ok(true) {
-        return Err(GwmError::Other(format!(
-          "daemon: pipe {} is already in use by a live daemon",
-          opts.socket.display()
-        )));
-      }
-    }
     let path = widestring::U16CString::from_str(format!("\\\\.\\pipe\\{}", opts.socket.display()))
       .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {}: {e}", opts.socket.display())))?;
+    let probe = Conn::connect_by_path_with_wait_mode(path.as_ucstr(), ConnectWaitMode::Timeout(Duration::from_secs(1)));
+    if probe.is_ok() {
+      return Err(GwmError::Other(format!(
+        "daemon: pipe {} is already in use by a live daemon",
+        opts.socket.display()
+      )));
+    }
     let mut options = PipeListenerOptions::new();
     options.path = std::borrow::Cow::Owned(path);
     options.mode = PipeMode::Bytes;
@@ -1413,22 +1393,141 @@ pub use server_win::{default_socket, serve, socket_path, ServeOptions};
 pub mod client {
   use super::*;
   use crate::error::GwmError;
-  use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
+  use interprocess::os::windows::named_pipe::{pipe_mode, PipeStream};
+  use interprocess::ConnectWaitMode;
   use std::io::{BufRead, BufReader, Write};
+  use std::os::windows::io::{AsHandle, AsRawHandle};
   use std::sync::mpsc;
   use std::time::Duration;
+
+  /// The duplex byte stream this client speaks over — the NATIVE named-pipe
+  /// API rather than the `local_socket` adapter, for two reasons (Codex
+  /// review #439): the adapter silently ignores `ConnectOptions::wait_mode`
+  /// (unbounded connects), and it hides the handle needed to authenticate
+  /// the server (see [`verify_server_owner`]).
+  type Conn = PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>;
 
   /// Same value and rationale as the unix client's handshake deadline.
   const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
 
-  fn connect(socket: &Path) -> Result<Stream> {
-    let name_str = socket.to_string_lossy().into_owned();
-    let name = name_str
-      .clone()
-      .to_ns_name::<GenericNamespaced>()
-      .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {name_str}: {e}")))?;
-    Stream::connect(name)
-      .map_err(|e| GwmError::Other(format!("daemon: cannot connect to \\\\.\\pipe\\{name_str}: {e}")))
+  /// `\\.\pipe\<name>` as the UTF-16 path the native connect expects.
+  fn pipe_path(socket: &Path) -> Result<widestring::U16CString> {
+    widestring::U16CString::from_str(format!("\\\\.\\pipe\\{}", socket.display()))
+      .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {}: {e}", socket.display())))
+  }
+
+  /// Refuse a pipe server not owned by the current user (or the builtin
+  /// Administrators group, which an elevated same-user daemon can own):
+  /// `\\.\pipe\` names are first-come-first-served and predictable, so
+  /// another local account could squat `gwm-<user>.sock` with a permissive
+  /// DACL and feed forged worktree data to the statusline and every other
+  /// consumer (Codex review #439). The owner SID is read from the CONNECTED
+  /// kernel object itself, so there is no PID-reuse race; any API failure
+  /// fails closed. The unix analogue is the owner-only socket directory,
+  /// which makes squatting the path impossible in the first place.
+  fn verify_server_owner(conn: &Conn) -> Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+      CreateWellKnownSid, EqualSid, GetTokenInformation, TokenUser, WinBuiltinAdministratorsSid,
+      OWNER_SECURITY_INFORMATION, PSID, SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let deny = |what: &str| GwmError::Other(format!("daemon: refusing untrusted pipe server ({what})"));
+
+    // Owner of the connected pipe object.
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the handle is borrowed from the live connection; out-pointers
+    // are valid locals. On success `owner` points INTO `descriptor`, which
+    // must stay alive until the comparisons below and then be LocalFree'd.
+    let status = unsafe {
+      GetSecurityInfo(
+        conn.as_handle().as_raw_handle(),
+        SE_KERNEL_OBJECT,
+        OWNER_SECURITY_INFORMATION,
+        &mut owner,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        &mut descriptor,
+      )
+    };
+    if status != 0 || owner.is_null() {
+      return Err(deny("cannot read the pipe owner"));
+    }
+    // Free `descriptor` on every path from here on.
+    let result = (|| {
+      // SID of the user this process runs as.
+      let mut token = std::ptr::null_mut();
+      // SAFETY: querying our own process token; closed right after the copy.
+      if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(deny("cannot open the process token"));
+      }
+      let mut user_buf = [0u8; 256];
+      let mut len = 0u32;
+      // SAFETY: advapi fills a TOKEN_USER into the (large enough) buffer.
+      let got = unsafe {
+        GetTokenInformation(
+          token,
+          TokenUser,
+          user_buf.as_mut_ptr().cast(),
+          user_buf.len() as u32,
+          &mut len,
+        )
+      };
+      // SAFETY: `token` came from a successful OpenProcessToken.
+      unsafe { CloseHandle(token) };
+      if got == 0 {
+        return Err(deny("cannot read the token user"));
+      }
+      // SAFETY: on success the buffer holds a valid TOKEN_USER.
+      let user_sid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+      // SAFETY: both SIDs are valid for the duration of the call.
+      if unsafe { EqualSid(owner, user_sid) } != 0 {
+        return Ok(());
+      }
+      // An elevated daemon's objects can be owned by BUILTIN\Administrators
+      // rather than the user SID. Accepting that group opens nothing to an
+      // unprivileged attacker — a local admin already controls the machine.
+      let mut admin_buf = [0u8; SECURITY_MAX_SID_SIZE as usize];
+      let mut admin_len = admin_buf.len() as u32;
+      // SAFETY: CreateWellKnownSid fills the (max-sized) buffer.
+      let admin_ok = unsafe {
+        CreateWellKnownSid(
+          WinBuiltinAdministratorsSid,
+          std::ptr::null_mut(),
+          admin_buf.as_mut_ptr().cast(),
+          &mut admin_len,
+        )
+      };
+      // SAFETY: both SIDs are valid; admin_buf holds a well-known SID.
+      if admin_ok != 0 && unsafe { EqualSid(owner, admin_buf.as_ptr().cast_mut().cast()) } != 0 {
+        return Ok(());
+      }
+      Err(deny("owned by another account"))
+    })();
+    // SAFETY: `descriptor` came from a successful GetSecurityInfo.
+    unsafe { LocalFree(descriptor.cast()) };
+    result
+  }
+
+  /// Connect with a REAL bounded wait (the native API honours
+  /// [`ConnectWaitMode`], unlike the `local_socket` adapter) and refuse a
+  /// server we cannot authenticate.
+  fn connect(socket: &Path) -> Result<Conn> {
+    let path = pipe_path(socket)?;
+    let conn = Conn::connect_by_path_with_wait_mode(path.as_ucstr(), ConnectWaitMode::Timeout(CLIENT_TIMEOUT))
+      .map_err(|e| {
+        GwmError::Other(format!(
+          "daemon: cannot connect to \\\\.\\pipe\\{}: {e}",
+          socket.display()
+        ))
+      })?;
+    verify_server_owner(&conn)?;
+    Ok(conn)
   }
 
   /// One-shot `list` with the default handshake deadline.
@@ -1458,8 +1557,8 @@ pub mod client {
   }
 
   fn round_trip(socket: &Path) -> Result<Vec<JsonWorktree>> {
-    let stream = connect(socket)?;
-    let (recv, mut send) = stream.split();
+    let conn = connect(socket)?;
+    let (recv, mut send) = conn.split();
     writeln!(send, "{LIST_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
     send.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
     let mut reader = BufReader::new(recv);
@@ -1477,31 +1576,28 @@ pub mod client {
   ///
   /// Shape (Codex review #439): connect + handshake + the BLOCKING read
   /// loop all live on a helper thread, so the first `recv_timeout` bounds
-  /// the connect too — a wedged daemon whose pipe accepts no instance
-  /// degrades `statusline --watch` within the deadline instead of hanging
-  /// it. Reads stay blocking on purpose: client-side nonblocking mode on a
-  /// named pipe is `PIPE_NOWAIT`, which Microsoft deprecates and which
-  /// surfaces empty-pipe reads as fatal-looking errors (witnessed in CI).
-  /// Ending the stream is a PROTOCOL affair instead: the send half is
-  /// handed back to this thread, and when `on_snapshot` asks to stop we
-  /// write a hang-up line — the pipe server closes the connection on any
-  /// client chatter, which unblocks the reader thread via EOF and frees
-  /// the daemon's connection slot. If the daemon is wedged and never
-  /// reads, the reader thread leaks until the short-lived CLI process
-  /// exits — the same accepted cost as `list_once`'s timeout path.
+  /// them all — a wedged daemon degrades `statusline --watch` within the
+  /// deadline instead of hanging it. Ending the stream is a PROTOCOL
+  /// affair: the send half is handed back to this side, and when
+  /// `on_snapshot` asks to stop we write a hang-up line — the pipe server
+  /// closes the connection on any client chatter, which unblocks the
+  /// reader thread via EOF and frees the daemon's connection slot. If the
+  /// daemon is wedged and never reads, the reader thread leaks until the
+  /// short-lived CLI process exits — the same accepted cost as
+  /// `list_once`'s timeout path.
   pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
     let socket = socket.to_path_buf();
     let (tx, rx) = mpsc::channel::<Result<String>>();
     let (half_tx, half_rx) = mpsc::channel();
     std::thread::spawn(move || {
-      let stream = match connect(&socket) {
+      let conn = match connect(&socket) {
         Ok(s) => s,
         Err(e) => {
           let _ = tx.send(Err(e));
           return;
         }
       };
-      let (recv, mut send) = stream.split();
+      let (recv, mut send) = conn.split();
       if let Err(e) = writeln!(send, "{SUBSCRIBE_REQUEST}").and_then(|()| send.flush()) {
         let _ = tx.send(Err(GwmError::Other(format!("daemon: {e}"))));
         return;

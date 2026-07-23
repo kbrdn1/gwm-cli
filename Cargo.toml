@@ -177,7 +177,7 @@ libc = "0.2"
 [target."cfg(windows)".dependencies]
 interprocess = "2.4.2"
 widestring = "1.2.1"
-windows-sys = { version = "0.61.2", features = ["Win32_System_Pipes", "Win32_Foundation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_Pipes", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
 
 [target."cfg(windows)".dev-dependencies]
 interprocess = "2.4.2"
