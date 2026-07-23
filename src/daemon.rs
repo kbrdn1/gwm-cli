@@ -978,11 +978,10 @@ mod server_win {
   use super::*;
   use crate::error::GwmError;
   use interprocess::local_socket::{
-    prelude::*, ConnectOptions, GenericNamespaced, ListenerNonblockingMode, ListenerOptions, RecvHalf, SendHalf, Stream,
+    prelude::*, GenericNamespaced, ListenerNonblockingMode, ListenerOptions, RecvHalf, SendHalf, Stream,
   };
   use interprocess::os::windows::local_socket::ListenerOptionsExt;
   use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-  use interprocess::ConnectWaitMode;
   use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1017,6 +1016,24 @@ mod server_win {
   /// subscription tick). Small enough that deadlines land promptly, large
   /// enough that an idle connection costs a negligible wakeup rate.
   const NB_TICK: Duration = Duration::from_millis(15);
+
+  /// Raw `ERROR_NO_DATA` (232). In `PIPE_NOWAIT` mode an empty pipe read
+  /// (and some full-buffer writes) surfaces as this raw code, which std
+  /// maps to `ErrorKind::BrokenPipe` — indistinguishable BY KIND from a
+  /// really broken pipe (`ERROR_BROKEN_PIPE`, 109). Every nonblocking
+  /// retry loop below must therefore match on the raw code (Codex review
+  /// #439: kind-only matching closed every idle connection and ended
+  /// subscriptions at their first empty poll tick).
+  const ERROR_NO_DATA: i32 = 232;
+
+  /// Whether this I/O error means "try again later" on a `PIPE_NOWAIT`
+  /// stream: the portable kinds plus the raw `ERROR_NO_DATA` mapping.
+  fn is_transient(e: &std::io::Error) -> bool {
+    matches!(
+      e.kind(),
+      ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+    ) || e.raw_os_error() == Some(ERROR_NO_DATA)
+  }
 
   /// Configuration for [`serve`] — same shape as the unix module's so the
   /// CLI builds it identically on both platforms. `socket` holds the PIPE
@@ -1115,21 +1132,32 @@ mod server_win {
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
     // Courtesy probe for a clear "already in use" message, mirroring the
     // unix stale-socket check (pipes need no stale cleanup: they vanish
-    // with their process). BOUNDED (Codex review #439): a squatted or
-    // wedged pipe with no available instance would park an unbounded
-    // connect forever and this must never hang `gwm daemon` startup. The
-    // probe is not the real guard — `create_sync` claims the name with
-    // `FILE_FLAG_FIRST_PIPE_INSTANCE`, so an occupied name fails the bind
-    // below even when the probe timed out.
-    let probe = ConnectOptions::new()
-      .name(ns_name(&opts.socket)?)
-      .wait_mode(ConnectWaitMode::Timeout(Duration::from_secs(1)))
-      .connect_sync();
-    if probe.is_ok() {
-      return Err(GwmError::Other(format!(
-        "daemon: pipe {} is already in use by a live daemon",
-        opts.socket.display()
-      )));
+    // with their process). BOUNDED by an EXTERNAL deadline (Codex review
+    // #439, twice): `ConnectOptions::wait_mode` is silently ignored by
+    // interprocess 2.4.2's Windows local-socket adapter (`from_options`
+    // calls `connect_by_path` unbounded), so the connect runs on a helper
+    // thread and the wait is taken on the channel — a squatted pipe with
+    // no available instance must never hang `gwm daemon` startup. The
+    // parked helper thread leaks in that case; a one-off thread at daemon
+    // startup is an accepted cost. The probe is not the real guard —
+    // `create_sync` claims the name with `FILE_FLAG_FIRST_PIPE_INSTANCE`,
+    // so an occupied name fails the bind below even when the probe timed
+    // out.
+    {
+      let probe_name = opts.socket.clone();
+      let (ptx, prx) = std::sync::mpsc::channel();
+      std::thread::spawn(move || {
+        let alive = ns_name(&probe_name)
+          .map(|n| Stream::connect(n).is_ok())
+          .unwrap_or(false);
+        let _ = ptx.send(alive);
+      });
+      if prx.recv_timeout(Duration::from_secs(1)) == Ok(true) {
+        return Err(GwmError::Other(format!(
+          "daemon: pipe {} is already in use by a live daemon",
+          opts.socket.display()
+        )));
+      }
     }
     let listener = ListenerOptions::new()
       .name(ns_name(&opts.socket)?)
@@ -1206,8 +1234,7 @@ mod server_win {
       }
       let chunk = match reader.fill_buf() {
         Ok(c) => c,
-        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-        Err(e) if e.kind() == ErrorKind::WouldBlock => {
+        Err(e) if is_transient(&e) => {
           std::thread::sleep(NB_TICK);
           continue;
         }
@@ -1246,10 +1273,12 @@ mod server_win {
         return Err(std::io::Error::from(ErrorKind::TimedOut));
       }
       match send.write(&bytes[written..]) {
-        Ok(0) => return Err(std::io::Error::from(ErrorKind::WriteZero)),
+        // A full PIPE_NOWAIT byte-mode buffer reports a SUCCESSFUL write
+        // of zero bytes, not WouldBlock (Codex review #439) — that is
+        // backpressure to retry under the deadline, not a dead sink.
+        Ok(0) => std::thread::sleep(NB_TICK),
         Ok(n) => written += n,
-        Err(e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(NB_TICK),
+        Err(e) if is_transient(&e) => std::thread::sleep(NB_TICK),
         Err(e) => return Err(e),
       }
     }
@@ -1259,8 +1288,7 @@ mod server_win {
       }
       match send.flush() {
         Ok(()) => return Ok(()),
-        Err(e) if e.kind() == ErrorKind::Interrupted => {}
-        Err(e) if e.kind() == ErrorKind::WouldBlock => std::thread::sleep(NB_TICK),
+        Err(e) if is_transient(&e) => std::thread::sleep(NB_TICK),
         Err(e) => return Err(e),
       }
     }
@@ -1341,8 +1369,7 @@ mod server_win {
           // does, so writing anything IS the client's hang-up signal —
           // the close then unblocks its reader thread via EOF (#439).
           Ok(_) => return,
-          Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
-          Err(e) if e.kind() == ErrorKind::Interrupted => {}
+          Err(e) if is_transient(&e) => {}
           Err(_) => return, // dead link
         }
         let now = Instant::now();

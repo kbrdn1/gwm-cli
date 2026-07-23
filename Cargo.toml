@@ -178,6 +178,9 @@ libc = "0.2"
 interprocess = "2.4.2"
 widestring = "1.2.1"
 
+[target."cfg(windows)".dev-dependencies]
+interprocess = "2.4.2"
+
 [dev-dependencies]
 assert_cmd = "2"
 criterion = "0.8"

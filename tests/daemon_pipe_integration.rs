@@ -181,3 +181,43 @@ fn a_stopped_subscription_frees_its_server_connection_slot() {
   }
   assert!(freed, "the subscription's connection slot must be released after stop");
 }
+
+#[test]
+fn an_idle_connection_survives_between_two_requests() {
+  // Codex review #439 (P1): an empty PIPE_NOWAIT read surfaces raw
+  // ERROR_NO_DATA, which std maps to BrokenPipe — kind-only matching
+  // treated the idle gap between two requests as a dead link and closed
+  // the connection. A raw client sends two `list` requests 200 ms apart
+  // on ONE connection; both must get a response line.
+  use gwm::daemon::LIST_REQUEST;
+  use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
+  use std::io::{BufRead, BufReader, Write};
+
+  let (dir, _repo) = init_repo();
+  let workdir = dir.path().to_path_buf();
+  let daemon = TestDaemon::start(&workdir, "idle", Duration::from_millis(50));
+
+  let name = daemon
+    .pipe
+    .to_string_lossy()
+    .into_owned()
+    .to_ns_name::<GenericNamespaced>()
+    .expect("pipe name");
+  let stream = Stream::connect(name).expect("connect");
+  let (recv, mut send) = stream.split();
+  let mut reader = BufReader::new(recv);
+
+  for round in 0..2u8 {
+    writeln!(send, "{LIST_REQUEST}").expect("request write");
+    send.flush().expect("request flush");
+    let mut line = String::new();
+    let n = reader.read_line(&mut line).expect("response read");
+    assert!(n > 0, "round {round}: the connection must still be open");
+    assert!(
+      line.contains("\"result\""),
+      "round {round}: a JSON-RPC response is expected: {line:?}"
+    );
+    // Idle gap spanning many NB_TICK polls before the second request.
+    thread::sleep(Duration::from_millis(200));
+  }
+}
