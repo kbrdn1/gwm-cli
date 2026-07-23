@@ -25,6 +25,7 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 
 - **Bootstrap that actually runs your project.** File copies with deny-list regexes (born from a real "AWS RDS credentials in a copied `.env`" incident), six lifecycle hook phases, stack presets for Laravel / Node / Rust / Go / Python.
 - **A TUI you can live in.** Embedded lazygit and shell overlays, a details sidebar with CI state and working-tree file explorer, remappable keys, themes, command palette.
+- **It knows which AI agent works where.** Sessions from Claude Code, Codex, opencode and Mistral Vibe are detected from their on-disk artefacts (no process scanning, Windows included) and surfaced everywhere: an AGENT column in the table and TUI, a detail overlay on `a`, `gwm agents` with manual pinning, the JSON/daemon field and the statusline (which rides the daemon socket, so it is Unix-only today).
 - **A machine surface, not just a human one.** `--format=json`, a JSON-RPC daemon with a push stream, and `gwm statusline` for your prompt. The schemas are frozen under SemVer.
 - **Undo.** `gwm undo` and `gwm history` recover a worktree you removed by mistake, without `git reflog`.
 

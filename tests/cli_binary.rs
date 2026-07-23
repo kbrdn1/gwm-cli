@@ -28,6 +28,8 @@ fn help_prints_subcommands() {
     .success()
     .stdout(predicate::str::contains("  init "))
     .stdout(predicate::str::contains("  list "))
+    // Issue #408: agent-session surface (list / attach / detach).
+    .stdout(predicate::str::contains("  agents "))
     .stdout(predicate::str::contains("  create "))
     // Issue #83: create an issue from repo templates, then create the worktree.
     .stdout(predicate::str::contains("  new "))
@@ -5588,4 +5590,580 @@ fn workspace_refuses_a_still_unsupported_subcommand() {
     .failure()
     .code(1)
     .stderr(predicate::str::contains("--workspace is only supported"));
+}
+
+// -- gwm agents (issue #408, US4) ------------------------------------------
+//
+// Detection is hermetic here: GWM_AGENTS_HOME points every scan at a seeded
+// TempDir, so no test depends on the runner's real home or installed agents.
+
+mod agents_cmd {
+  use super::*;
+  use common::init_repo;
+  use std::path::Path;
+
+  /// Seed a codex session recorded at `cwd` under `home`.
+  fn seed_codex(home: &Path, cwd: &Path, sid: &str) {
+    let dir = home
+      .join(".codex/sessions")
+      .join(gwm::agent_sessions::codex_day_dir(std::time::SystemTime::now()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Windows paths carry backslashes — escape them or the JSON line is
+    // invalid and the session is silently dropped.
+    let cwd = cwd.display().to_string().replace('\\', "\\\\");
+    let line = format!(
+      r#"{{"timestamp":"2026-07-22T10:00:00.000Z","type":"session_meta","payload":{{"session_id":"{sid}","cwd":"{cwd}"}}}}"#,
+    );
+    std::fs::write(dir.join(format!("rollout-{sid}.jsonl")), format!("{line}\n")).unwrap();
+  }
+
+  fn gwm_in(dir: &Path, home: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd.current_dir(dir).env("GWM_AGENTS_HOME", home);
+    cmd
+  }
+
+  #[test]
+  fn opencode_db_sessions_are_read_without_a_sqlite3_cli() {
+    // Codex review round I (P1): Windows rarely ships a `sqlite3` CLI, so
+    // shelling out silently degraded every opencode ≥ 1.x install to the
+    // dead legacy JSON. The db must be read in-process — strip PATH so any
+    // external sqlite3 is unreachable and the session must still surface.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home.path().join(".local/share/opencode");
+    std::fs::create_dir_all(dir.join("storage/project")).unwrap();
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::SystemTime::UNIX_EPOCH)
+      .unwrap()
+      .as_millis() as i64;
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn
+      .execute_batch(
+        "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer);",
+      )
+      .unwrap();
+    conn
+      .execute(
+        "INSERT INTO session VALUES (?1, NULL, ?2, ?3, ?4, NULL)",
+        rusqlite::params![
+          "oc-nocli",
+          repo_dir.path().display().to_string(),
+          "db without cli",
+          now_ms
+        ],
+      )
+      .unwrap();
+    drop(conn);
+
+    gwm_in(repo_dir.path(), home.path())
+      .env("PATH", "")
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("opencode"))
+      .stdout(predicate::str::contains("db without cli"));
+  }
+
+  #[test]
+  fn attach_resolves_exact_names_before_substrings() {
+    // Codex review round K (P2): the agents worktree matcher did a bare
+    // case-sensitive substring match, so with worktrees `foo` and
+    // `foo-extra`, `gwm agents attach foo <id>` errored as ambiguous
+    // instead of selecting the exact name — `find_fuzzy`'s tiering (exact
+    // name, exact id, then case-insensitive substring) applies here too.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let side = tempfile::TempDir::new().unwrap();
+    let foo = side.path().join("foo");
+    let foo_extra = side.path().join("foo-extra");
+    git_at(
+      repo_dir.path(),
+      &["worktree", "add", "-b", "b-foo", foo.to_str().unwrap()],
+    );
+    git_at(
+      repo_dir.path(),
+      &["worktree", "add", "-b", "b-foo-extra", foo_extra.to_str().unwrap()],
+    );
+    seed_codex(home.path(), &foo, "ffff-exact");
+
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", "foo", "ffff-exact"])
+      .assert()
+      .success();
+  }
+
+  #[test]
+  fn opencode_detection_honors_xdg_data_home() {
+    // Codex review round O (P2): with `XDG_DATA_HOME` set, opencode keeps
+    // `opencode.db` under `$XDG_DATA_HOME/opencode` — the hardcoded
+    // `~/.local/share` base made every session invisible there. No
+    // GWM_AGENTS_HOME here: the seam deliberately IGNORES XDG (round T),
+    // so the XDG resolution is exercised against the real-home path — the
+    // assertions only require the seeded session to be present, ambient
+    // sessions from the machine's own stores may appear alongside.
+    let (repo_dir, _repo) = init_repo();
+    let xdg = tempfile::TempDir::new().unwrap();
+    let dir = xdg.path().join("opencode");
+    std::fs::create_dir_all(dir.join("storage/project")).unwrap();
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::SystemTime::UNIX_EPOCH)
+      .unwrap()
+      .as_millis() as i64;
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn
+      .execute_batch(
+        "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer);",
+      )
+      .unwrap();
+    conn
+      .execute(
+        "INSERT INTO session VALUES (?1, NULL, ?2, ?3, ?4, NULL)",
+        rusqlite::params!["oc-xdg", repo_dir.path().display().to_string(), "xdg session", now_ms],
+      )
+      .unwrap();
+    drop(conn);
+
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(repo_dir.path())
+      .env_remove("GWM_AGENTS_HOME")
+      .env("XDG_DATA_HOME", xdg.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("opencode"))
+      .stdout(predicate::str::contains("xdg session"));
+  }
+
+  #[test]
+  fn gwm_agents_home_beats_an_inherited_xdg_data_home() {
+    // Codex review round T (P2): with GWM_AGENTS_HOME isolating a run but
+    // an absolute XDG_DATA_HOME inherited from the environment, the
+    // opencode scan followed XDG into the REAL machine store — the seam
+    // must win for every backend or tests and the documented override
+    // become machine-dependent.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let xdg = tempfile::TempDir::new().unwrap(); // absolute, and NOT the seam
+    let dir = home.path().join(".local/share/opencode");
+    std::fs::create_dir_all(dir.join("storage/project")).unwrap();
+    let now_ms = std::time::SystemTime::now()
+      .duration_since(std::time::SystemTime::UNIX_EPOCH)
+      .unwrap()
+      .as_millis() as i64;
+    let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+    conn
+      .execute_batch(
+        "CREATE TABLE session (id text, parent_id text, directory text, title text, time_updated integer, time_archived integer);",
+      )
+      .unwrap();
+    conn
+      .execute(
+        "INSERT INTO session VALUES (?1, NULL, ?2, ?3, ?4, NULL)",
+        rusqlite::params!["oc-seam", repo_dir.path().display().to_string(), "seam wins", now_ms],
+      )
+      .unwrap();
+    drop(conn);
+
+    gwm_in(repo_dir.path(), home.path())
+      .env("XDG_DATA_HOME", xdg.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("seam wins"));
+  }
+
+  #[test]
+  fn agents_lists_detected_sessions_per_worktree() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "0000-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("codex"))
+      .stdout(predicate::str::contains("0000-cafe"))
+      .stdout(predicate::str::contains("active"))
+      // Codex review round A: the human listing must also carry the last
+      // activity (spec US4) — a relative form like "0m ago".
+      .stdout(predicate::str::contains("ago"));
+  }
+
+  #[test]
+  fn list_hides_the_agent_column_without_any_detected_session() {
+    // Codex review round D: with no agent tooling / no session, the human
+    // table must be byte-identical to the pre-#408 layout — no AGENT
+    // header squeezing NAME/BRANCH/PATH.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("list")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT").not());
+  }
+
+  #[test]
+  fn list_shows_the_agent_column_when_a_session_is_detected() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "1111-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("list")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"))
+      .stdout(predicate::str::contains("codex"));
+  }
+
+  #[test]
+  fn agents_lists_unmatched_sessions_in_a_dedicated_section() {
+    // Codex review round C: the attach error says "run `gwm agents` to see
+    // the detected ids", so a session matched to NO worktree — precisely
+    // the one worth attaching — must be listed too, under `unmatched`.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), Path::new("/somewhere/else"), "9999-lost");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("unmatched"))
+      .stdout(predicate::str::contains("9999-lost"));
+  }
+
+  #[test]
+  fn agents_omits_the_unmatched_section_when_every_session_is_matched() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "0000-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("unmatched").not());
+  }
+
+  #[test]
+  fn agents_listing_prefers_the_session_name_when_present() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    let dir = home
+      .path()
+      .join(".codex/sessions")
+      .join(gwm::agent_sessions::codex_day_dir(std::time::SystemTime::now()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cwd = repo_dir.path().display().to_string().replace('\\', "\\\\");
+    let meta = format!(r#"{{"type":"session_meta","payload":{{"session_id":"named-1","cwd":"{cwd}"}}}}"#);
+    let user = r#"{"type":"event_msg","payload":{"type":"user_message","message":"refactor the login flow"}}"#;
+    std::fs::write(
+      dir.join("rollout-named.jsonl"),
+      format!(
+        "{meta}
+{user}
+"
+      ),
+    )
+    .unwrap();
+
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      // Name shown alongside the (full) id — both visible, the id is what
+      // attach takes.
+      .stdout(predicate::str::contains("refactor the login flow"))
+      .stdout(predicate::str::contains("named-1"));
+  }
+
+  #[test]
+  fn pinned_marker_is_scoped_to_the_pinned_worktree_only() {
+    // Codex review round A: a session detected on worktree A but pinned on
+    // B must be flagged "pinned" only under B.
+    let (repo_dir, repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    // Session recorded on the MAIN checkout path (detected on A).
+    seed_codex(home.path(), repo_dir.path(), "4444-cafe");
+    // A second worktree B to pin onto.
+    let wt_b = repo_dir.path().join("wt-b");
+    {
+      let head = repo.head().unwrap().peel_to_commit().unwrap();
+      repo.branch("feat/b", &head, false).unwrap();
+      let mut opts = git2::WorktreeAddOptions::new();
+      let branch = repo.find_branch("feat/b", git2::BranchType::Local).unwrap();
+      opts.reference(Some(branch.get()));
+      repo.worktree("wt-b", &wt_b, Some(&opts)).unwrap();
+    }
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", "wt-b", "4444-cafe"])
+      .assert()
+      .success();
+
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let text = String::from_utf8_lossy(&out);
+    // Split per worktree block: the main checkout's block must NOT carry
+    // "pinned"; wt-b's block must.
+    let blocks: Vec<&str> = text.split("\n\n").collect();
+    let _ = blocks; // block layout is free; assert line-wise instead:
+    let pinned_lines: Vec<&str> = text.lines().filter(|l| l.contains("pinned")).collect();
+    assert_eq!(pinned_lines.len(), 1, "exactly one pinned line, got: {text}");
+  }
+
+  #[test]
+  fn attach_accumulates_pins_and_detach_removes_one_or_all() {
+    // User feedback 2026-07-22: several agents can work one worktree —
+    // attach ADDS a pin, `detach <wt> <id>` removes that one, bare
+    // `detach <wt>` clears them all.
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "aaaa-multi");
+    seed_codex(home.path(), repo_dir.path(), "bbbb-multi");
+
+    for sid in ["aaaa-multi", "bbbb-multi"] {
+      gwm_in(repo_dir.path(), home.path())
+        .args(["agents", "attach", ".", sid])
+        .assert()
+        .success();
+    }
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let text = String::from_utf8_lossy(&out);
+    let pinned = text.lines().filter(|l| l.contains("pinned")).count();
+    assert_eq!(pinned, 2, "both pins marked, got: {text}");
+
+    // Targeted detach removes exactly one pin.
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "detach", ".", "aaaa-multi"])
+      .assert()
+      .success();
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let text = String::from_utf8_lossy(&out);
+    assert_eq!(text.lines().filter(|l| l.contains("pinned")).count(), 1, "got: {text}");
+    assert!(
+      text.lines().any(|l| l.contains("bbbb-multi") && l.contains("pinned")),
+      "the other pin survives: {text}"
+    );
+
+    // Bare detach clears the rest.
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "detach", "."])
+      .assert()
+      .success();
+    let out = gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    assert!(!String::from_utf8_lossy(&out).contains("pinned"));
+  }
+
+  #[test]
+  fn workspace_list_table_carries_the_agent_column() {
+    // Codex review round A: `gwm list --workspace` (human table) must show
+    // AGENT like the single-repo table — and like it, only when a session
+    // was actually detected (round D conditional).
+    let root = workspace_with_worktrees();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), &root.path().join("alpha-wt"), "aaaa-ws");
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", "."])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"))
+      .stdout(predicate::str::contains("codex"));
+  }
+
+  #[test]
+  fn workspace_list_table_hides_the_agent_column_without_sessions() {
+    let root = workspace_with_worktrees();
+    let home = tempfile::TempDir::new().unwrap();
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", "."])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT").not())
+      // Codex review round E: the DATA rows must drop the 8-wide `-`
+      // placeholder cell too, not just the header — otherwise the table
+      // grows a headerless column that shifts PATH.
+      .stdout(predicate::str::is_match(r"clean\s+-\s+/").unwrap().not());
+  }
+
+  #[test]
+  fn workspace_listings_honor_per_repo_pins() {
+    // Codex review round I (P2): a session pinned in a child repo vanished
+    // from every workspace surface — the workspace pass handed detection an
+    // empty pin list instead of opening each row's owning repo.
+    let root = workspace_with_worktrees();
+    let home = tempfile::TempDir::new().unwrap();
+    // Recorded OUTSIDE any workspace path: only the pin can surface it.
+    seed_codex(home.path(), &home.path().join("elsewhere"), "cccc-wspin");
+    let alpha_wt = root.path().join("alpha-wt");
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(&alpha_wt)
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["agents", "attach", ".", "cccc-wspin"])
+      .assert()
+      .success();
+
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", ".", "--format=json"])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("cccc-wspin"));
+    // Human table too: the pinned session drives the AGENT column.
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(root.path())
+      .env("GWM_AGENTS_HOME", home.path())
+      .args(["list", "--workspace", "."])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("codex"));
+  }
+
+  #[test]
+  fn agents_json_returns_the_wire_shape() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "1111-cafe");
+
+    let out = gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "--format=json"])
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
+    let rows = v.as_array().expect("array of worktrees");
+    let with = rows
+      .iter()
+      .find(|r| r["agents"].is_object())
+      .expect("one row carries agents");
+    assert_eq!(with["agents"]["top"]["kind"], "codex");
+    assert_eq!(with["agents"]["top"]["id"], "1111-cafe");
+  }
+
+  #[test]
+  fn agents_with_nothing_detected_says_so_and_exits_zero() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("no agent session"));
+  }
+
+  #[test]
+  fn attach_pins_an_unmatched_session_and_detach_restores_detection() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    // Session recorded elsewhere: pure detection matches nothing.
+    seed_codex(home.path(), Path::new("/somewhere/else"), "2222-cafe");
+
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", ".", "2222-cafe"])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("2222-cafe"));
+
+    // The pin is honoured by `agents` AND by the list JSON surface.
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("codex"))
+      .stdout(predicate::str::contains("pinned"));
+    let out = gwm_in(repo_dir.path(), home.path())
+      .args(["list", "--format=json"])
+      .assert()
+      .success()
+      .get_output()
+      .stdout
+      .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert!(
+      v.as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["agents"]["top"]["id"] == "2222-cafe"),
+      "pinned session must ride the list JSON"
+    );
+
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "detach", "."])
+      .assert()
+      .success();
+    // Codex review round C: with the pin gone the session is no longer
+    // attributed to any worktree, but it stays discoverable — listed under
+    // `unmatched` (unpinned) instead of vanishing from the output.
+    gwm_in(repo_dir.path(), home.path())
+      .arg("agents")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("unmatched"))
+      .stdout(predicate::str::contains("2222-cafe"))
+      .stdout(predicate::str::contains("pinned").not());
+  }
+
+  #[test]
+  fn attach_unknown_session_id_fails_with_a_hint() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    gwm_in(repo_dir.path(), home.path())
+      .args(["agents", "attach", ".", "nope-nope"])
+      .assert()
+      .failure()
+      .stderr(predicate::str::contains("gwm agents"));
+  }
+
+  #[test]
+  fn plain_list_table_carries_the_agent_column() {
+    let (repo_dir, _repo) = init_repo();
+    let home = tempfile::TempDir::new().unwrap();
+    seed_codex(home.path(), repo_dir.path(), "3333-cafe");
+    gwm_in(repo_dir.path(), home.path())
+      .arg("list")
+      .assert()
+      .success()
+      .stdout(predicate::str::contains("AGENT"))
+      .stdout(predicate::str::contains("codex"));
+  }
 }

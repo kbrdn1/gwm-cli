@@ -1,6 +1,6 @@
 ---
 name: gwm
-description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
+description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
@@ -8,14 +8,15 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: `1.0.0` (the SemVer milestone; machine contracts frozen — MSRV 1.86). 1.0.0 ships: `gwm exec` / `gwm clean` (fleet command fan-out + build-artifact reclaim, #313), `gwm review <PR#>` (materialise a PR into a worktree, #308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` stack templates (#37), multi-repo `--workspace` mode (#36), embedded PTY overlays for lazygit / shell (#35), a redesigned & fully-rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree file-explorer pane and a current-PR CI indicator (#300 / #299).
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: `1.1.1` (machine contracts frozen since 1.0.0 — MSRV 1.86). In development (#408): **agent session detection** — per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts (no process scanning), surfaced as `gwm agents [attach|detach]`, a conditional AGENT column (TUI + `gwm list`), an `a` overlay with attach-by-id, a pinned-only Agents sidebar pane, multi-pins in branch config (`gwm-agent-pin`, multi-valued), an additive experimental `agents` JSON field and a statusline segment. 1.0.0 shipped: `gwm exec` / `gwm clean` (fleet command fan-out + build-artifact reclaim, #313), `gwm review <PR#>` (materialise a PR into a worktree, #308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` stack templates (#37), multi-repo `--workspace` mode (#36), embedded PTY overlays for lazygit / shell (#35), a redesigned & fully-rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree file-explorer pane and a current-PR CI indicator (#300 / #299).
 
 ## When to use this skill
 
-- User runs or asks about any `gwm <subcommand>`: `init` (incl. `--preset`), `list` (incl. `--format json`), `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`, `exec`, `clean`, `review`, `daemon`, `statusline`, `new`, `pr`, `config`, `history`, `undo`, `trust`, `labels`, `milestones`, `hooks`, `commit-prefix`, `aliases`, `theme`, `tui keys`.
+- User runs or asks about any `gwm <subcommand>`: `init` (incl. `--preset`), `list` (incl. `--format json`), `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`, `exec`, `clean`, `review`, `daemon`, `statusline`, `agents`, `new`, `pr`, `config`, `history`, `undo`, `trust`, `labels`, `milestones`, `hooks`, `commit-prefix`, `aliases`, `theme`, `tui keys`.
 - User wants to **fan a command out across worktrees** (`gwm exec -- <cmd>`) or **reclaim build artifacts** (`gwm clean`).
 - User wants to **materialise a GitHub PR into a worktree** to review/test it (`gwm review <PR#>`, cross-fork, safe-by-default).
 - User wants a **multi-repo workspace** (`gwm --workspace <dir>`), the **JSON API / daemon** (`--format=json`, `gwm daemon`, `gwm statusline` for shell prompts), or **stack presets** (`gwm init --preset laravel|node|rust|go|python-uv|generic`).
+- User asks **which AI agents are working where**: `gwm agents` (per-worktree sessions + an `unmatched` section), `gwm agents attach <wt> <id>` / `detach <wt> [<id>]` (multi-pins), the TUI `a` overlay (select `j`/`k`, pin `a`, unpin `d`, attach-by-id `i`), the pinned-only `Agents` sidebar pane, or the `GWM_AGENTS_HOME` test seam.
 - User opens the TUI by running `gwm` alone in a repo, or the picker via `gwm switch` / `gwm s`.
 - User asks about the redesigned TUI: PTY overlays (`l`/`L` lazygit, `r`/`R` review, `o`/`O` shell, #35), the Settings panel (`4`) and its live-editable Keys tab (#294), the Command Logs modal (`3`), the Working Tree file-explorer pane (#300), the current-PR CI indicator (#299), `[tui.keys.modal.<context>]` rebindable overlay keys (#219), and `[tui.macro1]`/`[tui.macro2]` (`h`/`H`).
 - User mentions `.gwm.toml` (per-repo config) or any of its sections: `[worktree]`, `[doctor]`, `[tui]`, `[tui.open]`, `[git_tui]`, `[review]`, `[[bootstrap.copy]]`, `[[bootstrap.guard]]`, `[[bootstrap.no_symlink]]`, `[[bootstrap.command]]`, `[bootstrap.fallback.*]`.
@@ -132,6 +133,16 @@ gwm milestones list|push [--dry-run] [--prune]    # sync the declarative [[miles
 gwm daemon [--socket <path>] [--poll-ms <n>]   # long-running JSON-RPC 2.0 over a unix socket (list/doctor/path/subscribe)
 gwm statusline [--socket <path>] [--watch]     # one-line prompt summary off the daemon (degrades to blank when none)
 
+# --- AI-agent sessions (#408) ---
+gwm agents [--format table|json]          # sessions per worktree (agent, freshness, last activity, id, name)
+                                          #   + an `unmatched` section for sessions no worktree claimed
+gwm agents attach <pat> <session-id>      # pin a session to a worktree (pins ACCUMULATE — several per worktree)
+gwm agents detach <pat> [<session-id>]    # unpin one session, or every pin when the id is omitted
+                                          #   detection reads on-disk artefacts only (Claude Code, Codex,
+                                          #   opencode incl. its opencode.db, Mistral Vibe) — no process scanning;
+                                          #   renames show (Claude live registry, Codex session_index, opencode titles);
+                                          #   GWM_AGENTS_HOME overrides the scanned home (test seam)
+
 # --- config / convention / introspection ---
 gwm config get|set|unset|list|validate|path|edit   # git-config-style editing of .gwm.toml (comment-preserving)
 gwm history [--all]                       # recent destructive ops journal (newest first)
@@ -233,6 +244,7 @@ context.
 | `h` / `H`       | run `[tui.macro1]` / `[tui.macro2]` (#290)                                  |
 | `y` / `w` / `Y` | yank branch name / worktree name / absolute path to the clipboard           |
 | `i` / `B`       | link prompt (issue/PR) / browse-links menu (open linked issue·PR in browser)|
+| `a`             | agent sessions overlay (#408) — `j`/`k` select, `a` pin, `d` unpin, `i` attach-by-id, `Esc` close; the sidebar `Agents` pane shows pinned sessions only |
 | `F`             | refresh GitHub issue/PR status via `gh` (off-thread; statusbar spinner)     |
 | `V` / `v`       | toggle the sidebar / flip its position left ↔ right                         |
 | `S` / `Space`   | sidebar Details mode (commits ↔ stashes) / cycle layout (auto→side→stacked) |
@@ -287,6 +299,8 @@ When the sidebar is open (default ON, toggle with `v`), it shows a details panel
 Worktree block: name (bold) prefixed by the `●` dot · `branch · short-head` (branch coloured by `BranchStatus` — worst-state wins: dirty=red, ahead/behind=yellow, unpublished=magenta, synced=green, unknown=darkgray) · `Created: <age>` with freshness colour (green < 7d, yellow < 30d, darkgray ≥ 30d; `-` when undeterminable, e.g. trunk / detached HEAD) · status + flag badges (only the relevant ones — false flags stay invisible: `★ main`, `🔒 locked`, `⚠ prunable`) · tilde-compressed path.
 
 GitHub fetch state machine per worktree: `Idle → Loading → Loaded(T) | Error(String)`. Manual refresh = `F` (the legacy `R` was rebound to `R: review` in #75).
+
+An `Agents` block (issue #408) sits between Issue / PR and Working Tree when at least one session is **pinned** to the selected worktree — one line per pinned session (agent · freshness · last activity · name), collapsed entirely otherwise; the full detected list lives in the `a` overlay. The main table grows a conditional `AGENT` column (top session per worktree) only when a session is detected.
 
 `Tab` swaps focus between the worktree list and the sidebar. `j` / `k` (and arrows) scroll the Recent Commits block when the sidebar is focused — the small blocks above stay pinned. The focused panel's border turns cyan.
 
@@ -679,6 +693,7 @@ src/
 ├── launcher.rs / multiplexer.rs   # [git_tui]/[review] launcher pipeline · tmux/zellij hand-off
 ├── daemon.rs / json_api.rs        # JSON-RPC 2.0 daemon + `--format=json` DTOs/schemas (#38)
 ├── statusline.rs        # `gwm statusline` prompt one-liner off the daemon (#309)
+├── agent_sessions.rs    # AI-agent session detection — 4 artefact backends + pins overlay (#408)
 ├── command_log.rs       # process-global command log (Command Logs modal, #290)
 ├── doctor.rs            # `gwm doctor` checks (config, env, orphan branches, prunable wts, launcher PATH probes)
 ├── cli.rs               # clap subcommands + handlers (incl. exec / clean, #313)
@@ -775,6 +790,7 @@ gwm new <t> <desc>           # create issue from template, then its worktree
 gwm pr [--draft] [--render]  # render [pr_template], then gh pr create
 gwm daemon                   # JSON-RPC 2.0 over a unix socket
 gwm statusline [--watch]     # one-line prompt summary off the daemon
+gwm agents [attach|detach]   # AI-agent sessions per worktree + manual pins (#408)
 gwm types                    # show branch types
 gwm doctor [--format json]   # diagnose setup (exit 0/1/2)
 gwm config get|set|list      # edit .gwm.toml (comment-preserving)

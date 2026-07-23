@@ -6,7 +6,7 @@
 
 use gwm::doctor::{Check, DoctorReport};
 use gwm::github::BranchLink;
-use gwm::json_api::{check_status_str, JsonDoctorReport, JsonPath, JsonStatus, JsonWorktree};
+use gwm::json_api::{self, check_status_str, JsonDoctorReport, JsonPath, JsonStatus, JsonWorktree};
 use gwm::worktree::{BranchStatus, WorktreeInfo};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -174,6 +174,7 @@ fn json_worktree_serialize_deserialize_round_trips() {
     age_seconds: Some(42),
     issue: Some(309),
     pr: Some(310),
+    agents: None,
   };
   let line = serde_json::to_string(&wt).unwrap();
   let back: JsonWorktree = serde_json::from_str(&line).unwrap();
@@ -193,4 +194,104 @@ fn json_worktree_vec_decodes_from_a_daemon_list_result() {
   assert_eq!(wts.len(), 1);
   assert!(wts[0].is_main);
   assert!(wts[0].status.unknown);
+}
+
+// -- Agent detection cache (issue #408, Codex review round A) ---------------
+
+/// The daemon re-lists every poll tick; identical inputs within the TTL must
+/// reuse the last detection instead of re-walking the artefact stores. The
+/// probe: seed a session, attach once, delete the artefacts, attach again —
+/// a cache hit still carries the agents (staleness ≤ 30 s is the documented
+/// trade-off). Runs in its own process-global slot; this file has no other
+/// attach_agents caller, so the env var and the cache stay uncontended.
+#[test]
+fn attach_agents_reuses_detection_within_the_ttl() {
+  let home = tempfile::TempDir::new().unwrap();
+  // SAFETY-of-intent: single test touching this var in this binary.
+  std::env::set_var("GWM_AGENTS_HOME", home.path());
+  let dir = home
+    .path()
+    .join(".codex/sessions")
+    .join(gwm::agent_sessions::codex_day_dir(std::time::SystemTime::now()));
+  std::fs::create_dir_all(&dir).unwrap();
+  std::fs::write(
+    dir.join("rollout-cache.jsonl"),
+    r#"{"type":"session_meta","payload":{"session_id":"cache-1","cwd":"/work/cached"}}
+"#,
+  )
+  .unwrap();
+
+  let row = || JsonWorktree {
+    name: "cached".into(),
+    id: "cached".into(),
+    path: "/work/cached".into(),
+    branch: Some("main".into()),
+    head: None,
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: JsonStatus {
+      is_dirty: false,
+      has_upstream: false,
+      ahead: 0,
+      behind: 0,
+      unknown: false,
+    },
+    age_seconds: None,
+    issue: None,
+    pr: None,
+    agents: None,
+  };
+
+  let reals = vec![std::path::PathBuf::from("/work/cached")];
+  let mut rows = vec![row()];
+  json_api::attach_agents(&mut rows, &reals, &[]);
+  assert!(rows[0].agents.is_some(), "seeded session must be detected");
+
+  // Remove the artefacts: a cache hit still serves the previous summary.
+  std::fs::remove_dir_all(home.path().join(".codex")).unwrap();
+  let mut rows2 = vec![row()];
+  json_api::attach_agents(&mut rows2, &reals, &[]);
+  assert!(
+    rows2[0].agents.is_some(),
+    "within the TTL the cached detection must be reused (no re-walk)"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_worktree_path_stays_the_plain_lossy_absolute_path() {
+  // Codex review round U (P2, undoing round T's key reuse): the public
+  // `path` is the schema value consumers open and compare — it must NEVER
+  // grow disambiguation suffixes, even for non-UTF-8 paths (where it is
+  // lossy by JSON's nature). Agent association uses a separate INTERNAL
+  // lossless key built from the caller-kept real PathBufs instead.
+  use std::ffi::OsStr;
+  use std::os::unix::ffi::OsStrExt;
+  let mk = |bytes: &[u8]| gwm::worktree::WorktreeInfo {
+    name: "wt".into(),
+    id: "wt".into(),
+    path: std::path::PathBuf::from("/repo").join(OsStr::from_bytes(bytes)),
+    branch: Some("main".into()),
+    head: None,
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: Default::default(),
+    link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
+    age: None,
+  };
+  let a = JsonWorktree::from(&mk(b"wt-\xff"));
+  let b = JsonWorktree::from(&mk(b"wt-\xfe"));
+  assert_eq!(
+    a.path,
+    mk(b"wt-\xff").path.to_string_lossy(),
+    "no suffix, plain lossy value"
+  );
+  assert_eq!(
+    a.path, b.path,
+    "lossy public paths may collide — the internal key disambiguates"
+  );
 }

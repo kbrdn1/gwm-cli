@@ -221,6 +221,13 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
       || a.status != b.status
       || a.issue != b.issue
       || a.pr != b.pr
+      // Agents compared whole, `last_activity` included (Codex review round
+      // D): unlike `age_seconds` — recomputed from the clock every poll —
+      // `last_activity` only moves when the agent actually wrote an
+      // artefact, so it IS a real change a subscriber wants (a statusline's
+      // "Ns ago" would otherwise go stale while the agent works). Push
+      // frequency is bounded by the 30 s detection cache, not the poll rate.
+      || a.agents != b.agents
   })
 }
 

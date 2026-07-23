@@ -1211,3 +1211,44 @@ fn gh_command_line_uses_the_program_basename_and_joins_args() {
     "gh issue view 226 --json title,body"
   );
 }
+
+// -- Agent pin branch guard (issue #408, Codex review round B) --------------
+
+/// libgit2 surfaces a detached HEAD either as `None` or as the literal
+/// `Some("HEAD")` (same trap the statusline handles). Writing
+/// `branch.HEAD.gwm-agent-pin` would share one pin across every detached
+/// worktree, so `"HEAD"` must read as "no branch".
+#[test]
+fn pinnable_branch_rejects_none_and_literal_head() {
+  use gwm::github::pinnable_branch;
+  assert_eq!(pinnable_branch(None), None);
+  assert_eq!(pinnable_branch(Some("HEAD")), None);
+  assert_eq!(pinnable_branch(Some("feat/#408-x")), Some("feat/#408-x"));
+  assert_eq!(pinnable_branch(Some("main")), Some("main"));
+}
+
+/// User feedback 2026-07-22: a worktree can host several agent sessions at
+/// once, so pins are a multi-valued branch-config key — attach accumulates,
+/// detach removes one specific pin, clear drops them all.
+#[test]
+fn agent_pins_accumulate_and_detach_individually() {
+  use gwm::github::{add_agent_pin, agent_pins, clear_agent_pins, remove_agent_pin};
+  let (_dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+  assert!(agent_pins(&repo, &branch).unwrap().is_empty());
+  add_agent_pin(&repo, &branch, "sid-one").unwrap();
+  add_agent_pin(&repo, &branch, "sid-two").unwrap();
+  // Re-attaching the same id is a no-op, not a duplicate.
+  add_agent_pin(&repo, &branch, "sid-one").unwrap();
+  assert_eq!(agent_pins(&repo, &branch).unwrap(), vec!["sid-one", "sid-two"]);
+
+  // Detach removes exactly the named pin.
+  assert!(remove_agent_pin(&repo, &branch, "sid-one").unwrap());
+  assert_eq!(agent_pins(&repo, &branch).unwrap(), vec!["sid-two"]);
+  // Removing an absent pin reports false, never errors.
+  assert!(!remove_agent_pin(&repo, &branch, "sid-one").unwrap());
+
+  clear_agent_pins(&repo, &branch).unwrap();
+  assert!(agent_pins(&repo, &branch).unwrap().is_empty());
+}

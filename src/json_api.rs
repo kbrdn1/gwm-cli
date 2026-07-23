@@ -72,6 +72,64 @@ pub struct JsonWorktree {
   pub issue: Option<u64>,
   /// Linked PR number (inferred, explicit, or auto-detected), if any.
   pub pr: Option<u64>,
+  /// Agent sessions matched to this worktree (issue #408). **Experimental
+  /// tier** — additive, omitted entirely (never `null`) when no session
+  /// matched, so pre-#408 payloads are byte-identical. See
+  /// `docs/schema/README.md` for the tier rules.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub agents: Option<JsonWorktreeAgents>,
+}
+
+/// The agent-session summary of one worktree row (issue #408).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonWorktreeAgents {
+  /// The most recently active session — what compact surfaces display.
+  pub top: JsonAgentSession,
+  /// Every matched session, most recent first.
+  pub sessions: Vec<JsonAgentSession>,
+}
+
+/// One detected agent session on the wire (issue #408).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonAgentSession {
+  /// Stable lowercase agent name: `claude` | `codex` | `opencode` | `vibe`.
+  pub kind: String,
+  /// `active` | `idle`.
+  pub freshness: String,
+  /// Last artefact activity, epoch seconds UTC.
+  pub last_activity: u64,
+  /// Backend-stable session identifier.
+  pub id: String,
+  /// Human-readable session name when the artefacts carry one (first user
+  /// prompt or recorded title). Omitted when unavailable.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub name: Option<String>,
+}
+
+impl JsonWorktreeAgents {
+  /// Wire shape of a detection summary, `None` when no session matched —
+  /// feeding `skip_serializing_if` so empty rows stay byte-identical.
+  pub fn from_summary(agents: &crate::agent_sessions::WorktreeAgents, now: std::time::SystemTime) -> Option<Self> {
+    let to_wire = |s: &crate::agent_sessions::AgentSession| JsonAgentSession {
+      kind: s.kind.display().to_string(),
+      freshness: match crate::agent_sessions::Freshness::classify(s.last_activity, s.ended, now) {
+        crate::agent_sessions::Freshness::Active => "active".to_string(),
+        crate::agent_sessions::Freshness::Idle => "idle".to_string(),
+      },
+      last_activity: s
+        .last_activity
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0),
+      id: s.id.clone(),
+      name: s.name.clone(),
+    };
+    let top = agents.top()?;
+    Some(Self {
+      top: to_wire(top),
+      sessions: agents.sessions.iter().map(to_wire).collect(),
+    })
+  }
 }
 
 impl From<&WorktreeInfo> for JsonWorktree {
@@ -79,6 +137,11 @@ impl From<&WorktreeInfo> for JsonWorktree {
     Self {
       name: w.name.clone(),
       id: w.id.clone(),
+      // The plain lossy absolute path: it is the PUBLIC schema value
+      // consumers open and compare, so it must never grow disambiguation
+      // suffixes (Codex review round U undoing round T's key reuse) —
+      // agent association uses a separate lossless INTERNAL key derived
+      // from the caller-kept real `PathBuf`s instead.
       path: w.path.to_string_lossy().into_owned(),
       branch: w.branch.clone(),
       head: w.head.clone(),
@@ -89,6 +152,9 @@ impl From<&WorktreeInfo> for JsonWorktree {
       age_seconds: w.age.map(|d| d.as_secs()),
       issue: w.link.issue,
       pr: w.link.pr,
+      // Filled by the list assembly when detection ran (issue #408); a bare
+      // conversion carries no session info.
+      agents: None,
     }
   }
 }
@@ -165,5 +231,135 @@ impl From<&DoctorReport> for JsonDoctorReport {
 /// `gwm list --format=json` and the daemon's `list` RPC method so both
 /// surfaces stay byte-identical.
 pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
-  Ok(worktree::list(repo)?.iter().map(JsonWorktree::from).collect())
+  let trees = worktree::list(repo)?;
+  let mut rows: Vec<JsonWorktree> = trees.iter().map(JsonWorktree::from).collect();
+  let reals: Vec<std::path::PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
+  let pins = agent_pins_for_rows(repo, &trees);
+  attach_agents(&mut rows, &reals, &pins);
+  Ok(rows)
+}
+
+/// Manual agent pins for already-built rows: `(path key, session id)` pairs
+/// read from each row's branch config (issue #408 US4). Rows without a
+/// branch (detached) cannot carry a pin.
+pub fn agent_pins_for_rows(repo: &git2::Repository, trees: &[crate::worktree::WorktreeInfo]) -> Vec<(String, String)> {
+  trees
+    .iter()
+    .flat_map(|w| {
+      let pins = crate::github::pinnable_branch(w.branch.as_deref())
+        .map(|branch| crate::github::agent_pins(repo, branch).unwrap_or_default())
+        .unwrap_or_default();
+      // Keyed by the lossless display key — the INTERNAL association key
+      // shared with `attach_agents` (round U), never the public path.
+      let key = crate::agent_sessions::path_display_key(&w.path);
+      pins.into_iter().map(move |sid| (key.clone(), sid))
+    })
+    .collect()
+}
+
+/// Populate the experimental `agents` field on already-built rows (issue
+/// #408): one detection pass over the whole set, keyed back by `path`, with
+/// manual `pins` overlaid. The single shared implementation for every
+/// surface (CLI list, daemon, workspace rows) so they cannot drift. No home
+/// directory → no-op (FR-009).
+///
+/// Workspace callers open each row's owning repo to build `pins` (Codex
+/// review round I) — this pass itself stays repo-agnostic.
+pub fn attach_agents(rows: &mut [JsonWorktree], reals: &[std::path::PathBuf], pins: &[(String, String)]) {
+  attach_agents_inner(rows, reals, pins, false);
+}
+
+/// [`attach_agents`] variant that also returns the raw session pool, so
+/// `gwm agents` can list the sessions no worktree matched — precisely the
+/// ones worth attaching manually (Codex review round C). Split from the
+/// plain call because the pool costs the Claude foreign-dir sweep (round
+/// F): `gwm list` and daemon polls must not pay it.
+pub fn attach_agents_with_pool(
+  rows: &mut [JsonWorktree],
+  reals: &[std::path::PathBuf],
+  pins: &[(String, String)],
+) -> Vec<crate::agent_sessions::AgentSession> {
+  attach_agents_inner(rows, reals, pins, true)
+}
+
+fn attach_agents_inner(
+  rows: &mut [JsonWorktree],
+  reals: &[std::path::PathBuf],
+  pins: &[(String, String)],
+  want_pool: bool,
+) -> Vec<crate::agent_sessions::AgentSession> {
+  let Some(home) = crate::agent_sessions::agents_home() else {
+    return Vec::new();
+  };
+  let now = std::time::SystemTime::now();
+  // The association keys are lossless display keys derived from the
+  // ORIGINAL PathBufs the caller kept (rows and reals are parallel) —
+  // never the public `row.path`, which stays the plain lossy absolute
+  // path of the schema and could collide for non-UTF-8 worktrees
+  // (Codex review rounds T + U).
+  debug_assert_eq!(rows.len(), reals.len());
+  let keyed: Vec<(String, std::path::PathBuf)> = reals
+    .iter()
+    .map(|p| (crate::agent_sessions::path_display_key(p), p.clone()))
+    .collect();
+  let (summary, pool) = detect_cached(&home, &keyed, pins, now, want_pool);
+  for (row, real) in rows.iter_mut().zip(reals) {
+    row.agents = summary
+      .get(&crate::agent_sessions::path_display_key(real))
+      .and_then(|a| JsonWorktreeAgents::from_summary(a, now));
+  }
+  pool
+}
+
+/// Detection result cache for the daemon's poll loop (Codex review round A):
+/// `subscribe` consumers make the daemon re-list every poll tick (1 s by
+/// default, once per subscriber), and re-walking the Codex/opencode/Vibe
+/// stores each time is real disk churn. Same inputs within the TTL reuse the
+/// last summary — the TUI's own 30 s re-detection cadence, applied here.
+/// ponytail: one process-global slot guarded by a Mutex; per-input LRU only
+/// if a real multi-repo daemon setup ever needs it.
+/// `want_pool` selects the detection depth (round F): `false` = summary
+/// only, matched-only Claude scan, empty pool returned; `true` = full
+/// sweep + raw pool. A cached full detection serves BOTH shapes (the
+/// summary is identical — swept sessions never summarize); a cached
+/// summary-only entry cannot serve a pool request and is recomputed.
+fn detect_cached(
+  home: &std::path::Path,
+  keyed: &[(String, std::path::PathBuf)],
+  pins: &[(String, String)],
+  now: std::time::SystemTime,
+  want_pool: bool,
+) -> (
+  std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+  Vec<crate::agent_sessions::AgentSession>,
+) {
+  const TTL: std::time::Duration = std::time::Duration::from_secs(30);
+  type CacheKey = (std::path::PathBuf, Vec<(String, String)>, Vec<String>);
+  type Detection = (
+    std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+    Vec<crate::agent_sessions::AgentSession>,
+  );
+  type CacheSlot = Option<(std::time::Instant, CacheKey, bool, Detection)>;
+  static CACHE: std::sync::Mutex<CacheSlot> = std::sync::Mutex::new(None);
+
+  let key: CacheKey = (
+    home.to_path_buf(),
+    pins.to_vec(),
+    keyed.iter().map(|(k, _)| k.clone()).collect(),
+  );
+  // A poisoned mutex here would mean a panic mid-detection; recover by
+  // recomputing rather than propagating the poison.
+  let mut slot = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+  if let Some((at, cached_key, has_pool, detection)) = slot.as_ref() {
+    if *cached_key == key && at.elapsed() < TTL && (*has_pool || !want_pool) {
+      return detection.clone();
+    }
+  }
+  let detection = if want_pool {
+    crate::agent_sessions::detect_with_sessions(home, keyed, pins, now)
+  } else {
+    (crate::agent_sessions::detect_all(home, keyed, pins, now), Vec::new())
+  };
+  *slot = Some((std::time::Instant::now(), key, want_pool, detection.clone()));
+  detection
 }

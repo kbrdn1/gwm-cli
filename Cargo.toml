@@ -166,6 +166,7 @@ tui-term = "0.3"
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
 serde_yaml_ng = "0.10.0"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /

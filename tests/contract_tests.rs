@@ -123,6 +123,7 @@ fn sample_worktree() -> JsonWorktree {
     age_seconds: Some(10),
     issue: Some(317),
     pr: Some(318),
+    agents: None,
   }
 }
 
@@ -924,5 +925,105 @@ fn clean_yes_flag_takes_no_value() {
       );
     }
     other => panic!("expected Command::Clean, got {other:?}"),
+  }
+}
+
+// --- 8. Agent sessions field (issue #408) ----------------------------------
+//
+// `agents` is an ADDITIVE, experimental-tier field on the list row (same
+// route the workspace `repo` field took): present in `properties`, never in
+// `required`, omitted (not null) when no session matched, ignored cleanly by
+// pre-#408 consumers. SCHEMA_VERSION stays 1.
+
+mod agent_sessions_field {
+  use super::*;
+  use gwm::json_api::{JsonAgentSession, JsonWorktreeAgents};
+
+  fn sample_agents() -> JsonWorktreeAgents {
+    let s = |kind: &str, freshness: &str, ts: u64, id: &str| JsonAgentSession {
+      kind: kind.into(),
+      freshness: freshness.into(),
+      last_activity: ts,
+      id: id.into(),
+      name: Some("fix the login flow".into()),
+    };
+    JsonWorktreeAgents {
+      top: s("claude", "active", 1_784_480_000, "a7820111"),
+      sessions: vec![
+        s("claude", "active", 1_784_480_000, "a7820111"),
+        s("codex", "idle", 1_784_470_000, "019f6b95"),
+      ],
+    }
+  }
+
+  fn sample_worktree_with_agents() -> JsonWorktree {
+    let mut w = sample_worktree();
+    w.agents = Some(sample_agents());
+    w
+  }
+
+  #[test]
+  fn agents_is_documented_but_never_required() {
+    let schema = read_schema("worktree-list.schema.json");
+    let required = required_set(&schema, "/$defs/worktree/required");
+    let properties = object_keys(&schema, "/$defs/worktree/properties");
+    assert!(properties.contains("agents"), "`agents` must be a documented property");
+    assert!(
+      !required.contains("agents"),
+      "`agents` is additive/experimental — requiring it would break the additive policy"
+    );
+  }
+
+  #[test]
+  fn worktree_with_agents_still_matches_the_schema() {
+    let schema = read_schema("worktree-list.schema.json");
+    let required = required_set(&schema, "/$defs/worktree/required");
+    let properties = object_keys(&schema, "/$defs/worktree/properties");
+    let serialized = serialized_keys(&sample_worktree_with_agents());
+    assert_field_contract("worktree row with agents", &required, &serialized, &properties);
+  }
+
+  #[test]
+  fn agents_shape_and_types_are_frozen() {
+    assert_type_baseline(
+      "worktree agents",
+      &sample_agents(),
+      &[("top", "object"), ("sessions", "array")],
+    );
+    assert_type_baseline(
+      "agent session",
+      &sample_agents().top,
+      &[
+        ("kind", "string"),
+        ("freshness", "string"),
+        ("last_activity", "integer"),
+        ("id", "string"),
+        ("name", "string"),
+      ],
+    );
+  }
+
+  #[test]
+  fn agents_is_omitted_not_null_when_absent() {
+    let v = serde_json::to_value(sample_worktree()).unwrap();
+    assert!(
+      !v.as_object().unwrap().contains_key("agents"),
+      "a session-less row must omit `agents` entirely (skip_serializing_if), not carry null"
+    );
+  }
+
+  #[test]
+  fn a_pre_408_consumer_parses_a_payload_carrying_agents() {
+    // Minimal stand-in for a consumer compiled against the pre-#408 shape:
+    // serde ignores unknown fields by default, so `agents` passes through.
+    #[derive(serde::Deserialize)]
+    struct OldRow {
+      name: String,
+      path: String,
+    }
+    let payload = serde_json::to_string(&sample_worktree_with_agents()).unwrap();
+    let old: OldRow = serde_json::from_str(&payload).expect("old consumer must keep working");
+    assert_eq!(old.name, "feat-317");
+    assert_eq!(old.path, "/wt/feat-317");
   }
 }

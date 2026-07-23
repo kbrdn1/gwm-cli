@@ -237,6 +237,11 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "preview and reclaim build artifacts in the selected worktree",
     },
     PaletteEntry {
+      action: Action::AgentSessions,
+      name: "agents",
+      description: "show the agent sessions attached to the selected worktree",
+    },
+    PaletteEntry {
       action: Action::MuxPane,
       name: "mux-pane",
       description: "open the selected worktree in a new multiplexer pane/tab",

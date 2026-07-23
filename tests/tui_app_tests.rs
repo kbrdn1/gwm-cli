@@ -8076,3 +8076,726 @@ fn clean_overlay_real_profile_change_disarms_the_countdown() {
     "changing the target re-requires confirmation"
   );
 }
+
+// -- Agent session pane (issue #408) --------------------------------------
+
+mod agent_sessions_pane {
+  use super::*;
+  use gwm::agent_sessions::{AgentKind, AgentSession, Freshness, WorktreeAgents};
+  use gwm::tui::{agent_cell_label, TaskKind};
+  use std::collections::BTreeMap;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn snapshot_for(path: &str, kind: AgentKind, age_secs: u64) -> BTreeMap<String, WorktreeAgents> {
+    let mut map = BTreeMap::new();
+    map.insert(
+      path.to_string(),
+      WorktreeAgents {
+        sessions: vec![AgentSession {
+          kind,
+          cwd: PathBuf::from(path),
+          last_activity: SystemTime::now() - Duration::from_secs(age_secs),
+          ended: false,
+          id: "s1".into(),
+          name: None,
+        }],
+      },
+    );
+    map
+  }
+
+  #[test]
+  fn agent_snapshot_applies_on_live_generation_and_coalesces() {
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    // A second request while one is in flight coalesces (the debounce).
+    assert!(app.tasks.request(TaskKind::AgentSessions).is_none());
+    let map = snapshot_for("/w/one", AgentKind::ClaudeCode, 10);
+    assert!(app.apply_agent_snapshot(generation, map.clone(), None, BTreeMap::new()));
+    assert_eq!(app.agent_snapshot.as_ref(), Some(&map));
+  }
+
+  #[test]
+  fn same_set_refresh_keeps_an_in_flight_detection_alive() {
+    // Codex review round P (P2): every refresh used to invalidate the
+    // AgentSessions slot unconditionally — with auto_refresh_secs shorter
+    // than a scan of a large store, each tick freed the slot while the
+    // scan thread kept running, spawned a concurrent scan and dropped the
+    // previous result as stale: scans piled up and no snapshot ever
+    // landed. A refresh that re-lists the SAME worktree set must keep the
+    // in-flight run authoritative; only a genuinely different set drops it.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.refresh().unwrap();
+    assert!(
+      app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()),
+      "an unchanged worktree set left the in-flight detection authoritative"
+    );
+  }
+
+  #[test]
+  fn branch_flip_refresh_drops_the_in_flight_detection() {
+    // Codex review round Q (P2): pins live in BRANCH config, so a checkout
+    // that switches branch without changing path moved the pins key — a
+    // same-path-only staleness gate would keep showing the OLD branch's
+    // pins for up to 30 s. The (path, branch) key drops the in-flight run.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    {
+      let head = app.repo.head().unwrap().peel_to_commit().unwrap();
+      app.repo.branch("flipped", &head, false).unwrap();
+      app.repo.set_head("refs/heads/flipped").unwrap();
+    }
+    app.refresh().unwrap();
+    assert!(
+      !app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()),
+      "a branch flip at constant path invalidates the in-flight detection"
+    );
+  }
+
+  #[test]
+  fn summary_only_snapshot_keeps_the_previous_pool() {
+    // Round Q: the periodic tick is summary-only (`None` pool) — it must
+    // never wipe the candidates an open attach prompt is filtering.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(
+      generation,
+      BTreeMap::new(),
+      Some(vec![AgentSession {
+        kind: AgentKind::Codex,
+        cwd: PathBuf::from("/w/one"),
+        last_activity: SystemTime::now(),
+        ended: false,
+        id: "pool-keep".into(),
+        name: None,
+      }]),
+      BTreeMap::new(),
+    ));
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()));
+    assert_eq!(
+      app.agent_all_sessions.len(),
+      1,
+      "the pool survived the summary-only landing"
+    );
+    assert_eq!(app.agent_all_sessions[0].id, "pool-keep");
+  }
+
+  #[test]
+  fn opening_the_attach_prompt_starts_a_pool_refresh() {
+    // Round Q: the full sweep runs when the prompt opens, not on the
+    // periodic tick — observable as an in-flight AgentSessions run that
+    // coalesces any further request.
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_none(),
+      "the pool refresh is in flight right after the prompt opened"
+    );
+  }
+
+  #[test]
+  fn prompt_open_defers_the_pool_scan_behind_an_in_flight_run() {
+    // Codex review round R (P2): invalidating the in-flight periodic run
+    // only freed the SLOT — its thread kept walking the store while the
+    // prompt's full scan started, doubling the I/O. Opening the prompt
+    // while a run is in flight must instead queue the pool scan: the
+    // periodic result still lands, and the full scan chains after it.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    // The in-flight periodic run was NOT invalidated…
+    assert!(
+      app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()),
+      "the periodic run stays authoritative under the queued pool scan"
+    );
+    // …and its landing chained the queued full scan.
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_none(),
+      "the pool scan is in flight right after the periodic landing"
+    );
+  }
+
+  #[test]
+  fn closing_the_prompt_cancels_the_queued_pool_scan() {
+    // Codex review round T (P2): open-then-close the attach prompt while
+    // a periodic run is in flight left `agent_pool_wanted` set — the
+    // landing then chained the full foreign-dir sweep with no prompt left
+    // to consume it. The chain only fires while the prompt is still open.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.open_agent_overlay();
+    app.open_agent_input(); // queued behind the in-flight run
+    app.agent_input_cancel(); // …and abandoned before it landed
+    assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()));
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_some(),
+      "no orphan pool scan chained after the prompt closed"
+    );
+  }
+
+  #[test]
+  fn agent_snapshot_stale_generation_is_dropped() {
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    let live = snapshot_for("/w/one", AgentKind::Codex, 10);
+    assert!(app.apply_agent_snapshot(generation, live.clone(), None, BTreeMap::new()));
+    // A new run starts, then a refresh invalidates it mid-flight.
+    let stale = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.tasks.invalidate(TaskKind::AgentSessions);
+    assert!(!app.apply_agent_snapshot(stale, BTreeMap::new(), None, BTreeMap::new()));
+    // The last authoritative snapshot survives.
+    assert_eq!(app.agent_snapshot.as_ref(), Some(&live));
+  }
+
+  #[test]
+  fn agent_cell_is_empty_without_snapshot_or_sessions() {
+    // No snapshot yet (startup) and no matched sessions both render nothing —
+    // no placeholder noise (spec US1 scenario 5).
+    assert!(agent_cell_label(None, SystemTime::now()).is_none());
+    let empty = WorktreeAgents::default();
+    assert!(agent_cell_label(Some(&empty), SystemTime::now()).is_none());
+  }
+
+  #[test]
+  fn agent_cell_shows_top_agent_with_freshness() {
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: vec![
+        AgentSession {
+          kind: AgentKind::ClaudeCode,
+          cwd: PathBuf::from("/w/one"),
+          last_activity: now - Duration::from_secs(10),
+          ended: false,
+          id: "new".into(),
+          name: None,
+        },
+        AgentSession {
+          kind: AgentKind::Vibe,
+          cwd: PathBuf::from("/w/one"),
+          last_activity: now - Duration::from_secs(4000),
+          ended: false,
+          id: "old".into(),
+          name: None,
+        },
+      ],
+    };
+    let (label, freshness) = agent_cell_label(Some(&agents), now).unwrap();
+    assert_eq!(label, "claude");
+    assert_eq!(freshness, Freshness::Active);
+
+    let idle_only = WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind: AgentKind::Opencode,
+        cwd: PathBuf::from("/w/one"),
+        last_activity: now - Duration::from_secs(4000),
+        ended: false,
+        id: "old".into(),
+        name: None,
+      }],
+    };
+    let (label, freshness) = agent_cell_label(Some(&idle_only), now).unwrap();
+    assert_eq!(label, "opencode");
+    assert_eq!(freshness, Freshness::Idle);
+  }
+
+  #[test]
+  fn agents_for_looks_up_by_worktree_path() {
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    let path = app.worktrees[0].path.to_string_lossy().to_string();
+    let map = snapshot_for(&path, AgentKind::ClaudeCode, 10);
+    assert!(app.apply_agent_snapshot(generation, map, None, BTreeMap::new()));
+    let w = app.worktrees[0].clone();
+    assert!(app.agents_for(&w).is_some());
+    assert_eq!(app.agents_for(&w).unwrap().top().unwrap().id, "s1");
+  }
+}
+
+// -- Agent detail overlay (issue #408, US2) --------------------------------
+
+mod agent_detail_overlay {
+  use super::*;
+  use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
+  use gwm::tui::state::detail_overlay::{agent_detail_rows, DetailRole};
+  use gwm::tui::{TaskKind, View};
+  use std::collections::BTreeMap;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn seeded_app_with_sessions() -> (tempfile::TempDir, App) {
+    let (dir, mut app) = make_app();
+    let now = SystemTime::now();
+    let path = app.worktrees[0].path.to_string_lossy().to_string();
+    let mut map = BTreeMap::new();
+    map.insert(
+      path.clone(),
+      WorktreeAgents {
+        sessions: vec![
+          AgentSession {
+            kind: AgentKind::ClaudeCode,
+            cwd: PathBuf::from(&path),
+            last_activity: now - Duration::from_secs(10),
+            ended: false,
+            id: "newest-session".into(),
+            name: None,
+          },
+          AgentSession {
+            kind: AgentKind::Codex,
+            cwd: PathBuf::from(&path),
+            last_activity: now - Duration::from_secs(4000),
+            ended: false,
+            id: "older-session".into(),
+            name: None,
+          },
+        ],
+      },
+    );
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(generation, map, None, BTreeMap::new()));
+    (dir, app)
+  }
+
+  #[test]
+  fn open_lists_sessions_most_recent_first() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    assert_eq!(app.view, View::DetailOverlay);
+    let rows = &app.detail_overlay.rows;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].label, "claude");
+    assert_eq!(rows[0].role, DetailRole::Active);
+    assert_eq!(rows[1].label, "codex");
+    assert_eq!(rows[1].role, DetailRole::Muted);
+    // Value carries freshness + a human-readable recency, not raw timestamps,
+    // and the FULL id (user feedback: 8-char truncation was useless for attach).
+    assert!(rows[0].value.contains("active"));
+    assert!(rows[1].value.contains("idle"));
+    assert!(
+      rows[0].value.contains("newest-session"),
+      "full id expected: {}",
+      rows[0].value
+    );
+    // meta carries the session id for attach/detach on the selected row.
+    assert_eq!(rows[0].meta.as_deref(), Some("newest-session"));
+    // User feedback 2026-07-22: capitalized title, no worktree name suffix.
+    assert_eq!(app.detail_overlay.title, "Agent Sessions");
+  }
+
+  #[test]
+  fn open_on_sessionless_worktree_states_it_rather_than_empty() {
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    assert_eq!(app.view, View::DetailOverlay);
+    let rows = &app.detail_overlay.rows;
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].value.contains("no agent session found"));
+    assert_eq!(rows[0].role, DetailRole::Muted);
+  }
+
+  #[test]
+  fn attach_on_an_empty_list_falls_through_to_the_by_id_prompt() {
+    // User feedback 2026-07-22: with "no agent session found" there is
+    // nothing to select, so `a` must open the attach-by-id prompt instead
+    // of dead-ending on a status error.
+    use gwm::tui::state::detail_overlay::DetailMode;
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.attach_selected_agent();
+    assert_eq!(app.detail_overlay.mode, DetailMode::Input);
+  }
+
+  #[test]
+  fn close_restores_the_list_untouched() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    let selected_before = app.list_state.selected();
+    app.open_agent_overlay();
+    app.close_detail_overlay();
+    assert_eq!(app.view, View::List);
+    assert_eq!(app.list_state.selected(), selected_before);
+  }
+
+  #[test]
+  fn detail_rows_are_generic_label_value_role_triples() {
+    // The mapping is pure and content-agnostic: any consumer can build rows.
+    let rows = agent_detail_rows(None, &[], SystemTime::now());
+    assert_eq!(rows.len(), 1);
+    let row = &rows[0];
+    // The triple shape is the reuse contract for the future rich view.
+    let _label: &String = &row.label;
+    let _value: &String = &row.value;
+    let _role: &DetailRole = &row.role;
+    let _meta: &Option<String> = &row.meta;
+  }
+
+  #[test]
+  fn selection_starts_at_zero_moves_and_clamps() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    assert_eq!(app.detail_overlay.selected, 0);
+    app.detail_overlay.select_next();
+    assert_eq!(app.detail_overlay.selected, 1);
+    app.detail_overlay.select_next(); // clamps at last row
+    assert_eq!(app.detail_overlay.selected, 1);
+    app.detail_overlay.select_prev();
+    app.detail_overlay.select_prev(); // clamps at zero
+    assert_eq!(app.detail_overlay.selected, 0);
+  }
+
+  #[test]
+  fn rows_prefer_the_session_name_over_the_id() {
+    // User feedback: a named session displays its name, not the uuid.
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: vec![AgentSession {
+        kind: AgentKind::ClaudeCode,
+        cwd: PathBuf::from("/w/one"),
+        last_activity: now - Duration::from_secs(10),
+        ended: false,
+        id: "a7820111-8232".into(),
+        name: Some("fix the login timeout bug".into()),
+      }],
+    };
+    let rows = agent_detail_rows(Some(&agents), &[], now);
+    assert!(
+      rows[0].value.contains("fix the login timeout bug"),
+      "got {}",
+      rows[0].value
+    );
+    assert!(
+      !rows[0].value.contains("a7820111"),
+      "id must yield to the name: {}",
+      rows[0].value
+    );
+    // The id still rides meta for attach.
+    assert_eq!(rows[0].meta.as_deref(), Some("a7820111-8232"));
+  }
+
+  #[test]
+  fn attach_writes_the_pin_into_the_current_branch_after_a_flip() {
+    // Codex review round U (P2): the overlay captured (path, branch) at
+    // open; a branch flipped externally while it stayed open meant attach
+    // wrote `branch.<old>.gwm-agent-pin`. The write must re-resolve the
+    // CURRENT branch from the captured path.
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    {
+      let head = app.repo.head().unwrap().peel_to_commit().unwrap();
+      app.repo.branch("flipped", &head, false).unwrap();
+      app.repo.set_head("refs/heads/flipped").unwrap();
+    }
+    app.refresh().unwrap(); // worktrees now carry the new branch
+    app.attach_selected_agent();
+    let pins = gwm::github::agent_pins(&app.repo, "flipped").unwrap();
+    assert_eq!(pins, vec!["newest-session"], "the pin landed in the CURRENT branch");
+  }
+
+  #[test]
+  fn pin_change_during_an_in_flight_scan_chains_instead_of_racing() {
+    // Codex review round U (P2): attach/detach invalidated the
+    // AgentSessions slot while its thread was still walking the store —
+    // the next tick spawned a second concurrent scan (same hazard as
+    // rounds P/R). With a run in flight the refresh queues: the landing
+    // stays authoritative, the fresh pins survive it, and the re-scan
+    // chains after.
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.attach_selected_agent(); // pin written while the scan is in flight
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert!(!gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
+    // The in-flight run still lands (not invalidated) — with PRE-change
+    // pins that must not clobber the fresh map…
+    let stale_pins = BTreeMap::new();
+    assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, stale_pins));
+    assert!(
+      app.agent_pins.values().flatten().any(|sid| sid == "newest-session"),
+      "the fresh pin survived the stale landing: {:?}",
+      app.agent_pins
+    );
+    // …and the queued re-detection is due (snapshot cleared, slot free).
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_some(),
+      "the slot is free for the chained re-scan"
+    );
+  }
+
+  #[test]
+  fn attach_pins_the_selected_session_and_marks_the_row() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    app.detail_overlay.select_next(); // select "older-session"
+    app.attach_selected_agent();
+    // Pin persisted in branch config for the target worktree's branch.
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    let pins = gwm::github::agent_pins(&app.repo, &branch).unwrap();
+    assert_eq!(pins, vec!["older-session"]);
+    // The row now carries the pinned marker.
+    let row = &app.detail_overlay.rows[app.detail_overlay.selected];
+    assert!(row.value.contains("pinned"), "got {}", row.value);
+  }
+
+  #[test]
+  fn attach_accumulates_pins_and_detach_removes_only_the_selected_one() {
+    // User feedback 2026-07-22: several agents can work one worktree, so a
+    // second attach ADDS a pin (it used to replace), and `d` unpins only
+    // the selected session.
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    app.attach_selected_agent(); // pin "newest-session"
+    app.detail_overlay.select_next();
+    app.attach_selected_agent(); // pin "older-session" TOO
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert_eq!(
+      gwm::github::agent_pins(&app.repo, &branch).unwrap(),
+      vec!["newest-session", "older-session"]
+    );
+    // Both rows carry the marker.
+    assert!(app.detail_overlay.rows.iter().all(|r| r.value.contains("pinned")));
+
+    // Detach on the selected (older) row removes only that pin.
+    app.detach_selected_agent();
+    assert_eq!(
+      gwm::github::agent_pins(&app.repo, &branch).unwrap(),
+      vec!["newest-session"]
+    );
+    assert!(app.detail_overlay.rows[0].value.contains("pinned"));
+    assert!(!app.detail_overlay.rows[1].value.contains("pinned"));
+  }
+
+  #[test]
+  fn detach_clears_the_pin() {
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    app.attach_selected_agent();
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert!(!gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
+    app.detach_selected_agent();
+    assert!(gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
+    let row = &app.detail_overlay.rows[0];
+    assert!(!row.value.contains("pinned"), "got {}", row.value);
+  }
+}
+
+// -- Agents sidebar pane (issue #408, user feedback 2026-07-22) ------------
+
+mod agent_pane {
+  use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
+  use gwm::tui::theme::Theme;
+  use gwm::tui::{agent_pane_lines, agents_pane_title};
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn line_text(line: &ratatui::text::Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+  }
+
+  fn mk(kind: AgentKind, age: u64, id: &str, name: Option<&str>) -> AgentSession {
+    AgentSession {
+      kind,
+      cwd: PathBuf::from("/w/one"),
+      last_activity: SystemTime::now() - Duration::from_secs(age),
+      ended: false,
+      id: id.into(),
+      name: name.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn pane_lists_only_pinned_sessions_preferring_names() {
+    // User feedback 2026-07-22: the sidebar pane is the *deliberate* view —
+    // only pinned sessions show there; the full detected list lives in the
+    // `a` overlay.
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: vec![
+        mk(AgentKind::ClaudeCode, 10, "uuid-1", Some("fix login bug")),
+        mk(AgentKind::Codex, 400, "uuid-2", None),
+      ],
+    };
+    let pinned = ["uuid-1".to_string()];
+    let lines = agent_pane_lines(Some(&agents), &pinned, now, &Theme::default());
+    assert_eq!(lines.len(), 1, "only the pinned session shows");
+    let first = line_text(&lines[0]);
+    assert!(first.contains("claude"), "got {first}");
+    assert!(first.contains("active"), "got {first}");
+    assert!(first.contains("fix login bug"), "got {first}");
+    assert!(!first.contains("uuid-1"), "name must replace the id: {first}");
+  }
+
+  #[test]
+  fn pane_caps_at_three_pinned_sessions_with_an_overflow_line() {
+    let now = SystemTime::now();
+    let agents = WorktreeAgents {
+      sessions: (0..5)
+        .map(|i| mk(AgentKind::ClaudeCode, 1000 + i, &format!("uuid-{i}"), None))
+        .collect(),
+    };
+    let pinned: Vec<String> = (0..5).map(|i| format!("uuid-{i}")).collect();
+    let lines = agent_pane_lines(Some(&agents), &pinned, now, &Theme::default());
+    assert_eq!(lines.len(), 4, "3 pinned sessions + overflow line");
+    let overflow = line_text(&lines[3]);
+    assert!(overflow.contains("+2"), "got {overflow}");
+  }
+
+  #[test]
+  fn pane_is_empty_without_pins_so_the_block_collapses() {
+    let now = SystemTime::now();
+    assert!(agent_pane_lines(None, &[], now, &Theme::default()).is_empty());
+    // Detected-but-unpinned sessions do NOT surface in the pane (user
+    // feedback 2026-07-22) — they stay in the overlay until pinned.
+    let agents = WorktreeAgents {
+      sessions: vec![mk(AgentKind::ClaudeCode, 10, "uuid-1", None)],
+    };
+    assert!(agent_pane_lines(Some(&agents), &[], now, &Theme::default()).is_empty());
+  }
+
+  #[test]
+  fn pane_title_advertises_the_overlay_key() {
+    let km = gwm::tui::keymap::Keymap::defaults();
+    let title = agents_pane_title(&km);
+    assert!(title.contains("Agents"), "got {title}");
+    assert!(title.contains('a'), "resolved overlay key expected: {title}");
+  }
+}
+
+// -- Detail overlay footer hints (user feedback 2026-07-22) ----------------
+
+mod agent_overlay_hints {
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::theme::Theme;
+  use gwm::tui::{modal_hint_for_context, HintContext};
+
+  #[test]
+  fn detail_footer_advertises_select_attach_detach_close() {
+    let line = modal_hint_for_context(
+      HintContext::Detail,
+      &Keymap::defaults(),
+      &ModalKeymap::defaults(),
+      &Theme::default(),
+    );
+    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+    for needle in ["select", "attach", "detach", "close"] {
+      assert!(text.contains(needle), "hint must advertise '{needle}', got: {text}");
+    }
+    // The resolved default keys ride along.
+    assert!(text.contains('a'), "attach key expected: {text}");
+    assert!(text.contains('d'), "detach key expected: {text}");
+  }
+}
+
+// -- Overlay refresh + attach-by-id input (user feedback 2026-07-22 #2) ----
+
+mod agent_overlay_input {
+  use super::*;
+  use gwm::agent_sessions::{AgentKind, AgentSession, WorktreeAgents};
+  use gwm::tui::state::detail_overlay::{filter_sessions, DetailMode};
+  use gwm::tui::TaskKind;
+  use std::collections::BTreeMap;
+  use std::path::PathBuf;
+  use std::time::{Duration, SystemTime};
+
+  fn session(kind: AgentKind, id: &str, name: Option<&str>) -> AgentSession {
+    AgentSession {
+      kind,
+      cwd: PathBuf::from("/elsewhere"),
+      last_activity: SystemTime::now() - Duration::from_secs(10),
+      ended: false,
+      id: id.into(),
+      name: name.map(str::to_string),
+    }
+  }
+
+  #[test]
+  fn snapshot_landing_rebuilds_the_open_overlay_rows() {
+    // User feedback: after attach/detach the async re-detection lands but
+    // the open overlay kept its stale rows until reopened.
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    assert!(app.detail_overlay.rows[0].value.contains("no agent session"));
+
+    let path = app.worktrees[0].path.to_string_lossy().to_string();
+    let mut map = BTreeMap::new();
+    map.insert(
+      path,
+      WorktreeAgents {
+        sessions: vec![session(AgentKind::Codex, "fresh-1", None)],
+      },
+    );
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(generation, map, None, BTreeMap::new()));
+    assert_eq!(app.detail_overlay.rows.len(), 1);
+    assert!(app.detail_overlay.rows[0].value.contains("fresh-1"));
+  }
+
+  #[test]
+  fn filter_matches_id_name_and_kind_case_insensitively() {
+    let all = vec![
+      session(AgentKind::Codex, "019f6b95-abcd", Some("review feature flags")),
+      session(AgentKind::ClaudeCode, "a7820111-uuid", Some("fix login")),
+      session(AgentKind::Vibe, "vibe-1", None),
+    ];
+    let ids = |q: &str| -> Vec<String> { filter_sessions(&all, q).into_iter().map(|s| s.id.clone()).collect() };
+    assert_eq!(ids("019f"), ["019f6b95-abcd"]);
+    assert_eq!(ids("LOGIN"), ["a7820111-uuid"]);
+    assert_eq!(ids("vibe"), ["vibe-1"]);
+    assert_eq!(ids("").len(), 3, "empty query lists everything");
+    assert!(ids("zzz").is_empty());
+  }
+
+  #[test]
+  fn input_mode_attaches_the_highlighted_candidate() {
+    let (_d, mut app) = make_app();
+    // Seed the global session pool with an unmatched session.
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    assert!(app.apply_agent_snapshot(
+      generation,
+      BTreeMap::new(),
+      Some(vec![session(AgentKind::Codex, "pool-42", Some("refactor auth"))]),
+      BTreeMap::new(),
+    ));
+    app.open_agent_overlay();
+    app.open_agent_input();
+    assert_eq!(app.detail_overlay.mode, DetailMode::Input);
+    app.agent_input_push('p');
+    app.agent_input_push('o');
+    app.agent_input_push('o');
+    app.agent_input_push('l');
+    app.agent_input_submit();
+    // Back to the list, pin persisted for the target worktree's branch.
+    assert_eq!(app.detail_overlay.mode, DetailMode::List);
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    let pins = gwm::github::agent_pins(&app.repo, &branch).unwrap();
+    assert_eq!(pins, vec!["pool-42"]);
+  }
+
+  #[test]
+  fn input_mode_escape_returns_to_list_without_pinning() {
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    app.agent_input_push('x');
+    app.agent_input_cancel();
+    assert_eq!(app.detail_overlay.mode, DetailMode::List);
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert!(gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
+  }
+
+  #[test]
+  fn input_mode_unknown_id_reports_and_stays_in_input() {
+    let (_d, mut app) = make_app();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    for c in "nope".chars() {
+      app.agent_input_push(c);
+    }
+    app.agent_input_submit();
+    assert_eq!(app.detail_overlay.mode, DetailMode::Input, "stay for correction");
+    assert!(app.status.contains("no agent session"), "got {}", app.status);
+  }
+}
