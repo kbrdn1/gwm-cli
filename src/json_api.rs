@@ -137,11 +137,12 @@ impl From<&WorktreeInfo> for JsonWorktree {
     Self {
       name: w.name.clone(),
       id: w.id.clone(),
-      // The lossless display key, not `to_string_lossy`: two paths
-      // differing only in invalid UTF-8 bytes must not serialize to the
-      // same string and share one agents entry (Codex review round T).
-      // Byte-identical for valid UTF-8 paths.
-      path: crate::agent_sessions::path_display_key(&w.path),
+      // The plain lossy absolute path: it is the PUBLIC schema value
+      // consumers open and compare, so it must never grow disambiguation
+      // suffixes (Codex review round U undoing round T's key reuse) —
+      // agent association uses a separate lossless INTERNAL key derived
+      // from the caller-kept real `PathBuf`s instead.
+      path: w.path.to_string_lossy().into_owned(),
       branch: w.branch.clone(),
       head: w.head.clone(),
       is_main: w.is_main,
@@ -233,7 +234,7 @@ pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
   let trees = worktree::list(repo)?;
   let mut rows: Vec<JsonWorktree> = trees.iter().map(JsonWorktree::from).collect();
   let reals: Vec<std::path::PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
-  let pins = agent_pins_for_rows(repo, &rows);
+  let pins = agent_pins_for_rows(repo, &trees);
   attach_agents(&mut rows, &reals, &pins);
   Ok(rows)
 }
@@ -241,14 +242,17 @@ pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
 /// Manual agent pins for already-built rows: `(path key, session id)` pairs
 /// read from each row's branch config (issue #408 US4). Rows without a
 /// branch (detached) cannot carry a pin.
-pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Vec<(String, String)> {
-  rows
+pub fn agent_pins_for_rows(repo: &git2::Repository, trees: &[crate::worktree::WorktreeInfo]) -> Vec<(String, String)> {
+  trees
     .iter()
-    .flat_map(|r| {
-      let pins = crate::github::pinnable_branch(r.branch.as_deref())
+    .flat_map(|w| {
+      let pins = crate::github::pinnable_branch(w.branch.as_deref())
         .map(|branch| crate::github::agent_pins(repo, branch).unwrap_or_default())
         .unwrap_or_default();
-      pins.into_iter().map(move |sid| (r.path.clone(), sid))
+      // Keyed by the lossless display key — the INTERNAL association key
+      // shared with `attach_agents` (round U), never the public path.
+      let key = crate::agent_sessions::path_display_key(&w.path);
+      pins.into_iter().map(move |sid| (key.clone(), sid))
     })
     .collect()
 }
@@ -288,19 +292,20 @@ fn attach_agents_inner(
     return Vec::new();
   };
   let now = std::time::SystemTime::now();
-  // Keys are the rows' (lossless) display strings; detection matches on
-  // the ORIGINAL PathBuf the caller kept — reconstructing it from the
-  // string would corrupt non-UTF-8 paths (round T).
+  // The association keys are lossless display keys derived from the
+  // ORIGINAL PathBufs the caller kept (rows and reals are parallel) —
+  // never the public `row.path`, which stays the plain lossy absolute
+  // path of the schema and could collide for non-UTF-8 worktrees
+  // (Codex review rounds T + U).
   debug_assert_eq!(rows.len(), reals.len());
-  let keyed: Vec<(String, std::path::PathBuf)> = rows
+  let keyed: Vec<(String, std::path::PathBuf)> = reals
     .iter()
-    .zip(reals)
-    .map(|(r, p)| (r.path.clone(), p.clone()))
+    .map(|p| (crate::agent_sessions::path_display_key(p), p.clone()))
     .collect();
   let (summary, pool) = detect_cached(&home, &keyed, pins, now, want_pool);
-  for row in rows.iter_mut() {
+  for (row, real) in rows.iter_mut().zip(reals) {
     row.agents = summary
-      .get(&row.path)
+      .get(&crate::agent_sessions::path_display_key(real))
       .and_then(|a| JsonWorktreeAgents::from_summary(a, now));
   }
   pool

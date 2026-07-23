@@ -260,11 +260,12 @@ fn attach_agents_reuses_detection_within_the_ttl() {
 
 #[cfg(unix)]
 #[test]
-fn json_worktree_paths_stay_unique_for_non_utf8_worktrees() {
-  // Codex review round T (P2): `JsonWorktree.path` went through
-  // `to_string_lossy`, so two worktrees differing only in invalid UTF-8
-  // bytes serialized to the SAME string and shared one agents entry on
-  // the JSON/daemon surface. The lossless display key keeps them apart.
+fn json_worktree_path_stays_the_plain_lossy_absolute_path() {
+  // Codex review round U (P2, undoing round T's key reuse): the public
+  // `path` is the schema value consumers open and compare — it must NEVER
+  // grow disambiguation suffixes, even for non-UTF-8 paths (where it is
+  // lossy by JSON's nature). Agent association uses a separate INTERNAL
+  // lossless key built from the caller-kept real PathBufs instead.
   use std::ffi::OsStr;
   use std::os::unix::ffi::OsStrExt;
   let mk = |bytes: &[u8]| gwm::worktree::WorktreeInfo {
@@ -284,5 +285,13 @@ fn json_worktree_paths_stay_unique_for_non_utf8_worktrees() {
   };
   let a = JsonWorktree::from(&mk(b"wt-\xff"));
   let b = JsonWorktree::from(&mk(b"wt-\xfe"));
-  assert_ne!(a.path, b.path, "distinct invalid-byte paths never serialize alike");
+  assert_eq!(
+    a.path,
+    mk(b"wt-\xff").path.to_string_lossy(),
+    "no suffix, plain lossy value"
+  );
+  assert_eq!(
+    a.path, b.path,
+    "lossy public paths may collide — the internal key disambiguates"
+  );
 }

@@ -335,6 +335,10 @@ pub struct App {
   /// it chains after that run lands instead of walking the store
   /// concurrently (Codex review round R).
   agent_pool_wanted: bool,
+  /// A pin changed while a detection run was in flight — the re-scan (and
+  /// the pins refresh) chains after that run lands instead of racing a
+  /// second walk against it (Codex review round U).
+  agent_redetect_wanted: bool,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
@@ -618,6 +622,7 @@ impl App {
       agent_all_sessions: Vec::new(),
       agent_pins: std::collections::BTreeMap::new(),
       agent_pool_wanted: false,
+      agent_redetect_wanted: false,
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -1458,8 +1463,16 @@ impl App {
       }
     }
     // The worker read the pins from each row's owning repo (round P);
-    // store them before the overlay rebuild below reads the map.
-    self.agent_pins = pins;
+    // store them before the overlay rebuild below reads the map — UNLESS
+    // a pin changed while this run was in flight: its map predates the
+    // change, so the fresh event-path read stands and a re-detection is
+    // chained by clearing the snapshot timestamp (round U).
+    if self.agent_redetect_wanted {
+      self.agent_redetect_wanted = false;
+      self.agent_snapshot_at = None;
+    } else {
+      self.agent_pins = pins;
+    }
     // A landing detection refreshes the open overlay in place (user
     // feedback: attach/detach used to leave stale rows until reopened).
     if self.view == View::DetailOverlay {
@@ -2673,6 +2686,14 @@ impl App {
     read_pins_from_sources(&self.agent_pin_sources())
   }
 
+  /// The current pinnable branch of the worktree at `path`, freshly read
+  /// from the listed rows (which every refresh re-lists) — never the
+  /// branch captured when an overlay opened (Codex review round U).
+  fn current_branch_of(&self, path: &Path) -> Option<String> {
+    let w = self.worktrees.iter().find(|w| w.path == path)?;
+    crate::github::pinnable_branch(w.branch.as_deref()).map(str::to_string)
+  }
+
   /// Pin the selected overlay row's session to the overlay's target worktree
   /// (`a` inside the modal). Auto-detection stays the default; the pin only
   /// adds (issue #408 US4).
@@ -2698,7 +2719,14 @@ impl App {
       self.status = "agent pins are per-repo — not available in workspace mode".into();
       return false;
     }
-    let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
+    let Some((path, _)) = self.detail_overlay_target.clone() else {
+      self.status = "cannot pin: no worktree captured".into();
+      return false;
+    };
+    // The CURRENT branch, not the one captured at overlay open: a branch
+    // flipped externally while the overlay stayed open would otherwise
+    // receive the pin under `branch.<old>.` (Codex review round U).
+    let Some(branch) = self.current_branch_of(&path) else {
       self.status = "cannot pin: worktree has no branch (detached HEAD)".into();
       return false;
     };
@@ -2789,7 +2817,12 @@ impl App {
       self.status = "no session selected to unpin".into();
       return;
     };
-    let Some((path, Some(branch))) = self.detail_overlay_target.clone() else {
+    let Some((path, _)) = self.detail_overlay_target.clone() else {
+      self.status = "cannot detach: no worktree captured".into();
+      return;
+    };
+    // Same round-U rule as attach: unpin from the CURRENT branch.
+    let Some(branch) = self.current_branch_of(&path) else {
       self.status = "cannot detach: worktree has no branch (detached HEAD)".into();
       return;
     };
@@ -2818,8 +2851,16 @@ impl App {
       let rows = self.build_agent_rows(&w);
       self.detail_overlay.set_rows(rows);
     }
-    self.tasks.invalidate(TaskKind::AgentSessions);
-    self.agent_snapshot_at = None;
+    if self.tasks.is_loading(TaskKind::AgentSessions) {
+      // The in-flight thread keeps walking the store even if its slot is
+      // dropped — invalidating here raced a second scan against it
+      // (round U, same hazard as rounds P/R). Let it land and chain the
+      // re-detection; its pre-change pins are skipped on landing.
+      self.agent_redetect_wanted = true;
+    } else {
+      self.tasks.invalidate(TaskKind::AgentSessions);
+      self.agent_snapshot_at = None;
+    }
   }
 
   /// Close the detail overlay back to the list, leaving list state as it was.

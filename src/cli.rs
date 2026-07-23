@@ -1858,13 +1858,17 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
   match action {
     None => {
       let mut rows: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
-      let pins = json_api::agent_pins_for_rows(&repo, &rows);
+      let pins = json_api::agent_pins_for_rows(&repo, &trees);
       let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
-      let pool = json_api::attach_agents_with_pool(&mut rows, &reals, &pins);
+      // JSON mirrors `gwm list --format=json` and has no `unmatched`
+      // section, so it must not pay the full foreign-dir sweep the pool
+      // costs (Codex review round U) — only the human table does.
       if format == AgentsFormat::Json {
+        json_api::attach_agents(&mut rows, &reals, &pins);
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
       }
+      let pool = json_api::attach_agents_with_pool(&mut rows, &reals, &pins);
       // The pinned marker is scoped per (worktree, session): a session
       // detected on A but pinned on B is flagged only under B (Codex
       // review round A).
@@ -1875,14 +1879,15 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
         .map(|d| d.as_secs())
         .unwrap_or(0);
       let mut any = false;
-      for row in &rows {
+      for (row, tree) in rows.iter().zip(&trees) {
         let Some(agents) = &row.agents else {
           continue;
         };
         any = true;
+        let row_key = crate::agent_sessions::path_display_key(&tree.path);
         println!("{}", row.name);
         for s in &agents.sessions {
-          let pin_mark = if pinned_pairs.contains(&(row.path.as_str(), s.id.as_str())) {
+          let pin_mark = if pinned_pairs.contains(&(row_key.as_str(), s.id.as_str())) {
             "  pinned"
           } else {
             ""
@@ -2105,7 +2110,7 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     let mut dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
     // Agent sessions (issue #408): the shared `attach_agents` pass keeps
     // this surface byte-identical to the daemon's `list`.
-    let pins = json_api::agent_pins_for_rows(&repo, &dto);
+    let pins = json_api::agent_pins_for_rows(&repo, &trees);
     let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
     json_api::attach_agents(&mut dto, &reals, &pins);
     if detect_pr {

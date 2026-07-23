@@ -8476,6 +8476,55 @@ mod agent_detail_overlay {
   }
 
   #[test]
+  fn attach_writes_the_pin_into_the_current_branch_after_a_flip() {
+    // Codex review round U (P2): the overlay captured (path, branch) at
+    // open; a branch flipped externally while it stayed open meant attach
+    // wrote `branch.<old>.gwm-agent-pin`. The write must re-resolve the
+    // CURRENT branch from the captured path.
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    {
+      let head = app.repo.head().unwrap().peel_to_commit().unwrap();
+      app.repo.branch("flipped", &head, false).unwrap();
+      app.repo.set_head("refs/heads/flipped").unwrap();
+    }
+    app.refresh().unwrap(); // worktrees now carry the new branch
+    app.attach_selected_agent();
+    let pins = gwm::github::agent_pins(&app.repo, "flipped").unwrap();
+    assert_eq!(pins, vec!["newest-session"], "the pin landed in the CURRENT branch");
+  }
+
+  #[test]
+  fn pin_change_during_an_in_flight_scan_chains_instead_of_racing() {
+    // Codex review round U (P2): attach/detach invalidated the
+    // AgentSessions slot while its thread was still walking the store —
+    // the next tick spawned a second concurrent scan (same hazard as
+    // rounds P/R). With a run in flight the refresh queues: the landing
+    // stays authoritative, the fresh pins survive it, and the re-scan
+    // chains after.
+    let (_d, mut app) = seeded_app_with_sessions();
+    app.open_agent_overlay();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.attach_selected_agent(); // pin written while the scan is in flight
+    let branch = app.worktrees[0].branch.clone().unwrap();
+    assert!(!gwm::github::agent_pins(&app.repo, &branch).unwrap().is_empty());
+    // The in-flight run still lands (not invalidated) — with PRE-change
+    // pins that must not clobber the fresh map…
+    let stale_pins = BTreeMap::new();
+    assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, stale_pins));
+    assert!(
+      app.agent_pins.values().flatten().any(|sid| sid == "newest-session"),
+      "the fresh pin survived the stale landing: {:?}",
+      app.agent_pins
+    );
+    // …and the queued re-detection is due (snapshot cleared, slot free).
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_some(),
+      "the slot is free for the chained re-scan"
+    );
+  }
+
+  #[test]
   fn attach_pins_the_selected_session_and_marks_the_row() {
     let (_d, mut app) = seeded_app_with_sessions();
     app.open_agent_overlay();
