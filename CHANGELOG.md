@@ -55,6 +55,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the Homebrew tap and the Scoop bucket) keep a credential, and both sides
   of that split are pinned by a test. (#429)
 
+### Fixed
+
+- `gwm clean --yes` no longer fails wholesale when a concurrent writer (a
+  watcher such as rust-analyzer regenerating files inside `target/`) races
+  the removal: a transient ENOTEMPTY is retried with a bounded budget, and a
+  directory already reclaimed by someone else counts as success instead of
+  aborting the command. (#440)
+
 ## Past releases
 
 In reverse chronological order:
