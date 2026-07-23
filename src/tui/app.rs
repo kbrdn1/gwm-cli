@@ -1333,7 +1333,7 @@ impl App {
     let rows: Vec<(String, PathBuf)> = self
       .worktrees
       .iter()
-      .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
+      .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
       .collect();
     // Pin reads are branch-config I/O — in workspace mode one repo open
     // per row. That happens in the WORKER, not here (Codex review round P:
@@ -1379,7 +1379,7 @@ impl App {
     let rows: Vec<(String, PathBuf)> = self
       .worktrees
       .iter()
-      .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
+      .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
       .collect();
     let pin_sources = self.agent_pin_sources();
     let tx = self.task_tx.clone();
@@ -1413,7 +1413,11 @@ impl App {
         } else {
           self.workdir.clone()
         };
-        Some((w.path.to_string_lossy().to_string(), branch.to_string(), repo_dir))
+        Some((
+          crate::agent_sessions::path_display_key(&w.path),
+          branch.to_string(),
+          repo_dir,
+        ))
       })
       .collect()
   }
@@ -1472,7 +1476,7 @@ impl App {
     self
       .agent_snapshot
       .as_ref()
-      .and_then(|map| map.get(w.path.to_string_lossy().as_ref()))
+      .and_then(|map| map.get(&crate::agent_sessions::path_display_key(&w.path)))
   }
 
   /// Any session in the landed snapshot at all? Drives the table's AGENT
@@ -2651,7 +2655,7 @@ impl App {
     // refreshed by the landing itself and by every attach/detach.
     let pinned = self
       .agent_pins
-      .get(w.path.to_string_lossy().as_ref())
+      .get(&crate::agent_sessions::path_display_key(&w.path))
       .cloned()
       .unwrap_or_default();
     crate::tui::state::detail_overlay::agent_detail_rows(self.agents_for(w), &pinned, std::time::SystemTime::now())

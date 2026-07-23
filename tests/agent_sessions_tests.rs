@@ -1042,6 +1042,38 @@ fn distinct_non_utf8_paths_never_collide() {
 }
 
 #[test]
+fn path_display_key_is_exact_for_utf8_paths() {
+  // The overwhelmingly common case must stay byte-identical to the old
+  // lossy form: the key doubles as the JSON/TUI display string.
+  assert_eq!(
+    gwm::agent_sessions::path_display_key(Path::new("/work/one")),
+    "/work/one"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn path_display_key_disambiguates_non_utf8_paths() {
+  // Codex review round S (P2): the TUI snapshot/pins maps were keyed by
+  // `to_string_lossy`, so two paths differing only in invalid UTF-8 bytes
+  // shared one entry and a session leaked across worktrees. The key
+  // appends a hash of the raw OsStr for those paths.
+  use std::ffi::OsStr;
+  use std::os::unix::ffi::OsStrExt;
+  let a = PathBuf::from("/repo").join(OsStr::from_bytes(b"wt-\xff"));
+  let b = PathBuf::from("/repo").join(OsStr::from_bytes(b"wt-\xfe"));
+  let (ka, kb) = (
+    gwm::agent_sessions::path_display_key(&a),
+    gwm::agent_sessions::path_display_key(&b),
+  );
+  assert_ne!(ka, kb, "distinct invalid-byte paths never share a key");
+  assert!(
+    ka.starts_with(&*a.to_string_lossy()),
+    "the key stays human-readable: {ka}"
+  );
+}
+
+#[test]
 fn summarize_drops_unmatched_sessions_without_error() {
   let sessions = [session(AgentKind::Vibe, "/somewhere/else", 10, "s1")];
   let map = summarize_with(&sessions, &[wt("one", "/work/one")], ident);

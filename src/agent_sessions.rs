@@ -873,6 +873,25 @@ where
   map
 }
 
+/// Lossless display key for a worktree path — the map key every TUI
+/// surface (snapshot, pins, lookups) uses. Valid UTF-8 paths (the
+/// overwhelmingly common case) key by their exact string, byte-identical
+/// to the old `to_string_lossy` form; a non-UTF-8 path appends a hash of
+/// its raw `OsStr` so two paths differing only in invalid bytes can never
+/// share a snapshot or pins entry (Codex review round S — the display
+/// string alone collapsed them onto one replacement character).
+pub fn path_display_key(path: &Path) -> String {
+  match path.to_str() {
+    Some(s) => s.to_owned(),
+    None => {
+      use std::hash::{Hash, Hasher};
+      let mut h = std::collections::hash_map::DefaultHasher::new();
+      path.hash(&mut h);
+      format!("{}#{:016x}", path.to_string_lossy(), h.finish())
+    }
+  }
+}
+
 /// Deterministic session ordering: live first, most recent first, then
 /// `kind` + `id` as stable tiebreakers — equal mtimes are common on
 /// low-resolution filesystems, and a read_dir-order flip between two scans

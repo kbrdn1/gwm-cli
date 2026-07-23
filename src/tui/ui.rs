@@ -724,7 +724,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // bordered block collapses to zero height when nothing is pinned.
   let agent_pins: &[String] = app
     .agent_pins
-    .get(w.path.to_string_lossy().as_ref())
+    .get(&crate::agent_sessions::path_display_key(&w.path))
     .map(|v| v.as_slice())
     .unwrap_or(&[]);
   let agent_lines = agent_pane_lines(app.agents_for(&w), agent_pins, std::time::SystemTime::now(), &theme);
