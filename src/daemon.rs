@@ -982,7 +982,7 @@ mod server_win {
   use interprocess::local_socket::{prelude::*, GenericNamespaced, Stream};
   use interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions, PipeMode, PipeStream};
   use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-  use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+  use std::io::{BufRead, BufReader, ErrorKind, Write};
   use std::os::windows::io::{AsHandle, AsRawHandle};
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
