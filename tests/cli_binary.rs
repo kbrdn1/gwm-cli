@@ -5697,9 +5697,12 @@ mod agents_cmd {
   fn opencode_detection_honors_xdg_data_home() {
     // Codex review round O (P2): with `XDG_DATA_HOME` set, opencode keeps
     // `opencode.db` under `$XDG_DATA_HOME/opencode` — the hardcoded
-    // `~/.local/share` base made every session invisible there.
+    // `~/.local/share` base made every session invisible there. No
+    // GWM_AGENTS_HOME here: the seam deliberately IGNORES XDG (round T),
+    // so the XDG resolution is exercised against the real-home path — the
+    // assertions only require the seeded session to be present, ambient
+    // sessions from the machine's own stores may appear alongside.
     let (repo_dir, _repo) = init_repo();
-    let home = tempfile::TempDir::new().unwrap();
     let xdg = tempfile::TempDir::new().unwrap();
     let dir = xdg.path().join("opencode");
     std::fs::create_dir_all(dir.join("storage/project")).unwrap();
@@ -5721,7 +5724,10 @@ mod agents_cmd {
       .unwrap();
     drop(conn);
 
-    gwm_in(repo_dir.path(), home.path())
+    let mut cmd = Command::cargo_bin("gwm").unwrap();
+    cmd
+      .current_dir(repo_dir.path())
+      .env_remove("GWM_AGENTS_HOME")
       .env("XDG_DATA_HOME", xdg.path())
       .arg("agents")
       .assert()
