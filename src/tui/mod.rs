@@ -28,7 +28,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub use app::{
-  App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget, OpenTarget, View,
+  read_pins_from_sources, App, CreateKey, ExecPickerKey, LauncherPlan, LinkPromptKey, LinkPromptStage, LinkTarget,
+  OpenTarget, View,
 };
 pub use state::async_task::{CreateWorktreeResult, TaskKind, TaskMsg, TaskRunner};
 pub use state::clean_overlay::CleanOverlay;

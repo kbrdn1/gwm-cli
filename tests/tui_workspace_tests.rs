@@ -488,8 +488,10 @@ fn workspace_pins_are_read_from_each_rows_own_repo() {
   let alpha = Repository::open(root.path().join("alpha")).unwrap();
   gwm::github::add_agent_pin(&alpha, "main", "sid-ws-alpha").unwrap();
 
-  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
-  app.maybe_refresh_agent_sessions();
+  let app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  // Round P moved the periodic read into the detection worker; the same
+  // sources + reader pair is exercised here without spawning the thread.
+  let pins = gwm::tui::read_pins_from_sources(&app.agent_pin_sources());
 
   let alpha_row = app
     .worktrees
@@ -498,9 +500,9 @@ fn workspace_pins_are_read_from_each_rows_own_repo() {
     .expect("alpha's main checkout is a row");
   let key = alpha_row.path.to_string_lossy().to_string();
   assert_eq!(
-    app.agent_pins.get(&key).map(Vec::as_slice),
+    pins.get(&key).map(Vec::as_slice),
     Some(&["sid-ws-alpha".to_string()][..]),
-    "the pin set in alpha's branch config reaches the render-side map"
+    "the pin set in alpha's branch config reaches the per-path map"
   );
 }
 
@@ -548,8 +550,11 @@ fn overlay_pin_markers_survive_an_active_repo_swap() {
       }],
     },
   );
+  // The worker reads pins from each row's OWNING repo (round P): even
+  // with the active repo drifted to beta, alpha's pin is in the sources.
+  let pins = gwm::tui::read_pins_from_sources(&app.agent_pin_sources());
   let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
-  assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
+  assert!(app.apply_agent_snapshot(generation, map, Vec::new(), pins));
   assert!(
     app.detail_overlay.rows.iter().any(|r| r.value.contains("pinned")),
     "the pin from alpha's own repo marks the row: {:?}",

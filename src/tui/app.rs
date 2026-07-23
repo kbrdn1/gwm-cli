@@ -214,6 +214,29 @@ pub struct RepoMeta {
   pub config: Config,
 }
 
+/// Pins per worktree path, read from each row's owning repo (its branch
+/// config). Runs in the detection worker on the periodic path (round P) and
+/// synchronously on user-action paths; repos are opened at most once per
+/// distinct workdir. Pub: the state tests pin the owning-repo contract
+/// through it without spawning the worker thread.
+pub fn read_pins_from_sources(
+  sources: &[(String, String, PathBuf)],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+  let mut repos: std::collections::BTreeMap<&PathBuf, Option<Repository>> = std::collections::BTreeMap::new();
+  let mut out = std::collections::BTreeMap::new();
+  for (path, branch, repo_dir) in sources {
+    let repo = repos.entry(repo_dir).or_insert_with(|| Repository::open(repo_dir).ok());
+    let Some(repo) = repo.as_ref() else {
+      continue;
+    };
+    let pins = crate::github::agent_pins(repo, branch).unwrap_or_default();
+    if !pins.is_empty() {
+      out.insert(path.clone(), pins);
+    }
+  }
+  out
+}
+
 /// Workspace-mode state (issue #36). `None` in single-repo mode (the default).
 /// The *active* repo lives in `App`'s core fields (`repo`/`repo_name`/
 /// `workdir`/`config`); this holds everything needed to swap a different repo
@@ -1050,6 +1073,7 @@ impl App {
   /// the synchronous [`Self::refresh`] and by the off-thread drain in
   /// [`Self::drain_task_results`].
   fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
+    let old_paths: std::collections::BTreeSet<PathBuf> = self.worktrees.iter().map(|w| w.path.clone()).collect();
     // The carry-over preserves this session's in-memory fetched issue/PR state
     // across a re-list, keyed by number. In workspace mode that key collides
     // across repos (two repos can both own `#1`), so skip it: the freshly
@@ -1093,11 +1117,18 @@ impl App {
     // every refresh path shares, so the OFF-thread drains (`RefreshWorktrees` /
     // `RefreshWorkspace`) get it too, not just the synchronous `refresh`.
     self.tasks.invalidate(TaskKind::Sidebar);
-    // Same staleness reasoning for the agent snapshot (issue #408): the
-    // worktree set may have changed, so an in-flight detection matched
-    // against the old set is dropped and the next tick re-detects.
-    self.tasks.invalidate(TaskKind::AgentSessions);
-    self.agent_snapshot_at = None;
+    // Agent staleness is keyed to the SET of worktree paths, not to the
+    // refresh itself (Codex review round P): invalidating unconditionally
+    // freed the in-flight slot while its scan thread kept running, so an
+    // auto-refresh faster than the scan piled up concurrent scans whose
+    // results were each dropped as stale — no snapshot ever landed. A
+    // same-set refresh keeps the in-flight run (the 30 s TTL owns
+    // freshness); only a genuinely different set drops it.
+    let new_paths: std::collections::BTreeSet<PathBuf> = self.worktrees.iter().map(|w| w.path.clone()).collect();
+    if old_paths != new_paths {
+      self.tasks.invalidate(TaskKind::AgentSessions);
+      self.agent_snapshot_at = None;
+    }
     self.status = if spawned > 0 {
       format!(
         "refreshed — {} worktree(s); fetching GitHub status…",
@@ -1289,25 +1320,46 @@ impl App {
       .iter()
       .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
       .collect();
-    // Manual pins are read on the main thread (`Repository` is not `Send`)
-    // and moved into the worker as plain strings (issue #408 US4). In
-    // workspace mode each row reads from its owning repo via `row_repo`
-    // (Codex review round I — the round-A single-repo ceiling hid pins set
-    // in child repos).
-    self.agent_pins = self.read_agent_pins();
-    let pins: Vec<(String, String)> = self
-      .agent_pins
-      .iter()
-      .flat_map(|(path, sids)| sids.iter().map(move |sid| (path.clone(), sid.clone())))
-      .collect();
+    // Pin reads are branch-config I/O — in workspace mode one repo open
+    // per row. That happens in the WORKER, not here (Codex review round P:
+    // the event loop must not touch the disk on the periodic path); the
+    // main thread only assembles (path, branch, owning repo dir) triples,
+    // resolved via `row_repo` so each row reads its own repo (round I).
+    let pin_sources = self.agent_pin_sources();
     let tx = self.task_tx.clone();
     std::thread::spawn(move || {
+      let pins_map = read_pins_from_sources(&pin_sources);
+      let pins: Vec<(String, String)> = pins_map
+        .iter()
+        .flat_map(|(path, sids)| sids.iter().map(move |sid| (path.clone(), sid.clone())))
+        .collect();
       let (map, all) = match crate::agent_sessions::agents_home() {
         Some(home) => crate::agent_sessions::detect_with_sessions(&home, &rows, &pins, std::time::SystemTime::now()),
         None => Default::default(), // no home: detection degrades to empty (FR-009)
       };
-      let _ = tx.send(TaskMsg::AgentSessions(generation, map, all));
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map, all, pins_map));
     });
+  }
+
+  /// The (worktree path, branch, owning repo workdir) triples the detection
+  /// worker reads pins from — assembled here without touching the disk. In
+  /// workspace mode the owner comes from the `row_repo` mapping; in
+  /// single-repo mode every row belongs to the active repo.
+  pub fn agent_pin_sources(&self) -> Vec<(String, String, PathBuf)> {
+    self
+      .worktrees
+      .iter()
+      .enumerate()
+      .filter_map(|(i, w)| {
+        let branch = crate::github::pinnable_branch(w.branch.as_deref())?;
+        let repo_dir = if let Some(ws) = &self.workspace {
+          ws.repos.get(*ws.row_repo.get(i)?)?.workdir.clone()
+        } else {
+          self.workdir.clone()
+        };
+        Some((w.path.to_string_lossy().to_string(), branch.to_string(), repo_dir))
+      })
+      .collect()
   }
 
   /// Store a completed detection snapshot if its generation is still
@@ -1320,6 +1372,7 @@ impl App {
     generation: u64,
     map: std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
     all: Vec<crate::agent_sessions::AgentSession>,
+    pins: std::collections::BTreeMap<String, Vec<String>>,
   ) -> bool {
     if !self.tasks.complete(TaskKind::AgentSessions, generation) {
       return false;
@@ -1327,6 +1380,9 @@ impl App {
     self.agent_snapshot = Some(map);
     self.agent_snapshot_at = Some(std::time::Instant::now());
     self.agent_all_sessions = all;
+    // The worker read the pins from each row's owning repo (round P);
+    // store them before the overlay rebuild below reads the map.
+    self.agent_pins = pins;
     // A landing detection refreshes the open overlay in place (user
     // feedback: attach/detach used to leave stale rows until reopened).
     if self.view == View::DetailOverlay {
@@ -1660,12 +1716,12 @@ impl App {
           self.sidebar.cache = Some(((path, mode), sections));
           applied = true;
         }
-        TaskMsg::AgentSessions(generation, map, all) => {
+        TaskMsg::AgentSessions(generation, map, all, pins) => {
           // Late-drop + store live in `apply_agent_snapshot` so the state
           // contract is pinned ratatui-free (issue #408). Deliberately does
           // NOT set `applied`: agent detection reads no git state, so there
           // is nothing for the post-drain refresh bookkeeping to do.
-          self.apply_agent_snapshot(generation, map, all);
+          self.apply_agent_snapshot(generation, map, all, pins);
         }
       }
     }
@@ -2518,53 +2574,26 @@ impl App {
   /// Rows for the captured worktree: sessions from the snapshot, the manual
   /// pins marked (issue #408 US4 + user feedback 2026-07-22 — multi-pin).
   fn build_agent_rows(&self, w: &crate::worktree::WorktreeInfo) -> Vec<crate::tui::state::detail_overlay::DetailRow> {
-    // Pins must come from the worktree's OWNING repo, not `self.repo`: in
-    // workspace mode an auto-refresh can swap the active repo under the
-    // open overlay, and a same-named branch there would yield absent or
-    // wrong markers (Codex review round N). `read_agent_pins` resolves
-    // owners via `row_repo`.
+    // Pins come from the per-path map — built per OWNING repo, so a
+    // workspace active-repo swap under the open overlay cannot yield
+    // absent or wrong markers (round N), and the snapshot-landing rebuild
+    // does no branch-config I/O on the event loop (round P): the map is
+    // refreshed by the landing itself and by every attach/detach.
     let pinned = self
-      .read_agent_pins()
-      .remove(w.path.to_string_lossy().as_ref())
+      .agent_pins
+      .get(w.path.to_string_lossy().as_ref())
+      .cloned()
       .unwrap_or_default();
     crate::tui::state::detail_overlay::agent_detail_rows(self.agents_for(w), &pinned, std::time::SystemTime::now())
   }
 
-  /// Fresh pins per worktree path from branch config — event-path only
-  /// (the render reads the [`Self::agent_pins`] copy). In workspace mode
-  /// each row reads from its OWNING repo (`row_repo` mapping) so a pin set
-  /// in a child repo survives, and a same-named branch in another repo
-  /// cannot leak its pins (Codex review rounds A + I).
+  /// Fresh pins per worktree path from branch config — the synchronous
+  /// read for USER-ACTION paths (attach/detach refresh); the periodic
+  /// detection reads the same sources in its worker instead (round P).
+  /// Each row reads from its OWNING repo via [`Self::agent_pin_sources`]
+  /// (rounds A + I: a same-named branch elsewhere cannot leak its pins).
   fn read_agent_pins(&self) -> std::collections::BTreeMap<String, Vec<String>> {
-    if let Some(ws) = &self.workspace {
-      return self
-        .worktrees
-        .iter()
-        .enumerate()
-        .filter_map(|(i, w)| {
-          let branch = crate::github::pinnable_branch(w.branch.as_deref())?;
-          let meta = ws.repos.get(*ws.row_repo.get(i)?)?;
-          let repo = Repository::open(&meta.workdir).ok()?;
-          let pins = crate::github::agent_pins(&repo, branch).ok()?;
-          if pins.is_empty() {
-            return None;
-          }
-          Some((w.path.to_string_lossy().to_string(), pins))
-        })
-        .collect();
-    }
-    self
-      .worktrees
-      .iter()
-      .filter_map(|w| {
-        let branch = crate::github::pinnable_branch(w.branch.as_deref())?;
-        let pins = crate::github::agent_pins(&self.repo, branch).ok()?;
-        if pins.is_empty() {
-          return None;
-        }
-        Some((w.path.to_string_lossy().to_string(), pins))
-      })
-      .collect()
+    read_pins_from_sources(&self.agent_pin_sources())
   }
 
   /// Pin the selected overlay row's session to the overlay's target worktree
@@ -2701,11 +2730,13 @@ impl App {
   /// render-side pins copy (the Agents pane shows pinned-only), and push
   /// the new pin state to every other surface (snapshot re-detection).
   fn refresh_agent_overlay_rows(&mut self, path: &Path) {
+    // Map first: `build_agent_rows` reads the [`Self::agent_pins`] copy
+    // (round P), so the fresh read must land before the rows rebuild.
+    self.agent_pins = self.read_agent_pins();
     if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
       let rows = self.build_agent_rows(&w);
       self.detail_overlay.set_rows(rows);
     }
-    self.agent_pins = self.read_agent_pins();
     self.tasks.invalidate(TaskKind::AgentSessions);
     self.agent_snapshot_at = None;
   }

@@ -8112,8 +8112,26 @@ mod agent_sessions_pane {
     // A second request while one is in flight coalesces (the debounce).
     assert!(app.tasks.request(TaskKind::AgentSessions).is_none());
     let map = snapshot_for("/w/one", AgentKind::ClaudeCode, 10);
-    assert!(app.apply_agent_snapshot(generation, map.clone(), Vec::new()));
+    assert!(app.apply_agent_snapshot(generation, map.clone(), Vec::new(), BTreeMap::new()));
     assert_eq!(app.agent_snapshot.as_ref(), Some(&map));
+  }
+
+  #[test]
+  fn same_set_refresh_keeps_an_in_flight_detection_alive() {
+    // Codex review round P (P2): every refresh used to invalidate the
+    // AgentSessions slot unconditionally — with auto_refresh_secs shorter
+    // than a scan of a large store, each tick freed the slot while the
+    // scan thread kept running, spawned a concurrent scan and dropped the
+    // previous result as stale: scans piled up and no snapshot ever
+    // landed. A refresh that re-lists the SAME worktree set must keep the
+    // in-flight run authoritative; only a genuinely different set drops it.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.refresh().unwrap();
+    assert!(
+      app.apply_agent_snapshot(generation, BTreeMap::new(), Vec::new(), BTreeMap::new()),
+      "an unchanged worktree set left the in-flight detection authoritative"
+    );
   }
 
   #[test]
@@ -8121,11 +8139,11 @@ mod agent_sessions_pane {
     let (_d, mut app) = make_app();
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
     let live = snapshot_for("/w/one", AgentKind::Codex, 10);
-    assert!(app.apply_agent_snapshot(generation, live.clone(), Vec::new()));
+    assert!(app.apply_agent_snapshot(generation, live.clone(), Vec::new(), BTreeMap::new()));
     // A new run starts, then a refresh invalidates it mid-flight.
     let stale = app.tasks.request(TaskKind::AgentSessions).unwrap();
     app.tasks.invalidate(TaskKind::AgentSessions);
-    assert!(!app.apply_agent_snapshot(stale, BTreeMap::new(), Vec::new()));
+    assert!(!app.apply_agent_snapshot(stale, BTreeMap::new(), Vec::new(), BTreeMap::new()));
     // The last authoritative snapshot survives.
     assert_eq!(app.agent_snapshot.as_ref(), Some(&live));
   }
@@ -8187,7 +8205,7 @@ mod agent_sessions_pane {
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
     let path = app.worktrees[0].path.to_string_lossy().to_string();
     let map = snapshot_for(&path, AgentKind::ClaudeCode, 10);
-    assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
+    assert!(app.apply_agent_snapshot(generation, map, Vec::new(), BTreeMap::new()));
     let w = app.worktrees[0].clone();
     assert!(app.agents_for(&w).is_some());
     assert_eq!(app.agents_for(&w).unwrap().top().unwrap().id, "s1");
@@ -8234,7 +8252,7 @@ mod agent_detail_overlay {
       },
     );
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
-    assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
+    assert!(app.apply_agent_snapshot(generation, map, Vec::new(), BTreeMap::new()));
     (dir, app)
   }
 
@@ -8557,7 +8575,7 @@ mod agent_overlay_input {
       },
     );
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
-    assert!(app.apply_agent_snapshot(generation, map, Vec::new()));
+    assert!(app.apply_agent_snapshot(generation, map, Vec::new(), BTreeMap::new()));
     assert_eq!(app.detail_overlay.rows.len(), 1);
     assert!(app.detail_overlay.rows[0].value.contains("fresh-1"));
   }
@@ -8586,6 +8604,7 @@ mod agent_overlay_input {
       generation,
       BTreeMap::new(),
       vec![session(AgentKind::Codex, "pool-42", Some("refactor auth"))],
+      BTreeMap::new(),
     ));
     app.open_agent_overlay();
     app.open_agent_input();

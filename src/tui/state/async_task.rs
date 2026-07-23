@@ -253,6 +253,9 @@ pub enum TaskMsg {
     u64,
     std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
     Vec<crate::agent_sessions::AgentSession>,
+    // Pins per worktree path, read in the worker from each row's owning
+    // repo — branch-config I/O stays off the event loop (round P).
+    std::collections::BTreeMap<String, Vec<String>>,
   ),
 }
 
