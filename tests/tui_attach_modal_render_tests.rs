@@ -113,3 +113,46 @@ fn attach_prompt_shows_a_scrollbar_when_candidates_overflow() {
     "an overflowing candidate list must render a scrollbar thumb"
   );
 }
+
+#[test]
+fn attach_prompt_survives_a_tiny_terminal() {
+  // Codex review #445: on a terminal of 8 rows or fewer, centered_abs
+  // clamps the modal to the terminal height but the scrollbar rect kept
+  // its full geometry and rendered past the ratatui buffer — a panic.
+  let dir = repo();
+  let mut app = app_with_open_prompt(&dir, 10);
+  let _ = draw_rows(&mut app, 100, 8);
+  let _ = draw_rows(&mut app, 100, 5);
+}
+
+#[test]
+fn detail_overlay_survives_a_tiny_terminal() {
+  // Same class of bug on the sibling detail mode's rows rect.
+  use gwm::agent_sessions::WorktreeAgents;
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+  let path = app.worktrees[0].path.to_string_lossy().to_string();
+  let mut map = BTreeMap::new();
+  map.insert(
+    path,
+    WorktreeAgents {
+      sessions: (0..6).map(session).collect(),
+    },
+  );
+  assert!(app.apply_agent_snapshot(generation, map, None, BTreeMap::new()));
+  app.open_agent_overlay();
+  let _ = draw_rows(&mut app, 100, 6);
+  let _ = draw_rows(&mut app, 100, 5);
+}
+
+#[test]
+fn attach_prompt_window_is_capped_on_tall_terminals() {
+  // User feedback 2026-07-23: the fixed window must not swallow the whole
+  // terminal — at most 10 candidate rows, the scrollbar covers the rest.
+  let dir = repo();
+  let mut app = app_with_open_prompt(&dir, 40);
+  let rows = draw_rows(&mut app, 100, 40);
+  let shown = rows.iter().filter(|r| r.contains("aaa-")).count();
+  assert!(shown <= 10, "the candidate window is capped at 10 rows, got {shown}");
+}

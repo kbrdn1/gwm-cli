@@ -4491,7 +4491,9 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // FIXED listing height (issue #445): the window is sized by the
     // terminal alone, never by the filtered candidate count — typing must
     // not resize the frame. Short lists blank-pad the remaining rows.
-    let list_h = (term.height as usize).saturating_sub(12).max(3);
+    // Capped at 10 rows: a full-terminal prompt reads as a takeover, not
+    // a palette (user feedback 2026-07-23); the scrollbar covers the rest.
+    let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
     let (start, end) = picker_window(candidates.len(), ov.input_selected, list_h);
     let now = std::time::SystemTime::now();
 
@@ -4553,13 +4555,19 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
     // Scrollbar over the listing sub-area when the candidates overflow the
     // fixed window — same affordance as the detail mode below (issue #445).
+    // Intersected with the modal's real area: on a tiny terminal
+    // `centered_abs` clamps the frame, and an un-clipped rect would render
+    // past the ratatui buffer and panic (Codex review #445).
     let list_rect = Rect {
       x: area.x + 1,
       y: area.y + 2 /* border + padding */ + 2 /* title */ + 2, /* id line + blank */
       width: area.width.saturating_sub(2),
       height: list_h as u16,
-    };
-    let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
+    }
+    .intersection(area);
+    if list_rect.height > 0 {
+      let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
+    }
     return;
   }
   let total = ov.rows.len();
@@ -4612,13 +4620,18 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
   // Scrollbar over the rows sub-area (right padding column) when the list
   // overflows — the missing affordance from the feedback.
+  // Intersected with the modal's real area for the same tiny-terminal
+  // clamp as the attach prompt above (Codex review #445).
   let rows_rect = Rect {
     x: area.x + 1,
     y: area.y + 2 /* border + padding */ + 2, /* title lines */
     width: area.width.saturating_sub(2),
     height: visible as u16,
-  };
-  let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
+  }
+  .intersection(area);
+  if rows_rect.height > 0 {
+    let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
+  }
 }
 
 /// Render the clean reclaim overlay (issue #325). A centred modal showing
