@@ -854,7 +854,7 @@ pub fn summarize_with<F>(
 where
   F: Fn(&Path) -> PathBuf,
 {
-  let keyed: Vec<(&String, String)> = worktrees
+  let keyed: Vec<(&String, PathBuf)> = worktrees
     .iter()
     .map(|(id, path)| (id, comparison_key(&canonicalize(path))))
     .collect();
@@ -893,12 +893,13 @@ fn session_sort_key(s: &AgentSession) -> (bool, std::cmp::Reverse<SystemTime>, A
 /// by `summarize_converges_case_variants_on_case_insensitive_volumes`).
 /// A platform-wide fold instead would MERGE two genuinely distinct
 /// worktrees on a case-sensitive APFS/NTFS volume, fabricating a match.
-fn comparison_key(path: &Path) -> String {
-  path
-    .components()
-    .map(|c| c.as_os_str().to_string_lossy())
-    .collect::<Vec<_>>()
-    .join("\u{1f}")
+fn comparison_key(path: &Path) -> PathBuf {
+  // Collecting components normalises trailing separators and `.` segments
+  // WITHOUT any UTF-8 conversion: `to_string_lossy` mapped distinct
+  // non-UTF-8 byte sequences to the same replacement character, so two
+  // legitimate worktrees could collide into one key and a session could
+  // attach to the wrong one (Codex review round R).
+  path.components().collect()
 }
 
 /// Production entry: fs canonicalisation with lexical fallback (a session may
@@ -973,7 +974,7 @@ fn collect_with(
     // Summary surfaces: only name the rollouts a worktree will claim or a
     // pin references (Codex review round G) — same canonical comparison as
     // `summarize`, so an eager skip can't drop a name summarize would show.
-    let keys: std::collections::BTreeSet<String> = worktree_paths
+    let keys: std::collections::BTreeSet<PathBuf> = worktree_paths
       .iter()
       .map(|p| comparison_key(&p.canonicalize().unwrap_or_else(|_| p.to_path_buf())))
       .collect();

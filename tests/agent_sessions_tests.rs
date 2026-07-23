@@ -1016,6 +1016,31 @@ fn equal_timestamps_sort_deterministically_by_kind_then_id() {
   assert_eq!(a, ["zzz", "aaa", "bbb"], "tie broken by kind (claude < codex) then id");
 }
 
+#[cfg(unix)]
+#[test]
+fn distinct_non_utf8_paths_never_collide() {
+  // Codex review round R (P2): `to_string_lossy` in the comparison key
+  // mapped DIFFERENT invalid byte sequences to the same replacement
+  // character — two legitimate worktrees could share a key and a session
+  // could attach to the wrong one. The key is byte-lossless now.
+  use std::ffi::OsStr;
+  use std::os::unix::ffi::OsStrExt;
+  let wt_a = PathBuf::from("/repo").join(OsStr::from_bytes(b"proj-\xff"));
+  let wt_b = PathBuf::from("/repo").join(OsStr::from_bytes(b"proj-\xfe"));
+  let sessions = [AgentSession {
+    kind: AgentKind::Codex,
+    cwd: wt_a.clone(),
+    last_activity: SystemTime::now() - Duration::from_secs(10),
+    ended: false,
+    id: "s1".to_string(),
+    name: None,
+  }];
+  let keyed = [("a".to_string(), wt_a), ("b".to_string(), wt_b)];
+  let map = summarize_with(&sessions, &keyed, ident);
+  assert_eq!(map.get("a").map(|x| x.sessions.len()), Some(1));
+  assert!(!map.contains_key("b"), "no phantom cross-attachment: {map:?}");
+}
+
 #[test]
 fn summarize_drops_unmatched_sessions_without_error() {
   let sessions = [session(AgentKind::Vibe, "/somewhere/else", 10, "s1")];

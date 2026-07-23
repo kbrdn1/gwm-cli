@@ -8198,6 +8198,29 @@ mod agent_sessions_pane {
   }
 
   #[test]
+  fn prompt_open_defers_the_pool_scan_behind_an_in_flight_run() {
+    // Codex review round R (P2): invalidating the in-flight periodic run
+    // only freed the SLOT — its thread kept walking the store while the
+    // prompt's full scan started, doubling the I/O. Opening the prompt
+    // while a run is in flight must instead queue the pool scan: the
+    // periodic result still lands, and the full scan chains after it.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.open_agent_overlay();
+    app.open_agent_input();
+    // The in-flight periodic run was NOT invalidated…
+    assert!(
+      app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()),
+      "the periodic run stays authoritative under the queued pool scan"
+    );
+    // …and its landing chained the queued full scan.
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_none(),
+      "the pool scan is in flight right after the periodic landing"
+    );
+  }
+
+  #[test]
   fn agent_snapshot_stale_generation_is_dropped() {
     let (_d, mut app) = make_app();
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();

@@ -331,6 +331,10 @@ pub struct App {
   /// cycle + immediately after attach/detach). Empty in workspace mode
   /// (same single-repo ceiling as the pins themselves).
   pub agent_pins: std::collections::BTreeMap<String, Vec<String>>,
+  /// A full pool scan was requested while a detection run was in flight —
+  /// it chains after that run lands instead of walking the store
+  /// concurrently (Codex review round R).
+  agent_pool_wanted: bool,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
@@ -613,6 +617,7 @@ impl App {
       agent_snapshot_at: None,
       agent_all_sessions: Vec::new(),
       agent_pins: std::collections::BTreeMap::new(),
+      agent_pool_wanted: false,
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -1360,7 +1365,14 @@ impl App {
   /// ride the 30 s periodic tick. Drops a coalescing in-flight periodic
   /// run: this result supersedes it anyway.
   fn refresh_agent_pool(&mut self) {
-    self.tasks.invalidate(TaskKind::AgentSessions);
+    // A run in flight keeps walking the store even after `invalidate`
+    // frees its slot — starting the full scan NOW would double the I/O.
+    // Queue it instead; `apply_agent_snapshot` chains it on landing
+    // (round R).
+    if self.tasks.is_loading(TaskKind::AgentSessions) {
+      self.agent_pool_wanted = true;
+      return;
+    }
     let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
       return;
     };
@@ -1425,8 +1437,18 @@ impl App {
     self.agent_snapshot_at = Some(std::time::Instant::now());
     // `None` = summary-only run: the previous pool survives so an open
     // attach prompt keeps its candidates (round Q).
+    let landed_pool = all.is_some();
     if let Some(all) = all {
       self.agent_all_sessions = all;
+    }
+    // A pool scan queued while this run was in flight chains now that the
+    // slot is free (round R); a landing that already carried the pool
+    // satisfies the request outright.
+    if self.agent_pool_wanted {
+      self.agent_pool_wanted = false;
+      if !landed_pool {
+        self.refresh_agent_pool();
+      }
     }
     // The worker read the pins from each row's owning repo (round P);
     // store them before the overlay rebuild below reads the map.
