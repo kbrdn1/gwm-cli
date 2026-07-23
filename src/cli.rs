@@ -3251,9 +3251,10 @@ fn cmd_doctor(format: OutputFormat) -> Result<()> {
 
 /// `gwm daemon` (issue #38, phase 2). Discovers the repo from the CWD,
 /// binds the JSON-RPC socket, and serves until killed. The serving path
-/// is unix + `daemon`-feature only; elsewhere it returns a clean error so
-/// the subcommand stays present (and help identical) on every platform.
-#[cfg(all(unix, feature = "daemon"))]
+/// needs the `daemon` feature plus a supported transport — a unix domain
+/// socket, or a named pipe on Windows (#439); elsewhere it returns a clean
+/// error so the subcommand stays present (and help identical) everywhere.
+#[cfg(all(any(unix, windows), feature = "daemon"))]
 fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   use std::sync::atomic::AtomicBool;
   use std::sync::Arc;
@@ -3275,11 +3276,11 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   crate::daemon::serve(&opts, Arc::new(AtomicBool::new(false)))
 }
 
-#[cfg(not(all(unix, feature = "daemon")))]
+#[cfg(not(all(any(unix, windows), feature = "daemon")))]
 fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   let _ = (socket, poll_ms);
   Err(GwmError::Other(
-    "daemon mode is unavailable in this build (requires a Unix platform and the `daemon` feature)".into(),
+    "daemon mode is unavailable in this build (requires the `daemon` feature on a supported platform)".into(),
   ))
 }
 
@@ -3299,7 +3300,7 @@ fn print_statusline(worktrees: &[crate::json_api::JsonWorktree], cwd: &Path) {
   let _ = io::stdout().flush();
 }
 
-#[cfg(all(unix, feature = "daemon"))]
+#[cfg(all(any(unix, windows), feature = "daemon"))]
 fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   let socket = socket.unwrap_or_else(crate::daemon::socket_path);
   // `print_statusline` canonicalises both the cwd and each worktree path,
@@ -3327,16 +3328,14 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   Ok(())
 }
 
-#[cfg(not(all(unix, feature = "daemon")))]
+#[cfg(not(all(any(unix, windows), feature = "daemon")))]
 fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
-  // No daemon transport in this build: the statusline has no source, so it
-  // degrades to the documented empty line (exit 0) rather than erroring.
-  // EVERY segment inherits this ceiling — branch, flags, issue/PR and the
-  // #408 agent indicator alike (docs carry the Unix-only caveat). The
-  // statusline is deliberately daemon-fed (#309: a prompt path must never
-  // open the repo or scan artefact stores itself); lighting it up on
-  // Windows means a named-pipe daemon transport, a follow-up to #38, not a
-  // local-detection fallback here.
+  // No daemon transport in this build (`--no-default-features`, or an
+  // unsupported platform): the statusline has no source, so it degrades to
+  // the documented empty line (exit 0) rather than erroring. The statusline
+  // is deliberately daemon-fed (#309: a prompt path must never open the
+  // repo or scan artefact stores itself); unix rides the socket, Windows
+  // the named pipe (#439).
   let _ = (socket, watch);
   let cwd = std::env::current_dir().unwrap_or_default();
   print_statusline(&[], &cwd);
