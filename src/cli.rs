@@ -1859,7 +1859,8 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
     None => {
       let mut rows: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
       let pins = json_api::agent_pins_for_rows(&repo, &rows);
-      let pool = json_api::attach_agents_with_pool(&mut rows, &pins);
+      let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
+      let pool = json_api::attach_agents_with_pool(&mut rows, &reals, &pins);
       if format == AgentsFormat::Json {
         println!("{}", serde_json::to_string_pretty(&rows)?);
         return Ok(());
@@ -1947,10 +1948,10 @@ fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> 
       // typo fails now instead of pinning dead weight.
       let home = crate::agent_sessions::agents_home()
         .ok_or_else(|| GwmError::Config("no home directory to scan for agent sessions".into()))?;
-      let key = target.path.to_string_lossy().to_string();
+      let key = crate::agent_sessions::path_display_key(&target.path);
       let keyed: Vec<(String, PathBuf)> = trees
         .iter()
-        .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
+        .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
         .collect();
       let probe = [(key.clone(), session_id.clone())];
       let map = crate::agent_sessions::detect_all(&home, &keyed, &probe, std::time::SystemTime::now());
@@ -2105,7 +2106,8 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     // Agent sessions (issue #408): the shared `attach_agents` pass keeps
     // this surface byte-identical to the daemon's `list`.
     let pins = json_api::agent_pins_for_rows(&repo, &dto);
-    json_api::attach_agents(&mut dto, &pins);
+    let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
+    json_api::attach_agents(&mut dto, &reals, &pins);
     if detect_pr {
       // When detection RAN for a row its result is authoritative — apply
       // it even when `None` (clears a stale persisted PR). When it did NOT
@@ -2139,7 +2141,7 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     if let Some(home) = crate::agent_sessions::agents_home() {
       let keyed: Vec<(String, PathBuf)> = trees
         .iter()
-        .map(|w| (w.path.to_string_lossy().to_string(), w.path.clone()))
+        .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
         .collect();
       let pins: Vec<(String, String)> = trees
         .iter()
@@ -2147,13 +2149,16 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
           let pins = github::pinnable_branch(w.branch.as_deref())
             .map(|b| github::agent_pins(&repo, b).unwrap_or_default())
             .unwrap_or_default();
-          let path = w.path.to_string_lossy().to_string();
+          let path = crate::agent_sessions::path_display_key(&w.path);
           pins.into_iter().map(move |sid| (path.clone(), sid))
         })
         .collect();
       let map = crate::agent_sessions::detect_all(&home, &keyed, &pins, std::time::SystemTime::now());
       for (i, w) in trees.iter().enumerate() {
-        if let Some(top) = map.get(w.path.to_string_lossy().as_ref()).and_then(|a| a.top()) {
+        if let Some(top) = map
+          .get(&crate::agent_sessions::path_display_key(&w.path))
+          .and_then(|a| a.top())
+        {
           cells[i] = top.kind.display().to_string();
         }
       }
@@ -2294,7 +2299,7 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       let repo = Repository::open(&row.repo_path).ok()?;
       let branch = github::pinnable_branch(row.info.branch.as_deref())?;
       let pins = github::agent_pins(&repo, branch).ok()?;
-      let path = row.info.path.to_string_lossy().to_string();
+      let path = crate::agent_sessions::path_display_key(&row.info.path);
       Some(pins.into_iter().map(move |sid| (path.clone(), sid)).collect::<Vec<_>>())
     })
     .flatten()
@@ -2325,7 +2330,8 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       .collect();
     // Issue #408: same shared agents pass as single-repo list / daemon,
     // with each row's own repo pins overlaid (round I).
-    json_api::attach_agents(&mut worktree_rows, &agent_pins);
+    let reals: Vec<PathBuf> = rows.iter().map(|r| r.info.path.clone()).collect();
+    json_api::attach_agents(&mut worktree_rows, &reals, &agent_pins);
     let dto: Vec<WorkspaceJsonWorktree> = rows
       .iter()
       .zip(worktree_rows)
@@ -2348,11 +2354,19 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     if let Some(home) = crate::agent_sessions::agents_home() {
       let keyed: Vec<(String, PathBuf)> = rows
         .iter()
-        .map(|r| (r.info.path.to_string_lossy().to_string(), r.info.path.clone()))
+        .map(|r| {
+          (
+            crate::agent_sessions::path_display_key(&r.info.path),
+            r.info.path.clone(),
+          )
+        })
         .collect();
       let map = crate::agent_sessions::detect_all(&home, &keyed, &agent_pins, std::time::SystemTime::now());
       for (i, r) in rows.iter().enumerate() {
-        if let Some(top) = map.get(r.info.path.to_string_lossy().as_ref()).and_then(|a| a.top()) {
+        if let Some(top) = map
+          .get(&crate::agent_sessions::path_display_key(&r.info.path))
+          .and_then(|a| a.top())
+        {
           cells[i] = top.kind.display().to_string();
         }
       }

@@ -1447,10 +1447,13 @@ impl App {
     }
     // A pool scan queued while this run was in flight chains now that the
     // slot is free (round R); a landing that already carried the pool
-    // satisfies the request outright.
+    // satisfies the request outright, and a prompt closed in the meantime
+    // abandons it — nobody would consume the sweep (round T).
     if self.agent_pool_wanted {
       self.agent_pool_wanted = false;
-      if !landed_pool {
+      let prompt_open = self.view == View::DetailOverlay
+        && self.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input;
+      if !landed_pool && prompt_open {
         self.refresh_agent_pool();
       }
     }

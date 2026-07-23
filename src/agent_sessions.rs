@@ -1008,8 +1008,12 @@ fn collect_with(
   // opencode follows the XDG base-dir convention on every platform
   // (research.md D4): `$XDG_DATA_HOME/opencode` when the variable is set
   // (absolute per spec — a relative value is ignored), else the
-  // home-relative `.local/share/opencode` (Codex review round O).
+  // home-relative `.local/share/opencode` (Codex review round O). The
+  // `GWM_AGENTS_HOME` seam beats an inherited XDG_DATA_HOME (round T):
+  // an isolated test/CI run must scan the injected home, not the real
+  // machine store the environment happens to point at.
   let opencode_base = std::env::var_os("XDG_DATA_HOME")
+    .filter(|_| std::env::var_os("GWM_AGENTS_HOME").is_none())
     .map(PathBuf::from)
     .filter(|p| p.is_absolute())
     .unwrap_or_else(|| home.join(".local/share"))

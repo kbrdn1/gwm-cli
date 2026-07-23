@@ -137,7 +137,11 @@ impl From<&WorktreeInfo> for JsonWorktree {
     Self {
       name: w.name.clone(),
       id: w.id.clone(),
-      path: w.path.to_string_lossy().into_owned(),
+      // The lossless display key, not `to_string_lossy`: two paths
+      // differing only in invalid UTF-8 bytes must not serialize to the
+      // same string and share one agents entry (Codex review round T).
+      // Byte-identical for valid UTF-8 paths.
+      path: crate::agent_sessions::path_display_key(&w.path),
       branch: w.branch.clone(),
       head: w.head.clone(),
       is_main: w.is_main,
@@ -226,9 +230,11 @@ impl From<&DoctorReport> for JsonDoctorReport {
 /// `gwm list --format=json` and the daemon's `list` RPC method so both
 /// surfaces stay byte-identical.
 pub fn worktrees(repo: &git2::Repository) -> Result<Vec<JsonWorktree>> {
-  let mut rows: Vec<JsonWorktree> = worktree::list(repo)?.iter().map(JsonWorktree::from).collect();
+  let trees = worktree::list(repo)?;
+  let mut rows: Vec<JsonWorktree> = trees.iter().map(JsonWorktree::from).collect();
+  let reals: Vec<std::path::PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
   let pins = agent_pins_for_rows(repo, &rows);
-  attach_agents(&mut rows, &pins);
+  attach_agents(&mut rows, &reals, &pins);
   Ok(rows)
 }
 
@@ -255,8 +261,8 @@ pub fn agent_pins_for_rows(repo: &git2::Repository, rows: &[JsonWorktree]) -> Ve
 ///
 /// Workspace callers open each row's owning repo to build `pins` (Codex
 /// review round I) — this pass itself stays repo-agnostic.
-pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
-  attach_agents_inner(rows, pins, false);
+pub fn attach_agents(rows: &mut [JsonWorktree], reals: &[std::path::PathBuf], pins: &[(String, String)]) {
+  attach_agents_inner(rows, reals, pins, false);
 }
 
 /// [`attach_agents`] variant that also returns the raw session pool, so
@@ -266,13 +272,15 @@ pub fn attach_agents(rows: &mut [JsonWorktree], pins: &[(String, String)]) {
 /// F): `gwm list` and daemon polls must not pay it.
 pub fn attach_agents_with_pool(
   rows: &mut [JsonWorktree],
+  reals: &[std::path::PathBuf],
   pins: &[(String, String)],
 ) -> Vec<crate::agent_sessions::AgentSession> {
-  attach_agents_inner(rows, pins, true)
+  attach_agents_inner(rows, reals, pins, true)
 }
 
 fn attach_agents_inner(
   rows: &mut [JsonWorktree],
+  reals: &[std::path::PathBuf],
   pins: &[(String, String)],
   want_pool: bool,
 ) -> Vec<crate::agent_sessions::AgentSession> {
@@ -280,9 +288,14 @@ fn attach_agents_inner(
     return Vec::new();
   };
   let now = std::time::SystemTime::now();
+  // Keys are the rows' (lossless) display strings; detection matches on
+  // the ORIGINAL PathBuf the caller kept — reconstructing it from the
+  // string would corrupt non-UTF-8 paths (round T).
+  debug_assert_eq!(rows.len(), reals.len());
   let keyed: Vec<(String, std::path::PathBuf)> = rows
     .iter()
-    .map(|r| (r.path.clone(), std::path::PathBuf::from(&r.path)))
+    .zip(reals)
+    .map(|(r, p)| (r.path.clone(), p.clone()))
     .collect();
   let (summary, pool) = detect_cached(&home, &keyed, pins, now, want_pool);
   for row in rows.iter_mut() {

@@ -8221,6 +8221,24 @@ mod agent_sessions_pane {
   }
 
   #[test]
+  fn closing_the_prompt_cancels_the_queued_pool_scan() {
+    // Codex review round T (P2): open-then-close the attach prompt while
+    // a periodic run is in flight left `agent_pool_wanted` set — the
+    // landing then chained the full foreign-dir sweep with no prompt left
+    // to consume it. The chain only fires while the prompt is still open.
+    let (_d, mut app) = make_app();
+    let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+    app.open_agent_overlay();
+    app.open_agent_input(); // queued behind the in-flight run
+    app.agent_input_cancel(); // …and abandoned before it landed
+    assert!(app.apply_agent_snapshot(generation, BTreeMap::new(), None, BTreeMap::new()));
+    assert!(
+      app.tasks.request(TaskKind::AgentSessions).is_some(),
+      "no orphan pool scan chained after the prompt closed"
+    );
+  }
+
+  #[test]
   fn agent_snapshot_stale_generation_is_dropped() {
     let (_d, mut app) = make_app();
     let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();

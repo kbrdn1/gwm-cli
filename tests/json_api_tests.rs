@@ -243,16 +243,46 @@ fn attach_agents_reuses_detection_within_the_ttl() {
     agents: None,
   };
 
+  let reals = vec![std::path::PathBuf::from("/work/cached")];
   let mut rows = vec![row()];
-  json_api::attach_agents(&mut rows, &[]);
+  json_api::attach_agents(&mut rows, &reals, &[]);
   assert!(rows[0].agents.is_some(), "seeded session must be detected");
 
   // Remove the artefacts: a cache hit still serves the previous summary.
   std::fs::remove_dir_all(home.path().join(".codex")).unwrap();
   let mut rows2 = vec![row()];
-  json_api::attach_agents(&mut rows2, &[]);
+  json_api::attach_agents(&mut rows2, &reals, &[]);
   assert!(
     rows2[0].agents.is_some(),
     "within the TTL the cached detection must be reused (no re-walk)"
   );
+}
+
+#[cfg(unix)]
+#[test]
+fn json_worktree_paths_stay_unique_for_non_utf8_worktrees() {
+  // Codex review round T (P2): `JsonWorktree.path` went through
+  // `to_string_lossy`, so two worktrees differing only in invalid UTF-8
+  // bytes serialized to the SAME string and shared one agents entry on
+  // the JSON/daemon surface. The lossless display key keeps them apart.
+  use std::ffi::OsStr;
+  use std::os::unix::ffi::OsStrExt;
+  let mk = |bytes: &[u8]| gwm::worktree::WorktreeInfo {
+    name: "wt".into(),
+    id: "wt".into(),
+    path: std::path::PathBuf::from("/repo").join(OsStr::from_bytes(bytes)),
+    branch: Some("main".into()),
+    head: None,
+    is_main: false,
+    is_locked: false,
+    is_prunable: false,
+    status: Default::default(),
+    link: gwm::github::BranchLink::empty(),
+    issue_state: None,
+    pr_state: None,
+    age: None,
+  };
+  let a = JsonWorktree::from(&mk(b"wt-\xff"));
+  let b = JsonWorktree::from(&mk(b"wt-\xfe"));
+  assert_ne!(a.path, b.path, "distinct invalid-byte paths never serialize alike");
 }
