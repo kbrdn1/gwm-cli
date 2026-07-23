@@ -138,3 +138,46 @@ fn statusline_render_shape_survives_the_pipe() {
     "with a live pipe daemon the statusline is not the blank degradation: {stdout:?}"
   );
 }
+
+#[test]
+fn a_stopped_subscription_frees_its_server_connection_slot() {
+  // Codex review #439: when the callback stops the subscription, both
+  // stream halves must actually drop (closing the pipe) — with a daemon
+  // capped at ONE connection, a leaked subscribe connection would make
+  // every later request fail, so a passing list_once IS the proof the
+  // slot was released.
+  let (dir, _repo) = init_repo();
+  let workdir = dir.path().to_path_buf();
+  let pipe = pipe_name("slot");
+  let shutdown = Arc::new(AtomicBool::new(false));
+  let mut opts = ServeOptions::new(pipe.clone(), workdir, Duration::from_millis(50));
+  opts.max_connections = 1;
+  let flag = Arc::clone(&shutdown);
+  let handle = thread::spawn(move || {
+    serve(&opts, flag).expect("serve must bind and run");
+  });
+  let daemon = TestDaemon {
+    pipe,
+    shutdown,
+    handle: Some(handle),
+  };
+  for _ in 0..200 {
+    if client::list_once(&daemon.pipe).is_ok() {
+      break;
+    }
+    thread::sleep(Duration::from_millis(10));
+  }
+
+  client::subscribe(&daemon.pipe, |_| false).expect("one snapshot then stop");
+  // The reader thread exits within a tick; give it a moment, then the
+  // single slot must be usable again.
+  let mut freed = false;
+  for _ in 0..100 {
+    if client::list_once(&daemon.pipe).is_ok() {
+      freed = true;
+      break;
+    }
+    thread::sleep(Duration::from_millis(20));
+  }
+  assert!(freed, "the subscription's connection slot must be released after stop");
+}

@@ -331,3 +331,49 @@ fn client_request_lines_are_valid_rpc_for_their_methods() {
   let sub: Value = serde_json::from_str(SUBSCRIBE_REQUEST).unwrap();
   assert_eq!(sub["method"], serde_json::json!("subscribe"));
 }
+
+// --- pipe-name user fragment (issue #439, Codex review) ---------------------
+
+#[test]
+fn pipe_user_fragments_stay_distinct_for_punctuation_variants() {
+  // `alice.smith` and `alice-smith` are two different accounts; a lossy
+  // fold-to-dash would give both the same global pipe name, and the DACL
+  // would then lock the second user's daemon out of its own default name.
+  let a = gwm::daemon::pipe_user_fragment("alice.smith");
+  let b = gwm::daemon::pipe_user_fragment("alice-smith");
+  assert_ne!(a, b, "punctuation variants must not collide: {a} vs {b}");
+}
+
+#[test]
+fn pipe_user_fragments_keep_plain_names_readable() {
+  assert_eq!(gwm::daemon::pipe_user_fragment("kylian"), "kylian");
+  assert_eq!(gwm::daemon::pipe_user_fragment("User123"), "User123");
+}
+
+#[test]
+fn pipe_user_fragments_are_valid_pipe_name_material() {
+  // Whatever the input (separators, unicode, empty), the fragment must be
+  // ASCII-alphanumeric plus '_' only — always a legal pipe-name chunk.
+  for raw in ["DOMAIN\\alice", "a b", "é", "", "x:y/z"] {
+    let frag = gwm::daemon::pipe_user_fragment(raw);
+    assert!(
+      frag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+      "fragment for {raw:?} must be pipe-safe: {frag:?}"
+    );
+  }
+}
+
+#[test]
+fn pipe_user_fragments_are_injective_on_distinct_inputs() {
+  let inputs = ["DOMAIN\\alice", "DOMAIN_alice", "domain\\alice", "a.b", "a_b", "a-b"];
+  let frags: Vec<String> = inputs.iter().map(|i| gwm::daemon::pipe_user_fragment(i)).collect();
+  for i in 0..frags.len() {
+    for j in (i + 1)..frags.len() {
+      assert_ne!(
+        frags[i], frags[j],
+        "{} and {} must map to distinct fragments",
+        inputs[i], inputs[j]
+      );
+    }
+  }
+}

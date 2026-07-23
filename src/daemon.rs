@@ -929,6 +929,30 @@ mod server {
 #[cfg(all(unix, feature = "daemon"))]
 pub use server::{default_socket, serve, socket_in, socket_path, ServeOptions};
 
+/// Injective pipe-name fragment for a Windows account identity (issue
+/// #439). ASCII alphanumerics pass through; every other character —
+/// including the `\` of `DOMAIN\user` — becomes `_XX` (uppercase hex of
+/// each UTF-8 byte), so `alice.smith` / `alice-smith`, or same-named
+/// accounts on two domains, can never share a default pipe name (a lossy
+/// fold would let the owner-only DACL lock the second user out of its own
+/// default). `_` itself is escaped too, which is what makes the mapping
+/// injective. Compiled on every platform so the property is unit-testable
+/// off Windows; only the Windows `socket_path` consumes it.
+pub fn pipe_user_fragment(raw: &str) -> String {
+  let mut out = String::with_capacity(raw.len());
+  for c in raw.chars() {
+    if c.is_ascii_alphanumeric() {
+      out.push(c);
+    } else {
+      let mut buf = [0u8; 4];
+      for b in c.encode_utf8(&mut buf).bytes() {
+        out.push_str(&format!("_{b:02X}"));
+      }
+    }
+  }
+  out
+}
+
 // ---------------------------------------------------------------------------
 // Named-pipe server & client — Windows only, behind the `daemon` feature
 // (issue #439). Exposes the same public interface as the unix module, so
@@ -954,10 +978,11 @@ mod server_win {
   use super::*;
   use crate::error::GwmError;
   use interprocess::local_socket::{
-    prelude::*, GenericNamespaced, ListenerNonblockingMode, ListenerOptions, RecvHalf, SendHalf, Stream,
+    prelude::*, ConnectOptions, GenericNamespaced, ListenerNonblockingMode, ListenerOptions, RecvHalf, SendHalf, Stream,
   };
   use interprocess::os::windows::local_socket::ListenerOptionsExt;
   use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+  use interprocess::ConnectWaitMode;
   use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
   use std::path::PathBuf;
   use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1037,19 +1062,22 @@ mod server_win {
     }
   }
 
-  /// Default pipe name. `\\.\pipe\` is machine-global, so the username
-  /// namespaces the default and two users' daemons don't fight over one
-  /// name — but the [`owner_only_descriptor`] is the actual access
-  /// barrier; the name only prevents accidental clashes. Characters
-  /// outside `[A-Za-z0-9]` are folded to `-` (a username is not a valid
-  /// pipe-name fragment by construction).
+  /// Default pipe name. `\\.\pipe\` is machine-global, so the identity
+  /// fragment namespaces the default and two users' daemons don't fight
+  /// over one name — but the [`owner_only_descriptor`] is the actual
+  /// access barrier; the name only prevents accidental clashes. The
+  /// fragment is [`pipe_user_fragment`] over `USERDOMAIN\USERNAME`
+  /// (injective escaping, Codex review #439): two accounts whose names
+  /// differ only in punctuation, or same-named accounts on different
+  /// domains, get distinct default names — a lossy fold would let the
+  /// DACL lock the second user out of its own default.
   pub fn socket_path() -> PathBuf {
     let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
-    let safe: String = user
-      .chars()
-      .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-      .collect();
-    PathBuf::from(format!("gwm-{safe}.sock"))
+    let identity = match std::env::var("USERDOMAIN") {
+      Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+      _ => user,
+    };
+    PathBuf::from(format!("gwm-{}.sock", pipe_user_fragment(&identity)))
   }
 
   /// The default [`socket_path`] plus the manage-dir flag, which is always
@@ -1085,10 +1113,19 @@ mod server_win {
   /// Bind the pipe and serve connections until `shutdown` flips — the
   /// Windows counterpart of the unix `serve`, same loop shape.
   pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
-    // Refuse a name a live daemon already owns, mirroring the unix stale-
-    // socket check (pipes need no stale cleanup: they vanish with their
-    // process). The probe-then-bind window is the same benign TOCTOU.
-    if Stream::connect(ns_name(&opts.socket)?).is_ok() {
+    // Courtesy probe for a clear "already in use" message, mirroring the
+    // unix stale-socket check (pipes need no stale cleanup: they vanish
+    // with their process). BOUNDED (Codex review #439): a squatted or
+    // wedged pipe with no available instance would park an unbounded
+    // connect forever and this must never hang `gwm daemon` startup. The
+    // probe is not the real guard — `create_sync` claims the name with
+    // `FILE_FLAG_FIRST_PIPE_INSTANCE`, so an occupied name fails the bind
+    // below even when the probe timed out.
+    let probe = ConnectOptions::new()
+      .name(ns_name(&opts.socket)?)
+      .wait_mode(ConnectWaitMode::Timeout(Duration::from_secs(1)))
+      .connect_sync();
+    if probe.is_ok() {
       return Err(GwmError::Other(format!(
         "daemon: pipe {} is already in use by a live daemon",
         opts.socket.display()
@@ -1098,7 +1135,12 @@ mod server_win {
       .name(ns_name(&opts.socket)?)
       .security_descriptor(owner_only_descriptor()?)
       .create_sync()
-      .map_err(|e| GwmError::Other(format!("daemon: failed to bind pipe {}: {e}", opts.socket.display())))?;
+      .map_err(|e| {
+        GwmError::Other(format!(
+          "daemon: failed to bind pipe {} (a name that is already claimed is refused — first-instance guard): {e}",
+          opts.socket.display()
+        ))
+      })?;
     // Nonblocking on BOTH sides: `accept` so this loop can poll the
     // shutdown flag (as on unix), and the accepted streams because every
     // per-connection deadline below is a sleep-retry loop over
@@ -1393,52 +1435,150 @@ pub mod client {
     parse_list_result(line.trim())
   }
 
+  /// Poll cadence of the subscribe reader's nonblocking line loop.
+  const READER_TICK: Duration = Duration::from_millis(15);
+
   /// Subscribe to `worktrees.changed` — same contract as the unix client:
   /// the first snapshot is bounded by [`CLIENT_TIMEOUT`], later pushes wait
   /// indefinitely, and a stream that closes before any snapshot errors so
-  /// the caller's degradation branch fires (issue #312). A reader thread
-  /// pumps lines into a channel; it ends when the stream closes, and the
-  /// send half is kept alive for the loop's whole lifetime so the pipe
-  /// stays fully open.
+  /// the caller's degradation branch fires (issue #312).
+  ///
+  /// Shape (Codex review #439): the WHOLE connect + handshake + read loop
+  /// lives on a helper thread, so the first `recv_timeout` bounds the
+  /// connect too — a wedged daemon whose pipe accepts no instance must
+  /// degrade `statusline --watch` within the deadline, not hang it. The
+  /// thread owns both stream halves and reads NONBLOCKING under a cancel
+  /// flag: when `on_snapshot` asks to stop, flipping the flag makes the
+  /// thread exit within a tick and drop both halves — actually closing
+  /// the pipe and freeing the server's connection slot (a blocking
+  /// `read_line` would keep both alive until the next push, potentially
+  /// forever).
   pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
-    let stream = connect(socket)?;
-    let (recv, mut send) = stream.split();
-    writeln!(send, "{SUBSCRIBE_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
-    send.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
-    let (tx, rx) = mpsc::channel();
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let socket = socket.to_path_buf();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&cancel);
+    let (tx, rx) = mpsc::channel::<Result<String>>();
     std::thread::spawn(move || {
-      let mut reader = BufReader::new(recv);
-      loop {
-        let mut line = String::new();
-        match reader.read_line(&mut line) {
-          Ok(0) | Err(_) => break, // EOF or dead link — dropping tx ends the stream
-          Ok(_) => {
-            if tx.send(line).is_err() {
-              break; // consumer stopped listening
-            }
+      let stream = match connect(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+          let _ = tx.send(Err(e));
+          return;
+        }
+      };
+      if let Err(e) = stream.set_nonblocking(true) {
+        let _ = tx.send(Err(GwmError::Other(format!("daemon: {e}"))));
+        return;
+      }
+      let (recv, mut send) = stream.split();
+      // The handshake write races an empty kernel buffer at worst — retry
+      // WouldBlock briefly rather than treating it as fatal.
+      let frame = format!("{SUBSCRIBE_REQUEST}\n").into_bytes();
+      let deadline = Instant::now() + CLIENT_TIMEOUT;
+      let mut written = 0usize;
+      while written < frame.len() {
+        if flag.load(Ordering::Relaxed) || Instant::now() >= deadline {
+          return; // both halves drop here — the pipe closes
+        }
+        match send.write(&frame[written..]) {
+          Ok(0) => return,
+          Ok(n) => written += n,
+          Err(e)
+            if matches!(
+              e.kind(),
+              std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+          {
+            std::thread::sleep(READER_TICK);
+          }
+          Err(e) => {
+            let _ = tx.send(Err(GwmError::Other(format!("daemon: {e}"))));
+            return;
           }
         }
       }
+      // Nonblocking line loop: accumulate until '\n', ship each line. On
+      // cancel or a dead link, fall off the end — dropping BOTH halves
+      // closes the pipe (the whole point of the flag).
+      let mut reader = std::io::BufReader::new(recv);
+      let mut buf: Vec<u8> = Vec::new();
+      loop {
+        if flag.load(Ordering::Relaxed) {
+          return;
+        }
+        let chunk = match reader.fill_buf() {
+          Ok(c) => c,
+          Err(e)
+            if matches!(
+              e.kind(),
+              std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+          {
+            std::thread::sleep(READER_TICK);
+            continue;
+          }
+          Err(_) => return, // dead link — dropping tx ends the consumer loop
+        };
+        if chunk.is_empty() {
+          return; // EOF — peer closed
+        }
+        if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+          buf.extend_from_slice(&chunk[..pos]);
+          reader.consume(pos + 1);
+          let line = String::from_utf8_lossy(&buf).into_owned();
+          buf.clear();
+          if tx.send(Ok(line)).is_err() {
+            return; // consumer stopped listening
+          }
+        } else {
+          let n = chunk.len();
+          buf.extend_from_slice(chunk);
+          reader.consume(n);
+        }
+      }
     });
+
     let mut delivered_any = false;
+    let mut result = Ok(());
     loop {
-      let line = if delivered_any {
+      let msg = if delivered_any {
         rx.recv().ok()
       } else {
         rx.recv_timeout(CLIENT_TIMEOUT).ok()
       };
-      let Some(line) = line else { break };
+      let Some(msg) = msg else { break };
+      let line = match msg {
+        Ok(line) => line,
+        Err(e) => {
+          result = Err(e);
+          break;
+        }
+      };
       let trimmed = line.trim();
       if trimmed.is_empty() {
         continue;
       }
-      let worktrees = parse_worktrees_changed(trimmed)?;
-      delivered_any = true;
-      if !on_snapshot(&worktrees) {
-        break;
+      match parse_worktrees_changed(trimmed) {
+        Ok(worktrees) => {
+          delivered_any = true;
+          if !on_snapshot(&worktrees) {
+            break;
+          }
+        }
+        Err(e) => {
+          result = Err(e);
+          break;
+        }
       }
     }
-    drop(send);
+    // Wake and end the reader thread so it drops both halves promptly —
+    // closing the pipe and freeing the daemon's connection slot.
+    cancel.store(true, Ordering::Relaxed);
+    result?;
     if !delivered_any {
       return Err(GwmError::Other(
         "daemon: stream closed before the first snapshot".to_string(),
