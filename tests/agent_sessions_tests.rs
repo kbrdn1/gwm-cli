@@ -1384,3 +1384,82 @@ fn claude_live_session_name_beats_the_first_prompt() {
   let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
   assert_eq!(sessions[0].name.as_deref(), Some("feat-408-agent-session-pane"));
 }
+
+// --- process-level liveness (issue #441) ------------------------------------
+
+/// Spawn-and-reap a child so its PID names a real but dead process. The
+/// reuse window between `wait()` and the scan is microseconds on
+/// sequential-PID kernels — accepted; the alternative is no dead-PID
+/// coverage at all.
+#[cfg(unix)]
+fn reaped_pid() -> u32 {
+  let mut child = std::process::Command::new("true").spawn().expect("spawn true");
+  let pid = child.id();
+  child.wait().expect("reap the child");
+  pid
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dead_registry_pid_ends_the_claude_session() {
+  // An agent killed outright leaves its live-registry file behind; the
+  // recorded PID is the process-level signal that it is not coming back,
+  // so the session must not read as active for the rest of ACTIVE_WINDOW.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("aaaa-1111.jsonl"), "{}");
+  write(
+    &tmp.path().join(".claude/sessions/40001.json"),
+    &format!(
+      r#"{{"pid":{},"sessionId":"aaaa-1111","name":"killed","status":"busy"}}"#,
+      reaped_pid()
+    ),
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  assert!(
+    sessions[0].ended,
+    "a registry entry whose process is gone must end the session"
+  );
+}
+
+#[test]
+fn a_live_registry_pid_keeps_the_claude_session_running() {
+  // Our own PID is alive by definition — the registry entry must not
+  // demote the session it names.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("aaaa-1111.jsonl"), "{}");
+  write(
+    &tmp.path().join(".claude/sessions/40002.json"),
+    &format!(
+      r#"{{"pid":{},"sessionId":"aaaa-1111","name":"alive","status":"busy"}}"#,
+      std::process::id()
+    ),
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  assert!(!sessions[0].ended, "a live PID must keep the session running");
+}
+
+#[test]
+fn a_registry_entry_without_a_pid_stays_artefact_only() {
+  // No PID in the registry file → no process signal → the artefact-only
+  // behaviour is the graceful degradation, not a demotion.
+  let tmp = tempfile::TempDir::new().unwrap();
+  let base = tmp.path().join(".claude/projects");
+  let wt = PathBuf::from("/Users/x/proj");
+  write(&base.join(claude_slug(&wt)).join("aaaa-1111.jsonl"), "{}");
+  write(
+    &tmp.path().join(".claude/sessions/40003.json"),
+    r#"{"sessionId":"aaaa-1111","name":"no-pid","status":"busy"}"#,
+  );
+
+  let sessions = ClaudeCodeSource.scan(&base, std::slice::from_ref(&wt), SystemTime::now());
+  assert!(
+    !sessions[0].ended,
+    "no process signal → keep the artefact-only classification"
+  );
+}
