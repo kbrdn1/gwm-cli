@@ -62,7 +62,9 @@ pub struct AgentSession {
   /// since the slug mapping is lossy and only matches forward).
   pub cwd: PathBuf,
   pub last_activity: SystemTime,
-  /// Only Vibe can observe a terminated session (non-null `end_time`).
+  /// Observed termination: Vibe records one (non-null `end_time`), and a
+  /// Claude Code live-registry entry whose PID is no longer running sets
+  /// it too (issue #441). Everything else degrades to artefact freshness.
   pub ended: bool,
   pub id: String,
   /// Human-readable session name when the artefacts carry one: the first
@@ -187,12 +189,45 @@ fn first_user_text(path: &Path) -> Option<String> {
 /// paths and looks their slugs up — O(#worktrees), no directory sweep.
 pub struct ClaudeCodeSource;
 
-/// Live-session names from `<.claude>/sessions/*.json` — Claude Code's own
-/// registry of running sessions (`{sessionId, name, status}`). The name it
-/// carries is what the app displays, so it beats the first-prompt heuristic
-/// (user feedback 2026-07-22). Missing dir → empty map (dead sessions fall
-/// back to their first prompt).
-fn claude_live_names(projects_base: &Path) -> std::collections::HashMap<String, String> {
+/// One `<.claude>/sessions/<pid>.json` registry entry: the display name the
+/// app shows (beats the first-prompt heuristic, user feedback 2026-07-22),
+/// plus whether the recorded process is still running (issue #441).
+struct LiveEntry {
+  name: Option<String>,
+  dead: bool,
+}
+
+/// Whether `pid` names a running process. Unix: `kill(pid, 0)` probes
+/// existence without delivering a signal — EPERM still means alive (owned
+/// by another user). Non-unix, and an out-of-range or zero pid a corrupt
+/// registry could carry: no reliable probe, so report alive and keep the
+/// artefact-only classification. A dead PID recycled by an unrelated
+/// process reads as alive — that misreport window matches today's
+/// artefact-only one, accepted (#441).
+fn pid_is_alive(pid: u64) -> bool {
+  #[cfg(unix)]
+  {
+    let Ok(pid) = libc::pid_t::try_from(pid) else {
+      return true;
+    };
+    if pid <= 0 {
+      return true;
+    }
+    // SAFETY: signal 0 performs error checking only; nothing is delivered.
+    (unsafe { libc::kill(pid, 0) } == 0) || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = pid;
+    true
+  }
+}
+
+/// Live-session registry from `<.claude>/sessions/*.json` — Claude Code's
+/// own record of running sessions (`{pid, sessionId, name, status}`).
+/// Missing dir → empty map (sessions fall back to their first prompt and
+/// the artefact-only freshness).
+fn claude_live_registry(projects_base: &Path) -> std::collections::HashMap<String, LiveEntry> {
   let mut map = std::collections::HashMap::new();
   let Some(sessions_dir) = projects_base.parent().map(|p| p.join("sessions")) else {
     return map;
@@ -207,12 +242,33 @@ fn claude_live_names(projects_base: &Path) -> std::collections::HashMap<String, 
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
       continue;
     };
-    if let (Some(sid), Some(name)) = (
-      v.get("sessionId").and_then(|x| x.as_str()),
-      v.get("name").and_then(|x| x.as_str()),
-    ) {
-      if let Some(clean) = clean_session_name(name) {
-        map.insert(sid.to_string(), clean);
+    let Some(sid) = v.get("sessionId").and_then(|x| x.as_str()) else {
+      continue;
+    };
+    let incoming = LiveEntry {
+      name: v.get("name").and_then(|x| x.as_str()).and_then(clean_session_name),
+      dead: v.get("pid").and_then(|x| x.as_u64()).is_some_and(|p| !pid_is_alive(p)),
+    };
+    // A killed-then-resumed session leaves BOTH registry files behind with
+    // the same sessionId (stale dead PID + fresh live one), and read_dir
+    // order is undefined — so merge instead of last-write-wins: a live PID
+    // always beats a dead one; at equal liveness the first entry stays,
+    // only filling a missing name (Codex review #441).
+    match map.entry(sid.to_string()) {
+      std::collections::hash_map::Entry::Vacant(slot) => {
+        slot.insert(incoming);
+      }
+      std::collections::hash_map::Entry::Occupied(mut slot) => {
+        let current = slot.get_mut();
+        if current.dead && !incoming.dead {
+          let kept_name = incoming.name.or_else(|| current.name.take());
+          *current = LiveEntry {
+            name: kept_name,
+            dead: false,
+          };
+        } else if current.dead == incoming.dead && current.name.is_none() {
+          current.name = incoming.name;
+        }
       }
     }
   }
@@ -237,7 +293,7 @@ impl ClaudeCodeSource {
   }
 
   fn scan_impl(&self, base: &Path, worktrees: &[PathBuf], now: SystemTime, sweep: bool) -> Vec<AgentSession> {
-    let live_names = claude_live_names(base);
+    let live = claude_live_registry(base);
     // Normalise before slugging: libgit2 reports the main checkout with a
     // trailing '/', which would grow a trailing '-' the recorded cwd never
     // has. `components()` drops redundant separators lexically.
@@ -256,7 +312,7 @@ impl ClaudeCodeSource {
         continue;
       }
       claimed.insert(slug.as_str());
-      scan_claude_dir(&base.join(slug), wt, &live_names, now, &mut out);
+      scan_claude_dir(&base.join(slug), wt, &live, now, &mut out);
     }
     if !sweep {
       return out;
@@ -277,7 +333,7 @@ impl ClaudeCodeSource {
         if claimed.contains(name.to_string_lossy().as_ref()) {
           continue;
         }
-        scan_claude_dir(&dir, &dir, &live_names, now, &mut out);
+        scan_claude_dir(&dir, &dir, &live, now, &mut out);
       }
     }
     out
@@ -289,7 +345,7 @@ impl ClaudeCodeSource {
 fn scan_claude_dir(
   dir: &Path,
   cwd: &Path,
-  live_names: &std::collections::HashMap<String, String>,
+  live: &std::collections::HashMap<String, LiveEntry>,
   now: SystemTime,
   out: &mut Vec<AgentSession>,
 ) {
@@ -313,13 +369,14 @@ fn scan_claude_dir(
     let Some(id) = clean_id(stem) else {
       continue;
     };
+    let entry = live.get(stem);
     out.push(AgentSession {
       kind: AgentKind::ClaudeCode,
       cwd: cwd.to_path_buf(),
       last_activity: mtime,
-      ended: false,
+      ended: entry.is_some_and(|e| e.dead),
       id,
-      name: live_names.get(stem).cloned().or_else(|| first_user_text(&path)),
+      name: entry.and_then(|e| e.name.clone()).or_else(|| first_user_text(&path)),
     });
   }
 }
@@ -1082,7 +1139,7 @@ fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<Agent
   if sid.contains(['/', '\\']) {
     return None;
   }
-  let live_names = claude_live_names(base);
+  let live = claude_live_registry(base);
   let entries = std::fs::read_dir(base).ok()?;
   for dir in entries.flatten() {
     let path = dir.path().join(format!("{sid}.jsonl"));
@@ -1092,13 +1149,14 @@ fn claude_session_by_id(base: &Path, sid: &str, now: SystemTime) -> Option<Agent
     if !within_scan_window(mtime, now) {
       continue;
     }
+    let entry = live.get(sid);
     return Some(AgentSession {
       kind: AgentKind::ClaudeCode,
       cwd: dir.path(),
       last_activity: mtime,
-      ended: false,
+      ended: entry.is_some_and(|e| e.dead),
       id: clean_id(sid)?,
-      name: live_names.get(sid).cloned().or_else(|| first_user_text(&path)),
+      name: entry.and_then(|e| e.name.clone()).or_else(|| first_user_text(&path)),
     });
   }
   None
@@ -1122,8 +1180,9 @@ pub enum Freshness {
 }
 
 impl Freshness {
-  /// Classify from the last artefact activity. `ended` (only Vibe can set it)
-  /// forces `Idle`; a timestamp in the future clamps to `Active`.
+  /// Classify from the last artefact activity. `ended` (Vibe's recorded
+  /// `end_time`, or a dead live-registry PID for Claude Code, #441) forces
+  /// `Idle`; a timestamp in the future clamps to `Active`.
   pub fn classify(last_activity: SystemTime, ended: bool, now: SystemTime) -> Self {
     if ended {
       return Freshness::Idle;

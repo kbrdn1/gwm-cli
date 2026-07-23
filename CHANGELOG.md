@@ -50,6 +50,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Agent session detection no longer reports an outright-killed Claude Code
+  session as active for the rest of the 5-minute activity window: on Unix,
+  when the live registry (`~/.claude/sessions/<pid>.json`) records the
+  session's PID and that process is gone, the session drops to idle
+  immediately. Backends without a process signal (Codex, opencode, Vibe)
+  and non-Unix platforms keep the artefact-only classification. (#441)
+
 - The release workflow's read-only checkouts no longer persist the
   auto-injected token in `.git/config`. Only the two checkouts that push
   (the Homebrew tap and the Scoop bucket) keep a credential, and both sides
