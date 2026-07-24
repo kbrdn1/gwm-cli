@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The `Working Tree` pane scrolls. With the status pane focused, `J` / `K`
+  (rebindable as `wt_scroll_down` / `wt_scroll_up` under `[tui.keys]`) move
+  an independent scroll offset over the file tree, clamped against the
+  viewport the layout actually granted the section — on a large change set
+  the entries beyond the pane height were simply unreachable before. The
+  offset resets on worktree navigation and on the commits ↔ stashes mode
+  toggle, mirroring the Recent Commits scroll contract. (#437)
+
 ### Changed
 
 - No workflow checkout persists the auto-injected token any more: the
