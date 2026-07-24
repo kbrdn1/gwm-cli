@@ -165,6 +165,30 @@ fn release_workflow_carries_no_aur_publish_automation() {
   }
 }
 
+/// The winget publish automation was removed in #448: `WINGET_TOKEN` was never
+/// provisioned, so the guard step turned every stable release run into a red
+/// "publish kbrdn1.gwm to winget" job, and the channel is blocked upstream
+/// anyway (the initial manifest PR microsoft/winget-pkgs#403295 sits on
+/// Needs-CLA, and `komac update` can only update a package that already
+/// exists). winget joins the AUR, Nixpkgs and aqua as a channel fed by hand:
+/// the maintainer runs a pinned `komac update ... --submit` after a stable
+/// release, see CONTRIBUTING.md > Releases > winget.
+///
+/// If the channel is unblocked and manual submissions prove routine, deleting
+/// this test is the correct first step of the change that brings the job back.
+#[test]
+fn release_workflow_carries_no_winget_publish_automation() {
+  let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
+
+  for needle in ["winget-publish", "WINGET_TOKEN", "komac", "winget-pkgs"] {
+    assert!(
+      !workflow.contains(needle),
+      "release.yml must not reference `{needle}`: winget submissions are made by hand (#448), \
+       see CONTRIBUTING.md > Releases > winget"
+    );
+  }
+}
+
 #[test]
 fn prerelease_workflow_does_not_match_stable_tags() {
   let workflow = fs::read_to_string(".github/workflows/pre-release.yml").unwrap();
