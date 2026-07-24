@@ -2244,6 +2244,24 @@ impl App {
     self.sidebar.scroll_up();
   }
 
+  /// Scroll the Working Tree pane down (issue #437, `J`). Gated on the
+  /// status pane holding the navigation focus — the same condition that
+  /// routes `j` / `k` to the sidebar in [`Self::next`] / [`Self::prev`] —
+  /// so the keys stay inert (and reusable) in the worktrees context.
+  pub fn wt_scroll_down(&mut self) {
+    if self.sidebar.open && self.sidebar.focused {
+      self.sidebar.wt_scroll_down();
+    }
+  }
+
+  /// Scroll the Working Tree pane up (issue #437, `K`). Same focus gate
+  /// as [`Self::wt_scroll_down`].
+  pub fn wt_scroll_up(&mut self) {
+    if self.sidebar.open && self.sidebar.focused {
+      self.sidebar.wt_scroll_up();
+    }
+  }
+
   /// Open the Keybindings (help) overlay from the top (#217). Resetting
   /// the scroll offset here keeps re-opens predictable.
   pub fn enter_help(&mut self) {

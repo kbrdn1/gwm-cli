@@ -147,6 +147,17 @@ pub struct SidebarState {
   /// by [`Self::scroll_down`] to clamp so the panel content can never
   /// be pushed entirely off-screen.
   pub max_scroll: u16,
+  /// First-visible line index of the Working Tree section (issue
+  /// #437). Independent from `scroll` — the file tree and the commit
+  /// list overflow at different rates. Bumped by
+  /// [`Self::wt_scroll_down`] / [`Self::wt_scroll_up`]; reset to 0 by
+  /// [`Self::on_navigation`] and [`Self::cycle_mode`].
+  pub wt_scroll: u16,
+  /// Upper bound for `wt_scroll`, republished by the renderer every
+  /// frame against the Working Tree section's clamped viewport (the
+  /// layout solver may hand the section less height than its content
+  /// on a large change set — exactly the case #437 exists for).
+  pub wt_max_scroll: u16,
   /// Cached pre-rendered sections keyed by the selected worktree's
   /// path **and** the active mode (issue #34). `None` = cold cache
   /// (the renderer will rebuild and store). Invalidated on selection
@@ -178,6 +189,8 @@ impl SidebarState {
       focused: false,
       scroll: 0,
       max_scroll: 0,
+      wt_scroll: 0,
+      wt_max_scroll: 0,
       cache: None,
       mode: SidebarMode::Commits,
     }
@@ -242,6 +255,7 @@ impl SidebarState {
       SidebarMode::Stashes => SidebarMode::Commits,
     };
     self.scroll = 0;
+    self.wt_scroll = 0;
     self.cache = None;
   }
 
@@ -260,6 +274,7 @@ impl SidebarState {
   /// itself on the next frame anyway).
   pub fn on_navigation(&mut self) {
     self.scroll = 0;
+    self.wt_scroll = 0;
     self.cache = None;
   }
 
@@ -284,6 +299,19 @@ impl SidebarState {
   /// 0. Matches `k`-on-sidebar; safe to call from `scroll == 0`.
   pub fn scroll_up(&mut self) {
     self.scroll = self.scroll.saturating_sub(1);
+  }
+
+  /// Scroll the Working Tree viewport down by one line, clamped at
+  /// `wt_max_scroll` (issue #437). Same clamp invariant as
+  /// [`Self::scroll_down`], applied to the file-tree section.
+  pub fn wt_scroll_down(&mut self) {
+    self.wt_scroll = self.wt_scroll.saturating_add(1).min(self.wt_max_scroll);
+  }
+
+  /// Scroll the Working Tree viewport up by one line, saturating at 0
+  /// (issue #437).
+  pub fn wt_scroll_up(&mut self) {
+    self.wt_scroll = self.wt_scroll.saturating_sub(1);
   }
 
   /// Flip `open`. When closing, also drops `focused` — a hidden

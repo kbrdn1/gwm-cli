@@ -302,6 +302,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     None => {
       // Sidebar not rendered → no scrollable surface → no max scroll to track.
       app.sidebar.max_scroll = 0;
+      app.sidebar.wt_max_scroll = 0;
       draw_list(f, area, app);
       return;
     }
@@ -639,6 +640,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       .split(area);
     app.sidebar.max_scroll = 0;
     app.sidebar.scroll = 0;
+    app.sidebar.wt_max_scroll = 0;
+    app.sidebar.wt_scroll = 0;
     render_section(
       f,
       chunks[0],
@@ -784,6 +787,18 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   }
   let scroll = app.sidebar.scroll;
 
+  // Working Tree scroll (issue #437). The section asks for
+  // `Length(content + 2)` but the layout solver may hand it less when
+  // the sidebar column is shorter than the sum of its sections — the
+  // exact case where entries used to be unreachable. Republish the max
+  // against the clamped viewport, same contract as Recent Commits.
+  let wt_visible = chunks[3].height.saturating_sub(2);
+  app.sidebar.wt_max_scroll = (working_tree_len as u16).saturating_sub(wt_visible);
+  if app.sidebar.wt_scroll > app.sidebar.wt_max_scroll {
+    app.sidebar.wt_scroll = app.sidebar.wt_max_scroll;
+  }
+  let wt_scroll = app.sidebar.wt_scroll;
+
   // Issue #34: surface the active mode in the bottom-scrollable
   // panel title. The footer keeps the `i of N` counter; the bottom
   // hint switches to "Enter: copy stash@{N}" in stashes mode.
@@ -875,7 +890,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       working_tree_title,
       SectionBody::new(&sections.working_tree),
       border_color,
-      0,
+      wt_scroll,
       working_tree_footer,
     );
   }
@@ -2071,6 +2086,7 @@ impl HintContext {
       HintContext::Status => &[
         // Read the status pane.
         Hint::Key(Down, "scroll"),
+        Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
@@ -2731,6 +2747,8 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     HelpRow::Blank,
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
+    entry(Action::WtScrollDown, "scroll the Working Tree pane down (status focus)"),
+    entry(Action::WtScrollUp, "scroll the Working Tree pane up (status focus)"),
     entry(Action::Top, "jump to first worktree"),
     entry(Action::Bottom, "jump to last worktree"),
   ];

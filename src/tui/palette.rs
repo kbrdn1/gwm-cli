@@ -197,6 +197,16 @@ pub const fn palette_entries() -> &'static [PaletteEntry] {
       description: "focus the status pane (opens it if hidden)",
     },
     PaletteEntry {
+      action: Action::WtScrollDown,
+      name: "wt-scroll-down",
+      description: "scroll the Working Tree pane down (status focus)",
+    },
+    PaletteEntry {
+      action: Action::WtScrollUp,
+      name: "wt-scroll-up",
+      description: "scroll the Working Tree pane up (status focus)",
+    },
+    PaletteEntry {
       action: Action::Top,
       name: "top",
       description: "jump to the first worktree",

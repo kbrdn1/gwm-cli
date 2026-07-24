@@ -232,6 +232,23 @@ fn default_keymap_binds_sync_to_lowercase_s() {
 }
 
 #[test]
+fn default_keymap_binds_working_tree_scroll() {
+  // Issue #437: `J` / `K` (Shift+j / Shift+k) scroll the Working Tree
+  // pane from the status context. Rebindable as `wt_scroll_down` /
+  // `wt_scroll_up` under `[tui.keys]`.
+  let km = Keymap::defaults();
+
+  let down = KeyStroke::parse_chord("J").unwrap();
+  assert!(matches!(
+    km.lookup(&down),
+    ChordResolution::Matched(Action::WtScrollDown)
+  ));
+
+  let up = KeyStroke::parse_chord("K").unwrap();
+  assert!(matches!(km.lookup(&up), ChordResolution::Matched(Action::WtScrollUp)));
+}
+
+#[test]
 fn default_keymap_binds_open_docs_to_dot() {
   // Issue #233: `.` opens the gwm documentation in the browser, reusing the
   // OpenMenu browser-spawn path. Rebindable as `open_docs` under `[tui.keys]`.
