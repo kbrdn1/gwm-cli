@@ -751,25 +751,28 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   };
 
   // Per-section block height = content rows + 2 border lines. Fixed
-  // for the small sections (worktree / issue-PR / working-tree);
-  // Recent Commits flexes to fill the rest of the sidebar height.
-  // Issue #34: the Working Tree section is empty in `Stashes` mode
-  // (no `git status --short` to render); collapse its constraint to
-  // 0 so the empty titled block disappears instead of leaving a
-  // bordered void.
+  // for the small sections (worktree / issue-PR); the three variable
+  // sections — Agents / Working Tree / Recent Commits — share the rest
+  // through the responsive solver (issue #438): natural heights while
+  // everything fits (commits absorbs the slack, as the old `Min(3)`
+  // did), a 5-line floor per visible section plus proportional sharing
+  // on overflow. Empty sections keep their collapse behaviour (issue
+  // #34: Working Tree is empty in `Stashes` mode; #408: Agents hidden
+  // with no session).
   let h = |lines: usize| (lines as u16).saturating_add(2);
-  let working_tree_height = if working_tree_len == 0 { 0 } else { h(working_tree_len) };
-  let agents_height = if agent_lines.is_empty() {
-    0
-  } else {
-    h(agent_lines.len())
-  };
+  let fixed = h(worktree_len).saturating_add(h(issue_pr_lines.len()));
+  let (agents_height, working_tree_height, commits_height) = super::state::sidebar::split_section_heights(
+    area.height.saturating_sub(fixed),
+    agent_lines.len() as u16,
+    working_tree_len as u16,
+    commits_len,
+  );
   let constraints = [
     Constraint::Length(h(worktree_len)),
     Constraint::Length(h(issue_pr_lines.len())),
     Constraint::Length(agents_height),
     Constraint::Length(working_tree_height),
-    Constraint::Min(3),
+    Constraint::Length(commits_height),
   ];
   let chunks = Layout::default()
     .direction(Direction::Vertical)
@@ -893,6 +896,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       wt_scroll,
       working_tree_footer,
     );
+    // Scrollbar over the inner right column when the tree overflows the
+    // viewport the responsive split granted (user feedback on PR #454) —
+    // the scroll existed (#437) but nothing showed where the viewport
+    // sat. Same herdr-style helper as the overflowing modals; no-op when
+    // everything fits.
+    let inner = Rect {
+      x: chunks[3].x.saturating_add(1),
+      y: chunks[3].y.saturating_add(1),
+      width: chunks[3].width.saturating_sub(2),
+      height: chunks[3].height.saturating_sub(2),
+    };
+    if inner.height > 0 {
+      let _ = scrollable_body_area(f, inner, wt_scroll, working_tree_len, &theme);
+    }
   }
   render_section(
     f,

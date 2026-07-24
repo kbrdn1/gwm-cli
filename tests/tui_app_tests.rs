@@ -986,6 +986,82 @@ fn cycle_mode_resets_wt_scroll() {
 }
 
 #[test]
+fn section_heights_fit_naturally_with_commits_absorbing_slack() {
+  // Issue #438: when everything fits, each variable section keeps its
+  // natural height (content + 2 borders) and Recent Commits absorbs the
+  // remaining space — the exact behaviour the old `Min(3)` constraint
+  // produced, now pinned through the pure solver.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(60, 3, 10, 20), (5, 12, 43));
+}
+
+#[test]
+fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
+  // Overflow: the scrollable sections (Working Tree / Recent Commits) are
+  // guaranteed min(natural, 5) lines and share the surplus proportionally
+  // to content size, capped at natural height, residue cascading to Recent
+  // Commits first. Agents cannot scroll so it keeps its natural height
+  // outright (see section_heights_never_clamp_the_agents_pane).
+  // available=21, agents=6 (natural 8, kept), wt=30 (natural 32, floor 5),
+  // commits=50 (natural 52, floor 5): base 18, surplus 3 → give =
+  // 3*len/86 = (0, 1, 1), residue 1 → commits. Sum == available exactly.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 6, 7));
+}
+
+#[test]
+fn section_heights_never_clamp_the_agents_pane() {
+  // Codex review on PR #454: the Agents pane has no scroll — clamping it
+  // below its content permanently hides the trailing "+N more" row (3
+  // pinned rows + the overflow indicator = 4 content rows max, bounded by
+  // agent_pane_lines). A non-scrollable section keeps its natural height
+  // even when the column overflows; only the scrollable sections clamp.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let (agents, wt, commits) = split_section_heights(21, 4, 30, 50);
+  assert_eq!(agents, 6, "agents must keep natural height (4 rows + borders)");
+  assert_eq!((agents, wt, commits), (6, 6, 9));
+}
+
+#[test]
+fn section_heights_keep_empty_sections_collapsed() {
+  // A section with no content keeps its collapse behaviour: Agents hidden
+  // when no session, Working Tree at 0 when the tree is clean. The
+  // collapsed section never eats a 5-line floor.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(40, 0, 5, 10), (0, 7, 33));
+  assert_eq!(split_section_heights(30, 2, 0, 8), (4, 0, 26));
+}
+
+#[test]
+fn section_heights_degrade_commits_first_on_tiny_terminal() {
+  // available below the floors' sum: hand out what exists with Recent
+  // Commits served first (the historical always-visible section), then
+  // Working Tree, then Agents. Sum must never exceed the available height.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(8, 6, 30, 50), (0, 3, 5));
+}
+
+#[test]
+fn section_heights_survive_empty_commits_under_overflow() {
+  // Codex review on PR #454: with an empty history (natural 2) the commits
+  // floor used to be raised to 3, breaking the floor <= natural invariant
+  // the sharing math relies on — `nat - floor` underflowed and panicked in
+  // debug builds. The natural height of commits is now floored at 3 (the
+  // old `Min(3)` rendered an empty bordered panel at 3 lines anyway), so
+  // the invariant holds and the split stays additive.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(8, 0, 5, 0), (0, 5, 3));
+}
+
+#[test]
+fn section_heights_give_everything_to_commits_when_alone() {
+  // No agents, clean tree, empty history: Recent Commits keeps the whole
+  // column, matching the pre-#438 rendering of an empty bottom panel.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(20, 0, 0, 0), (0, 0, 20));
+}
+
+#[test]
 fn focus_routes_navigation_to_sidebar() {
   // When sidebar is focused, next()/prev() should NOT move the list selection.
   let (_dir, mut app) = make_app();

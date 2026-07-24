@@ -246,6 +246,40 @@ fn working_tree_section_renders_file_tree_with_icons() {
   );
 }
 
+#[test]
+fn working_tree_section_shows_a_scrollbar_when_the_tree_overflows() {
+  // User feedback on PR #454: the Working Tree pane scrolls (#437) and gets
+  // clamped by the responsive split (#438), but nothing showed *where* the
+  // viewport sits — the scrollbar affordance was missing. On a short
+  // terminal with a large change set the pane must paint the herdr-style
+  // thumb on its inner right column, like the overflowing modals do.
+  let dir = repo_with_commits(20);
+  for i in 0..30 {
+    std::fs::write(dir.path().join(format!("file-{i:02}.rs")), "x").unwrap();
+  }
+
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  // 50 rows: tall enough that the responsive split hands the Working Tree a
+  // real (but clamped) viewport — on a shorter terminal the tiny-terminal
+  // path can shrink the pane to its borders, where there is nothing to
+  // scroll over and no bar to draw.
+  let backend = TestBackend::new(120, 50);
+  let mut terminal = Terminal::new(backend).unwrap();
+  warm_sidebar(&mut app);
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+  terminal.draw(|f| draw(f, &mut app)).unwrap();
+
+  assert!(
+    app.sidebar.wt_max_scroll > 0,
+    "fixture must actually overflow the Working Tree viewport"
+  );
+  let text = buffer_text(&terminal);
+  assert!(
+    text.contains('█'),
+    "an overflowing Working Tree pane must show the scrollbar thumb: {text}"
+  );
+}
+
 /// Run a `git` CLI command in `dir`, asserting success. Lets a render test
 /// build a feature branch with a deterministic diff against `main`.
 fn git_in(dir: &std::path::Path, args: &[&str]) {
