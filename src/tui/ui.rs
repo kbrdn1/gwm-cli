@@ -896,6 +896,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       wt_scroll,
       working_tree_footer,
     );
+    // Scrollbar over the inner right column when the tree overflows the
+    // viewport the responsive split granted (user feedback on PR #454) —
+    // the scroll existed (#437) but nothing showed where the viewport
+    // sat. Same herdr-style helper as the overflowing modals; no-op when
+    // everything fits.
+    let inner = Rect {
+      x: chunks[3].x.saturating_add(1),
+      y: chunks[3].y.saturating_add(1),
+      width: chunks[3].width.saturating_sub(2),
+      height: chunks[3].height.saturating_sub(2),
+    };
+    if inner.height > 0 {
+      let _ = scrollable_body_area(f, inner, wt_scroll, working_tree_len, &theme);
+    }
   }
   render_section(
     f,
