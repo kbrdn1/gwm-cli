@@ -986,6 +986,55 @@ fn cycle_mode_resets_wt_scroll() {
 }
 
 #[test]
+fn section_heights_fit_naturally_with_commits_absorbing_slack() {
+  // Issue #438: when everything fits, each variable section keeps its
+  // natural height (content + 2 borders) and Recent Commits absorbs the
+  // remaining space — the exact behaviour the old `Min(3)` constraint
+  // produced, now pinned through the pure solver.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(60, 3, 10, 20), (5, 12, 43));
+}
+
+#[test]
+fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
+  // Overflow: every visible section is guaranteed min(natural, 5) lines,
+  // then the surplus is distributed proportionally to content size,
+  // capped at natural height, residue cascading to Recent Commits first.
+  // available=21, agents=6 (natural 8), wt=30 (natural 32), commits=50
+  // (natural 52): floors 5+5+5, surplus 6 → give = 6*len/86 = (0, 2, 3),
+  // residue 1 → commits. Sum must equal the available height exactly.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(21, 6, 30, 50), (5, 7, 9));
+}
+
+#[test]
+fn section_heights_keep_empty_sections_collapsed() {
+  // A section with no content keeps its collapse behaviour: Agents hidden
+  // when no session, Working Tree at 0 when the tree is clean. The
+  // collapsed section never eats a 5-line floor.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(40, 0, 5, 10), (0, 7, 33));
+  assert_eq!(split_section_heights(30, 2, 0, 8), (4, 0, 26));
+}
+
+#[test]
+fn section_heights_degrade_commits_first_on_tiny_terminal() {
+  // available below the floors' sum: hand out what exists with Recent
+  // Commits served first (the historical always-visible section), then
+  // Working Tree, then Agents. Sum must never exceed the available height.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(8, 6, 30, 50), (0, 3, 5));
+}
+
+#[test]
+fn section_heights_give_everything_to_commits_when_alone() {
+  // No agents, clean tree, empty history: Recent Commits keeps the whole
+  // column, matching the pre-#438 rendering of an empty bottom panel.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(20, 0, 0, 0), (0, 0, 20));
+}
+
+#[test]
 fn focus_routes_navigation_to_sidebar() {
   // When sidebar is focused, next()/prev() should NOT move the list selection.
   let (_dir, mut app) = make_app();
