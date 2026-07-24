@@ -18,9 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the linked PR: one row per check with the state icon coloured like
   the sidebar CI indicator, `j` / `k` to move, `Enter` to open the
   check's details URL in the browser, `f` to filter, `Esc` to close
-  (verbs rebindable under `[tui.keys.modal.ci_checks]`). The per-check
-  name and URL are now kept when the rollup is classified, additively
-  on `PrStatus`. (#436)
+  (verbs rebindable under `[tui.keys.modal.ci_checks]`). Each row
+  carries a right-aligned muted detail column with the owning workflow
+  and the run duration (elapsed time with an ellipsis while the check
+  is in flight), and the PR line's CI indicator ends with the resolved
+  key that opens the overlay (`… CI passing 10/10 [c]`). The per-check
+  name, URL, workflow and timestamps are now kept when the rollup is
+  classified, additively on `PrStatus`. (#436)
 
 - Responsive sidebar heights. The Agents, `Working Tree` and `Recent
   Commits` sections now share the column through a pure layout solver:
