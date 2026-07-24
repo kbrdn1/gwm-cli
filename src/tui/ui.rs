@@ -4585,9 +4585,13 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     let area = centered_abs(width, height, term);
     f.render_widget(Clear, area);
     f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    // Scrollbar over the LISTING sub-area (Codex review #455): the rows
+    // start after border (1) + padding (1) + two title lines + the query
+    // line + its blank spacer = y + 6 — anchoring at + 4 overlapped the
+    // query and stopped short of the last rows.
     let list_rect = Rect {
       x: area.x + 1,
-      y: area.y + 2 + 2,
+      y: area.y + 6,
       width: area.width.saturating_sub(2),
       height: list_h as u16,
     }
@@ -4707,10 +4711,20 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // Selection paints a full-width bar (picker convention): pad the row
     // out to the modal's inner width so the highlight reads as one block.
     // The optional `extra` detail (#436: workflow · duration) sits right-
-    // aligned inside that bar, rendered muted.
+    // aligned inside that bar, rendered muted. Its width is RESERVED
+    // (Codex review #455): a long check name truncates with an ellipsis
+    // instead of pushing the detail column past the clipping edge.
     let extra = row.extra.as_deref().unwrap_or("");
     let extra_cols = if extra.is_empty() { 0 } else { extra.chars().count() };
-    let text_cols = label_w + 2 + row.value.chars().count();
+    let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
+    let value: String = if row.value.chars().count() > value_budget {
+      let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
+      v.push('…');
+      v
+    } else {
+      row.value.clone()
+    };
+    let text_cols = label_w + 2 + value.chars().count();
     let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
@@ -4727,7 +4741,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     }
     lines.push(Line::from(vec![
       Span::styled(format!("{:label_w$}  ", row.label), label_style),
-      Span::styled(row.value.clone(), value_style),
+      Span::styled(value, value_style),
       Span::styled(" ".repeat(pad), pad_style),
       Span::styled(extra.to_string(), extra_style),
     ]));

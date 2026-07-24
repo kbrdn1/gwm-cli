@@ -1475,7 +1475,12 @@ impl App {
     }
     // A landing detection refreshes the open overlay in place (user
     // feedback: attach/detach used to leave stale rows until reopened).
-    if self.view == View::DetailOverlay {
+    // Gated on the AGENTS consumer (Codex review #455): a stale target
+    // left by an interrupted agents overlay must never rebuild the CI
+    // checks rows into session rows under an unchanged CiChecks kind.
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::Agents
+    {
       if let Some((path, _)) = self.detail_overlay_target.clone() {
         if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
           let rows = self.build_agent_rows(&w);
@@ -2707,6 +2712,9 @@ impl App {
       }
     };
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
+    // Drop any stale agents target (an interrupted agents overlay leaves
+    // one behind) — it belongs to the agents consumer only (Codex #455).
+    self.detail_overlay_target = None;
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
       "CI Checks".into(),

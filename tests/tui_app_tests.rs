@@ -2611,6 +2611,67 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
 }
 
 #[test]
+fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
+  // Codex review on PR #455: an agents overlay interrupted without a close
+  // (an async task flipping the view) leaves detail_overlay_target set; a
+  // detection landing while the CI overlay is later open used to rebuild
+  // the rows as agent sessions while the kind stayed CiChecks — Enter then
+  // tried to open a session id as a URL. The landing rebuild is now gated
+  // on DetailKind::Agents and enter_ci_checks drops the stale target.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  use gwm::tui::TaskKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+
+  // Agents overlay opened (captures the target), then interrupted without
+  // a close — the exact hole the review describes.
+  app.open_agent_overlay();
+  app.view = View::Report;
+
+  app.focus_status();
+  app.enter_ci_checks();
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(app.detail_overlay.rows[0].value, "ci");
+
+  let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+  assert!(app.apply_agent_snapshot(
+    generation,
+    std::collections::BTreeMap::new(),
+    None,
+    std::collections::BTreeMap::new()
+  ));
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::CiChecks,
+    "kind must survive the landing"
+  );
+  assert_eq!(
+    app.detail_overlay.rows[0].value, "ci",
+    "the CI rows must not be replaced by agent rows"
+  );
+}
+
+#[test]
 fn pr_line_ci_hint_disappears_when_the_binding_is_removed() {
   // Codex review on PR #455: `ci_checks = []` (or `edit_worktree = []` in
   // the status context) unbinds the action — the PR line must then drop

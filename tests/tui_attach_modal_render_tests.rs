@@ -92,6 +92,78 @@ fn ci_checks_overlay_shows_its_own_hints_and_row_details() {
   );
 }
 
+/// Codex review on PR #455: a long check name used to push the detail
+/// column past the modal edge (ratatui clips right), erasing exactly the
+/// workflow + duration the column exists for. The value truncates with an
+/// ellipsis instead, reserving the detail column's width.
+#[test]
+fn ci_checks_long_name_truncates_and_keeps_the_detail_column() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks = vec![PrCheck {
+    name: format!("test (windows-latest, {})", "x".repeat(90)),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some("ci".into()),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: Some("2026-07-24T14:52:24Z".into()),
+  }];
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+
+  let joined = draw_rows(&mut app, 100, 30).join("\n");
+  assert!(
+    joined.contains("ci · 1m18s"),
+    "the detail column survives a long check name: {joined}"
+  );
+  assert!(
+    joined.contains('…'),
+    "the long name truncates with an ellipsis: {joined}"
+  );
+}
+
+/// Codex review on PR #455: the filter's scrollbar rect started at the
+/// query line (`area.y + 4`) instead of the filtered listing (`+ 6`),
+/// overlapping the input and stopping short of the last rows.
+#[test]
+fn ci_checks_filter_scrollbar_tracks_the_listing_not_the_query() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks: Vec<PrCheck> = (0..25)
+    .map(|i| PrCheck {
+      name: format!("check-{i:02}"),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    })
+    .collect();
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+  app.ci_input_open();
+
+  let rows = draw_rows(&mut app, 100, 26);
+  assert!(
+    rows.iter().any(|r| r.contains('█')),
+    "an overflowing filtered list must show the scrollbar thumb"
+  );
+  let query_row = rows
+    .iter()
+    .find(|r| r.contains("filter:"))
+    .expect("the query line is on screen");
+  assert!(
+    !query_row.contains('█'),
+    "the scrollbar must not overlap the query line: {query_row}"
+  );
+}
+
 /// Render into a fixed terminal and return the buffer as one row per line.
 fn draw_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
   let backend = TestBackend::new(width, height);
