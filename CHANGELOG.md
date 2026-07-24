@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Windows named pipe transport for the daemon** (#439). `gwm daemon` and
+  `gwm statusline` now work on Windows: the daemon binds an owner-only named
+  pipe under `\\.\pipe\` (default name `gwm-<user>.sock`, `--socket` takes
+  the pipe name) with the same JSON-RPC surface, DoS guards and graceful
+  degradation as the unix socket, and the statusline client rides it — every
+  segment lights up, including the agent indicator from #408. Unix behaviour
+  is untouched; the docs' Unix-only caveats are lifted.
 - **Agent session pane** (#408). gwm now detects AI-agent coding sessions
   (Claude Code, Codex, opencode, Mistral Vibe) per worktree by reading each
   tool's on-disk session artefacts — no process scanning, `std::fs` only, so
