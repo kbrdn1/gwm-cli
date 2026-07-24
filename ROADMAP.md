@@ -4,13 +4,23 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v1.0.0 stable
+## Current state — v1.2.0 stable
 
-The current **stable** line is **v1.0.0** (2026-06-26) — the SemVer milestone.
-The surface is feature-complete and the **machine-readable contracts are now
-frozen**: the CLI subcommands / flags / exit codes, the `--format=json` schemas,
-the daemon JSON-RPC protocol, and the `.gwm.toml` section set will not break
-without a major bump (see [Stability & compatibility](docs/6.development/3.stability.md)).
+The current **stable** line is **v1.2.0** (2026-07-21). The machine-readable
+contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
+the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
+section set will not break without a major bump (see
+[Stability & compatibility](docs/6.development/3.stability.md)).
+
+Since the 1.0.0 milestone (2026-06-26): the **1.0.x patches** hardened the line
+(security-only 1.0.3 among them); **1.1.0** shipped the first outside-report
+features ([#363](https://github.com/kbrdn1/gwm-cli/issues/363) — persisted
+sidebar layout, OSC 52 yank that works over SSH) and **1.1.1** fixed global
+config resolution on macOS; **1.2.0** was the distribution push
+([#383](https://github.com/kbrdn1/gwm-cli/issues/383) — Scoop, `.deb` / `.rpm`,
+AUR, aqua, with winget wired and pending upstream). In `dev`, unreleased: the
+**agent session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408))
+and its follow-ups — see [Shipped highlights](#shipped-highlights).
 
 1.0.0 promotes the entire **0.10.0 train**: the **rc.1** Settings-editability +
 TUI enrichment cycle; the **rc.2** train (embedded PTY overlays, the TUI keymap
@@ -119,6 +129,9 @@ For reference (each linked to its closing PR):
 | [#309](https://github.com/kbrdn1/gwm-cli/issues/309) ([PR #311](https://github.com/kbrdn1/gwm-cli/pull/311)) | v0.10.0-rc.3 | `gwm statusline` — first real consumer of `gwm daemon` (#38): a dependency-free client rendering a compact one-line worktree summary (active branch, count, dirty / ahead / behind, linked issue / PR) for tmux / starship / zsh; `--watch` rides the `subscribe` stream, degrades to a blank line + exit `0` when no daemon is reachable; `docs/5.integrations/4.daemon-consumers.md` (EN + FR) |
 | [#313](https://github.com/kbrdn1/gwm-cli/issues/313) ([PR #314](https://github.com/kbrdn1/gwm-cli/pull/314)) | v0.10.0-rc.4 | Fleet chores across worktrees: `gwm exec [<slug>...] -- <cmd>` (run a command in each worktree sequentially — every non-main worktree by default, or listed slugs; everything after `--` forwarded verbatim; `✓ / ✗` rollup, non-zero exit on any failure) and `gwm clean [<slug>...] [--yes]` (report — or with `--yes` reclaim — heavy build artifacts `target/` / `node_modules/` / `dist/` / `build/`; deletes only git-ignored dirs, never follows symlinks, not journaled into `gwm history`) |
 | [#317](https://github.com/kbrdn1/gwm-cli/issues/317) / [#318](https://github.com/kbrdn1/gwm-cli/issues/318) / [#319](https://github.com/kbrdn1/gwm-cli/issues/319) / [#324](https://github.com/kbrdn1/gwm-cli/issues/324) / [#325](https://github.com/kbrdn1/gwm-cli/issues/325) / [#326](https://github.com/kbrdn1/gwm-cli/issues/326) / [#334](https://github.com/kbrdn1/gwm-cli/issues/334) | v1.0.0 | The 1.0 commitment: frozen, versioned machine contracts pinned by `tests/contract_tests.rs` (`SCHEMA_VERSION = 1`, daemon `schema_version`, `docs/schema/README.md`) (#317); published stability & compatibility policy (`docs/6.development/3.stability.md`, EN + FR) (#318); frozen `exec` / `clean` surface decision (#319); named `[exec]` / `[clean]` config profiles + bounded `--jobs` parallelism (#324); `--workspace` fan-out for `gwm exec` / `gwm clean` (#326); TUI exec (`x`) / clean (`X`) overlays (#325); help-overlay + overlay polish (#334) |
+| [#363](https://github.com/kbrdn1/gwm-cli/issues/363) | v1.1.0 | First outside-report release: persisted sidebar layout (`V` / `H` write back to config) and OSC 52 clipboard yank that works over SSH |
+| [#383](https://github.com/kbrdn1/gwm-cli/issues/383) | v1.2.0 | Distribution push: Scoop bucket, native `.deb` / `.rpm` packages, AUR (`gwm-cli-bin`), aqua standard registry; winget wired, pending upstream merge |
+| [#408](https://github.com/kbrdn1/gwm-cli/issues/408) ([PR #435](https://github.com/kbrdn1/gwm-cli/pull/435)) + follow-ups [#439](https://github.com/kbrdn1/gwm-cli/issues/439) ([PR #444](https://github.com/kbrdn1/gwm-cli/pull/444)) / [#440](https://github.com/kbrdn1/gwm-cli/issues/440) ([PR #442](https://github.com/kbrdn1/gwm-cli/pull/442)) / [#441](https://github.com/kbrdn1/gwm-cli/issues/441) ([PR #443](https://github.com/kbrdn1/gwm-cli/pull/443)) / [#445](https://github.com/kbrdn1/gwm-cli/issues/445) ([PR #446](https://github.com/kbrdn1/gwm-cli/pull/446)) | dev (unreleased) | **Agent session pane**: detect AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) per worktree from on-disk artefacts — AGENT column (table + TUI), `a` detail overlay with pinning, `gwm agents` CLI, additive JSON `agents` field, statusline segment. Follow-ups: **Windows named pipe transport** for `gwm daemon` / `gwm statusline` (owner-only pipe, server identity verified by owner SID) (#439); `gwm clean` ENOTEMPTY race tolerance (#440); process-level liveness — a dead recorded PID demotes the session immediately on unix (#441); fixed-height attach prompt with a scrollbar (#445) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -137,29 +150,12 @@ a frozen surface waits for a future major.
 
 The next feature line is queued from a comparative read of the field
 (`chmouel/lazyworktree` and `d-kuro/gwq`) against the actual gwm codebase. Four
-capability gaps came out of it, and they are ordered by what they unlock rather
-than by size.
+capability gaps came out of it; the first — the agent session pane
+([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) — has shipped to `dev`
+with its follow-ups (see the table above). The remaining three are ordered by
+what they unlock rather than by size.
 
-### 1. Agent session pane ([#408](https://github.com/kbrdn1/gwm-cli/issues/408))
-
-Surface which worktrees have an AI agent working in them, and what that agent
-has been doing. This is the highest-value gap: it is the one capability a
-competitor has that gwm does not, and "one isolated worktree per agent" is the
-workflow people are actually adopting in 2026.
-
-Detection reads on-disk session artifacts rather than scanning processes, so it
-stays cross-platform (Windows included, which the reference implementation drops)
-and testable against a `TempDir`. Four agent CLIs were inspected and their storage
-schemas share nothing but the concept, which is what justifies a trait:
-
-- [#409](https://github.com/kbrdn1/gwm-cli/issues/409) — spike: pin down the Claude Code cwd-slug convention (blocks the Claude backend only)
-- [#410](https://github.com/kbrdn1/gwm-cli/issues/410) — `SessionSource` trait + backends for Claude Code, Codex, opencode and Mistral Vibe
-- [#411](https://github.com/kbrdn1/gwm-cli/issues/411) — generic detail overlay (shell + block renderer), shared with the rich PR/Issue view
-- [#412](https://github.com/kbrdn1/gwm-cli/issues/412) — TUI surface: agent column, Status pane section, `a` opens the overlay
-- [#413](https://github.com/kbrdn1/gwm-cli/issues/413) — daemon + `statusline` exposure (counters and states only, never transcript content)
-- [#414](https://github.com/kbrdn1/gwm-cli/issues/414) — process-level liveness on macOS/Linux, deferred until the mtime badge has been seen in use
-
-### 2. Multi-forge support ([#419](https://github.com/kbrdn1/gwm-cli/issues/419))
+### 1. Multi-forge support ([#419](https://github.com/kbrdn1/gwm-cli/issues/419))
 
 A `Forge` trait plus a GitLab (`glab`) backend. This does not improve discovery
 on GitHub; it widens the addressable audience to communities that are
@@ -171,7 +167,7 @@ forge selection for self-hosted instances.
 Lands before the rich PR/Issue view, so that view is born multi-forge instead of
 being rewritten later.
 
-### 3. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) → [#418](https://github.com/kbrdn1/gwm-cli/issues/418))
+### 2. Naming flexibility ([#415](https://github.com/kbrdn1/gwm-cli/issues/415) → [#416](https://github.com/kbrdn1/gwm-cli/issues/416) → [#417](https://github.com/kbrdn1/gwm-cli/issues/417) → [#418](https://github.com/kbrdn1/gwm-cli/issues/418))
 
 `gwm create` requires the full `<type> <issue> <desc>` triple, and there is no
 way to name a worktree freely. Working through this surfaced a real defect
@@ -190,15 +186,15 @@ Sequenced cheapest-first, each step shippable on its own:
 - [#417](https://github.com/kbrdn1/gwm-cli/issues/417) — derive the parser from the pattern and drop `BRANCH_RE`, which removes the defect at the root
 - [#418](https://github.com/kbrdn1/gwm-cli/issues/418) — token-driven create form with a live branch/path preview
 
-### 4. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
+### 3. Rich PR/Issue view ([#420](https://github.com/kbrdn1/gwm-cli/issues/420))
 
 Read a pull request or issue in full without leaving the TUI: description,
 individual checks, reviews, conversation, and inline review comments. Modelled
 on `snacks.nvim`'s `snacks.gh`, whose key lesson is that inline diff comments are
 reachable only through GraphQL, not through `gh --json`.
 
-Comes last of the four, and inherits the detail overlay paid for by the agent
-pane. Where gwm can beat the reference: `snacks.gh` has no notion of a worktree,
+Comes last of the three, and inherits the detail overlay the agent pane
+(#408) already paid for. Where gwm can beat the reference: `snacks.gh` has no notion of a worktree,
 so the user picks from a flat list; gwm already knows the
 worktree → branch → PR → issue chain and can open on the current row directly.
 
@@ -206,9 +202,9 @@ worktree → branch → PR → issue chain and can open on the current row direc
 
 Smaller Status-pane items, independent of the four capability gaps above:
 
-- [#436](https://github.com/kbrdn1/gwm-cli/issues/436), **CI checks overlay**: with the Status pane focused, `c` lists the current PR's individual checks (the #299 indicator only shows the collapsed rollup); `Enter` opens a check in the browser. Reuses the #411 detail overlay shell.
+- [#436](https://github.com/kbrdn1/gwm-cli/issues/436), **CI checks overlay**: with the Status pane focused, `c` lists the current PR's individual checks (the #299 indicator only shows the collapsed rollup); `Enter` opens a check in the browser. Reuses the detail overlay shell shipped with #408.
 - [#437](https://github.com/kbrdn1/gwm-cli/issues/437), **Working Tree scroll**: `Shift+J` / `Shift+K` from the Status context scroll the file tree (#300), which is currently clamped with no way to reach overflow.
-- [#438](https://github.com/kbrdn1/gwm-cli/issues/438), **responsive sidebar heights**: Agents / Working Tree / Recent Commits share the column with a 5-line minimum per visible section instead of first-come `Length(content)`. Blocked by #412 (the Agents pane).
+- [#438](https://github.com/kbrdn1/gwm-cli/issues/438), **responsive sidebar heights**: Agents / Working Tree / Recent Commits share the column with a 5-line minimum per visible section instead of first-come `Length(content)`. Unblocked since the Agents pane shipped (#408).
 
 ### Deferred
 
@@ -222,11 +218,6 @@ seen:
 - [#422](https://github.com/kbrdn1/gwm-cli/issues/422) — comparison page covering gwm, gwq and lazyworktree (gwq is the incumbent by star count and has been dormant since May)
 - [#423](https://github.com/kbrdn1/gwm-cli/issues/423) — sync `docs/` to the Astro docs site, with the in-repo tree as the source of truth
 
-Housekeeping:
-
-- [#304](https://github.com/kbrdn1/gwm-cli/issues/304) — **Workspace follow-up** — the nuanced review items left open after the multi-repo workspace PR (#303) landed.
-- [#206](https://github.com/kbrdn1/gwm-cli/issues/206) — **Docs screenshots** — replace the provisional placeholders with real TUI captures across the doc tree.
-
 ## Ambitious
 
 Larger investments with strategic payoff. Gated by user demand or a concrete
@@ -236,11 +227,12 @@ the daemon's "concrete first consumer" as `gwm statusline` (#309) in rc.3, and
 the fan-out / disk-hygiene candidates from the post-rc.2 gap review as
 `gwm exec` and `gwm clean` (#313) in the in-progress `[Unreleased]` delta.
 
-Two of the queued items above qualify as ambitious rather than incremental, and
-both have a concrete first consumer, which is why they are queued rather than
-parked here:
+The first of the two ambitious bets from the field review — the **agent
+session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408)), a new
+detection subsystem with four backends consumed by the TUI, `gwm agents`, the
+daemon and `gwm statusline` — has shipped to `dev`. One remains queued rather
+than parked, because it has a concrete first consumer:
 
-- the **agent session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) is a new detection subsystem with four backends, and its first consumer is the TUI plus `gwm statusline` through the daemon.
 - the **`Forge` trait** ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)) is a structural change to the GitHub layer, and its first consumer is the GitLab backend it exists to enable.
 
 No other large bets are queued. They land once an issue with a concrete first
