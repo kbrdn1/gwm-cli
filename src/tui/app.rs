@@ -4805,6 +4805,18 @@ impl App {
     if let Ok(status) = &r {
       self.persist_loaded_pr_title(status);
     }
+    // A landing fetch refreshes the open CI checks overlay in place
+    // (validation feedback on PR #455, `F` = refresh inside the overlay) —
+    // same convention as the agents landing, gated on the CI consumer.
+    // set_rows clamps the selection to the new count.
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      if let Ok(status) = &r {
+        let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
+        self.detail_overlay.set_rows(rows);
+      }
+    }
     self.github.apply_pr_result(r);
   }
 

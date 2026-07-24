@@ -2199,6 +2199,7 @@ impl HintContext {
         Hint::Lit("j/k", "select"),
         Hint::Modal(ModalAction::CiChecksOpen, "open"),
         Hint::Modal(ModalAction::CiChecksFilter, "filter"),
+        Hint::Modal(ModalAction::CiChecksRefresh, "refresh"),
         Hint::Modal(ModalAction::CiChecksClose, "close"),
       ],
       HintContext::Help => &[

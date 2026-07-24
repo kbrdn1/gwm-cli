@@ -2611,6 +2611,67 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
 }
 
 #[test]
+fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
+  // Validation feedback on PR #455: `F` inside the overlay re-fetches the
+  // PR; the landing must refresh the open CI overlay in place (same
+  // convention as the agents landing), keeping the kind and clamping the
+  // selection to the new row count.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mk_check = |name: &str, outcome: CheckOutcome| PrCheck {
+    name: name.into(),
+    outcome,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  };
+  let mk_status = |checks: Vec<PrCheck>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: checks.len() as u32,
+    ci: CiState::Running,
+    checks,
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(vec![
+    mk_check("a", CheckOutcome::Running),
+    mk_check("b", CheckOutcome::Running),
+  ])));
+
+  app.enter_ci_checks();
+  app.detail_overlay.select_next();
+  assert_eq!(app.detail_overlay.selected, 1);
+
+  app.apply_pr_fetch_result(Ok(mk_status(vec![mk_check("a", CheckOutcome::Passing)])));
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(
+    app.detail_overlay.rows.len(),
+    1,
+    "the landing refreshes the rows in place"
+  );
+  assert_eq!(app.detail_overlay.rows[0].value, "a");
+  assert_eq!(app.detail_overlay.selected, 0, "the selection clamps to the new count");
+}
+
+#[test]
+fn ci_checks_refresh_and_filter_mirror_the_list_view_keys() {
+  // Validation feedback on PR #455 (2026-07-24): inside the overlay `f`
+  // re-fetches and `/` filters — the exact keys the list view uses for
+  // refresh and filter. Rebindable under [tui.keys.modal.ci_checks].
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  let modal = ModalKeymap::defaults();
+  assert_eq!(modal.primary_key(ModalAction::CiChecksRefresh).as_deref(), Some("f"));
+  assert_eq!(modal.primary_key(ModalAction::CiChecksFilter).as_deref(), Some("/"));
+}
+
+#[test]
 fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
   // Codex review on PR #455: an agents overlay interrupted without a close
   // (an async task flipping the view) leaves detail_overlay_target set; a

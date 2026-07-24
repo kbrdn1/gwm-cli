@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `j` / `k` sidebar scroll — lists every `statusCheckRollup` entry of
   the linked PR: one row per check with the state icon coloured like
   the sidebar CI indicator, `j` / `k` to move, `Enter` to open the
-  check's details URL in the browser, `f` to filter, `Esc` to close
+  check's details URL in the browser, `/` to filter, `f` to re-fetch
+  the PR and refresh the rows in place, `Esc` to close
   (verbs rebindable under `[tui.keys.modal.ci_checks]`). Each row
   carries a right-aligned muted detail column with the owning workflow
   and the run duration (elapsed time with an ellipsis while the check

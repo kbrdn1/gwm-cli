@@ -304,12 +304,15 @@ define_modal_actions! {
     CleanConfirm => "confirm" [ "y", "Enter" ],
     CleanCancel  => "cancel"  [ "n", "Esc" ],
   }
+  // #436: the defaults mirror the list view's own keys — `/` filters and
+  // `f` refreshes there too (user feedback 2026-07-24).
   CiChecks {
-    CiChecksClose  => "close"       [ "Esc", "q" ],
-    CiChecksNext   => "select_next" [ "j", "Down" ],
-    CiChecksPrev   => "select_prev" [ "k", "Up" ],
-    CiChecksOpen   => "open"        [ "Enter" ],
-    CiChecksFilter => "filter"      [ "f" ],
+    CiChecksClose   => "close"       [ "Esc", "q" ],
+    CiChecksNext    => "select_next" [ "j", "Down" ],
+    CiChecksPrev    => "select_prev" [ "k", "Up" ],
+    CiChecksOpen    => "open"        [ "Enter" ],
+    CiChecksFilter  => "filter"      [ "/" ],
+    CiChecksRefresh => "refresh"     [ "f" ],
   }
 }
 

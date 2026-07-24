@@ -719,6 +719,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             None => app.status = "this check exposes no details URL".into(),
           },
           Some(ModalAction::CiChecksFilter) => app.ci_input_open(),
+          // Validation feedback on PR #455: `F` re-fetches the PR from
+          // inside the overlay; the landing refreshes the rows in place
+          // (apply_pr_fetch_result).
+          Some(ModalAction::CiChecksRefresh) => app.refresh_github_status(),
           _ => {}
         }
       }
