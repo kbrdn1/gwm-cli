@@ -2612,12 +2612,17 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
 
 #[test]
 fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
-  // Validation feedback on PR #455: `F` inside the overlay re-fetches the
+  // Validation feedback on PR #455: `f` inside the overlay re-fetches the
   // PR; the landing must refresh the open CI overlay in place (same
   // convention as the agents landing), keeping the kind and clamping the
-  // selection to the new row count.
+  // selection to the new row count. The result is injected through the
+  // spine + drain — the path a real background worker takes — not the
+  // `apply_pr_fetch_result` seam: the first cut of this feature rebuilt
+  // the rows only in the seam, so the pane refreshed but the overlay
+  // never did (field-caught on the local install).
   use gwm::github::{CheckOutcome, PrCheck};
   use gwm::tui::state::detail_overlay::DetailKind;
+  use gwm::tui::TaskMsg;
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
   app.refresh_link();
@@ -2629,35 +2634,75 @@ fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
     started_at: None,
     completed_at: None,
   };
-  let mk_status = |checks: Vec<PrCheck>| PrStatus {
-    number: 61,
+  let mk_status = |number: u64, checks: Vec<PrCheck>| PrStatus {
+    number,
     title: "CI checks fixture".into(),
     state: PrState::Open,
-    url: "https://example.test/pull/61".into(),
+    url: format!("https://example.test/pull/{}", number),
     updated_at: String::new(),
     checks_passed: 0,
     checks_total: checks.len() as u32,
     ci: CiState::Running,
     checks,
   };
-  app.apply_pr_fetch_result(Ok(mk_status(vec![
-    mk_check("a", CheckOutcome::Running),
-    mk_check("b", CheckOutcome::Running),
-  ])));
+  app.apply_pr_fetch_result(Ok(mk_status(
+    61,
+    vec![
+      mk_check("a", CheckOutcome::Running),
+      mk_check("b", CheckOutcome::Running),
+    ],
+  )));
 
   app.enter_ci_checks();
   app.detail_overlay.select_next();
   assert_eq!(app.detail_overlay.selected, 1);
 
-  app.apply_pr_fetch_result(Ok(mk_status(vec![mk_check("a", CheckOutcome::Passing)])));
+  // `f` claims a spine slot; the worker's result comes back over the
+  // task channel and is applied by the drain.
+  let generation = request_github_pr(&mut app, 61);
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(
+      generation,
+      61,
+      Ok(mk_status(61, vec![mk_check("a", CheckOutcome::Passing)])),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
   assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
   assert_eq!(
     app.detail_overlay.rows.len(),
     1,
-    "the landing refreshes the rows in place"
+    "the drained landing refreshes the rows in place"
   );
   assert_eq!(app.detail_overlay.rows[0].value, "a");
   assert_eq!(app.detail_overlay.selected, 0, "the selection clamps to the new count");
+
+  // A landing for a *different* PR (the worktree-wide bulk prefetch) must
+  // not clobber the open overlay's rows.
+  let generation = request_github_pr(&mut app, 62);
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(
+      generation,
+      62,
+      Ok(mk_status(
+        62,
+        vec![
+          mk_check("x", CheckOutcome::Failing),
+          mk_check("y", CheckOutcome::Failing),
+        ],
+      )),
+    ))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.detail_overlay.rows.len(),
+    1,
+    "another PR's landing must not clobber the linked PR's rows"
+  );
+  assert_eq!(app.detail_overlay.rows[0].value, "a");
 }
 
 #[test]
@@ -3008,6 +3053,17 @@ fn request_github_issue(app: &mut gwm::tui::App, n: u64) -> u64 {
     .request(TaskKind::GithubIssue(n))
     .expect("a cold GitHub issue slot must hand out a generation");
   app.github.mark_loading(FetchKey::Issue(n));
+  generation
+}
+
+/// PR-side counterpart to [`request_github_issue`].
+fn request_github_pr(app: &mut gwm::tui::App, n: u64) -> u64 {
+  use gwm::tui::{FetchKey, TaskKind};
+  let generation = app
+    .tasks
+    .request(TaskKind::GithubPr(n))
+    .expect("a cold GitHub PR slot must hand out a generation");
+  app.github.mark_loading(FetchKey::Pr(n));
   generation
 }
 

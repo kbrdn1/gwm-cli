@@ -1646,6 +1646,7 @@ impl App {
           }
           if let Ok(status) = &result {
             self.persist_loaded_pr_title(status);
+            self.refresh_ci_overlay_on_pr_landing(status);
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -4804,20 +4805,30 @@ impl App {
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
     if let Ok(status) = &r {
       self.persist_loaded_pr_title(status);
-    }
-    // A landing fetch refreshes the open CI checks overlay in place
-    // (validation feedback on PR #455, `F` = refresh inside the overlay) —
-    // same convention as the agents landing, gated on the CI consumer.
-    // set_rows clamps the selection to the new count.
-    if self.view == View::DetailOverlay
-      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
-    {
-      if let Ok(status) = &r {
-        let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
-        self.detail_overlay.set_rows(rows);
-      }
+      self.refresh_ci_overlay_on_pr_landing(status);
     }
     self.github.apply_pr_result(r);
+  }
+
+  /// Rebuild the open CI checks overlay from a landed PR fetch (validation
+  /// feedback on PR #455, `f` = refresh inside the overlay) — same
+  /// convention as the agents landing. Gated on the CI consumer AND on the
+  /// linked PR: the worktree-wide bulk prefetch lands other PRs' results
+  /// through the same drain arm, and those must not clobber the rows.
+  /// `set_rows` clamps the selection to the new count. Called from both
+  /// landing paths — the drain (`TaskMsg::GithubPr`, the real worker path)
+  /// and the `apply_pr_fetch_result` test seam — so they cannot desync
+  /// again (the first cut lived only in the seam, so the running TUI never
+  /// refreshed the overlay).
+  fn refresh_ci_overlay_on_pr_landing(&mut self, status: &PrStatus) {
+    if self.view != View::DetailOverlay
+      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
+      || self.github.link.pr != Some(status.number)
+    {
+      return;
+    }
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
+    self.detail_overlay.set_rows(rows);
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
