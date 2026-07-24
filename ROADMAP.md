@@ -153,7 +153,7 @@ a frozen surface waits for a future major.
 The next feature line is queued from a comparative read of the field
 (`chmouel/lazyworktree` and `d-kuro/gwq`) against the actual gwm codebase. Four
 capability gaps came out of it; the first — the agent session pane
-([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) — has shipped to `dev`
+([#408](https://github.com/kbrdn1/gwm-cli/issues/408)) — shipped in v1.3.0
 with its follow-ups (see the table above). The remaining three are ordered by
 what they unlock rather than by size.
 
@@ -227,12 +227,12 @@ first consumer. The previous "Ambitious" items all shipped in the v0.10.0 rc
 trains above: config presets (#37) and the JSON-RPC API + daemon (#38) in rc.2,
 the daemon's "concrete first consumer" as `gwm statusline` (#309) in rc.3, and
 the fan-out / disk-hygiene candidates from the post-rc.2 gap review as
-`gwm exec` and `gwm clean` (#313) in the in-progress `[Unreleased]` delta.
+`gwm exec` and `gwm clean` (#313) in the 1.0 line.
 
 The first of the two ambitious bets from the field review — the **agent
 session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408)), a new
 detection subsystem with four backends consumed by the TUI, `gwm agents`, the
-daemon and `gwm statusline` — has shipped to `dev`. One remains queued rather
+daemon and `gwm statusline` — shipped in v1.3.0. One remains queued rather
 than parked, because it has a concrete first consumer:
 
 - the **`Forge` trait** ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)) is a structural change to the GitHub layer, and its first consumer is the GitLab backend it exists to enable.

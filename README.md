@@ -2,7 +2,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/_assets/promo.png">
     <source media="(prefers-color-scheme: light)" srcset="docs/_assets/promo-light.png">
-    <img alt="gwm — git worktree manager, a CLI + TUI in Rust. One binary, every worktree, zero runtime deps." src="docs/_assets/promo.png" width="100%">
+    <img alt="gwm — git worktree manager, a CLI + TUI in Rust. One binary, every worktree, setup already done." src="docs/_assets/promo.png" width="100%">
   </picture>
 </p>
 
