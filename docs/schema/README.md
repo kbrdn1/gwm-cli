@@ -72,6 +72,7 @@ Stable: `name`, `id`, `path`, `branch`, `head`, `is_main`, `is_locked`,
 | Field | Tier | Note |
 |-------|------|------|
 | `repo` | **experimental** | present only in `--workspace` mode; rides the young workspace feature (#36). In `properties` but never `required`. |
+| `agents` | **experimental** | agent-session summary (#408): `{top, sessions[]}` of `{kind, freshness, last_activity, id}`. Additive — omitted entirely (never `null`) when no session matched. In `properties` but never `required`; its shape may still change in a minor while the feature settles. |
 
 `doctor.schema.json` (`checks[]`, `severity`, `exit_code`) and
 `path.schema.json` (`name`, `path`, `branch`) are entirely **stable**.

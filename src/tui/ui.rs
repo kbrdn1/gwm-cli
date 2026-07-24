@@ -172,6 +172,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     View::CleanReport => draw_clean_overlay(f, app),
     // #290: branch-rename inline modal renders over the list.
     View::Edit => draw_edit_worktree(f, app),
+    // #408: generic detail overlay (agent sessions) as a centred modal.
+    View::DetailOverlay => draw_detail_overlay(f, app),
     View::List => {}
   }
 }
@@ -487,19 +489,36 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
   if is_workspace {
     header_cells.push(Cell::from("REPO"));
   }
+  // AGENT column only when at least one session is detected (Codex review
+  // round D): a no-agent setup keeps the exact pre-#408 table instead of an
+  // empty fixed column squeezing NAME/BRANCH/PATH on narrow terminals.
+  let show_agent = app.any_agent_sessions();
   header_cells.push(Cell::from("I/P"));
   header_cells.push(Cell::from("NAME"));
   header_cells.push(Cell::from("BRANCH"));
   header_cells.push(Cell::from("STATUS"));
+  if show_agent {
+    header_cells.push(Cell::from("AGENT"));
+  }
   header_cells.push(Cell::from("PATH"));
   let header = Row::new(header_cells).style(Style::default().fg(theme.muted).add_modifier(Modifier::BOLD));
+
+  // Agent cells resolved up front (issue #408) for the same borrow reason as
+  // `repo_names`: `agents_for` reads `app` immutably, `list_state` is borrowed
+  // mutably at render time. Pure snapshot lookups — no I/O on the render path.
+  let now = std::time::SystemTime::now();
+  let agent_cells: Vec<Option<(&'static str, crate::agent_sessions::Freshness)>> = visible
+    .iter()
+    .map(|w| agent_cell_label(app.agents_for(w), now))
+    .collect();
 
   let rows: Vec<Row> = visible
     .iter()
     .enumerate()
     .map(|(vi, w)| {
       let repo = is_workspace.then(|| (repo_names[vi].as_str(), repo_w));
-      build_row(w, repo, name_w, branch_w, status_w, &theme)
+      let agent = show_agent.then_some(agent_cells[vi]);
+      build_row(w, repo, name_w, branch_w, status_w, agent, &theme)
     })
     .collect();
 
@@ -527,8 +546,13 @@ fn draw_list(f: &mut Frame, area: Rect, app: &mut App) {
     Constraint::Min(name_w),
     Constraint::Min(branch_w),
     Constraint::Length(status_w),
-    Constraint::Fill(1),
   ]);
+  if show_agent {
+    // AGENT (issue #408): hard length sized to the longest agent name
+    // ("opencode"), so the solver never starves it into ambiguity.
+    widths.push(Constraint::Length(8));
+  }
+  widths.push(Constraint::Fill(1));
 
   let list_has_focus = !(app.sidebar.open && app.sidebar.focused);
   let border_color = panel_border_color(list_has_focus, &app.theme);
@@ -606,6 +630,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       Constraint::Length(h(placeholder.len())),
       Constraint::Length(h(issue_pr_lines.len())),
       Constraint::Length(0),
+      Constraint::Length(0),
       Constraint::Min(3),
     ];
     let chunks = Layout::default()
@@ -634,7 +659,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     );
     render_section(
       f,
-      chunks[3],
+      chunks[4],
       recent_items_pane_title(active_mode, &app.keymap),
       SectionBody::new(&[]),
       border_color,
@@ -692,12 +717,22 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // line that is rebuilt fresh each frame (issue #73) — it's prefixed onto
   // the cached worktree section at render time instead of being spliced into
   // a cloned vec.
-  let header_line = sidebar_header_line(&w, app);
+  let prefix_lines = vec![sidebar_header_line(&w, app)];
   let issue_pr_lines = github_status_lines(app, issue_pr_inner_width);
+  // Agents pane body (issue #408): per-frame pure snapshot + pins lookup
+  // (no config I/O — `app.agent_pins` is refreshed off-render), its
+  // bordered block collapses to zero height when nothing is pinned.
+  let agent_pins: &[String] = app
+    .agent_pins
+    .get(&crate::agent_sessions::path_display_key(&w.path))
+    .map(|v| v.as_slice())
+    .unwrap_or(&[]);
+  let agent_lines = agent_pane_lines(app.agents_for(&w), agent_pins, std::time::SystemTime::now(), &theme);
 
   // Read the resolved section lengths via a short immutable borrow so the
   // layout solver and scroll clamp can run before the render borrow. The
-  // worktree section gains +1 row for the live header prefix.
+  // worktree section gains the live prefix rows (header + optional agent
+  // summary).
   let (worktree_len, working_tree_len, working_tree_counts, commits_len) = {
     let s = if cache_is_current {
       app.sidebar.cache.as_ref().map(|(_, s)| s).unwrap_or(&placeholder)
@@ -705,7 +740,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       &placeholder
     };
     (
-      s.worktree.len() + 1,
+      s.worktree.len() + prefix_lines.len(),
       s.working_tree.len(),
       s.working_tree_counts,
       s.recent_commits.len() as u16,
@@ -721,9 +756,15 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // bordered void.
   let h = |lines: usize| (lines as u16).saturating_add(2);
   let working_tree_height = if working_tree_len == 0 { 0 } else { h(working_tree_len) };
+  let agents_height = if agent_lines.is_empty() {
+    0
+  } else {
+    h(agent_lines.len())
+  };
   let constraints = [
     Constraint::Length(h(worktree_len)),
     Constraint::Length(h(issue_pr_lines.len())),
+    Constraint::Length(agents_height),
     Constraint::Length(working_tree_height),
     Constraint::Min(3),
   ];
@@ -735,7 +776,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   // Recent Commits is the only scrollable section. Clamp the scroll
   // offset to its visible area so `j` / `k` can't scroll past the end.
   // Done before the render borrow so no mutable `app` access overlaps it.
-  let commits_area = chunks[3];
+  let commits_area = chunks[4];
   let commits_visible = commits_area.height.saturating_sub(2);
   app.sidebar.max_scroll = commits_len.saturating_sub(commits_visible);
   if app.sidebar.scroll > app.sidebar.max_scroll {
@@ -802,7 +843,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     f,
     chunks[0],
     status_pane_title(),
-    SectionBody::with_prefix(&header_line, &sections.worktree),
+    SectionBody::with_prefix(&prefix_lines, &sections.worktree),
     border_color,
     0,
     None,
@@ -816,10 +857,21 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     0,
     None,
   );
-  if !sections.working_tree.is_empty() {
+  if !agent_lines.is_empty() {
     render_section(
       f,
       chunks[2],
+      agents_pane_title(&app.keymap),
+      SectionBody::new(&agent_lines),
+      border_color,
+      0,
+      None,
+    );
+  }
+  if !sections.working_tree.is_empty() {
+    render_section(
+      f,
+      chunks[3],
       working_tree_title,
       SectionBody::new(&sections.working_tree),
       border_color,
@@ -848,7 +900,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
 /// section; it's rebuilt fresh per frame anyway, so passing it separately
 /// costs nothing and keeps the cached `worktree` vec immutable.
 struct SectionBody<'a> {
-  prefix: Option<&'a Line<'a>>,
+  prefix: &'a [Line<'a>],
   lines: &'a [Line<'a>],
 }
 
@@ -856,16 +908,14 @@ impl<'a> SectionBody<'a> {
   /// Section body with no leading live line (Issue / PR, Working Tree,
   /// Recent Commits, and the `(nothing selected)` placeholder).
   fn new(lines: &'a [Line<'a>]) -> Self {
-    Self { prefix: None, lines }
+    Self { prefix: &[], lines }
   }
 
-  /// Section body whose first row is a per-frame live line — the worktree
-  /// identity block, led by the `● <name>` status-dot header.
-  fn with_prefix(prefix: &'a Line<'a>, lines: &'a [Line<'a>]) -> Self {
-    Self {
-      prefix: Some(prefix),
-      lines,
-    }
+  /// Section body whose first rows are per-frame live lines — the worktree
+  /// identity block, led by the `● <name>` status-dot header (and, since
+  /// issue #408, an optional agent summary line).
+  fn with_prefix(prefix: &'a [Line<'a>], lines: &'a [Line<'a>]) -> Self {
+    Self { prefix, lines }
   }
 }
 
@@ -906,7 +956,7 @@ fn render_section(
     spans.extend(l.spans.iter().map(|s| Span::styled(s.content.as_ref(), s.style)));
     Line::from(spans)
   }
-  let padded: Vec<Line<'_>> = prefix.into_iter().chain(lines.iter()).map(pad).collect();
+  let padded: Vec<Line<'_>> = prefix.iter().chain(lines.iter()).map(pad).collect();
   // No `Wrap`: every section now relies on ratatui's view-level hard-clip,
   // matching lazygit's commits panel and ensuring 1 logical row = 1 visual
   // row (so the layout's `Constraint::Length` always matches what we draw).
@@ -918,6 +968,68 @@ fn render_section(
 /// the linked PR / issue state. Rendered fresh every frame (not cached)
 /// so the dot reflects the live fetch result without invalidating the
 /// expensive git preview cache underneath.
+/// Title of the Agents sidebar pane (issue #408, user feedback 2026-07-22):
+/// advertises the overlay key like `Issue / PR [F]` does its fetch key.
+pub fn agents_pane_title(keymap: &Keymap) -> String {
+  format!(" Agents [{}] ", action_chord(keymap, Action::AgentSessions, "a"))
+}
+
+/// Per-frame body of the Agents sidebar pane: one line per **pinned**
+/// session (user feedback 2026-07-22 — the pane is the deliberate view;
+/// the full detected list lives in the `a` overlay), capped at three —
+/// agent kind coloured by freshness, a human-readable recency, and the
+/// session name (full id when unnamed). Empty when nothing is pinned, so
+/// the bordered block collapses like the Working Tree pane does in stashes
+/// mode. Pure — pinned by `tests/tui_app_tests.rs::agent_pane`.
+pub fn agent_pane_lines(
+  agents: Option<&crate::agent_sessions::WorktreeAgents>,
+  pinned: &[String],
+  now: std::time::SystemTime,
+  theme: &Theme,
+) -> Vec<Line<'static>> {
+  const MAX_ROWS: usize = 3;
+  let Some(agents) = agents else {
+    return Vec::new();
+  };
+  let shown: Vec<&crate::agent_sessions::AgentSession> = agents
+    .sessions
+    .iter()
+    .filter(|s| pinned.iter().any(|p| p == &s.id))
+    .collect();
+  let mut lines: Vec<Line<'static>> = shown
+    .iter()
+    .take(MAX_ROWS)
+    .map(|s| {
+      let freshness = crate::agent_sessions::Freshness::classify(s.last_activity, s.ended, now);
+      let (word, color) = match freshness {
+        crate::agent_sessions::Freshness::Active => ("active", theme.clean),
+        crate::agent_sessions::Freshness::Idle => ("idle", theme.muted),
+      };
+      let ago = now
+        .duration_since(s.last_activity)
+        .map(worktree::format_relative_duration)
+        .unwrap_or_else(|_| "now".into());
+      let identity = s.name.as_deref().unwrap_or(&s.id);
+      Line::from(vec![
+        Span::styled(
+          s.kind.display().to_string(),
+          Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" · {word} · {ago} ago · "), Style::default().fg(theme.muted)),
+        Span::styled(identity.to_string(), Style::default().fg(theme.name)),
+      ])
+    })
+    .collect();
+  let extra = shown.len().saturating_sub(MAX_ROWS);
+  if extra > 0 {
+    lines.push(Line::from(Span::styled(
+      format!("+{extra} more"),
+      Style::default().fg(theme.muted),
+    )));
+  }
+  lines
+}
+
 fn sidebar_header_line(w: &WorktreeInfo, app: &App) -> Line<'static> {
   let (dot, dot_color) = sidebar_status_dot(app);
   Line::from(vec![
@@ -1688,6 +1800,19 @@ pub fn help_label_style(theme: &Theme) -> Style {
   Style::default().fg(theme.name)
 }
 
+/// Label + freshness for a worktree's AGENT cell (issue #408). `None` — for
+/// a missing snapshot (startup) or a session-less worktree — renders an empty
+/// cell, indistinguishable from today (spec US1 scenario 5). Pure so the
+/// contract is pinned ratatui-free by `tests/tui_app_tests.rs`.
+pub fn agent_cell_label(
+  agents: Option<&crate::agent_sessions::WorktreeAgents>,
+  now: std::time::SystemTime,
+) -> Option<(&'static str, crate::agent_sessions::Freshness)> {
+  let top = agents?.top()?;
+  let freshness = crate::agent_sessions::Freshness::classify(top.last_activity, top.ended, now);
+  Some((top.kind.display(), freshness))
+}
+
 /// Build one worktree table row. In workspace mode (issue #36) `repo` is
 /// `Some((name, width))` and a leading `REPO` cell is inserted after the age
 /// column, painted in the `accent` role; in single-repo mode it is `None` and
@@ -1698,6 +1823,9 @@ fn build_row(
   name_w: u16,
   branch_w: u16,
   status_w: u16,
+  // Outer `Option` = is the AGENT column shown at all (round D:
+  // conditional on any detected session); inner = this row's top agent.
+  agent: Option<Option<(&'static str, crate::agent_sessions::Freshness)>>,
   theme: &Theme,
 ) -> Row<'static> {
   let marker = table_marker(w, theme);
@@ -1741,6 +1869,20 @@ fn build_row(
   cells.push(name_cell);
   cells.push(branch_cell);
   cells.push(status_cell);
+  // AGENT (issue #408): the most recently active session's agent, coloured by
+  // freshness — `clean` (active) vs `muted` (idle). Sessionless row in a
+  // shown column → empty cell; column hidden → no cell at all (round D).
+  if let Some(agent) = agent {
+    cells.push(match agent {
+      Some((label, crate::agent_sessions::Freshness::Active)) => {
+        Cell::from(label).style(Style::default().fg(theme.clean).add_modifier(Modifier::BOLD))
+      }
+      Some((label, crate::agent_sessions::Freshness::Idle)) => {
+        Cell::from(label).style(Style::default().fg(theme.muted))
+      }
+      None => Cell::from(""),
+    });
+  }
   cells.push(path_cell);
   Row::new(cells)
 }
@@ -1866,6 +2008,9 @@ pub enum HintContext {
   Clean,
   /// Branch-rename modal (`View::Edit`, #290).
   Rename,
+  /// Generic detail overlay (issue #408): scroll / close. Agent sessions
+  /// today, the rich PR/Issue view tomorrow.
+  Detail,
 }
 
 impl HintContext {
@@ -1888,6 +2033,7 @@ impl HintContext {
       HintContext::ExecPicker => "exec",
       HintContext::Clean => "clean",
       HintContext::Rename => "rename",
+      HintContext::Detail => "agents",
     }
   }
 
@@ -1999,6 +2145,16 @@ impl HintContext {
       // modal keymap; the scroll/pan pairs stay literal (no single resolved
       // key captures `j/k` / `h/l`, matching the Create/Confirm convention).
       HintContext::Report => &[Hint::Modal(ModalAction::ReportClose, "close")],
+      // #408: detail overlay — selection pair stays literal like Help's;
+      // attach / detach / close resolve through the modal keymap so a
+      // rebind shows through.
+      HintContext::Detail => &[
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::DetailAttach, "attach"),
+        Hint::Modal(ModalAction::DetailDetach, "detach"),
+        Hint::Modal(ModalAction::DetailInput, "by id"),
+        Hint::Modal(ModalAction::DetailClose, "close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2069,6 +2225,7 @@ impl HintContext {
       HintContext::CommandPalette => KeyContext::CommandPalette,
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
+      HintContext::Detail => KeyContext::Detail,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -2226,7 +2383,7 @@ pub fn command_logs_footer_hints(modal: &ModalKeymap) -> Vec<(String, String)> {
   hints
 }
 
-fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
+pub fn modal_hint_for_context(ctx: HintContext, keymap: &Keymap, modal: &ModalKeymap, theme: &Theme) -> Line<'static> {
   let resolved = ctx.resolve(keymap, modal);
   let hints: Vec<(&str, &str)> = resolved.iter().map(|(k, l)| (k.as_str(), l.as_str())).collect();
   modal_hint_line(&hints, theme)
@@ -2626,6 +2783,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(
       Action::CleanOverlay,
       "preview and reclaim build artifacts (with confirm)",
+    ));
+    rows.push(entry(
+      Action::AgentSessions,
+      "show the agent sessions attached to this worktree",
     ));
   }
   rows.push(entry(
@@ -4308,6 +4469,169 @@ fn draw_exec_picker(f: &mut Frame, app: &App) {
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
   f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+}
+
+/// Render the generic detail overlay (issue #408). A centred modal listing
+/// `(label, value)` rows with theme-mapped roles — agent sessions today, the
+/// rich PR/Issue view tomorrow. Content is prebuilt state
+/// ([`crate::tui::state::detail_overlay::DetailOverlay`]); this function
+/// only paints it, so the render path stays pure.
+fn draw_detail_overlay(f: &mut Frame, app: &App) {
+  use crate::tui::state::detail_overlay::{DetailMode, DetailRole};
+  let accent = app.theme.accent;
+  let term = f.area();
+  let width = overlay_modal_width(term.width);
+  let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
+  let ov = &app.detail_overlay;
+
+  // Attach-by-id prompt (user feedback 2026-07-22): palette-style query
+  // over every detected session; Enter pins the highlighted candidate.
+  if ov.mode == DetailMode::Input {
+    let candidates = app.agent_input_candidates();
+    // FIXED listing height (issue #445): the window is sized by the
+    // terminal alone, never by the filtered candidate count — typing must
+    // not resize the frame. Short lists blank-pad the remaining rows.
+    // Capped at 10 rows: a full-terminal prompt reads as a takeover, not
+    // a palette (user feedback 2026-07-23); the scrollbar covers the rest.
+    let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
+    let (start, end) = picker_window(candidates.len(), ov.input_selected, list_h);
+    let now = std::time::SystemTime::now();
+
+    let mut lines = overlay_title_lines("Attach a session", accent);
+    lines.push(Line::from(vec![
+      Span::styled("id: ", Style::default().fg(app.theme.muted)),
+      Span::styled(
+        ov.input.clone(),
+        Style::default().fg(app.theme.name).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled("▏", Style::default().fg(accent)),
+    ]));
+    lines.push(Line::from(String::new()));
+    if candidates.is_empty() {
+      lines.push(Line::from(Span::styled(
+        "no matching session",
+        Style::default().fg(app.theme.muted),
+      )));
+    }
+    for (i, sess) in candidates.iter().enumerate().take(end).skip(start) {
+      let freshness = crate::agent_sessions::Freshness::classify(sess.last_activity, sess.ended, now);
+      let color = match freshness {
+        crate::agent_sessions::Freshness::Active => app.theme.clean,
+        crate::agent_sessions::Freshness::Idle => app.theme.muted,
+      };
+      let identity = sess.name.as_deref().unwrap_or(&sess.id);
+      let text = format!("{:<9} {}", sess.kind.display(), identity);
+      let pad = inner.saturating_sub(text.chars().count());
+      let mut style = Style::default().fg(color);
+      let mut pad_style = Style::default();
+      if i == ov.input_selected {
+        style = style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+        pad_style = pad_style.bg(app.theme.selection_bg);
+      }
+      lines.push(Line::from(vec![
+        Span::styled(text, style),
+        Span::styled(" ".repeat(pad), pad_style),
+      ]));
+    }
+    // Blank-pad up to the fixed window so the frame height is constant
+    // whatever the filter matched (the empty-state line counts as one row).
+    let shown = if candidates.is_empty() { 1 } else { end - start };
+    for _ in shown..list_h {
+      lines.push(Line::from(String::new()));
+    }
+    lines.push(Line::from(String::new()));
+    lines.push(modal_hint_line(
+      &[
+        ("type", "filter"),
+        ("↑/↓", "pick"),
+        ("Enter", "attach"),
+        ("Esc", "back"),
+      ],
+      &app.theme,
+    ));
+    let height = lines.len() as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_abs(width, height, term);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    // Scrollbar over the listing sub-area when the candidates overflow the
+    // fixed window — same affordance as the detail mode below (issue #445).
+    // Intersected with the modal's real area: on a tiny terminal
+    // `centered_abs` clamps the frame, and an un-clipped rect would render
+    // past the ratatui buffer and panic (Codex review #445).
+    let list_rect = Rect {
+      x: area.x + 1,
+      y: area.y + 2 /* border + padding */ + 2 /* title */ + 2, /* id line + blank */
+      width: area.width.saturating_sub(2),
+      height: list_h as u16,
+    }
+    .intersection(area);
+    if list_rect.height > 0 {
+      let _ = scrollable_body_area(f, list_rect, start as u16, candidates.len(), &app.theme);
+    }
+    return;
+  }
+  let total = ov.rows.len();
+  // The modal height is derived from the VISIBLE row count, which is
+  // constant while navigating — scrolling must never resize the frame
+  // (user feedback 2026-07-22). The window follows the selection.
+  let max_visible = (term.height as usize).saturating_sub(10).max(3);
+  let visible = total.min(max_visible);
+  let (start, end) = picker_window(total, ov.selected, visible);
+
+  let label_w = ov.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0);
+  let mut lines = overlay_title_lines(&ov.title, accent);
+  for (i, row) in ov.rows.iter().enumerate().take(end).skip(start) {
+    let (label_color, value_color, value_bold) = match row.role {
+      DetailRole::Active => (app.theme.clean, app.theme.clean, true),
+      DetailRole::Muted => (app.theme.muted, app.theme.muted, false),
+      DetailRole::Normal => (app.theme.name, app.theme.name, false),
+    };
+    // Selection paints a full-width bar (picker convention): pad the row
+    // out to the modal's inner width so the highlight reads as one block.
+    let text_cols = label_w + 2 + row.value.chars().count();
+    let pad = inner.saturating_sub(text_cols);
+    let mut label_style = Style::default().fg(label_color);
+    let mut value_style = Style::default().fg(value_color);
+    if value_bold {
+      value_style = value_style.add_modifier(Modifier::BOLD);
+    }
+    let mut pad_style = Style::default();
+    if i == ov.selected {
+      label_style = label_style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+      value_style = value_style.bg(app.theme.selection_bg);
+      pad_style = pad_style.bg(app.theme.selection_bg);
+    }
+    lines.push(Line::from(vec![
+      Span::styled(format!("{:label_w$}  ", row.label), label_style),
+      Span::styled(row.value.clone(), value_style),
+      Span::styled(" ".repeat(pad), pad_style),
+    ]));
+  }
+  push_modal_hint(
+    &mut lines,
+    HintContext::Detail,
+    &app.keymap,
+    &app.modal_keymap,
+    &app.theme,
+  );
+  let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
+  let area = centered_abs(width, height, term);
+  f.render_widget(Clear, area);
+  f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+  // Scrollbar over the rows sub-area (right padding column) when the list
+  // overflows — the missing affordance from the feedback.
+  // Intersected with the modal's real area for the same tiny-terminal
+  // clamp as the attach prompt above (Codex review #445).
+  let rows_rect = Rect {
+    x: area.x + 1,
+    y: area.y + 2 /* border + padding */ + 2, /* title lines */
+    width: area.width.saturating_sub(2),
+    height: visible as u16,
+  }
+  .intersection(area);
+  if rows_rect.height > 0 {
+    let _ = scrollable_body_area(f, rows_rect, start as u16, total, &app.theme);
+  }
 }
 
 /// Render the clean reclaim overlay (issue #325). A centred modal showing

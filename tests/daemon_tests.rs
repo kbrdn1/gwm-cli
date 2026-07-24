@@ -34,6 +34,7 @@ fn sample(name: &str) -> JsonWorktree {
     age_seconds: Some(10),
     issue: None,
     pr: None,
+    agents: None,
   }
 }
 
@@ -180,6 +181,55 @@ fn worktrees_differ_detects_real_changes() {
 }
 
 #[test]
+fn worktrees_differ_notices_agent_changes_including_fresh_activity() {
+  // Codex review rounds C+D: subscribers must hear a session appear,
+  // vanish, flip active↔idle — AND receive fresh `last_activity`. Unlike
+  // `age_seconds` (recomputed from the clock every poll), `last_activity`
+  // only moves on real agent writes, and push frequency is bounded by the
+  // 30 s detection cache, so comparing it whole is spam-safe.
+  use gwm::json_api::{JsonAgentSession, JsonWorktreeAgents};
+  use std::slice::from_ref;
+  let session = JsonAgentSession {
+    kind: "claude".into(),
+    freshness: "active".into(),
+    last_activity: 100,
+    id: "s1".into(),
+    name: None,
+  };
+  let base = sample("x");
+  let mut with = base.clone();
+  with.agents = Some(JsonWorktreeAgents {
+    top: session.clone(),
+    sessions: vec![session],
+  });
+
+  // Appearing / vanishing.
+  assert!(worktrees_differ(from_ref(&base), from_ref(&with)));
+  assert!(worktrees_differ(from_ref(&with), from_ref(&base)));
+
+  // active → idle flip.
+  let mut idle = with.clone();
+  if let Some(a) = idle.agents.as_mut() {
+    a.sessions[0].freshness = "idle".into();
+  }
+  assert!(worktrees_differ(from_ref(&with), from_ref(&idle)));
+
+  // Fresh real activity on the same session pushes too.
+  let mut fresh = with.clone();
+  if let Some(a) = fresh.agents.as_mut() {
+    a.top.last_activity += 5;
+    a.sessions[0].last_activity += 5;
+  }
+  assert!(
+    worktrees_differ(from_ref(&with), from_ref(&fresh)),
+    "fresh activity is a real change"
+  );
+
+  // Identical snapshots stay quiet.
+  assert!(!worktrees_differ(from_ref(&with), from_ref(&with)));
+}
+
+#[test]
 fn subscription_push_skips_phantom_empty_on_transient_error() {
   // Issue #341: a transient `run_list` error must NOT push an empty
   // `worktrees.changed`. The pre-fix `unwrap_or_default()` turned the Err
@@ -280,4 +330,50 @@ fn client_request_lines_are_valid_rpc_for_their_methods() {
   assert_eq!(list["method"], serde_json::json!("list"));
   let sub: Value = serde_json::from_str(SUBSCRIBE_REQUEST).unwrap();
   assert_eq!(sub["method"], serde_json::json!("subscribe"));
+}
+
+// --- pipe-name user fragment (issue #439, Codex review) ---------------------
+
+#[test]
+fn pipe_user_fragments_stay_distinct_for_punctuation_variants() {
+  // `alice.smith` and `alice-smith` are two different accounts; a lossy
+  // fold-to-dash would give both the same global pipe name, and the DACL
+  // would then lock the second user's daemon out of its own default name.
+  let a = gwm::daemon::pipe_user_fragment("alice.smith");
+  let b = gwm::daemon::pipe_user_fragment("alice-smith");
+  assert_ne!(a, b, "punctuation variants must not collide: {a} vs {b}");
+}
+
+#[test]
+fn pipe_user_fragments_keep_plain_names_readable() {
+  assert_eq!(gwm::daemon::pipe_user_fragment("kylian"), "kylian");
+  assert_eq!(gwm::daemon::pipe_user_fragment("User123"), "User123");
+}
+
+#[test]
+fn pipe_user_fragments_are_valid_pipe_name_material() {
+  // Whatever the input (separators, unicode, empty), the fragment must be
+  // ASCII-alphanumeric plus '_' only — always a legal pipe-name chunk.
+  for raw in ["DOMAIN\\alice", "a b", "é", "", "x:y/z"] {
+    let frag = gwm::daemon::pipe_user_fragment(raw);
+    assert!(
+      frag.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+      "fragment for {raw:?} must be pipe-safe: {frag:?}"
+    );
+  }
+}
+
+#[test]
+fn pipe_user_fragments_are_injective_on_distinct_inputs() {
+  let inputs = ["DOMAIN\\alice", "DOMAIN_alice", "domain\\alice", "a.b", "a_b", "a-b"];
+  let frags: Vec<String> = inputs.iter().map(|i| gwm::daemon::pipe_user_fragment(i)).collect();
+  for i in 0..frags.len() {
+    for j in (i + 1)..frags.len() {
+      assert_ne!(
+        frags[i], frags[j],
+        "{} and {} must map to distinct fragments",
+        inputs[i], inputs[j]
+      );
+    }
+  }
 }

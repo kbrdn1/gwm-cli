@@ -6,7 +6,8 @@
 //! which is deterministic across filesystems (CLAUDE.md env-independence).
 
 use gwm::clean::{
-  default_patterns, delete_reclaim, format_report, human_size, resolve_clean_dirs, scan_worktree, WorktreeReclaim,
+  default_patterns, delete_reclaim, format_report, human_size, remove_dir_all_tolerant, resolve_clean_dirs,
+  scan_worktree, WorktreeReclaim,
 };
 use gwm::config::{CleanConfig, CleanProfile};
 use std::collections::BTreeMap;
@@ -153,6 +154,94 @@ fn delete_reclaim_removes_artifact_dirs_only() {
   assert_eq!(freed, 2048);
   assert!(!wt.join("target").exists(), "target/ should be deleted");
   assert!(wt.join("src").exists(), "src/ must be preserved");
+}
+
+// --- ENOTEMPTY race tolerance (issue #440) ----------------------------------
+
+#[test]
+fn delete_reclaim_tolerates_an_artifact_already_gone() {
+  // Another process (or a parallel `gwm clean`) reclaimed target/ between the
+  // scan and the delete — a NotFound is a success, not a wholesale failure.
+  let dir = TempDir::new().unwrap();
+  let wt = dir.path();
+  make_artifact(wt, "target", 2048);
+  let r = scan_worktree("feat-1", wt, &default_patterns());
+  fs::remove_dir_all(wt.join("target")).unwrap();
+
+  let freed = delete_reclaim(&r).expect("an already-missing artifact must not fail the command");
+  assert_eq!(freed, 2048, "freed still reports the scanned size");
+}
+
+#[test]
+fn retry_recovers_when_a_concurrent_writer_races_the_removal() {
+  // Simulates rust-analyzer recreating a file inside target/ mid-removal:
+  // the first passes hit ENOTEMPTY, the next pass deletes what was rewritten.
+  let dir = TempDir::new().unwrap();
+  let target = dir.path().join("target");
+  make_artifact(dir.path(), "target", 64);
+  let mut calls = 0u32;
+
+  let res = remove_dir_all_tolerant(&target, |p| {
+    calls += 1;
+    if calls < 3 {
+      Err(std::io::Error::new(std::io::ErrorKind::DirectoryNotEmpty, "ENOTEMPTY"))
+    } else {
+      fs::remove_dir_all(p)
+    }
+  });
+
+  assert!(res.is_ok(), "a transient ENOTEMPTY must be retried: {res:?}");
+  assert_eq!(calls, 3, "two failed passes then the successful one");
+  assert!(!target.exists());
+}
+
+#[test]
+fn retry_gives_up_after_bounded_attempts() {
+  // A writer that never stops must not spin the command forever.
+  let dir = TempDir::new().unwrap();
+  let target = dir.path().join("target");
+  let mut calls = 0u32;
+
+  let res = remove_dir_all_tolerant(&target, |_| {
+    calls += 1;
+    Err(std::io::Error::new(std::io::ErrorKind::DirectoryNotEmpty, "ENOTEMPTY"))
+  });
+
+  let err = res.expect_err("a persistent ENOTEMPTY must surface after the retries");
+  assert_eq!(err.kind(), std::io::ErrorKind::DirectoryNotEmpty);
+  assert_eq!(calls, 3, "the retry budget is bounded");
+}
+
+#[test]
+fn retry_does_not_mask_other_errors() {
+  // Only the ENOTEMPTY race is transient; anything else propagates first hit.
+  let dir = TempDir::new().unwrap();
+  let target = dir.path().join("target");
+  let mut calls = 0u32;
+
+  let res = remove_dir_all_tolerant(&target, |_| {
+    calls += 1;
+    Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "EACCES"))
+  });
+
+  let err = res.expect_err("a non-ENOTEMPTY error must propagate");
+  assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
+  assert_eq!(calls, 1, "no retry on non-transient errors");
+}
+
+#[test]
+fn an_already_missing_dir_counts_as_reclaimed_without_retry() {
+  let dir = TempDir::new().unwrap();
+  let target = dir.path().join("target");
+  let mut calls = 0u32;
+
+  let res = remove_dir_all_tolerant(&target, |_| {
+    calls += 1;
+    Err(std::io::Error::new(std::io::ErrorKind::NotFound, "ENOENT"))
+  });
+
+  assert!(res.is_ok(), "NotFound means someone else reclaimed it: {res:?}");
+  assert_eq!(calls, 1);
 }
 
 #[test]

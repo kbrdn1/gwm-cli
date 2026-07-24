@@ -4,7 +4,7 @@
 # binary and the library crate stay `gwm` (see [[bin]] / [lib] below),
 # so `cargo install gwm-cli` still yields the `gwm` command.
 name = "gwm-cli"
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 # MSRV is the floor required by every use in the crate, not just the
 # newest one introduced here. `std::sync::LazyLock` (this PR, src/naming.rs)
@@ -166,12 +166,21 @@ tui-term = "0.3"
 # we hash bytes, not parsed TOML.
 sha2 = "0.11"
 serde_yaml_ng = "0.10.0"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 # Unix-only: needed for `O_NOFOLLOW` in bootstrap's TOCTOU-safe copy
 # primitives (issue #93). Already pulled in transitively by git2 /
 # dirs / cc, declared here for explicit use in `src/bootstrap.rs`.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target."cfg(windows)".dependencies]
+interprocess = "2.4.2"
+widestring = "1.2.1"
+windows-sys = { version = "0.61.2", features = ["Win32_System_Pipes", "Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Threading"] }
+
+[target."cfg(windows)".dev-dependencies]
+interprocess = "2.4.2"
 
 [dev-dependencies]
 assert_cmd = "2"

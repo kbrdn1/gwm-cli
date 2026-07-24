@@ -117,6 +117,12 @@ pub enum TaskKind {
   /// per row; the render key-check discards a result for a since-moved
   /// selection and the next tick requests the settled one.
   Sidebar,
+  /// Off-thread agent-session detection (issue #408): the four artefact
+  /// scans under the user's home (`agent_sessions::detect_all`) touch the
+  /// filesystem and must never run inside `terminal.draw()`. A single global
+  /// slot — a tick that finds a run in flight coalesces; the render reads
+  /// the last completed snapshot only.
+  AgentSessions,
 }
 
 impl TaskKind {
@@ -136,6 +142,7 @@ impl TaskKind {
       TaskKind::EditWorktree => "renaming worktree…",
       TaskKind::RefreshWorkspace => "refreshing worktrees…",
       TaskKind::Sidebar => "loading preview…",
+      TaskKind::AgentSessions => "detecting agent sessions…",
     }
   }
 
@@ -238,6 +245,23 @@ pub enum TaskMsg {
   /// `SidebarState::cache`; a result whose selection has since moved is dropped
   /// by [`TaskRunner::complete`] (generation) and ignored by the render (key).
   Sidebar(u64, PathBuf, SidebarMode, SidebarSections),
+  /// An agent-session detection result (issue #408): the worker's generation
+  /// and the per-worktree-path summary. The drain replaces the app snapshot
+  /// atomically; a superseded late result is dropped by
+  /// [`TaskRunner::complete`].
+  AgentSessions(
+    u64,
+    std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+    // The raw session pool, `Some` only when the worker ran the full
+    // foreign-dir sweep (the attach-prompt path); the periodic
+    // summary-only detection sends `None` and the previous pool survives
+    // (round Q — the sweep is linear in the whole artefact history and
+    // must not run every 30 s).
+    Option<Vec<crate::agent_sessions::AgentSession>>,
+    // Pins per worktree path, read in the worker from each row's owning
+    // repo — branch-config I/O stays off the event loop (round P).
+    std::collections::BTreeMap<String, Vec<String>>,
+  ),
 }
 
 /// Coalescing + late-drop spine for background tasks (issue #231).

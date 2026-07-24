@@ -48,7 +48,14 @@ jobs:
             target: x86_64-pc-windows-msvc
             archive: zip
     steps:
+      # Reads the tree to build and package it, never pushes — so the token
+      # `actions/checkout` would otherwise leave in `.git/config` is a
+      # credential handed to every later step for nothing. Same reasoning for
+      # every checkout below that does not pass an explicit `token:`;
+      # `tests/release_workflow_tests.rs` pins both sides of that split.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -147,7 +154,12 @@ jobs:
       !contains(github.event.inputs.tag || github.ref_name, '-beta.')
     runs-on: ubuntu-latest
     steps:
+      # Only reads `changelogs/` for the release notes. The publish step below
+      # authenticates `gh` through an explicit `GH_TOKEN`, not through the git
+      # credential this checkout would persist.
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: download all artifacts
         uses: actions/download-artifact@v8
@@ -249,6 +261,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: gwm-cli
+          persist-credentials: false
 
       - name: checkout kbrdn1/homebrew-tap
         uses: actions/checkout@v7
@@ -337,6 +350,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           path: gwm-cli
+          persist-credentials: false
 
       - name: checkout kbrdn1/scoop-gwm
         uses: actions/checkout@v7
@@ -389,97 +403,13 @@ jobs:
           git commit -m "gwm ${TAG#v} (${TAG})"
           git push
 
-  aur-publish:
-    name: publish gwm-cli-bin to the AUR
-    needs: [release]
-    runs-on: ubuntu-latest
-    # Stable releases only — rc/alpha/beta must never reach `yay -S gwm-cli-bin`,
-    # otherwise Arch users would silently move to a pre-release. Same reasoning
-    # as homebrew-tap-update / scoop-bucket-update above (the whole workflow is
-    # implicitly tag-scoped via the upstream jobs).
-    if: |
-      !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
-      !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
-      !contains(github.event.inputs.tag || github.ref_name, '-beta.')
-    # While AUR_SSH_PRIVATE_KEY is being provisioned the first time, a missing
-    # secret would fail this job. Keep it advisory so the GitHub release still
-    # lands and the AUR push can be re-driven manually via workflow_dispatch
-    # once the secret exists. Flip to false after the first successful sync
-    # (see CONTRIBUTING.md > Releases > AUR).
-    continue-on-error: true
-    steps:
-      - name: verify AUR_SSH_PRIVATE_KEY is configured
-        env:
-          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-        run: |
-          if [ -z "${AUR_SSH_PRIVATE_KEY:-}" ]; then
-            echo "::error::AUR_SSH_PRIVATE_KEY secret is not configured."
-            echo "Bootstrap: see CONTRIBUTING.md > Releases > AUR setup."
-            exit 1
-          fi
-
-      - name: checkout gwm-cli (template + render script)
-        uses: actions/checkout@v7
-
-      - name: fetch sha256 sidecars from the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          mkdir -p sha
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
-            gh release download "$TAG" \
-              --repo kbrdn1/gwm-cli \
-              --pattern "gwm-${TAG}-${target}.tar.gz.sha256" \
-              --dir sha
-          done
-          ls -la sha
-
-      - name: render aur/PKGBUILD
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          VERSION="${TAG#v}"
-          SHA_X86_64=$(awk '{print $1}' "sha/gwm-${TAG}-x86_64-unknown-linux-gnu.tar.gz.sha256")
-          SHA_ARM64=$(awk '{print $1}' "sha/gwm-${TAG}-aarch64-unknown-linux-gnu.tar.gz.sha256")
-          mkdir -p aur
-          sh .github/scripts/render-aur-pkgbuild.sh \
-            "$VERSION" "$SHA_X86_64" "$SHA_ARM64" \
-            packaging/aur/PKGBUILD.template \
-            > aur/PKGBUILD
-          echo "=== rendered aur/PKGBUILD ==="
-          cat aur/PKGBUILD
-
-      # Third-party action — pinned to a commit SHA (v4.2.0) because it is
-      # trusted with AUR_SSH_PRIVATE_KEY. It clones the AUR repo, drops in our
-      # rendered PKGBUILD, regenerates .SRCINFO via makepkg, and pushes.
-      # `test: true` runs `makepkg` in an Arch container against the real
-      # release binary — it builds the package (verifying the source download
-      # and sha256sums on the actual statically-linked artifact), so a broken
-      # PKGBUILD or a bad checksum fails the job here rather than shipping to
-      # the AUR. It does NOT run namcap; the PKGBUILD was namcap-linted locally
-      # (see the PR / packaging/aur/PKGBUILD.template).
-      - name: publish to the AUR
-        uses: KSXGitHub/github-actions-deploy-aur@084b0d9b15415bf9cdb65d44dad1efe37a354050 # v4.2.0
-        with:
-          pkgname: gwm-cli-bin
-          pkgbuild: aur/PKGBUILD
-          commit_username: kbrdn1
-          commit_email: onepiecekylian@gmail.com
-          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
-          commit_message: "gwm-cli-bin ${{ github.ref_name }}"
-          ssh_keyscan_types: rsa,ecdsa,ed25519
-          test: true
-
   winget-publish:
     name: publish kbrdn1.gwm to winget
     needs: [release]
     runs-on: ubuntu-latest
     # Stable releases only — rc/alpha/beta must never reach `winget install
-    # kbrdn1.gwm`. Same reasoning as the homebrew/scoop/aur jobs above (the
-    # whole workflow is implicitly tag-scoped via the upstream jobs).
+    # kbrdn1.gwm`. Same reasoning as the homebrew/scoop jobs above (the whole
+    # workflow is implicitly tag-scoped via the upstream jobs).
     if: |
       !contains(github.event.inputs.tag || github.ref_name, '-rc.') &&
       !contains(github.event.inputs.tag || github.ref_name, '-alpha.') &&
@@ -512,8 +442,8 @@ jobs:
       # `cargo-bins/cargo-binstall@main` (a mutable ref) and installs the latest
       # komac at runtime, so a compromise of either would run with WINGET_TOKEN
       # in scope — a SHA pin on the action alone would not protect the secret.
-      # Pinning the one tool that touches the token is the same posture as the
-      # SHA-pinned deploy-aur job above.
+      # Pinning the one tool that touches the token is the rule for every
+      # third-party binary this workflow trusts with a credential.
       - name: install komac (pinned + digest-anchored)
         env:
           GH_TOKEN: ${{ github.token }}

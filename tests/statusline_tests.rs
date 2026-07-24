@@ -28,6 +28,7 @@ fn wt(path: &str, name: &str, branch: Option<&str>) -> JsonWorktree {
     },
     age_seconds: None,
     issue: None,
+    agents: None,
     pr: None,
   }
 }
@@ -222,4 +223,55 @@ fn render_for_cwd_resolves_then_renders() {
   assert_eq!(render_for_cwd(&wts, Path::new("/wt/feat")), "feat/#7-f · 2 wt");
   // Outside any worktree: count-only, still useful in a prompt.
   assert_eq!(render_for_cwd(&wts, Path::new("/tmp")), "2 wt");
+}
+
+// -- Agent indicator (issue #408) ------------------------------------------
+
+mod agent_indicator {
+  use super::*;
+  use gwm::json_api::{JsonAgentSession, JsonWorktreeAgents};
+
+  fn agents(kind: &str, freshness: &str) -> JsonWorktreeAgents {
+    let s = JsonAgentSession {
+      kind: kind.into(),
+      freshness: freshness.into(),
+      last_activity: 1_784_480_000,
+      id: "s1".into(),
+      name: None,
+    };
+    JsonWorktreeAgents {
+      top: s.clone(),
+      sessions: vec![s],
+    }
+  }
+
+  #[test]
+  fn active_session_on_the_active_worktree_shows_a_compact_hint() {
+    let mut w = wt("/wt/feat", "feat", Some("feat/#408-x"));
+    w.agents = Some(agents("claude", "active"));
+    assert_eq!(render(&[w], Some(0)), "feat/#408-x · 1 wt · claude");
+  }
+
+  #[test]
+  fn idle_session_is_not_advertised() {
+    // The statusline is the most compact surface — only a live pair is
+    // worth a segment; idle leftovers stay in the TUI overlay.
+    let mut w = wt("/wt/feat", "feat", Some("feat/#408-x"));
+    w.agents = Some(agents("codex", "idle"));
+    assert_eq!(render(&[w], Some(0)), "feat/#408-x · 1 wt");
+  }
+
+  #[test]
+  fn no_agents_field_renders_byte_identical_to_before() {
+    let w = wt("/wt/feat", "feat", Some("feat/#408-x"));
+    assert_eq!(render(&[w], Some(0)), "feat/#408-x · 1 wt");
+  }
+
+  #[test]
+  fn inactive_worktree_sessions_do_not_leak_into_the_line() {
+    let mut other = wt("/wt/other", "other", Some("feat/#1-y"));
+    other.agents = Some(agents("vibe", "active"));
+    let active = wt("/wt/feat", "feat", Some("feat/#408-x"));
+    assert_eq!(render(&[active, other], Some(0)), "feat/#408-x · 2 wt");
+  }
 }

@@ -49,6 +49,122 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
   );
 }
 
+/// Every `actions/checkout` in `release.yml`, paired with its `with:` block.
+///
+/// Parsing the YAML rather than grepping the text keeps the invariant below
+/// honest: a step that spells its inputs differently, or a job that grows a
+/// second checkout, is still seen.
+fn release_workflow_checkout_steps() -> Vec<(String, serde_yaml_ng::Value)> {
+  let workflow: serde_yaml_ng::Value =
+    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/release.yml").unwrap()).unwrap();
+
+  let mut steps = Vec::new();
+  for (job_name, job) in workflow["jobs"].as_mapping().expect("release.yml must define jobs") {
+    let job_name = job_name.as_str().unwrap_or_default().to_string();
+    let Some(job_steps) = job["steps"].as_sequence() else {
+      continue;
+    };
+    for step in job_steps {
+      let uses = step["uses"].as_str().unwrap_or_default();
+      if uses.starts_with("actions/checkout@") {
+        steps.push((job_name.clone(), step["with"].clone()));
+      }
+    }
+  }
+  steps
+}
+
+/// A checkout that is only there to read the tree (sources, packaging
+/// templates, render scripts, `changelogs/`) has no use for the auto-injected
+/// token `actions/checkout` writes into `.git/config`. Leaving it there hands a
+/// credential to every later step in the job, including the ones that render
+/// templates from release data.
+///
+/// The discriminator is the explicit `token:` input: the two checkouts that
+/// genuinely push (the Homebrew tap and the Scoop bucket) pass a scoped PAT and
+/// rely on it being persisted. Everything else must opt out.
+#[test]
+fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
+  let mut audited = 0;
+
+  for (job, with) in release_workflow_checkout_steps() {
+    if !with["token"].is_null() {
+      continue;
+    }
+    audited += 1;
+    assert_eq!(
+      with["persist-credentials"].as_bool(),
+      Some(false),
+      "the checkout in job `{job}` does not push, so it must set `persist-credentials: false`"
+    );
+  }
+
+  assert!(
+    audited >= 4,
+    "expected at least 4 credential-free checkouts in release.yml, found {audited} — the parser is \
+     probably no longer seeing the steps"
+  );
+}
+
+/// The mirror of the invariant above: the two checkouts that push must keep the
+/// credential they were handed. A blanket `persist-credentials: false` sweep
+/// across the file would break `git push` in both publish jobs, and it would
+/// break it at tag time, on the one run nobody gets to retry cheaply.
+#[test]
+fn release_workflow_publishing_checkouts_keep_their_token() {
+  let pushing: Vec<_> = release_workflow_checkout_steps()
+    .into_iter()
+    .filter(|(_, with)| !with["token"].is_null())
+    .collect();
+
+  assert_eq!(
+    pushing.len(),
+    2,
+    "expected exactly the tap and bucket checkouts to carry a token, found {}",
+    pushing.len()
+  );
+
+  for (job, with) in pushing {
+    assert_ne!(
+      with["persist-credentials"].as_bool(),
+      Some(false),
+      "job `{job}` pushes with its token, so it must not disable credential persistence"
+    );
+  }
+}
+
+/// The AUR publish automation was removed in #430: `gwm-cli-bin` is maintained
+/// on the AUR by a third party, so the job never had push rights on it. Being
+/// advisory, it failed silently on every stable tag while the release run
+/// reported success, which is the worst of both worlds: the docs read as
+/// automated and nobody sees the failure.
+///
+/// `AUR_SSH_PRIVATE_KEY` is pinned alongside the job because the secret was
+/// malformed to begin with (`invalid format` at the v1.2.0 tag). Resurrecting
+/// a reference to it by copy-paste would fail the same way, quietly.
+///
+/// If co-maintenance of the package is ever granted, deleting this test is the
+/// correct first step of the change that brings the job back, not a workaround
+/// for it. The template, render script and their tests were kept intact for
+/// exactly that.
+#[test]
+fn release_workflow_carries_no_aur_publish_automation() {
+  let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
+
+  for needle in [
+    "aur-publish",
+    "AUR_SSH_PRIVATE_KEY",
+    "github-actions-deploy-aur",
+    "gwm-cli-bin",
+  ] {
+    assert!(
+      !workflow.contains(needle),
+      "release.yml must not reference `{needle}`: the AUR package is maintained by a third party \
+       (#430) and is refreshed by hand, see CONTRIBUTING.md > Releases > AUR"
+    );
+  }
+}
+
 #[test]
 fn prerelease_workflow_does_not_match_stable_tags() {
   let workflow = fs::read_to_string(".github/workflows/pre-release.yml").unwrap();

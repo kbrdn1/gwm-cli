@@ -25,6 +25,7 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 
 - **Bootstrap that actually runs your project.** File copies with deny-list regexes (born from a real "AWS RDS credentials in a copied `.env`" incident), six lifecycle hook phases, stack presets for Laravel / Node / Rust / Go / Python.
 - **A TUI you can live in.** Embedded lazygit and shell overlays, a details sidebar with CI state and working-tree file explorer, remappable keys, themes, command palette.
+- **It knows which AI agent works where.** Sessions from Claude Code, Codex, opencode and Mistral Vibe are detected from their on-disk artefacts (no process enumeration, Windows included; on Unix a dead recorded PID drops the session to idle at once) and surfaced everywhere: an AGENT column in the table and TUI, a detail overlay on `a`, `gwm agents` with manual pinning, the JSON/daemon field and the statusline (fed by the daemon transport everywhere: a unix socket, or a named pipe on Windows).
 - **A machine surface, not just a human one.** `--format=json`, a JSON-RPC daemon with a push stream, and `gwm statusline` for your prompt. The schemas are frozen under SemVer.
 - **Undo.** `gwm undo` and `gwm history` recover a worktree you removed by mistake, without `git reflog`.
 
@@ -43,8 +44,10 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 | aqua             | `aqua g -i kbrdn1/gwm-cli`                                           |
 | Debian / Ubuntu  | `.deb` from [Releases](https://github.com/kbrdn1/gwm-cli/releases) → `sudo apt install ./gwm-cli_<ver>-1_amd64.deb` |
 | Fedora / RHEL    | `.rpm` from [Releases](https://github.com/kbrdn1/gwm-cli/releases) → `sudo dnf install ./gwm-cli-<ver>-1.x86_64.rpm` |
-| Arch (AUR)       | `yay -S gwm-cli-bin` (or `paru -S gwm-cli-bin`)                      |
+| Arch (AUR) ⚠️     | `yay -S gwm-cli-bin` (or `paru -S gwm-cli-bin`) — community-maintained, currently **1.2.0** ([#430](https://github.com/kbrdn1/gwm-cli/issues/430)) |
 | Prebuilt         | <https://github.com/kbrdn1/gwm-cli/releases> (Linux / macOS / Windows) |
+
+**On the AUR row:** `gwm-cli-bin` is packaged and maintained by a community contributor, not by this project, so its version can lag behind a release (it is at `1.2.0` while the current release is `1.3.0`). Every other channel in the table is published from this repository's release pipeline. See [#430](https://github.com/kbrdn1/gwm-cli/issues/430); if you want the current version on Arch, use `cargo binstall gwm-cli` or a prebuilt tarball in the meantime.
 
 The crate is published as **`gwm-cli`** (the bare `gwm` name on crates.io belongs to an unrelated project) — the installed command is still `gwm`. `cargo binstall gwm-cli` grabs the prebuilt binary from the matching GitHub Release instead of compiling `git2`/vendored-libgit2 from source — no Rust toolchain needed at install time.
 

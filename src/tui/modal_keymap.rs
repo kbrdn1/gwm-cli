@@ -81,6 +81,9 @@ pub enum KeyContext {
   Confirm,
   /// Keybindings / help overlay (scroll-only).
   Help,
+  /// Generic detail overlay (issue #408, scroll-only / close) — agent
+  /// sessions today, the rich PR/Issue view tomorrow.
+  Detail,
   /// Command-logs overlay (issue #226, scroll-only + copy).
   CommandLogs,
   /// Settings panel navigation (issue #232).
@@ -112,6 +115,7 @@ impl KeyContext {
       KeyContext::Create => "create",
       KeyContext::Confirm => "confirm",
       KeyContext::Help => "help",
+      KeyContext::Detail => "detail",
       KeyContext::CommandLogs => "command_logs",
       KeyContext::Config => "config",
       KeyContext::ConfigEdit => "config.edit",
@@ -138,6 +142,7 @@ impl KeyContext {
       Create,
       Confirm,
       Help,
+      Detail,
       CommandLogs,
       Config,
       ConfigEdit,
@@ -218,6 +223,14 @@ define_modal_actions! {
     HelpScrollLeft   => "scroll_left"   [ "Left", "h" ],
     HelpScrollTop    => "scroll_top"    [ "Home", "g" ],
     HelpScrollBottom => "scroll_bottom" [ "End", "G" ],
+  }
+  Detail {
+    DetailClose      => "close"        [ "Esc", "q" ],
+    DetailSelectNext => "select_next"  [ "Down", "j" ],
+    DetailSelectPrev => "select_prev"  [ "Up", "k" ],
+    DetailAttach     => "attach"       [ "a" ],
+    DetailDetach     => "detach"       [ "d" ],
+    DetailInput      => "attach_by_id" [ "i" ],
   }
   CommandLogs {
     CommandLogsClose        => "close"         [ "Esc", "q" ],

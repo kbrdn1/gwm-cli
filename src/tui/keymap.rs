@@ -144,6 +144,7 @@ define_actions! {
   ConfigPanel       => "config_panel",
   ExecOverlay       => "exec_overlay",
   CleanOverlay      => "clean_overlay",
+  AgentSessions     => "agent_sessions",
   Help              => "help",
   Quit              => "quit",
   // Future surface — bound to ':' by default, picked up by #32.
@@ -499,6 +500,7 @@ impl Keymap {
       def(Action::ConfigPanel, &["4"]),
       // #325: `x` opens the exec profile picker overlay.
       def(Action::ExecOverlay, &["x"]),
+      def(Action::AgentSessions, &["a"]),
       // #325: `X` opens the clean reclaim overlay.
       def(Action::CleanOverlay, &["X"]),
       def(Action::Filter, &["/"]),

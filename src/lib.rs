@@ -15,6 +15,7 @@
 //! `tests/contract_tests.rs`.
 #![doc(hidden)]
 
+pub mod agent_sessions;
 pub mod aliases;
 pub mod bootstrap;
 pub mod clean;

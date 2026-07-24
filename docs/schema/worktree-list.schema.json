@@ -5,7 +5,9 @@
   "title": "gwm worktree list",
   "description": "Output of `gwm list --format=json` and the daemon's `list` JSON-RPC method (issue #38). A stable array of worktrees, decoupled from gwm's internal types.",
   "type": "array",
-  "items": { "$ref": "#/$defs/worktree" },
+  "items": {
+    "$ref": "#/$defs/worktree"
+  },
   "$defs": {
     "worktree": {
       "type": "object",
@@ -31,7 +33,7 @@
         },
         "name": {
           "type": "string",
-          "description": "Display name — basename of the worktree directory."
+          "description": "Display name \u2014 basename of the worktree directory."
         },
         "id": {
           "type": "string",
@@ -42,46 +44,153 @@
           "description": "Absolute path to the worktree working directory."
         },
         "branch": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Checked-out branch shorthand, or null when unresolvable."
         },
         "head": {
-          "type": ["string", "null"],
+          "type": [
+            "string",
+            "null"
+          ],
           "description": "Full HEAD commit oid (40-char hex), or null when unresolvable."
         },
-        "is_main": { "type": "boolean" },
-        "is_locked": { "type": "boolean" },
-        "is_prunable": { "type": "boolean" },
-        "status": { "$ref": "#/$defs/status" },
+        "is_main": {
+          "type": "boolean"
+        },
+        "is_locked": {
+          "type": "boolean"
+        },
+        "is_prunable": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
         "age_seconds": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "description": "Branch age relative to the trunk baseline, in whole seconds. Null for trunk branches and unresolvable repos."
         },
         "issue": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "description": "Linked GitHub issue number, or null."
         },
         "pr": {
-          "type": ["integer", "null"],
+          "type": [
+            "integer",
+            "null"
+          ],
           "minimum": 0,
           "description": "Linked GitHub PR number, or null."
+        },
+        "agents": {
+          "description": "EXPERIMENTAL (issue #408) \u2014 agent sessions matched to this worktree from on-disk artefacts (Claude Code, Codex, opencode, Mistral Vibe). Additive field: omitted entirely when no session matched, never null. Being experimental-tier, its shape may still change in a minor release; see README.md for the tier rules.",
+          "$ref": "#/$defs/agents"
         }
       }
     },
     "status": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["is_dirty", "has_upstream", "ahead", "behind", "unknown"],
+      "required": [
+        "is_dirty",
+        "has_upstream",
+        "ahead",
+        "behind",
+        "unknown"
+      ],
       "properties": {
-        "is_dirty": { "type": "boolean" },
-        "has_upstream": { "type": "boolean" },
-        "ahead": { "type": "integer", "minimum": 0 },
-        "behind": { "type": "integer", "minimum": 0 },
+        "is_dirty": {
+          "type": "boolean"
+        },
+        "has_upstream": {
+          "type": "boolean"
+        },
+        "ahead": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "behind": {
+          "type": "integer",
+          "minimum": 0
+        },
         "unknown": {
           "type": "boolean",
           "description": "Status couldn't be computed (detached HEAD, unborn branch)."
+        }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "description": "Per-worktree agent-session summary (issue #408, experimental tier).",
+      "required": [
+        "top",
+        "sessions"
+      ],
+      "properties": {
+        "top": {
+          "description": "The most recently active session \u2014 what compact surfaces display.",
+          "$ref": "#/$defs/agent_session"
+        },
+        "sessions": {
+          "type": "array",
+          "description": "Every matched session, most recent first.",
+          "items": {
+            "$ref": "#/$defs/agent_session"
+          }
+        }
+      }
+    },
+    "agent_session": {
+      "type": "object",
+      "description": "One detected agent session (issue #408, experimental tier).",
+      "required": [
+        "kind",
+        "freshness",
+        "last_activity",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "claude",
+            "codex",
+            "opencode",
+            "vibe"
+          ],
+          "description": "Stable lowercase agent name."
+        },
+        "freshness": {
+          "type": "string",
+          "enum": [
+            "active",
+            "idle"
+          ],
+          "description": "Activity classification from artefact recency (active = last 300 s; a terminated Vibe session is always idle)."
+        },
+        "last_activity": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Last artefact activity, epoch seconds UTC."
+        },
+        "id": {
+          "type": "string",
+          "description": "Backend-stable session identifier."
+        },
+        "name": {
+          "type": "string",
+          "description": "Human-readable session name when the artefacts carry one (first user prompt or recorded title). Omitted when unavailable."
         }
       }
     }

@@ -1,15 +1,16 @@
 //! Integration tests for the AUR packaging (issue #379).
 //!
 //! `.github/scripts/render-aur-pkgbuild.sh` substitutes placeholders in
-//! `packaging/aur/PKGBUILD.template` to produce the `PKGBUILD` that
-//! `release.yml > aur-publish` pushes to the `gwm-cli-bin` AUR package after
-//! every stable release. A malformed PKGBUILD silently breaks `yay -S
+//! `packaging/aur/PKGBUILD.template` to produce the `PKGBUILD` for the
+//! `gwm-cli-bin` AUR package. A malformed PKGBUILD silently breaks `yay -S
 //! gwm-cli-bin` for every Arch user, so the contract — the right version, both
 //! per-arch checksums, the `gwm`/`gwm-cli` provides/conflicts, and the
-//! completion/license install lines — is exercised here. The second half pins
-//! the `release.yml` wiring so a deleted step or an unpinned third-party
-//! action can't slip through green (mirrors `linux_packaging_metadata_tests.rs`
-//! + `scoop_manifest_tests.rs`).
+//! completion/license install lines — is exercised here.
+//!
+//! The AUR package is maintained by a third party (#430), so there is no
+//! `release.yml` job to pin: the rendered PKGBUILD is handed over by hand.
+//! That makes the render contract below the *only* guard on the artefact,
+//! rather than one half of it.
 
 #![cfg(unix)]
 
@@ -27,11 +28,6 @@ fn script_path() -> PathBuf {
 
 fn template_path() -> PathBuf {
   project_root().join("packaging/aur/PKGBUILD.template")
-}
-
-fn release_yml() -> String {
-  let path = project_root().join(".github/workflows/release.yml");
-  std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 fn run_script(args: &[&str]) -> Output {
@@ -68,6 +64,21 @@ fn template_exists_and_carries_all_placeholders() {
   for ph in ["__VERSION__", "__SHA256_X86_64__", "__SHA256_ARM64__"] {
     assert!(body.contains(ph), "template missing placeholder {ph}: {}", t.display());
   }
+
+  // The rendered PKGBUILD is handed to a third-party packager (#430), so it
+  // must not claim maintainership of a package we do not own. AUR convention
+  // puts the packaging author on `# Contributor:` and leaves `# Maintainer:`
+  // to whoever owns it.
+  assert!(
+    body.contains("# Contributor: Kylian Bardini"),
+    "template must credit the packaging author as Contributor: {}",
+    t.display()
+  );
+  assert!(
+    !body.contains("# Maintainer:"),
+    "template must not claim the `# Maintainer:` line: `gwm-cli-bin` is maintained on the AUR by a \
+     third party (#430)"
+  );
 }
 
 #[test]
@@ -191,58 +202,5 @@ fn rejects_invalid_sha256_in_either_position() {
   assert!(
     stderr.contains("sha256") || stderr.contains("64") || stderr.contains("hex"),
     "stderr should explain the sha rejection: {stderr}"
-  );
-}
-
-// ---- release.yml wiring (#379) ------------------------------------------
-
-#[test]
-fn release_workflow_publishes_to_the_aur() {
-  let yml = release_yml();
-  assert!(
-    yml.contains("aur-publish:"),
-    "release.yml must define the aur-publish job"
-  );
-  assert!(
-    yml.contains("pkgname: gwm-cli-bin"),
-    "aur-publish must push the gwm-cli-bin package"
-  );
-  assert!(
-    yml.contains(".github/scripts/render-aur-pkgbuild.sh"),
-    "aur-publish must render the PKGBUILD via the render script"
-  );
-  assert!(
-    yml.contains("packaging/aur/PKGBUILD.template"),
-    "aur-publish must render from the AUR template"
-  );
-}
-
-#[test]
-fn deploy_aur_action_is_pinned_to_a_commit_sha() {
-  let yml = release_yml();
-  // The third-party action is trusted with AUR_SSH_PRIVATE_KEY — it must be
-  // pinned to a 40-char commit SHA, never a mutable @vX / @branch ref.
-  let needle = "KSXGitHub/github-actions-deploy-aur@";
-  let idx = yml.find(needle).expect("release.yml must use the deploy-aur action");
-  let rest = &yml[idx + needle.len()..];
-  let sha: String = rest.chars().take_while(|c| c.is_ascii_hexdigit()).collect();
-  assert_eq!(
-    sha.len(),
-    40,
-    "deploy-aur must be pinned to a 40-char commit SHA, got `{sha}`"
-  );
-}
-
-#[test]
-fn aur_publish_is_stable_only_and_advisory() {
-  let yml = release_yml();
-  let job = yml.split_once("aur-publish:").expect("aur-publish job present").1;
-  // Stable-only gate: pre-release suffixes must be excluded so a `-rc.` tag
-  // never lands on `yay -S gwm-cli-bin`.
-  assert!(job.contains("-rc."), "aur-publish must gate out -rc. pre-releases");
-  // Advisory until the SSH key secret is provisioned (flip after first sync).
-  assert!(
-    job.contains("continue-on-error: true"),
-    "aur-publish must be advisory while AUR_SSH_PRIVATE_KEY is being provisioned"
   );
 }

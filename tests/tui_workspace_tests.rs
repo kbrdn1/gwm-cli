@@ -477,3 +477,92 @@ fn refresh_invalidates_an_inflight_async_workspace_relist() {
     "the superseded workspace payload was dropped — the fresh map stands"
   );
 }
+
+#[test]
+fn workspace_pins_are_read_from_each_rows_own_repo() {
+  // Codex review round I (P2): a session pinned in a child repo was
+  // invisible in TUI workspace mode — `read_agent_pins` returned an empty
+  // map instead of opening each row's owning repo, so the Agents pane
+  // (pinned-only) never showed it.
+  let root = workspace_root();
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  gwm::github::add_agent_pin(&alpha, "main", "sid-ws-alpha").unwrap();
+
+  let app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  // Round P moved the periodic read into the detection worker; the same
+  // sources + reader pair is exercised here without spawning the thread.
+  let pins = gwm::tui::read_pins_from_sources(&app.agent_pin_sources());
+
+  let alpha_row = app
+    .worktrees
+    .iter()
+    .find(|w| w.path.ends_with("alpha"))
+    .expect("alpha's main checkout is a row");
+  let key = alpha_row.path.to_string_lossy().to_string();
+  assert_eq!(
+    pins.get(&key).map(Vec::as_slice),
+    Some(&["sid-ws-alpha".to_string()][..]),
+    "the pin set in alpha's branch config reaches the per-path map"
+  );
+}
+
+#[test]
+fn overlay_pin_markers_survive_an_active_repo_swap() {
+  // Codex review round N (P2): the overlay's pinned markers were read
+  // through `self.repo` — the ACTIVE repo. In workspace mode an
+  // auto-refresh can move the selection (and swap the active repo) while
+  // the overlay stays bound to its captured worktree; the markers then
+  // came from the WRONG repo's branch config (both repos here share the
+  // branch name `main`). They must come from the captured worktree's
+  // owning repo.
+  use gwm::tui::state::async_task::TaskKind;
+
+  let root = workspace_root();
+  let alpha = Repository::open(root.path().join("alpha")).unwrap();
+  gwm::github::add_agent_pin(&alpha, "main", "sid-alpha-pin").unwrap();
+
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  app.list_state.select(Some(0));
+  app.sync_active_repo();
+  app.open_agent_overlay(); // captures alpha's main-checkout row
+
+  // Drift: the selection moves to beta's row -> the active repo swaps.
+  let last = app.worktrees.len() - 1;
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+  assert_eq!(app.repo_name, "beta", "precondition: the active repo drifted");
+
+  // A detection snapshot lands and refreshes the overlay in place; the
+  // pinned session resolves for alpha's path, so its row must carry the
+  // pinned marker even though the active repo is beta now.
+  let alpha_path = app.worktrees[0].path.clone();
+  let mut map = std::collections::BTreeMap::new();
+  map.insert(
+    alpha_path.to_string_lossy().to_string(),
+    gwm::agent_sessions::WorktreeAgents {
+      sessions: vec![gwm::agent_sessions::AgentSession {
+        kind: gwm::agent_sessions::AgentKind::ClaudeCode,
+        cwd: alpha_path,
+        last_activity: std::time::SystemTime::now(),
+        ended: false,
+        id: "sid-alpha-pin".into(),
+        name: None,
+      }],
+    },
+  );
+  // The worker reads pins from each row's OWNING repo (round P): even
+  // with the active repo drifted to beta, alpha's pin is in the sources.
+  let pins = gwm::tui::read_pins_from_sources(&app.agent_pin_sources());
+  let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+  assert!(app.apply_agent_snapshot(generation, map, None, pins));
+  assert!(
+    app.detail_overlay.rows.iter().any(|r| r.value.contains("pinned")),
+    "the pin from alpha's own repo marks the row: {:?}",
+    app
+      .detail_overlay
+      .rows
+      .iter()
+      .map(|r| r.value.clone())
+      .collect::<Vec<_>>()
+  );
+}

@@ -221,6 +221,13 @@ pub fn worktrees_differ(old: &[JsonWorktree], new: &[JsonWorktree]) -> bool {
       || a.status != b.status
       || a.issue != b.issue
       || a.pr != b.pr
+      // Agents compared whole, `last_activity` included (Codex review round
+      // D): unlike `age_seconds` — recomputed from the clock every poll —
+      // `last_activity` only moves when the agent actually wrote an
+      // artefact, so it IS a real change a subscriber wants (a statusline's
+      // "Ns ago" would otherwise go stale while the agent works). Push
+      // frequency is bounded by the 30 s detection cache, not the poll rate.
+      || a.agents != b.agents
   })
 }
 
@@ -921,3 +928,745 @@ mod server {
 
 #[cfg(all(unix, feature = "daemon"))]
 pub use server::{default_socket, serve, socket_in, socket_path, ServeOptions};
+
+/// Injective pipe-name fragment for a Windows account identity (issue
+/// #439). ASCII alphanumerics pass through; every other character —
+/// including the `\` of `DOMAIN\user` — becomes `_XX` (uppercase hex of
+/// each UTF-8 byte), so `alice.smith` / `alice-smith`, or same-named
+/// accounts on two domains, can never share a default pipe name (a lossy
+/// fold would let the owner-only DACL lock the second user out of its own
+/// default). `_` itself is escaped too, which is what makes the mapping
+/// injective. Compiled on every platform so the property is unit-testable
+/// off Windows; only the Windows `socket_path` consumes it.
+pub fn pipe_user_fragment(raw: &str) -> String {
+  let mut out = String::with_capacity(raw.len());
+  for c in raw.chars() {
+    if c.is_ascii_alphanumeric() {
+      out.push(c);
+    } else {
+      let mut buf = [0u8; 4];
+      for b in c.encode_utf8(&mut buf).bytes() {
+        out.push_str(&format!("_{b:02X}"));
+      }
+    }
+  }
+  out
+}
+
+// ---------------------------------------------------------------------------
+// Named-pipe server & client — Windows only, behind the `daemon` feature
+// (issue #439). Exposes the same public interface as the unix module, so
+// `cmd_daemon` / `cmd_statusline` compile identically on both platforms.
+//
+// This is a sibling of `server`, not a shared generic core, on purpose:
+// the unix module's #341 hardening is battle-tested and stays byte-
+// identical, and the two transports differ exactly where a generic
+// abstraction would be the most contorted —
+// - `interprocess`'s sync streams have no read/write timeouts, and its
+//   NOWAIT mode is unusable (an empty-pipe read is downgraded to a fake
+//   EOF — see `peek_available`), so every guard unix gets from
+//   `set_read_timeout` (slow-loris line deadline, subscription poll tick,
+//   dead-peer detection) is rebuilt here on BLOCKING streams polled with
+//   `PeekNamedPipe` before every read;
+// - the cross-user barrier is the pipe's owner-only security descriptor,
+//   the named-pipe analogue of `chmod 0600` + the private socket dir
+//   (`\\.\pipe\` has no directories to restrict).
+// The small shared bits (`ActiveGuard`, `ACCEPT_TICK`) are deliberately
+// duplicated rather than hoisted, to keep the unix module untouched.
+// ---------------------------------------------------------------------------
+
+#[cfg(all(windows, feature = "daemon"))]
+mod server_win {
+  use super::*;
+  use crate::error::GwmError;
+  use interprocess::os::windows::named_pipe::{pipe_mode, PipeListenerOptions, PipeMode, PipeStream};
+  use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+  use interprocess::ConnectWaitMode;
+  use std::io::{BufRead, BufReader, ErrorKind, Write};
+  use std::os::windows::io::{AsHandle, AsRawHandle};
+  use std::path::PathBuf;
+  use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+  use std::sync::Arc;
+  use std::time::{Duration, Instant};
+
+  /// The accepted duplex byte stream this server speaks over.
+  type Conn = PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>;
+
+  /// RAII counter of live client connections — duplicated from the unix
+  /// module (see the section comment above).
+  struct ActiveGuard(Arc<AtomicUsize>);
+
+  impl ActiveGuard {
+    fn try_acquire(active: &Arc<AtomicUsize>, max: usize) -> Option<Self> {
+      if active.fetch_add(1, Ordering::SeqCst) + 1 > max {
+        active.fetch_sub(1, Ordering::SeqCst);
+        return None;
+      }
+      Some(ActiveGuard(Arc::clone(active)))
+    }
+  }
+
+  impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+      self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+  }
+
+  /// How long the accept loop sleeps on `WouldBlock` before re-checking the
+  /// shutdown flag — same value and role as the unix module's.
+  const ACCEPT_TICK: Duration = Duration::from_millis(50);
+
+  /// Sleep quantum of the peek-driven wait loops (request reads, the
+  /// subscription tick). Small enough that deadlines land promptly, large
+  /// enough that an idle connection costs a negligible wakeup rate.
+  const NB_TICK: Duration = Duration::from_millis(15);
+
+  /// Configuration for [`serve`] — same shape as the unix module's so the
+  /// CLI builds it identically on both platforms. `socket` holds the PIPE
+  /// NAME (`gwm-<user>.sock` → `\\.\pipe\gwm-<user>.sock`), not a
+  /// filesystem path, and `manage_socket_dir` is accepted but meaningless
+  /// (pipe names have no parent directory to secure).
+  pub struct ServeOptions {
+    /// Name of the pipe to create under `\\.\pipe\`.
+    pub socket: PathBuf,
+    /// The repo this daemon answers for (its main workdir).
+    pub repo_workdir: PathBuf,
+    /// Interval between worktree-state polls for `subscribe` streams.
+    pub poll_interval: Duration,
+    /// Max bytes accepted for a single request line before the connection
+    /// is dropped (memory-bounding DoS guard, as on unix).
+    pub max_line_len: usize,
+    /// Per-request-line wall-time budget, rebuilt on `PeekNamedPipe`
+    /// polling since the transport has no socket-level timeout. `None`
+    /// disables the deadline. Writes are BLOCKING and unbudgeted, matching
+    /// the unix server's `writeln!`.
+    pub read_timeout: Option<Duration>,
+    /// Max concurrent client connections (thread-bounding DoS guard).
+    pub max_connections: usize,
+    /// Interface parity with unix; no-op here (see the struct docs).
+    pub manage_socket_dir: bool,
+  }
+
+  impl ServeOptions {
+    /// Same defaults, same rationale as the unix module.
+    pub const DEFAULT_MAX_LINE_LEN: usize = 64 * 1024;
+    pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 128;
+
+    pub fn new(socket: PathBuf, repo_workdir: PathBuf, poll_interval: Duration) -> Self {
+      Self {
+        socket,
+        repo_workdir,
+        poll_interval,
+        max_line_len: Self::DEFAULT_MAX_LINE_LEN,
+        read_timeout: Some(Self::DEFAULT_READ_TIMEOUT),
+        max_connections: Self::DEFAULT_MAX_CONNECTIONS,
+        manage_socket_dir: false,
+      }
+    }
+  }
+
+  /// Default pipe name. `\\.\pipe\` is machine-global, so the identity
+  /// fragment namespaces the default and two users' daemons don't fight
+  /// over one name — but the [`owner_only_descriptor`] is the actual
+  /// access barrier; the name only prevents accidental clashes. The
+  /// fragment is [`pipe_user_fragment`] over `USERDOMAIN\USERNAME`
+  /// (injective escaping, Codex review #439): two accounts whose names
+  /// differ only in punctuation, or same-named accounts on different
+  /// domains, get distinct default names — a lossy fold would let the
+  /// DACL lock the second user out of its own default.
+  pub fn socket_path() -> PathBuf {
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".to_string());
+    let identity = match std::env::var("USERDOMAIN") {
+      Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
+      _ => user,
+    };
+    PathBuf::from(format!("gwm-{}.sock", pipe_user_fragment(&identity)))
+  }
+
+  /// The default [`socket_path`] plus the manage-dir flag, which is always
+  /// `false` here: pipe names are not filesystem paths, there is no parent
+  /// directory to create or secure.
+  pub fn default_socket() -> (PathBuf, bool) {
+    (socket_path(), false)
+  }
+
+  /// Owner-only DACL for the pipe: `D:P` (protected, no inheritance) with a
+  /// single ACE granting `GENERIC_ALL` to OWNER RIGHTS (`S-1-3-4`) — the
+  /// user the daemon runs as. A non-empty protected DACL implicitly denies
+  /// every other SID, so a cross-user connect fails outright: the
+  /// named-pipe analogue of the unix module's `chmod 0600`. Fail closed:
+  /// a descriptor error refuses to serve rather than exposing the pipe
+  /// with the default (Everyone-readable) DACL.
+  fn owner_only_descriptor() -> Result<SecurityDescriptor> {
+    let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)")
+      .map_err(|e| GwmError::Other(format!("daemon: cannot encode the pipe SDDL: {e}")))?;
+    SecurityDescriptor::deserialize(&sddl)
+      .map_err(|e| GwmError::Other(format!("daemon: cannot build the pipe security descriptor: {e}")))
+  }
+
+  /// Bytes currently readable on the connection, or `None` when the peer
+  /// is gone. `PeekNamedPipe` is the canonical non-blocking poll for a
+  /// BLOCKING named pipe — and blocking streams are a hard requirement
+  /// here: in `PIPE_NOWAIT` mode an empty-pipe read surfaces raw
+  /// `ERROR_NO_DATA`, whose kind is `BrokenPipe`, and interprocess's
+  /// `downgrade_eof` then converts it to `Ok(0)` — indistinguishable from
+  /// a real EOF, which silently closed idle connections and ended every
+  /// subscription at its first empty poll (Codex review #439, witnessed in
+  /// CI). Peeking sidesteps the whole NOWAIT minefield.
+  fn peek_available(conn: &Conn) -> Option<usize> {
+    let mut avail: u32 = 0;
+    // SAFETY: PeekNamedPipe with a null buffer only queries the available
+    // byte count; the handle is borrowed from `conn` and outlives the call.
+    let ok = unsafe {
+      windows_sys::Win32::System::Pipes::PeekNamedPipe(
+        conn.as_handle().as_raw_handle(),
+        std::ptr::null_mut(),
+        0,
+        std::ptr::null_mut(),
+        &mut avail,
+        std::ptr::null_mut(),
+      )
+    };
+    if ok == 0 {
+      None // broken / disconnected peer
+    } else {
+      Some(avail as usize)
+    }
+  }
+
+  /// Bind the pipe and serve connections until `shutdown` flips — the
+  /// Windows counterpart of the unix `serve`, same loop shape.
+  pub fn serve(opts: &ServeOptions, shutdown: Arc<AtomicBool>) -> Result<()> {
+    // Courtesy probe for a clear "already in use" message, mirroring the
+    // unix stale-socket check (pipes need no stale cleanup: they vanish
+    // with their process). BOUNDED for real this time (Codex review #439,
+    // twice): the `local_socket` adapter silently ignores
+    // `ConnectOptions::wait_mode`, but the native API honours it — a
+    // squatted pipe with no available instance times out instead of
+    // hanging `gwm daemon` startup. The probe is not the real guard —
+    // the first listener instance is created with
+    // `FILE_FLAG_FIRST_PIPE_INSTANCE`, so an occupied name fails the bind
+    // below even when the probe timed out.
+    let path = widestring::U16CString::from_str(format!("\\\\.\\pipe\\{}", opts.socket.display()))
+      .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {}: {e}", opts.socket.display())))?;
+    let probe = Conn::connect_by_path_with_wait_mode(path.as_ucstr(), ConnectWaitMode::Timeout(Duration::from_secs(1)));
+    if probe.is_ok() {
+      return Err(GwmError::Other(format!(
+        "daemon: pipe {} is already in use by a live daemon",
+        opts.socket.display()
+      )));
+    }
+    let mut options = PipeListenerOptions::new();
+    options.path = std::borrow::Cow::Owned(path);
+    options.mode = PipeMode::Bytes;
+    options.security_descriptor = Some(owner_only_descriptor()?);
+    let listener = options.create_duplex::<pipe_mode::Bytes>().map_err(|e| {
+      GwmError::Other(format!(
+        "daemon: failed to bind pipe {} (a name that is already claimed is refused — first-instance guard): {e}",
+        opts.socket.display()
+      ))
+    })?;
+    // Nonblocking ACCEPT so this loop can poll the shutdown flag (as on
+    // unix). The listener flag also marks the accepted streams
+    // nonblocking, so each one is flipped back to BLOCKING right after
+    // accept — see `peek_available` for why NOWAIT streams are unusable.
+    listener
+      .set_nonblocking(true)
+      .map_err(|e| GwmError::Other(format!("daemon: set_nonblocking failed: {e}")))?;
+
+    let active = Arc::new(AtomicUsize::new(0));
+    eprintln!("gwm daemon listening on \\\\.\\pipe\\{}", opts.socket.display());
+
+    loop {
+      if shutdown.load(Ordering::Relaxed) {
+        break;
+      }
+      match listener.accept() {
+        Ok(conn) => {
+          if let Err(e) = conn.set_nonblocking(false) {
+            eprintln!("daemon: failed to set connection blocking: {e}");
+            continue;
+          }
+          let Some(guard) = ActiveGuard::try_acquire(&active, opts.max_connections) else {
+            continue;
+          };
+          let workdir = opts.repo_workdir.clone();
+          let poll = opts.poll_interval;
+          let max_line_len = opts.max_line_len;
+          let read_timeout = opts.read_timeout;
+          let shutdown = Arc::clone(&shutdown);
+          std::thread::spawn(move || {
+            let _guard = guard;
+            handle_connection(&conn, &workdir, poll, max_line_len, read_timeout, &shutdown);
+          });
+        }
+        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+          std::thread::sleep(ACCEPT_TICK);
+        }
+        Err(e) => {
+          eprintln!("daemon: accept error: {e}");
+          std::thread::sleep(ACCEPT_TICK);
+        }
+      }
+    }
+    Ok(())
+  }
+
+  /// Read one newline-terminated request line: the unix `read_request_line`
+  /// with the socket timeout replaced by a `PeekNamedPipe` wait loop
+  /// bounded by `deadline` (slow-loris guard) and the shutdown flag. The
+  /// peek only runs when the BufReader holds nothing — buffered bytes must
+  /// drain first, or a pipelined second line would wait on a peek that can
+  /// never see it. Same return contract: `None` on EOF / deadline /
+  /// oversize / error, and the caller drops the connection.
+  fn read_request_line(
+    conn: &Conn,
+    reader: &mut BufReader<&Conn>,
+    max_len: usize,
+    deadline: Option<Instant>,
+    shutdown: &AtomicBool,
+  ) -> Option<Vec<u8>> {
+    let mut buf = Vec::new();
+    loop {
+      if shutdown.load(Ordering::Relaxed) {
+        return None;
+      }
+      if let Some(dl) = deadline {
+        if Instant::now() >= dl {
+          return None; // per-line deadline exceeded — slow-loris
+        }
+      }
+      if reader.buffer().is_empty() {
+        match peek_available(conn) {
+          None => return None, // peer gone
+          Some(0) => {
+            std::thread::sleep(NB_TICK);
+            continue;
+          }
+          Some(_) => {} // bytes ready — the blocking fill below won't block
+        }
+      }
+      let chunk = match reader.fill_buf() {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+        Err(_) => return None, // reset / dead link
+      };
+      if chunk.is_empty() {
+        return None; // EOF (a partial line here is an incomplete request)
+      }
+      if let Some(pos) = chunk.iter().position(|&b| b == b'\n') {
+        if buf.len() + pos > max_len {
+          return None; // oversize before the newline
+        }
+        buf.extend_from_slice(&chunk[..pos]);
+        reader.consume(pos + 1);
+        return Some(buf);
+      }
+      if buf.len() + chunk.len() > max_len {
+        return None; // unterminated line past the cap
+      }
+      let n = chunk.len();
+      buf.extend_from_slice(chunk);
+      reader.consume(n);
+    }
+  }
+
+  /// Blocking `write_all` + `flush` of one newline-terminated frame — the
+  /// pipe counterpart of the unix server's `writeln!`. Blocking and
+  /// unbudgeted on purpose: a subscriber that never drains its end parks
+  /// only its own connection thread, exactly as on unix.
+  fn write_frame(mut conn: &Conn, bytes: &[u8]) -> std::io::Result<()> {
+    conn.write_all(bytes)?;
+    conn.flush()
+  }
+
+  /// Serve one connection — the unix `handle_connection` on a blocking
+  /// duplex pipe stream. Same guards, same `subscribe` upgrade.
+  fn handle_connection(
+    conn: &Conn,
+    workdir: &Path,
+    poll: Duration,
+    max_line_len: usize,
+    read_timeout: Option<Duration>,
+    shutdown: &AtomicBool,
+  ) {
+    let mut reader = BufReader::new(conn);
+    loop {
+      let deadline = read_timeout.map(|t| Instant::now() + t);
+      let Some(bytes) = read_request_line(conn, &mut reader, max_line_len, deadline, shutdown) else {
+        return; // EOF, deadline, oversize, or dead link — drop the connection
+      };
+      let line = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.trim(),
+        Err(_) => return, // not a UTF-8 JSON-RPC client
+      };
+      if line.is_empty() {
+        continue;
+      }
+      let is_subscribe = serde_json::from_str::<RpcRequest>(line)
+        .map(|r| r.method == "subscribe")
+        .unwrap_or(false);
+      if is_subscribe {
+        stream_subscription(conn, &mut reader, workdir, poll, shutdown);
+        return;
+      }
+      if let Some(response) = handle_line(workdir, line) {
+        let mut frame = response.into_bytes();
+        frame.push(b'\n');
+        if write_frame(conn, &frame).is_err() {
+          return;
+        }
+      }
+    }
+  }
+
+  /// Push `worktrees.changed` notifications — the unix `stream_subscription`
+  /// with the timeout-as-poll-tick replaced by a sliced `PeekNamedPipe`
+  /// wait: each tick sleeps in `NB_TICK` steps while probing the peer, so
+  /// a closed pipe and the shutdown flag are noticed promptly.
+  fn stream_subscription(
+    conn: &Conn,
+    reader: &mut BufReader<&Conn>,
+    workdir: &Path,
+    poll: Duration,
+    shutdown: &AtomicBool,
+  ) {
+    let mut last: Option<Vec<JsonWorktree>> = None;
+    if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
+      if send_notification(conn, &snapshot).is_err() {
+        return;
+      }
+      last = Some(snapshot);
+    }
+    loop {
+      let tick_end = Instant::now() + poll;
+      loop {
+        if shutdown.load(Ordering::Relaxed) {
+          return;
+        }
+        // Client chatter ENDS the subscription here, unlike on unix
+        // (which ignores it): the pipe client cannot close its recv half
+        // from another thread the way a unix client's fd drop does, so
+        // writing anything IS the client's hang-up signal — the close
+        // then unblocks its reader thread via EOF (#439). Bytes may sit
+        // in the BufReader (pipelined after the subscribe line) or on
+        // the pipe itself.
+        if !reader.buffer().is_empty() {
+          return;
+        }
+        match peek_available(conn) {
+          None => return,    // peer closed or dead link
+          Some(0) => {}      // idle — keep ticking
+          Some(_) => return, // chatter — hang up
+        }
+        let now = Instant::now();
+        if now >= tick_end {
+          break;
+        }
+        std::thread::sleep(NB_TICK.min(tick_end - now));
+      }
+      if let Some(snapshot) = next_subscription_push(&last, run_list(workdir)) {
+        if send_notification(conn, &snapshot).is_err() {
+          return;
+        }
+        last = Some(snapshot);
+      }
+    }
+  }
+
+  fn send_notification(conn: &Conn, worktrees: &[JsonWorktree]) -> std::io::Result<()> {
+    let mut frame = worktrees_changed_notification(worktrees).to_string().into_bytes();
+    frame.push(b'\n');
+    write_frame(conn, &frame)
+  }
+}
+#[cfg(all(windows, feature = "daemon"))]
+pub use server_win::{default_socket, serve, socket_path, ServeOptions};
+
+/// Daemon **client** transport for Windows — same public surface as the
+/// unix `client` module. The sync pipe streams have no read timeout, so
+/// every bounded wait runs the blocking read on a helper thread and takes
+/// the deadline on the channel instead: a wedged daemon must degrade the
+/// statusline to its documented blank line, never freeze the shell prompt.
+#[cfg(all(windows, feature = "daemon"))]
+pub mod client {
+  use super::*;
+  use crate::error::GwmError;
+  use interprocess::os::windows::named_pipe::{pipe_mode, PipeStream};
+  use interprocess::ConnectWaitMode;
+  use std::io::{BufRead, BufReader, Write};
+  use std::os::windows::io::{AsHandle, AsRawHandle};
+  use std::sync::mpsc;
+  use std::time::Duration;
+
+  /// The duplex byte stream this client speaks over — the NATIVE named-pipe
+  /// API rather than the `local_socket` adapter, for two reasons (Codex
+  /// review #439): the adapter silently ignores `ConnectOptions::wait_mode`
+  /// (unbounded connects), and it hides the handle needed to authenticate
+  /// the server (see [`verify_server_owner`]).
+  type Conn = PipeStream<pipe_mode::Bytes, pipe_mode::Bytes>;
+
+  /// Same value and rationale as the unix client's handshake deadline.
+  const CLIENT_TIMEOUT: Duration = Duration::from_secs(5);
+
+  /// `\\.\pipe\<name>` as the UTF-16 path the native connect expects.
+  fn pipe_path(socket: &Path) -> Result<widestring::U16CString> {
+    widestring::U16CString::from_str(format!("\\\\.\\pipe\\{}", socket.display()))
+      .map_err(|e| GwmError::Other(format!("daemon: invalid pipe name {}: {e}", socket.display())))
+  }
+
+  /// Refuse a pipe server not owned by the current user (or the builtin
+  /// Administrators group, which an elevated same-user daemon can own):
+  /// `\\.\pipe\` names are first-come-first-served and predictable, so
+  /// another local account could squat `gwm-<user>.sock` with a permissive
+  /// DACL and feed forged worktree data to the statusline and every other
+  /// consumer (Codex review #439). The owner SID is read from the CONNECTED
+  /// kernel object itself, so there is no PID-reuse race; any API failure
+  /// fails closed. The unix analogue is the owner-only socket directory,
+  /// which makes squatting the path impossible in the first place.
+  fn verify_server_owner(conn: &Conn) -> Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT};
+    use windows_sys::Win32::Security::{
+      CreateWellKnownSid, EqualSid, GetTokenInformation, TokenUser, WinBuiltinAdministratorsSid,
+      OWNER_SECURITY_INFORMATION, PSID, SECURITY_MAX_SID_SIZE, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let deny = |what: &str| GwmError::Other(format!("daemon: refusing untrusted pipe server ({what})"));
+
+    // Owner of the connected pipe object.
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor = std::ptr::null_mut();
+    // SAFETY: the handle is borrowed from the live connection; out-pointers
+    // are valid locals. On success `owner` points INTO `descriptor`, which
+    // must stay alive until the comparisons below and then be LocalFree'd.
+    let status = unsafe {
+      GetSecurityInfo(
+        conn.as_handle().as_raw_handle(),
+        SE_KERNEL_OBJECT,
+        OWNER_SECURITY_INFORMATION,
+        &mut owner,
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        std::ptr::null_mut(),
+        &mut descriptor,
+      )
+    };
+    if status != 0 || owner.is_null() {
+      return Err(deny("cannot read the pipe owner"));
+    }
+    // Free `descriptor` on every path from here on.
+    let result = (|| {
+      // SID of the user this process runs as.
+      let mut token = std::ptr::null_mut();
+      // SAFETY: querying our own process token; closed right after the copy.
+      if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return Err(deny("cannot open the process token"));
+      }
+      // u64 storage so the buffer is 8-aligned: casting a byte array to
+      // TOKEN_USER trips Rust's misaligned-dereference abort (witnessed
+      // in CI as STATUS_STACK_BUFFER_OVERRUN).
+      let mut user_buf = [0u64; 32];
+      let mut len = 0u32;
+      // SAFETY: advapi fills a TOKEN_USER into the (large enough) buffer.
+      let got = unsafe {
+        GetTokenInformation(
+          token,
+          TokenUser,
+          user_buf.as_mut_ptr().cast(),
+          (user_buf.len() * 8) as u32,
+          &mut len,
+        )
+      };
+      // SAFETY: `token` came from a successful OpenProcessToken.
+      unsafe { CloseHandle(token) };
+      if got == 0 {
+        return Err(deny("cannot read the token user"));
+      }
+      // SAFETY: on success the buffer holds a valid TOKEN_USER.
+      let user_sid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+
+      // SAFETY: both SIDs are valid for the duration of the call.
+      if unsafe { EqualSid(owner, user_sid) } != 0 {
+        return Ok(());
+      }
+      // An elevated daemon's objects can be owned by BUILTIN\Administrators
+      // rather than the user SID. Accepting that group opens nothing to an
+      // unprivileged attacker — a local admin already controls the machine.
+      let mut admin_buf = [0u64; (SECURITY_MAX_SID_SIZE as usize).div_ceil(8)];
+      let mut admin_len = (admin_buf.len() * 8) as u32;
+      // SAFETY: CreateWellKnownSid fills the (max-sized) buffer.
+      let admin_ok = unsafe {
+        CreateWellKnownSid(
+          WinBuiltinAdministratorsSid,
+          std::ptr::null_mut(),
+          admin_buf.as_mut_ptr().cast(),
+          &mut admin_len,
+        )
+      };
+      // SAFETY: both SIDs are valid; admin_buf holds a well-known SID.
+      if admin_ok != 0 && unsafe { EqualSid(owner, admin_buf.as_ptr().cast_mut().cast()) } != 0 {
+        return Ok(());
+      }
+      Err(deny("owned by another account"))
+    })();
+    // SAFETY: `descriptor` came from a successful GetSecurityInfo.
+    unsafe { LocalFree(descriptor.cast()) };
+    result
+  }
+
+  /// Connect with a REAL bounded wait (the native API honours
+  /// [`ConnectWaitMode`], unlike the `local_socket` adapter) and refuse a
+  /// server we cannot authenticate.
+  fn connect(socket: &Path) -> Result<Conn> {
+    let path = pipe_path(socket)?;
+    let conn = Conn::connect_by_path_with_wait_mode(path.as_ucstr(), ConnectWaitMode::Timeout(CLIENT_TIMEOUT))
+      .map_err(|e| {
+        GwmError::Other(format!(
+          "daemon: cannot connect to \\\\.\\pipe\\{}: {e}",
+          socket.display()
+        ))
+      })?;
+    verify_server_owner(&conn)?;
+    Ok(conn)
+  }
+
+  /// One-shot `list` with the default handshake deadline.
+  pub fn list_once(socket: &Path) -> Result<Vec<JsonWorktree>> {
+    list_once_with_timeout(socket, Some(CLIENT_TIMEOUT))
+  }
+
+  /// [`list_once`] with an explicit deadline (test seam, as on unix). The
+  /// round-trip runs on a helper thread; on timeout that thread leaks
+  /// until the short-lived CLI process exits — the accepted cost of the
+  /// transport's missing read timeout.
+  #[doc(hidden)]
+  pub fn list_once_with_timeout(socket: &Path, timeout: Option<Duration>) -> Result<Vec<JsonWorktree>> {
+    let socket = socket.to_path_buf();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+      let _ = tx.send(round_trip(&socket));
+    });
+    match timeout {
+      Some(t) => rx
+        .recv_timeout(t)
+        .map_err(|_| GwmError::Other("daemon: timed out waiting for the response".to_string()))?,
+      None => rx
+        .recv()
+        .map_err(|_| GwmError::Other("daemon: client thread died".to_string()))?,
+    }
+  }
+
+  fn round_trip(socket: &Path) -> Result<Vec<JsonWorktree>> {
+    let conn = connect(socket)?;
+    let (recv, mut send) = conn.split();
+    writeln!(send, "{LIST_REQUEST}").map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    send.flush().map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    let mut reader = BufReader::new(recv);
+    let mut line = String::new();
+    reader
+      .read_line(&mut line)
+      .map_err(|e| GwmError::Other(format!("daemon: {e}")))?;
+    parse_list_result(line.trim())
+  }
+
+  /// Subscribe to `worktrees.changed` — same contract as the unix client:
+  /// the first snapshot is bounded by [`CLIENT_TIMEOUT`], later pushes wait
+  /// indefinitely, and a stream that closes before any snapshot errors so
+  /// the caller's degradation branch fires (issue #312).
+  ///
+  /// Shape (Codex review #439): connect + handshake + the BLOCKING read
+  /// loop all live on a helper thread, so the first `recv_timeout` bounds
+  /// them all — a wedged daemon degrades `statusline --watch` within the
+  /// deadline instead of hanging it. Ending the stream is a PROTOCOL
+  /// affair: the send half is handed back to this side, and when
+  /// `on_snapshot` asks to stop we write a hang-up line — the pipe server
+  /// closes the connection on any client chatter, which unblocks the
+  /// reader thread via EOF and frees the daemon's connection slot. If the
+  /// daemon is wedged and never reads, the reader thread leaks until the
+  /// short-lived CLI process exits — the same accepted cost as
+  /// `list_once`'s timeout path.
+  pub fn subscribe(socket: &Path, mut on_snapshot: impl FnMut(&[JsonWorktree]) -> bool) -> Result<()> {
+    let socket = socket.to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<String>>();
+    let (half_tx, half_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+      let conn = match connect(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+          let _ = tx.send(Err(e));
+          return;
+        }
+      };
+      let (recv, mut send) = conn.split();
+      if let Err(e) = writeln!(send, "{SUBSCRIBE_REQUEST}").and_then(|()| send.flush()) {
+        let _ = tx.send(Err(GwmError::Other(format!("daemon: {e}"))));
+        return;
+      }
+      // Hand the send half to the consumer so it can hang up (see above).
+      let _ = half_tx.send(send);
+      let mut reader = BufReader::new(recv);
+      loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+          Ok(0) | Err(_) => break, // EOF or dead link — dropping tx ends the stream
+          Ok(_) => {
+            if tx.send(Ok(line)).is_err() {
+              break; // consumer stopped listening
+            }
+          }
+        }
+      }
+    });
+
+    let mut delivered_any = false;
+    let mut result = Ok(());
+    loop {
+      let msg = if delivered_any {
+        rx.recv().ok()
+      } else {
+        rx.recv_timeout(CLIENT_TIMEOUT).ok()
+      };
+      let Some(msg) = msg else { break };
+      let line = match msg {
+        Ok(line) => line,
+        Err(e) => {
+          result = Err(e);
+          break;
+        }
+      };
+      let trimmed = line.trim();
+      if trimmed.is_empty() {
+        continue;
+      }
+      match parse_worktrees_changed(trimmed) {
+        Ok(worktrees) => {
+          delivered_any = true;
+          if !on_snapshot(&worktrees) {
+            break;
+          }
+        }
+        Err(e) => {
+          result = Err(e);
+          break;
+        }
+      }
+    }
+    // Hang up: any client line makes the pipe server close this
+    // connection, which unblocks the reader thread via EOF so both halves
+    // drop and the daemon's slot frees. Best effort — a dead daemon
+    // already ended the stream.
+    if let Ok(mut send) = half_rx.try_recv() {
+      let _ = writeln!(send, "bye").and_then(|()| send.flush());
+    }
+    result?;
+    if !delivered_any {
+      return Err(GwmError::Other(
+        "daemon: stream closed before the first snapshot".to_string(),
+      ));
+    }
+    Ok(())
+  }
+}

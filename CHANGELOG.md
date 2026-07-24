@@ -16,6 +16,7 @@ _Nothing yet._
 
 In reverse chronological order:
 
+- [`1.3.0`](changelogs/1.3.0.md) — 2026-07-24
 - [`1.2.0`](changelogs/1.2.0.md) — 2026-07-21
 - [`1.1.1`](changelogs/1.1.1.md) — 2026-07-16
 - [`1.1.0`](changelogs/1.1.0.md) — 2026-07-15

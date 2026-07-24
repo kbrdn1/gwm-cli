@@ -112,6 +112,12 @@ pub enum View {
   /// [`App::create_form`] plus [`App::edit_original_branch`] /
   /// [`App::edit_original_path`].
   Edit,
+  /// Generic detail overlay (issue #408). A centred row-list modal — its
+  /// first consumer is the agent-session view (`a` on the worktree list);
+  /// the content contract is deliberately generic so the planned rich
+  /// PR/Issue view reuses it. State lives on [`App::detail_overlay`]; keys
+  /// resolve through [`crate::tui::modal_keymap::KeyContext::Detail`].
+  DetailOverlay,
 }
 
 /// What the run loop must do after [`App::handle_exec_picker_key`]
@@ -208,6 +214,29 @@ pub struct RepoMeta {
   pub config: Config,
 }
 
+/// Pins per worktree path, read from each row's owning repo (its branch
+/// config). Runs in the detection worker on the periodic path (round P) and
+/// synchronously on user-action paths; repos are opened at most once per
+/// distinct workdir. Pub: the state tests pin the owning-repo contract
+/// through it without spawning the worker thread.
+pub fn read_pins_from_sources(
+  sources: &[(String, String, PathBuf)],
+) -> std::collections::BTreeMap<String, Vec<String>> {
+  let mut repos: std::collections::BTreeMap<&PathBuf, Option<Repository>> = std::collections::BTreeMap::new();
+  let mut out = std::collections::BTreeMap::new();
+  for (path, branch, repo_dir) in sources {
+    let repo = repos.entry(repo_dir).or_insert_with(|| Repository::open(repo_dir).ok());
+    let Some(repo) = repo.as_ref() else {
+      continue;
+    };
+    let pins = crate::github::agent_pins(repo, branch).unwrap_or_default();
+    if !pins.is_empty() {
+      out.insert(path.clone(), pins);
+    }
+  }
+  out
+}
+
 /// Workspace-mode state (issue #36). `None` in single-repo mode (the default).
 /// The *active* repo lives in `App`'s core fields (`repo`/`repo_name`/
 /// `workdir`/`config`); this holds everything needed to swap a different repo
@@ -283,6 +312,33 @@ pub struct App {
   /// Recent Commits height; [`SidebarState::scroll_down`] clamps
   /// against it.
   pub sidebar: SidebarState,
+
+  /// Last completed agent-session snapshot, keyed by worktree path string
+  /// (issue #408). `None` until the first detection lands — the table then
+  /// renders without agent cells, no placeholder noise. Replaced atomically
+  /// by [`Self::apply_agent_snapshot`]; the render path only reads it.
+  pub agent_snapshot: Option<std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>>,
+  /// When the current snapshot was taken — drives the periodic re-detection
+  /// in [`Self::maybe_refresh_agent_sessions`] so freshness colours do not
+  /// fossilise at their startup value.
+  pub agent_snapshot_at: Option<std::time::Instant>,
+  /// Every session the last detection saw, matched or not — the candidate
+  /// pool of the overlay's attach-by-id prompt (user feedback 2026-07-22).
+  pub agent_all_sessions: Vec<crate::agent_sessions::AgentSession>,
+  /// Pinned session ids per worktree path — the sidebar Agents pane shows
+  /// ONLY these (user feedback 2026-07-22), and the render path must not
+  /// read git config, so the map is refreshed off-render (each detection
+  /// cycle + immediately after attach/detach). Empty in workspace mode
+  /// (same single-repo ceiling as the pins themselves).
+  pub agent_pins: std::collections::BTreeMap<String, Vec<String>>,
+  /// A full pool scan was requested while a detection run was in flight —
+  /// it chains after that run lands instead of walking the store
+  /// concurrently (Codex review round R).
+  agent_pool_wanted: bool,
+  /// A pin changed while a detection run was in flight — the re-scan (and
+  /// the pins refresh) chains after that run lands instead of racing a
+  /// second walk against it (Codex review round U).
+  agent_redetect_wanted: bool,
 
   // Vim motion buffer: armed by first `g`, completed by the second.
   // **Kept for backward compatibility** with pre-#87 tests that read
@@ -469,6 +525,15 @@ pub struct App {
   /// before an armed reclaim fires (Codex #333 review).
   clean_overlay_countdown_secs: u32,
 
+  /// Generic detail overlay content (issue #408) — filled by
+  /// [`Self::open_agent_overlay`] while [`View::DetailOverlay`] is up.
+  pub detail_overlay: crate::tui::state::detail_overlay::DetailOverlay,
+
+  /// The worktree the open detail overlay was built for — `(path, branch)`
+  /// captured at open so attach/detach pin against it even if an
+  /// auto-refresh drifts the live selection (clean-overlay pattern).
+  detail_overlay_target: Option<(PathBuf, Option<String>)>,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -552,6 +617,12 @@ impl App {
       help_max_scroll: 0,
       help_max_x_scroll: 0,
       sidebar: SidebarState::new(),
+      agent_snapshot: None,
+      agent_snapshot_at: None,
+      agent_all_sessions: Vec::new(),
+      agent_pins: std::collections::BTreeMap::new(),
+      agent_pool_wanted: false,
+      agent_redetect_wanted: false,
       pending_g: false,
       pending_chord: Vec::new(),
       keymap,
@@ -582,6 +653,8 @@ impl App {
       clean_overlay: CleanOverlay::new(),
       clean_overlay_cfg: CleanConfig::default(),
       clean_overlay_countdown_secs: 0,
+      detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
+      detail_overlay_target: None,
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -1010,6 +1083,11 @@ impl App {
   /// the synchronous [`Self::refresh`] and by the off-thread drain in
   /// [`Self::drain_task_results`].
   fn apply_refreshed_worktrees(&mut self, mut worktrees: Vec<WorktreeInfo>) {
+    let old_keys: std::collections::BTreeSet<(PathBuf, Option<String>)> = self
+      .worktrees
+      .iter()
+      .map(|w| (w.path.clone(), w.branch.clone()))
+      .collect();
     // The carry-over preserves this session's in-memory fetched issue/PR state
     // across a re-list, keyed by number. In workspace mode that key collides
     // across repos (two repos can both own `#1`), so skip it: the freshly
@@ -1053,6 +1131,24 @@ impl App {
     // every refresh path shares, so the OFF-thread drains (`RefreshWorktrees` /
     // `RefreshWorkspace`) get it too, not just the synchronous `refresh`.
     self.tasks.invalidate(TaskKind::Sidebar);
+    // Agent staleness is keyed to the SET of (path, branch) pairs, not to
+    // the refresh itself (Codex review rounds P + Q): invalidating
+    // unconditionally freed the in-flight slot while its scan thread kept
+    // running, so an auto-refresh faster than the scan piled up concurrent
+    // scans whose results were each dropped as stale — no snapshot ever
+    // landed. The branch is part of the key because pins live in BRANCH
+    // config: a same-path checkout that switched branch must drop the old
+    // branch's pins instead of showing them for up to 30 s. A same-keys
+    // refresh keeps the in-flight run (the 30 s TTL owns freshness).
+    let new_keys: std::collections::BTreeSet<(PathBuf, Option<String>)> = self
+      .worktrees
+      .iter()
+      .map(|w| (w.path.clone(), w.branch.clone()))
+      .collect();
+    if old_keys != new_keys {
+      self.tasks.invalidate(TaskKind::AgentSessions);
+      self.agent_snapshot_at = None;
+    }
     self.status = if spawned > 0 {
       format!(
         "refreshed — {} worktree(s); fetching GitHub status…",
@@ -1223,6 +1319,193 @@ impl App {
       let sections = crate::tui::ui::build_sidebar_payload(&w, mode, &trunks, &theme);
       let _ = tx.send(TaskMsg::Sidebar(generation, path, mode, sections));
     });
+  }
+
+  /// Keep agent-session detection off the render path (issue #408). Called
+  /// once per event-loop tick, next to [`Self::maybe_refresh_sidebar`]: a
+  /// cold snapshot (startup, or nulled by a refresh) or one older than the
+  /// re-detection period spawns one worker; a tick that finds a run already
+  /// in flight coalesces onto it — same no-timer debounce as the sidebar.
+  pub fn maybe_refresh_agent_sessions(&mut self) {
+    const REDETECT_PERIOD: std::time::Duration = std::time::Duration::from_secs(30);
+    let fresh = self.agent_snapshot_at.is_some_and(|at| at.elapsed() < REDETECT_PERIOD);
+    if fresh {
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
+      return; // detection already in flight — coalesce
+    };
+    let rows: Vec<(String, PathBuf)> = self
+      .worktrees
+      .iter()
+      .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
+      .collect();
+    // Pin reads are branch-config I/O — in workspace mode one repo open
+    // per row. That happens in the WORKER, not here (Codex review round P:
+    // the event loop must not touch the disk on the periodic path); the
+    // main thread only assembles (path, branch, owning repo dir) triples,
+    // resolved via `row_repo` so each row reads its own repo (round I).
+    let pin_sources = self.agent_pin_sources();
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let pins_map = read_pins_from_sources(&pin_sources);
+      let pins: Vec<(String, String)> = pins_map
+        .iter()
+        .flat_map(|(path, sids)| sids.iter().map(move |sid| (path.clone(), sid.clone())))
+        .collect();
+      // Summary-only: the matched-per-worktree scan, NOT the full
+      // foreign-dir sweep — that one is linear in the whole artefact
+      // history and runs only when the attach prompt opens (round Q).
+      let map = match crate::agent_sessions::agents_home() {
+        Some(home) => crate::agent_sessions::detect_all(&home, &rows, &pins, std::time::SystemTime::now()),
+        None => Default::default(), // no home: detection degrades to empty (FR-009)
+      };
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map, None, pins_map));
+    });
+  }
+
+  /// Spawn the FULL detection — foreign-dir sweep included — to feed the
+  /// attach prompt's candidate pool. Prompt-open only (round Q): the sweep
+  /// costs a bounded read of every recent foreign artefact and must not
+  /// ride the 30 s periodic tick. Drops a coalescing in-flight periodic
+  /// run: this result supersedes it anyway.
+  fn refresh_agent_pool(&mut self) {
+    // A run in flight keeps walking the store even after `invalidate`
+    // frees its slot — starting the full scan NOW would double the I/O.
+    // Queue it instead; `apply_agent_snapshot` chains it on landing
+    // (round R).
+    if self.tasks.is_loading(TaskKind::AgentSessions) {
+      self.agent_pool_wanted = true;
+      return;
+    }
+    let Some(generation) = self.tasks.request(TaskKind::AgentSessions) else {
+      return;
+    };
+    let rows: Vec<(String, PathBuf)> = self
+      .worktrees
+      .iter()
+      .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
+      .collect();
+    let pin_sources = self.agent_pin_sources();
+    let tx = self.task_tx.clone();
+    std::thread::spawn(move || {
+      let pins_map = read_pins_from_sources(&pin_sources);
+      let pins: Vec<(String, String)> = pins_map
+        .iter()
+        .flat_map(|(path, sids)| sids.iter().map(move |sid| (path.clone(), sid.clone())))
+        .collect();
+      let (map, all) = match crate::agent_sessions::agents_home() {
+        Some(home) => crate::agent_sessions::detect_with_sessions(&home, &rows, &pins, std::time::SystemTime::now()),
+        None => Default::default(), // no home: detection degrades to empty (FR-009)
+      };
+      let _ = tx.send(TaskMsg::AgentSessions(generation, map, Some(all), pins_map));
+    });
+  }
+
+  /// The (worktree path, branch, owning repo workdir) triples the detection
+  /// worker reads pins from — assembled here without touching the disk. In
+  /// workspace mode the owner comes from the `row_repo` mapping; in
+  /// single-repo mode every row belongs to the active repo.
+  pub fn agent_pin_sources(&self) -> Vec<(String, String, PathBuf)> {
+    self
+      .worktrees
+      .iter()
+      .enumerate()
+      .filter_map(|(i, w)| {
+        let branch = crate::github::pinnable_branch(w.branch.as_deref())?;
+        let repo_dir = if let Some(ws) = &self.workspace {
+          ws.repos.get(*ws.row_repo.get(i)?)?.workdir.clone()
+        } else {
+          self.workdir.clone()
+        };
+        Some((
+          crate::agent_sessions::path_display_key(&w.path),
+          branch.to_string(),
+          repo_dir,
+        ))
+      })
+      .collect()
+  }
+
+  /// Store a completed detection snapshot if its generation is still
+  /// authoritative (issue #408). Returns `true` when applied; a late result
+  /// superseded by [`TaskRunner::invalidate`] is dropped and the previous
+  /// snapshot survives. Extracted from the drain so the state contract is
+  /// pinned ratatui-free by `tests/tui_app_tests.rs`.
+  pub fn apply_agent_snapshot(
+    &mut self,
+    generation: u64,
+    map: std::collections::BTreeMap<String, crate::agent_sessions::WorktreeAgents>,
+    all: Option<Vec<crate::agent_sessions::AgentSession>>,
+    pins: std::collections::BTreeMap<String, Vec<String>>,
+  ) -> bool {
+    if !self.tasks.complete(TaskKind::AgentSessions, generation) {
+      return false;
+    }
+    self.agent_snapshot = Some(map);
+    self.agent_snapshot_at = Some(std::time::Instant::now());
+    // `None` = summary-only run: the previous pool survives so an open
+    // attach prompt keeps its candidates (round Q).
+    let landed_pool = all.is_some();
+    if let Some(all) = all {
+      self.agent_all_sessions = all;
+    }
+    // A pool scan queued while this run was in flight chains now that the
+    // slot is free (round R); a landing that already carried the pool
+    // satisfies the request outright, and a prompt closed in the meantime
+    // abandons it — nobody would consume the sweep (round T).
+    if self.agent_pool_wanted {
+      self.agent_pool_wanted = false;
+      let prompt_open = self.view == View::DetailOverlay
+        && self.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input;
+      if !landed_pool && prompt_open {
+        self.refresh_agent_pool();
+      }
+    }
+    // The worker read the pins from each row's owning repo (round P);
+    // store them before the overlay rebuild below reads the map — UNLESS
+    // a pin changed while this run was in flight: its map predates the
+    // change, so the fresh event-path read stands and a re-detection is
+    // chained by clearing the snapshot timestamp (round U).
+    if self.agent_redetect_wanted {
+      self.agent_redetect_wanted = false;
+      self.agent_snapshot_at = None;
+    } else {
+      self.agent_pins = pins;
+    }
+    // A landing detection refreshes the open overlay in place (user
+    // feedback: attach/detach used to leave stale rows until reopened).
+    if self.view == View::DetailOverlay {
+      if let Some((path, _)) = self.detail_overlay_target.clone() {
+        if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
+          let rows = self.build_agent_rows(&w);
+          self.detail_overlay.set_rows(rows);
+        }
+      }
+    }
+    true
+  }
+
+  /// The agent sessions matched to `w`, if a snapshot has landed and holds
+  /// any (issue #408). Pure lookup — the render path's only entry point.
+  pub fn agents_for(&self, w: &crate::worktree::WorktreeInfo) -> Option<&crate::agent_sessions::WorktreeAgents> {
+    self
+      .agent_snapshot
+      .as_ref()
+      .and_then(|map| map.get(&crate::agent_sessions::path_display_key(&w.path)))
+  }
+
+  /// Any session in the landed snapshot at all? Drives the table's AGENT
+  /// column visibility (Codex review round D): with no agent tooling the
+  /// table must stay visually pre-#408, not carry an empty 8-cell column
+  /// squeezing NAME/BRANCH/PATH on narrow terminals. Keyed to the whole
+  /// snapshot — not the visible rows — so filtering/scrolling never makes
+  /// the column flicker.
+  pub fn any_agent_sessions(&self) -> bool {
+    self
+      .agent_snapshot
+      .as_ref()
+      .is_some_and(|map| map.values().any(|a| !a.sessions.is_empty()))
   }
 
   /// Off-thread `gwm sync` of the selected worktree for the `S` key (issue
@@ -1522,6 +1805,13 @@ impl App {
           // is ever shown under the live header.
           self.sidebar.cache = Some(((path, mode), sections));
           applied = true;
+        }
+        TaskMsg::AgentSessions(generation, map, all, pins) => {
+          // Late-drop + store live in `apply_agent_snapshot` so the state
+          // contract is pinned ratatui-free (issue #408). Deliberately does
+          // NOT set `applied`: agent detection reads no git state, so there
+          // is nothing for the post-drain refresh bookkeeping to do.
+          self.apply_agent_snapshot(generation, map, all, pins);
         }
       }
     }
@@ -1917,6 +2207,8 @@ impl App {
       View::ExecPicker => HintContext::ExecPicker,
       View::CleanReport => HintContext::Clean,
       View::Edit => HintContext::Rename,
+      // Issue #408: the detail overlay advertises its close/scroll keys.
+      View::DetailOverlay => HintContext::Detail,
       View::List => self.pane_hint_context(),
     }
   }
@@ -2347,6 +2639,236 @@ impl App {
   /// [`View::CleanReport`]. Refuses (status-bar message, no transition) when
   /// nothing is selected. A scan that finds nothing safe still opens — the
   /// report says so.
+  /// Open the agent-session detail overlay for the selected worktree
+  /// (issue #408, `a`). Rows come from the pure
+  /// [`crate::tui::state::detail_overlay::agent_detail_rows`] mapping over
+  /// the last completed snapshot — a session-less worktree opens with an
+  /// explicit "no agent session found" row, never blank.
+  pub fn open_agent_overlay(&mut self) {
+    let Some(sel) = self.selected().cloned() else {
+      self.status = "nothing selected".into();
+      return;
+    };
+    // Capture the target now (clean-overlay pattern, Codex #333): an
+    // auto-refresh can drift the live selection while the overlay is open,
+    // and attach/detach must pin against THIS worktree's branch.
+    self.detail_overlay_target = Some((
+      sel.path.clone(),
+      crate::github::pinnable_branch(sel.branch.as_deref()).map(str::to_string),
+    ));
+    let rows = self.build_agent_rows(&sel);
+    self.detail_overlay.open("Agent Sessions".into(), rows);
+    self.view = View::DetailOverlay;
+  }
+
+  /// Rows for the captured worktree: sessions from the snapshot, the manual
+  /// pins marked (issue #408 US4 + user feedback 2026-07-22 — multi-pin).
+  fn build_agent_rows(&self, w: &crate::worktree::WorktreeInfo) -> Vec<crate::tui::state::detail_overlay::DetailRow> {
+    // Pins come from the per-path map — built per OWNING repo, so a
+    // workspace active-repo swap under the open overlay cannot yield
+    // absent or wrong markers (round N), and the snapshot-landing rebuild
+    // does no branch-config I/O on the event loop (round P): the map is
+    // refreshed by the landing itself and by every attach/detach.
+    let pinned = self
+      .agent_pins
+      .get(&crate::agent_sessions::path_display_key(&w.path))
+      .cloned()
+      .unwrap_or_default();
+    crate::tui::state::detail_overlay::agent_detail_rows(self.agents_for(w), &pinned, std::time::SystemTime::now())
+  }
+
+  /// Fresh pins per worktree path from branch config — the synchronous
+  /// read for USER-ACTION paths (attach/detach refresh); the periodic
+  /// detection reads the same sources in its worker instead (round P).
+  /// Each row reads from its OWNING repo via [`Self::agent_pin_sources`]
+  /// (rounds A + I: a same-named branch elsewhere cannot leak its pins).
+  fn read_agent_pins(&self) -> std::collections::BTreeMap<String, Vec<String>> {
+    read_pins_from_sources(&self.agent_pin_sources())
+  }
+
+  /// The current pinnable branch of the worktree at `path`, freshly read
+  /// from the listed rows (which every refresh re-lists) — never the
+  /// branch captured when an overlay opened (Codex review round U).
+  fn current_branch_of(&self, path: &Path) -> Option<String> {
+    let w = self.worktrees.iter().find(|w| w.path == path)?;
+    crate::github::pinnable_branch(w.branch.as_deref()).map(str::to_string)
+  }
+
+  /// Pin the selected overlay row's session to the overlay's target worktree
+  /// (`a` inside the modal). Auto-detection stays the default; the pin only
+  /// adds (issue #408 US4).
+  pub fn attach_selected_agent(&mut self) {
+    let Some(sid) = self.detail_overlay.selected_meta().map(str::to_string) else {
+      // Only the "no agent session found" placeholder carries no id: with
+      // nothing to select, `a` falls through to the attach-by-id prompt
+      // instead of dead-ending (user feedback 2026-07-22).
+      self.open_agent_input();
+      return;
+    };
+    self.attach_agent_by_id(&sid);
+  }
+
+  /// Pin `sid` to the overlay's target worktree — shared by the row action
+  /// and the attach-by-id prompt. Returns `true` when the pin was written.
+  fn attach_agent_by_id(&mut self, sid: &str) -> bool {
+    if self.is_workspace() {
+      // Pins are single-repo (same ceiling as the CLI surfaces): in
+      // workspace mode `sync_active_repo` may swap `self.repo` under the
+      // open overlay, which would write the pin into the wrong repo's
+      // config (Codex review round B).
+      self.status = "agent pins are per-repo — not available in workspace mode".into();
+      return false;
+    }
+    let Some((path, _)) = self.detail_overlay_target.clone() else {
+      self.status = "cannot pin: no worktree captured".into();
+      return false;
+    };
+    // The CURRENT branch, not the one captured at overlay open: a branch
+    // flipped externally while the overlay stayed open would otherwise
+    // receive the pin under `branch.<old>.` (Codex review round U).
+    let Some(branch) = self.current_branch_of(&path) else {
+      self.status = "cannot pin: worktree has no branch (detached HEAD)".into();
+      return false;
+    };
+    if let Err(e) = crate::github::add_agent_pin(&self.repo, &branch, sid) {
+      self.status = format!("pin failed: {e}");
+      return false;
+    }
+    self.status = format!("pinned {sid}");
+    self.refresh_agent_overlay_rows(&path);
+    true
+  }
+
+  /// Enter the attach-by-id prompt (`i` in the overlay): palette-style
+  /// query over EVERY detected session — a session matched to no worktree
+  /// is exactly the one worth pinning manually.
+  pub fn open_agent_input(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
+    self.detail_overlay.input.clear();
+    self.detail_overlay.input_selected = 0;
+    // The candidate pool needs the full sweep — refreshed on open, not on
+    // the periodic tick (round Q); until it lands the prompt filters the
+    // last landed pool.
+    self.refresh_agent_pool();
+  }
+
+  pub fn agent_input_push(&mut self, c: char) {
+    self.detail_overlay.input.push(c);
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn agent_input_pop(&mut self) {
+    self.detail_overlay.input.pop();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn agent_input_next(&mut self) {
+    let len = self.agent_input_candidates().len();
+    self.detail_overlay.input_selected = (self.detail_overlay.input_selected + 1).min(len.saturating_sub(1));
+  }
+
+  pub fn agent_input_prev(&mut self) {
+    self.detail_overlay.input_selected = self.detail_overlay.input_selected.saturating_sub(1);
+  }
+
+  pub fn agent_input_cancel(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::List;
+    self.detail_overlay.input.clear();
+  }
+
+  /// The prompt's filtered candidate pool (owned clones — the borrow of
+  /// `agent_all_sessions` must not outlive `&mut self` call sites).
+  pub fn agent_input_candidates(&self) -> Vec<crate::agent_sessions::AgentSession> {
+    crate::tui::state::detail_overlay::filter_sessions(&self.agent_all_sessions, &self.detail_overlay.input)
+      .into_iter()
+      .cloned()
+      .collect()
+  }
+
+  /// Attach the highlighted candidate (or the literal query when nothing
+  /// matches a known session — validated before persisting). Unknown id
+  /// keeps the prompt open for correction.
+  pub fn agent_input_submit(&mut self) {
+    let candidates = self.agent_input_candidates();
+    let sid = candidates
+      .get(self.detail_overlay.input_selected)
+      .map(|s| s.id.clone())
+      .unwrap_or_else(|| self.detail_overlay.input.trim().to_string());
+    let known = candidates.iter().any(|s| s.id == sid);
+    if sid.is_empty() || !known {
+      self.status = format!("no agent session matching '{sid}' — run gwm agents for ids");
+      return;
+    }
+    if self.attach_agent_by_id(&sid) {
+      self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::List;
+      self.detail_overlay.input.clear();
+    }
+  }
+
+  /// Unpin the SELECTED session (`d` inside the modal). Pins are
+  /// multi-valued (user feedback 2026-07-22): only the highlighted
+  /// session's pin is removed, the others stay.
+  pub fn detach_selected_agent(&mut self) {
+    if self.is_workspace() {
+      self.status = "agent pins are per-repo — not available in workspace mode".into();
+      return;
+    }
+    let Some(sid) = self.detail_overlay.selected_meta().map(str::to_string) else {
+      self.status = "no session selected to unpin".into();
+      return;
+    };
+    let Some((path, _)) = self.detail_overlay_target.clone() else {
+      self.status = "cannot detach: no worktree captured".into();
+      return;
+    };
+    // Same round-U rule as attach: unpin from the CURRENT branch.
+    let Some(branch) = self.current_branch_of(&path) else {
+      self.status = "cannot detach: worktree has no branch (detached HEAD)".into();
+      return;
+    };
+    match crate::github::remove_agent_pin(&self.repo, &branch, &sid) {
+      Ok(true) => self.status = format!("unpinned {sid}"),
+      Ok(false) => {
+        self.status = "session is not pinned".into();
+        return;
+      }
+      Err(e) => {
+        self.status = format!("detach failed: {e}");
+        return;
+      }
+    }
+    self.refresh_agent_overlay_rows(&path);
+  }
+
+  /// Rebuild the open overlay's rows after a pin change, refresh the
+  /// render-side pins copy (the Agents pane shows pinned-only), and push
+  /// the new pin state to every other surface (snapshot re-detection).
+  fn refresh_agent_overlay_rows(&mut self, path: &Path) {
+    // Map first: `build_agent_rows` reads the [`Self::agent_pins`] copy
+    // (round P), so the fresh read must land before the rows rebuild.
+    self.agent_pins = self.read_agent_pins();
+    if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
+      let rows = self.build_agent_rows(&w);
+      self.detail_overlay.set_rows(rows);
+    }
+    if self.tasks.is_loading(TaskKind::AgentSessions) {
+      // The in-flight thread keeps walking the store even if its slot is
+      // dropped — invalidating here raced a second scan against it
+      // (round U, same hazard as rounds P/R). Let it land and chain the
+      // re-detection; its pre-change pins are skipped on landing.
+      self.agent_redetect_wanted = true;
+    } else {
+      self.tasks.invalidate(TaskKind::AgentSessions);
+      self.agent_snapshot_at = None;
+    }
+  }
+
+  /// Close the detail overlay back to the list, leaving list state as it was.
+  pub fn close_detail_overlay(&mut self) {
+    self.detail_overlay_target = None;
+    self.view = View::List;
+  }
+
   pub fn enter_clean_overlay(&mut self) {
     let Some(sel) = self.selected() else {
       self.status = "nothing selected".into();

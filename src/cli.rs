@@ -67,6 +67,37 @@ pub struct Cli {
   pub command: Option<Command>,
 }
 
+/// Sub-actions of `gwm agents` (issue #408 US4). Bare `gwm agents` lists.
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum AgentsAction {
+  /// Pin session SESSION_ID to the worktree matching PATTERN. The pin
+  /// overlays auto-detection and ACCUMULATES — several sessions can be
+  /// pinned to one worktree.
+  Attach {
+    /// Worktree name (substring match), or `.` for the enclosing worktree.
+    pattern: String,
+    /// Session id as shown by `gwm agents`.
+    session_id: String,
+  },
+  /// Remove pin(s) from the worktree matching PATTERN: the one named by
+  /// SESSION_ID, or every pin when omitted.
+  Detach {
+    /// Worktree name (substring match), or `.` for the enclosing worktree.
+    pattern: String,
+    /// Specific pinned session id to remove (all pins when omitted).
+    session_id: Option<String>,
+  },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum AgentsFormat {
+  /// Human-readable listing (default).
+  Table,
+  /// Machine-readable JSON — the same worktree rows as
+  /// `gwm list --format=json` (experimental `agents` field included).
+  Json,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ListFormat {
   /// Human-readable table (default).
@@ -135,6 +166,17 @@ pub enum Command {
     /// network-free. Ignored with `--format names`.
     #[arg(long)]
     detect_pr: bool,
+  },
+  /// Agent sessions per worktree (issue #408): list what detection found,
+  /// or pin/unpin a session manually. Detection reads each agent's on-disk
+  /// session artefacts (Claude Code, Codex, opencode, Mistral Vibe) — a pin
+  /// overlays it for the cases the recorded directory cannot cover.
+  Agents {
+    #[command(subcommand)]
+    action: Option<AgentsAction>,
+    /// Output format for the listing (ignored by attach/detach).
+    #[arg(long, value_enum, default_value_t = AgentsFormat::Table)]
+    format: AgentsFormat,
   },
   /// Create a new worktree (and matching branch).
   Create {
@@ -324,22 +366,25 @@ pub enum Command {
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
     format: OutputFormat,
   },
-  /// Run a long-running JSON-RPC 2.0 daemon over a unix domain socket.
+  /// Run a long-running JSON-RPC 2.0 daemon over a local transport.
   ///
   /// Editors, statusbars, and tooling connect once and call `list` /
   /// `doctor` / `path`, or `subscribe` for pushed `worktrees.changed`
   /// notifications — instead of spawning `gwm` per query (issue #38).
   /// Newline-delimited JSON, one request and one response per line.
   ///
-  /// Unix-only and built behind the default-on `daemon` feature; on other
-  /// platforms / `--no-default-features` builds the command exits with an
+  /// The transport is a unix domain socket on unix and a named pipe under
+  /// `\\.\pipe\` on Windows (issue #439). Built behind the default-on
+  /// `daemon` feature; a `--no-default-features` build exits with an
   /// explanatory error.
   Daemon {
-    /// Socket path to bind. Defaults to `$XDG_RUNTIME_DIR/gwm.sock`,
-    /// falling back to `$TMPDIR`, then `/tmp`. When the chosen base dir is
-    /// not owner-only (e.g. the shared `/tmp` last resort), the socket is
-    /// isolated in a per-user `<base>/gwm-<uid>/gwm.sock` instead, so it
-    /// stays un-connectable cross-user.
+    /// Where to bind. On unix: a socket path, defaulting to
+    /// `$XDG_RUNTIME_DIR/gwm.sock`, falling back to `$TMPDIR`, then
+    /// `/tmp` — isolated in a per-user `<base>/gwm-<uid>/gwm.sock` when
+    /// the base dir is not owner-only. On Windows: the pipe NAME under
+    /// `\\.\pipe\` (not a filesystem path), defaulting to
+    /// `gwm-<user>.sock`, restricted to the owner by its security
+    /// descriptor.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Worktree-state poll interval in milliseconds for `subscribe` push
@@ -353,7 +398,8 @@ pub enum Command {
   /// Print a compact one-line worktree summary for shell prompts (issue #309).
   ///
   /// The first real consumer of `gwm daemon`: it connects to the daemon's
-  /// unix socket, asks for the worktree set, and renders a single line —
+  /// transport (unix socket, or a named pipe on Windows, issue #439), asks
+  /// for the worktree set, and renders a single line —
   /// active branch, worktree count, dirty / ahead / behind, linked issue /
   /// PR — suitable for a tmux / starship / zsh statusline. With `--watch`
   /// it subscribes to the daemon's `worktrees.changed` stream and reprints
@@ -364,10 +410,11 @@ pub enum Command {
   /// nothing instead of erroring. A CI rollup is intentionally not shown —
   /// it is not part of the daemon's stable schema.
   Statusline {
-    /// Daemon socket path. Defaults to the same resolution as `gwm daemon`:
-    /// `$XDG_RUNTIME_DIR/gwm.sock`, then `$TMPDIR`, then `/tmp` — isolated in
-    /// a per-user `<base>/gwm-<uid>/gwm.sock` when the base dir isn't
-    /// owner-only (the shared `/tmp` fallback).
+    /// Daemon socket path (unix) or pipe name (Windows). Defaults to the
+    /// same resolution as `gwm daemon`: `$XDG_RUNTIME_DIR/gwm.sock`, then
+    /// `$TMPDIR`, then `/tmp` — isolated in a per-user
+    /// `<base>/gwm-<uid>/gwm.sock` when the base dir isn't owner-only —
+    /// and `gwm-<user>.sock` under `\\.\pipe\` on Windows.
     #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
     /// Stream live updates: subscribe to `worktrees.changed` and reprint
@@ -1022,6 +1069,7 @@ pub fn run(cli: Cli) -> Result<()> {
     Command::Bootstrap { target, skip_hooks } => cmd_bootstrap(target, skip_hooks, mode),
     Command::Sync { pattern, merge } => cmd_sync(pattern, merge),
     Command::Prune { dry_run } => cmd_prune(dry_run),
+    Command::Agents { action, format } => cmd_agents(action, format),
     Command::Doctor { format } => cmd_doctor(format),
     Command::Daemon { socket, poll_ms } => cmd_daemon(socket, poll_ms),
     Command::Statusline { socket, watch } => cmd_statusline(socket, watch),
@@ -1805,6 +1853,215 @@ fn cmd_init(preset: Option<String>, list_presets: bool, show: bool) -> Result<()
   Ok(())
 }
 
+/// `gwm agents` (issue #408 US4): list detected agent sessions per worktree,
+/// or pin/unpin one manually. Pins live in git branch config
+/// (`gwm-agent-pin`) and overlay auto-detection everywhere.
+fn cmd_agents(action: Option<AgentsAction>, format: AgentsFormat) -> Result<()> {
+  let repo = worktree::discover_repo(None)?;
+  let trees = worktree::list(&repo)?;
+
+  match action {
+    None => {
+      let mut rows: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
+      let pins = json_api::agent_pins_for_rows(&repo, &trees);
+      let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
+      // JSON mirrors `gwm list --format=json` and has no `unmatched`
+      // section, so it must not pay the full foreign-dir sweep the pool
+      // costs (Codex review round U) — only the human table does.
+      if format == AgentsFormat::Json {
+        json_api::attach_agents(&mut rows, &reals, &pins);
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+      }
+      let pool = json_api::attach_agents_with_pool(&mut rows, &reals, &pins);
+      // The pinned marker is scoped per (worktree, session): a session
+      // detected on A but pinned on B is flagged only under B (Codex
+      // review round A).
+      let pinned_pairs: std::collections::BTreeSet<(&str, &str)> =
+        pins.iter().map(|(path, sid)| (path.as_str(), sid.as_str())).collect();
+      let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+      let mut any = false;
+      for (row, tree) in rows.iter().zip(&trees) {
+        let Some(agents) = &row.agents else {
+          continue;
+        };
+        any = true;
+        let row_key = crate::agent_sessions::path_display_key(&tree.path);
+        println!("{}", row.name);
+        for s in &agents.sessions {
+          let pin_mark = if pinned_pairs.contains(&(row_key.as_str(), s.id.as_str())) {
+            "  pinned"
+          } else {
+            ""
+          };
+          // Relative last activity (spec US4): the human table must let old
+          // sessions be told apart at a glance.
+          let ago = worktree::format_relative_duration(std::time::Duration::from_secs(
+            now_epoch.saturating_sub(s.last_activity),
+          ));
+          let name_part = s.name.as_deref().map(|n| format!("  {n}")).unwrap_or_default();
+          println!(
+            "  {:<9} {:<7} {:>4} ago  {}{}{}",
+            s.kind, s.freshness, ago, s.id, name_part, pin_mark
+          );
+        }
+      }
+      // Sessions no worktree matched (Codex review round C): the attach
+      // error points here for ids, so the ones worth attaching — launched
+      // in another repo, a subdirectory, an old path — must be visible.
+      let shown: std::collections::BTreeSet<&str> = rows
+        .iter()
+        .filter_map(|r| r.agents.as_ref())
+        .flat_map(|a| a.sessions.iter().map(|s| s.id.as_str()))
+        .collect();
+      let mut unmatched: Vec<&crate::agent_sessions::AgentSession> =
+        pool.iter().filter(|s| !shown.contains(s.id.as_str())).collect();
+      unmatched.sort_by_key(|s| (s.ended, std::cmp::Reverse(s.last_activity)));
+      if !unmatched.is_empty() {
+        any = true;
+        let now_sys = std::time::SystemTime::now();
+        println!("unmatched");
+        for s in &unmatched {
+          let word = match crate::agent_sessions::Freshness::classify(s.last_activity, s.ended, now_sys) {
+            crate::agent_sessions::Freshness::Active => "active",
+            crate::agent_sessions::Freshness::Idle => "idle",
+          };
+          let ago = worktree::format_relative_duration(now_sys.duration_since(s.last_activity).unwrap_or_default());
+          let name_part = s.name.as_deref().map(|n| format!("  {n}")).unwrap_or_default();
+          println!(
+            "  {:<9} {:<7} {:>4} ago  {}{}",
+            s.kind.display(),
+            word,
+            ago,
+            s.id,
+            name_part
+          );
+        }
+      }
+      if !any {
+        println!("no agent session found");
+      }
+      Ok(())
+    }
+    Some(AgentsAction::Attach { pattern, session_id }) => {
+      let target = resolve_agents_worktree(&trees, &pattern)?;
+      let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
+        return Err(GwmError::Config(format!(
+          "worktree '{}' has no branch (detached HEAD) — a pin lives in branch config",
+          target.name
+        )));
+      };
+      // Validate the id resolves from artefacts before persisting, so a
+      // typo fails now instead of pinning dead weight.
+      let home = crate::agent_sessions::agents_home()
+        .ok_or_else(|| GwmError::Config("no home directory to scan for agent sessions".into()))?;
+      let key = crate::agent_sessions::path_display_key(&target.path);
+      let keyed: Vec<(String, PathBuf)> = trees
+        .iter()
+        .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
+        .collect();
+      let probe = [(key.clone(), session_id.clone())];
+      let map = crate::agent_sessions::detect_all(&home, &keyed, &probe, std::time::SystemTime::now());
+      let found = map
+        .get(&key)
+        .is_some_and(|a| a.sessions.iter().any(|s| s.id == session_id));
+      if !found {
+        return Err(GwmError::Config(format!(
+          "no agent session with id '{session_id}' — run `gwm agents` to see the detected ids"
+        )));
+      }
+      github::add_agent_pin(&repo, &branch, &session_id)?;
+      println!("pinned {session_id} to {}", target.name);
+      Ok(())
+    }
+    Some(AgentsAction::Detach { pattern, session_id }) => {
+      let target = resolve_agents_worktree(&trees, &pattern)?;
+      let Some(branch) = github::pinnable_branch(target.branch.as_deref()).map(str::to_string) else {
+        return Err(GwmError::Config(format!(
+          "worktree '{}' has no branch (detached HEAD) — nothing to detach",
+          target.name
+        )));
+      };
+      match session_id {
+        Some(sid) => {
+          if !github::remove_agent_pin(&repo, &branch, &sid)? {
+            return Err(GwmError::Config(format!(
+              "no pin '{sid}' on {} — run `gwm agents` to see the pinned ids",
+              target.name
+            )));
+          }
+          println!("detached {sid} from {}", target.name);
+        }
+        None => {
+          github::clear_agent_pins(&repo, &branch)?;
+          println!("detached every agent pin from {}", target.name);
+        }
+      }
+      Ok(())
+    }
+  }
+}
+
+/// Resolve `pattern` against the full worktree set with
+/// [`worktree::find_fuzzy`]'s tiering — exact name, then exact id, then
+/// case-insensitive substring (Codex review round K) — but unlike it the
+/// main checkout is included (a pin on it is legitimate) and `.` selects
+/// the worktree enclosing the cwd.
+fn resolve_agents_worktree(trees: &[worktree::WorktreeInfo], pattern: &str) -> Result<worktree::WorktreeInfo> {
+  if pattern == "." {
+    let cwd = std::env::current_dir()?;
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    return trees
+      .iter()
+      .filter(|w| {
+        let wp = w.path.canonicalize().unwrap_or_else(|_| w.path.clone());
+        cwd.starts_with(&wp)
+      })
+      .max_by_key(|w| w.path.as_os_str().len())
+      .cloned()
+      .ok_or_else(|| GwmError::WorktreeNotFound(".".into()));
+  }
+  let exact: Vec<&worktree::WorktreeInfo> = trees.iter().filter(|w| w.name == pattern).collect();
+  match exact.as_slice() {
+    [one] => {
+      // find_fuzzy: a token that is one worktree's display name and
+      // another's stable id must not silently pick the name match.
+      if let Some(by_id) = trees.iter().find(|w| w.id == pattern && w.id != one.id) {
+        return Err(GwmError::Other(format!(
+          "'{}' is ambiguous: the display name of '{}' and the id of '{}'; target one by its unique id",
+          pattern, one.id, by_id.id
+        )));
+      }
+      return Ok((*one).clone());
+    }
+    [] => {
+      if let Some(by_id) = trees.iter().find(|w| w.id == pattern) {
+        return Ok(by_id.clone());
+      }
+    }
+    many => {
+      let ids = many.iter().map(|w| w.id.as_str()).collect::<Vec<_>>().join(", ");
+      return Err(GwmError::Other(format!(
+        "name '{pattern}' is ambiguous ({} worktrees share it); target one by id: {ids}",
+        many.len()
+      )));
+    }
+  }
+  let pat = pattern.to_lowercase();
+  let matches: Vec<&worktree::WorktreeInfo> = trees.iter().filter(|w| w.name.to_lowercase().contains(&pat)).collect();
+  match matches.as_slice() {
+    [one] => Ok((*one).clone()),
+    [] => Err(GwmError::WorktreeNotFound(pattern.into())),
+    many => Err(GwmError::Config(format!(
+      "pattern '{pattern}' is ambiguous: {}",
+      many.iter().map(|w| w.name.as_str()).collect::<Vec<_>>().join(", ")
+    ))),
+  }
+}
+
 fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   let repo = worktree::discover_repo(None)?;
   let trees = worktree::list(&repo)?;
@@ -1856,6 +2113,11 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     // worktree — unlike `names`, a JSON consumer wants the full picture
     // (an editor statusbar resolves the active worktree from the set).
     let mut dto: Vec<json_api::JsonWorktree> = trees.iter().map(json_api::JsonWorktree::from).collect();
+    // Agent sessions (issue #408): the shared `attach_agents` pass keeps
+    // this surface byte-identical to the daemon's `list`.
+    let pins = json_api::agent_pins_for_rows(&repo, &trees);
+    let reals: Vec<PathBuf> = trees.iter().map(|w| w.path.clone()).collect();
+    json_api::attach_agents(&mut dto, &reals, &pins);
     if detect_pr {
       // When detection RAN for a row its result is authoritative — apply
       // it even when `None` (clears a stale persisted PR). When it did NOT
@@ -1880,14 +2142,59 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     .clamp(6, 40);
   let status_w = 14;
   let pr_w = 6;
+  // AGENT column (issue #408): the same compact indicator as the TUI table —
+  // the most recently active agent per worktree, or `-`. Sized to the
+  // longest agent name ("opencode").
+  let agent_w = 8;
+  let agent_cells: Vec<String> = {
+    let mut cells = vec!["-".to_string(); trees.len()];
+    if let Some(home) = crate::agent_sessions::agents_home() {
+      let keyed: Vec<(String, PathBuf)> = trees
+        .iter()
+        .map(|w| (crate::agent_sessions::path_display_key(&w.path), w.path.clone()))
+        .collect();
+      let pins: Vec<(String, String)> = trees
+        .iter()
+        .flat_map(|w| {
+          let pins = github::pinnable_branch(w.branch.as_deref())
+            .map(|b| github::agent_pins(&repo, b).unwrap_or_default())
+            .unwrap_or_default();
+          let path = crate::agent_sessions::path_display_key(&w.path);
+          pins.into_iter().map(move |sid| (path.clone(), sid))
+        })
+        .collect();
+      let map = crate::agent_sessions::detect_all(&home, &keyed, &pins, std::time::SystemTime::now());
+      for (i, w) in trees.iter().enumerate() {
+        if let Some(top) = map
+          .get(&crate::agent_sessions::path_display_key(&w.path))
+          .and_then(|a| a.top())
+        {
+          cells[i] = top.kind.display().to_string();
+        }
+      }
+    }
+    cells
+  };
+  // Column shown only when a session was detected (Codex review round D):
+  // a no-agent setup keeps the exact pre-#408 table layout. The pre-padded
+  // fragment (cell + separator, or nothing) keeps one format string per row.
+  let show_agent = agent_cells.iter().any(|c| c != "-");
+  let agent_col = |cell: &str| {
+    if show_agent {
+      format!("{cell:<agent_w$}  ")
+    } else {
+      String::new()
+    }
+  };
 
   if detect_pr {
     println!(
-      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}PATH",
       "NAME",
       "BRANCH",
       "STATUS",
       "PR",
+      agent_col("AGENT"),
       nw = name_w,
       bw = branch_w,
       sw = status_w,
@@ -1895,10 +2202,11 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
     );
   } else {
     println!(
-      "  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "  {:<nw$}  {:<bw$}  {:<sw$}  {}PATH",
       "NAME",
       "BRANCH",
       "STATUS",
+      agent_col("AGENT"),
       nw = name_w,
       bw = branch_w,
       sw = status_w,
@@ -1914,12 +2222,13 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
       let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
-        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}{}",
         mark,
         w.name,
         branch,
         status,
         pr_cell,
+        agent_col(&agent_cells[i]),
         w.path.display(),
         nw = name_w,
         bw = branch_w,
@@ -1928,11 +2237,12 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
       );
     } else {
       println!(
-        "{} {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        "{} {:<nw$}  {:<bw$}  {:<sw$}  {}{}",
         mark,
         w.name,
         branch,
         status,
+        agent_col(&agent_cells[i]),
         w.path.display(),
         nw = name_w,
         bw = branch_w,
@@ -1989,6 +2299,22 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     Vec::new()
   };
 
+  // Pins live in each row's OWNING repo branch config — open it per row
+  // (`agent_pins_for_rows` is single-repo; a workspace spans several). A
+  // session pinned in a child repo must survive on every workspace surface
+  // (Codex review round I).
+  let agent_pins: Vec<(String, String)> = rows
+    .iter()
+    .filter_map(|row| {
+      let repo = Repository::open(&row.repo_path).ok()?;
+      let branch = github::pinnable_branch(row.info.branch.as_deref())?;
+      let pins = github::agent_pins(&repo, branch).ok()?;
+      let path = crate::agent_sessions::path_display_key(&row.info.path);
+      Some(pins.into_iter().map(move |sid| (path.clone(), sid)).collect::<Vec<_>>())
+    })
+    .flatten()
+    .collect();
+
   if format == ListFormat::Json {
     // Workspace JSON tags each worktree with its owning `repo` so a
     // cross-repo consumer can disambiguate (issue #36 + #38).
@@ -1998,7 +2324,7 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       #[serde(flatten)]
       worktree: json_api::JsonWorktree,
     }
-    let dto: Vec<WorkspaceJsonWorktree> = rows
+    let mut worktree_rows: Vec<json_api::JsonWorktree> = rows
       .iter()
       .enumerate()
       .map(|(i, row)| {
@@ -2009,10 +2335,19 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
         if let Some(pr) = detected_prs.get(i).copied().flatten() {
           worktree.pr = pr;
         }
-        WorkspaceJsonWorktree {
-          repo: &row.repo_name,
-          worktree,
-        }
+        worktree
+      })
+      .collect();
+    // Issue #408: same shared agents pass as single-repo list / daemon,
+    // with each row's own repo pins overlaid (round I).
+    let reals: Vec<PathBuf> = rows.iter().map(|r| r.info.path.clone()).collect();
+    json_api::attach_agents(&mut worktree_rows, &reals, &agent_pins);
+    let dto: Vec<WorkspaceJsonWorktree> = rows
+      .iter()
+      .zip(worktree_rows)
+      .map(|(row, worktree)| WorkspaceJsonWorktree {
+        repo: &row.repo_name,
+        worktree,
       })
       .collect();
     println!("{}", serde_json::to_string_pretty(&dto)?);
@@ -2020,6 +2355,43 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
   }
 
   let repo_w = rows.iter().map(|r| r.repo_name.len()).max().unwrap_or(4).clamp(4, 30);
+  // AGENT parity with the single-repo table (Codex review round A): one
+  // detection pass over the merged rows, each row's own repo pins overlaid
+  // (round I).
+  let agent_w = 8;
+  let agent_cells: Vec<String> = {
+    let mut cells = vec!["-".to_string(); rows.len()];
+    if let Some(home) = crate::agent_sessions::agents_home() {
+      let keyed: Vec<(String, PathBuf)> = rows
+        .iter()
+        .map(|r| {
+          (
+            crate::agent_sessions::path_display_key(&r.info.path),
+            r.info.path.clone(),
+          )
+        })
+        .collect();
+      let map = crate::agent_sessions::detect_all(&home, &keyed, &agent_pins, std::time::SystemTime::now());
+      for (i, r) in rows.iter().enumerate() {
+        if let Some(top) = map
+          .get(&crate::agent_sessions::path_display_key(&r.info.path))
+          .and_then(|a| a.top())
+        {
+          cells[i] = top.kind.display().to_string();
+        }
+      }
+    }
+    cells
+  };
+  // Same conditional column as the single-repo table (round D).
+  let show_agent = agent_cells.iter().any(|c| c != "-");
+  let agent_col = |cell: &str| {
+    if show_agent {
+      format!("{cell:<agent_w$}  ")
+    } else {
+      String::new()
+    }
+  };
   let name_w = rows.iter().map(|r| r.info.name.len()).max().unwrap_or(4).clamp(4, 40);
   let branch_w = rows
     .iter()
@@ -2032,12 +2404,13 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
 
   if detect_pr {
     println!(
-      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  PATH",
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}PATH",
       "REPO",
       "NAME",
       "BRANCH",
       "STATUS",
       "PR",
+      agent_col("AGENT"),
       rw = repo_w,
       nw = name_w,
       bw = branch_w,
@@ -2046,11 +2419,12 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
     );
   } else {
     println!(
-      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  PATH",
+      "  {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}PATH",
       "REPO",
       "NAME",
       "BRANCH",
       "STATUS",
+      agent_col("AGENT"),
       rw = repo_w,
       nw = name_w,
       bw = branch_w,
@@ -2067,13 +2441,14 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       let pr = detected_prs.get(i).copied().flatten().flatten();
       let pr_cell = pr.map(|n| format!("#{n}")).unwrap_or_else(|| "-".into());
       println!(
-        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}",
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {:<pw$}  {}{}",
         mark,
         row.repo_name,
         w.name,
         branch,
         status,
         pr_cell,
+        agent_col(&agent_cells[i]),
         w.path.display(),
         rw = repo_w,
         nw = name_w,
@@ -2083,12 +2458,13 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       );
     } else {
       println!(
-        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}",
+        "{} {:<rw$}  {:<nw$}  {:<bw$}  {:<sw$}  {}{}",
         mark,
         row.repo_name,
         w.name,
         branch,
         status,
+        agent_col(&agent_cells[i]),
         w.path.display(),
         rw = repo_w,
         nw = name_w,
@@ -2880,9 +3256,10 @@ fn cmd_doctor(format: OutputFormat) -> Result<()> {
 
 /// `gwm daemon` (issue #38, phase 2). Discovers the repo from the CWD,
 /// binds the JSON-RPC socket, and serves until killed. The serving path
-/// is unix + `daemon`-feature only; elsewhere it returns a clean error so
-/// the subcommand stays present (and help identical) on every platform.
-#[cfg(all(unix, feature = "daemon"))]
+/// needs the `daemon` feature plus a supported transport — a unix domain
+/// socket, or a named pipe on Windows (#439); elsewhere it returns a clean
+/// error so the subcommand stays present (and help identical) everywhere.
+#[cfg(all(any(unix, windows), feature = "daemon"))]
 fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   use std::sync::atomic::AtomicBool;
   use std::sync::Arc;
@@ -2904,11 +3281,11 @@ fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   crate::daemon::serve(&opts, Arc::new(AtomicBool::new(false)))
 }
 
-#[cfg(not(all(unix, feature = "daemon")))]
+#[cfg(not(all(any(unix, windows), feature = "daemon")))]
 fn cmd_daemon(socket: Option<PathBuf>, poll_ms: u64) -> Result<()> {
   let _ = (socket, poll_ms);
   Err(GwmError::Other(
-    "daemon mode is unavailable in this build (requires a Unix platform and the `daemon` feature)".into(),
+    "daemon mode is unavailable in this build (requires the `daemon` feature on a supported platform)".into(),
   ))
 }
 
@@ -2928,7 +3305,7 @@ fn print_statusline(worktrees: &[crate::json_api::JsonWorktree], cwd: &Path) {
   let _ = io::stdout().flush();
 }
 
-#[cfg(all(unix, feature = "daemon"))]
+#[cfg(all(any(unix, windows), feature = "daemon"))]
 fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   let socket = socket.unwrap_or_else(crate::daemon::socket_path);
   // `print_statusline` canonicalises both the cwd and each worktree path,
@@ -2956,10 +3333,14 @@ fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
   Ok(())
 }
 
-#[cfg(not(all(unix, feature = "daemon")))]
+#[cfg(not(all(any(unix, windows), feature = "daemon")))]
 fn cmd_statusline(socket: Option<PathBuf>, watch: bool) -> Result<()> {
-  // No daemon transport in this build: the statusline has no source, so it
-  // degrades to the documented empty line (exit 0) rather than erroring.
+  // No daemon transport in this build (`--no-default-features`, or an
+  // unsupported platform): the statusline has no source, so it degrades to
+  // the documented empty line (exit 0) rather than erroring. The statusline
+  // is deliberately daemon-fed (#309: a prompt path must never open the
+  // repo or scan artefact stores itself); unix rides the socket, Windows
+  // the named pipe (#439).
   let _ = (socket, watch);
   let cwd = std::env::current_dir().unwrap_or_default();
   print_statusline(&[], &cwd);
