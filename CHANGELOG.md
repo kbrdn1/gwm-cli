@@ -19,7 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guaranteed at least 5 lines (border + 3 content rows) with the
   remaining height split proportionally to content size. Empty sections
   keep their collapse behaviour; overflowing content stays reachable
-  through the existing section scrolls. (#438)
+  through the existing section scrolls, and an overflowing `Working
+  Tree` paints a scrollbar on its inner right edge. (#438)
 - The `Working Tree` pane scrolls. With the status pane focused, `J` / `K`
   (rebindable as `wt_scroll_down` / `wt_scroll_up` under `[tui.keys]`) move
   an independent scroll offset over the file tree, clamped against the
