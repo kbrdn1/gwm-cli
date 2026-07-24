@@ -132,7 +132,13 @@ pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commi
   let natural = |len: u16| if len == 0 { 0 } else { len.saturating_add(2) };
   let natural_a = natural(agents_len);
   let natural_w = natural(wt_len);
-  let natural_c = commits_len.saturating_add(2);
+  // Commits is never collapsed and its natural height is floored at 3 —
+  // the old `Min(3)` rendered an empty bordered panel at 3 lines anyway.
+  // Raising the *natural* height (not just the floor) keeps the
+  // `floor <= natural` invariant the sharing math below relies on
+  // (Codex review, PR #454: an empty history with `floor_c = 3` made
+  // `nat - floor` underflow).
+  let natural_c = commits_len.saturating_add(2).max(3);
 
   if natural_a as u32 + natural_w as u32 + natural_c as u32 <= available as u32 {
     return (natural_a, natural_w, available - natural_a - natural_w);
@@ -140,7 +146,7 @@ pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commi
 
   let floor_a = natural_a.min(5);
   let floor_w = natural_w.min(5);
-  let floor_c = natural_c.clamp(3, 5);
+  let floor_c = natural_c.min(5);
 
   let base = floor_a + floor_w + floor_c;
   if base > available {

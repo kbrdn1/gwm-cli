@@ -1027,6 +1027,18 @@ fn section_heights_degrade_commits_first_on_tiny_terminal() {
 }
 
 #[test]
+fn section_heights_survive_empty_commits_under_overflow() {
+  // Codex review on PR #454: with an empty history (natural 2) the commits
+  // floor used to be raised to 3, breaking the floor <= natural invariant
+  // the sharing math relies on — `nat - floor` underflowed and panicked in
+  // debug builds. The natural height of commits is now floored at 3 (the
+  // old `Min(3)` rendered an empty bordered panel at 3 lines anyway), so
+  // the invariant holds and the split stays additive.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(8, 0, 5, 0), (0, 5, 3));
+}
+
+#[test]
 fn section_heights_give_everything_to_commits_when_alone() {
   // No agents, clean tree, empty history: Recent Commits keeps the whole
   // column, matching the pre-#438 rendering of an empty bottom panel.
