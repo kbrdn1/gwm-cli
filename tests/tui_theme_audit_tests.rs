@@ -424,6 +424,7 @@ fn pr_summary_line_merged_badge_routes_through_pr_badge_color() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = gwm::tui::pr_summary_line(
@@ -572,6 +573,7 @@ fn summary_line_loaded_icons_resolve_through_state_roles() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   };
   let pr = gwm::tui::pr_summary_line(
     9,

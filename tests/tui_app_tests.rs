@@ -2269,6 +2269,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     checks_passed: 2,
     checks_total: 3,
     ci: CiState::Running,
+    checks: vec![],
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -2305,6 +2306,108 @@ fn loaded_issue_status_persists_title_for_no_fetch_startup() {
 }
 
 #[test]
+fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
+  // Issue #436: the CI checks overlay lists every statusCheckRollup entry of
+  // the linked PR — one row per check, order preserved, the details URL kept
+  // as the row meta so Enter can open it in the browser.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 1,
+    checks_total: 2,
+    ci: CiState::Failing,
+    checks: vec![
+      PrCheck {
+        name: "test (ubuntu-latest)".into(),
+        outcome: CheckOutcome::Failing,
+        url: Some("https://example.test/actions/runs/1/job/2".into()),
+      },
+      PrCheck {
+        name: "rustfmt".into(),
+        outcome: CheckOutcome::Passing,
+        url: None,
+      },
+    ],
+  }));
+
+  app.enter_ci_checks();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(app.detail_overlay.rows.len(), 2);
+  assert_eq!(app.detail_overlay.rows[0].value, "test (ubuntu-latest)");
+  assert_eq!(
+    app.detail_overlay.rows[0].meta.as_deref(),
+    Some("https://example.test/actions/runs/1/job/2")
+  );
+  assert_eq!(app.detail_overlay.rows[1].value, "rustfmt");
+  assert_eq!(app.detail_overlay.rows[1].meta, None);
+}
+
+#[test]
+fn enter_ci_checks_without_checks_stays_on_the_list_with_a_status_hint() {
+  // No linked PR (or a PR with an empty rollup): the overlay would be an
+  // empty void — surface the situation on the status bar instead.
+  let (_dir, mut app) = make_app();
+  app.enter_ci_checks();
+  assert_ne!(app.view, View::DetailOverlay, "no overlay without checks");
+  assert!(
+    app.status.contains("CI checks"),
+    "status bar must explain why nothing opened: {}",
+    app.status
+  );
+}
+
+#[test]
+fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
+  // Issue #436: `c` is contextual, same dispatch mechanism that turns j/k
+  // into sidebar scroll — worktrees context keeps the rename modal, status
+  // context opens the CI checks overlay.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+    }],
+  }));
+
+  app.focus_status();
+  app.edit_worktree_action();
+  assert_eq!(app.view, View::DetailOverlay, "status focus routes c to the CI overlay");
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+
+  app.close_detail_overlay();
+  app.focus_worktrees();
+  app.edit_worktree_action();
+  assert_ne!(
+    app.view,
+    View::DetailOverlay,
+    "worktrees context keeps the rename modal on c"
+  );
+}
+
+#[test]
 fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
@@ -2318,6 +2421,7 @@ fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2340,6 +2444,7 @@ fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2889,6 +2994,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -3794,6 +3900,7 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }));
 
   let theme = Theme::default();
@@ -4467,6 +4574,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     checks_passed: 3,
     checks_total: 3,
     ci: CiState::Passing,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4621,6 +4729,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4663,6 +4772,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let theme = Theme::default();
@@ -4692,6 +4802,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     checks_passed: 1,
     checks_total: 2,
     ci: gwm::github::CiState::Failing,
+    checks: vec![],
     updated_at: String::new(),
   };
   let theme = Theme::default();
@@ -4725,6 +4836,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     checks_passed: 0,
     checks_total: 0,
     ci: gwm::github::CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4770,6 +4882,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(

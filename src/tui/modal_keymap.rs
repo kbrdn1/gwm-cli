@@ -106,6 +106,9 @@ pub enum KeyContext {
   ExecPicker,
   /// Clean reclaim overlay (issue #325).
   Clean,
+  /// CI checks overlay (issue #436) — the detail-overlay shell opened on
+  /// the linked PR's per-check rollup list.
+  CiChecks,
 }
 
 impl KeyContext {
@@ -126,6 +129,7 @@ impl KeyContext {
       KeyContext::LinkInputNumber => "link.input_number",
       KeyContext::ExecPicker => "exec",
       KeyContext::Clean => "clean",
+      KeyContext::CiChecks => "ci_checks",
     }
   }
 
@@ -153,6 +157,7 @@ impl KeyContext {
       LinkInputNumber,
       ExecPicker,
       Clean,
+      CiChecks,
     ]
   }
 }
@@ -298,6 +303,13 @@ define_modal_actions! {
     CleanPrev    => "prev"    [ "k", "Up" ],
     CleanConfirm => "confirm" [ "y", "Enter" ],
     CleanCancel  => "cancel"  [ "n", "Esc" ],
+  }
+  CiChecks {
+    CiChecksClose  => "close"       [ "Esc", "q" ],
+    CiChecksNext   => "select_next" [ "j", "Down" ],
+    CiChecksPrev   => "select_prev" [ "k", "Up" ],
+    CiChecksOpen   => "open"        [ "Enter" ],
+    CiChecksFilter => "filter"      [ "f" ],
   }
 }
 

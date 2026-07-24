@@ -367,6 +367,7 @@ fn status_hints_are_grouped_read_then_sidebar_then_navigate_then_global() {
       "scroll",
       "wt scroll", // #437: Working Tree pane scroll
       "fetch",     // read the status pane
+      "ci checks", // #436: `c` routes to the CI checks overlay here
       "mode",
       "layout", // sidebar mode / layout
       "worktrees",

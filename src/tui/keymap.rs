@@ -145,6 +145,8 @@ define_actions! {
   // Overlays
   CommandLogs       => "command_logs",
   ConfigPanel       => "config_panel",
+  // #436: CI checks overlay — also reachable via `c` in the status context.
+  CiChecks          => "ci_checks",
   ExecOverlay       => "exec_overlay",
   CleanOverlay      => "clean_overlay",
   AgentSessions     => "agent_sessions",
@@ -504,6 +506,10 @@ impl Keymap {
       def(Action::FocusStatus, &["2"]),
       def(Action::CommandLogs, &["3"]),
       def(Action::ConfigPanel, &["4"]),
+      // #436: `C` opens the CI checks overlay from anywhere in the list
+      // view; `c` does the same while the status pane holds the focus
+      // (contextual routing, same mechanism as j/k sidebar scroll).
+      def(Action::CiChecks, &["C"]),
       // #325: `x` opens the exec profile picker overlay.
       def(Action::ExecOverlay, &["x"]),
       def(Action::AgentSessions, &["a"]),

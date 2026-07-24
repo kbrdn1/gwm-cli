@@ -2208,7 +2208,13 @@ impl App {
       View::CleanReport => HintContext::Clean,
       View::Edit => HintContext::Rename,
       // Issue #408: the detail overlay advertises its close/scroll keys.
-      View::DetailOverlay => HintContext::Detail,
+      View::DetailOverlay => {
+        if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+          HintContext::CiChecks
+        } else {
+          HintContext::Detail
+        }
+      }
       View::List => self.pane_hint_context(),
     }
   }
@@ -2675,8 +2681,106 @@ impl App {
       crate::github::pinnable_branch(sel.branch.as_deref()).map(str::to_string),
     ));
     let rows = self.build_agent_rows(&sel);
-    self.detail_overlay.open("Agent Sessions".into(), rows);
+    self.detail_overlay.open(
+      crate::tui::state::detail_overlay::DetailKind::Agents,
+      "Agent Sessions".into(),
+      rows,
+    );
     self.view = View::DetailOverlay;
+  }
+
+  /// Open the CI checks overlay (issue #436): one row per classified
+  /// `statusCheckRollup` entry of the linked PR, in rollup order. With no
+  /// linked PR or an empty rollup the overlay would be a bordered void —
+  /// explain on the status bar instead.
+  pub fn enter_ci_checks(&mut self) {
+    let checks = match self.pr_fetch_state() {
+      GitHubFetchState::Loaded(pr) if !pr.checks.is_empty() => pr.checks.clone(),
+      _ => {
+        self.status = "no CI checks to show — link a PR and fetch (F) first".into();
+        return;
+      }
+    };
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks);
+    self.detail_overlay.open(
+      crate::tui::state::detail_overlay::DetailKind::CiChecks,
+      "CI Checks".into(),
+      rows,
+    );
+    self.view = View::DetailOverlay;
+  }
+
+  /// Contextual `c` (issue #436) — same routing mechanism that turns
+  /// `j` / `k` into sidebar scroll in [`Self::next`] / [`Self::prev`]:
+  /// the worktrees context keeps the rename modal, the status context
+  /// opens the CI checks overlay.
+  pub fn edit_worktree_action(&mut self) {
+    if self.sidebar.open && self.sidebar.focused {
+      self.enter_ci_checks();
+    } else {
+      self.enter_edit_worktree();
+    }
+  }
+
+  // ---- CI checks overlay `f` filter (issue #436) ---------------------------
+  // Same shell machinery as the agent attach prompt right above (mode +
+  // input buffer + candidate cursor), filtering the overlay's own rows.
+
+  pub fn ci_input_open(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
+    self.detail_overlay.input.clear();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn ci_input_push(&mut self, c: char) {
+    self.detail_overlay.input.push(c);
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn ci_input_pop(&mut self) {
+    self.detail_overlay.input.pop();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  /// Indices of the rows matching the live query, in row order.
+  pub fn ci_input_matches(&self) -> Vec<usize> {
+    crate::tui::state::detail_overlay::filter_rows(&self.detail_overlay.rows, &self.detail_overlay.input)
+  }
+
+  pub fn ci_input_next(&mut self) {
+    let len = self.ci_input_matches().len();
+    self.detail_overlay.input_selected = (self.detail_overlay.input_selected + 1).min(len.saturating_sub(1));
+  }
+
+  pub fn ci_input_prev(&mut self) {
+    self.detail_overlay.input_selected = self.detail_overlay.input_selected.saturating_sub(1);
+  }
+
+  pub fn ci_input_cancel(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::List;
+    self.detail_overlay.input.clear();
+  }
+
+  /// The details URL of the highlighted filtered row (Enter inside the
+  /// filter). Pure so the event loop owns the actual browser spawn; also
+  /// re-anchors the List selection on the picked row and leaves the
+  /// filter, so Esc-free flows land where the user expects.
+  pub fn ci_input_selected_url(&mut self) -> Option<String> {
+    let matches = self.ci_input_matches();
+    let row_idx = matches.get(self.detail_overlay.input_selected).copied()?;
+    self.detail_overlay.selected = row_idx;
+    self.ci_input_cancel();
+    self.detail_overlay.rows.get(row_idx).and_then(|r| r.meta.clone())
+  }
+
+  /// The details URL of the selected row in List mode (Enter). `None` when
+  /// the check carries no URL — the caller reports on the status bar.
+  pub fn ci_selected_url(&self) -> Option<String> {
+    self
+      .detail_overlay
+      .rows
+      .get(self.detail_overlay.selected)
+      .and_then(|r| r.meta.clone())
   }
 
   /// Rows for the captured worktree: sessions from the snapshot, the manual

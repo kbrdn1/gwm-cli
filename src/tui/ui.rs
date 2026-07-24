@@ -2043,6 +2043,10 @@ pub enum HintContext {
   /// Generic detail overlay (issue #408): scroll / close. Agent sessions
   /// today, the rich PR/Issue view tomorrow.
   Detail,
+  /// CI checks overlay (issue #436): the detail-overlay shell on the linked
+  /// PR's per-check rollup — j/k select, Enter opens the details URL,
+  /// f filters, Esc closes.
+  CiChecks,
 }
 
 impl HintContext {
@@ -2066,6 +2070,7 @@ impl HintContext {
       HintContext::Clean => "clean",
       HintContext::Rename => "rename",
       HintContext::Detail => "agents",
+      HintContext::CiChecks => "checks",
     }
   }
 
@@ -2105,6 +2110,8 @@ impl HintContext {
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
+        // #436: `c` routes to the CI checks overlay in this context.
+        Hint::Key(EditWorktree, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -2188,6 +2195,12 @@ impl HintContext {
         Hint::Modal(ModalAction::DetailInput, "by id"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
+      HintContext::CiChecks => &[
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::CiChecksOpen, "open"),
+        Hint::Modal(ModalAction::CiChecksFilter, "filter"),
+        Hint::Modal(ModalAction::CiChecksClose, "close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2259,6 +2272,7 @@ impl HintContext {
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
       HintContext::Detail => KeyContext::Detail,
+      HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -2822,6 +2836,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(
       Action::AgentSessions,
       "show the agent sessions attached to this worktree",
+    ));
+    rows.push(entry(
+      Action::CiChecks,
+      "list the linked PR's CI checks (also `c` with status focus)",
     ));
   }
   rows.push(entry(
@@ -4519,6 +4537,67 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
   let ov = &app.detail_overlay;
 
+  // CI checks filter (issue #436): palette-style query over the overlay's
+  // own rows — the highlight follows the filtered set, Enter opens the
+  // highlighted check's details URL. Same fixed-height frame contract as
+  // the attach prompt below (#445: typing must not resize the window).
+  if ov.mode == DetailMode::Input && ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+    let matches = app.ci_input_matches();
+    let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
+    let (start, end) = picker_window(matches.len(), ov.input_selected, list_h);
+
+    let mut lines = overlay_title_lines("Filter CI checks", accent);
+    lines.push(Line::from(vec![
+      Span::styled("filter: ", Style::default().fg(app.theme.muted)),
+      Span::styled(
+        ov.input.clone(),
+        Style::default().fg(app.theme.name).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled("▏", Style::default().fg(accent)),
+    ]));
+    lines.push(Line::from(String::new()));
+    if matches.is_empty() {
+      lines.push(Line::from(Span::styled(
+        "no matching check",
+        Style::default().fg(app.theme.muted),
+      )));
+    }
+    for (i, row_idx) in matches.iter().enumerate().take(end).skip(start) {
+      let Some(row) = ov.rows.get(*row_idx) else { continue };
+      let label_color = match row.role {
+        DetailRole::Success => app.theme.clean,
+        DetailRole::Failure => app.theme.prunable,
+        DetailRole::Running => app.theme.dirty,
+        _ => app.theme.name,
+      };
+      let text = format!("{}  {}", row.label, row.value);
+      let pad = inner.saturating_sub(text.chars().count());
+      let mut style = Style::default().fg(label_color);
+      if i == ov.input_selected {
+        style = style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+      }
+      lines.push(Line::from(Span::styled(format!("{}{}", text, " ".repeat(pad)), style)));
+    }
+    for _ in matches.len().min(end).saturating_sub(start)..list_h {
+      lines.push(Line::from(String::new()));
+    }
+    let height = (2 + list_h + 2) as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_abs(width, height, term);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    let list_rect = Rect {
+      x: area.x + 1,
+      y: area.y + 2 + 2,
+      width: area.width.saturating_sub(2),
+      height: list_h as u16,
+    }
+    .intersection(area);
+    if list_rect.height > 0 {
+      let _ = scrollable_body_area(f, list_rect, start as u16, matches.len(), &app.theme);
+    }
+    return;
+  }
+
   // Attach-by-id prompt (user feedback 2026-07-22): palette-style query
   // over every detected session; Enter pins the highlighted candidate.
   if ov.mode == DetailMode::Input {
@@ -4620,6 +4699,10 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
       DetailRole::Muted => (app.theme.muted, app.theme.muted, false),
       DetailRole::Normal => (app.theme.name, app.theme.name, false),
+      // #436: per-check CI outcomes, same theme roles as `ci_indicator`.
+      DetailRole::Success => (app.theme.clean, app.theme.name, false),
+      DetailRole::Failure => (app.theme.prunable, app.theme.name, false),
+      DetailRole::Running => (app.theme.dirty, app.theme.name, false),
     };
     // Selection paints a full-width bar (picker convention): pad the row
     // out to the modal's inner width so the highlight reads as one block.

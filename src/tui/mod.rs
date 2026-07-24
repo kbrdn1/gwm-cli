@@ -669,14 +669,46 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // captured as query input (palette convention): printable chars type,
       // Backspace pops, arrows move the candidate highlight, Enter
       // attaches, Esc falls back to the list.
+      // Issue #436: the same shell serves two consumers — route the input
+      // prompt AND the list verbs by `detail_overlay.kind` (agents attach
+      // by id; CI checks filter their own rows and open URLs).
       View::DetailOverlay if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input => {
+        let ci = app.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks;
         match key.code {
+          KeyCode::Esc if ci => app.ci_input_cancel(),
           KeyCode::Esc => app.agent_input_cancel(),
+          KeyCode::Enter if ci => {
+            if let Some(url) = app.ci_input_selected_url() {
+              open_url(&url, &mut app);
+            }
+          }
           KeyCode::Enter => app.agent_input_submit(),
+          KeyCode::Backspace if ci => app.ci_input_pop(),
           KeyCode::Backspace => app.agent_input_pop(),
+          KeyCode::Down if ci => app.ci_input_next(),
           KeyCode::Down => app.agent_input_next(),
+          KeyCode::Up if ci => app.ci_input_prev(),
           KeyCode::Up => app.agent_input_prev(),
-          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.agent_input_push(c),
+          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if ci {
+              app.ci_input_push(c)
+            } else {
+              app.agent_input_push(c)
+            }
+          }
+          _ => {}
+        }
+      }
+      View::DetailOverlay if app.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks => {
+        match app.resolve_modal(KeyContext::CiChecks, key) {
+          Some(ModalAction::CiChecksClose) => app.close_detail_overlay(),
+          Some(ModalAction::CiChecksNext) => app.detail_overlay.select_next(),
+          Some(ModalAction::CiChecksPrev) => app.detail_overlay.select_prev(),
+          Some(ModalAction::CiChecksOpen) => match app.ci_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            None => app.status = "this check exposes no details URL".into(),
+          },
+          Some(ModalAction::CiChecksFilter) => app.ci_input_open(),
           _ => {}
         }
       }
@@ -929,7 +961,11 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Pull if !app.picker_mode => app.request_pull(),
     Action::Push if !app.picker_mode => app.request_push(),
     // #290: `c` opens the branch-rename modal.
-    Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
+    // Issue #436: `c` is contextual — rename in the worktrees context, CI
+    // checks overlay while the status pane holds the focus (routing lives
+    // on the App method, same pattern as j/k sidebar scroll).
+    Action::EditWorktree if !app.picker_mode => app.edit_worktree_action(),
+    Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.

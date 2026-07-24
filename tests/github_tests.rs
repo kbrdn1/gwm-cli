@@ -6,7 +6,8 @@ mod common;
 
 use common::init_repo;
 use gwm::github::{
-  self, parse_issue_json, parse_pr_head_json, parse_pr_json, BranchLink, CiState, IssueState, LinkSource, PrState,
+  self, parse_issue_json, parse_pr_head_json, parse_pr_json, BranchLink, CheckOutcome, CiState, IssueState, LinkSource,
+  PrState,
 };
 
 fn make_branch(repo: &git2::Repository, name: &str) {
@@ -509,6 +510,49 @@ fn parse_pr_json_extracts_state_draft_and_checks() {
   // 2 out of 3 checks completed (the IN_PROGRESS one is still running).
   assert_eq!(pr.checks_passed, 2);
   assert_eq!(pr.checks_total, 3);
+}
+
+#[test]
+fn parse_pr_json_keeps_the_per_check_list() {
+  // Issue #436: `RawCheck` used to drop the per-check name and URL when the
+  // rollup collapsed into `CiState` — the CI checks overlay needs the full
+  // classified list. Both rollup shapes must resolve: a `CheckRun` carries
+  // `name` + `detailsUrl`, the legacy `StatusContext` carries `context` +
+  // `targetUrl`.
+  let json = r#"{
+    "number": 61,
+    "title": "feat(tui): fuzzy search",
+    "state": "OPEN",
+    "isDraft": false,
+    "url": "https://github.com/kbrdn1/gwm-cli/pull/61",
+    "statusCheckRollup": [
+      {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
+       "detailsUrl": "https://github.com/kbrdn1/gwm-cli/actions/runs/1/job/2"},
+      {"context": "security/scan", "state": "FAILURE",
+       "targetUrl": "https://scanner.example/run/9"},
+      {"name": "fmt", "status": "IN_PROGRESS", "conclusion": null}
+    ],
+    "updatedAt": "2026-05-19T10:00:00Z"
+  }"#;
+
+  let pr = parse_pr_json(json).unwrap();
+
+  assert_eq!(pr.checks.len(), 3, "one entry per rollup check, order preserved");
+  assert_eq!(pr.checks[0].name, "ci");
+  assert_eq!(pr.checks[0].outcome, CheckOutcome::Passing);
+  assert_eq!(
+    pr.checks[0].url.as_deref(),
+    Some("https://github.com/kbrdn1/gwm-cli/actions/runs/1/job/2")
+  );
+  assert_eq!(
+    pr.checks[1].name, "security/scan",
+    "StatusContext name comes from `context`"
+  );
+  assert_eq!(pr.checks[1].outcome, CheckOutcome::Failing);
+  assert_eq!(pr.checks[1].url.as_deref(), Some("https://scanner.example/run/9"));
+  assert_eq!(pr.checks[2].name, "fmt");
+  assert_eq!(pr.checks[2].outcome, CheckOutcome::Running);
+  assert_eq!(pr.checks[2].url, None, "a CheckRun without detailsUrl yields no URL");
 }
 
 #[test]
