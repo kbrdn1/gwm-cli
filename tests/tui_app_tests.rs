@@ -919,6 +919,73 @@ fn sidebar_scroll_clamps_at_max() {
 }
 
 #[test]
+fn wt_scroll_requires_status_focus() {
+  // Issue #437: `J` / `K` scroll the Working Tree pane only while the
+  // status pane holds the navigation focus — same gate as `j` / `k`
+  // routing in `next()` / `prev()`. Unfocused, the keys are inert so
+  // they stay free for future list-view use.
+  let (_dir, mut app) = make_app();
+  app.sidebar.wt_max_scroll = 5;
+  assert!(!app.sidebar.focused);
+  app.wt_scroll_down();
+  assert_eq!(
+    app.sidebar.wt_scroll, 0,
+    "unfocused sidebar must not scroll the Working Tree"
+  );
+
+  app.focus_status();
+  app.wt_scroll_down();
+  assert_eq!(app.sidebar.wt_scroll, 1);
+}
+
+#[test]
+fn wt_scroll_clamps_between_zero_and_max() {
+  // The renderer republishes `wt_max_scroll` every frame; scrolling must
+  // clamp against it (down) and saturate at zero (up) exactly like the
+  // Recent Commits offset.
+  let (_dir, mut app) = make_app();
+  app.focus_status();
+  app.wt_scroll_up();
+  assert_eq!(app.sidebar.wt_scroll, 0, "scrolling up from 0 stays at 0");
+
+  app.sidebar.wt_max_scroll = 2;
+  app.wt_scroll_down();
+  app.wt_scroll_down();
+  app.wt_scroll_down();
+  assert_eq!(app.sidebar.wt_scroll, 2, "scrolling beyond max must clamp");
+  app.wt_scroll_up();
+  assert_eq!(app.sidebar.wt_scroll, 1);
+}
+
+#[test]
+fn navigation_resets_wt_scroll() {
+  // Selection change → new worktree → the previous Working Tree offset is
+  // meaningless. Same reset contract as the Recent Commits scroll.
+  let (_dir, mut app) = make_app();
+  app.sidebar.wt_max_scroll = 5;
+  app.sidebar.wt_scroll = 3;
+  app.on_navigation();
+  assert_eq!(
+    app.sidebar.wt_scroll, 0,
+    "navigation must reset the Working Tree scroll"
+  );
+}
+
+#[test]
+fn cycle_mode_resets_wt_scroll() {
+  // Stashes mode renders no Working Tree section; a stale offset would
+  // land on unrelated content when toggling back to Commits.
+  let (_dir, mut app) = make_app();
+  app.sidebar.wt_max_scroll = 5;
+  app.sidebar.wt_scroll = 3;
+  app.sidebar.cycle_mode();
+  assert_eq!(
+    app.sidebar.wt_scroll, 0,
+    "mode toggle must reset the Working Tree scroll"
+  );
+}
+
+#[test]
 fn focus_routes_navigation_to_sidebar() {
   // When sidebar is focused, next()/prev() should NOT move the list selection.
   let (_dir, mut app) = make_app();
