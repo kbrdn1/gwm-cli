@@ -108,6 +108,72 @@ impl SidebarMode {
   }
 }
 
+/// Split the sidebar height left over for the three variable sections —
+/// Agents / Working Tree / Recent Commits — into per-section block
+/// heights, borders included (issue #438). Pure and ratatui-free so the
+/// policy is unit-testable without a backend, like [`SidebarState::resolve_layout`].
+///
+/// - When every natural height (`content + 2` borders) fits, each section
+///   keeps it and Recent Commits absorbs the slack — the exact behaviour
+///   the old `Min(3)` constraint produced.
+/// - On overflow, every **visible** section is guaranteed
+///   `min(natural, 5)` lines (border + at least 3 content rows) and the
+///   surplus is distributed proportionally to content size, capped at the
+///   natural height; the integer-division residue cascades to Recent
+///   Commits, then Working Tree, then Agents. The total need exceeds the
+///   surplus by construction, so the residue is always absorbed.
+/// - A section with no content stays collapsed at 0 (Agents with no
+///   session, Working Tree on a clean tree) and never eats a floor.
+///   Recent Commits is never collapsed: an empty history still renders
+///   its bordered panel, floored at the historical `Min(3)`.
+/// - Below the floors' sum (tiny terminal) sections are served in the
+///   order commits → working tree → agents with whatever remains.
+pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commits_len: u16) -> (u16, u16, u16) {
+  let natural = |len: u16| if len == 0 { 0 } else { len.saturating_add(2) };
+  let natural_a = natural(agents_len);
+  let natural_w = natural(wt_len);
+  let natural_c = commits_len.saturating_add(2);
+
+  if natural_a as u32 + natural_w as u32 + natural_c as u32 <= available as u32 {
+    return (natural_a, natural_w, available - natural_a - natural_w);
+  }
+
+  let floor_a = natural_a.min(5);
+  let floor_w = natural_w.min(5);
+  let floor_c = natural_c.clamp(3, 5);
+
+  let base = floor_a + floor_w + floor_c;
+  if base > available {
+    let c = floor_c.min(available);
+    let rest = available - c;
+    let w = floor_w.min(rest);
+    let a = floor_a.min(rest - w);
+    return (a, w, c);
+  }
+
+  let surplus = available - base;
+  let total = agents_len as u32 + wt_len as u32 + commits_len as u32;
+  let give = |len: u16, floor_v: u16, nat: u16| -> u16 {
+    if total == 0 {
+      return 0;
+    }
+    ((surplus as u32 * len as u32 / total) as u16).min(nat - floor_v)
+  };
+  let mut a = floor_a + give(agents_len, floor_a, natural_a);
+  let mut w = floor_w + give(wt_len, floor_w, natural_w);
+  let mut c = floor_c + give(commits_len, floor_c, natural_c);
+  let mut residue = available - a - w - c;
+  let mut top_up = |h: &mut u16, nat: u16| {
+    let room = (nat - *h).min(residue);
+    *h += room;
+    residue -= room;
+  };
+  top_up(&mut c, natural_c);
+  top_up(&mut w, natural_w);
+  top_up(&mut a, natural_a);
+  (a, w, c)
+}
+
 /// Pure sidebar state. Use [`Self::new`] (or the [`Default`] impl below)
 /// to get the initial state that matches the previous `App::new_at`
 /// behaviour (open + unfocused + zero scroll + cold cache) — the
