@@ -365,7 +365,8 @@ fn status_hints_are_grouped_read_then_sidebar_then_navigate_then_global() {
     labels,
     vec![
       "scroll",
-      "fetch", // read the status pane
+      "wt scroll", // #437: Working Tree pane scroll
+      "fetch",     // read the status pane
       "mode",
       "layout", // sidebar mode / layout
       "worktrees",

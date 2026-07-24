@@ -103,6 +103,9 @@ define_actions! {
   Up                => "up",
   Top               => "top",
   Bottom            => "bottom",
+  // #437: Working Tree pane scroll, status context only.
+  WtScrollDown      => "wt_scroll_down",
+  WtScrollUp        => "wt_scroll_up",
   ToggleSidebar     => "toggle_sidebar",
   ToggleSidebarMode => "toggle_sidebar_mode",
   CycleSidebarLayout => "cycle_sidebar_layout",
@@ -487,6 +490,9 @@ impl Keymap {
       def(Action::Up, &["k", "Up"]),
       def(Action::Top, &["g g"]),
       def(Action::Bottom, &["G", "End"]),
+      // #437: `J` / `K` scroll the Working Tree pane from the status context.
+      def(Action::WtScrollDown, &["J"]),
+      def(Action::WtScrollUp, &["K"]),
       // #290: V=toggle show/hide, S=cycle content (Commits↔Stashes),
       // Space=cycle orientation (auto/side-by-side/stacked), v=toggle position.
       def(Action::ToggleSidebar, &["V"]),

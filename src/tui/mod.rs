@@ -820,6 +820,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Up => app.prev(),
     Action::Top => app.first(),
     Action::Bottom => app.last(),
+    // Issue #437: Working Tree pane scroll — no-ops unless the status
+    // pane holds the focus (gate lives on the `App` methods).
+    Action::WtScrollDown => app.wt_scroll_down(),
+    Action::WtScrollUp => app.wt_scroll_up(),
     Action::ToggleSidebar => app.toggle_sidebar(),
     // Issue #34: cycle the sidebar preview between commits and
     // stashes. Lands here as the merge resolution between #166
