@@ -2403,6 +2403,59 @@ fn pr_summary_line_advertises_the_ci_checks_key_after_the_indicator() {
 }
 
 #[test]
+fn pr_line_ci_hint_follows_the_focus_context() {
+  // Codex review on PR #455: with the worktrees pane focused, `c` opens the
+  // rename modal — advertising it next to the CI indicator was a lie. The
+  // hint resolves dynamically: the contextual `c` (EditWorktree's chord)
+  // while the status pane holds the focus, the global `ci_checks` binding
+  // (`C`) otherwise.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 10,
+    checks_total: 10,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+
+  let text_of = |app: &App| -> String {
+    gwm::tui::github_status_lines(app, 120)
+      .iter()
+      .flat_map(|l| l.spans.iter())
+      .map(|s| s.content.as_ref())
+      .collect()
+  };
+
+  app.focus_worktrees();
+  let unfocused = text_of(&app);
+  assert!(
+    unfocused.contains("10/10 [C]"),
+    "worktrees focus advertises the global ci_checks binding: {unfocused}"
+  );
+
+  app.focus_status();
+  let focused = text_of(&app);
+  assert!(
+    focused.contains("10/10 [c]"),
+    "status focus advertises the contextual c: {focused}"
+  );
+}
+
+#[test]
 fn ci_check_rows_carry_workflow_and_duration_details() {
   // #436 validation feedback: each row surfaces the workflow name and the
   // run duration in `extra` — completed runs show the exact span, running

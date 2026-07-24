@@ -5163,10 +5163,16 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
     // #436: advertise the key that opens the CI checks overlay right after
-    // the indicator — the contextual `c` (EditWorktree's chord, which routes
-    // to the overlay while the status pane is focused), resolved live so a
-    // rebind shows through.
-    let ci_key = action_chord(&app.keymap, Action::EditWorktree, "c");
+    // the indicator, resolved live so a rebind shows through. The key is
+    // context-accurate (Codex review #455): the contextual `c`
+    // (EditWorktree's chord) only while the status pane holds the focus —
+    // in the worktrees context that key opens the rename modal, so the
+    // global `ci_checks` binding is advertised instead.
+    let ci_key = if app.sidebar.open && app.sidebar.focused {
+      action_chord(&app.keymap, Action::EditWorktree, "c")
+    } else {
+      action_chord(&app.keymap, Action::CiChecks, "C")
+    };
     lines.push(pr_summary_line_with_spinner(
       n,
       link.pr_source,
