@@ -578,17 +578,26 @@ If co-maintenance of `gwm-cli-bin` is ever granted, the job can come back: the t
 
 #### Refreshing the package after a stable release
 
-Once the initial manifest is merged, submit each new version with komac (a **classic** PAT with the `public_repo` scope — komac's fork + cross-repo-PR flow does not work with fine-grained tokens):
+Once the initial manifest is merged, submit each new version with komac (a **classic** PAT with the `public_repo` scope — komac's fork + cross-repo-PR flow does not work with fine-grained tokens). The token rule from the removed job still applies to the manual flow: komac is the binary that holds the PAT, so run a **pinned, digest-verified** komac, not whatever `PATH` happens to find. Bump the version and digest together, re-deriving the digest yourself (`shasum -a 256 <tarball>`):
 
 ```bash
+KOMAC_VERSION=2.16.0
+KOMAC_SHA256=7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d   # x86_64-unknown-linux-gnu
+tarball="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+gh release download "v${KOMAC_VERSION}" --repo russellbanks/Komac --pattern "$tarball" --dir /tmp/komac
+echo "${KOMAC_SHA256}  /tmp/komac/${tarball}" | shasum -a 256 -c -
+tar -C /tmp/komac -xzf "/tmp/komac/${tarball}"
+
 TAG=v1.3.0   # the stable tag you just pushed
 
 GITHUB_TOKEN=<classic PAT> KOMAC_FORK_OWNER=kbrdn1 \
-komac update kbrdn1.gwm \
+/tmp/komac/komac update kbrdn1.gwm \
   --version "${TAG#v}" \
   --urls "https://github.com/kbrdn1/gwm-cli/releases/download/${TAG}/gwm-${TAG}-x86_64-pc-windows-msvc.zip" \
   --submit
 ```
+
+(On macOS, swap the `x86_64-unknown-linux-gnu` triple for your platform's komac artifact and re-derive its digest.)
 
 The tag's `v` prefix is stripped to match the winget `PackageVersion`, and the manifest keeps the shape of the initial submission (`InstallerType: zip`, `NestedInstallerType: portable`). Never submit a pre-release tag.
 

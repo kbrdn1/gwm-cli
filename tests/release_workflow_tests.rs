@@ -180,7 +180,11 @@ fn release_workflow_carries_no_aur_publish_automation() {
 fn release_workflow_carries_no_winget_publish_automation() {
   let workflow = fs::read_to_string(".github/workflows/release.yml").unwrap();
 
-  for needle in ["winget-publish", "WINGET_TOKEN", "komac", "winget-pkgs"] {
+  // Broad on purpose: `winget`/`WINGET` also catches the `winget-releaser`
+  // action the removed wiring test explicitly banned (it would resurrect a
+  // mutable-ref binary with a classic PAT in scope), not just the old job's
+  // own identifiers.
+  for needle in ["winget", "WINGET", "komac"] {
     assert!(
       !workflow.contains(needle),
       "release.yml must not reference `{needle}`: winget submissions are made by hand (#448), \
