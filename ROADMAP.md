@@ -4,9 +4,9 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v1.2.0 stable
+## Current state — v1.3.0 stable
 
-The current **stable** line is **v1.2.0** (2026-07-21). The machine-readable
+The current **stable** line is **v1.3.0** (2026-07-24). The machine-readable
 contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
 the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
 section set will not break without a major bump (see
@@ -18,9 +18,11 @@ features ([#363](https://github.com/kbrdn1/gwm-cli/issues/363) — persisted
 sidebar layout, OSC 52 yank that works over SSH) and **1.1.1** fixed global
 config resolution on macOS; **1.2.0** was the distribution push
 ([#383](https://github.com/kbrdn1/gwm-cli/issues/383) — Scoop, `.deb` / `.rpm`,
-AUR, aqua, with winget wired and pending upstream). In `dev`, unreleased: the
+AUR, aqua, with winget wired and pending upstream); **1.3.0** shipped the
 **agent session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408))
-and its follow-ups — see [Shipped highlights](#shipped-highlights).
+and its follow-ups, including the Windows named pipe transport for the daemon
+([#439](https://github.com/kbrdn1/gwm-cli/issues/439)) — see
+[Shipped highlights](#shipped-highlights).
 
 1.0.0 promotes the entire **0.10.0 train**: the **rc.1** Settings-editability +
 TUI enrichment cycle; the **rc.2** train (embedded PTY overlays, the TUI keymap
@@ -131,7 +133,7 @@ For reference (each linked to its closing PR):
 | [#317](https://github.com/kbrdn1/gwm-cli/issues/317) / [#318](https://github.com/kbrdn1/gwm-cli/issues/318) / [#319](https://github.com/kbrdn1/gwm-cli/issues/319) / [#324](https://github.com/kbrdn1/gwm-cli/issues/324) / [#325](https://github.com/kbrdn1/gwm-cli/issues/325) / [#326](https://github.com/kbrdn1/gwm-cli/issues/326) / [#334](https://github.com/kbrdn1/gwm-cli/issues/334) | v1.0.0 | The 1.0 commitment: frozen, versioned machine contracts pinned by `tests/contract_tests.rs` (`SCHEMA_VERSION = 1`, daemon `schema_version`, `docs/schema/README.md`) (#317); published stability & compatibility policy (`docs/6.development/3.stability.md`, EN + FR) (#318); frozen `exec` / `clean` surface decision (#319); named `[exec]` / `[clean]` config profiles + bounded `--jobs` parallelism (#324); `--workspace` fan-out for `gwm exec` / `gwm clean` (#326); TUI exec (`x`) / clean (`X`) overlays (#325); help-overlay + overlay polish (#334) |
 | [#363](https://github.com/kbrdn1/gwm-cli/issues/363) | v1.1.0 | First outside-report release: persisted sidebar layout (`V` / `H` write back to config) and OSC 52 clipboard yank that works over SSH |
 | [#383](https://github.com/kbrdn1/gwm-cli/issues/383) | v1.2.0 | Distribution push: Scoop bucket, native `.deb` / `.rpm` packages, AUR (`gwm-cli-bin`), aqua standard registry; winget wired, pending upstream merge |
-| [#408](https://github.com/kbrdn1/gwm-cli/issues/408) ([PR #435](https://github.com/kbrdn1/gwm-cli/pull/435)) + follow-ups [#439](https://github.com/kbrdn1/gwm-cli/issues/439) ([PR #444](https://github.com/kbrdn1/gwm-cli/pull/444)) / [#440](https://github.com/kbrdn1/gwm-cli/issues/440) ([PR #442](https://github.com/kbrdn1/gwm-cli/pull/442)) / [#441](https://github.com/kbrdn1/gwm-cli/issues/441) ([PR #443](https://github.com/kbrdn1/gwm-cli/pull/443)) / [#445](https://github.com/kbrdn1/gwm-cli/issues/445) ([PR #446](https://github.com/kbrdn1/gwm-cli/pull/446)) | dev (unreleased) | **Agent session pane**: detect AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) per worktree from on-disk artefacts — AGENT column (table + TUI), `a` detail overlay with pinning, `gwm agents` CLI, additive JSON `agents` field, statusline segment. Follow-ups: **Windows named pipe transport** for `gwm daemon` / `gwm statusline` (owner-only pipe, server identity verified by owner SID) (#439); `gwm clean` ENOTEMPTY race tolerance (#440); process-level liveness — a dead recorded PID demotes the session immediately on unix (#441); fixed-height attach prompt with a scrollbar (#445) |
+| [#408](https://github.com/kbrdn1/gwm-cli/issues/408) ([PR #435](https://github.com/kbrdn1/gwm-cli/pull/435)) + follow-ups [#439](https://github.com/kbrdn1/gwm-cli/issues/439) ([PR #444](https://github.com/kbrdn1/gwm-cli/pull/444)) / [#440](https://github.com/kbrdn1/gwm-cli/issues/440) ([PR #442](https://github.com/kbrdn1/gwm-cli/pull/442)) / [#441](https://github.com/kbrdn1/gwm-cli/issues/441) ([PR #443](https://github.com/kbrdn1/gwm-cli/pull/443)) / [#445](https://github.com/kbrdn1/gwm-cli/issues/445) ([PR #446](https://github.com/kbrdn1/gwm-cli/pull/446)) | v1.3.0 | **Agent session pane**: detect AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) per worktree from on-disk artefacts — AGENT column (table + TUI), `a` detail overlay with pinning, `gwm agents` CLI, additive JSON `agents` field, statusline segment. Follow-ups: **Windows named pipe transport** for `gwm daemon` / `gwm statusline` (owner-only pipe, server identity verified by owner SID) (#439); `gwm clean` ENOTEMPTY race tolerance (#440); process-level liveness — a dead recorded PID demotes the session immediately on unix (#441); fixed-height attach prompt with a scrollbar (#445) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
