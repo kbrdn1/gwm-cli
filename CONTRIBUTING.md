@@ -569,22 +569,39 @@ If co-maintenance of `gwm-cli-bin` is ever granted, the job can come back: the t
 
 ### winget (`winget install kbrdn1.gwm`)
 
-Stable releases automatically open a manifest PR to [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) via the `winget-publish` job in [`release.yml`](.github/workflows/release.yml). It runs [`komac`](https://github.com/russellbanks/Komac) directly — from a **pinned, digest-anchored** release binary — to build the manifest for the new version from the release's Windows `.zip` (`InstallerType: zip`, `NestedInstallerType: portable`) and push a PR from your `winget-pkgs` fork. The tag's `v` prefix is stripped to match the winget `PackageVersion`. Pre-releases are filtered out. The release-wiring contract is pinned by [`tests/winget_release_tests.rs`](tests/winget_release_tests.rs).
+**This channel is manual.** A `winget-publish` job existed briefly (#381) and was removed in #448: `WINGET_TOKEN` was never provisioned, so its guard step painted a red job on every stable release run, and the channel is blocked upstream anyway — the **initial** `kbrdn1.gwm` manifest PR ([microsoft/winget-pkgs#403295](https://github.com/microsoft/winget-pkgs/pull/403295)) sits on `Needs-CLA`, and `komac update` can only update a package that already exists in `winget-pkgs`. Automation for a channel that cannot publish is a job that can only fail. winget joins the AUR, Nixpkgs and aqua as a channel fed by hand; the absence of the job is pinned by a test in [`tests/release_workflow_tests.rs`](tests/release_workflow_tests.rs).
 
-> **Why not the `winget-releaser` action?** It pulls `cargo-bins/cargo-binstall@main` and installs the latest `komac` at runtime — both mutable refs that would run with `WINGET_TOKEN` in scope, so a SHA pin on the action alone wouldn't protect the token. Pinning the one tool that touches the secret is the rule for every third-party binary the release workflow trusts with a credential.
->
-> The expected komac digest (`KOMAC_SHA256`) is stored **in this repo**, not fetched from the same upstream release as the binary — a release whose artifacts *and* its `SHA256SUMS` were both swapped would otherwise still verify. To upgrade komac, bump `KOMAC_VERSION` and `KOMAC_SHA256` together and re-derive the digest yourself (`shasum -a 256 komac-<ver>-x86_64-unknown-linux-gnu.tar.gz`).
+#### Unblocking the channel (one-time)
 
-**komac only updates an existing package** — the job runs `komac update`, not `komac new`. The **first** `kbrdn1.gwm` manifest is submitted manually (`komac new` / `komac submit`); the job takes over from the next version onward. Every submission then goes through Microsoft's moderated validation (schema + a Windows sandbox install), which is external to this repo.
+1. Sign Microsoft's CLA on [microsoft/winget-pkgs#403295](https://github.com/microsoft/winget-pkgs/pull/403295) (comment `@microsoft-github-policy-service agree`) and get the initial manifest merged. Every submission goes through Microsoft's moderated validation (schema + a Windows sandbox install), which is external to this repo.
+2. Keep the `microsoft/winget-pkgs` fork under your account — [`komac`](https://github.com/russellbanks/Komac) pushes its PR branches there.
 
-#### One-time bootstrap (maintainer)
+#### Refreshing the package after a stable release
 
-1. Fork [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) under your account (komac pushes its branch there): `gh repo fork microsoft/winget-pkgs --clone=false`.
-2. Submit the **initial** `kbrdn1.gwm` manifest manually and get it merged.
-3. Create a **classic** PAT with the `public_repo` scope — komac's fork + cross-repo-PR flow needs a classic token; new fine-grained PATs don't work here. Add it as the `WINGET_TOKEN` secret on `gwm-cli`: <https://github.com/kbrdn1/gwm-cli/settings/secrets/actions/new>.
-4. Flip `continue-on-error: true` to `false` on the `winget-publish` job after the first successful automated submission.
+Once the initial manifest is merged, submit each new version with komac (a **classic** PAT with the `public_repo` scope — komac's fork + cross-repo-PR flow does not work with fine-grained tokens). The token rule from the removed job still applies to the manual flow: komac is the binary that holds the PAT, so run a **pinned, digest-verified** komac, not whatever `PATH` happens to find. Bump the version and digest together, re-deriving the digest yourself (`shasum -a 256 <tarball>`):
 
-Re-drive a failed submission the same way: `gh workflow run release.yml --ref <tag>`.
+```bash
+KOMAC_VERSION=2.16.0
+KOMAC_SHA256=7d2707fa6210f2789a3702de49fbd150b736dbf426ee0b9bc8e098736f9fd82d   # x86_64-unknown-linux-gnu
+tarball="komac-${KOMAC_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+gh release download "v${KOMAC_VERSION}" --repo russellbanks/Komac --pattern "$tarball" --dir /tmp/komac
+echo "${KOMAC_SHA256}  /tmp/komac/${tarball}" | shasum -a 256 -c -
+tar -C /tmp/komac -xzf "/tmp/komac/${tarball}"
+
+TAG=v1.3.0   # the stable tag you just pushed
+
+GITHUB_TOKEN=<classic PAT> KOMAC_FORK_OWNER=kbrdn1 \
+/tmp/komac/komac update kbrdn1.gwm \
+  --version "${TAG#v}" \
+  --urls "https://github.com/kbrdn1/gwm-cli/releases/download/${TAG}/gwm-${TAG}-x86_64-pc-windows-msvc.zip" \
+  --submit
+```
+
+(On macOS, swap the `x86_64-unknown-linux-gnu` triple for your platform's komac artifact and re-derive its digest.)
+
+The tag's `v` prefix is stripped to match the winget `PackageVersion`, and the manifest keeps the shape of the initial submission (`InstallerType: zip`, `NestedInstallerType: portable`). Never submit a pre-release tag.
+
+If the channel is unblocked and the manual flow proves routine, the job can come back — deleting the pin test is the first step of that change, and the removed job (pinned, digest-anchored komac; see the git history of `release.yml` at #448) is the starting point.
 
 ---
 
