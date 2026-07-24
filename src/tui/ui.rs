@@ -5167,11 +5167,12 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
     // context-accurate (Codex review #455): the contextual `c`
     // (EditWorktree's chord) only while the status pane holds the focus —
     // in the worktrees context that key opens the rename modal, so the
-    // global `ci_checks` binding is advertised instead.
+    // global `ci_checks` binding is advertised instead. An explicitly
+    // unbound action yields no suffix at all rather than a dead key.
     let ci_key = if app.sidebar.open && app.sidebar.focused {
-      action_chord(&app.keymap, Action::EditWorktree, "c")
+      app.keymap.primary_chord(Action::EditWorktree)
     } else {
-      action_chord(&app.keymap, Action::CiChecks, "C")
+      app.keymap.primary_chord(Action::CiChecks)
     };
     lines.push(pr_summary_line_with_spinner(
       n,
@@ -5184,7 +5185,7 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       max_width,
       &app.theme,
       Some(spinner),
-      Some(&ci_key),
+      ci_key.as_deref(),
     ));
   }
   lines

@@ -2579,18 +2579,99 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
     }],
   }));
 
+  // Codex review on PR #455: the contextual routing lives on the KEY path
+  // only — a pure pre-resolution the event loop applies before run_action.
+  // The palette's `edit-worktree` entry must stay a rename everywhere, so
+  // accept_command_palette returns the action unresolved.
+  use gwm::tui::keymap::Action;
   app.focus_status();
-  app.edit_worktree_action();
-  assert_eq!(app.view, View::DetailOverlay, "status focus routes c to the CI overlay");
-  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(
+    app.resolve_contextual_action(Action::EditWorktree),
+    Action::CiChecks,
+    "status focus routes the edit-worktree KEY to the CI overlay"
+  );
+  assert_eq!(
+    app.resolve_contextual_action(Action::Down),
+    Action::Down,
+    "other actions pass through untouched"
+  );
 
-  app.close_detail_overlay();
   app.focus_worktrees();
-  app.edit_worktree_action();
-  assert_ne!(
-    app.view,
-    View::DetailOverlay,
-    "worktrees context keeps the rename modal on c"
+  assert_eq!(
+    app.resolve_contextual_action(Action::EditWorktree),
+    Action::EditWorktree,
+    "worktrees context keeps the rename on c"
+  );
+
+  // The resolved CiChecks action opens the overlay as before.
+  app.focus_status();
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+}
+
+#[test]
+fn pr_line_ci_hint_disappears_when_the_binding_is_removed() {
+  // Codex review on PR #455: `ci_checks = []` (or `edit_worktree = []` in
+  // the status context) unbinds the action — the PR line must then drop
+  // the key suffix instead of advertising a dead key.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::keymap::Action;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+  app.focus_worktrees();
+  app.keymap.apply_override(Action::CiChecks, Vec::new()).unwrap();
+
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter())
+    .map(|s| s.content.as_ref())
+    .collect();
+  assert!(
+    text.contains("1/1") && !text.contains("1/1 ["),
+    "an unbound ci_checks must drop the key suffix: {text}"
+  );
+}
+
+#[test]
+fn enter_ci_checks_error_resolves_the_fetch_key() {
+  // Codex review on PR #455: the "fetch (F) first" hint hard-coded `F`;
+  // the message now resolves the active fetch_github binding and drops
+  // the parenthetical entirely when the action is unbound.
+  use gwm::tui::keymap::Action;
+  let (_dir, mut app) = make_app();
+  app.enter_ci_checks();
+  assert!(
+    app.status.contains("(F)"),
+    "default binding shows in the hint: {}",
+    app.status
+  );
+
+  app.keymap.apply_override(Action::FetchGithub, Vec::new()).unwrap();
+  app.enter_ci_checks();
+  assert!(
+    !app.status.contains('(') && app.status.contains("fetch"),
+    "unbound fetch drops the parenthetical: {}",
+    app.status
   );
 }
 

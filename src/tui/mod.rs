@@ -428,6 +428,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           if matches!(action, Action::Quit) {
             app.should_quit = true;
           } else {
+            // #436: the key path applies the contextual pre-resolution
+            // (c → CI checks while the status pane is focused); the
+            // palette path deliberately does not — its entries dispatch
+            // by name (Codex review #455).
+            let action = app.resolve_contextual_action(action);
             run_action(terminal, &mut app, action)?;
           }
         }
@@ -966,10 +971,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Pull if !app.picker_mode => app.request_pull(),
     Action::Push if !app.picker_mode => app.request_push(),
     // #290: `c` opens the branch-rename modal.
-    // Issue #436: `c` is contextual — rename in the worktrees context, CI
-    // checks overlay while the status pane holds the focus (routing lives
-    // on the App method, same pattern as j/k sidebar scroll).
-    Action::EditWorktree if !app.picker_mode => app.edit_worktree_action(),
+    Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
     Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),

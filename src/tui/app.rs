@@ -2697,7 +2697,12 @@ impl App {
     let checks = match self.pr_fetch_state() {
       GitHubFetchState::Loaded(pr) if !pr.checks.is_empty() => pr.checks.clone(),
       _ => {
-        self.status = "no CI checks to show — link a PR and fetch (F) first".into();
+        // Resolve the active fetch binding instead of hard-coding `F`
+        // (Codex review #455); an unbound action drops the parenthetical.
+        self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+          Some(key) => format!("no CI checks to show — link a PR and fetch ({key}) first"),
+          None => "no CI checks to show — link a PR and fetch first".into(),
+        };
         return;
       }
     };
@@ -2710,15 +2715,20 @@ impl App {
     self.view = View::DetailOverlay;
   }
 
-  /// Contextual `c` (issue #436) — same routing mechanism that turns
-  /// `j` / `k` into sidebar scroll in [`Self::next`] / [`Self::prev`]:
-  /// the worktrees context keeps the rename modal, the status context
-  /// opens the CI checks overlay.
-  pub fn edit_worktree_action(&mut self) {
-    if self.sidebar.open && self.sidebar.focused {
-      self.enter_ci_checks();
+  /// Contextual KEY routing (issue #436) — same mechanism that turns
+  /// `j` / `k` into sidebar scroll: while the status pane holds the
+  /// focus, the `c` keystroke (EditWorktree) opens the CI checks
+  /// overlay instead of the rename modal. Applied by the event loop on
+  /// the **key path only** (Codex review #455): the command palette
+  /// dispatches actions by their NAME, so its `edit-worktree` entry
+  /// must stay a rename in every context (a dedicated `ci-checks`
+  /// entry already exists there). Pure, so the contract is pinned
+  /// without an event loop.
+  pub fn resolve_contextual_action(&self, action: Action) -> Action {
+    if action == Action::EditWorktree && self.sidebar.open && self.sidebar.focused {
+      Action::CiChecks
     } else {
-      self.enter_edit_worktree();
+      action
     }
   }
 
