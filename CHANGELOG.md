@@ -12,6 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A CI checks overlay. `C` (rebindable `ci_checks`) — or `c` while the
+  status pane holds the focus, the same contextual dispatch as the
+  `j` / `k` sidebar scroll — lists every `statusCheckRollup` entry of
+  the linked PR: one row per check with the state icon coloured like
+  the sidebar CI indicator, `j` / `k` to move, `Enter` to open the
+  check's details URL in the browser, `f` to filter, `Esc` to close
+  (verbs rebindable under `[tui.keys.modal.ci_checks]`). The per-check
+  name and URL are now kept when the rollup is classified, additively
+  on `PrStatus`. (#436)
+
 - Responsive sidebar heights. The Agents, `Working Tree` and `Recent
   Commits` sections now share the column through a pure layout solver:
   natural heights while everything fits (`Recent Commits` absorbs the
