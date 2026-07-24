@@ -2701,7 +2701,7 @@ impl App {
         return;
       }
     };
-    let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks);
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
       "CI Checks".into(),

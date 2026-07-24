@@ -527,7 +527,9 @@ fn parse_pr_json_keeps_the_per_check_list() {
     "url": "https://github.com/kbrdn1/gwm-cli/pull/61",
     "statusCheckRollup": [
       {"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS",
-       "detailsUrl": "https://github.com/kbrdn1/gwm-cli/actions/runs/1/job/2"},
+       "detailsUrl": "https://github.com/kbrdn1/gwm-cli/actions/runs/1/job/2",
+       "workflowName": "ci", "startedAt": "2026-07-24T14:51:06Z",
+       "completedAt": "2026-07-24T14:52:24Z"},
       {"context": "security/scan", "state": "FAILURE",
        "targetUrl": "https://scanner.example/run/9"},
       {"name": "fmt", "status": "IN_PROGRESS", "conclusion": null}
@@ -553,6 +555,13 @@ fn parse_pr_json_keeps_the_per_check_list() {
   assert_eq!(pr.checks[2].name, "fmt");
   assert_eq!(pr.checks[2].outcome, CheckOutcome::Running);
   assert_eq!(pr.checks[2].url, None, "a CheckRun without detailsUrl yields no URL");
+  // #436 validation feedback: keep the run metadata for the overlay's
+  // right-aligned detail column (workflow + duration).
+  assert_eq!(pr.checks[0].workflow_name.as_deref(), Some("ci"));
+  assert_eq!(pr.checks[0].started_at.as_deref(), Some("2026-07-24T14:51:06Z"));
+  assert_eq!(pr.checks[0].completed_at.as_deref(), Some("2026-07-24T14:52:24Z"));
+  assert_eq!(pr.checks[1].workflow_name, None, "a StatusContext has no workflow");
+  assert_eq!(pr.checks[1].started_at, None);
 }
 
 #[test]

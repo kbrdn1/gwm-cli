@@ -4706,32 +4706,40 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     };
     // Selection paints a full-width bar (picker convention): pad the row
     // out to the modal's inner width so the highlight reads as one block.
+    // The optional `extra` detail (#436: workflow · duration) sits right-
+    // aligned inside that bar, rendered muted.
+    let extra = row.extra.as_deref().unwrap_or("");
+    let extra_cols = if extra.is_empty() { 0 } else { extra.chars().count() };
     let text_cols = label_w + 2 + row.value.chars().count();
-    let pad = inner.saturating_sub(text_cols);
+    let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
     if value_bold {
       value_style = value_style.add_modifier(Modifier::BOLD);
     }
     let mut pad_style = Style::default();
+    let mut extra_style = Style::default().fg(app.theme.muted);
     if i == ov.selected {
       label_style = label_style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
       value_style = value_style.bg(app.theme.selection_bg);
       pad_style = pad_style.bg(app.theme.selection_bg);
+      extra_style = extra_style.bg(app.theme.selection_bg);
     }
     lines.push(Line::from(vec![
       Span::styled(format!("{:label_w$}  ", row.label), label_style),
       Span::styled(row.value.clone(), value_style),
       Span::styled(" ".repeat(pad), pad_style),
+      Span::styled(extra.to_string(), extra_style),
     ]));
   }
-  push_modal_hint(
-    &mut lines,
-    HintContext::Detail,
-    &app.keymap,
-    &app.modal_keymap,
-    &app.theme,
-  );
+  // #436 validation feedback: the CI checks consumer advertises ITS verbs,
+  // not the agents' attach / detach — the hint context follows the kind.
+  let hint_ctx = if ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+    HintContext::CiChecks
+  } else {
+    HintContext::Detail
+  };
+  push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
   let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
@@ -5154,6 +5162,11 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   }
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
+    // #436: advertise the key that opens the CI checks overlay right after
+    // the indicator — the contextual `c` (EditWorktree's chord, which routes
+    // to the overlay while the status pane is focused), resolved live so a
+    // rebind shows through.
+    let ci_key = action_chord(&app.keymap, Action::EditWorktree, "c");
     lines.push(pr_summary_line_with_spinner(
       n,
       link.pr_source,
@@ -5165,6 +5178,7 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       max_width,
       &app.theme,
       Some(spinner),
+      Some(&ci_key),
     ));
   }
   lines
@@ -5507,10 +5521,12 @@ pub fn pr_summary_line(
   state: &GitHubFetchState<crate::github::PrStatus>,
   max_width: usize,
   theme: &Theme,
+  ci_hint: Option<&str>,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None, ci_hint)
 }
 
+#[allow(clippy::too_many_arguments)] // one arg past the limit; splitting a builder for a single call site is worse
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
@@ -5519,6 +5535,7 @@ fn pr_summary_line_with_spinner(
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
+  ci_hint: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}", n);
   let resolved = match state {
@@ -5576,8 +5593,16 @@ fn pr_summary_line_with_spinner(
       // Issue #299: surface the derived CI state (icon + label + N/M, coloured)
       // instead of the bare ` · checks N/M`, so pass / fail / running reads at a
       // glance. `ci_indicator` returns `None` when the PR has no checks.
+      // #436 validation feedback: the indicator ends with the resolved key
+      // that opens the CI checks overlay, mirroring the pane titles' `[F]`.
       let (trailing, trailing_color) = match ci_indicator(s.ci, s.checks_passed, s.checks_total, theme) {
-        Some((text, color)) => (text, Some(color)),
+        Some((text, color)) => (
+          match ci_hint {
+            Some(key) => format!("{text} [{key}]"),
+            None => text,
+          },
+          Some(color),
+        ),
         None => (String::new(), None),
       };
       SummaryState::Loaded {

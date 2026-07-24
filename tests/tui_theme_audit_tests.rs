@@ -433,6 +433,7 @@ fn pr_summary_line_merged_badge_routes_through_pr_badge_color() {
     &gwm::tui::GitHubFetchState::Loaded(status),
     80,
     &t,
+    None,
   );
   assert_eq!(
     fg_containing(&line, "merged"),
@@ -532,6 +533,7 @@ fn summary_line_heads_resolve_through_name_role() {
     &gwm::tui::GitHubFetchState::Idle,
     80,
     &t,
+    None,
   );
   assert_eq!(
     fg_containing(&pr, "PR    #9"),
@@ -581,6 +583,7 @@ fn summary_line_loaded_icons_resolve_through_state_roles() {
     &gwm::tui::GitHubFetchState::Loaded(pr_status),
     80,
     &t,
+    None,
   );
   assert_eq!(
     pr.spans[0].style.fg,
@@ -658,6 +661,7 @@ fn summary_line_non_loaded_icons_stay_muted() {
     &gwm::tui::GitHubFetchState::Error("offline".into()),
     80,
     &t,
+    None,
   );
   assert_eq!(pr.spans[0].style.fg, Some(t.muted), "error PR icon → muted");
 }

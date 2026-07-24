@@ -2329,11 +2329,17 @@ fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
         name: "test (ubuntu-latest)".into(),
         outcome: CheckOutcome::Failing,
         url: Some("https://example.test/actions/runs/1/job/2".into()),
+        workflow_name: None,
+        started_at: None,
+        completed_at: None,
       },
       PrCheck {
         name: "rustfmt".into(),
         outcome: CheckOutcome::Passing,
         url: None,
+        workflow_name: None,
+        started_at: None,
+        completed_at: None,
       },
     ],
   }));
@@ -2353,6 +2359,93 @@ fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
 }
 
 #[test]
+fn pr_summary_line_advertises_the_ci_checks_key_after_the_indicator() {
+  // #436 validation feedback: the PR line's CI indicator ends with the
+  // resolved key that opens the checks overlay — `… CI passing 10/10 [c]` —
+  // mirroring the pane titles' `[F]` / `[a]` convention. No indicator
+  // (CiState::None) → no hint.
+  let mk = |ci: gwm::github::CiState, passed: u32, total: u32| gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: passed,
+    checks_total: total,
+    ci,
+    checks: vec![],
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(mk(gwm::github::CiState::Passing, 10, 10)),
+    80,
+    &theme,
+    Some("c"),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+  assert!(
+    text.contains("10/10 [c]"),
+    "the CI trailing must end with the key hint: {text}"
+  );
+
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(mk(gwm::github::CiState::None, 0, 0)),
+    80,
+    &theme,
+    Some("c"),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+  assert!(!text.contains("[c]"), "no CI indicator, no hint: {text}");
+}
+
+#[test]
+fn ci_check_rows_carry_workflow_and_duration_details() {
+  // #436 validation feedback: each row surfaces the workflow name and the
+  // run duration in `extra` — completed runs show the exact span, running
+  // ones the elapsed time with an ellipsis, a legacy StatusContext (no
+  // metadata) none at all.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::ci_check_rows;
+  let now: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339("2026-07-24T14:53:06Z")
+    .unwrap()
+    .into();
+  let checks = vec![
+    PrCheck {
+      name: "test".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at: Some("2026-07-24T14:51:06Z".into()),
+      completed_at: Some("2026-07-24T14:52:24Z".into()),
+    },
+    PrCheck {
+      name: "fmt".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at: Some("2026-07-24T14:51:06Z".into()),
+      completed_at: None,
+    },
+    PrCheck {
+      name: "security/scan".into(),
+      outcome: CheckOutcome::Failing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    },
+  ];
+  let rows = ci_check_rows(&checks, now);
+  assert_eq!(rows[0].extra.as_deref(), Some("ci · 1m18s"));
+  assert_eq!(rows[1].extra.as_deref(), Some("ci · 2m…"));
+  assert_eq!(rows[2].extra, None);
+}
+
+#[test]
 fn enter_ci_checks_without_checks_stays_on_the_list_with_a_status_hint() {
   // No linked PR (or a PR with an empty rollup): the overlay would be an
   // empty void — surface the situation on the status bar instead.
@@ -2363,6 +2456,44 @@ fn enter_ci_checks_without_checks_stays_on_the_list_with_a_status_hint() {
     app.status.contains("CI checks"),
     "status bar must explain why nothing opened: {}",
     app.status
+  );
+}
+
+#[test]
+fn ci_filter_enter_on_a_urlless_check_leaves_the_filter_and_signals_it() {
+  // Codex review on PR #455: Enter inside the `f` filter on a check with no
+  // details URL silently dropped back to the list — the List-mode Enter
+  // path reports "no details URL", the filter path must too. A void query
+  // with no match at all keeps the filter open instead.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind, DetailMode};
+  let (_dir, mut app) = make_app();
+  let checks = vec![PrCheck {
+    name: "legacy/scan".into(),
+    outcome: CheckOutcome::Failing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  let rows = ci_check_rows(&checks, std::time::SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.ci_input_open();
+
+  assert_eq!(app.ci_input_selected_url(), None, "no URL on the selected check");
+  assert_eq!(
+    app.detail_overlay.mode,
+    DetailMode::List,
+    "a picked row leaves the filter even without a URL"
+  );
+
+  app.ci_input_open();
+  app.ci_input_push('z');
+  assert_eq!(app.ci_input_selected_url(), None);
+  assert_eq!(
+    app.detail_overlay.mode,
+    DetailMode::Input,
+    "no match under the query keeps the filter open"
   );
 }
 
@@ -2389,6 +2520,9 @@ fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
       name: "ci".into(),
       outcome: CheckOutcome::Running,
       url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
     }],
   }));
 
@@ -4583,6 +4717,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     &GitHubFetchState::Loaded(status),
     35,
     &Theme::default(),
+    None,
   );
   let width = line_visible_width(&line);
   assert!(
@@ -4738,6 +4873,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     &GitHubFetchState::Loaded(status),
     80,
     &Theme::default(),
+    None,
   );
   assert!(
     line.spans[0].content.contains(gwm::tui::PR_ICON),
@@ -4754,6 +4890,7 @@ fn pr_summary_line_icon_has_trailing_space_only() {
     &GitHubFetchState::Idle,
     80,
     &Theme::default(),
+    None,
   );
   assert_eq!(
     line.spans[0].content.as_ref(),
@@ -4782,6 +4919,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     &GitHubFetchState::Loaded(status),
     80,
     &theme,
+    None,
   );
   assert_eq!(
     line.spans[0].style.fg,
@@ -4812,6 +4950,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     &GitHubFetchState::Loaded(status),
     80,
     &theme,
+    None,
   );
   let ci = span_with(&line, "CI").expect("a CI indicator span");
   assert!(
@@ -4845,6 +4984,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     &GitHubFetchState::Loaded(status),
     80,
     &Theme::default(),
+    None,
   );
   let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
@@ -4891,6 +5031,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     &GitHubFetchState::Loaded(status),
     80,
     &Theme::default(),
+    None,
   );
   let chip = span_with(&line, "detected").expect("a 'detected' source chip span");
   assert!(

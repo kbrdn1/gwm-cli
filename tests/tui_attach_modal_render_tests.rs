@@ -52,6 +52,46 @@ fn app_with_open_prompt(dir: &TempDir, count: usize) -> App {
   app
 }
 
+/// Validation feedback on PR #455: the CI checks overlay rendered the
+/// AGENTS footer hints (attach / detach / by id) because the modal hint
+/// context was hard-coded to `Detail` — and its rows carried no detail
+/// beyond the name. The footer must advertise the ci_checks verbs, and
+/// each row must surface the workflow + duration in a right-aligned
+/// column.
+#[test]
+fn ci_checks_overlay_shows_its_own_hints_and_row_details() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks = vec![PrCheck {
+    name: "test (ubuntu-latest)".into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some("ci".into()),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: Some("2026-07-24T14:52:24Z".into()),
+  }];
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+
+  let joined = draw_rows(&mut app, 100, 30).join("\n");
+  assert!(joined.contains("open"), "ci_checks verbs must be advertised: {joined}");
+  assert!(
+    joined.contains("filter"),
+    "ci_checks verbs must be advertised: {joined}"
+  );
+  assert!(
+    !joined.contains("attach"),
+    "the agents verbs must not leak into the CI overlay: {joined}"
+  );
+  assert!(
+    joined.contains("ci · 1m18s"),
+    "each row must carry workflow + duration: {joined}"
+  );
+}
+
 /// Render into a fixed terminal and return the buffer as one row per line.
 fn draw_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
   let backend = TestBackend::new(width, height);

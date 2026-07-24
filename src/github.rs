@@ -630,6 +630,13 @@ pub struct PrCheck {
   pub name: String,
   pub outcome: CheckOutcome,
   pub url: Option<String>,
+  /// Owning workflow (`workflowName`, CheckRun shape only) — surfaced in
+  /// the overlay's detail column (#436 validation feedback).
+  pub workflow_name: Option<String>,
+  /// RFC 3339 run timestamps (CheckRun shape only): the overlay derives
+  /// the run duration (or the elapsed time of an in-flight run) from them.
+  pub started_at: Option<String>,
+  pub completed_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -702,6 +709,13 @@ struct RawCheck {
   context: String,
   #[serde(rename = "targetUrl", default)]
   target_url: Option<String>,
+  // Run metadata (CheckRun shape), kept for the overlay's detail column.
+  #[serde(rename = "workflowName", default)]
+  workflow_name: Option<String>,
+  #[serde(rename = "startedAt", default)]
+  started_at: Option<String>,
+  #[serde(rename = "completedAt", default)]
+  completed_at: Option<String>,
 }
 
 pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
@@ -755,6 +769,9 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
       },
       outcome: classify_check(c),
       url: c.details_url.clone().or_else(|| c.target_url.clone()),
+      workflow_name: c.workflow_name.clone(),
+      started_at: c.started_at.clone(),
+      completed_at: c.completed_at.clone(),
     })
     .collect();
   Ok(PrStatus {

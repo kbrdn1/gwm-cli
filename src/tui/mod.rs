@@ -677,11 +677,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
         match key.code {
           KeyCode::Esc if ci => app.ci_input_cancel(),
           KeyCode::Esc => app.agent_input_cancel(),
-          KeyCode::Enter if ci => {
-            if let Some(url) = app.ci_input_selected_url() {
-              open_url(&url, &mut app);
+          KeyCode::Enter if ci => match app.ci_input_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            // The method flips back to List only when a row WAS picked —
+            // report the missing URL like the List-mode Enter does (Codex
+            // review #455). A query with no match keeps the filter open.
+            None if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::List => {
+              app.status = "this check exposes no details URL".into()
             }
-          }
+            None => {}
+          },
           KeyCode::Enter => app.agent_input_submit(),
           KeyCode::Backspace if ci => app.ci_input_pop(),
           KeyCode::Backspace => app.agent_input_pop(),

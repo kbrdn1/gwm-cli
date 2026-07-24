@@ -56,6 +56,10 @@ pub struct DetailRow {
   pub value: String,
   pub role: DetailRole,
   pub meta: Option<String>,
+  /// Optional right-aligned detail column, rendered muted (issue #436:
+  /// workflow name + run duration on a CI check row). `None` keeps the
+  /// pre-#436 two-column layout.
+  pub extra: Option<String>,
 }
 
 /// The overlay's whole state. "Closed" is simply `View::List` — the `App`
@@ -126,6 +130,7 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: &[String], now
       value: "no agent session found".into(),
       role: DetailRole::Muted,
       meta: None,
+      extra: None,
     }];
   }
   sessions
@@ -151,22 +156,20 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: &[String], now
         value: format!("{word} · {ago} ago · {identity}{pin_mark}"),
         role,
         meta: Some(s.id.clone()),
+        extra: None,
       }
     })
     .collect()
 }
 
-/// Fuzzy-ish filter for the attach-by-id prompt: case-insensitive substring
-/// match on the session id, its name, and the agent kind. An empty query
-/// lists the whole pool. Pure — pinned by
-/// `tests/tui_app_tests.rs::agent_overlay_input`.
 /// One overlay row per classified rollup check (issue #436): the state
 /// icon + outcome label on the left, the check name as the value, the
-/// details URL as the opaque meta so Enter can open it in the browser.
-/// Same icons as the sidebar's `ci_indicator`; role picks the matching
-/// theme colour at render time. Pure — pinned by
-/// `tests/tui_app_tests.rs::enter_ci_checks_opens_the_overlay_with_one_row_per_check`.
-pub fn ci_check_rows(checks: &[crate::github::PrCheck]) -> Vec<DetailRow> {
+/// details URL as the opaque meta so Enter can open it in the browser,
+/// and the workflow + run duration as the right-aligned `extra` column
+/// (#436 validation feedback). Same icons as the sidebar's
+/// `ci_indicator`; role picks the matching theme colour at render time.
+/// Pure — `now` anchors the elapsed time of in-flight runs.
+pub fn ci_check_rows(checks: &[crate::github::PrCheck], now: SystemTime) -> Vec<DetailRow> {
   use crate::github::CheckOutcome;
   use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON};
   checks
@@ -182,9 +185,52 @@ pub fn ci_check_rows(checks: &[crate::github::PrCheck]) -> Vec<DetailRow> {
         value: c.name.clone(),
         role,
         meta: c.url.clone(),
+        extra: check_extra(c, now),
       }
     })
     .collect()
+}
+
+/// The detail column of one check row: `workflow · duration` for a
+/// completed run, `workflow · elapsed…` for an in-flight one, whichever
+/// part exists otherwise, `None` when the rollup entry carries no run
+/// metadata at all (legacy StatusContext shape).
+fn check_extra(c: &crate::github::PrCheck, now: SystemTime) -> Option<String> {
+  let parse = |s: &Option<String>| {
+    s.as_deref()
+      .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+      .map(|d| d.with_timezone(&chrono::Utc))
+  };
+  let duration = match (parse(&c.started_at), parse(&c.completed_at)) {
+    (Some(start), Some(end)) => u64::try_from((end - start).num_seconds()).ok().map(format_run_duration),
+    (Some(start), None) => {
+      let now = chrono::DateTime::<chrono::Utc>::from(now);
+      u64::try_from((now - start).num_seconds())
+        .ok()
+        .map(|secs| format!("{}…", format_run_duration(secs)))
+    }
+    _ => None,
+  };
+  match (c.workflow_name.as_deref(), duration) {
+    (Some(w), Some(d)) => Some(format!("{w} · {d}")),
+    (Some(w), None) => Some(w.to_string()),
+    (None, Some(d)) => Some(d),
+    (None, None) => None,
+  }
+}
+
+/// Compact human duration for a check run: `47s`, `1m18s`, `2m`, `1h02m`.
+fn format_run_duration(secs: u64) -> String {
+  let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+  if h > 0 {
+    format!("{h}h{m:02}m")
+  } else if m > 0 && s > 0 {
+    format!("{m}m{s:02}s")
+  } else if m > 0 {
+    format!("{m}m")
+  } else {
+    format!("{s}s")
+  }
 }
 
 /// The `f` filter of the CI checks overlay (issue #436): case-insensitive
@@ -201,6 +247,10 @@ pub fn filter_rows(rows: &[DetailRow], query: &str) -> Vec<usize> {
     .collect()
 }
 
+/// Fuzzy-ish filter for the attach-by-id prompt: case-insensitive substring
+/// match on the session id, its name, and the agent kind. An empty query
+/// lists the whole pool. Pure — pinned by
+/// `tests/tui_app_tests.rs::agent_overlay_input`.
 pub fn filter_sessions<'a>(all: &'a [AgentSession], query: &str) -> Vec<&'a AgentSession> {
   let q = query.to_lowercase();
   all
