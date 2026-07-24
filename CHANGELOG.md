@@ -10,82 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- **Windows named pipe transport for the daemon** (#439). `gwm daemon` and
-  `gwm statusline` now work on Windows: the daemon binds an owner-only named
-  pipe under `\\.\pipe\` (default name `gwm-<user>.sock`, `--socket` takes
-  the pipe name) with the same JSON-RPC surface, DoS guards and graceful
-  degradation as the unix socket, and the statusline client rides it — every
-  segment lights up, including the agent indicator from #408. Unix behaviour
-  is untouched; the docs' Unix-only caveats are lifted.
-- **Agent session pane** (#408). gwm now detects AI-agent coding sessions
-  (Claude Code, Codex, opencode, Mistral Vibe) per worktree by reading each
-  tool's on-disk session artefacts — no process scanning, `std::fs` only, so
-  detection behaves identically on Linux, macOS and Windows. Surfaced as:
-  an **AGENT** column in the worktree table (most recently active agent,
-  coloured by freshness), an `Agent:` summary line in the sidebar's Worktree
-  block, a generic detail overlay on `a` (rebindable; scroll/close keys under
-  `[tui.keys.modal.detail]`) listing every matched session, an **additive,
-  experimental-tier** `agents` field on the `list --format=json` / daemon
-  row (`SCHEMA_VERSION` stays 1; omitted when no session matched), and an
-  active-agent segment in `gwm statusline`. Detection runs off-thread with a
-  30 s re-check and a 30-day artefact scan window; missing or malformed
-  artefact stores degrade silently to "no sessions".
-- **`gwm agents` + manual pinning** (#408). A dedicated CLI surface for the
-  same detection: `gwm agents` lists sessions per worktree (human or
-  `--format=json`), the plain `gwm list` table gains an AGENT column, and
-  `gwm agents attach <worktree> <session-id>` / `detach` pin a session to a
-  worktree when the recorded directory is not enough — auto-detection stays
-  the default, the pin (git branch config `gwm-agent-pin`, one per worktree)
-  only adds, and every surface honours it. `GWM_AGENTS_HOME` overrides the
-  scanned home for deterministic tests/CI. Sessions carry a human-readable
-  **name** when their artefacts have one (first prompt, or Vibe's title) —
-  shown in the overlay and `gwm agents`, and exposed as an optional `name`
-  on the wire. The TUI overlay is interactive: `j`/`k` select a session
-  (highlight + scrollbar, stable frame), `a` pins it, `d` unpins. Daemon
-  detection is cached for 30 s per poll loop; a live session always beats a
-  freshly-ended one for the compact indicator.
-
-### Removed
-
-- The `aur-publish` job. `gwm-cli-bin` is maintained on the AUR by a third
-  party, so the job never had push rights: being advisory, it failed silently
-  on every stable tag while the release reported success. The AUR is now fed
-  by hand, like Nixpkgs and aqua. The `PKGBUILD` template, its render script
-  and their tests are unchanged, so the handover stays a one-liner. (#430)
-
-### Changed
-
-- Agent session detection no longer reports an outright-killed Claude Code
-  session as active for the rest of the 5-minute activity window: on Unix,
-  when the live registry (`~/.claude/sessions/<pid>.json`) records the
-  session's PID and that process is gone, the session drops to idle
-  immediately. Backends without a process signal (Codex, opencode, Vibe)
-  and non-Unix platforms keep the artefact-only classification. (#441)
-
-- The release workflow's read-only checkouts no longer persist the
-  auto-injected token in `.git/config`. Only the two checkouts that push
-  (the Homebrew tap and the Scoop bucket) keep a credential, and both sides
-  of that split are pinned by a test. (#429)
-
-### Fixed
-
-- The "Attach a session" prompt of the agent detail overlay keeps a fixed
-  frame while typing: the candidate window is sized by the terminal alone
-  (short lists blank-pad), so the modal no longer resizes on every
-  keystroke, and an overflowing list now shows the same scrollbar as the
-  detail mode. (#445)
-- `gwm clean --yes` no longer fails wholesale when a concurrent writer (a
-  watcher such as rust-analyzer regenerating files inside `target/`) races
-  the removal: a transient ENOTEMPTY is retried with a bounded budget, and a
-  directory already reclaimed by someone else counts as success instead of
-  aborting the command. (#440)
+_Nothing yet._
 
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.3.0`](changelogs/1.3.0.md) — 2026-07-24
 - [`1.2.0`](changelogs/1.2.0.md) — 2026-07-21
 - [`1.1.1`](changelogs/1.1.1.md) — 2026-07-16
 - [`1.1.0`](changelogs/1.1.0.md) — 2026-07-15
