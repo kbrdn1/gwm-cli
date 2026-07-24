@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- No workflow checkout persists the auto-injected token any more: the
+  read-only checkouts of `ci.yml` (all six) and `pre-release.yml` (both) now
+  set `persist-credentials: false`, extending the `release.yml` split from
+  #429 to every workflow. The invariant is pinned per file by a YAML-parsing
+  test, with a stricter rule than release.yml: these workflows never push, so
+  no checkout may pass a token at all. (#433)
+
 ### Removed
 
 - The `winget-publish` job. `WINGET_TOKEN` was never provisioned, so the
