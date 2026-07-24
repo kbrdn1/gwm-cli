@@ -50,16 +50,21 @@ fn stable_release_publish_uses_github_cli_with_workflow_token() {
 }
 
 /// Every `actions/checkout` in `release.yml`, paired with its `with:` block.
+fn release_workflow_checkout_steps() -> Vec<(String, serde_yaml_ng::Value)> {
+  workflow_checkout_steps(".github/workflows/release.yml")
+}
+
+/// Every `actions/checkout` in the given workflow, paired with its `with:`
+/// block.
 ///
-/// Parsing the YAML rather than grepping the text keeps the invariant below
+/// Parsing the YAML rather than grepping the text keeps the invariants below
 /// honest: a step that spells its inputs differently, or a job that grows a
 /// second checkout, is still seen.
-fn release_workflow_checkout_steps() -> Vec<(String, serde_yaml_ng::Value)> {
-  let workflow: serde_yaml_ng::Value =
-    serde_yaml_ng::from_str(&fs::read_to_string(".github/workflows/release.yml").unwrap()).unwrap();
+fn workflow_checkout_steps(path: &str) -> Vec<(String, serde_yaml_ng::Value)> {
+  let workflow: serde_yaml_ng::Value = serde_yaml_ng::from_str(&fs::read_to_string(path).unwrap()).unwrap();
 
   let mut steps = Vec::new();
-  for (job_name, job) in workflow["jobs"].as_mapping().expect("release.yml must define jobs") {
+  for (job_name, job) in workflow["jobs"].as_mapping().expect("workflow must define jobs") {
     let job_name = job_name.as_str().unwrap_or_default().to_string();
     let Some(job_steps) = job["steps"].as_sequence() else {
       continue;
@@ -104,6 +109,42 @@ fn release_workflow_checkouts_without_a_token_do_not_persist_credentials() {
     "expected at least 4 credential-free checkouts in release.yml, found {audited} — the parser is \
      probably no longer seeing the steps"
   );
+}
+
+/// #433, the follow-up to #429/#432: the sibling workflows carry the same
+/// shape, and none of their checkouts pushes — `ci.yml` is entirely read-only
+/// and `pre-release.yml` publishes through `gh` with an env token, never
+/// `git push`. No checkout here has any business passing `token:`, so the rule
+/// is stricter than in release.yml: every checkout opts out, no exceptions.
+#[test]
+fn ci_and_prerelease_checkouts_do_not_persist_credentials() {
+  for (path, floor) in [
+    (".github/workflows/ci.yml", 6),
+    (".github/workflows/pre-release.yml", 2),
+  ] {
+    let mut audited = 0;
+
+    for (job, with) in workflow_checkout_steps(path) {
+      assert!(
+        with["token"].is_null(),
+        "the checkout in `{path}` job `{job}` passes an explicit token, but nothing in this \
+         workflow pushes — drop it or move the job behind release.yml's audited split"
+      );
+      audited += 1;
+      assert_eq!(
+        with["persist-credentials"].as_bool(),
+        Some(false),
+        "the checkout in `{path}` job `{job}` does not push, so it must set \
+         `persist-credentials: false`"
+      );
+    }
+
+    assert!(
+      audited >= floor,
+      "expected at least {floor} checkouts in `{path}`, found {audited} — the parser is probably \
+       no longer seeing the steps"
+    );
+  }
 }
 
 /// The mirror of the invariant above: the two checkouts that push must keep the
