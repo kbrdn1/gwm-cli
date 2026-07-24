@@ -997,14 +997,29 @@ fn section_heights_fit_naturally_with_commits_absorbing_slack() {
 
 #[test]
 fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
-  // Overflow: every visible section is guaranteed min(natural, 5) lines,
-  // then the surplus is distributed proportionally to content size,
-  // capped at natural height, residue cascading to Recent Commits first.
-  // available=21, agents=6 (natural 8), wt=30 (natural 32), commits=50
-  // (natural 52): floors 5+5+5, surplus 6 → give = 6*len/86 = (0, 2, 3),
-  // residue 1 → commits. Sum must equal the available height exactly.
+  // Overflow: the scrollable sections (Working Tree / Recent Commits) are
+  // guaranteed min(natural, 5) lines and share the surplus proportionally
+  // to content size, capped at natural height, residue cascading to Recent
+  // Commits first. Agents cannot scroll so it keeps its natural height
+  // outright (see section_heights_never_clamp_the_agents_pane).
+  // available=21, agents=6 (natural 8, kept), wt=30 (natural 32, floor 5),
+  // commits=50 (natural 52, floor 5): base 18, surplus 3 → give =
+  // 3*len/86 = (0, 1, 1), residue 1 → commits. Sum == available exactly.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(21, 6, 30, 50), (5, 7, 9));
+  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 6, 7));
+}
+
+#[test]
+fn section_heights_never_clamp_the_agents_pane() {
+  // Codex review on PR #454: the Agents pane has no scroll — clamping it
+  // below its content permanently hides the trailing "+N more" row (3
+  // pinned rows + the overflow indicator = 4 content rows max, bounded by
+  // agent_pane_lines). A non-scrollable section keeps its natural height
+  // even when the column overflows; only the scrollable sections clamp.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let (agents, wt, commits) = split_section_heights(21, 4, 30, 50);
+  assert_eq!(agents, 6, "agents must keep natural height (4 rows + borders)");
+  assert_eq!((agents, wt, commits), (6, 6, 9));
 }
 
 #[test]

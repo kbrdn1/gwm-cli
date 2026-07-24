@@ -116,12 +116,18 @@ impl SidebarMode {
 /// - When every natural height (`content + 2` borders) fits, each section
 ///   keeps it and Recent Commits absorbs the slack — the exact behaviour
 ///   the old `Min(3)` constraint produced.
-/// - On overflow, every **visible** section is guaranteed
-///   `min(natural, 5)` lines (border + at least 3 content rows) and the
-///   surplus is distributed proportionally to content size, capped at the
-///   natural height; the integer-division residue cascades to Recent
-///   Commits, then Working Tree, then Agents. The total need exceeds the
-///   surplus by construction, so the residue is always absorbed.
+/// - On overflow, every **visible** scrollable section (Working Tree,
+///   Recent Commits) is guaranteed `min(natural, 5)` lines (border + at
+///   least 3 content rows) and the surplus is distributed proportionally
+///   to content size, capped at the natural height; the integer-division
+///   residue cascades to Recent Commits, then Working Tree, then Agents.
+///   The total need exceeds the surplus by construction, so the residue
+///   is always absorbed.
+/// - The Agents pane has **no scroll**, so clamping it below its content
+///   would permanently hide the trailing `+N more` row — it keeps its
+///   natural height outright (Codex review, PR #454). Safe: the pane is
+///   bounded to 4 content rows by construction (`agent_pane_lines` caps
+///   at 3 pinned rows plus the overflow indicator).
 /// - A section with no content stays collapsed at 0 (Agents with no
 ///   session, Working Tree on a clean tree) and never eats a floor.
 ///   Recent Commits is never collapsed: an empty history still renders
@@ -144,7 +150,7 @@ pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commi
     return (natural_a, natural_w, available - natural_a - natural_w);
   }
 
-  let floor_a = natural_a.min(5);
+  let floor_a = natural_a;
   let floor_w = natural_w.min(5);
   let floor_c = natural_c.min(5);
 
