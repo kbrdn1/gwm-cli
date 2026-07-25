@@ -107,6 +107,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong-tenant hazard and covers SSH remotes, where no host can honestly be
   pinned. `$GH_HOST` is now pinned for github.com too, since an ambient
   `GH_HOST` would otherwise retarget a github.com repo.
+- **The forge CLI host pin carries the port**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `https://ghe.example:8443/…`
+  pinned only `ghe.example`, sending `gh` to port 443 — guaranteed wrong, and
+  possibly a different instance listening there.
+- **IPv6 remotes parse correctly**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `git@[::1]:group/repo.git`
+  was split on the first colon, yielding host `git@[` and a nonsense path. The
+  scp-form and port splits are now bracket-aware.
+- **`gwm doctor` honours `$GWM_GH` / `$GWM_GLAB`**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). The forge-CLI probe
+  looked for the bare `gh` / `glab` name, warning about a working setup that
+  points at an alternative binary.
 - **Ancestor group labels stay out of the project label diff**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). GitLab returns them
   from the project endpoint by default, so `gwm labels push --prune` proposed

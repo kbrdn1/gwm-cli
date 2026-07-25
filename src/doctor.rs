@@ -440,7 +440,16 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   // linking and has no `gh` installed, which is not a regression worth
   // shipping for a feature they don't use.
   if let Some(kind) = ctx.config.forge {
-    needed.insert(kind.cli_name().into());
+    // The RESOLVED program, not the bare name: `$GWM_GH` / `$GWM_GLAB`
+    // may point at an alternative binary, and probing `gh` regardless
+    // warned about a setup that works and pushed the exit code to 1
+    // (Codex review #458). `which` resolves an explicit path too, so the
+    // same lookup covers both forms.
+    let program = match kind {
+      crate::forge::ForgeKind::GitHub => crate::github::gh_program(),
+      crate::forge::ForgeKind::GitLab => crate::gitlab::glab_program(),
+    };
+    needed.insert(program.to_string_lossy().into_owned());
   }
   // Review launcher is opt-in; only probe when the user actually
   // configured one (`command` or `tool`).

@@ -268,6 +268,25 @@ pub struct RemoteRef {
   pub trust: OriginTrust,
 }
 
+impl RemoteRef {
+  /// `host[:port]` — what `$GH_HOST` / a CLI `--hostname` expects.
+  ///
+  /// Derived from [`Self::web_origin`] so the web port survives: pinning
+  /// the bare host for `https://ghe.example:8443/…` sent `gh` to port 443,
+  /// which is guaranteed wrong and may reach a different instance
+  /// listening there (Codex review #458). Whether every `gh` version
+  /// honours a port here is not documented; passing it is still strictly
+  /// better than dropping it.
+  pub fn authority(&self) -> &str {
+    self
+      .web_origin
+      .split_once("://")
+      .map(|(_, rest)| rest)
+      .unwrap_or(&self.web_origin)
+      .trim_end_matches('/')
+  }
+}
+
 /// Parse any of the git remote URL flavours into [`RemoteRef`]:
 ///
 /// - scp-like SSH: `git@host:group/proj.git`
@@ -284,8 +303,14 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
 
   // Drop any `user@` prefix, then split off a `:port` suffix.
   let authority = host_part.rsplit('@').next().unwrap_or(host_part);
-  let (host, port) = match authority.rsplit_once(':') {
-    // Only split a trailing `:port`, never an IPv6 segment.
+  // A bracketed IPv6 literal keeps its brackets, and only a `:` past the
+  // closing `]` can introduce a port — `[::1]` is a host, not host `[`
+  // with port `:1]`.
+  let port_sep = match authority.rfind(']') {
+    Some(close) => authority[close..].find(':').map(|i| close + i),
+    None => authority.rfind(':'),
+  };
+  let (host, port) = match port_sep.map(|i| (&authority[..i], &authority[i + 1..])) {
     Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
     _ => (authority, None),
   };
@@ -326,10 +351,23 @@ fn split_host_and_path(url: &str) -> Option<(&str, &str)> {
   if let Some((_scheme, rest)) = url.split_once("://") {
     return rest.split_once('/');
   }
-  // scp-like `[user@]host:path`. The `:` here separates host from path,
-  // so it must not be confused with a `:port` (which scp syntax cannot
-  // express anyway).
-  url.split_once(':')
+  // scp-like `[user@]host:path`. The `:` separates host from path, so it
+  // must not be confused with a `:port` (which scp syntax cannot express)
+  // — nor with the colons inside a bracketed IPv6 literal, which a plain
+  // `split_once(':')` chopped in half (Codex review #458): `git@[::1]:g/r`
+  // became host `git@[` and path `:1]:g/r`.
+  let user_len = url.find('@').map(|i| i + 1).unwrap_or(0);
+  let hostpath = &url[user_len..];
+  let sep = if hostpath.starts_with('[') {
+    // Only a `:` past the closing bracket separates host from path.
+    hostpath
+      .find(']')
+      .and_then(|close| hostpath[close..].find(':').map(|i| close + i))?
+  } else {
+    hostpath.find(':')?
+  };
+  let host_end = user_len + sep;
+  Some((&url[..host_end], &url[host_end + 1..]))
 }
 
 fn trim_git_suffix(s: &str) -> &str {

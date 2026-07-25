@@ -5,6 +5,14 @@ mod common;
 use common::init_repo;
 use gwm::config::Config;
 use gwm::doctor::{self, CheckStatus, DoctorCtx, Severity};
+use std::sync::{Mutex, OnceLock};
+
+/// Serialise the env-mutating tests in this binary (only the forge-CLI
+/// override probe today), since `set_var` is process-wide.
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn ctx_for<'a>(repo: &'a git2::Repository, workdir: &'a std::path::Path, config: &'a Config) -> DoctorCtx<'a> {
   DoctorCtx {
@@ -1096,6 +1104,49 @@ fn an_explicit_gitlab_forge_probes_glab() {
   assert!(
     !missing.split(',').any(|b| b.trim() == "gh"),
     "selecting GitLab must not probe for `gh`, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn the_forge_cli_probe_honours_the_gwm_gh_override() {
+  // `$GWM_GH` / `$GWM_GLAB` point at an alternative binary; probing the
+  // bare name `gh` regardless warned about a setup that works, and pushed
+  // the exit code to 1 (Codex review #458).
+  let (dir, repo) = init_repo();
+  let fake = dir.path().join("my-gh");
+  std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake, perms).unwrap();
+  }
+  let config = Config {
+    forge: Some(gwm::forge::ForgeKind::GitHub),
+    ..Default::default()
+  };
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by the lock above; restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake);
+  }
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+  assert!(
+    !missing.contains("gh"),
+    "the overridden binary exists, so nothing should be reported missing: {}",
     c.detail
   );
 }

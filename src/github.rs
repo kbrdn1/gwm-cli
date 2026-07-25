@@ -1388,7 +1388,7 @@ pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
   }
-  vec![("GH_HOST".to_string(), origin.host.clone())]
+  vec![("GH_HOST".to_string(), origin.authority().to_string())]
 }
 
 impl Forge for GitHubForge {

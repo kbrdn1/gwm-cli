@@ -470,3 +470,55 @@ fn forge_host_key_parses_and_is_optional() {
   let unset: Config = toml::from_str("").unwrap();
   assert_eq!(unset.forge_host, None);
 }
+
+// --- Codex review #458, round 4 -------------------------------------------
+
+#[test]
+fn gh_host_carries_the_port_of_an_enterprise_origin() {
+  // Dropping it targeted 443 — guaranteed wrong when the remote states a
+  // port, and possibly a different instance listening there.
+  let r = forge::parse_remote_url("https://ghe.example:8443/org/repo.git").unwrap();
+
+  assert_eq!(
+    gwm::github::gh_env(&r),
+    vec![("GH_HOST".to_string(), "ghe.example:8443".to_string())]
+  );
+}
+
+#[test]
+fn gh_host_omits_a_default_port() {
+  let r = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
+
+  assert_eq!(
+    gwm::github::gh_env(&r),
+    vec![("GH_HOST".to_string(), "github.com".to_string())]
+  );
+}
+
+#[test]
+fn an_ipv6_scp_remote_splits_on_the_bracketed_host() {
+  // `split_once(':')` cut `git@[::1]:group/repo.git` into host `git@[` and
+  // path `:1]:group/repo.git`, so both the URL and every CLI call pointed
+  // at nonsense.
+  let r = forge::parse_remote_url("git@[::1]:group/repo.git").unwrap();
+
+  assert_eq!(r.host, "[::1]");
+  assert_eq!(r.path, "group/repo");
+}
+
+#[test]
+fn an_ipv6_ssh_url_keeps_its_brackets_and_drops_the_ssh_port() {
+  let r = forge::parse_remote_url("ssh://git@[2001:db8::1]:2222/group/repo.git").unwrap();
+
+  assert_eq!(r.host, "[2001:db8::1]");
+  assert_eq!(r.path, "group/repo");
+  assert_eq!(r.web_origin, "https://[2001:db8::1]");
+}
+
+#[test]
+fn an_ipv6_https_url_keeps_its_web_port() {
+  let r = forge::parse_remote_url("https://[2001:db8::1]:8443/group/repo.git").unwrap();
+
+  assert_eq!(r.host, "[2001:db8::1]");
+  assert_eq!(r.web_origin, "https://[2001:db8::1]:8443");
+}
