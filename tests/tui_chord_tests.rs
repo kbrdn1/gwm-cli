@@ -598,15 +598,21 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
   }
 
   // Fixed (non-rebindable) controls the contexts handle OUTSIDE ModalAction
-  // (Codex review #456): the palette's fuzzy filter input, the number /
-  // value typing and their Backspace erasers. `ModalAction::all()` cannot
-  // see them, so pin them literally.
+  // (Codex review #456, twice): the palette's fuzzy filter input (lowercase
+  // ASCII, digits, `_`, `-` — nothing else), the value typing and Backspace
+  // erasers, and the two input sub-modes that bypass the rebindable verbs
+  // entirely (the agents attach-by-id prompt, the CI checks filter).
+  // `ModalAction::all()` cannot see them, so pin them literally.
   for (section, keys) in [
-    ("Command Palette", "any char"),
+    ("Command Palette", "a-z 0-9 _ -"),
     ("Command Palette", "Backspace"),
     ("Link Prompt", "Backspace"),
-    ("Settings", "0-9"),
+    ("Settings", "any char"),
     ("Settings", "Backspace"),
+    ("Agent Sessions", "any char"),
+    ("Agent Sessions", "Backspace"),
+    ("CI Checks", "any char"),
+    ("CI Checks", "Backspace"),
   ] {
     let present = sections.get(section).is_some_and(|m| m.contains_key(keys));
     assert!(
