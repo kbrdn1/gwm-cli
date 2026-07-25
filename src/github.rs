@@ -1378,25 +1378,26 @@ impl GitHubForge {
 /// the argv only ever carries `--repo owner/repo` and never a hostname
 /// (Codex review #458, round 3).
 ///
-/// Nothing is pinned when the slug is empty — the caller wants `gh` to
-/// infer the project locally.
+/// The host is pinned whenever a slug is known — including github.com,
+/// and including a **guessed** (SSH) origin. Both were exempted at some
+/// point and both exemptions were wrong (Codex review #458):
 ///
-/// A **guessed** (SSH) origin is pinned anyway when its host is not
-/// github.com, which is the one place this diverges from
-/// [`crate::gitlab::glab_env`] (Codex review #458). The reason is that
-/// `gh` cannot be steered any other way here: `--repo owner/repo` carries
-/// no hostname, `gh api repos/<slug>/…` bakes the slug into the request
-/// path, and neither falls back to the working directory. Pinning nothing
-/// therefore means silently querying github.com — where a same-named repo
-/// belonging to someone else may answer. A distinct SSH hostname is a
-/// documented GitLab pattern, not a GitHub one, so the SSH host is the
-/// best available signal; `glab`, which *does* resolve from the working
-/// directory, is left to do so.
+/// - The child inherits gwm's environment, so an ambient `GH_HOST` —
+///   routine for enterprise users — retargets every call, since the argv
+///   only ever carries `--repo owner/repo` and never a hostname. Knowing
+///   the repo is on github.com, gwm says so rather than letting the
+///   environment decide.
+/// - `gh` cannot be steered any other way: `gh api repos/<slug>/…` bakes
+///   the slug into the request path, so unlike `glab` it has no working
+///   directory to fall back to. This is the one place the two backends
+///   diverge — see [`crate::gitlab::glab_env`], where a guessed origin is
+///   deliberately left alone because a distinct SSH hostname *is* a
+///   documented GitLab pattern.
+///
+/// Nothing is pinned only when the slug is empty: that is the caller
+/// asking `gh` to infer the project locally.
 pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.path.is_empty() {
-    return Vec::new();
-  }
-  if origin.trust != forge::OriginTrust::FromUrl && origin.host == "github.com" {
     return Vec::new();
   }
   vec![("GH_HOST".to_string(), origin.authority().to_string())]

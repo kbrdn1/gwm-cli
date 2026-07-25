@@ -374,15 +374,6 @@ fn an_ssh_enterprise_remote_still_pins_gh_host() {
 }
 
 #[test]
-fn an_ssh_github_dot_com_remote_pins_nothing() {
-  // github.com is the default anyway; pinning it from a guess adds risk
-  // with no benefit.
-  let r = forge::parse_remote_url("git@github.com:o/r.git").unwrap();
-
-  assert!(gwm::github::gh_env(&r).is_empty());
-}
-
-#[test]
 fn gh_host_is_pinned_even_for_github_dot_com() {
   // The child inherits gwm's environment, so a user's ambient
   // `GH_HOST=github.acme.internal` (routine for enterprise users) would
@@ -492,4 +483,32 @@ fn a_guessed_origin_is_flagged_so_urls_can_be_confirmed_upstream() {
 
   assert!(!f.origin_is_authoritative());
   assert_eq!(f.issue_url(7), "https://gitlab-ssh.acme/team/proj/-/issues/7");
+}
+
+// --- Codex review #458, round 7 -------------------------------------------
+
+#[test]
+fn gh_host_is_pinned_for_an_ssh_github_dot_com_remote_too() {
+  // Round 5 exempted a guessed github.com origin from the pin, which left
+  // the very hazard round 4 closed for `https://` remotes still open for
+  // `git@github.com:` ones: the child inherits gwm's environment, so an
+  // ambient `GH_HOST=github.acme.internal` retargets every call — reads,
+  // label creates, milestone deletes — at a same-named repo on another
+  // tenant. Knowing the repo is on github.com, gwm says so.
+  let r = forge::parse_remote_url("git@github.com:owner/repo.git").unwrap();
+
+  assert_eq!(
+    gwm::github::gh_env(&r),
+    vec![("GH_HOST".to_string(), "github.com".to_string())]
+  );
+}
+
+#[test]
+fn gh_host_is_still_unpinned_without_a_slug() {
+  // The `gwm new` / `gwm pr` fallback for an unparseable origin: the
+  // caller wants `gh` to infer everything locally.
+  let (_dir, repo) = init_repo();
+  let f = forge::resolve_or_default(&repo, &Config::default());
+
+  assert_eq!(f.slug(), "");
 }

@@ -957,3 +957,17 @@ fn an_empty_selector_makes_glab_api_resolve_the_project_itself() {
     vec!["api", "--paginate", "projects/:fullpath/milestones?per_page=100"]
   );
 }
+
+#[test]
+fn every_write_path_honours_the_repo_selector() {
+  // `create_pr` reached past `repo_selector()` for the raw slug, so MR
+  // creation — the one call that *mutates* another tenant rather than
+  // just reading it — still resolved against glab's default host on an
+  // SSH origin. Pinned at the argv level so a future call site cannot
+  // silently reintroduce it.
+  let issue = gitlab::issue_create_argv("", "T", "B", &[]);
+  let mr = gitlab::mr_create_argv("", "T", "B", "feat/x", Some("main"), false);
+
+  assert!(!issue.iter().any(|a| a == "--repo"), "issue argv: {issue:?}");
+  assert!(!mr.iter().any(|a| a == "--repo"), "mr argv: {mr:?}");
+}

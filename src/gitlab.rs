@@ -887,7 +887,7 @@ impl Forge for GitLabForge {
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
     let body = forge::read_body_file(req.body_file)?;
     let out = self.run_argv(mr_create_argv(
-      &self.origin.path,
+      self.repo_selector(),
       req.title,
       &body,
       req.head,

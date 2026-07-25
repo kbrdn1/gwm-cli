@@ -126,12 +126,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). A GitLab slug can be
   `group/sub/proj`; splitting on the first separator gave `owner=group`,
   `repo=sub/proj`. The namespace is everything before the last one.
-- **An enterprise SSH origin pins the GitHub host**
-  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `gh` takes no
-  hostname from `--repo owner/repo`, bakes the slug into `gh api repos/<slug>`,
-  and does not fall back to the working directory, so pinning nothing meant
-  silently querying github.com — where a same-named repo belonging to someone
-  else may answer.
+- **The GitHub host is pinned whenever the slug is known**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)), including github.com
+  and including SSH origins. `gh` takes no hostname from `--repo owner/repo`,
+  bakes the slug into `gh api repos/<slug>`, and does not fall back to the
+  working directory the way `glab` does — so an ambient `GH_HOST` retargeted
+  every call, and pinning nothing on an enterprise host meant silently
+  querying github.com.
 - **`gwm doctor` honours `$GWM_GH` / `$GWM_GLAB`**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). The forge-CLI probe
   looked for the bare `gh` / `glab` name, warning about a working setup that
