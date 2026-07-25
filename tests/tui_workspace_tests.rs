@@ -211,6 +211,41 @@ fn failed_repo_activation_marks_the_selection_stale_then_recovers() {
 }
 
 #[test]
+fn going_stale_closes_the_open_ci_checks_overlay() {
+  // Codex review #455 (P2): a relist that marks the selection stale while
+  // the CI checks overlay is up used to leave it open — every verb, Enter
+  // opening a check URL included, then acted on the previously active
+  // repo. Every stale transition closes the overlay at the source.
+  use gwm::tui::state::detail_overlay::{DetailKind, DetailRole, DetailRow};
+  let root = workspace_root(); // alpha, beta
+  let mut app = App::new_workspace_at_layered(root.path(), None).unwrap();
+  app.detail_overlay.open(
+    DetailKind::CiChecks,
+    "CI Checks".into(),
+    vec![DetailRow {
+      label: "✓".into(),
+      value: "stale-check".into(),
+      role: DetailRole::Success,
+      meta: None,
+      extra: None,
+    }],
+  );
+  app.view = gwm::tui::View::DetailOverlay;
+
+  fs::remove_dir_all(root.path().join("beta")).unwrap();
+  let last = app.worktrees.len() - 1;
+  app.list_state.select(Some(last));
+  app.sync_active_repo();
+
+  assert!(app.workspace_active_stale, "the dead selection is stale");
+  assert_eq!(
+    app.view,
+    gwm::tui::View::List,
+    "going stale closes the CI checks overlay"
+  );
+}
+
+#[test]
 fn no_visible_selection_marks_workspace_stale() {
   // When the filter hides every row (no selection), workspace mode has no
   // active repo the selection points at, so write actions must be blocked:

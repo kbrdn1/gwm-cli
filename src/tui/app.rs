@@ -795,6 +795,20 @@ impl App {
     self.sidebar.orientation = self.config.tui.sidebar_orientation;
   }
 
+  /// Mark the workspace selection stale AND close the open CI checks
+  /// overlay (Codex review #455): its rows belong to the previously
+  /// active repo, so every verb — `Enter` opening a check URL included —
+  /// would act on the wrong repo. One funnel so a new stale site cannot
+  /// forget the close.
+  fn mark_workspace_stale(&mut self) {
+    self.workspace_active_stale = true;
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      self.close_detail_overlay();
+    }
+  }
+
   pub fn sync_active_repo(&mut self) {
     let Some(ws) = self.workspace.as_ref() else {
       return;
@@ -804,11 +818,11 @@ impl App {
       // active repo the selection points at, so writes must not fall through to
       // the previously active repo — mark stale to block them (#304). Reached
       // only in workspace mode (the `ws` guard above returns in single-repo).
-      self.workspace_active_stale = true;
+      self.mark_workspace_stale();
       return;
     };
     let Some(&target) = ws.row_repo.get(raw) else {
-      self.workspace_active_stale = true;
+      self.mark_workspace_stale();
       return;
     };
     if target == ws.active {
@@ -850,7 +864,7 @@ impl App {
         // Keep the previously active repo live but mark the selection stale so
         // repo-mutating actions are blocked until the user moves to a
         // reachable row (or a refresh drops the dead repo) — #304.
-        self.workspace_active_stale = true;
+        self.mark_workspace_stale();
         self.status = format!(
           "workspace: repo '{}' is unavailable ({}) — press r to refresh",
           meta.name, e
