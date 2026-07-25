@@ -575,7 +575,12 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
     }
   }
 
-  // Expected multiset: how many modal verbs bind each (section, keys) pair.
+  // Expected multiset: how many entries must carry each (section, keys)
+  // pair. Modal verbs AND the fixed (non-rebindable) controls the contexts
+  // handle outside ModalAction share ONE ledger (Codex review #456, third
+  // round): a fixed `Backspace` row must not be able to cover for a future
+  // modal verb defaulting to `Backspace` in the same section — summing
+  // both expectations makes either omission trip the count.
   let mut expected: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
   for action in ModalAction::all() {
     let keys = modal.keys_display(action);
@@ -588,37 +593,42 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       .entry((section_for(action.context()).to_string(), keys))
       .or_default() += 1;
   }
+  // The exhaustive fixed-control ledger of the modal sections: the free
+  // typing of the Create form's issue / description fields, the palette's
+  // fuzzy filter charset (lowercase ASCII, digits, `_`, `-` — nothing
+  // else), the value / number typing and Backspace erasers, the two input
+  // sub-modes that bypass the rebindable verbs entirely (agents
+  // attach-by-id prompt, CI checks filter), and the PTY escape hatch.
+  for (section, keys) in [
+    ("Create Form", "any char"),
+    ("Create Form", "Backspace"),
+    ("Link Prompt", "0-9"),
+    ("Link Prompt", "Backspace"),
+    ("Command Palette", "a-z 0-9 _ -"),
+    ("Command Palette", "Backspace"),
+    ("Settings", "any char"),
+    ("Settings", "Backspace"),
+    ("Agent Sessions", "any char"),
+    ("Agent Sessions", "Backspace"),
+    ("Agent Sessions", "Up/Down"),
+    ("Agent Sessions", "enter"),
+    ("Agent Sessions", "Esc"),
+    ("CI Checks", "any char"),
+    ("CI Checks", "Backspace"),
+    ("CI Checks", "Up/Down"),
+    ("CI Checks", "enter"),
+    ("CI Checks", "Esc"),
+    ("PTY Overlay", "Esc"),
+  ] {
+    *expected.entry((section.to_string(), keys.to_string())).or_default() += 1;
+  }
   for ((section, keys), wanted) in &expected {
     let have = sections.get(section).and_then(|m| m.get(keys)).copied().unwrap_or(0);
     assert!(
       have >= *wanted,
       "the {section:?} section documents {have} entr(y/ies) with keys {keys:?} but \
-       {wanted} modal verb(s) bind them — one is missing from `help_rows` (issue #453)"
-    );
-  }
-
-  // Fixed (non-rebindable) controls the contexts handle OUTSIDE ModalAction
-  // (Codex review #456, twice): the palette's fuzzy filter input (lowercase
-  // ASCII, digits, `_`, `-` — nothing else), the value typing and Backspace
-  // erasers, and the two input sub-modes that bypass the rebindable verbs
-  // entirely (the agents attach-by-id prompt, the CI checks filter).
-  // `ModalAction::all()` cannot see them, so pin them literally.
-  for (section, keys) in [
-    ("Command Palette", "a-z 0-9 _ -"),
-    ("Command Palette", "Backspace"),
-    ("Link Prompt", "Backspace"),
-    ("Settings", "any char"),
-    ("Settings", "Backspace"),
-    ("Agent Sessions", "any char"),
-    ("Agent Sessions", "Backspace"),
-    ("CI Checks", "any char"),
-    ("CI Checks", "Backspace"),
-  ] {
-    let present = sections.get(section).is_some_and(|m| m.contains_key(keys));
-    assert!(
-      present,
-      "the {section:?} section must document the fixed {keys:?} control \
-       (handled outside ModalAction — issue #453)"
+       {wanted} are required (modal verbs + fixed controls) — one is missing from \
+       `help_rows` (issue #453)"
     );
   }
 }
