@@ -2111,6 +2111,110 @@ impl App {
   /// to `View::CommandPalette` and arms the pure state machine on
   /// `self.palette` with a fresh empty buffer. Status bar shows a
   /// short hint so the user knows what to type.
+  /// Typing route of the palette, resolved BEFORE the modal context
+  /// (Codex review #456): during text input the printable keys and
+  /// Backspace are reserved for typing — a rebind like
+  /// `palette.close = ["x"]` must not close the palette mid-word. Returns
+  /// `true` when the key was consumed as input; charset keys type, other
+  /// printable characters are swallowed (no palette entry could match
+  /// them), Ctrl-modified keys fall through to the modal resolution.
+  pub fn palette_input_key(&mut self, key: KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers as Mods;
+    // Ctrl/Alt-modified strokes are bindable and must stay reachable
+    // (Codex review #456) — only unmodified legitimate input is reserved.
+    if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
+      return false;
+    }
+    // Kitty-style terminals report an uppercase as Char + SHIFT (the case
+    // KeyStroke::from_event normalises): that is an uppercase letter, not
+    // the palette's lowercase input — a binding on "X" must stay
+    // reachable on every terminal encoding (Codex review #456, it. 10).
+    if key.modifiers.contains(Mods::SHIFT) && matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic()) {
+      return false;
+    }
+    if key.code == KeyCode::Backspace {
+      self.palette_pop_char();
+      return true;
+    }
+    match key.code {
+      KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+        self.palette_push_char(c);
+        true
+      }
+      // Characters outside the filter charset fall through to the modal
+      // resolution — a rebind like `close = ["?"]` stays honoured (#293
+      // contract); unresolved ones are dropped by the dispatch fallback.
+      _ => false,
+    }
+  }
+
+  /// Fallback after an EMPTY modal resolution in the palette (Codex
+  /// review #456, iterations 10/14): an unresolved modified charset
+  /// printable is still typing (AltGr/Option characters arrive as
+  /// Char + ALT on some keyboards), and an unresolved modified Backspace
+  /// still erases (parity with the pre-#456 routing).
+  pub fn palette_unresolved_fallback(&mut self, key: KeyEvent) {
+    match key.code {
+      KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+        self.palette_push_char(c);
+      }
+      KeyCode::Backspace => self.palette_pop_char(),
+      _ => {}
+    }
+  }
+
+  /// Typing route of the Settings value editor — same reserved-typing
+  /// contract as [`Self::palette_input_key`] (Codex review #456). A no-op
+  /// (`false`) when no edit is live.
+  pub fn settings_edit_input_key(&mut self, key: KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers as Mods;
+    if self.config_panel.editing.is_none() {
+      return false;
+    }
+    if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
+      return false;
+    }
+    if key.code == KeyCode::Backspace {
+      self.config_panel.pop_edit_char();
+      return true;
+    }
+    match key.code {
+      // A character the field refuses (a non-digit on a numeric field) is
+      // NOT typing — it falls through so a rebound verb on it still fires
+      // (Codex review #456, iteration 11).
+      KeyCode::Char(c) => self.config_panel.push_edit_char(c),
+      _ => false,
+    }
+  }
+
+  /// The whole Settings-editor key route (Codex review #456, iteration
+  /// 10) — one testable method: reserved typing first, then the modal
+  /// resolution, and an unresolved printable is REINJECTED as typing
+  /// (AltGr/Option characters arrive Char + ALT on some keyboards; they
+  /// are not reserved so a bound Alt+x stays reachable, but when nothing
+  /// resolves they are what the user typed).
+  pub fn handle_settings_edit_key(&mut self, key: KeyEvent) {
+    if self.settings_edit_input_key(key) {
+      return;
+    }
+    match self.resolve_modal(KeyContext::ConfigEdit, key) {
+      Some(ModalAction::ConfigEditSubmit) => self.commit_settings_edit(),
+      Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_edit(),
+      _ => match key.code {
+        // Best-effort reinjection; a character the field refuses (an
+        // AltGr symbol on a numeric field) is simply dropped.
+        KeyCode::Char(c) => {
+          let _ = self.config_panel.push_edit_char(c);
+        }
+        // An UNBOUND Alt/Ctrl+Backspace still erases (iteration 14 —
+        // parity with the pre-#456 routing, which erased on every
+        // KeyCode::Backspace).
+        KeyCode::Backspace => self.config_panel.pop_edit_char(),
+        _ => {}
+      },
+    }
+  }
+
   pub fn open_command_palette(&mut self) {
     self.palette.open();
     self.view = View::CommandPalette;
@@ -3994,6 +4098,34 @@ impl App {
       return CreateKey::Handled;
     }
     let on_type = self.create_form.field == Field::Type;
+    // Typing is RESERVED on the text fields (Codex review #456): a modal
+    // rebind like `cancel = ["Backspace"]` (or `= ["q"]`) resolved before
+    // the typing fallback, so it stole the eraser / typed characters.
+    // Printable keys and Backspace route to the field first — the palette
+    // convention; modal verbs act through non-printable keys (Ctrl-
+    // modified chars still fall through to the modal resolution).
+    if !on_type
+      && !key
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+    {
+      match key.code {
+        KeyCode::Backspace => {
+          self.create_pop_char();
+          return CreateKey::Handled;
+        }
+        // Only the field's LEGITIMATE input is reserved: free text on
+        // description, digits on issue. A non-digit on the issue field
+        // still reaches the modal resolution (a printable rebind stays
+        // honoured, the #293 contract), with the digits-only status hint
+        // as the unresolved fallback below.
+        KeyCode::Char(c) if self.create_form.field != Field::Issue || c.is_ascii_digit() => {
+          self.create_push_char(c);
+          return CreateKey::Handled;
+        }
+        _ => {}
+      }
+    }
     // #219: verbs resolve through the `create` context. The type-cycling
     // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
     // Type field; on a text field their keys fall through to literal input
@@ -5073,6 +5205,28 @@ impl App {
         _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
         _ => {}
       },
+      // Typing stays reserved here too (Codex review #456) — digits and
+      // Backspace route to the number before the stage context so a
+      // modal rebind cannot swallow them. Same contract as the create
+      // form; Ctrl-modified chars still reach the modal resolution.
+      LinkPromptStage::InputNumber
+        if key.code == KeyCode::Backspace
+          && !key
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+      {
+        self.link_prompt_pop_char()
+      }
+      LinkPromptStage::InputNumber
+        if matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
+          && !key
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+      {
+        if let KeyCode::Char(c) = key.code {
+          self.link_prompt_push_char(c);
+        }
+      }
       LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
         Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
         Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,

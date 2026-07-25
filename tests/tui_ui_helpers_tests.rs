@@ -657,12 +657,17 @@ fn config_capture_footer_hints_differ_by_capture_kind() {
     "a single-stroke capture auto-commits, no save verb: {modal:?}"
   );
 
-  // A rebind of the config.edit cancel verb shows through.
+  // A rebind of the config.edit cancel verb shows through (a modified
+  // stroke — bare printables are refused as reserved typing since the
+  // #456 review, iteration 13).
   let mut mk = ModalKeymap::defaults();
-  mk.apply_override(ModalAction::ConfigEditCancel, vec![parse_single("q").unwrap()])
+  mk.apply_override(ModalAction::ConfigEditCancel, vec![parse_single("Alt+q").unwrap()])
     .unwrap();
   let rebound = config_capture_footer_hints(&mk, false);
-  assert!(rebound.iter().any(|(k, l)| k == "q" && l == "cancel"), "{rebound:?}");
+  assert!(
+    rebound.iter().any(|(k, l)| k == "Alt+q" && l == "cancel"),
+    "{rebound:?}"
+  );
 }
 
 #[test]

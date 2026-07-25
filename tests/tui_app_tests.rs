@@ -745,6 +745,412 @@ fn create_type_navigation_loops() {
 }
 
 #[test]
+fn backspace_stays_a_reserved_eraser_in_the_create_form() {
+  // Codex review #456 (iteration 7): a modal rebind like
+  // `[tui.keys.modal.create] cancel = ["Backspace"]` used to resolve
+  // BEFORE the typing fallback, so Backspace cancelled the form and the
+  // text fields lost their eraser. The physical Backspace is a reserved
+  // editing control on the input fields (and such rebinds are refused at
+  // config time since iteration 14) — this route is the runtime
+  // backstop.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Issue;
+  app.create_push_char('4');
+  app.create_push_char('2');
+  let out = app.handle_create_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert_ne!(
+    out,
+    CreateKey::Cancel,
+    "Backspace must not cancel while a text field is focused"
+  );
+  assert_eq!(app.create_form.issue, "4", "Backspace must erase the last digit");
+}
+
+#[test]
+fn backspace_stays_a_reserved_eraser_in_the_link_number_input() {
+  // Codex review #456: Backspace is reserved typing on the number stage
+  // (a colliding rebind is refused at config time).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, mut app) = make_app();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+  let out = app.handle_link_prompt_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert!(matches!(out, LinkPromptKey::Handled), "Backspace is plain typing");
+  assert_eq!(app.link_prompt_number_input(), "4", "Backspace erases the last digit");
+}
+
+#[test]
+fn printable_keys_stay_typing_in_the_create_form_despite_rebinds() {
+  // Codex review #456 (iteration 8): a modal rebind onto a printable key
+  // (`cancel = ["q"]`) resolved before the typing fallback, so `q` closed
+  // the form mid-word. On a text field the printable keys are reserved
+  // for typing (the palette convention, and such rebinds are refused at
+  // config time since iteration 14) — this route is the runtime
+  // backstop. Type-cycling verbs keep bare letters: they only fire on
+  // the Type field, so `next_type = ["q"]` must not steal the letter
+  // from a text field either.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::CreateNextType, KeyStroke::parse_chord("q").unwrap())
+    .unwrap();
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  let before = app.create_form.type_index;
+  let out = app.handle_create_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert_ne!(out, CreateKey::Cancel, "a printable rebind must not fire while typing");
+  assert_eq!(app.create_form.desc, "q", "the character types into the field instead");
+  assert_eq!(
+    app.create_form.type_index, before,
+    "the type must not cycle from a text field"
+  );
+}
+
+#[test]
+fn printable_keys_stay_typing_in_the_link_number_input_despite_rebinds() {
+  // Codex review #456: digits are reserved typing on the number stage
+  // (a colliding rebind like cancel = ["5"] is refused at config time);
+  // non-digits still reach the modal resolution (#293 contract).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, mut app) = make_app();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  let out = app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+  assert!(matches!(out, LinkPromptKey::Handled), "a digit is plain typing");
+  assert_eq!(app.link_prompt_number_input(), "5", "the digit types into the number");
+}
+
+#[test]
+fn palette_input_routes_typing_before_modal_rebinds() {
+  // Codex review #456: the palette's filter charset and Backspace are
+  // reserved typing, routed through a testable App method before the
+  // modal resolution (bindings that would collide are refused at config
+  // time — see reserved_typing_keys_cannot_be_rebound_in_input_contexts).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+    "a charset key is consumed as typing"
+  );
+  assert_eq!(app.palette.buffer(), "x", "the character filters");
+  assert!(
+    app.palette_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+    "Backspace is consumed as the eraser"
+  );
+  assert_eq!(app.palette.buffer(), "", "Backspace erases");
+}
+
+#[test]
+fn settings_editor_routes_typing_before_modal_rebinds() {
+  // Same contract for the Settings value editor (Codex review #456):
+  // printables and Backspace are consumed as typing before the modal
+  // resolution. Rebinds on those keys are refused at config time
+  // (iteration 13) — this route is the runtime backstop behind that
+  // validation.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("4".into());
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+    "a printable key is consumed as typing"
+  );
+  assert_eq!(app.config_panel.editing.as_deref(), Some("45"));
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+    "Backspace is consumed as the eraser"
+  );
+  assert_eq!(app.config_panel.editing.as_deref(), Some("4"));
+}
+
+#[test]
+fn modified_strokes_reach_the_modal_resolution_in_input_modes() {
+  // Codex review #456 (iteration 9): the reserved-typing routes must not
+  // swallow Ctrl/Alt-modified strokes — the parser accepts bindings like
+  // `close = ["Alt+x"]` or `accept = ["Ctrl+Backspace"]` and they have to
+  // stay reachable while typing. Only unmodified legitimate input is
+  // reserved.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+    "Alt+x must fall through to the modal resolution"
+  );
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+    "Ctrl+Backspace must fall through to the modal resolution"
+  );
+  app.config_panel.editing = Some("1".into());
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+    "Alt+x must fall through in the settings editor"
+  );
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+    "Ctrl+Backspace must fall through in the settings editor"
+  );
+}
+
+#[test]
+fn settings_editor_reinjects_unresolved_modified_backspace() {
+  // Codex review #456 (iteration 14): before the reserved-typing routes,
+  // every KeyCode::Backspace erased — including Alt/Ctrl+Backspace. The
+  // modifier-aware route let those reach the modal resolution (correct,
+  // a bound Ctrl+Backspace must fire), but the empty-resolution fallback
+  // only reinjected Char, so an UNBOUND modified Backspace stopped
+  // erasing. Parity restored: it pops one character again.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("ab".into());
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("a"),
+    "an unresolved Alt+Backspace must still erase"
+  );
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some(""),
+    "an unresolved Ctrl+Backspace must still erase"
+  );
+}
+
+#[test]
+fn palette_reinjects_unresolved_modified_backspace() {
+  // Same parity for the command palette (Codex review #456, iteration
+  // 14): an UNBOUND Alt/Ctrl+Backspace falls through the modal
+  // resolution and must still erase, exactly like the pre-#456 routing.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  app.palette_input_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+  app.palette_input_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+  app.palette_unresolved_fallback(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+  assert_eq!(
+    app.palette.buffer(),
+    "a",
+    "an unresolved Alt+Backspace must still erase"
+  );
+  // The charset reinjection (AltGr parity) keeps working through the
+  // same fallback.
+  app.palette_unresolved_fallback(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+  assert_eq!(
+    app.palette.buffer(),
+    "ac",
+    "an unresolved AltGr charset character still types"
+  );
+}
+
+#[test]
+fn settings_editor_reinjects_unresolved_modified_characters() {
+  // Codex review #456 (iteration 10): AltGr/Option printables arrive as
+  // Char + ALT on some keyboards. They are not reserved typing (a bound
+  // Alt+x must stay reachable), but when the modal resolution comes up
+  // empty the character IS typing and must reach the buffer — the old
+  // fallback pushed it, the modifier-aware route dropped it, making
+  // characters like @ or { impossible to type.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("a".into());
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::ALT));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("a@"),
+    "an unresolved AltGr character must still type"
+  );
+}
+
+#[test]
+fn shifted_uppercase_never_counts_as_palette_typing() {
+  // Codex review #456 (iteration 10): kitty-style terminals report an
+  // uppercase X as Char('x') + SHIFT — the very case KeyStroke::from_event
+  // normalises. The palette only takes lowercase input, so that stroke is
+  // NOT canonical typing and must fall through to the modal resolution
+  // (a binding on "X" stays reachable on every terminal encoding).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SHIFT)),
+    "a shifted letter is an uppercase, not palette input"
+  );
+  assert_eq!(app.palette.buffer(), "", "nothing must have been typed");
+}
+
+#[test]
+fn a_character_the_numeric_field_refuses_is_not_claimed_as_typing() {
+  // Codex review #456 (iteration 11): on a numeric field push_edit_char
+  // refuses non-digits, but settings_edit_input_key still claimed them as
+  // consumed. A character the field refuses is not typing; it falls
+  // through to the modal resolution (where only non-typing strokes can be
+  // bound since iteration 13, so nothing fires and the reinjection drops
+  // it) — the buffer must stay untouched either way.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::{SettingField, SettingsTab};
+  let (_dir, mut app) = make_app();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+  while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
+    app.config_panel.selected += 1;
+    assert!(
+      app.config_panel.selected < 100,
+      "ConfirmCountdown not found in the Tui tab"
+    );
+  }
+  app.config_panel.begin_edit("4");
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+    "a character the numeric field refuses must fall through to the resolution"
+  );
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("4"),
+    "the refused character must not land in the numeric buffer"
+  );
+}
+
+#[test]
+fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
+  // Codex review #456 (iterations 12-13): a VALID config like
+  // `[tui.keys.modal.palette] close = ["x"]` replaced Esc, then the
+  // reserved typing consumed `x` — the overlay had no exit left short of
+  // Ctrl-C killing the whole TUI. Bindings the typing routes would
+  // swallow are refused up front, at config time: every verb of the
+  // always-typing contexts (palette, link number input), the whole
+  // ConfigEdit context (it only exists while a value edit consumes
+  // printables and Backspace), and CreateSubmit (submitting only works
+  // from the Description field, where all printables are typing). The
+  // other create verbs stay bindable on bare letters — they act on the
+  // Type field, which takes no text input.
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  let mut modal = ModalKeymap::defaults();
+  for (action, chord) in [
+    (ModalAction::CommandPaletteClose, "x"),
+    (ModalAction::CommandPaletteAccept, "Backspace"),
+    (ModalAction::LinkInputCancel, "5"),
+    (ModalAction::LinkInputSubmit, "Backspace"),
+    (ModalAction::ConfigEditSubmit, "5"),
+    (ModalAction::ConfigEditCancel, "x"),
+    (ModalAction::ConfigEditCancel, "Backspace"),
+    (ModalAction::CreateSubmit, "s"),
+    (ModalAction::CreateSubmit, "Backspace"),
+    // Iteration 14: cancel / field navigation must stay reachable from
+    // the create form's TEXT fields, where bare printables and Backspace
+    // are typing — only the type-cycling verbs live on a typing-free
+    // field and keep bare letters.
+    (ModalAction::CreateCancel, "q"),
+    (ModalAction::CreateCancel, "Backspace"),
+    (ModalAction::CreateNextField, "Backspace"),
+    (ModalAction::CreatePrevField, "a"),
+  ] {
+    assert!(
+      modal
+        .apply_override(action, KeyStroke::parse_chord(chord).unwrap())
+        .is_err(),
+      "{action:?} = [{chord:?}] must be refused — the key is reserved typing input"
+    );
+  }
+  for (action, chord) in [
+    (ModalAction::CreateNextType, "n"),
+    (ModalAction::CreateCancel, "Alt+q"),
+    (ModalAction::ConfigEditSubmit, "Alt+s"),
+    (ModalAction::CommandPaletteClose, "Alt+x"),
+  ] {
+    assert!(
+      modal
+        .apply_override(action, KeyStroke::parse_chord(chord).unwrap())
+        .is_ok(),
+      "{action:?} = [{chord:?}] must stay bindable"
+    );
+  }
+}
+
+#[test]
+fn link_number_footer_drops_a_fetch_binding_swallowed_by_typing() {
+  // Codex review #456 (iteration 13): with the global `fetch_github`
+  // rebound to a digit or Backspace, the number-input stage consumes the
+  // key as typing before the fetch fallback — the shortcut cannot fire
+  // there. The footer must drop the dead hint rather than advertise it
+  // (the same convention as a key shadowed by a modal binding).
+  use crossterm::event::{KeyCode, KeyModifiers};
+  use gwm::tui::keymap::{Action, KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::HintContext;
+
+  let modal = ModalKeymap::defaults();
+  let default = HintContext::LinkInputNumber.resolve(&Keymap::defaults(), &modal);
+  assert!(
+    default.iter().any(|(_, l)| l == "fetch"),
+    "the default fetch binding must be advertised: {default:?}"
+  );
+  let mut km = Keymap::defaults();
+  km_apply(&mut km, Action::FetchGithub, KeyCode::Char('5'));
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "a fetch binding swallowed by digit typing must not be advertised: {resolved:?}"
+  );
+  let mut km = Keymap::defaults();
+  km_apply(&mut km, Action::FetchGithub, KeyCode::Backspace);
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "a fetch binding swallowed by the eraser must not be advertised: {resolved:?}"
+  );
+
+  fn km_apply(km: &mut Keymap, action: Action, code: KeyCode) {
+    km.apply_override(action, vec![vec![KeyStroke::new(code, KeyModifiers::empty())]])
+      .unwrap();
+  }
+}
+
+#[test]
+fn full_edit_buffer_still_consumes_valid_characters() {
+  // Codex review #456 (iteration 12): at the buffer limit push_edit_char
+  // refused even VALID characters, so the stroke leaked through to the
+  // modal resolution mid-typing. A type-accepted character is consumed
+  // as a no-op at the limit; only a character the field refuses outright
+  // falls through.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::{SettingField, SettingsTab};
+  let (_dir, mut app) = make_app();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+  while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
+    app.config_panel.selected += 1;
+    assert!(
+      app.config_panel.selected < 100,
+      "ConfirmCountdown not found in the Tui tab"
+    );
+  }
+  app.config_panel.begin_edit("999"); // at the 3-char limit
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+    "a valid digit at the limit is a consumed no-op — it must not leak to the resolution"
+  );
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("999"),
+    "the buffer must stay at its limit"
+  );
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();

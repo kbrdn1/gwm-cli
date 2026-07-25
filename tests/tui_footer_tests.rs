@@ -345,11 +345,13 @@ fn worktrees_hints_are_grouped_lifecycle_then_act_then_navigate_then_global() {
     labels,
     vec![
       "new", "del", "boot", // lifecycle
-      "open", "git", "review", "yank", // act on the selected worktree
+      "open", "git", "exec", "agents", "review", "yank", // act on the selected worktree
       "filter", "status", "logs", "settings", // find / navigate
       "help", "quit", // global
     ],
-    "worktrees footer hints must follow the grouped order"
+    "worktrees footer hints must follow the grouped order (#453 re-audit: \
+     exec and agent sessions joined the act family; clean / mux / macros \
+     stay overlay-only — the footer is a teaser, `?` is the manual)"
   );
 }
 

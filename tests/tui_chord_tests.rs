@@ -516,6 +516,162 @@ fn help_overlay_documents_every_action() {
 }
 
 #[test]
+fn help_overlay_documents_every_modal_action_in_its_section() {
+  // #453: the #334 guard above pins `Action::all()` only, so modal verbs
+  // kept drifting out of the overlay — most of the modal key contexts were
+  // absent entirely. A flat chord-string check would be toothless here
+  // (modal verbs share their defaults: `Esc, q` closes half the modals),
+  // so the guard is per SECTION: each `KeyContext` maps to the section
+  // title expected to document it, and every one of its `ModalAction`s
+  // must surface inside that section with the exact keys string
+  // `modal_entry` renders (`keys_display`). Rebinds show through since
+  // both sides read the same `ModalKeymap`.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
+  use gwm::tui::{HelpRow, HintContext};
+
+  let section_for = |ctx: KeyContext| -> &'static str {
+    match ctx {
+      KeyContext::Create => "Create Form",
+      KeyContext::Confirm => "Delete Worktree",
+      KeyContext::Help => "Help Overlay",
+      KeyContext::Detail => "Agent Sessions",
+      KeyContext::CommandLogs => "Command Logs",
+      KeyContext::Config | KeyContext::ConfigEdit => "Settings",
+      KeyContext::Report => "Bootstrap Report",
+      KeyContext::OpenMenu => "Browse Links",
+      KeyContext::CommandPalette => "Command Palette",
+      KeyContext::LinkChooseTarget | KeyContext::LinkInputNumber => "Link Prompt",
+      KeyContext::ExecPicker => "Exec Profiles",
+      KeyContext::Clean => "Clean Reclaim",
+      KeyContext::CiChecks => "CI Checks",
+    }
+  };
+
+  let modal = ModalKeymap::defaults();
+  let rows = help_rows(&Keymap::defaults(), &modal, HintContext::Worktrees);
+
+  // section title -> keys string -> number of entries documenting it. A
+  // COUNT, not a set (Codex review #456): verbs can share their keys
+  // inside one section (both Link Prompt cancels are `Esc`), so mere
+  // presence would let one of them drop out of the overlay unnoticed.
+  let mut sections: std::collections::HashMap<String, std::collections::HashMap<String, usize>> =
+    std::collections::HashMap::new();
+  let mut current: Option<String> = None;
+  for row in &rows {
+    match row {
+      HelpRow::Section(title) => current = Some(title.clone()),
+      HelpRow::Entry { keys, .. } if !keys.is_empty() => {
+        if let Some(section) = &current {
+          *sections
+            .entry(section.clone())
+            .or_default()
+            .entry(keys.clone())
+            .or_default() += 1;
+        }
+      }
+      _ => {}
+    }
+  }
+
+  // Expected multiset: how many entries must carry each (section, keys)
+  // pair. Modal verbs AND the fixed (non-rebindable) controls the contexts
+  // handle outside ModalAction share ONE ledger (Codex review #456, third
+  // round): a fixed `Backspace` row must not be able to cover for a future
+  // modal verb defaulting to `Backspace` in the same section — summing
+  // both expectations makes either omission trip the count.
+  let mut expected: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
+  for action in ModalAction::all() {
+    let keys = modal.keys_display(action);
+    assert!(
+      !keys.is_empty(),
+      "ModalAction::{action:?} has no default binding — the guard identifies \
+       verbs by their keys string; bind it (or document the exception)"
+    );
+    *expected
+      .entry((section_for(action.context()).to_string(), keys))
+      .or_default() += 1;
+  }
+  // The exhaustive fixed-control ledger of the modal sections: the free
+  // typing of the Create form's issue / description fields, the palette's
+  // fuzzy filter charset (lowercase ASCII, digits, `_`, `-` — nothing
+  // else), the value / number typing and Backspace erasers, the two input
+  // sub-modes that bypass the rebindable verbs entirely (agents
+  // attach-by-id prompt, CI checks filter), and the PTY escape hatch.
+  for (section, keys) in [
+    ("Create Form", "0-9"),
+    ("Create Form", "any char"),
+    ("Create Form", "Backspace"),
+    ("Link Prompt", "0-9"),
+    ("Link Prompt", "Backspace"),
+    ("Command Palette", "a-z 0-9 _ -"),
+    ("Command Palette", "Backspace"),
+    ("Settings", "any char"),
+    ("Settings", "Backspace"),
+    ("Settings", "enter"),
+    ("Settings", "Esc"),
+    ("Agent Sessions", "any char"),
+    ("Agent Sessions", "Backspace"),
+    ("Agent Sessions", "Up/Down"),
+    ("Agent Sessions", "enter"),
+    ("Agent Sessions", "Esc"),
+    ("CI Checks", "any char"),
+    ("CI Checks", "Backspace"),
+    ("CI Checks", "Up/Down"),
+    ("CI Checks", "enter"),
+    ("CI Checks", "Esc"),
+    ("PTY Overlay", "Esc"),
+  ] {
+    *expected.entry((section.to_string(), keys.to_string())).or_default() += 1;
+  }
+  for ((section, keys), wanted) in &expected {
+    let have = sections.get(section).and_then(|m| m.get(keys)).copied().unwrap_or(0);
+    assert!(
+      have >= *wanted,
+      "the {section:?} section documents {have} entr(y/ies) with keys {keys:?} but \
+       {wanted} are required (modal verbs + fixed controls) — one is missing from \
+       `help_rows` (issue #453)"
+    );
+  }
+}
+
+#[test]
+fn picker_help_hides_every_modal_section() {
+  // Codex review #456 (iteration 8): in a real `gwm switch` the filter
+  // bar is ALWAYS active — its only exits confirm (Enter) or cancel
+  // (Esc) the pick — so no overlay is reachable no matter what
+  // `run_action` would allow: every printable key (`?`, `:`, `3`, `4`,
+  // `o`) types into the filter instead. Advertising the modal sections
+  // there described an impossible state; the picker help documents the
+  // pick/cancel/filter surface only.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let rows = help_rows(&Keymap::defaults(), &ModalKeymap::defaults(), HintContext::Picker);
+  let sections: std::collections::HashSet<String> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Section(t) => Some(t.clone()),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(
+    sections,
+    ["Global", "List View"].iter().map(|s| s.to_string()).collect(),
+    "the picker help must carry no modal section — none is reachable behind the always-on filter"
+  );
+  assert!(
+    !rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Entry { label, .. } if label == "open the command palette")),
+    "the palette opener is dead behind the picker filter and must stay hidden"
+  );
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in

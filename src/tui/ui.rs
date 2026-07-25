@@ -1,5 +1,5 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
-use super::keymap::{Action, Keymap};
+use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
@@ -2091,9 +2091,13 @@ impl HintContext {
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
-        // Act on the selected worktree.
+        // Act on the selected worktree. #453 re-audit: exec and agent
+        // sessions joined the family; clean / mux / macros stay
+        // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(ExecOverlay, "exec"),
+        Hint::Key(AgentSessions, "agents"),
         Hint::Key(ReviewFullscreen, "review"),
         Hint::Key(YankPath, "yank"),
         // Find / navigate panes.
@@ -2248,10 +2252,13 @@ impl HintContext {
         // #219: a global verb whose key is claimed by a modal binding in the
         // active context is resolved as that modal verb first — the event loop
         // never reaches the global action. Drop the hint rather than advertise
-        // a duplicate key for an unreachable action.
+        // a duplicate key for an unreachable action. Same for a key the
+        // context's reserved typing consumes (Codex review #456, iteration
+        // 13): `fetch_github` rebound to a digit never fires while typing the
+        // link number.
         Hint::Key(action, label) => keymap
           .primary_chord(*action)
-          .filter(|k| !self.key_shadowed_by_modal(k, modal))
+          .filter(|k| !self.key_shadowed_by_modal(k, modal) && !self.key_swallowed_by_typing(k))
           .map(|k| (k, label.to_string())),
         Hint::Modal(action, label) => modal.primary_key(*action).map(|k| (k, label.to_string())),
         Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
@@ -2288,6 +2295,21 @@ impl HintContext {
         .bindings_for(ctx)
         .iter()
         .any(|b| b.keys.iter().any(|ks| ks.to_string() == key)),
+      None => false,
+    }
+  }
+
+  /// `true` when this context's reserved typing consumes `key` before any
+  /// resolution — a global fallback on it (e.g. `fetch_github` rebound to a
+  /// digit at the link number stage) can never fire, so its hint is dead.
+  /// A multi-stroke chord dies with its opening stroke: the typing route
+  /// eats it before the pending-chord machinery sees it.
+  fn key_swallowed_by_typing(self, key: &str) -> bool {
+    match self.modal_context() {
+      Some(ctx) => KeyStroke::parse_chord(key)
+        .ok()
+        .and_then(|strokes| strokes.first().cloned())
+        .is_some_and(|ks| ctx.reserved_typing_stroke(&ks)),
       None => false,
     }
   }
@@ -2759,6 +2781,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   // A rebindable modal entry: keys resolved from the contextual keymap
   // (issue #219) so the create-form / delete-confirm rows track
   // `[tui.keys.modal.<context>]` overrides instead of a frozen literal.
+  // No display-side filtering is needed for the always-typing contexts:
+  // a binding their reserved input would swallow is refused at config
+  // time (`ModalKeymap::apply_override`, Codex review #456), so every
+  // advertised chord is reachable by construction.
   let modal_entry = |action: ModalAction, label: &str| -> HelpRow {
     HelpRow::Entry {
       keys: modal.keys_display(action),
@@ -2929,6 +2955,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreatePrevField, "previous field"),
       modal_entry(ModalAction::CreateSubmit, "submit (on description) / next field"),
       modal_entry(ModalAction::CreateCancel, "cancel"),
+      fixed("0-9", "type into the issue field (digits only)"),
+      fixed("any char", "type into the description field"),
+      fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
       HelpRow::Blank,
@@ -2941,6 +2970,170 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
+    ]);
+    // #453: one section per modal context, in workflow order, every verb
+    // resolved live against the modal keymap so rebinds show through (and
+    // an explicitly unbound verb renders `(unbound)` like every other
+    // entry). Completeness pinned per section by
+    // `help_overlay_documents_every_modal_action_in_its_section`. Only the
+    // sections whose actions `run_action` picker-gates live in this block
+    // (Codex review #456): the palette, the Command Logs / Settings
+    // overlays and the PTY stay reachable from `gwm switch` and render
+    // below for every context.
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Browse Links".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::OpenMenuToggle, "toggle issue / pull request"),
+      modal_entry(
+        ModalAction::OpenMenuAccept,
+        "open the highlighted target in the browser",
+      ),
+      modal_entry(ModalAction::OpenMenuIssue, "open the linked issue directly"),
+      modal_entry(ModalAction::OpenMenuPr, "open the linked pull request directly"),
+      modal_entry(ModalAction::OpenMenuClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Link Prompt".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::LinkChooseNext, "next target (issue / PR)"),
+      modal_entry(ModalAction::LinkChoosePrev, "previous target"),
+      modal_entry(ModalAction::LinkChooseIssue, "pick issue directly"),
+      modal_entry(ModalAction::LinkChoosePr, "pick pull request directly"),
+      modal_entry(ModalAction::LinkChooseAccept, "accept the highlighted target"),
+      modal_entry(ModalAction::LinkChooseCancel, "cancel"),
+      fixed("0-9", "type the issue / PR number"),
+      fixed("Backspace", "erase the last digit"),
+      modal_entry(ModalAction::LinkInputSubmit, "submit the typed number"),
+      modal_entry(ModalAction::LinkInputCancel, "cancel the number input"),
+      HelpRow::Blank,
+      HelpRow::Section("Exec Profiles".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ExecPickerNext, "next profile"),
+      modal_entry(ModalAction::ExecPickerPrev, "previous profile"),
+      modal_entry(ModalAction::ExecPickerAccept, "run the profile in a PTY overlay"),
+      modal_entry(ModalAction::ExecPickerCancel, "cancel"),
+      HelpRow::Blank,
+      HelpRow::Section("Clean Reclaim".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CleanNext, "next profile"),
+      modal_entry(ModalAction::CleanPrev, "previous profile"),
+      modal_entry(ModalAction::CleanConfirm, "reclaim (starts the safety countdown)"),
+      modal_entry(ModalAction::CleanCancel, "cancel"),
+      HelpRow::Blank,
+      HelpRow::Section("Agent Sessions".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::DetailSelectNext, "next session"),
+      modal_entry(ModalAction::DetailSelectPrev, "previous session"),
+      modal_entry(ModalAction::DetailAttach, "attach to the selected session"),
+      modal_entry(ModalAction::DetailDetach, "detach the selected session"),
+      modal_entry(ModalAction::DetailInput, "attach by id (palette-style prompt)"),
+      fixed("any char", "attach prompt: type to filter the session ids"),
+      fixed("Backspace", "attach prompt: delete the last character"),
+      fixed("Up/Down", "attach prompt: move the highlight"),
+      fixed("enter", "attach prompt: attach the highlighted session"),
+      fixed("Esc", "attach prompt: back to the list"),
+      modal_entry(ModalAction::DetailClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("CI Checks".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CiChecksNext, "next check"),
+      modal_entry(ModalAction::CiChecksPrev, "previous check"),
+      modal_entry(ModalAction::CiChecksOpen, "open the check's details URL in the browser"),
+      modal_entry(ModalAction::CiChecksFilter, "filter the checks by name"),
+      modal_entry(ModalAction::CiChecksRefresh, "re-fetch the PR and refresh the rows"),
+      fixed("any char", "filter: type to narrow the checks"),
+      fixed("Backspace", "filter: delete the last character"),
+      fixed("Up/Down", "filter: move the highlight"),
+      fixed("enter", "filter: open the highlighted check's URL"),
+      fixed("Esc", "filter: back to the list"),
+      modal_entry(ModalAction::CiChecksClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Bootstrap Report".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ReportClose, "close"),
+    ]);
+  }
+  // In a real `gwm switch` the filter bar is ALWAYS active — its only
+  // exits confirm (Enter) or cancel (Esc) the pick — so no overlay is
+  // reachable there, whatever `run_action` would allow: every printable
+  // key (`?`, `:`, `3`, `4`, `o`) types into the filter instead (Codex
+  // review #456, iteration 8). The modal sections all stay non-picker.
+  if !picker_mode {
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Command Palette".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommandPaletteNext, "next command"),
+      modal_entry(ModalAction::CommandPalettePrev, "previous command"),
+      modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
+      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
+      fixed("Backspace", "delete the last filter character"),
+      modal_entry(ModalAction::CommandPaletteClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Command Logs".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommandLogsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommandLogsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommandLogsScrollLeft, "pan left"),
+      modal_entry(ModalAction::CommandLogsScrollRight, "pan right"),
+      modal_entry(ModalAction::CommandLogsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommandLogsScrollBottom, "jump to the bottom"),
+      modal_entry(
+        ModalAction::CommandLogsCopy,
+        "copy the full transcript to the clipboard",
+      ),
+      modal_entry(ModalAction::CommandLogsClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Settings".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ConfigNextTab, "next tab"),
+      modal_entry(ModalAction::ConfigPrevTab, "previous tab"),
+      modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
+      modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
+      modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
+      modal_entry(
+        ModalAction::ConfigActivate,
+        "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
+      ),
+      modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
+      modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
+      modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
+      modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
+      modal_entry(
+        ModalAction::ConfigEditSubmit,
+        "commit the edited value / the captured global chord",
+      ),
+      modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
+      fixed(
+        "any char",
+        "type the value — free text for text fields, digits for numeric ones",
+      ),
+      fixed(
+        "Backspace",
+        "erase the last character / drop the last stroke of a global capture",
+      ),
+      fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
+      fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
+      modal_entry(ModalAction::ConfigClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("PTY Overlay".to_string()),
+      HelpRow::Blank,
+      fixed(
+        "Esc",
+        "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
+      ),
+    ]);
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Help Overlay".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::HelpScrollDown, "scroll down"),
+      modal_entry(ModalAction::HelpScrollUp, "scroll up"),
+      modal_entry(ModalAction::HelpScrollLeft, "pan left"),
+      modal_entry(ModalAction::HelpScrollRight, "pan right"),
+      modal_entry(ModalAction::HelpScrollTop, "jump to the top"),
+      modal_entry(ModalAction::HelpScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::HelpClose, "close"),
     ]);
   }
   rows
