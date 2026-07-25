@@ -2953,7 +2953,11 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     // resolved live against the modal keymap so rebinds show through (and
     // an explicitly unbound verb renders `(unbound)` like every other
     // entry). Completeness pinned per section by
-    // `help_overlay_documents_every_modal_action_in_its_section`.
+    // `help_overlay_documents_every_modal_action_in_its_section`. Only the
+    // sections whose actions `run_action` picker-gates live in this block
+    // (Codex review #456): the palette, the Command Logs / Settings
+    // overlays and the PTY stay reachable from `gwm switch` and render
+    // below for every context.
     rows.extend([
       HelpRow::Blank,
       HelpRow::Section("Browse Links".to_string()),
@@ -2979,15 +2983,6 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("Backspace", "erase the last digit"),
       modal_entry(ModalAction::LinkInputSubmit, "submit the typed number"),
       modal_entry(ModalAction::LinkInputCancel, "cancel the number input"),
-      HelpRow::Blank,
-      HelpRow::Section("Command Palette".to_string()),
-      HelpRow::Blank,
-      modal_entry(ModalAction::CommandPaletteNext, "next command"),
-      modal_entry(ModalAction::CommandPalettePrev, "previous command"),
-      modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
-      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
-      fixed("Backspace", "delete the last filter character"),
-      modal_entry(ModalAction::CommandPaletteClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("Exec Profiles".to_string()),
       HelpRow::Blank,
@@ -3031,61 +3026,76 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       fixed("Esc", "filter: back to the list"),
       modal_entry(ModalAction::CiChecksClose, "close"),
       HelpRow::Blank,
-      HelpRow::Section("Command Logs".to_string()),
-      HelpRow::Blank,
-      modal_entry(ModalAction::CommandLogsScrollDown, "scroll down"),
-      modal_entry(ModalAction::CommandLogsScrollUp, "scroll up"),
-      modal_entry(ModalAction::CommandLogsScrollLeft, "pan left"),
-      modal_entry(ModalAction::CommandLogsScrollRight, "pan right"),
-      modal_entry(ModalAction::CommandLogsScrollTop, "jump to the top"),
-      modal_entry(ModalAction::CommandLogsScrollBottom, "jump to the bottom"),
-      modal_entry(
-        ModalAction::CommandLogsCopy,
-        "copy the full transcript to the clipboard",
-      ),
-      modal_entry(ModalAction::CommandLogsClose, "close"),
-      HelpRow::Blank,
-      HelpRow::Section("Settings".to_string()),
-      HelpRow::Blank,
-      modal_entry(ModalAction::ConfigNextTab, "next tab"),
-      modal_entry(ModalAction::ConfigPrevTab, "previous tab"),
-      modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
-      modal_entry(ModalAction::ConfigSelectNext, "next setting"),
-      modal_entry(ModalAction::ConfigSelectPrev, "previous setting"),
-      modal_entry(
-        ModalAction::ConfigActivate,
-        "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
-      ),
-      modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
-      modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
-      modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
-      modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
-      modal_entry(
-        ModalAction::ConfigEditSubmit,
-        "commit the edited value / the captured global chord",
-      ),
-      modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
-      fixed(
-        "any char",
-        "type the value — free text for text fields, digits for numeric ones",
-      ),
-      fixed("Backspace", "erase a digit / drop the last stroke of a global capture"),
-      fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
-      fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
-      modal_entry(ModalAction::ConfigClose, "close"),
-      HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
       HelpRow::Blank,
       modal_entry(ModalAction::ReportClose, "close"),
-      HelpRow::Blank,
-      HelpRow::Section("PTY Overlay".to_string()),
-      HelpRow::Blank,
-      fixed(
-        "Esc",
-        "close the overlay — other keys pass through (any key closes a finished exec run)",
-      ),
     ]);
   }
+  // Reachable from the picker too (`run_action` does not gate them).
+  rows.extend([
+    HelpRow::Blank,
+    HelpRow::Section("Command Palette".to_string()),
+    HelpRow::Blank,
+    modal_entry(ModalAction::CommandPaletteNext, "next command"),
+    modal_entry(ModalAction::CommandPalettePrev, "previous command"),
+    modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
+    fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
+    fixed("Backspace", "delete the last filter character"),
+    modal_entry(ModalAction::CommandPaletteClose, "close"),
+    HelpRow::Blank,
+    HelpRow::Section("Command Logs".to_string()),
+    HelpRow::Blank,
+    modal_entry(ModalAction::CommandLogsScrollDown, "scroll down"),
+    modal_entry(ModalAction::CommandLogsScrollUp, "scroll up"),
+    modal_entry(ModalAction::CommandLogsScrollLeft, "pan left"),
+    modal_entry(ModalAction::CommandLogsScrollRight, "pan right"),
+    modal_entry(ModalAction::CommandLogsScrollTop, "jump to the top"),
+    modal_entry(ModalAction::CommandLogsScrollBottom, "jump to the bottom"),
+    modal_entry(
+      ModalAction::CommandLogsCopy,
+      "copy the full transcript to the clipboard",
+    ),
+    modal_entry(ModalAction::CommandLogsClose, "close"),
+    HelpRow::Blank,
+    HelpRow::Section("Settings".to_string()),
+    HelpRow::Blank,
+    modal_entry(ModalAction::ConfigNextTab, "next tab"),
+    modal_entry(ModalAction::ConfigPrevTab, "previous tab"),
+    modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
+    modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
+    modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
+    modal_entry(
+      ModalAction::ConfigActivate,
+      "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
+    ),
+    modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
+    modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
+    modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
+    modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
+    modal_entry(
+      ModalAction::ConfigEditSubmit,
+      "commit the edited value / the captured global chord",
+    ),
+    modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
+    fixed(
+      "any char",
+      "type the value — free text for text fields, digits for numeric ones",
+    ),
+    fixed(
+      "Backspace",
+      "erase the last character / drop the last stroke of a global capture",
+    ),
+    fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
+    fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
+    modal_entry(ModalAction::ConfigClose, "close"),
+    HelpRow::Blank,
+    HelpRow::Section("PTY Overlay".to_string()),
+    HelpRow::Blank,
+    fixed(
+      "Esc",
+      "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
+    ),
+  ]);
   // The overlay's own navigation is reachable from the picker too (`?`
   // opens it there as well), so this section renders in every context.
   rows.extend([

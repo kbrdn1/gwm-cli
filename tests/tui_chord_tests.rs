@@ -637,6 +637,56 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
 }
 
 #[test]
+fn picker_help_shows_only_reachable_modal_sections() {
+  // Codex review #456 (iteration 6): `gwm switch` still reaches the
+  // command palette, the Command Logs / Settings overlays and the PTY —
+  // `run_action` only picker-gates the worktree-mutating verbs — yet all
+  // the modal sections were hidden behind `!picker_mode`. The picker help
+  // documents the reachable overlays and keeps the gated ones hidden.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::{HelpRow, HintContext};
+
+  let rows = help_rows(&Keymap::defaults(), &ModalKeymap::defaults(), HintContext::Picker);
+  let sections: std::collections::HashSet<String> = rows
+    .iter()
+    .filter_map(|r| match r {
+      HelpRow::Section(t) => Some(t.clone()),
+      _ => None,
+    })
+    .collect();
+  for s in [
+    "Command Palette",
+    "Command Logs",
+    "Settings",
+    "PTY Overlay",
+    "Help Overlay",
+  ] {
+    assert!(
+      sections.contains(s),
+      "picker help must document the reachable {s:?} overlay: {sections:?}"
+    );
+  }
+  for s in [
+    "Create Form",
+    "Delete Worktree",
+    "Browse Links",
+    "Link Prompt",
+    "Exec Profiles",
+    "Clean Reclaim",
+    "Agent Sessions",
+    "CI Checks",
+    "Bootstrap Report",
+  ] {
+    assert!(
+      !sections.contains(s),
+      "picker-gated {s:?} must stay hidden in the picker help: {sections:?}"
+    );
+  }
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in
