@@ -490,6 +490,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // capture — hand-edit `.gwm.toml` for those (same hard-coded escape-hatch
       // trade-off as the rest of the keymap).
       View::Config if app.config_panel.capture.is_some() => app.handle_capture_key(key),
+      // Reserved value eraser for the settings editor too (Codex #456).
+      View::Config if app.config_panel.editing.is_some() && key.code == KeyCode::Backspace => {
+        app.config_panel.pop_edit_char()
+      }
       View::Config if app.config_panel.editing.is_some() => match app.resolve_modal(KeyContext::ConfigEdit, key) {
         Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
         Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
@@ -775,6 +779,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Tab still exit or navigate; Backspace edits.
       // #219: close / accept / prev / next resolve through the `palette`
       // context; every other key is literal input into the fuzzy buffer.
+      // The physical Backspace stays a reserved filter eraser (Codex
+      // review #456) — resolved before the palette context so a modal
+      // rebind cannot swallow it. Same contract as the create form.
+      View::CommandPalette if key.code == KeyCode::Backspace => app.palette_pop_char(),
       View::CommandPalette => match app.resolve_modal(KeyContext::CommandPalette, key) {
         Some(ModalAction::CommandPaletteClose) => app.close_command_palette(),
         Some(ModalAction::CommandPaletteAccept) => {

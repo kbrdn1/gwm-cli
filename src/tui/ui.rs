@@ -2919,9 +2919,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     ));
   }
   rows.push(entry(Action::Help, "this help"));
-  if !picker_mode {
-    rows.push(entry(Action::CommandPalette, "open the command palette"));
-  }
+  // run_action does not picker-gate the palette (Codex review #456), so
+  // its opener renders in `gwm switch` too, like its section below.
+  rows.push(entry(Action::CommandPalette, "open the command palette"));
   if !picker_mode {
     rows.extend([
       HelpRow::Blank,

@@ -3994,6 +3994,15 @@ impl App {
       return CreateKey::Handled;
     }
     let on_type = self.create_form.field == Field::Type;
+    // The physical Backspace is a RESERVED editing control on the text
+    // fields (Codex review #456): a modal rebind like `cancel =
+    // ["Backspace"]` resolved before the typing fallback and left the
+    // field without an eraser. Same contract as the Keys-tab capture's
+    // reserved Esc / Enter / Backspace.
+    if key.code == KeyCode::Backspace && !on_type {
+      self.create_pop_char();
+      return CreateKey::Handled;
+    }
     // #219: verbs resolve through the `create` context. The type-cycling
     // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
     // Type field; on a text field their keys fall through to literal input
@@ -5073,6 +5082,10 @@ impl App {
         _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
         _ => {}
       },
+      // The physical Backspace stays a reserved digit eraser here (Codex
+      // review #456) — resolved before the stage context so a modal
+      // rebind cannot swallow it. Same contract as the create form.
+      LinkPromptStage::InputNumber if key.code == KeyCode::Backspace => self.link_prompt_pop_char(),
       LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
         Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
         Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,

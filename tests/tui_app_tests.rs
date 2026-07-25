@@ -745,6 +745,66 @@ fn create_type_navigation_loops() {
 }
 
 #[test]
+fn backspace_stays_a_reserved_eraser_in_the_create_form() {
+  // Codex review #456 (iteration 7): a modal rebind like
+  // `[tui.keys.modal.create] cancel = ["Backspace"]` used to resolve
+  // BEFORE the typing fallback, so Backspace cancelled the form and the
+  // text fields lost their eraser. The physical Backspace is a reserved
+  // editing control on the input fields now — same contract as the
+  // Keys-tab capture's reserved Esc / Enter / Backspace.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::CreateCancel, KeyStroke::parse_chord("Backspace").unwrap())
+    .unwrap();
+  app.enter_create();
+  app.create_form.field = Field::Issue;
+  app.create_push_char('4');
+  app.create_push_char('2');
+  let out = app.handle_create_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert_ne!(
+    out,
+    CreateKey::Cancel,
+    "Backspace must not cancel while a text field is focused"
+  );
+  assert_eq!(app.create_form.issue, "4", "Backspace must erase the last digit");
+}
+
+#[test]
+fn backspace_stays_a_reserved_eraser_in_the_link_number_input() {
+  // Same reserved-control contract for the link prompt's number stage
+  // (Codex review #456): `[tui.keys.modal.link.input_number] cancel =
+  // ["Backspace"]` must not leave the digits without an eraser.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::LinkPromptKey;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::LinkInputCancel,
+      KeyStroke::parse_chord("Backspace").unwrap(),
+    )
+    .unwrap();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+  let out = app.handle_link_prompt_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert_ne!(out, LinkPromptKey::Cancel, "Backspace must not cancel the number input");
+  assert_eq!(
+    app.link_prompt_number_input(),
+    "4",
+    "Backspace must erase the last digit"
+  );
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();

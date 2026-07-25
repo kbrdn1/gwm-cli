@@ -668,6 +668,15 @@ fn picker_help_shows_only_reachable_modal_sections() {
       "picker help must document the reachable {s:?} overlay: {sections:?}"
     );
   }
+  // And the list-view opener of the palette renders too — documenting how
+  // to USE the palette without the key that opens it would be pointless
+  // (Codex review #456, iteration 7).
+  assert!(
+    rows
+      .iter()
+      .any(|r| matches!(r, HelpRow::Entry { label, .. } if label == "open the command palette")),
+    "picker help must advertise the palette opener"
+  );
   for s in [
     "Create Form",
     "Delete Worktree",
