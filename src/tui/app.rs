@@ -534,6 +534,14 @@ pub struct App {
   /// auto-refresh drifts the live selection (clean-overlay pattern).
   detail_overlay_target: Option<(PathBuf, Option<String>)>,
 
+  /// CI-consumer counterpart of `detail_overlay_target` (Codex review
+  /// #455): the PR number the open CI checks overlay was built for,
+  /// captured by [`Self::enter_ci_checks`]. A refresh whose re-detected
+  /// link disagrees (the PR changed or disappeared) closes the overlay up
+  /// front — otherwise the stale checks stay up through the new fetch,
+  /// and forever if it fails, with `Enter` opening an old PR's check URL.
+  detail_overlay_pr: Option<u64>,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -655,6 +663,7 @@ impl App {
       clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
+      detail_overlay_pr: None,
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -2719,6 +2728,9 @@ impl App {
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
     self.detail_overlay_target = None;
+    // Pin the overlay to the PR it renders, so a refresh whose re-detected
+    // link disagrees can close it (Codex review #455).
+    self.detail_overlay_pr = self.github.link.pr;
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
       "CI Checks".into(),
@@ -3010,6 +3022,7 @@ impl App {
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
+    self.detail_overlay_pr = None;
     self.view = View::List;
   }
 
@@ -4599,15 +4612,18 @@ impl App {
       }
     }
 
-    // The re-probe can also DROP the PR (a persisted detection coming back
-    // None) — or none was ever linked. The open CI checks overlay then
-    // shows checks for a PR the link no longer carries, and with no PR
-    // fetch to land nothing would ever refresh or close it (Codex review
-    // #455). Handle the identity change up front; the flow below owns the
-    // status line ("nothing linked" / "fetching…").
+    // The re-probe can also CHANGE the PR identity — a persisted detection
+    // coming back None, or re-detecting a different number (#61 → #62).
+    // The open CI checks overlay then shows checks for a PR the link no
+    // longer carries: with no fetch to land nothing would ever close it,
+    // and on a mere change the stale rows stay up through the new fetch
+    // (forever if it fails), `Enter` opening an old PR's check URL (Codex
+    // review #455, twice). The overlay is pinned to the PR that opened it
+    // (`detail_overlay_pr`); a disagreeing link closes it up front, and
+    // the flow below owns the status line ("nothing linked" / "fetching…").
     if self.view == View::DetailOverlay
       && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
-      && self.github.link.pr.is_none()
+      && self.github.link.pr != self.detail_overlay_pr
     {
       self.close_detail_overlay();
     }

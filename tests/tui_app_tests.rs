@@ -2771,6 +2771,36 @@ fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
   );
 }
 
+/// An App with a linked PR 61, its fetch landed and the CI overlay open —
+/// the shared setup of the two identity-change tests below.
+fn app_with_open_ci_overlay_on_pr_61() -> (tempfile::TempDir, git2::Repository, App) {
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "a".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::DetailOverlay);
+  (dir, repo, app)
+}
+
 #[test]
 fn refresh_closes_the_ci_overlay_when_the_pr_link_is_gone() {
   // Codex review #455 (P2): with a non-explicit link the refresh re-probes
@@ -2778,27 +2808,35 @@ fn refresh_closes_the_ci_overlay_when_the_pr_link_is_gone() {
   // leaving no PR at all. The open overlay then shows checks for a PR the
   // link no longer carries, and with nothing to fetch no landing will ever
   // refresh or close it. The refresh handles the identity change up front.
-  use gwm::tui::state::detail_overlay::{DetailKind, DetailRole, DetailRow};
-  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  assert_eq!(app.github.link.pr, None, "no PR is linked in this fixture");
-  app.detail_overlay.open(
-    DetailKind::CiChecks,
-    "CI Checks".into(),
-    vec![DetailRow {
-      label: "✓".into(),
-      value: "stale-check".into(),
-      role: DetailRole::Success,
-      meta: None,
-      extra: None,
-    }],
-  );
-  app.view = View::DetailOverlay;
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  // Simulate the re-probe dropping the detection (the in-refresh gh probe
+  // is not reachable from a test): the link no longer carries a PR.
+  app.github.link.pr = None;
 
   app.refresh_github_status();
   assert_eq!(
     app.view,
     View::List,
     "a refresh with no linked PR closes the stale CI overlay"
+  );
+}
+
+#[test]
+fn refresh_closes_the_ci_overlay_when_the_detected_pr_changes() {
+  // Codex review #455 (P2, second round): the None-only guard missed the
+  // re-detection CHANGING the PR (#61 → #62) — the old PR's checks stayed
+  // up during the new fetch, and forever if it failed, with Enter opening
+  // a stale check URL. The overlay carries the PR number that opened it,
+  // and a refresh whose link disagrees closes it up front.
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  // Simulate the re-probe re-detecting a different PR.
+  app.github.link.pr = Some(62);
+
+  app.refresh_github_status();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a refresh onto a different PR closes the stale CI overlay"
   );
 }
 
