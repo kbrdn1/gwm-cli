@@ -151,7 +151,10 @@ pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commi
   }
 
   let floor_a = natural_a;
-  let floor_w = natural_w.min(5);
+  // Working Tree gets a taller floor than Recent Commits (7 = border +
+  // 5 content rows): validation feedback on PR #455 — the shared 5-line
+  // floor read too small for a file tree in the field.
+  let floor_w = natural_w.min(7);
   let floor_c = natural_c.min(5);
 
   let base = floor_a + floor_w + floor_c;

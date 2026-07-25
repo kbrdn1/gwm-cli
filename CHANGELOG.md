@@ -31,7 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Commits` sections now share the column through a pure layout solver:
   natural heights while everything fits (`Recent Commits` absorbs the
   slack, as before), and on a short terminal every visible scrollable
-  section is guaranteed at least 5 lines (border + 3 content rows) with
+  section keeps a guaranteed floor (7 lines for `Working Tree`, border
+  plus 5 content rows; 5 lines for `Recent Commits`, border plus 3) with
   the remaining height split proportionally to content size — the
   non-scrollable Agents pane always keeps its full (bounded) height so
   its `+N more` indicator can never be clipped away. Empty sections

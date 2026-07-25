@@ -997,16 +997,18 @@ fn section_heights_fit_naturally_with_commits_absorbing_slack() {
 
 #[test]
 fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
-  // Overflow: the scrollable sections (Working Tree / Recent Commits) are
-  // guaranteed min(natural, 5) lines and share the surplus proportionally
-  // to content size, capped at natural height, residue cascading to Recent
-  // Commits first. Agents cannot scroll so it keeps its natural height
-  // outright (see section_heights_never_clamp_the_agents_pane).
-  // available=21, agents=6 (natural 8, kept), wt=30 (natural 32, floor 5),
-  // commits=50 (natural 52, floor 5): base 18, surplus 3 → give =
-  // 3*len/86 = (0, 1, 1), residue 1 → commits. Sum == available exactly.
+  // Overflow: the scrollable sections are guaranteed their floor —
+  // min(natural, 7) for Working Tree (validation feedback on PR #455: the
+  // 5-line floor read too small in the field), min(natural, 5) for Recent
+  // Commits — and share the surplus proportionally to content size, capped
+  // at natural height, residue cascading to Recent Commits first. Agents
+  // cannot scroll so it keeps its natural height outright (see
+  // section_heights_never_clamp_the_agents_pane).
+  // available=21, agents=6 (natural 8, kept), wt=30 (natural 32, floor 7),
+  // commits=50 (natural 52, floor 5): base 20, surplus 1 → give =
+  // 1*len/86 = (0, 0, 0), residue 1 → commits. Sum == available exactly.
   use gwm::tui::state::sidebar::split_section_heights;
-  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 6, 7));
+  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 7, 6));
 }
 
 #[test]
@@ -1019,7 +1021,7 @@ fn section_heights_never_clamp_the_agents_pane() {
   use gwm::tui::state::sidebar::split_section_heights;
   let (agents, wt, commits) = split_section_heights(21, 4, 30, 50);
   assert_eq!(agents, 6, "agents must keep natural height (4 rows + borders)");
-  assert_eq!((agents, wt, commits), (6, 6, 9));
+  assert_eq!((agents, wt, commits), (6, 8, 7));
 }
 
 #[test]
