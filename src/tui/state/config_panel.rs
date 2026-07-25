@@ -553,7 +553,11 @@ impl ConfigPanel {
   /// Append a character to the edit buffer. `Uint` fields take ASCII digits
   /// only (with per-field caps); `Text` fields take any printable character
   /// (capped at 256).
-  pub fn push_edit_char(&mut self, c: char) {
+  /// Returns whether the character was ACCEPTED by the field (Codex
+  /// review #456): a numeric field refuses non-digits, and a refused
+  /// character is not typing — the caller lets it reach the modal
+  /// resolution so a rebound verb on it still fires.
+  pub fn push_edit_char(&mut self, c: char) -> bool {
     let field = self.selected_field();
     let uint = matches!(field.map(SettingField::kind), Some(FieldKind::Uint));
     let limit = field.map(SettingField::edit_char_limit).unwrap_or(256);
@@ -561,11 +565,14 @@ impl ConfigPanel {
       if uint {
         if c.is_ascii_digit() && buf.len() < limit {
           buf.push(c);
+          return true;
         }
       } else if !c.is_control() && buf.len() < limit {
         buf.push(c);
+        return true;
       }
     }
+    false
   }
 
   /// Delete the last character of the edit buffer.

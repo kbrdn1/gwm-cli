@@ -987,6 +987,40 @@ fn shifted_uppercase_never_counts_as_palette_typing() {
 }
 
 #[test]
+fn rebound_cancel_reaches_resolution_on_a_numeric_field() {
+  // Codex review #456 (iteration 11): on a numeric field push_edit_char
+  // refuses non-digits, but settings_edit_input_key still claimed them as
+  // consumed — `config.edit.cancel = ["q"]` became inert. A character the
+  // field refuses is not typing; it falls through to the modal
+  // resolution so the rebound verb fires.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::{SettingField, SettingsTab};
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfigEditCancel, KeyStroke::parse_chord("q").unwrap())
+    .unwrap();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+  while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
+    app.config_panel.selected += 1;
+    assert!(
+      app.config_panel.selected < 100,
+      "ConfirmCountdown not found in the Tui tab"
+    );
+  }
+  app.config_panel.begin_edit("4");
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert!(
+    app.config_panel.editing.is_none(),
+    "the rebound cancel must fire on a character the numeric field refuses: {:?}",
+    app.config_panel.editing
+  );
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();

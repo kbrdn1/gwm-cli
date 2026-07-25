@@ -2164,10 +2164,10 @@ impl App {
       return true;
     }
     match key.code {
-      KeyCode::Char(c) => {
-        self.config_panel.push_edit_char(c);
-        true
-      }
+      // A character the field refuses (a non-digit on a numeric field) is
+      // NOT typing — it falls through so a rebound verb on it still fires
+      // (Codex review #456, iteration 11).
+      KeyCode::Char(c) => self.config_panel.push_edit_char(c),
       _ => false,
     }
   }
@@ -2187,7 +2187,9 @@ impl App {
       Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_edit(),
       _ => {
         if let KeyCode::Char(c) = key.code {
-          self.config_panel.push_edit_char(c);
+          // Best-effort reinjection; a character the field refuses (an
+          // AltGr symbol on a numeric field) is simply dropped.
+          let _ = self.config_panel.push_edit_char(c);
         }
       }
     }
