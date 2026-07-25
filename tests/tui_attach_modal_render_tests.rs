@@ -52,6 +52,157 @@ fn app_with_open_prompt(dir: &TempDir, count: usize) -> App {
   app
 }
 
+/// Validation feedback on PR #455: the CI checks overlay rendered the
+/// AGENTS footer hints (attach / detach / by id) because the modal hint
+/// context was hard-coded to `Detail` — and its rows carried no detail
+/// beyond the name. The footer must advertise the ci_checks verbs, and
+/// each row must surface the workflow + duration in a right-aligned
+/// column.
+#[test]
+fn ci_checks_overlay_shows_its_own_hints_and_row_details() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks = vec![PrCheck {
+    name: "test (ubuntu-latest)".into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some("ci".into()),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: Some("2026-07-24T14:52:24Z".into()),
+  }];
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+
+  let joined = draw_rows(&mut app, 100, 30).join("\n");
+  assert!(joined.contains("open"), "ci_checks verbs must be advertised: {joined}");
+  assert!(
+    joined.contains("filter"),
+    "ci_checks verbs must be advertised: {joined}"
+  );
+  assert!(
+    !joined.contains("attach"),
+    "the agents verbs must not leak into the CI overlay: {joined}"
+  );
+  assert!(
+    joined.contains("ci · 1m18s"),
+    "each row must carry workflow + duration: {joined}"
+  );
+}
+
+/// Codex review on PR #455: a long check name used to push the detail
+/// column past the modal edge (ratatui clips right), erasing exactly the
+/// workflow + duration the column exists for. The value truncates with an
+/// ellipsis instead, reserving the detail column's width.
+#[test]
+fn ci_checks_long_name_truncates_and_keeps_the_detail_column() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks = vec![PrCheck {
+    name: format!("test (windows-latest, {})", "x".repeat(90)),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some("ci".into()),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: Some("2026-07-24T14:52:24Z".into()),
+  }];
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+
+  let joined = draw_rows(&mut app, 100, 30).join("\n");
+  assert!(
+    joined.contains("ci · 1m18s"),
+    "the detail column survives a long check name: {joined}"
+  );
+  assert!(
+    joined.contains('…'),
+    "the long name truncates with an ellipsis: {joined}"
+  );
+}
+
+/// Codex review #455 (P2): on a narrow terminal a long WORKFLOW name made
+/// the detail column itself wider than the modal — the value truncated to
+/// nothing while the untouched column ran past the clipping edge, and
+/// ratatui cut its right end: the duration, the very info the column
+/// carries. The column is bounded too, truncating from the workflow side
+/// (leading ellipsis) so the duration tail survives.
+#[test]
+fn ci_checks_narrow_terminal_bounds_the_detail_column() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks = vec![PrCheck {
+    name: "build".into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some(format!("release-{}", "w".repeat(80))),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: Some("2026-07-24T14:52:24Z".into()),
+  }];
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+
+  let joined = draw_rows(&mut app, 60, 20).join("\n");
+  assert!(
+    joined.contains("build"),
+    "the check name keeps its reserved width: {joined}"
+  );
+  assert!(
+    joined.contains("1m18s"),
+    "the duration tail survives the bounded detail column: {joined}"
+  );
+  assert!(
+    joined.contains('…'),
+    "the oversized detail column truncates with an ellipsis: {joined}"
+  );
+}
+
+/// Codex review on PR #455: the filter's scrollbar rect started at the
+/// query line (`area.y + 4`) instead of the filtered listing (`+ 6`),
+/// overlapping the input and stopping short of the last rows.
+#[test]
+fn ci_checks_filter_scrollbar_tracks_the_listing_not_the_query() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks: Vec<PrCheck> = (0..25)
+    .map(|i| PrCheck {
+      name: format!("check-{i:02}"),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    })
+    .collect();
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+  app.ci_input_open();
+
+  let rows = draw_rows(&mut app, 100, 26);
+  assert!(
+    rows.iter().any(|r| r.contains('█')),
+    "an overflowing filtered list must show the scrollbar thumb"
+  );
+  let query_row = rows
+    .iter()
+    .find(|r| r.contains("filter:"))
+    .expect("the query line is on screen");
+  assert!(
+    !query_row.contains('█'),
+    "the scrollbar must not overlap the query line: {query_row}"
+  );
+}
+
 /// Render into a fixed terminal and return the buffer as one row per line.
 fn draw_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
   let backend = TestBackend::new(width, height);

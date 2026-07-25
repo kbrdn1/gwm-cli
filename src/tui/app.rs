@@ -534,6 +534,25 @@ pub struct App {
   /// auto-refresh drifts the live selection (clean-overlay pattern).
   detail_overlay_target: Option<(PathBuf, Option<String>)>,
 
+  /// CI-consumer counterpart of `detail_overlay_target` (Codex review
+  /// #455): the `(remote slug, PR number)` the open CI checks overlay was
+  /// built for, captured by [`Self::enter_ci_checks`]. Any link mutation
+  /// that disagrees — the PR changed, disappeared, or (workspace mode)
+  /// the slug moved to another repo whose PR happens to share the
+  /// number — closes the overlay up front via
+  /// [`Self::close_ci_overlay_if_link_disagrees`]; otherwise the stale
+  /// checks stay up through the new fetch, and forever if it fails, with
+  /// `Enter` opening an old PR's check URL.
+  detail_overlay_pr: Option<(Option<String>, u64)>,
+
+  /// The `PrCheck`s the open CI overlay renders (Codex review #455): the
+  /// duration tick used to read them back from the PR fetch cache, so an
+  /// invalidation while the overlay was up — a workspace `refresh_link`
+  /// with no bulk refetch, a failed manual refresh — silently killed the
+  /// clock of a Running check. The overlay owns its checks instead;
+  /// populated at open and on every landing, cleared on close.
+  ci_overlay_checks: Vec<github::PrCheck>,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -655,6 +674,8 @@ impl App {
       clean_overlay_countdown_secs: 0,
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
+      detail_overlay_pr: None,
+      ci_overlay_checks: Vec::new(),
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -783,6 +804,20 @@ impl App {
     self.sidebar.orientation = self.config.tui.sidebar_orientation;
   }
 
+  /// Mark the workspace selection stale AND close the open CI checks
+  /// overlay (Codex review #455): its rows belong to the previously
+  /// active repo, so every verb — `Enter` opening a check URL included —
+  /// would act on the wrong repo. One funnel so a new stale site cannot
+  /// forget the close.
+  fn mark_workspace_stale(&mut self) {
+    self.workspace_active_stale = true;
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      self.close_detail_overlay();
+    }
+  }
+
   pub fn sync_active_repo(&mut self) {
     let Some(ws) = self.workspace.as_ref() else {
       return;
@@ -792,11 +827,11 @@ impl App {
       // active repo the selection points at, so writes must not fall through to
       // the previously active repo — mark stale to block them (#304). Reached
       // only in workspace mode (the `ws` guard above returns in single-repo).
-      self.workspace_active_stale = true;
+      self.mark_workspace_stale();
       return;
     };
     let Some(&target) = ws.row_repo.get(raw) else {
-      self.workspace_active_stale = true;
+      self.mark_workspace_stale();
       return;
     };
     if target == ws.active {
@@ -838,7 +873,7 @@ impl App {
         // Keep the previously active repo live but mark the selection stale so
         // repo-mutating actions are blocked until the user moves to a
         // reachable row (or a refresh drops the dead repo) — #304.
-        self.workspace_active_stale = true;
+        self.mark_workspace_stale();
         self.status = format!(
           "workspace: repo '{}' is unavailable ({}) — press r to refresh",
           meta.name, e
@@ -1475,7 +1510,12 @@ impl App {
     }
     // A landing detection refreshes the open overlay in place (user
     // feedback: attach/detach used to leave stale rows until reopened).
-    if self.view == View::DetailOverlay {
+    // Gated on the AGENTS consumer (Codex review #455): a stale target
+    // left by an interrupted agents overlay must never rebuild the CI
+    // checks rows into session rows under an unchanged CiChecks kind.
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::Agents
+    {
       if let Some((path, _)) = self.detail_overlay_target.clone() {
         if let Some(w) = self.worktrees.iter().find(|w| w.path == path).cloned() {
           let rows = self.build_agent_rows(&w);
@@ -1641,6 +1681,10 @@ impl App {
           }
           if let Ok(status) = &result {
             self.persist_loaded_pr_title(status);
+            if self.refresh_ci_overlay_on_pr_landing(status) {
+              // The overlay-close message owns the status line this tick.
+              refresh_applied = true;
+            }
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -2067,6 +2111,110 @@ impl App {
   /// to `View::CommandPalette` and arms the pure state machine on
   /// `self.palette` with a fresh empty buffer. Status bar shows a
   /// short hint so the user knows what to type.
+  /// Typing route of the palette, resolved BEFORE the modal context
+  /// (Codex review #456): during text input the printable keys and
+  /// Backspace are reserved for typing — a rebind like
+  /// `palette.close = ["x"]` must not close the palette mid-word. Returns
+  /// `true` when the key was consumed as input; charset keys type, other
+  /// printable characters are swallowed (no palette entry could match
+  /// them), Ctrl-modified keys fall through to the modal resolution.
+  pub fn palette_input_key(&mut self, key: KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers as Mods;
+    // Ctrl/Alt-modified strokes are bindable and must stay reachable
+    // (Codex review #456) — only unmodified legitimate input is reserved.
+    if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
+      return false;
+    }
+    // Kitty-style terminals report an uppercase as Char + SHIFT (the case
+    // KeyStroke::from_event normalises): that is an uppercase letter, not
+    // the palette's lowercase input — a binding on "X" must stay
+    // reachable on every terminal encoding (Codex review #456, it. 10).
+    if key.modifiers.contains(Mods::SHIFT) && matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic()) {
+      return false;
+    }
+    if key.code == KeyCode::Backspace {
+      self.palette_pop_char();
+      return true;
+    }
+    match key.code {
+      KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+        self.palette_push_char(c);
+        true
+      }
+      // Characters outside the filter charset fall through to the modal
+      // resolution — a rebind like `close = ["?"]` stays honoured (#293
+      // contract); unresolved ones are dropped by the dispatch fallback.
+      _ => false,
+    }
+  }
+
+  /// Fallback after an EMPTY modal resolution in the palette (Codex
+  /// review #456, iterations 10/14): an unresolved modified charset
+  /// printable is still typing (AltGr/Option characters arrive as
+  /// Char + ALT on some keyboards), and an unresolved modified Backspace
+  /// still erases (parity with the pre-#456 routing).
+  pub fn palette_unresolved_fallback(&mut self, key: KeyEvent) {
+    match key.code {
+      KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+        self.palette_push_char(c);
+      }
+      KeyCode::Backspace => self.palette_pop_char(),
+      _ => {}
+    }
+  }
+
+  /// Typing route of the Settings value editor — same reserved-typing
+  /// contract as [`Self::palette_input_key`] (Codex review #456). A no-op
+  /// (`false`) when no edit is live.
+  pub fn settings_edit_input_key(&mut self, key: KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers as Mods;
+    if self.config_panel.editing.is_none() {
+      return false;
+    }
+    if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
+      return false;
+    }
+    if key.code == KeyCode::Backspace {
+      self.config_panel.pop_edit_char();
+      return true;
+    }
+    match key.code {
+      // A character the field refuses (a non-digit on a numeric field) is
+      // NOT typing — it falls through so a rebound verb on it still fires
+      // (Codex review #456, iteration 11).
+      KeyCode::Char(c) => self.config_panel.push_edit_char(c),
+      _ => false,
+    }
+  }
+
+  /// The whole Settings-editor key route (Codex review #456, iteration
+  /// 10) — one testable method: reserved typing first, then the modal
+  /// resolution, and an unresolved printable is REINJECTED as typing
+  /// (AltGr/Option characters arrive Char + ALT on some keyboards; they
+  /// are not reserved so a bound Alt+x stays reachable, but when nothing
+  /// resolves they are what the user typed).
+  pub fn handle_settings_edit_key(&mut self, key: KeyEvent) {
+    if self.settings_edit_input_key(key) {
+      return;
+    }
+    match self.resolve_modal(KeyContext::ConfigEdit, key) {
+      Some(ModalAction::ConfigEditSubmit) => self.commit_settings_edit(),
+      Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_edit(),
+      _ => match key.code {
+        // Best-effort reinjection; a character the field refuses (an
+        // AltGr symbol on a numeric field) is simply dropped.
+        KeyCode::Char(c) => {
+          let _ = self.config_panel.push_edit_char(c);
+        }
+        // An UNBOUND Alt/Ctrl+Backspace still erases (iteration 14 —
+        // parity with the pre-#456 routing, which erased on every
+        // KeyCode::Backspace).
+        KeyCode::Backspace => self.config_panel.pop_edit_char(),
+        _ => {}
+      },
+    }
+  }
+
   pub fn open_command_palette(&mut self) {
     self.palette.open();
     self.view = View::CommandPalette;
@@ -2208,7 +2356,13 @@ impl App {
       View::CleanReport => HintContext::Clean,
       View::Edit => HintContext::Rename,
       // Issue #408: the detail overlay advertises its close/scroll keys.
-      View::DetailOverlay => HintContext::Detail,
+      View::DetailOverlay => {
+        if self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+          HintContext::CiChecks
+        } else {
+          HintContext::Detail
+        }
+      }
       View::List => self.pane_hint_context(),
     }
   }
@@ -2242,6 +2396,24 @@ impl App {
 
   pub fn sidebar_scroll_up(&mut self) {
     self.sidebar.scroll_up();
+  }
+
+  /// Scroll the Working Tree pane down (issue #437, `J`). Gated on the
+  /// status pane holding the navigation focus — the same condition that
+  /// routes `j` / `k` to the sidebar in [`Self::next`] / [`Self::prev`] —
+  /// so the keys stay inert (and reusable) in the worktrees context.
+  pub fn wt_scroll_down(&mut self) {
+    if self.sidebar.open && self.sidebar.focused {
+      self.sidebar.wt_scroll_down();
+    }
+  }
+
+  /// Scroll the Working Tree pane up (issue #437, `K`). Same focus gate
+  /// as [`Self::wt_scroll_down`].
+  pub fn wt_scroll_up(&mut self) {
+    if self.sidebar.open && self.sidebar.focused {
+      self.sidebar.wt_scroll_up();
+    }
   }
 
   /// Open the Keybindings (help) overlay from the top (#217). Resetting
@@ -2657,8 +2829,177 @@ impl App {
       crate::github::pinnable_branch(sel.branch.as_deref()).map(str::to_string),
     ));
     let rows = self.build_agent_rows(&sel);
-    self.detail_overlay.open("Agent Sessions".into(), rows);
+    self.detail_overlay.open(
+      crate::tui::state::detail_overlay::DetailKind::Agents,
+      "Agent Sessions".into(),
+      rows,
+    );
     self.view = View::DetailOverlay;
+  }
+
+  /// Open the CI checks overlay (issue #436): one row per classified
+  /// `statusCheckRollup` entry of the linked PR, in rollup order. With no
+  /// linked PR or an empty rollup the overlay would be a bordered void —
+  /// explain on the status bar instead.
+  pub fn enter_ci_checks(&mut self) {
+    // Workspace mode: a failed `Repository::open` for the selected row
+    // leaves `github.link` and its cache on the previously active repo —
+    // opening now would show (and `Enter` would browse) the OLD repo's
+    // checks. Refuse, the same contract as the project-layer keymap
+    // editor (#304 / Codex review #455).
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable — can't open its CI checks".into();
+      return;
+    }
+    let checks = match self.pr_fetch_state() {
+      GitHubFetchState::Loaded(pr) if !pr.checks.is_empty() => pr.checks.clone(),
+      _ => {
+        // Resolve the active fetch binding instead of hard-coding `F`
+        // (Codex review #455); an unbound action drops the parenthetical.
+        self.status = match self.keymap.primary_chord(Action::FetchGithub) {
+          Some(key) => format!("no CI checks to show — link a PR and fetch ({key}) first"),
+          None => "no CI checks to show — link a PR and fetch first".into(),
+        };
+        return;
+      }
+    };
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&checks, std::time::SystemTime::now());
+    // Drop any stale agents target (an interrupted agents overlay leaves
+    // one behind) — it belongs to the agents consumer only (Codex #455).
+    self.detail_overlay_target = None;
+    // Pin the overlay to the PR it renders, so a link mutation that
+    // disagrees can close it (Codex review #455). The checks themselves
+    // are kept too — the duration tick's cache-independent source.
+    self.detail_overlay_pr = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
+    self.ci_overlay_checks = checks;
+    self.detail_overlay.open(
+      crate::tui::state::detail_overlay::DetailKind::CiChecks,
+      "CI Checks".into(),
+      rows,
+    );
+    self.view = View::DetailOverlay;
+  }
+
+  /// Contextual KEY routing (issue #436) — same mechanism that turns
+  /// `j` / `k` into sidebar scroll: while the status pane holds the
+  /// focus, the `c` keystroke (EditWorktree) opens the CI checks
+  /// overlay instead of the rename modal. Applied by the event loop on
+  /// the **key path only** (Codex review #455): the command palette
+  /// dispatches actions by their NAME, so its `edit-worktree` entry
+  /// must stay a rename in every context (a dedicated `ci-checks`
+  /// entry already exists there). Pure, so the contract is pinned
+  /// without an event loop.
+  pub fn resolve_contextual_action(&self, action: Action) -> Action {
+    if action == Action::EditWorktree && self.sidebar.open && self.sidebar.focused {
+      Action::CiChecks
+    } else {
+      action
+    }
+  }
+
+  // ---- CI checks overlay `f` filter (issue #436) ---------------------------
+  // Same shell machinery as the agent attach prompt right above (mode +
+  // input buffer + candidate cursor), filtering the overlay's own rows.
+
+  /// `f` inside the CI checks overlay — re-fetch the PR; the landing
+  /// refreshes the rows in place (`refresh_ci_overlay_on_pr_landing`).
+  /// The modal dispatch bypasses run_action's workspace guard, so it is
+  /// re-applied here (Codex review #455, P1): a selection gone stale
+  /// AFTER the overlay opened must not fetch — and persist PR metadata —
+  /// through the previously active repo's slug and handle. The overlay
+  /// closes, since its rows belong to that previous repo anyway.
+  pub fn ci_checks_refresh(&mut self) {
+    if self.workspace_active_stale {
+      self.close_detail_overlay();
+      self.status = "workspace: selected repo is unavailable — CI checks closed".into();
+      return;
+    }
+    self.refresh_github_status();
+  }
+
+  /// Poll-cadence tick (Codex review #455): a Running check's `extra`
+  /// column carries an elapsed duration formatted when the rows were
+  /// built, which otherwise freezes until the next `f`. Rebuild the rows
+  /// from the cached PR state while at least one check is still running —
+  /// pure in-memory formatting, no I/O — and stay a no-op once every
+  /// check is terminal so idle frames do no churn. `set_rows` keeps the
+  /// selection and the filter cursor clamped.
+  pub fn tick_ci_overlay_durations(&mut self) {
+    if self.view != View::DetailOverlay
+      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      return;
+    }
+    // The overlay's OWN checks, not the fetch cache (Codex review #455):
+    // an invalidation while the overlay is up — a workspace refresh_link
+    // with no bulk refetch, a failed manual refresh — would empty the
+    // cache and silently kill the clock of a still-Running check.
+    if !self
+      .ci_overlay_checks
+      .iter()
+      .any(|c| matches!(c.outcome, github::CheckOutcome::Running))
+    {
+      return;
+    }
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&self.ci_overlay_checks, std::time::SystemTime::now());
+    self.detail_overlay.set_rows(rows);
+  }
+
+  pub fn ci_input_open(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
+    self.detail_overlay.input.clear();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn ci_input_push(&mut self, c: char) {
+    self.detail_overlay.input.push(c);
+    self.detail_overlay.input_selected = 0;
+  }
+
+  pub fn ci_input_pop(&mut self) {
+    self.detail_overlay.input.pop();
+    self.detail_overlay.input_selected = 0;
+  }
+
+  /// Indices of the rows matching the live query, in row order.
+  pub fn ci_input_matches(&self) -> Vec<usize> {
+    crate::tui::state::detail_overlay::filter_rows(&self.detail_overlay.rows, &self.detail_overlay.input)
+  }
+
+  pub fn ci_input_next(&mut self) {
+    let len = self.ci_input_matches().len();
+    self.detail_overlay.input_selected = (self.detail_overlay.input_selected + 1).min(len.saturating_sub(1));
+  }
+
+  pub fn ci_input_prev(&mut self) {
+    self.detail_overlay.input_selected = self.detail_overlay.input_selected.saturating_sub(1);
+  }
+
+  pub fn ci_input_cancel(&mut self) {
+    self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::List;
+    self.detail_overlay.input.clear();
+  }
+
+  /// The details URL of the highlighted filtered row (Enter inside the
+  /// filter). Pure so the event loop owns the actual browser spawn; also
+  /// re-anchors the List selection on the picked row and leaves the
+  /// filter, so Esc-free flows land where the user expects.
+  pub fn ci_input_selected_url(&mut self) -> Option<String> {
+    let matches = self.ci_input_matches();
+    let row_idx = matches.get(self.detail_overlay.input_selected).copied()?;
+    self.detail_overlay.selected = row_idx;
+    self.ci_input_cancel();
+    self.detail_overlay.rows.get(row_idx).and_then(|r| r.meta.clone())
+  }
+
+  /// The details URL of the selected row in List mode (Enter). `None` when
+  /// the check carries no URL — the caller reports on the status bar.
+  pub fn ci_selected_url(&self) -> Option<String> {
+    self
+      .detail_overlay
+      .rows
+      .get(self.detail_overlay.selected)
+      .and_then(|r| r.meta.clone())
   }
 
   /// Rows for the captured worktree: sessions from the snapshot, the manual
@@ -2866,6 +3207,8 @@ impl App {
   /// Close the detail overlay back to the list, leaving list state as it was.
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
+    self.detail_overlay_pr = None;
+    self.ci_overlay_checks.clear();
     self.view = View::List;
   }
 
@@ -3755,6 +4098,34 @@ impl App {
       return CreateKey::Handled;
     }
     let on_type = self.create_form.field == Field::Type;
+    // Typing is RESERVED on the text fields (Codex review #456): a modal
+    // rebind like `cancel = ["Backspace"]` (or `= ["q"]`) resolved before
+    // the typing fallback, so it stole the eraser / typed characters.
+    // Printable keys and Backspace route to the field first — the palette
+    // convention; modal verbs act through non-printable keys (Ctrl-
+    // modified chars still fall through to the modal resolution).
+    if !on_type
+      && !key
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+    {
+      match key.code {
+        KeyCode::Backspace => {
+          self.create_pop_char();
+          return CreateKey::Handled;
+        }
+        // Only the field's LEGITIMATE input is reserved: free text on
+        // description, digits on issue. A non-digit on the issue field
+        // still reaches the modal resolution (a printable rebind stays
+        // honoured, the #293 contract), with the digits-only status hint
+        // as the unresolved fallback below.
+        KeyCode::Char(c) if self.create_form.field != Field::Issue || c.is_ascii_digit() => {
+          self.create_push_char(c);
+          return CreateKey::Handled;
+        }
+        _ => {}
+      }
+    }
     // #219: verbs resolve through the `create` context. The type-cycling
     // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
     // Type field; on a text field their keys fall through to literal input
@@ -4262,6 +4633,26 @@ impl App {
     // worktree's cache. `refresh_link` no longer holds the old issue/PR
     // numbers, so invalidate by predicate.
     self.tasks.invalidate_matching(TaskKind::is_github);
+    // Every link mutation funnels through here or through the
+    // `refresh_github_status` re-probe — both revalidate the CI overlay's
+    // pinned identity (Codex review #455): an auto-refresh relist can move
+    // the selection (the current worktree disappeared) while the overlay
+    // is up, and its checks must not survive their PR.
+    self.close_ci_overlay_if_link_disagrees();
+  }
+
+  /// Close the open CI checks overlay when the link no longer matches the
+  /// `(slug, PR)` it was built for — see `detail_overlay_pr`.
+  fn close_ci_overlay_if_link_disagrees(&mut self) {
+    if self.view != View::DetailOverlay
+      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      return;
+    }
+    let current = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
+    if current != self.detail_overlay_pr {
+      self.close_detail_overlay();
+    }
   }
 
   fn selected_branch_name(&self) -> Option<String> {
@@ -4454,6 +4845,11 @@ impl App {
         self.sync_selected_link_into_table();
       }
     }
+
+    // The re-probe can CHANGE the PR identity — a persisted detection
+    // coming back None, or re-detecting a different number (#61 → #62).
+    // The flow below owns the status line ("nothing linked" / "fetching…").
+    self.close_ci_overlay_if_link_disagrees();
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = format!(
@@ -4664,8 +5060,47 @@ impl App {
   pub fn apply_pr_fetch_result(&mut self, r: std::result::Result<PrStatus, String>) {
     if let Ok(status) = &r {
       self.persist_loaded_pr_title(status);
+      self.refresh_ci_overlay_on_pr_landing(status);
     }
     self.github.apply_pr_result(r);
+  }
+
+  /// Rebuild the open CI checks overlay from a landed PR fetch (validation
+  /// feedback on PR #455, `f` = refresh inside the overlay) — same
+  /// convention as the agents landing. Gated on the CI consumer AND on the
+  /// linked PR: the worktree-wide bulk prefetch lands other PRs' results
+  /// through the same drain arm, and those must not clobber the rows.
+  /// `set_rows` clamps the selection to the new count. Called from both
+  /// landing paths — the drain (`TaskMsg::GithubPr`, the real worker path)
+  /// and the `apply_pr_fetch_result` test seam — so they cannot desync
+  /// again (the first cut lived only in the seam, so the running TUI never
+  /// refreshed the overlay).
+  ///
+  /// Returns `true` when the landing closed the overlay and claimed the
+  /// status line (empty rollup) so the drain suppresses its end-of-drain
+  /// `report_github_refresh_status` — which otherwise overwrote the close
+  /// message with "github status refreshed" (Codex review #455); same
+  /// guard the sync arm uses.
+  fn refresh_ci_overlay_on_pr_landing(&mut self, status: &PrStatus) -> bool {
+    if self.view != View::DetailOverlay
+      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
+      || self.github.link.pr != Some(status.number)
+    {
+      return false;
+    }
+    // An empty rollup (a fresh commit whose workflows have not started
+    // yet) would blank the rows while leaving the overlay open — exactly
+    // the empty overlay `enter_ci_checks` refuses to open (Codex review
+    // #455). Close it and say why instead.
+    if status.checks.is_empty() {
+      self.close_detail_overlay();
+      self.status = "no CI checks reported by the refreshed PR".into();
+      return true;
+    }
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
+    self.ci_overlay_checks = status.checks.clone();
+    self.detail_overlay.set_rows(rows);
+    false
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
@@ -4770,6 +5205,28 @@ impl App {
         _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
         _ => {}
       },
+      // Typing stays reserved here too (Codex review #456) — digits and
+      // Backspace route to the number before the stage context so a
+      // modal rebind cannot swallow them. Same contract as the create
+      // form; Ctrl-modified chars still reach the modal resolution.
+      LinkPromptStage::InputNumber
+        if key.code == KeyCode::Backspace
+          && !key
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+      {
+        self.link_prompt_pop_char()
+      }
+      LinkPromptStage::InputNumber
+        if matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
+          && !key
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+      {
+        if let KeyCode::Char(c) = key.code {
+          self.link_prompt_push_char(c);
+        }
+      }
       LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
         Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
         Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,

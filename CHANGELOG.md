@@ -10,21 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Removed
-
-- The `winget-publish` job. `WINGET_TOKEN` was never provisioned, so the
-  guard step painted a red "publish kbrdn1.gwm to winget" job on every
-  stable release run, and the channel is blocked upstream anyway: the
-  initial manifest PR (microsoft/winget-pkgs#403295) sits on Needs-CLA and
-  `komac update` can only update a package that already exists. winget
-  joins the AUR, Nixpkgs and aqua as a channel fed by hand; the manual
-  `komac update` recipe lives in CONTRIBUTING, and the job's absence is
-  pinned by a test. (#448)
-
 ## Past releases
 
 In reverse chronological order:
 
+- [`1.4.0`](changelogs/1.4.0.md) — 2026-07-25
 - [`1.3.0`](changelogs/1.3.0.md) — 2026-07-24
 - [`1.2.0`](changelogs/1.2.0.md) — 2026-07-21
 - [`1.1.1`](changelogs/1.1.1.md) — 2026-07-16

@@ -1,5 +1,5 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
-use super::keymap::{Action, Keymap};
+use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
@@ -302,6 +302,7 @@ fn draw_body(f: &mut Frame, area: Rect, app: &mut App) {
     None => {
       // Sidebar not rendered → no scrollable surface → no max scroll to track.
       app.sidebar.max_scroll = 0;
+      app.sidebar.wt_max_scroll = 0;
       draw_list(f, area, app);
       return;
     }
@@ -639,6 +640,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       .split(area);
     app.sidebar.max_scroll = 0;
     app.sidebar.scroll = 0;
+    app.sidebar.wt_max_scroll = 0;
+    app.sidebar.wt_scroll = 0;
     render_section(
       f,
       chunks[0],
@@ -748,25 +751,28 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
   };
 
   // Per-section block height = content rows + 2 border lines. Fixed
-  // for the small sections (worktree / issue-PR / working-tree);
-  // Recent Commits flexes to fill the rest of the sidebar height.
-  // Issue #34: the Working Tree section is empty in `Stashes` mode
-  // (no `git status --short` to render); collapse its constraint to
-  // 0 so the empty titled block disappears instead of leaving a
-  // bordered void.
+  // for the small sections (worktree / issue-PR); the three variable
+  // sections — Agents / Working Tree / Recent Commits — share the rest
+  // through the responsive solver (issue #438): natural heights while
+  // everything fits (commits absorbs the slack, as the old `Min(3)`
+  // did), a 5-line floor per visible section plus proportional sharing
+  // on overflow. Empty sections keep their collapse behaviour (issue
+  // #34: Working Tree is empty in `Stashes` mode; #408: Agents hidden
+  // with no session).
   let h = |lines: usize| (lines as u16).saturating_add(2);
-  let working_tree_height = if working_tree_len == 0 { 0 } else { h(working_tree_len) };
-  let agents_height = if agent_lines.is_empty() {
-    0
-  } else {
-    h(agent_lines.len())
-  };
+  let fixed = h(worktree_len).saturating_add(h(issue_pr_lines.len()));
+  let (agents_height, working_tree_height, commits_height) = super::state::sidebar::split_section_heights(
+    area.height.saturating_sub(fixed),
+    agent_lines.len() as u16,
+    working_tree_len as u16,
+    commits_len,
+  );
   let constraints = [
     Constraint::Length(h(worktree_len)),
     Constraint::Length(h(issue_pr_lines.len())),
     Constraint::Length(agents_height),
     Constraint::Length(working_tree_height),
-    Constraint::Min(3),
+    Constraint::Length(commits_height),
   ];
   let chunks = Layout::default()
     .direction(Direction::Vertical)
@@ -783,6 +789,18 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
     app.sidebar.scroll = app.sidebar.max_scroll;
   }
   let scroll = app.sidebar.scroll;
+
+  // Working Tree scroll (issue #437). The section asks for
+  // `Length(content + 2)` but the layout solver may hand it less when
+  // the sidebar column is shorter than the sum of its sections — the
+  // exact case where entries used to be unreachable. Republish the max
+  // against the clamped viewport, same contract as Recent Commits.
+  let wt_visible = chunks[3].height.saturating_sub(2);
+  app.sidebar.wt_max_scroll = (working_tree_len as u16).saturating_sub(wt_visible);
+  if app.sidebar.wt_scroll > app.sidebar.wt_max_scroll {
+    app.sidebar.wt_scroll = app.sidebar.wt_max_scroll;
+  }
+  let wt_scroll = app.sidebar.wt_scroll;
 
   // Issue #34: surface the active mode in the bottom-scrollable
   // panel title. The footer keeps the `i of N` counter; the bottom
@@ -875,9 +893,23 @@ fn draw_sidebar(f: &mut Frame, area: Rect, app: &mut App) {
       working_tree_title,
       SectionBody::new(&sections.working_tree),
       border_color,
-      0,
+      wt_scroll,
       working_tree_footer,
     );
+    // Scrollbar over the inner right column when the tree overflows the
+    // viewport the responsive split granted (user feedback on PR #454) —
+    // the scroll existed (#437) but nothing showed where the viewport
+    // sat. Same herdr-style helper as the overflowing modals; no-op when
+    // everything fits.
+    let inner = Rect {
+      x: chunks[3].x.saturating_add(1),
+      y: chunks[3].y.saturating_add(1),
+      width: chunks[3].width.saturating_sub(2),
+      height: chunks[3].height.saturating_sub(2),
+    };
+    if inner.height > 0 {
+      let _ = scrollable_body_area(f, inner, wt_scroll, working_tree_len, &theme);
+    }
   }
   render_section(
     f,
@@ -2011,6 +2043,10 @@ pub enum HintContext {
   /// Generic detail overlay (issue #408): scroll / close. Agent sessions
   /// today, the rich PR/Issue view tomorrow.
   Detail,
+  /// CI checks overlay (issue #436): the detail-overlay shell on the linked
+  /// PR's per-check rollup — j/k select, Enter opens the details URL,
+  /// f filters, Esc closes.
+  CiChecks,
 }
 
 impl HintContext {
@@ -2034,6 +2070,7 @@ impl HintContext {
       HintContext::Clean => "clean",
       HintContext::Rename => "rename",
       HintContext::Detail => "agents",
+      HintContext::CiChecks => "checks",
     }
   }
 
@@ -2054,9 +2091,13 @@ impl HintContext {
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
-        // Act on the selected worktree.
+        // Act on the selected worktree. #453 re-audit: exec and agent
+        // sessions joined the family; clean / mux / macros stay
+        // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(ExecOverlay, "exec"),
+        Hint::Key(AgentSessions, "agents"),
         Hint::Key(ReviewFullscreen, "review"),
         Hint::Key(YankPath, "yank"),
         // Find / navigate panes.
@@ -2071,7 +2112,10 @@ impl HintContext {
       HintContext::Status => &[
         // Read the status pane.
         Hint::Key(Down, "scroll"),
+        Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
+        // #436: `c` routes to the CI checks overlay in this context.
+        Hint::Key(EditWorktree, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -2155,6 +2199,13 @@ impl HintContext {
         Hint::Modal(ModalAction::DetailInput, "by id"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
+      HintContext::CiChecks => &[
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::CiChecksOpen, "open"),
+        Hint::Modal(ModalAction::CiChecksFilter, "filter"),
+        Hint::Modal(ModalAction::CiChecksRefresh, "refresh"),
+        Hint::Modal(ModalAction::CiChecksClose, "close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2201,10 +2252,13 @@ impl HintContext {
         // #219: a global verb whose key is claimed by a modal binding in the
         // active context is resolved as that modal verb first — the event loop
         // never reaches the global action. Drop the hint rather than advertise
-        // a duplicate key for an unreachable action.
+        // a duplicate key for an unreachable action. Same for a key the
+        // context's reserved typing consumes (Codex review #456, iteration
+        // 13): `fetch_github` rebound to a digit never fires while typing the
+        // link number.
         Hint::Key(action, label) => keymap
           .primary_chord(*action)
-          .filter(|k| !self.key_shadowed_by_modal(k, modal))
+          .filter(|k| !self.key_shadowed_by_modal(k, modal) && !self.key_swallowed_by_typing(k))
           .map(|k| (k, label.to_string())),
         Hint::Modal(action, label) => modal.primary_key(*action).map(|k| (k, label.to_string())),
         Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
@@ -2226,6 +2280,7 @@ impl HintContext {
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
       HintContext::Detail => KeyContext::Detail,
+      HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -2240,6 +2295,21 @@ impl HintContext {
         .bindings_for(ctx)
         .iter()
         .any(|b| b.keys.iter().any(|ks| ks.to_string() == key)),
+      None => false,
+    }
+  }
+
+  /// `true` when this context's reserved typing consumes `key` before any
+  /// resolution — a global fallback on it (e.g. `fetch_github` rebound to a
+  /// digit at the link number stage) can never fire, so its hint is dead.
+  /// A multi-stroke chord dies with its opening stroke: the typing route
+  /// eats it before the pending-chord machinery sees it.
+  fn key_swallowed_by_typing(self, key: &str) -> bool {
+    match self.modal_context() {
+      Some(ctx) => KeyStroke::parse_chord(key)
+        .ok()
+        .and_then(|strokes| strokes.first().cloned())
+        .is_some_and(|ks| ctx.reserved_typing_stroke(&ks)),
       None => false,
     }
   }
@@ -2711,6 +2781,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   // A rebindable modal entry: keys resolved from the contextual keymap
   // (issue #219) so the create-form / delete-confirm rows track
   // `[tui.keys.modal.<context>]` overrides instead of a frozen literal.
+  // No display-side filtering is needed for the always-typing contexts:
+  // a binding their reserved input would swallow is refused at config
+  // time (`ModalKeymap::apply_override`, Codex review #456), so every
+  // advertised chord is reachable by construction.
   let modal_entry = |action: ModalAction, label: &str| -> HelpRow {
     HelpRow::Entry {
       keys: modal.keys_display(action),
@@ -2731,6 +2805,8 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     HelpRow::Blank,
     entry(Action::Down, "next (scrolls sidebar when focused)"),
     entry(Action::Up, "prev (scrolls sidebar when focused)"),
+    entry(Action::WtScrollDown, "scroll the Working Tree pane down (status focus)"),
+    entry(Action::WtScrollUp, "scroll the Working Tree pane up (status focus)"),
     entry(Action::Top, "jump to first worktree"),
     entry(Action::Bottom, "jump to last worktree"),
   ];
@@ -2787,6 +2863,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(
       Action::AgentSessions,
       "show the agent sessions attached to this worktree",
+    ));
+    rows.push(entry(
+      Action::CiChecks,
+      "list the linked PR's CI checks (also `c` with status focus)",
     ));
   }
   rows.push(entry(
@@ -2875,6 +2955,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreatePrevField, "previous field"),
       modal_entry(ModalAction::CreateSubmit, "submit (on description) / next field"),
       modal_entry(ModalAction::CreateCancel, "cancel"),
+      fixed("0-9", "type into the issue field (digits only)"),
+      fixed("any char", "type into the description field"),
+      fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
       HelpRow::Blank,
@@ -2887,6 +2970,170 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       ),
       modal_entry(ModalAction::ConfirmConfirm, "confirm"),
       modal_entry(ModalAction::ConfirmCancel, "cancel"),
+    ]);
+    // #453: one section per modal context, in workflow order, every verb
+    // resolved live against the modal keymap so rebinds show through (and
+    // an explicitly unbound verb renders `(unbound)` like every other
+    // entry). Completeness pinned per section by
+    // `help_overlay_documents_every_modal_action_in_its_section`. Only the
+    // sections whose actions `run_action` picker-gates live in this block
+    // (Codex review #456): the palette, the Command Logs / Settings
+    // overlays and the PTY stay reachable from `gwm switch` and render
+    // below for every context.
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Browse Links".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::OpenMenuToggle, "toggle issue / pull request"),
+      modal_entry(
+        ModalAction::OpenMenuAccept,
+        "open the highlighted target in the browser",
+      ),
+      modal_entry(ModalAction::OpenMenuIssue, "open the linked issue directly"),
+      modal_entry(ModalAction::OpenMenuPr, "open the linked pull request directly"),
+      modal_entry(ModalAction::OpenMenuClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Link Prompt".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::LinkChooseNext, "next target (issue / PR)"),
+      modal_entry(ModalAction::LinkChoosePrev, "previous target"),
+      modal_entry(ModalAction::LinkChooseIssue, "pick issue directly"),
+      modal_entry(ModalAction::LinkChoosePr, "pick pull request directly"),
+      modal_entry(ModalAction::LinkChooseAccept, "accept the highlighted target"),
+      modal_entry(ModalAction::LinkChooseCancel, "cancel"),
+      fixed("0-9", "type the issue / PR number"),
+      fixed("Backspace", "erase the last digit"),
+      modal_entry(ModalAction::LinkInputSubmit, "submit the typed number"),
+      modal_entry(ModalAction::LinkInputCancel, "cancel the number input"),
+      HelpRow::Blank,
+      HelpRow::Section("Exec Profiles".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ExecPickerNext, "next profile"),
+      modal_entry(ModalAction::ExecPickerPrev, "previous profile"),
+      modal_entry(ModalAction::ExecPickerAccept, "run the profile in a PTY overlay"),
+      modal_entry(ModalAction::ExecPickerCancel, "cancel"),
+      HelpRow::Blank,
+      HelpRow::Section("Clean Reclaim".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CleanNext, "next profile"),
+      modal_entry(ModalAction::CleanPrev, "previous profile"),
+      modal_entry(ModalAction::CleanConfirm, "reclaim (starts the safety countdown)"),
+      modal_entry(ModalAction::CleanCancel, "cancel"),
+      HelpRow::Blank,
+      HelpRow::Section("Agent Sessions".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::DetailSelectNext, "next session"),
+      modal_entry(ModalAction::DetailSelectPrev, "previous session"),
+      modal_entry(ModalAction::DetailAttach, "attach to the selected session"),
+      modal_entry(ModalAction::DetailDetach, "detach the selected session"),
+      modal_entry(ModalAction::DetailInput, "attach by id (palette-style prompt)"),
+      fixed("any char", "attach prompt: type to filter the session ids"),
+      fixed("Backspace", "attach prompt: delete the last character"),
+      fixed("Up/Down", "attach prompt: move the highlight"),
+      fixed("enter", "attach prompt: attach the highlighted session"),
+      fixed("Esc", "attach prompt: back to the list"),
+      modal_entry(ModalAction::DetailClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("CI Checks".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CiChecksNext, "next check"),
+      modal_entry(ModalAction::CiChecksPrev, "previous check"),
+      modal_entry(ModalAction::CiChecksOpen, "open the check's details URL in the browser"),
+      modal_entry(ModalAction::CiChecksFilter, "filter the checks by name"),
+      modal_entry(ModalAction::CiChecksRefresh, "re-fetch the PR and refresh the rows"),
+      fixed("any char", "filter: type to narrow the checks"),
+      fixed("Backspace", "filter: delete the last character"),
+      fixed("Up/Down", "filter: move the highlight"),
+      fixed("enter", "filter: open the highlighted check's URL"),
+      fixed("Esc", "filter: back to the list"),
+      modal_entry(ModalAction::CiChecksClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Bootstrap Report".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ReportClose, "close"),
+    ]);
+  }
+  // In a real `gwm switch` the filter bar is ALWAYS active — its only
+  // exits confirm (Enter) or cancel (Esc) the pick — so no overlay is
+  // reachable there, whatever `run_action` would allow: every printable
+  // key (`?`, `:`, `3`, `4`, `o`) types into the filter instead (Codex
+  // review #456, iteration 8). The modal sections all stay non-picker.
+  if !picker_mode {
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Command Palette".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommandPaletteNext, "next command"),
+      modal_entry(ModalAction::CommandPalettePrev, "previous command"),
+      modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
+      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
+      fixed("Backspace", "delete the last filter character"),
+      modal_entry(ModalAction::CommandPaletteClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Command Logs".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommandLogsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommandLogsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommandLogsScrollLeft, "pan left"),
+      modal_entry(ModalAction::CommandLogsScrollRight, "pan right"),
+      modal_entry(ModalAction::CommandLogsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommandLogsScrollBottom, "jump to the bottom"),
+      modal_entry(
+        ModalAction::CommandLogsCopy,
+        "copy the full transcript to the clipboard",
+      ),
+      modal_entry(ModalAction::CommandLogsClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Settings".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ConfigNextTab, "next tab"),
+      modal_entry(ModalAction::ConfigPrevTab, "previous tab"),
+      modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
+      modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
+      modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
+      modal_entry(
+        ModalAction::ConfigActivate,
+        "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
+      ),
+      modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
+      modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
+      modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
+      modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
+      modal_entry(
+        ModalAction::ConfigEditSubmit,
+        "commit the edited value / the captured global chord",
+      ),
+      modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
+      fixed(
+        "any char",
+        "type the value — free text for text fields, digits for numeric ones",
+      ),
+      fixed(
+        "Backspace",
+        "erase the last character / drop the last stroke of a global capture",
+      ),
+      fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
+      fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
+      modal_entry(ModalAction::ConfigClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("PTY Overlay".to_string()),
+      HelpRow::Blank,
+      fixed(
+        "Esc",
+        "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
+      ),
+    ]);
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Help Overlay".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::HelpScrollDown, "scroll down"),
+      modal_entry(ModalAction::HelpScrollUp, "scroll up"),
+      modal_entry(ModalAction::HelpScrollLeft, "pan left"),
+      modal_entry(ModalAction::HelpScrollRight, "pan right"),
+      modal_entry(ModalAction::HelpScrollTop, "jump to the top"),
+      modal_entry(ModalAction::HelpScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::HelpClose, "close"),
     ]);
   }
   rows
@@ -4484,6 +4731,71 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
   let ov = &app.detail_overlay;
 
+  // CI checks filter (issue #436): palette-style query over the overlay's
+  // own rows — the highlight follows the filtered set, Enter opens the
+  // highlighted check's details URL. Same fixed-height frame contract as
+  // the attach prompt below (#445: typing must not resize the window).
+  if ov.mode == DetailMode::Input && ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+    let matches = app.ci_input_matches();
+    let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
+    let (start, end) = picker_window(matches.len(), ov.input_selected, list_h);
+
+    let mut lines = overlay_title_lines("Filter CI checks", accent);
+    lines.push(Line::from(vec![
+      Span::styled("filter: ", Style::default().fg(app.theme.muted)),
+      Span::styled(
+        ov.input.clone(),
+        Style::default().fg(app.theme.name).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled("▏", Style::default().fg(accent)),
+    ]));
+    lines.push(Line::from(String::new()));
+    if matches.is_empty() {
+      lines.push(Line::from(Span::styled(
+        "no matching check",
+        Style::default().fg(app.theme.muted),
+      )));
+    }
+    for (i, row_idx) in matches.iter().enumerate().take(end).skip(start) {
+      let Some(row) = ov.rows.get(*row_idx) else { continue };
+      let label_color = match row.role {
+        DetailRole::Success => app.theme.clean,
+        DetailRole::Failure => app.theme.prunable,
+        DetailRole::Running => app.theme.dirty,
+        _ => app.theme.name,
+      };
+      let text = format!("{}  {}", row.label, row.value);
+      let pad = inner.saturating_sub(text.chars().count());
+      let mut style = Style::default().fg(label_color);
+      if i == ov.input_selected {
+        style = style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+      }
+      lines.push(Line::from(Span::styled(format!("{}{}", text, " ".repeat(pad)), style)));
+    }
+    for _ in matches.len().min(end).saturating_sub(start)..list_h {
+      lines.push(Line::from(String::new()));
+    }
+    let height = (2 + list_h + 2) as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_abs(width, height, term);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    // Scrollbar over the LISTING sub-area (Codex review #455): the rows
+    // start after border (1) + padding (1) + two title lines + the query
+    // line + its blank spacer = y + 6 — anchoring at + 4 overlapped the
+    // query and stopped short of the last rows.
+    let list_rect = Rect {
+      x: area.x + 1,
+      y: area.y + 6,
+      width: area.width.saturating_sub(2),
+      height: list_h as u16,
+    }
+    .intersection(area);
+    if list_rect.height > 0 {
+      let _ = scrollable_body_area(f, list_rect, start as u16, matches.len(), &app.theme);
+    }
+    return;
+  }
+
   // Attach-by-id prompt (user feedback 2026-07-22): palette-style query
   // over every detected session; Enter pins the highlighted candidate.
   if ov.mode == DetailMode::Input {
@@ -4585,35 +4897,76 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
       DetailRole::Muted => (app.theme.muted, app.theme.muted, false),
       DetailRole::Normal => (app.theme.name, app.theme.name, false),
+      // #436: per-check CI outcomes, same theme roles as `ci_indicator`.
+      DetailRole::Success => (app.theme.clean, app.theme.name, false),
+      DetailRole::Failure => (app.theme.prunable, app.theme.name, false),
+      DetailRole::Running => (app.theme.dirty, app.theme.name, false),
     };
     // Selection paints a full-width bar (picker convention): pad the row
     // out to the modal's inner width so the highlight reads as one block.
-    let text_cols = label_w + 2 + row.value.chars().count();
-    let pad = inner.saturating_sub(text_cols);
+    // The optional `extra` detail (#436: workflow · duration) sits right-
+    // aligned inside that bar, rendered muted. Its width is RESERVED
+    // (Codex review #455): a long check name truncates with an ellipsis
+    // instead of pushing the detail column past the clipping edge.
+    let mut extra: String = row.extra.as_deref().unwrap_or("").to_string();
+    let mut extra_cols = extra.chars().count();
+    // The detail column is bounded too (Codex review #455): on a narrow
+    // modal an oversized workflow name would run past the clipping edge
+    // and ratatui cuts its RIGHT end — the duration, the very info the
+    // column carries. Truncate from the workflow side instead (leading
+    // ellipsis, the tail survives), reserving the value a dozen columns
+    // or its full width when shorter.
+    if extra_cols > 0 {
+      let reserve = row.value.chars().count().min(12);
+      let extra_budget = inner.saturating_sub(label_w + 2 + reserve + 2);
+      if extra_cols > extra_budget {
+        if extra_budget == 0 {
+          extra.clear();
+        } else {
+          let tail: String = extra.chars().skip(extra_cols - (extra_budget - 1)).collect();
+          extra = format!("…{tail}");
+        }
+        extra_cols = extra.chars().count();
+      }
+    }
+    let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
+    let value: String = if row.value.chars().count() > value_budget {
+      let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
+      v.push('…');
+      v
+    } else {
+      row.value.clone()
+    };
+    let text_cols = label_w + 2 + value.chars().count();
+    let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
     if value_bold {
       value_style = value_style.add_modifier(Modifier::BOLD);
     }
     let mut pad_style = Style::default();
+    let mut extra_style = Style::default().fg(app.theme.muted);
     if i == ov.selected {
       label_style = label_style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
       value_style = value_style.bg(app.theme.selection_bg);
       pad_style = pad_style.bg(app.theme.selection_bg);
+      extra_style = extra_style.bg(app.theme.selection_bg);
     }
     lines.push(Line::from(vec![
       Span::styled(format!("{:label_w$}  ", row.label), label_style),
-      Span::styled(row.value.clone(), value_style),
+      Span::styled(value, value_style),
       Span::styled(" ".repeat(pad), pad_style),
+      Span::styled(extra, extra_style),
     ]));
   }
-  push_modal_hint(
-    &mut lines,
-    HintContext::Detail,
-    &app.keymap,
-    &app.modal_keymap,
-    &app.theme,
-  );
+  // #436 validation feedback: the CI checks consumer advertises ITS verbs,
+  // not the agents' attach / detach — the hint context follows the kind.
+  let hint_ctx = if ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+    HintContext::CiChecks
+  } else {
+    HintContext::Detail
+  };
+  push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
   let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
@@ -5036,6 +5389,26 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   }
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
+    // #436: advertise the key that opens the CI checks overlay right after
+    // the indicator, resolved live so a rebind shows through. The key is
+    // context-accurate (Codex review #455): the contextual `c`
+    // (EditWorktree's chord) only while the status pane holds the focus —
+    // in the worktrees context that key opens the rename modal, so the
+    // global `ci_checks` binding is advertised instead. An unbound
+    // EditWorktree falls back to the global binding (still live in that
+    // context); only when both are unbound does the suffix disappear. In
+    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
+    // printable keys feed the filter — so no key is advertised at all.
+    let ci_key = if app.picker_mode {
+      None
+    } else if app.sidebar.open && app.sidebar.focused {
+      app
+        .keymap
+        .primary_chord(Action::EditWorktree)
+        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
+    } else {
+      app.keymap.primary_chord(Action::CiChecks)
+    };
     lines.push(pr_summary_line_with_spinner(
       n,
       link.pr_source,
@@ -5047,6 +5420,7 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       max_width,
       &app.theme,
       Some(spinner),
+      ci_key.as_deref(),
     ));
   }
   lines
@@ -5389,10 +5763,12 @@ pub fn pr_summary_line(
   state: &GitHubFetchState<crate::github::PrStatus>,
   max_width: usize,
   theme: &Theme,
+  ci_hint: Option<&str>,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None, ci_hint)
 }
 
+#[allow(clippy::too_many_arguments)] // one arg past the limit; splitting a builder for a single call site is worse
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
@@ -5401,6 +5777,7 @@ fn pr_summary_line_with_spinner(
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
+  ci_hint: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}", n);
   let resolved = match state {
@@ -5458,8 +5835,16 @@ fn pr_summary_line_with_spinner(
       // Issue #299: surface the derived CI state (icon + label + N/M, coloured)
       // instead of the bare ` · checks N/M`, so pass / fail / running reads at a
       // glance. `ci_indicator` returns `None` when the PR has no checks.
+      // #436 validation feedback: the indicator ends with the resolved key
+      // that opens the CI checks overlay, mirroring the pane titles' `[F]`.
       let (trailing, trailing_color) = match ci_indicator(s.ci, s.checks_passed, s.checks_total, theme) {
-        Some((text, color)) => (text, Some(color)),
+        Some((text, color)) => (
+          match ci_hint {
+            Some(key) => format!("{text} [{key}]"),
+            None => text,
+          },
+          Some(color),
+        ),
         None => (String::new(), None),
       };
       SummaryState::Loaded {

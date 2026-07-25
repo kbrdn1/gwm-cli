@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-# gwm — git worktree manager
+# <picture><source media="(prefers-color-scheme: dark)" srcset="docs/_assets/logo.svg"><source media="(prefers-color-scheme: light)" srcset="docs/_assets/logo-light.svg"><img alt="" src="docs/_assets/logo.svg" width="26" height="26" align="top"></picture> gwm — git worktree manager
 
 [![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)
@@ -47,7 +47,7 @@ Written in Rust on vendored `libgit2`, so worktree operations are native rather 
 | Arch (AUR) ⚠️     | `yay -S gwm-cli-bin` (or `paru -S gwm-cli-bin`) — community-maintained, currently **1.2.0** ([#430](https://github.com/kbrdn1/gwm-cli/issues/430)) |
 | Prebuilt         | <https://github.com/kbrdn1/gwm-cli/releases> (Linux / macOS / Windows) |
 
-**On the AUR row:** `gwm-cli-bin` is packaged and maintained by a community contributor, not by this project, so its version can lag behind a release (it is at `1.2.0` while the current release is `1.3.0`). Every other channel in the table is published from this repository's release pipeline. See [#430](https://github.com/kbrdn1/gwm-cli/issues/430); if you want the current version on Arch, use `cargo binstall gwm-cli` or a prebuilt tarball in the meantime.
+**On the AUR row:** `gwm-cli-bin` is packaged and maintained by a community contributor, not by this project, so its version can lag behind a release (it is at `1.3.0` while the current release is `1.4.0`). Every other channel in the table is published from this repository's release pipeline. See [#430](https://github.com/kbrdn1/gwm-cli/issues/430); if you want the current version on Arch, use `cargo binstall gwm-cli` or a prebuilt tarball in the meantime.
 
 The crate is published as **`gwm-cli`** (the bare `gwm` name on crates.io belongs to an unrelated project) — the installed command is still `gwm`. `cargo binstall gwm-cli` grabs the prebuilt binary from the matching GitHub Release instead of compiling `git2`/vendored-libgit2 from source — no Rust toolchain needed at install time.
 

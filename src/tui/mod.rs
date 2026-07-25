@@ -203,6 +203,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // reflects the freshly-applied results, and the loader animates below
     // while any of them is still in flight (200ms poll cadence).
     app.drain_task_results();
+    // Advance the elapsed duration of any Running check while the CI
+    // overlay is up (Codex review #455) — same 200ms cadence, no-op
+    // otherwise.
+    app.tick_ci_overlay_durations();
     if app.is_github_loading() || app.is_task_loading() {
       app.spinner.tick();
     }
@@ -428,6 +432,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           if matches!(action, Action::Quit) {
             app.should_quit = true;
           } else {
+            // #436: the key path applies the contextual pre-resolution
+            // (c → CI checks while the status pane is focused); the
+            // palette path deliberately does not — its entries dispatch
+            // by name (Codex review #455).
+            let action = app.resolve_contextual_action(action);
             run_action(terminal, &mut app, action)?;
           }
         }
@@ -481,15 +490,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // capture — hand-edit `.gwm.toml` for those (same hard-coded escape-hatch
       // trade-off as the rest of the keymap).
       View::Config if app.config_panel.capture.is_some() => app.handle_capture_key(key),
-      View::Config if app.config_panel.editing.is_some() => match app.resolve_modal(KeyContext::ConfigEdit, key) {
-        Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
-        Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
-        _ => match key.code {
-          KeyCode::Backspace => app.config_panel.pop_edit_char(),
-          KeyCode::Char(c) => app.config_panel.push_edit_char(c),
-          _ => {}
-        },
-      },
+      // Typing routes before the modal context here too (Codex review
+      // #456) — see `App::settings_edit_input_key` (no-op unless an edit
+      // is live, so plain Config navigation falls through).
+      // The whole route lives in a testable App method (Codex review
+      // #456): reserved typing, then the modal resolution, then the
+      // AltGr reinjection of unresolved printables.
+      View::Config if app.config_panel.editing.is_some() => app.handle_settings_edit_key(key),
       // #219: nav keys resolve through the `config` context. Select vs scroll
       // and the horizontal pan / jump verbs stay gated on the read-only `All`
       // tab exactly as before; the bound global `config_panel` key still
@@ -669,14 +676,54 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // captured as query input (palette convention): printable chars type,
       // Backspace pops, arrows move the candidate highlight, Enter
       // attaches, Esc falls back to the list.
+      // Issue #436: the same shell serves two consumers — route the input
+      // prompt AND the list verbs by `detail_overlay.kind` (agents attach
+      // by id; CI checks filter their own rows and open URLs).
       View::DetailOverlay if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input => {
+        let ci = app.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks;
         match key.code {
+          KeyCode::Esc if ci => app.ci_input_cancel(),
           KeyCode::Esc => app.agent_input_cancel(),
+          KeyCode::Enter if ci => match app.ci_input_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            // The method flips back to List only when a row WAS picked —
+            // report the missing URL like the List-mode Enter does (Codex
+            // review #455). A query with no match keeps the filter open.
+            None if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::List => {
+              app.status = "this check exposes no details URL".into()
+            }
+            None => {}
+          },
           KeyCode::Enter => app.agent_input_submit(),
+          KeyCode::Backspace if ci => app.ci_input_pop(),
           KeyCode::Backspace => app.agent_input_pop(),
+          KeyCode::Down if ci => app.ci_input_next(),
           KeyCode::Down => app.agent_input_next(),
+          KeyCode::Up if ci => app.ci_input_prev(),
           KeyCode::Up => app.agent_input_prev(),
-          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.agent_input_push(c),
+          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if ci {
+              app.ci_input_push(c)
+            } else {
+              app.agent_input_push(c)
+            }
+          }
+          _ => {}
+        }
+      }
+      View::DetailOverlay if app.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks => {
+        match app.resolve_modal(KeyContext::CiChecks, key) {
+          Some(ModalAction::CiChecksClose) => app.close_detail_overlay(),
+          Some(ModalAction::CiChecksNext) => app.detail_overlay.select_next(),
+          Some(ModalAction::CiChecksPrev) => app.detail_overlay.select_prev(),
+          Some(ModalAction::CiChecksOpen) => match app.ci_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            None => app.status = "this check exposes no details URL".into(),
+          },
+          Some(ModalAction::CiChecksFilter) => app.ci_input_open(),
+          // Validation feedback on PR #455: `f` re-fetches the PR from
+          // inside the overlay; the landing refreshes the rows in place.
+          Some(ModalAction::CiChecksRefresh) => app.ci_checks_refresh(),
           _ => {}
         }
       }
@@ -726,29 +773,36 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Tab still exit or navigate; Backspace edits.
       // #219: close / accept / prev / next resolve through the `palette`
       // context; every other key is literal input into the fuzzy buffer.
-      View::CommandPalette => match app.resolve_modal(KeyContext::CommandPalette, key) {
-        Some(ModalAction::CommandPaletteClose) => app.close_command_palette(),
-        Some(ModalAction::CommandPaletteAccept) => {
-          if let Some(action) = app.accept_command_palette() {
-            run_palette_action(terminal, &mut app, action)?;
+      // Typing routes before the modal context (Codex review #456) — see
+      // `App::palette_input_key` for the reserved-typing contract (a
+      // testable method, per the repo's TDD rule for event-loop routes).
+      // Typing routes before the modal context (Codex review #456) — see
+      // `App::palette_input_key` for the reserved-typing contract (a
+      // testable method, per the repo's TDD rule for event-loop routes).
+      // Plain `if`, not a match guard: guards cannot borrow mutably.
+      // Typing routes before the modal context (Codex review #456) — see
+      // `App::palette_input_key` for the reserved-typing contract (a
+      // testable method; an `if` in the arm body because match guards
+      // cannot borrow mutably). The charset / swallow rules for plain
+      // characters live in that method now; only Ctrl-modified keys and
+      // non-character keys reach the modal resolution.
+      View::CommandPalette => {
+        if !app.palette_input_key(key) {
+          match app.resolve_modal(KeyContext::CommandPalette, key) {
+            Some(ModalAction::CommandPaletteClose) => app.close_command_palette(),
+            Some(ModalAction::CommandPaletteAccept) => {
+              if let Some(action) = app.accept_command_palette() {
+                run_palette_action(terminal, &mut app, action)?;
+              }
+            }
+            Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
+            Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
+            // Unresolved keys fall back to typing (AltGr / modified
+            // Backspace parity — Codex #456); testable App method.
+            _ => app.palette_unresolved_fallback(key),
           }
         }
-        Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
-        Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
-        _ => match key.code {
-          KeyCode::Backspace => app.palette_pop_char(),
-          KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
-            app.palette_push_char(c);
-          }
-          // Any other char (including the palette trigger `:`, the
-          // help glyph `?`, uppercase letters) is dropped — there is
-          // no palette entry name that could match it. Silently
-          // ignoring is friendlier than appending and producing zero
-          // matches with no explanation.
-          KeyCode::Char(_) => {}
-          _ => {}
-        },
-      },
+      }
     }
 
     // Picker contract (Copilot PR #53): only break when the App has
@@ -820,6 +874,10 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Up => app.prev(),
     Action::Top => app.first(),
     Action::Bottom => app.last(),
+    // Issue #437: Working Tree pane scroll — no-ops unless the status
+    // pane holds the focus (gate lives on the `App` methods).
+    Action::WtScrollDown => app.wt_scroll_down(),
+    Action::WtScrollUp => app.wt_scroll_up(),
     Action::ToggleSidebar => app.toggle_sidebar(),
     // Issue #34: cycle the sidebar preview between commits and
     // stashes. Lands here as the merge resolution between #166
@@ -926,6 +984,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Push if !app.picker_mode => app.request_push(),
     // #290: `c` opens the branch-rename modal.
     Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
+    Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.

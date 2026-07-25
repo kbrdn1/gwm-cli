@@ -4,9 +4,9 @@ This document tracks where `gwm` is heading. It complements [CHANGELOG.md](CHANG
 
 Each item below links to its GitHub issue. The scope, alternatives considered, and acceptance criteria live there — this file is the map, not the spec.
 
-## Current state — v1.3.0 stable
+## Current state — v1.4.0 stable
 
-The current **stable** line is **v1.3.0** (2026-07-24). The machine-readable
+The current **stable** line is **v1.4.0** (2026-07-25). The machine-readable
 contracts frozen at 1.0.0 still hold: the CLI subcommands / flags / exit codes,
 the `--format=json` schemas, the daemon JSON-RPC protocol, and the `.gwm.toml`
 section set will not break without a major bump (see
@@ -21,7 +21,11 @@ config resolution on macOS; **1.2.0** was the distribution push
 AUR, aqua, with winget wired and pending upstream); **1.3.0** shipped the
 **agent session pane** ([#408](https://github.com/kbrdn1/gwm-cli/issues/408))
 and its follow-ups, including the Windows named pipe transport for the daemon
-([#439](https://github.com/kbrdn1/gwm-cli/issues/439)) — see
+([#439](https://github.com/kbrdn1/gwm-cli/issues/439)); **1.4.0** completed the
+`?` help overlay ([#453](https://github.com/kbrdn1/gwm-cli/issues/453)) and
+closed the TUI-polish trio ([#436](https://github.com/kbrdn1/gwm-cli/issues/436)
+/ [#437](https://github.com/kbrdn1/gwm-cli/issues/437) /
+[#438](https://github.com/kbrdn1/gwm-cli/issues/438)) — see
 [Shipped highlights](#shipped-highlights).
 
 1.0.0 promotes the entire **0.10.0 train**: the **rc.1** Settings-editability +
@@ -134,6 +138,7 @@ For reference (each linked to its closing PR):
 | [#363](https://github.com/kbrdn1/gwm-cli/issues/363) | v1.1.0 | First outside-report release: persisted sidebar layout (`V` / `H` write back to config) and OSC 52 clipboard yank that works over SSH |
 | [#383](https://github.com/kbrdn1/gwm-cli/issues/383) | v1.2.0 | Distribution push: Scoop bucket, native `.deb` / `.rpm` packages, AUR (`gwm-cli-bin`), aqua standard registry; winget wired, pending upstream merge |
 | [#408](https://github.com/kbrdn1/gwm-cli/issues/408) ([PR #435](https://github.com/kbrdn1/gwm-cli/pull/435)) + follow-ups [#439](https://github.com/kbrdn1/gwm-cli/issues/439) ([PR #444](https://github.com/kbrdn1/gwm-cli/pull/444)) / [#440](https://github.com/kbrdn1/gwm-cli/issues/440) ([PR #442](https://github.com/kbrdn1/gwm-cli/pull/442)) / [#441](https://github.com/kbrdn1/gwm-cli/issues/441) ([PR #443](https://github.com/kbrdn1/gwm-cli/pull/443)) / [#445](https://github.com/kbrdn1/gwm-cli/issues/445) ([PR #446](https://github.com/kbrdn1/gwm-cli/pull/446)) | v1.3.0 | **Agent session pane**: detect AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) per worktree from on-disk artefacts — AGENT column (table + TUI), `a` detail overlay with pinning, `gwm agents` CLI, additive JSON `agents` field, statusline segment. Follow-ups: **Windows named pipe transport** for `gwm daemon` / `gwm statusline` (owner-only pipe, server identity verified by owner SID) (#439); `gwm clean` ENOTEMPTY race tolerance (#440); process-level liveness — a dead recorded PID demotes the session immediately on unix (#441); fixed-height attach prompt with a scrollbar (#445) |
+| [#437](https://github.com/kbrdn1/gwm-cli/issues/437) ([PR #452](https://github.com/kbrdn1/gwm-cli/pull/452)) / [#438](https://github.com/kbrdn1/gwm-cli/issues/438) ([PR #454](https://github.com/kbrdn1/gwm-cli/pull/454)) / [#436](https://github.com/kbrdn1/gwm-cli/issues/436) ([PR #455](https://github.com/kbrdn1/gwm-cli/pull/455)) / [#453](https://github.com/kbrdn1/gwm-cli/issues/453) ([PR #456](https://github.com/kbrdn1/gwm-cli/pull/456)) | v1.4.0 | **TUI polish + complete help overlay**: Working Tree scroll from the Status context (`J` / `K`, rebindable, viewport-clamped) (#437); responsive sidebar heights via a pure layout solver (guaranteed floors, proportional split, Agents pane never clipped, Working Tree scrollbar) (#438); CI checks overlay — one row per `statusCheckRollup` entry with workflow + duration, `Enter` opens details, `/` filter, `f` refresh (#436); `?` help overlay documents every modal context with a per-section completeness guard, which-key re-audit (`exec` / `agents`), and a reserved-typing contract across every input sub-mode (#453) |
 
 If an issue still shows `open` on GitHub even though its work shipped, it's a tracking issue waiting for a follow-up audit — check the CHANGELOG and the linked PR before reopening scope work on it.
 
@@ -199,14 +204,6 @@ Comes last of the three, and inherits the detail overlay the agent pane
 (#408) already paid for. Where gwm can beat the reference: `snacks.gh` has no notion of a worktree,
 so the user picks from a flat list; gwm already knows the
 worktree → branch → PR → issue chain and can open on the current row directly.
-
-### TUI polish
-
-Smaller Status-pane items, independent of the four capability gaps above:
-
-- [#436](https://github.com/kbrdn1/gwm-cli/issues/436), **CI checks overlay**: with the Status pane focused, `c` lists the current PR's individual checks (the #299 indicator only shows the collapsed rollup); `Enter` opens a check in the browser. Reuses the detail overlay shell shipped with #408.
-- [#437](https://github.com/kbrdn1/gwm-cli/issues/437), **Working Tree scroll**: `Shift+J` / `Shift+K` from the Status context scroll the file tree (#300), which is currently clamped with no way to reach overflow.
-- [#438](https://github.com/kbrdn1/gwm-cli/issues/438), **responsive sidebar heights**: Agents / Working Tree / Recent Commits share the column with a 5-line minimum per visible section instead of first-come `Length(content)`. Unblocked since the Agents pane shipped (#408).
 
 ### Deferred
 

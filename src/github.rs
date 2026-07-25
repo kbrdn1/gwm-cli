@@ -620,6 +620,25 @@ pub enum CiState {
   Failing,
 }
 
+/// One classified `statusCheckRollup` entry, kept per-check for the CI
+/// checks overlay (issue #436) — pre-#436 the name and URL were dropped
+/// when the rollup collapsed into [`CiState`]. `name` resolves from the
+/// `CheckRun` `name` or the legacy `StatusContext` `context`; `url` from
+/// `detailsUrl` or `targetUrl` respectively.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrCheck {
+  pub name: String,
+  pub outcome: CheckOutcome,
+  pub url: Option<String>,
+  /// Owning workflow (`workflowName`, CheckRun shape only) — surfaced in
+  /// the overlay's detail column (#436 validation feedback).
+  pub workflow_name: Option<String>,
+  /// RFC 3339 run timestamps (CheckRun shape only): the overlay derives
+  /// the run duration (or the elapsed time of an in-flight run) from them.
+  pub started_at: Option<String>,
+  pub completed_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrStatus {
   pub number: u64,
@@ -632,6 +651,8 @@ pub struct PrStatus {
   /// Overall CI state derived from the same rollup that feeds
   /// `checks_passed` / `checks_total` — no extra GitHub request.
   pub ci: CiState,
+  /// The classified per-check list, same order as the rollup (issue #436).
+  pub checks: Vec<PrCheck>,
 }
 
 #[derive(Deserialize)]
@@ -677,6 +698,24 @@ struct RawCheck {
   conclusion: Option<String>,
   #[serde(default)]
   state: String,
+  // Per-check identity + link, kept for the CI checks overlay (issue #436).
+  // `name` + `detailsUrl` on the `CheckRun` shape; `context` + `targetUrl`
+  // on the legacy `StatusContext` shape.
+  #[serde(default)]
+  name: String,
+  #[serde(rename = "detailsUrl", default)]
+  details_url: Option<String>,
+  #[serde(default)]
+  context: String,
+  #[serde(rename = "targetUrl", default)]
+  target_url: Option<String>,
+  // Run metadata (CheckRun shape), kept for the overlay's detail column.
+  #[serde(rename = "workflowName", default)]
+  workflow_name: Option<String>,
+  #[serde(rename = "startedAt", default)]
+  started_at: Option<String>,
+  #[serde(rename = "completedAt", default)]
+  completed_at: Option<String>,
 }
 
 pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
@@ -719,6 +758,22 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     .filter(|c| matches!(classify_check(c), CheckOutcome::Passing))
     .count() as u32;
   let ci = derive_ci_state(&raw.status_check_rollup);
+  let checks = raw
+    .status_check_rollup
+    .iter()
+    .map(|c| PrCheck {
+      name: if c.name.is_empty() {
+        c.context.clone()
+      } else {
+        c.name.clone()
+      },
+      outcome: classify_check(c),
+      url: c.details_url.clone().or_else(|| c.target_url.clone()),
+      workflow_name: c.workflow_name.clone(),
+      started_at: c.started_at.clone(),
+      completed_at: c.completed_at.clone(),
+    })
+    .collect();
   Ok(PrStatus {
     number: raw.number,
     title: raw.title,
@@ -728,12 +783,14 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
     checks_passed,
     checks_total,
     ci,
+    checks,
   })
 }
 
 /// The outcome of a single rollup entry, before the per-PR aggregation.
+/// Public since #436: the CI checks overlay renders one row per check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CheckOutcome {
+pub enum CheckOutcome {
   Passing,
   Running,
   Failing,

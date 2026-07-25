@@ -745,6 +745,412 @@ fn create_type_navigation_loops() {
 }
 
 #[test]
+fn backspace_stays_a_reserved_eraser_in_the_create_form() {
+  // Codex review #456 (iteration 7): a modal rebind like
+  // `[tui.keys.modal.create] cancel = ["Backspace"]` used to resolve
+  // BEFORE the typing fallback, so Backspace cancelled the form and the
+  // text fields lost their eraser. The physical Backspace is a reserved
+  // editing control on the input fields (and such rebinds are refused at
+  // config time since iteration 14) — this route is the runtime
+  // backstop.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.field = Field::Issue;
+  app.create_push_char('4');
+  app.create_push_char('2');
+  let out = app.handle_create_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert_ne!(
+    out,
+    CreateKey::Cancel,
+    "Backspace must not cancel while a text field is focused"
+  );
+  assert_eq!(app.create_form.issue, "4", "Backspace must erase the last digit");
+}
+
+#[test]
+fn backspace_stays_a_reserved_eraser_in_the_link_number_input() {
+  // Codex review #456: Backspace is reserved typing on the number stage
+  // (a colliding rebind is refused at config time).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, mut app) = make_app();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('4'), KeyModifiers::NONE));
+  app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE));
+  let out = app.handle_link_prompt_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+  assert!(matches!(out, LinkPromptKey::Handled), "Backspace is plain typing");
+  assert_eq!(app.link_prompt_number_input(), "4", "Backspace erases the last digit");
+}
+
+#[test]
+fn printable_keys_stay_typing_in_the_create_form_despite_rebinds() {
+  // Codex review #456 (iteration 8): a modal rebind onto a printable key
+  // (`cancel = ["q"]`) resolved before the typing fallback, so `q` closed
+  // the form mid-word. On a text field the printable keys are reserved
+  // for typing (the palette convention, and such rebinds are refused at
+  // config time since iteration 14) — this route is the runtime
+  // backstop. Type-cycling verbs keep bare letters: they only fire on
+  // the Type field, so `next_type = ["q"]` must not steal the letter
+  // from a text field either.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::CreateNextType, KeyStroke::parse_chord("q").unwrap())
+    .unwrap();
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  let before = app.create_form.type_index;
+  let out = app.handle_create_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert_ne!(out, CreateKey::Cancel, "a printable rebind must not fire while typing");
+  assert_eq!(app.create_form.desc, "q", "the character types into the field instead");
+  assert_eq!(
+    app.create_form.type_index, before,
+    "the type must not cycle from a text field"
+  );
+}
+
+#[test]
+fn printable_keys_stay_typing_in_the_link_number_input_despite_rebinds() {
+  // Codex review #456: digits are reserved typing on the number stage
+  // (a colliding rebind like cancel = ["5"] is refused at config time);
+  // non-digits still reach the modal resolution (#293 contract).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::LinkPromptKey;
+  let (_dir, mut app) = make_app();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  let out = app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+  assert!(matches!(out, LinkPromptKey::Handled), "a digit is plain typing");
+  assert_eq!(app.link_prompt_number_input(), "5", "the digit types into the number");
+}
+
+#[test]
+fn palette_input_routes_typing_before_modal_rebinds() {
+  // Codex review #456: the palette's filter charset and Backspace are
+  // reserved typing, routed through a testable App method before the
+  // modal resolution (bindings that would collide are refused at config
+  // time — see reserved_typing_keys_cannot_be_rebound_in_input_contexts).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+    "a charset key is consumed as typing"
+  );
+  assert_eq!(app.palette.buffer(), "x", "the character filters");
+  assert!(
+    app.palette_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+    "Backspace is consumed as the eraser"
+  );
+  assert_eq!(app.palette.buffer(), "", "Backspace erases");
+}
+
+#[test]
+fn settings_editor_routes_typing_before_modal_rebinds() {
+  // Same contract for the Settings value editor (Codex review #456):
+  // printables and Backspace are consumed as typing before the modal
+  // resolution. Rebinds on those keys are refused at config time
+  // (iteration 13) — this route is the runtime backstop behind that
+  // validation.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("4".into());
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+    "a printable key is consumed as typing"
+  );
+  assert_eq!(app.config_panel.editing.as_deref(), Some("45"));
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+    "Backspace is consumed as the eraser"
+  );
+  assert_eq!(app.config_panel.editing.as_deref(), Some("4"));
+}
+
+#[test]
+fn modified_strokes_reach_the_modal_resolution_in_input_modes() {
+  // Codex review #456 (iteration 9): the reserved-typing routes must not
+  // swallow Ctrl/Alt-modified strokes — the parser accepts bindings like
+  // `close = ["Alt+x"]` or `accept = ["Ctrl+Backspace"]` and they have to
+  // stay reachable while typing. Only unmodified legitimate input is
+  // reserved.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+    "Alt+x must fall through to the modal resolution"
+  );
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+    "Ctrl+Backspace must fall through to the modal resolution"
+  );
+  app.config_panel.editing = Some("1".into());
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+    "Alt+x must fall through in the settings editor"
+  );
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+    "Ctrl+Backspace must fall through in the settings editor"
+  );
+}
+
+#[test]
+fn settings_editor_reinjects_unresolved_modified_backspace() {
+  // Codex review #456 (iteration 14): before the reserved-typing routes,
+  // every KeyCode::Backspace erased — including Alt/Ctrl+Backspace. The
+  // modifier-aware route let those reach the modal resolution (correct,
+  // a bound Ctrl+Backspace must fire), but the empty-resolution fallback
+  // only reinjected Char, so an UNBOUND modified Backspace stopped
+  // erasing. Parity restored: it pops one character again.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("ab".into());
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("a"),
+    "an unresolved Alt+Backspace must still erase"
+  );
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some(""),
+    "an unresolved Ctrl+Backspace must still erase"
+  );
+}
+
+#[test]
+fn palette_reinjects_unresolved_modified_backspace() {
+  // Same parity for the command palette (Codex review #456, iteration
+  // 14): an UNBOUND Alt/Ctrl+Backspace falls through the modal
+  // resolution and must still erase, exactly like the pre-#456 routing.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  app.palette_input_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+  app.palette_input_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+  app.palette_unresolved_fallback(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+  assert_eq!(
+    app.palette.buffer(),
+    "a",
+    "an unresolved Alt+Backspace must still erase"
+  );
+  // The charset reinjection (AltGr parity) keeps working through the
+  // same fallback.
+  app.palette_unresolved_fallback(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+  assert_eq!(
+    app.palette.buffer(),
+    "ac",
+    "an unresolved AltGr charset character still types"
+  );
+}
+
+#[test]
+fn settings_editor_reinjects_unresolved_modified_characters() {
+  // Codex review #456 (iteration 10): AltGr/Option printables arrive as
+  // Char + ALT on some keyboards. They are not reserved typing (a bound
+  // Alt+x must stay reachable), but when the modal resolution comes up
+  // empty the character IS typing and must reach the buffer — the old
+  // fallback pushed it, the modifier-aware route dropped it, making
+  // characters like @ or { impossible to type.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("a".into());
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::ALT));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("a@"),
+    "an unresolved AltGr character must still type"
+  );
+}
+
+#[test]
+fn shifted_uppercase_never_counts_as_palette_typing() {
+  // Codex review #456 (iteration 10): kitty-style terminals report an
+  // uppercase X as Char('x') + SHIFT — the very case KeyStroke::from_event
+  // normalises. The palette only takes lowercase input, so that stroke is
+  // NOT canonical typing and must fall through to the modal resolution
+  // (a binding on "X" stays reachable on every terminal encoding).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SHIFT)),
+    "a shifted letter is an uppercase, not palette input"
+  );
+  assert_eq!(app.palette.buffer(), "", "nothing must have been typed");
+}
+
+#[test]
+fn a_character_the_numeric_field_refuses_is_not_claimed_as_typing() {
+  // Codex review #456 (iteration 11): on a numeric field push_edit_char
+  // refuses non-digits, but settings_edit_input_key still claimed them as
+  // consumed. A character the field refuses is not typing; it falls
+  // through to the modal resolution (where only non-typing strokes can be
+  // bound since iteration 13, so nothing fires and the reinjection drops
+  // it) — the buffer must stay untouched either way.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::{SettingField, SettingsTab};
+  let (_dir, mut app) = make_app();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+  while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
+    app.config_panel.selected += 1;
+    assert!(
+      app.config_panel.selected < 100,
+      "ConfirmCountdown not found in the Tui tab"
+    );
+  }
+  app.config_panel.begin_edit("4");
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+    "a character the numeric field refuses must fall through to the resolution"
+  );
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("4"),
+    "the refused character must not land in the numeric buffer"
+  );
+}
+
+#[test]
+fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
+  // Codex review #456 (iterations 12-13): a VALID config like
+  // `[tui.keys.modal.palette] close = ["x"]` replaced Esc, then the
+  // reserved typing consumed `x` — the overlay had no exit left short of
+  // Ctrl-C killing the whole TUI. Bindings the typing routes would
+  // swallow are refused up front, at config time: every verb of the
+  // always-typing contexts (palette, link number input), the whole
+  // ConfigEdit context (it only exists while a value edit consumes
+  // printables and Backspace), and CreateSubmit (submitting only works
+  // from the Description field, where all printables are typing). The
+  // other create verbs stay bindable on bare letters — they act on the
+  // Type field, which takes no text input.
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  let mut modal = ModalKeymap::defaults();
+  for (action, chord) in [
+    (ModalAction::CommandPaletteClose, "x"),
+    (ModalAction::CommandPaletteAccept, "Backspace"),
+    (ModalAction::LinkInputCancel, "5"),
+    (ModalAction::LinkInputSubmit, "Backspace"),
+    (ModalAction::ConfigEditSubmit, "5"),
+    (ModalAction::ConfigEditCancel, "x"),
+    (ModalAction::ConfigEditCancel, "Backspace"),
+    (ModalAction::CreateSubmit, "s"),
+    (ModalAction::CreateSubmit, "Backspace"),
+    // Iteration 14: cancel / field navigation must stay reachable from
+    // the create form's TEXT fields, where bare printables and Backspace
+    // are typing — only the type-cycling verbs live on a typing-free
+    // field and keep bare letters.
+    (ModalAction::CreateCancel, "q"),
+    (ModalAction::CreateCancel, "Backspace"),
+    (ModalAction::CreateNextField, "Backspace"),
+    (ModalAction::CreatePrevField, "a"),
+  ] {
+    assert!(
+      modal
+        .apply_override(action, KeyStroke::parse_chord(chord).unwrap())
+        .is_err(),
+      "{action:?} = [{chord:?}] must be refused — the key is reserved typing input"
+    );
+  }
+  for (action, chord) in [
+    (ModalAction::CreateNextType, "n"),
+    (ModalAction::CreateCancel, "Alt+q"),
+    (ModalAction::ConfigEditSubmit, "Alt+s"),
+    (ModalAction::CommandPaletteClose, "Alt+x"),
+  ] {
+    assert!(
+      modal
+        .apply_override(action, KeyStroke::parse_chord(chord).unwrap())
+        .is_ok(),
+      "{action:?} = [{chord:?}] must stay bindable"
+    );
+  }
+}
+
+#[test]
+fn link_number_footer_drops_a_fetch_binding_swallowed_by_typing() {
+  // Codex review #456 (iteration 13): with the global `fetch_github`
+  // rebound to a digit or Backspace, the number-input stage consumes the
+  // key as typing before the fetch fallback — the shortcut cannot fire
+  // there. The footer must drop the dead hint rather than advertise it
+  // (the same convention as a key shadowed by a modal binding).
+  use crossterm::event::{KeyCode, KeyModifiers};
+  use gwm::tui::keymap::{Action, KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::HintContext;
+
+  let modal = ModalKeymap::defaults();
+  let default = HintContext::LinkInputNumber.resolve(&Keymap::defaults(), &modal);
+  assert!(
+    default.iter().any(|(_, l)| l == "fetch"),
+    "the default fetch binding must be advertised: {default:?}"
+  );
+  let mut km = Keymap::defaults();
+  km_apply(&mut km, Action::FetchGithub, KeyCode::Char('5'));
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "a fetch binding swallowed by digit typing must not be advertised: {resolved:?}"
+  );
+  let mut km = Keymap::defaults();
+  km_apply(&mut km, Action::FetchGithub, KeyCode::Backspace);
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "a fetch binding swallowed by the eraser must not be advertised: {resolved:?}"
+  );
+
+  fn km_apply(km: &mut Keymap, action: Action, code: KeyCode) {
+    km.apply_override(action, vec![vec![KeyStroke::new(code, KeyModifiers::empty())]])
+      .unwrap();
+  }
+}
+
+#[test]
+fn full_edit_buffer_still_consumes_valid_characters() {
+  // Codex review #456 (iteration 12): at the buffer limit push_edit_char
+  // refused even VALID characters, so the stroke leaked through to the
+  // modal resolution mid-typing. A type-accepted character is consumed
+  // as a no-op at the limit; only a character the field refuses outright
+  // falls through.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::{SettingField, SettingsTab};
+  let (_dir, mut app) = make_app();
+  app.config_panel.tab = SettingsTab::Tui;
+  app.config_panel.selected = 0;
+  while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
+    app.config_panel.selected += 1;
+    assert!(
+      app.config_panel.selected < 100,
+      "ConfirmCountdown not found in the Tui tab"
+    );
+  }
+  app.config_panel.begin_edit("999"); // at the 3-char limit
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+    "a valid digit at the limit is a consumed no-op — it must not leak to the resolution"
+  );
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("999"),
+    "the buffer must stay at its limit"
+  );
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();
@@ -916,6 +1322,151 @@ fn sidebar_scroll_clamps_at_max() {
   assert_eq!(app.sidebar.scroll, 3);
   app.sidebar_scroll_down();
   assert_eq!(app.sidebar.scroll, 3, "scrolling beyond max must clamp");
+}
+
+#[test]
+fn wt_scroll_requires_status_focus() {
+  // Issue #437: `J` / `K` scroll the Working Tree pane only while the
+  // status pane holds the navigation focus — same gate as `j` / `k`
+  // routing in `next()` / `prev()`. Unfocused, the keys are inert so
+  // they stay free for future list-view use.
+  let (_dir, mut app) = make_app();
+  app.sidebar.wt_max_scroll = 5;
+  assert!(!app.sidebar.focused);
+  app.wt_scroll_down();
+  assert_eq!(
+    app.sidebar.wt_scroll, 0,
+    "unfocused sidebar must not scroll the Working Tree"
+  );
+
+  app.focus_status();
+  app.wt_scroll_down();
+  assert_eq!(app.sidebar.wt_scroll, 1);
+}
+
+#[test]
+fn wt_scroll_clamps_between_zero_and_max() {
+  // The renderer republishes `wt_max_scroll` every frame; scrolling must
+  // clamp against it (down) and saturate at zero (up) exactly like the
+  // Recent Commits offset.
+  let (_dir, mut app) = make_app();
+  app.focus_status();
+  app.wt_scroll_up();
+  assert_eq!(app.sidebar.wt_scroll, 0, "scrolling up from 0 stays at 0");
+
+  app.sidebar.wt_max_scroll = 2;
+  app.wt_scroll_down();
+  app.wt_scroll_down();
+  app.wt_scroll_down();
+  assert_eq!(app.sidebar.wt_scroll, 2, "scrolling beyond max must clamp");
+  app.wt_scroll_up();
+  assert_eq!(app.sidebar.wt_scroll, 1);
+}
+
+#[test]
+fn navigation_resets_wt_scroll() {
+  // Selection change → new worktree → the previous Working Tree offset is
+  // meaningless. Same reset contract as the Recent Commits scroll.
+  let (_dir, mut app) = make_app();
+  app.sidebar.wt_max_scroll = 5;
+  app.sidebar.wt_scroll = 3;
+  app.on_navigation();
+  assert_eq!(
+    app.sidebar.wt_scroll, 0,
+    "navigation must reset the Working Tree scroll"
+  );
+}
+
+#[test]
+fn cycle_mode_resets_wt_scroll() {
+  // Stashes mode renders no Working Tree section; a stale offset would
+  // land on unrelated content when toggling back to Commits.
+  let (_dir, mut app) = make_app();
+  app.sidebar.wt_max_scroll = 5;
+  app.sidebar.wt_scroll = 3;
+  app.sidebar.cycle_mode();
+  assert_eq!(
+    app.sidebar.wt_scroll, 0,
+    "mode toggle must reset the Working Tree scroll"
+  );
+}
+
+#[test]
+fn section_heights_fit_naturally_with_commits_absorbing_slack() {
+  // Issue #438: when everything fits, each variable section keeps its
+  // natural height (content + 2 borders) and Recent Commits absorbs the
+  // remaining space — the exact behaviour the old `Min(3)` constraint
+  // produced, now pinned through the pure solver.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(60, 3, 10, 20), (5, 12, 43));
+}
+
+#[test]
+fn section_heights_guarantee_floor_and_share_proportionally_on_overflow() {
+  // Overflow: the scrollable sections are guaranteed their floor —
+  // min(natural, 7) for Working Tree (validation feedback on PR #455: the
+  // 5-line floor read too small in the field), min(natural, 5) for Recent
+  // Commits — and share the surplus proportionally to content size, capped
+  // at natural height, residue cascading to Recent Commits first. Agents
+  // cannot scroll so it keeps its natural height outright (see
+  // section_heights_never_clamp_the_agents_pane).
+  // available=21, agents=6 (natural 8, kept), wt=30 (natural 32, floor 7),
+  // commits=50 (natural 52, floor 5): base 20, surplus 1 → give =
+  // 1*len/86 = (0, 0, 0), residue 1 → commits. Sum == available exactly.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(21, 6, 30, 50), (8, 7, 6));
+}
+
+#[test]
+fn section_heights_never_clamp_the_agents_pane() {
+  // Codex review on PR #454: the Agents pane has no scroll — clamping it
+  // below its content permanently hides the trailing "+N more" row (3
+  // pinned rows + the overflow indicator = 4 content rows max, bounded by
+  // agent_pane_lines). A non-scrollable section keeps its natural height
+  // even when the column overflows; only the scrollable sections clamp.
+  use gwm::tui::state::sidebar::split_section_heights;
+  let (agents, wt, commits) = split_section_heights(21, 4, 30, 50);
+  assert_eq!(agents, 6, "agents must keep natural height (4 rows + borders)");
+  assert_eq!((agents, wt, commits), (6, 8, 7));
+}
+
+#[test]
+fn section_heights_keep_empty_sections_collapsed() {
+  // A section with no content keeps its collapse behaviour: Agents hidden
+  // when no session, Working Tree at 0 when the tree is clean. The
+  // collapsed section never eats a 5-line floor.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(40, 0, 5, 10), (0, 7, 33));
+  assert_eq!(split_section_heights(30, 2, 0, 8), (4, 0, 26));
+}
+
+#[test]
+fn section_heights_degrade_commits_first_on_tiny_terminal() {
+  // available below the floors' sum: hand out what exists with Recent
+  // Commits served first (the historical always-visible section), then
+  // Working Tree, then Agents. Sum must never exceed the available height.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(8, 6, 30, 50), (0, 3, 5));
+}
+
+#[test]
+fn section_heights_survive_empty_commits_under_overflow() {
+  // Codex review on PR #454: with an empty history (natural 2) the commits
+  // floor used to be raised to 3, breaking the floor <= natural invariant
+  // the sharing math relies on — `nat - floor` underflowed and panicked in
+  // debug builds. The natural height of commits is now floored at 3 (the
+  // old `Min(3)` rendered an empty bordered panel at 3 lines anyway), so
+  // the invariant holds and the split stays additive.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(8, 0, 5, 0), (0, 5, 3));
+}
+
+#[test]
+fn section_heights_give_everything_to_commits_when_alone() {
+  // No agents, clean tree, empty history: Recent Commits keeps the whole
+  // column, matching the pre-#438 rendering of an empty bottom panel.
+  use gwm::tui::state::sidebar::split_section_heights;
+  assert_eq!(split_section_heights(20, 0, 0, 0), (0, 0, 20));
 }
 
 #[test]
@@ -2126,6 +2677,7 @@ fn apply_fetch_results_loads_issue_and_pr_state() {
     checks_passed: 2,
     checks_total: 3,
     ci: CiState::Running,
+    checks: vec![],
   };
   app.apply_issue_fetch_result(Ok(issue.clone()));
   app.apply_pr_fetch_result(Ok(pr.clone()));
@@ -2162,6 +2714,961 @@ fn loaded_issue_status_persists_title_for_no_fetch_startup() {
 }
 
 #[test]
+fn enter_ci_checks_opens_the_overlay_with_one_row_per_check() {
+  // Issue #436: the CI checks overlay lists every statusCheckRollup entry of
+  // the linked PR — one row per check, order preserved, the details URL kept
+  // as the row meta so Enter can open it in the browser.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 1,
+    checks_total: 2,
+    ci: CiState::Failing,
+    checks: vec![
+      PrCheck {
+        name: "test (ubuntu-latest)".into(),
+        outcome: CheckOutcome::Failing,
+        url: Some("https://example.test/actions/runs/1/job/2".into()),
+        workflow_name: None,
+        started_at: None,
+        completed_at: None,
+      },
+      PrCheck {
+        name: "rustfmt".into(),
+        outcome: CheckOutcome::Passing,
+        url: None,
+        workflow_name: None,
+        started_at: None,
+        completed_at: None,
+      },
+    ],
+  }));
+
+  app.enter_ci_checks();
+
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(app.detail_overlay.rows.len(), 2);
+  assert_eq!(app.detail_overlay.rows[0].value, "test (ubuntu-latest)");
+  assert_eq!(
+    app.detail_overlay.rows[0].meta.as_deref(),
+    Some("https://example.test/actions/runs/1/job/2")
+  );
+  assert_eq!(app.detail_overlay.rows[1].value, "rustfmt");
+  assert_eq!(app.detail_overlay.rows[1].meta, None);
+}
+
+#[test]
+fn pr_summary_line_advertises_the_ci_checks_key_after_the_indicator() {
+  // #436 validation feedback: the PR line's CI indicator ends with the
+  // resolved key that opens the checks overlay — `… CI passing 10/10 [c]` —
+  // mirroring the pane titles' `[F]` / `[a]` convention. No indicator
+  // (CiState::None) → no hint.
+  let mk = |ci: gwm::github::CiState, passed: u32, total: u32| gwm::github::PrStatus {
+    number: 9,
+    title: "x".into(),
+    state: gwm::github::PrState::Open,
+    url: String::new(),
+    checks_passed: passed,
+    checks_total: total,
+    ci,
+    checks: vec![],
+    updated_at: String::new(),
+  };
+  let theme = Theme::default();
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(mk(gwm::github::CiState::Passing, 10, 10)),
+    80,
+    &theme,
+    Some("c"),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+  assert!(
+    text.contains("10/10 [c]"),
+    "the CI trailing must end with the key hint: {text}"
+  );
+
+  let line = pr_summary_line(
+    9,
+    gwm::github::LinkSource::BranchName,
+    &GitHubFetchState::Loaded(mk(gwm::github::CiState::None, 0, 0)),
+    80,
+    &theme,
+    Some("c"),
+  );
+  let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect::<String>();
+  assert!(!text.contains("[c]"), "no CI indicator, no hint: {text}");
+}
+
+#[test]
+fn pr_line_ci_hint_follows_the_focus_context() {
+  // Codex review on PR #455: with the worktrees pane focused, `c` opens the
+  // rename modal — advertising it next to the CI indicator was a lie. The
+  // hint resolves dynamically: the contextual `c` (EditWorktree's chord)
+  // while the status pane holds the focus, the global `ci_checks` binding
+  // (`C`) otherwise.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 10,
+    checks_total: 10,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+
+  let text_of = |app: &App| -> String {
+    gwm::tui::github_status_lines(app, 120)
+      .iter()
+      .flat_map(|l| l.spans.iter())
+      .map(|s| s.content.as_ref())
+      .collect()
+  };
+
+  app.focus_worktrees();
+  let unfocused = text_of(&app);
+  assert!(
+    unfocused.contains("10/10 [C]"),
+    "worktrees focus advertises the global ci_checks binding: {unfocused}"
+  );
+
+  app.focus_status();
+  let focused = text_of(&app);
+  assert!(
+    focused.contains("10/10 [c]"),
+    "status focus advertises the contextual c: {focused}"
+  );
+
+  // Codex review #455 (P2): with `edit_worktree` explicitly unbound the
+  // contextual key is gone, but the global `ci_checks` binding still opens
+  // the overlay — advertise it instead of dropping the hint entirely.
+  app
+    .keymap
+    .apply_override(gwm::tui::keymap::Action::EditWorktree, vec![])
+    .unwrap();
+  let unbound = text_of(&app);
+  assert!(
+    unbound.contains("10/10 [C]"),
+    "unbound edit_worktree falls back to the global ci_checks key: {unbound}"
+  );
+}
+
+#[test]
+fn terminal_check_without_completion_shows_no_duration() {
+  // Codex review #455 (P2): "in flight" was decided on a missing
+  // completed_at, so a TERMINAL StatusContext carrying a start but no end
+  // read as still active ("2m…") — and froze there, since the duration
+  // tick only rebuilds while an outcome is Running. The elapsed form now
+  // requires the Running outcome; a terminal check with an unknown end
+  // shows no duration at all, just its workflow.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::ci_check_rows;
+  let now: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339("2026-07-24T14:53:06Z")
+    .unwrap()
+    .into();
+  let checks = vec![PrCheck {
+    name: "status-ctx".into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some("external".into()),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: None,
+  }];
+  let rows = ci_check_rows(&checks, now);
+  assert_eq!(
+    rows[0].extra.as_deref(),
+    Some("external"),
+    "a terminal check with no completion timestamp shows no duration"
+  );
+}
+
+#[test]
+fn ci_check_rows_carry_workflow_and_duration_details() {
+  // #436 validation feedback: each row surfaces the workflow name and the
+  // run duration in `extra` — completed runs show the exact span, running
+  // ones the elapsed time with an ellipsis, a legacy StatusContext (no
+  // metadata) none at all.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::ci_check_rows;
+  let now: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339("2026-07-24T14:53:06Z")
+    .unwrap()
+    .into();
+  let checks = vec![
+    PrCheck {
+      name: "test".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at: Some("2026-07-24T14:51:06Z".into()),
+      completed_at: Some("2026-07-24T14:52:24Z".into()),
+    },
+    PrCheck {
+      name: "fmt".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at: Some("2026-07-24T14:51:06Z".into()),
+      completed_at: None,
+    },
+    PrCheck {
+      name: "security/scan".into(),
+      outcome: CheckOutcome::Failing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    },
+  ];
+  let rows = ci_check_rows(&checks, now);
+  assert_eq!(rows[0].extra.as_deref(), Some("ci · 1m18s"));
+  assert_eq!(rows[1].extra.as_deref(), Some("ci · 2m…"));
+  assert_eq!(rows[2].extra, None);
+}
+
+#[test]
+fn enter_ci_checks_without_checks_stays_on_the_list_with_a_status_hint() {
+  // No linked PR (or a PR with an empty rollup): the overlay would be an
+  // empty void — surface the situation on the status bar instead.
+  let (_dir, mut app) = make_app();
+  app.enter_ci_checks();
+  assert_ne!(app.view, View::DetailOverlay, "no overlay without checks");
+  assert!(
+    app.status.contains("CI checks"),
+    "status bar must explain why nothing opened: {}",
+    app.status
+  );
+}
+
+#[test]
+fn ci_filter_enter_on_a_urlless_check_leaves_the_filter_and_signals_it() {
+  // Codex review on PR #455: Enter inside the `f` filter on a check with no
+  // details URL silently dropped back to the list — the List-mode Enter
+  // path reports "no details URL", the filter path must too. A void query
+  // with no match at all keeps the filter open instead.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind, DetailMode};
+  let (_dir, mut app) = make_app();
+  let checks = vec![PrCheck {
+    name: "legacy/scan".into(),
+    outcome: CheckOutcome::Failing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }];
+  let rows = ci_check_rows(&checks, std::time::SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.ci_input_open();
+
+  assert_eq!(app.ci_input_selected_url(), None, "no URL on the selected check");
+  assert_eq!(
+    app.detail_overlay.mode,
+    DetailMode::List,
+    "a picked row leaves the filter even without a URL"
+  );
+
+  app.ci_input_open();
+  app.ci_input_push('z');
+  assert_eq!(app.ci_input_selected_url(), None);
+  assert_eq!(
+    app.detail_overlay.mode,
+    DetailMode::Input,
+    "no match under the query keeps the filter open"
+  );
+}
+
+#[test]
+fn edit_worktree_action_routes_to_ci_checks_when_status_focused() {
+  // Issue #436: `c` is contextual, same dispatch mechanism that turns j/k
+  // into sidebar scroll — worktrees context keeps the rename modal, status
+  // context opens the CI checks overlay.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+
+  // Codex review on PR #455: the contextual routing lives on the KEY path
+  // only — a pure pre-resolution the event loop applies before run_action.
+  // The palette's `edit-worktree` entry must stay a rename everywhere, so
+  // accept_command_palette returns the action unresolved.
+  use gwm::tui::keymap::Action;
+  app.focus_status();
+  assert_eq!(
+    app.resolve_contextual_action(Action::EditWorktree),
+    Action::CiChecks,
+    "status focus routes the edit-worktree KEY to the CI overlay"
+  );
+  assert_eq!(
+    app.resolve_contextual_action(Action::Down),
+    Action::Down,
+    "other actions pass through untouched"
+  );
+
+  app.focus_worktrees();
+  assert_eq!(
+    app.resolve_contextual_action(Action::EditWorktree),
+    Action::EditWorktree,
+    "worktrees context keeps the rename on c"
+  );
+
+  // The resolved CiChecks action opens the overlay as before.
+  app.focus_status();
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::DetailOverlay);
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+}
+
+#[test]
+fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
+  // Validation feedback on PR #455: `f` inside the overlay re-fetches the
+  // PR; the landing must refresh the open CI overlay in place (same
+  // convention as the agents landing), keeping the kind and clamping the
+  // selection to the new row count. The result is injected through the
+  // spine + drain — the path a real background worker takes — not the
+  // `apply_pr_fetch_result` seam: the first cut of this feature rebuilt
+  // the rows only in the seam, so the pane refreshed but the overlay
+  // never did (field-caught on the local install).
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  use gwm::tui::TaskMsg;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mk_check = |name: &str, outcome: CheckOutcome| PrCheck {
+    name: name.into(),
+    outcome,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  };
+  let mk_status = |number: u64, checks: Vec<PrCheck>| PrStatus {
+    number,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: format!("https://example.test/pull/{}", number),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: checks.len() as u32,
+    ci: CiState::Running,
+    checks,
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(
+    61,
+    vec![
+      mk_check("a", CheckOutcome::Running),
+      mk_check("b", CheckOutcome::Running),
+    ],
+  )));
+
+  app.enter_ci_checks();
+  app.detail_overlay.select_next();
+  assert_eq!(app.detail_overlay.selected, 1);
+
+  // `f` claims a spine slot; the worker's result comes back over the
+  // task channel and is applied by the drain.
+  let generation = request_github_pr(&mut app, 61);
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(
+      generation,
+      61,
+      Ok(mk_status(61, vec![mk_check("a", CheckOutcome::Passing)])),
+    ))
+    .unwrap();
+  app.drain_task_results();
+
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(
+    app.detail_overlay.rows.len(),
+    1,
+    "the drained landing refreshes the rows in place"
+  );
+  assert_eq!(app.detail_overlay.rows[0].value, "a");
+  assert_eq!(app.detail_overlay.selected, 0, "the selection clamps to the new count");
+
+  // A landing for a *different* PR (the worktree-wide bulk prefetch) must
+  // not clobber the open overlay's rows.
+  let generation = request_github_pr(&mut app, 62);
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(
+      generation,
+      62,
+      Ok(mk_status(
+        62,
+        vec![
+          mk_check("x", CheckOutcome::Failing),
+          mk_check("y", CheckOutcome::Failing),
+        ],
+      )),
+    ))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(
+    app.detail_overlay.rows.len(),
+    1,
+    "another PR's landing must not clobber the linked PR's rows"
+  );
+  assert_eq!(app.detail_overlay.rows[0].value, "a");
+}
+
+#[test]
+fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
+  // Codex review #455 (P2, twice): a refresh can land an empty rollup — a
+  // new commit was just pushed and the workflows have not started yet.
+  // Blanking the rows while leaving the overlay open produced exactly the
+  // empty overlay `enter_ci_checks` refuses to open; close it and say why.
+  // The result goes through the spine + drain (the real worker path): the
+  // end-of-drain `report_github_refresh_status` used to overwrite the
+  // close message with "github status refreshed", so the status assertion
+  // below pins the whole drain, not just the landing helper.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::TaskMsg;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mk_status = |checks: Vec<PrCheck>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: checks.len() as u32,
+    ci: CiState::Running,
+    checks,
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(vec![PrCheck {
+    name: "a".into(),
+    outcome: CheckOutcome::Running,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }])));
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  let generation = request_github_pr(&mut app, 61);
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(generation, 61, Ok(mk_status(vec![]))))
+    .unwrap();
+  app.drain_task_results();
+  assert_eq!(app.view, View::List, "an empty landing closes the overlay");
+  assert!(
+    app.status.contains("no CI checks"),
+    "the close message survives the end-of-drain refresh report: {}",
+    app.status
+  );
+}
+
+/// An App with a linked PR 61, its fetch landed and the CI overlay open —
+/// the shared setup of the two identity-change tests below.
+fn app_with_open_ci_overlay_on_pr_61() -> (tempfile::TempDir, git2::Repository, App) {
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "a".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::DetailOverlay);
+  (dir, repo, app)
+}
+
+#[test]
+fn refresh_closes_the_ci_overlay_when_the_pr_link_is_gone() {
+  // Codex review #455 (P2): with a non-explicit link the refresh re-probes
+  // the PR detection, and a persisted detection can come back None —
+  // leaving no PR at all. The open overlay then shows checks for a PR the
+  // link no longer carries, and with nothing to fetch no landing will ever
+  // refresh or close it. The refresh handles the identity change up front.
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  // Simulate the re-probe dropping the detection (the in-refresh gh probe
+  // is not reachable from a test): the link no longer carries a PR.
+  app.github.link.pr = None;
+
+  app.refresh_github_status();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a refresh with no linked PR closes the stale CI overlay"
+  );
+}
+
+#[test]
+fn refresh_closes_the_ci_overlay_when_the_detected_pr_changes() {
+  // Codex review #455 (P2, second round): the None-only guard missed the
+  // re-detection CHANGING the PR (#61 → #62) — the old PR's checks stayed
+  // up during the new fetch, and forever if it failed, with Enter opening
+  // a stale check URL. The overlay carries the PR number that opened it,
+  // and a refresh whose link disagrees closes it up front.
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  // Simulate the re-probe re-detecting a different PR.
+  app.github.link.pr = Some(62);
+
+  app.refresh_github_status();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a refresh onto a different PR closes the stale CI overlay"
+  );
+}
+
+#[test]
+fn link_refresh_closes_the_ci_overlay_when_the_link_moves() {
+  // Codex review #455 (P2, third round): `refresh_github_status` is not
+  // the only path that mutates the link — `refresh_link` runs on
+  // navigation and on the auto-refresh relist (which can move the
+  // selection when the current worktree disappears), all while the
+  // overlay is up. The identity guard fires there too.
+  let (_dir, repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+
+  app.refresh_link();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a link refresh onto a different PR closes the stale CI overlay"
+  );
+}
+
+#[test]
+fn ci_checks_refuse_to_open_on_a_stale_workspace_selection() {
+  // Codex review #455 (P2): in workspace mode a failed `Repository::open`
+  // for the selected row leaves `github.link` and its cache on the
+  // previously active repo. Opening the overlay then would show — and
+  // `Enter` would browse — the OLD repo's checks. Refuse instead, the
+  // same contract as the project-layer keymap editor (#304).
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  app.close_detail_overlay();
+  app.workspace_active_stale = true;
+
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::List, "a stale selection must not open the overlay");
+  assert!(
+    app.status.contains("unavailable"),
+    "the status line explains the refusal: {}",
+    app.status
+  );
+}
+
+#[test]
+fn modal_ci_refresh_reapplies_the_workspace_stale_guard() {
+  // Codex review #455 (P1): the modal dispatch calls the refresh directly,
+  // bypassing run_action's `workspace_active_stale && is_repo_mutating`
+  // guard. A selection gone stale AFTER the overlay opened (an async
+  // relist landing on a repo `Repository::open` can no longer activate)
+  // must not fetch — and persist PR metadata — through the previously
+  // active repo's slug and handle. The overlay closes instead.
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  app.workspace_active_stale = true;
+
+  app.ci_checks_refresh();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a stale refresh closes the overlay instead of fetching"
+  );
+  assert!(
+    app.status.contains("unavailable"),
+    "the status line explains the close: {}",
+    app.status
+  );
+}
+
+#[test]
+fn ci_filter_cursor_clamps_when_a_refresh_shrinks_the_matches() {
+  // Codex review #455 (P2): `f` then `/` before the result lands, and the
+  // new rollup has fewer matches than the cursor position — set_rows only
+  // clamped `selected`, leaving `input_selected` out of bounds: no
+  // highlight, Enter returning None, a stuck filter until several `Up`
+  // presses. The filter cursor clamps against the new match count too.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mk_check = |name: &str| PrCheck {
+    name: name.into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  };
+  let mk_status = |checks: Vec<PrCheck>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: checks.len() as u32,
+    checks_total: checks.len() as u32,
+    ci: CiState::Passing,
+    checks,
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(vec![
+    mk_check("check-a"),
+    mk_check("check-b"),
+    mk_check("check-c"),
+  ])));
+  app.enter_ci_checks();
+  app.ci_input_open();
+  app.ci_input_push('c');
+  app.ci_input_next();
+  app.ci_input_next();
+  assert_eq!(
+    app.detail_overlay.input_selected, 2,
+    "the cursor sits on the last of 3 matches"
+  );
+
+  app.apply_pr_fetch_result(Ok(mk_status(vec![mk_check("check-a")])));
+  assert_eq!(app.ci_input_matches().len(), 1, "one match remains after the landing");
+  assert_eq!(
+    app.detail_overlay.input_selected, 0,
+    "the filter cursor clamps to the shrunk match list"
+  );
+}
+
+#[test]
+fn ci_overlay_ticks_running_check_durations() {
+  // Codex review #455 (P2): a Running check's elapsed duration was
+  // formatted once when the rows were built, then froze until the next
+  // `f`. The poll-cadence tick rebuilds the rows from the cached PR state
+  // while a check is still running — and stays a no-op once every check
+  // is terminal, so idle frames do no churn.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let started = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+  let mk_status = |outcome: CheckOutcome, started_at: Option<String>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "a".into(),
+      outcome,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at,
+      completed_at: None,
+    }],
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Running, Some(started.clone()))));
+  app.enter_ci_checks();
+  app.detail_overlay.rows[0].extra = Some("frozen".into());
+
+  app.tick_ci_overlay_durations();
+  assert_ne!(
+    app.detail_overlay.rows[0].extra.as_deref(),
+    Some("frozen"),
+    "a running check's duration is recomputed on the tick"
+  );
+
+  // Terminal outcomes: the tick must not rebuild anything.
+  app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Passing, Some(started))));
+  app.detail_overlay.rows[0].extra = Some("frozen".into());
+  app.tick_ci_overlay_durations();
+  assert_eq!(
+    app.detail_overlay.rows[0].extra.as_deref(),
+    Some("frozen"),
+    "no running check, no per-tick rebuild"
+  );
+}
+
+#[test]
+fn ci_overlay_ticks_survive_a_pr_cache_invalidation() {
+  // Codex review #455 (P2): the tick read the checks back from the PR
+  // fetch cache, so an invalidation while the overlay was up — a
+  // workspace refresh_link with no bulk refetch, or a failed manual
+  // refresh — silently killed the clock: the ellipsis still claimed an
+  // active check but the duration froze for good. The overlay carries
+  // its own checks now; the tick runs on what the overlay displays.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::TaskKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let started = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "a".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at: Some(started),
+      completed_at: None,
+    }],
+  }));
+  app.enter_ci_checks();
+
+  // The cache is flushed while the overlay is up (same identity, so the
+  // identity guard keeps it open).
+  app.tasks.invalidate_matching(TaskKind::is_github);
+  app.github.invalidate();
+
+  app.detail_overlay.rows[0].extra = Some("frozen".into());
+  app.tick_ci_overlay_durations();
+  assert_ne!(
+    app.detail_overlay.rows[0].extra.as_deref(),
+    Some("frozen"),
+    "the duration clock survives a PR cache invalidation"
+  );
+}
+
+#[test]
+fn pr_line_ci_hint_is_hidden_in_picker_mode() {
+  // Codex review #455 (P2): in picker mode (`gwm switch`) run_action drops
+  // Action::CiChecks — printable keys feed the filter — so the PR line
+  // must not advertise a key that does nothing.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (dir, repo, _app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  let mut app = App::new_picker_at_layered(Some(dir.path()), None).unwrap();
+  assert!(app.picker_mode);
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 10,
+    checks_total: 10,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter())
+    .map(|s| s.content.as_ref())
+    .collect();
+  assert!(text.contains("10/10"), "the CI indicator itself stays: {text}");
+  assert!(
+    !text.contains("10/10 ["),
+    "picker mode must not advertise the dead ci_checks key: {text}"
+  );
+}
+
+#[test]
+fn ci_checks_refresh_and_filter_mirror_the_list_view_keys() {
+  // Validation feedback on PR #455 (2026-07-24): inside the overlay `f`
+  // re-fetches and `/` filters — the exact keys the list view uses for
+  // refresh and filter. Rebindable under [tui.keys.modal.ci_checks].
+  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
+  let modal = ModalKeymap::defaults();
+  assert_eq!(modal.primary_key(ModalAction::CiChecksRefresh).as_deref(), Some("f"));
+  assert_eq!(modal.primary_key(ModalAction::CiChecksFilter).as_deref(), Some("/"));
+}
+
+#[test]
+fn agent_snapshot_landing_does_not_clobber_the_ci_overlay() {
+  // Codex review on PR #455: an agents overlay interrupted without a close
+  // (an async task flipping the view) leaves detail_overlay_target set; a
+  // detection landing while the CI overlay is later open used to rebuild
+  // the rows as agent sessions while the kind stayed CiChecks — Enter then
+  // tried to open a session id as a URL. The landing rebuild is now gated
+  // on DetailKind::Agents and enter_ci_checks drops the stale target.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::DetailKind;
+  use gwm::tui::TaskKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+
+  // Agents overlay opened (captures the target), then interrupted without
+  // a close — the exact hole the review describes.
+  app.open_agent_overlay();
+  app.view = View::Report;
+
+  app.focus_status();
+  app.enter_ci_checks();
+  assert_eq!(app.detail_overlay.kind, DetailKind::CiChecks);
+  assert_eq!(app.detail_overlay.rows[0].value, "ci");
+
+  let generation = app.tasks.request(TaskKind::AgentSessions).unwrap();
+  assert!(app.apply_agent_snapshot(
+    generation,
+    std::collections::BTreeMap::new(),
+    None,
+    std::collections::BTreeMap::new()
+  ));
+  assert_eq!(
+    app.detail_overlay.kind,
+    DetailKind::CiChecks,
+    "kind must survive the landing"
+  );
+  assert_eq!(
+    app.detail_overlay.rows[0].value, "ci",
+    "the CI rows must not be replaced by agent rows"
+  );
+}
+
+#[test]
+fn pr_line_ci_hint_disappears_when_the_binding_is_removed() {
+  // Codex review on PR #455: `ci_checks = []` (or `edit_worktree = []` in
+  // the status context) unbinds the action — the PR line must then drop
+  // the key suffix instead of advertising a dead key.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::keymap::Action;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 1,
+    checks_total: 1,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+  app.focus_worktrees();
+  app.keymap.apply_override(Action::CiChecks, Vec::new()).unwrap();
+
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter())
+    .map(|s| s.content.as_ref())
+    .collect();
+  assert!(
+    text.contains("1/1") && !text.contains("1/1 ["),
+    "an unbound ci_checks must drop the key suffix: {text}"
+  );
+}
+
+#[test]
+fn enter_ci_checks_error_resolves_the_fetch_key() {
+  // Codex review on PR #455: the "fetch (F) first" hint hard-coded `F`;
+  // the message now resolves the active fetch_github binding and drops
+  // the parenthetical entirely when the action is unbound.
+  use gwm::tui::keymap::Action;
+  let (_dir, mut app) = make_app();
+  app.enter_ci_checks();
+  assert!(
+    app.status.contains("(F)"),
+    "default binding shows in the hint: {}",
+    app.status
+  );
+
+  app.keymap.apply_override(Action::FetchGithub, Vec::new()).unwrap();
+  app.enter_ci_checks();
+  assert!(
+    !app.status.contains('(') && app.status.contains("fetch"),
+    "unbound fetch drops the parenthetical: {}",
+    app.status
+  );
+}
+
+#[test]
 fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
@@ -2175,6 +3682,7 @@ fn loaded_explicit_pr_status_persists_title_for_no_fetch_startup() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2197,6 +3705,7 @@ fn loaded_detected_pr_status_persists_detected_title_for_no_fetch_startup() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }));
 
   let link = gwm::github::read_link(&repo, "feat/#42-tui-search").unwrap();
@@ -2370,6 +3879,17 @@ fn request_github_issue(app: &mut gwm::tui::App, n: u64) -> u64 {
     .request(TaskKind::GithubIssue(n))
     .expect("a cold GitHub issue slot must hand out a generation");
   app.github.mark_loading(FetchKey::Issue(n));
+  generation
+}
+
+/// PR-side counterpart to [`request_github_issue`].
+fn request_github_pr(app: &mut gwm::tui::App, n: u64) -> u64 {
+  use gwm::tui::{FetchKey, TaskKind};
+  let generation = app
+    .tasks
+    .request(TaskKind::GithubPr(n))
+    .expect("a cold GitHub PR slot must hand out a generation");
+  app.github.mark_loading(FetchKey::Pr(n));
   generation
 }
 
@@ -2746,6 +4266,7 @@ fn refresh_github_status_message_reflects_partial_failure() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   };
   app.apply_pr_fetch_result(Ok(pr));
   // Now call the same status-rendering logic the refresh would have run.
@@ -3651,6 +5172,7 @@ fn table_marker_pr_pastille_uses_loaded_closed_pr_state() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }));
 
   let theme = Theme::default();
@@ -4324,6 +5846,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     checks_passed: 3,
     checks_total: 3,
     ci: CiState::Passing,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4332,6 +5855,7 @@ fn pr_summary_line_truncates_loaded_state_to_budget() {
     &GitHubFetchState::Loaded(status),
     35,
     &Theme::default(),
+    None,
   );
   let width = line_visible_width(&line);
   assert!(
@@ -4478,6 +6002,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4486,6 +6011,7 @@ fn pr_summary_line_leads_with_the_pr_icon() {
     &GitHubFetchState::Loaded(status),
     80,
     &Theme::default(),
+    None,
   );
   assert!(
     line.spans[0].content.contains(gwm::tui::PR_ICON),
@@ -4502,6 +6028,7 @@ fn pr_summary_line_icon_has_trailing_space_only() {
     &GitHubFetchState::Idle,
     80,
     &Theme::default(),
+    None,
   );
   assert_eq!(
     line.spans[0].content.as_ref(),
@@ -4520,6 +6047,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let theme = Theme::default();
@@ -4529,6 +6057,7 @@ fn pr_summary_line_loaded_icon_uses_pr_state_color() {
     &GitHubFetchState::Loaded(status),
     80,
     &theme,
+    None,
   );
   assert_eq!(
     line.spans[0].style.fg,
@@ -4549,6 +6078,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     checks_passed: 1,
     checks_total: 2,
     ci: gwm::github::CiState::Failing,
+    checks: vec![],
     updated_at: String::new(),
   };
   let theme = Theme::default();
@@ -4558,6 +6088,7 @@ fn pr_summary_line_loaded_renders_ci_indicator_when_checks_present() {
     &GitHubFetchState::Loaded(status),
     80,
     &theme,
+    None,
   );
   let ci = span_with(&line, "CI").expect("a CI indicator span");
   assert!(
@@ -4582,6 +6113,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     checks_passed: 0,
     checks_total: 0,
     ci: gwm::github::CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4590,6 +6122,7 @@ fn pr_summary_line_loaded_omits_ci_indicator_when_no_checks() {
     &GitHubFetchState::Loaded(status),
     80,
     &Theme::default(),
+    None,
   );
   let joined: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
   assert!(
@@ -4627,6 +6160,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
     updated_at: String::new(),
   };
   let line = pr_summary_line(
@@ -4635,6 +6169,7 @@ fn pr_summary_line_renders_detected_source_as_a_reverse_video_chip() {
     &GitHubFetchState::Loaded(status),
     80,
     &Theme::default(),
+    None,
   );
   let chip = span_with(&line, "detected").expect("a 'detected' source chip span");
   assert!(

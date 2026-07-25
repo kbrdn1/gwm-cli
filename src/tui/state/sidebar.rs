@@ -108,6 +108,87 @@ impl SidebarMode {
   }
 }
 
+/// Split the sidebar height left over for the three variable sections —
+/// Agents / Working Tree / Recent Commits — into per-section block
+/// heights, borders included (issue #438). Pure and ratatui-free so the
+/// policy is unit-testable without a backend, like [`SidebarState::resolve_layout`].
+///
+/// - When every natural height (`content + 2` borders) fits, each section
+///   keeps it and Recent Commits absorbs the slack — the exact behaviour
+///   the old `Min(3)` constraint produced.
+/// - On overflow, every **visible** scrollable section (Working Tree,
+///   Recent Commits) is guaranteed `min(natural, 5)` lines (border + at
+///   least 3 content rows) and the surplus is distributed proportionally
+///   to content size, capped at the natural height; the integer-division
+///   residue cascades to Recent Commits, then Working Tree, then Agents.
+///   The total need exceeds the surplus by construction, so the residue
+///   is always absorbed.
+/// - The Agents pane has **no scroll**, so clamping it below its content
+///   would permanently hide the trailing `+N more` row — it keeps its
+///   natural height outright (Codex review, PR #454). Safe: the pane is
+///   bounded to 4 content rows by construction (`agent_pane_lines` caps
+///   at 3 pinned rows plus the overflow indicator).
+/// - A section with no content stays collapsed at 0 (Agents with no
+///   session, Working Tree on a clean tree) and never eats a floor.
+///   Recent Commits is never collapsed: an empty history still renders
+///   its bordered panel, floored at the historical `Min(3)`.
+/// - Below the floors' sum (tiny terminal) sections are served in the
+///   order commits → working tree → agents with whatever remains.
+pub fn split_section_heights(available: u16, agents_len: u16, wt_len: u16, commits_len: u16) -> (u16, u16, u16) {
+  let natural = |len: u16| if len == 0 { 0 } else { len.saturating_add(2) };
+  let natural_a = natural(agents_len);
+  let natural_w = natural(wt_len);
+  // Commits is never collapsed and its natural height is floored at 3 —
+  // the old `Min(3)` rendered an empty bordered panel at 3 lines anyway.
+  // Raising the *natural* height (not just the floor) keeps the
+  // `floor <= natural` invariant the sharing math below relies on
+  // (Codex review, PR #454: an empty history with `floor_c = 3` made
+  // `nat - floor` underflow).
+  let natural_c = commits_len.saturating_add(2).max(3);
+
+  if natural_a as u32 + natural_w as u32 + natural_c as u32 <= available as u32 {
+    return (natural_a, natural_w, available - natural_a - natural_w);
+  }
+
+  let floor_a = natural_a;
+  // Working Tree gets a taller floor than Recent Commits (7 = border +
+  // 5 content rows): validation feedback on PR #455 — the shared 5-line
+  // floor read too small for a file tree in the field.
+  let floor_w = natural_w.min(7);
+  let floor_c = natural_c.min(5);
+
+  let base = floor_a + floor_w + floor_c;
+  if base > available {
+    let c = floor_c.min(available);
+    let rest = available - c;
+    let w = floor_w.min(rest);
+    let a = floor_a.min(rest - w);
+    return (a, w, c);
+  }
+
+  let surplus = available - base;
+  let total = agents_len as u32 + wt_len as u32 + commits_len as u32;
+  let give = |len: u16, floor_v: u16, nat: u16| -> u16 {
+    if total == 0 {
+      return 0;
+    }
+    ((surplus as u32 * len as u32 / total) as u16).min(nat - floor_v)
+  };
+  let mut a = floor_a + give(agents_len, floor_a, natural_a);
+  let mut w = floor_w + give(wt_len, floor_w, natural_w);
+  let mut c = floor_c + give(commits_len, floor_c, natural_c);
+  let mut residue = available - a - w - c;
+  let mut top_up = |h: &mut u16, nat: u16| {
+    let room = (nat - *h).min(residue);
+    *h += room;
+    residue -= room;
+  };
+  top_up(&mut c, natural_c);
+  top_up(&mut w, natural_w);
+  top_up(&mut a, natural_a);
+  (a, w, c)
+}
+
 /// Pure sidebar state. Use [`Self::new`] (or the [`Default`] impl below)
 /// to get the initial state that matches the previous `App::new_at`
 /// behaviour (open + unfocused + zero scroll + cold cache) — the
@@ -147,6 +228,17 @@ pub struct SidebarState {
   /// by [`Self::scroll_down`] to clamp so the panel content can never
   /// be pushed entirely off-screen.
   pub max_scroll: u16,
+  /// First-visible line index of the Working Tree section (issue
+  /// #437). Independent from `scroll` — the file tree and the commit
+  /// list overflow at different rates. Bumped by
+  /// [`Self::wt_scroll_down`] / [`Self::wt_scroll_up`]; reset to 0 by
+  /// [`Self::on_navigation`] and [`Self::cycle_mode`].
+  pub wt_scroll: u16,
+  /// Upper bound for `wt_scroll`, republished by the renderer every
+  /// frame against the Working Tree section's clamped viewport (the
+  /// layout solver may hand the section less height than its content
+  /// on a large change set — exactly the case #437 exists for).
+  pub wt_max_scroll: u16,
   /// Cached pre-rendered sections keyed by the selected worktree's
   /// path **and** the active mode (issue #34). `None` = cold cache
   /// (the renderer will rebuild and store). Invalidated on selection
@@ -178,6 +270,8 @@ impl SidebarState {
       focused: false,
       scroll: 0,
       max_scroll: 0,
+      wt_scroll: 0,
+      wt_max_scroll: 0,
       cache: None,
       mode: SidebarMode::Commits,
     }
@@ -242,6 +336,7 @@ impl SidebarState {
       SidebarMode::Stashes => SidebarMode::Commits,
     };
     self.scroll = 0;
+    self.wt_scroll = 0;
     self.cache = None;
   }
 
@@ -260,6 +355,7 @@ impl SidebarState {
   /// itself on the next frame anyway).
   pub fn on_navigation(&mut self) {
     self.scroll = 0;
+    self.wt_scroll = 0;
     self.cache = None;
   }
 
@@ -284,6 +380,19 @@ impl SidebarState {
   /// 0. Matches `k`-on-sidebar; safe to call from `scroll == 0`.
   pub fn scroll_up(&mut self) {
     self.scroll = self.scroll.saturating_sub(1);
+  }
+
+  /// Scroll the Working Tree viewport down by one line, clamped at
+  /// `wt_max_scroll` (issue #437). Same clamp invariant as
+  /// [`Self::scroll_down`], applied to the file-tree section.
+  pub fn wt_scroll_down(&mut self) {
+    self.wt_scroll = self.wt_scroll.saturating_add(1).min(self.wt_max_scroll);
+  }
+
+  /// Scroll the Working Tree viewport up by one line, saturating at 0
+  /// (issue #437).
+  pub fn wt_scroll_up(&mut self) {
+    self.wt_scroll = self.wt_scroll.saturating_sub(1);
   }
 
   /// Flip `open`. When closing, also drops `focused` — a hidden
