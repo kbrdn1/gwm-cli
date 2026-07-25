@@ -2131,7 +2131,9 @@ impl App {
         self.palette_push_char(c);
         true
       }
-      KeyCode::Char(_) => true,
+      // Characters outside the filter charset fall through to the modal
+      // resolution — a rebind like `close = ["?"]` stays honoured (#293
+      // contract); unresolved ones are dropped by the dispatch fallback.
       _ => false,
     }
   }
@@ -4054,12 +4056,16 @@ impl App {
           self.create_pop_char();
           return CreateKey::Handled;
         }
-        KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
-          if self.create_form.field == Field::Issue && !c.is_ascii_digit() {
-            self.status = "issue accepts digits only".into();
-          } else {
-            self.create_push_char(c);
-          }
+        // Only the field's LEGITIMATE input is reserved: free text on
+        // description, digits on issue. A non-digit on the issue field
+        // still reaches the modal resolution (a printable rebind stays
+        // honoured, the #293 contract), with the digits-only status hint
+        // as the unresolved fallback below.
+        KeyCode::Char(c)
+          if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            && (self.create_form.field != Field::Issue || c.is_ascii_digit()) =>
+        {
+          self.create_push_char(c);
           return CreateKey::Handled;
         }
         _ => {}
@@ -5150,7 +5156,8 @@ impl App {
       // form; Ctrl-modified chars still reach the modal resolution.
       LinkPromptStage::InputNumber if key.code == KeyCode::Backspace => self.link_prompt_pop_char(),
       LinkPromptStage::InputNumber
-        if matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+        if matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
+          && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
       {
         if let KeyCode::Char(c) = key.code {
           self.link_prompt_push_char(c);
