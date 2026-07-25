@@ -10,6 +10,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-forge support: a `Forge` trait and a GitLab (`glab`) backend**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). Issue / PR lookups
+  now go through a `Forge` abstraction with two implementations: the existing
+  GitHub one (`gh`) and a new GitLab one (`glab`). Worktrees, bootstrap,
+  branch naming and the `branch.<name>.gwm-*` link storage are unchanged and
+  forge-neutral — only the network layer knows which forge is in play.
+  - New `forge = "github" | "gitlab"` key in `.gwm.toml`. Omitted, the forge
+    is inferred from the `origin` host; a **self-hosted** instance lives on
+    an arbitrary domain and cannot be detected from the URL, so the explicit
+    key is the supported way in and always wins over inference.
+  - `$GWM_GLAB` overrides the `glab` binary, mirroring `$GWM_GH`.
+  - `gwm doctor` probes the forge CLI, but only when `forge` is set
+    explicitly, so repos that never opt in gain no new warning.
+  - GitLab specifics absorbed at the parse boundary: `iid` (not `id`) as the
+    user-visible number, `opened`/`locked` states, nested subgroup paths,
+    `#RRGGBB` label colours, `due_date` vs `due_on`, and `state_event` for
+    milestone transitions.
+
+### Changed
+
+- **Repo-slug extraction is host-agnostic**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `origin` URLs are
+  now parsed into host + path for any host, in both scp-like (`git@host:path`)
+  and scheme-ful (`ssh://`, `https://`) forms. Pre-#419 a non-`github.com`
+  remote was rejected outright, which made a GitLab remote unusable before
+  the backend got a say. Issue / PR URLs are built from the parsed host
+  instead of a hardcoded `https://github.com/`, so self-hosted instances get
+  links to their own server.
+- **An unrecognised CI state is reported as unknown, never as green**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `CheckOutcome`
+  gained an explicit `Unknown` variant, rendered as its own row in the CI
+  checks overlay. It aggregates as non-green, so a forge state this build
+  does not know can no longer paint a passing CI that is not passing.
+
+### Docs
+
+- New [GitLab (multi-forge)](docs/5.integrations/5.gitlab.md) integration
+  page covering forge selection, nested groups, the pipeline-to-CI-state
+  mapping, and the deferred TUI terminology sweep
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)).
+
 ## Past releases
 
 In reverse chronological order:

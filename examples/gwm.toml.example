@@ -28,6 +28,20 @@
 # even when trusted. Manage entries with `gwm trust list / revoke / show`.
 # Full threat model: https://github.com/kbrdn1/gwm-cli/blob/main/src/trust.rs
 
+# === forge (issue #419) ====================================================
+# Which code-hosting platform backs issue / PR lookups: "github" (shells out
+# to `gh`) or "gitlab" (shells out to `glab`, and says "MR" where GitHub says
+# "PR"). Everything else — branch links, worktrees, bootstrap — is identical.
+#
+# Omit the key and gwm infers the forge from the `origin` host, which covers
+# github.com and gitlab.com. A SELF-HOSTED instance lives on an arbitrary
+# domain and cannot be detected from the URL alone, so set it explicitly:
+#
+#   forge = "gitlab"
+#
+# The key always wins over inference, so it also forces GitHub on a host that
+# would otherwise be read as GitLab.
+
 [worktree]
 base = "{home}/cc-worktree/{repo}"
 # Repo-relative alternative (sibling `worktrees/`, à la Zed `../worktrees`):
