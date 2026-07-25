@@ -673,6 +673,7 @@ fn populated_status() -> Value {
     checks_passed: 3,
     checks_total: 4,
     ci: CiState::Running,
+    checks: vec![],
   });
   build_status_json(
     "feat/#317-freeze-machine-contracts",

@@ -2043,6 +2043,10 @@ pub enum HintContext {
   /// Generic detail overlay (issue #408): scroll / close. Agent sessions
   /// today, the rich PR/Issue view tomorrow.
   Detail,
+  /// CI checks overlay (issue #436): the detail-overlay shell on the linked
+  /// PR's per-check rollup — j/k select, Enter opens the details URL,
+  /// f filters, Esc closes.
+  CiChecks,
 }
 
 impl HintContext {
@@ -2066,6 +2070,7 @@ impl HintContext {
       HintContext::Clean => "clean",
       HintContext::Rename => "rename",
       HintContext::Detail => "agents",
+      HintContext::CiChecks => "checks",
     }
   }
 
@@ -2105,6 +2110,8 @@ impl HintContext {
         Hint::Key(Down, "scroll"),
         Hint::Key(WtScrollDown, "wt scroll"),
         Hint::Key(FetchGithub, "fetch"),
+        // #436: `c` routes to the CI checks overlay in this context.
+        Hint::Key(EditWorktree, "ci checks"),
         // Sidebar mode / layout.
         Hint::Key(ToggleSidebarMode, "mode"),
         Hint::Key(CycleSidebarLayout, "layout"),
@@ -2188,6 +2195,13 @@ impl HintContext {
         Hint::Modal(ModalAction::DetailInput, "by id"),
         Hint::Modal(ModalAction::DetailClose, "close"),
       ],
+      HintContext::CiChecks => &[
+        Hint::Lit("j/k", "select"),
+        Hint::Modal(ModalAction::CiChecksOpen, "open"),
+        Hint::Modal(ModalAction::CiChecksFilter, "filter"),
+        Hint::Modal(ModalAction::CiChecksRefresh, "refresh"),
+        Hint::Modal(ModalAction::CiChecksClose, "close"),
+      ],
       HintContext::Help => &[
         Hint::Lit("j/k", "scroll"),
         Hint::Lit("h/l", "pan"),
@@ -2259,6 +2273,7 @@ impl HintContext {
       HintContext::Report => KeyContext::Report,
       HintContext::Help => KeyContext::Help,
       HintContext::Detail => KeyContext::Detail,
+      HintContext::CiChecks => KeyContext::CiChecks,
       HintContext::ExecPicker => KeyContext::ExecPicker,
       HintContext::Clean => KeyContext::Clean,
       HintContext::Worktrees | HintContext::Status | HintContext::Picker | HintContext::Pty => return None,
@@ -2822,6 +2837,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     rows.push(entry(
       Action::AgentSessions,
       "show the agent sessions attached to this worktree",
+    ));
+    rows.push(entry(
+      Action::CiChecks,
+      "list the linked PR's CI checks (also `c` with status focus)",
     ));
   }
   rows.push(entry(
@@ -4519,6 +4538,71 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
   let inner = width.saturating_sub(6) as usize; // borders (1) + padding (2) each side
   let ov = &app.detail_overlay;
 
+  // CI checks filter (issue #436): palette-style query over the overlay's
+  // own rows — the highlight follows the filtered set, Enter opens the
+  // highlighted check's details URL. Same fixed-height frame contract as
+  // the attach prompt below (#445: typing must not resize the window).
+  if ov.mode == DetailMode::Input && ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+    let matches = app.ci_input_matches();
+    let list_h = (term.height as usize).saturating_sub(12).clamp(3, 10);
+    let (start, end) = picker_window(matches.len(), ov.input_selected, list_h);
+
+    let mut lines = overlay_title_lines("Filter CI checks", accent);
+    lines.push(Line::from(vec![
+      Span::styled("filter: ", Style::default().fg(app.theme.muted)),
+      Span::styled(
+        ov.input.clone(),
+        Style::default().fg(app.theme.name).add_modifier(Modifier::BOLD),
+      ),
+      Span::styled("▏", Style::default().fg(accent)),
+    ]));
+    lines.push(Line::from(String::new()));
+    if matches.is_empty() {
+      lines.push(Line::from(Span::styled(
+        "no matching check",
+        Style::default().fg(app.theme.muted),
+      )));
+    }
+    for (i, row_idx) in matches.iter().enumerate().take(end).skip(start) {
+      let Some(row) = ov.rows.get(*row_idx) else { continue };
+      let label_color = match row.role {
+        DetailRole::Success => app.theme.clean,
+        DetailRole::Failure => app.theme.prunable,
+        DetailRole::Running => app.theme.dirty,
+        _ => app.theme.name,
+      };
+      let text = format!("{}  {}", row.label, row.value);
+      let pad = inner.saturating_sub(text.chars().count());
+      let mut style = Style::default().fg(label_color);
+      if i == ov.input_selected {
+        style = style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
+      }
+      lines.push(Line::from(Span::styled(format!("{}{}", text, " ".repeat(pad)), style)));
+    }
+    for _ in matches.len().min(end).saturating_sub(start)..list_h {
+      lines.push(Line::from(String::new()));
+    }
+    let height = (2 + list_h + 2) as u16 + 2 /* border */ + 2 /* padding */;
+    let area = centered_abs(width, height, term);
+    f.render_widget(Clear, area);
+    f.render_widget(Paragraph::new(lines).block(overlay_block(accent)), area);
+    // Scrollbar over the LISTING sub-area (Codex review #455): the rows
+    // start after border (1) + padding (1) + two title lines + the query
+    // line + its blank spacer = y + 6 — anchoring at + 4 overlapped the
+    // query and stopped short of the last rows.
+    let list_rect = Rect {
+      x: area.x + 1,
+      y: area.y + 6,
+      width: area.width.saturating_sub(2),
+      height: list_h as u16,
+    }
+    .intersection(area);
+    if list_rect.height > 0 {
+      let _ = scrollable_body_area(f, list_rect, start as u16, matches.len(), &app.theme);
+    }
+    return;
+  }
+
   // Attach-by-id prompt (user feedback 2026-07-22): palette-style query
   // over every detected session; Enter pins the highlighted candidate.
   if ov.mode == DetailMode::Input {
@@ -4620,35 +4704,76 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       DetailRole::Active => (app.theme.clean, app.theme.clean, true),
       DetailRole::Muted => (app.theme.muted, app.theme.muted, false),
       DetailRole::Normal => (app.theme.name, app.theme.name, false),
+      // #436: per-check CI outcomes, same theme roles as `ci_indicator`.
+      DetailRole::Success => (app.theme.clean, app.theme.name, false),
+      DetailRole::Failure => (app.theme.prunable, app.theme.name, false),
+      DetailRole::Running => (app.theme.dirty, app.theme.name, false),
     };
     // Selection paints a full-width bar (picker convention): pad the row
     // out to the modal's inner width so the highlight reads as one block.
-    let text_cols = label_w + 2 + row.value.chars().count();
-    let pad = inner.saturating_sub(text_cols);
+    // The optional `extra` detail (#436: workflow · duration) sits right-
+    // aligned inside that bar, rendered muted. Its width is RESERVED
+    // (Codex review #455): a long check name truncates with an ellipsis
+    // instead of pushing the detail column past the clipping edge.
+    let mut extra: String = row.extra.as_deref().unwrap_or("").to_string();
+    let mut extra_cols = extra.chars().count();
+    // The detail column is bounded too (Codex review #455): on a narrow
+    // modal an oversized workflow name would run past the clipping edge
+    // and ratatui cuts its RIGHT end — the duration, the very info the
+    // column carries. Truncate from the workflow side instead (leading
+    // ellipsis, the tail survives), reserving the value a dozen columns
+    // or its full width when shorter.
+    if extra_cols > 0 {
+      let reserve = row.value.chars().count().min(12);
+      let extra_budget = inner.saturating_sub(label_w + 2 + reserve + 2);
+      if extra_cols > extra_budget {
+        if extra_budget == 0 {
+          extra.clear();
+        } else {
+          let tail: String = extra.chars().skip(extra_cols - (extra_budget - 1)).collect();
+          extra = format!("…{tail}");
+        }
+        extra_cols = extra.chars().count();
+      }
+    }
+    let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
+    let value: String = if row.value.chars().count() > value_budget {
+      let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
+      v.push('…');
+      v
+    } else {
+      row.value.clone()
+    };
+    let text_cols = label_w + 2 + value.chars().count();
+    let pad = inner.saturating_sub(text_cols + extra_cols);
     let mut label_style = Style::default().fg(label_color);
     let mut value_style = Style::default().fg(value_color);
     if value_bold {
       value_style = value_style.add_modifier(Modifier::BOLD);
     }
     let mut pad_style = Style::default();
+    let mut extra_style = Style::default().fg(app.theme.muted);
     if i == ov.selected {
       label_style = label_style.bg(app.theme.selection_bg).add_modifier(Modifier::BOLD);
       value_style = value_style.bg(app.theme.selection_bg);
       pad_style = pad_style.bg(app.theme.selection_bg);
+      extra_style = extra_style.bg(app.theme.selection_bg);
     }
     lines.push(Line::from(vec![
       Span::styled(format!("{:label_w$}  ", row.label), label_style),
-      Span::styled(row.value.clone(), value_style),
+      Span::styled(value, value_style),
       Span::styled(" ".repeat(pad), pad_style),
+      Span::styled(extra, extra_style),
     ]));
   }
-  push_modal_hint(
-    &mut lines,
-    HintContext::Detail,
-    &app.keymap,
-    &app.modal_keymap,
-    &app.theme,
-  );
+  // #436 validation feedback: the CI checks consumer advertises ITS verbs,
+  // not the agents' attach / detach — the hint context follows the kind.
+  let hint_ctx = if ov.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks {
+    HintContext::CiChecks
+  } else {
+    HintContext::Detail
+  };
+  push_modal_hint(&mut lines, hint_ctx, &app.keymap, &app.modal_keymap, &app.theme);
   let height = (2 + visible + 2) as u16 + 2 /* border */ + 2 /* padding */;
   let area = centered_abs(width, height, term);
   f.render_widget(Clear, area);
@@ -5071,6 +5196,26 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
   }
   if let Some(n) = link.pr {
     let spinner = app.spinner.glyph(DOT_FRAMES);
+    // #436: advertise the key that opens the CI checks overlay right after
+    // the indicator, resolved live so a rebind shows through. The key is
+    // context-accurate (Codex review #455): the contextual `c`
+    // (EditWorktree's chord) only while the status pane holds the focus —
+    // in the worktrees context that key opens the rename modal, so the
+    // global `ci_checks` binding is advertised instead. An unbound
+    // EditWorktree falls back to the global binding (still live in that
+    // context); only when both are unbound does the suffix disappear. In
+    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
+    // printable keys feed the filter — so no key is advertised at all.
+    let ci_key = if app.picker_mode {
+      None
+    } else if app.sidebar.open && app.sidebar.focused {
+      app
+        .keymap
+        .primary_chord(Action::EditWorktree)
+        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
+    } else {
+      app.keymap.primary_chord(Action::CiChecks)
+    };
     lines.push(pr_summary_line_with_spinner(
       n,
       link.pr_source,
@@ -5082,6 +5227,7 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
       max_width,
       &app.theme,
       Some(spinner),
+      ci_key.as_deref(),
     ));
   }
   lines
@@ -5424,10 +5570,12 @@ pub fn pr_summary_line(
   state: &GitHubFetchState<crate::github::PrStatus>,
   max_width: usize,
   theme: &Theme,
+  ci_hint: Option<&str>,
 ) -> Line<'static> {
-  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None)
+  pr_summary_line_with_spinner(n, src, state, PersistedSummary::none(), max_width, theme, None, ci_hint)
 }
 
+#[allow(clippy::too_many_arguments)] // one arg past the limit; splitting a builder for a single call site is worse
 fn pr_summary_line_with_spinner(
   n: u64,
   src: LinkSource,
@@ -5436,6 +5584,7 @@ fn pr_summary_line_with_spinner(
   max_width: usize,
   theme: &Theme,
   spinner: Option<&str>,
+  ci_hint: Option<&str>,
 ) -> Line<'static> {
   let head = format!("PR    #{}", n);
   let resolved = match state {
@@ -5493,8 +5642,16 @@ fn pr_summary_line_with_spinner(
       // Issue #299: surface the derived CI state (icon + label + N/M, coloured)
       // instead of the bare ` · checks N/M`, so pass / fail / running reads at a
       // glance. `ci_indicator` returns `None` when the PR has no checks.
+      // #436 validation feedback: the indicator ends with the resolved key
+      // that opens the CI checks overlay, mirroring the pane titles' `[F]`.
       let (trailing, trailing_color) = match ci_indicator(s.ci, s.checks_passed, s.checks_total, theme) {
-        Some((text, color)) => (text, Some(color)),
+        Some((text, color)) => (
+          match ci_hint {
+            Some(key) => format!("{text} [{key}]"),
+            None => text,
+          },
+          Some(color),
+        ),
         None => (String::new(), None),
       };
       SummaryState::Loaded {

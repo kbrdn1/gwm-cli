@@ -42,6 +42,7 @@ fn sample_pr(n: u64) -> PrStatus {
     checks_passed: 0,
     checks_total: 0,
     ci: CiState::None,
+    checks: vec![],
   }
 }
 

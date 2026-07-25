@@ -12,11 +12,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A CI checks overlay. `C` (rebindable `ci_checks`) — or `c` while the
+  status pane holds the focus, the same contextual dispatch as the
+  `j` / `k` sidebar scroll — lists every `statusCheckRollup` entry of
+  the linked PR: one row per check with the state icon coloured like
+  the sidebar CI indicator, `j` / `k` to move, `Enter` to open the
+  check's details URL in the browser, `/` to filter, `f` to re-fetch
+  the PR and refresh the rows in place, `Esc` to close
+  (verbs rebindable under `[tui.keys.modal.ci_checks]`). Each row
+  carries a right-aligned muted detail column with the owning workflow
+  and the run duration (elapsed time with an ellipsis while the check
+  is in flight), and the PR line's CI indicator ends with the resolved
+  key that opens the overlay (`… CI passing 10/10 [c]`). The per-check
+  name, URL, workflow and timestamps are now kept when the rollup is
+  classified, additively on `PrStatus`. (#436)
+
 - Responsive sidebar heights. The Agents, `Working Tree` and `Recent
   Commits` sections now share the column through a pure layout solver:
   natural heights while everything fits (`Recent Commits` absorbs the
   slack, as before), and on a short terminal every visible scrollable
-  section is guaranteed at least 5 lines (border + 3 content rows) with
+  section keeps a guaranteed floor (7 lines for `Working Tree`, border
+  plus 5 content rows; 5 lines for `Recent Commits`, border plus 3) with
   the remaining height split proportionally to content size — the
   non-scrollable Agents pane always keeps its full (bounded) height so
   its `+N more` indicator can never be clipped away. Empty sections

@@ -203,6 +203,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // reflects the freshly-applied results, and the loader animates below
     // while any of them is still in flight (200ms poll cadence).
     app.drain_task_results();
+    // Advance the elapsed duration of any Running check while the CI
+    // overlay is up (Codex review #455) — same 200ms cadence, no-op
+    // otherwise.
+    app.tick_ci_overlay_durations();
     if app.is_github_loading() || app.is_task_loading() {
       app.spinner.tick();
     }
@@ -428,6 +432,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
           if matches!(action, Action::Quit) {
             app.should_quit = true;
           } else {
+            // #436: the key path applies the contextual pre-resolution
+            // (c → CI checks while the status pane is focused); the
+            // palette path deliberately does not — its entries dispatch
+            // by name (Codex review #455).
+            let action = app.resolve_contextual_action(action);
             run_action(terminal, &mut app, action)?;
           }
         }
@@ -669,14 +678,54 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // captured as query input (palette convention): printable chars type,
       // Backspace pops, arrows move the candidate highlight, Enter
       // attaches, Esc falls back to the list.
+      // Issue #436: the same shell serves two consumers — route the input
+      // prompt AND the list verbs by `detail_overlay.kind` (agents attach
+      // by id; CI checks filter their own rows and open URLs).
       View::DetailOverlay if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::Input => {
+        let ci = app.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks;
         match key.code {
+          KeyCode::Esc if ci => app.ci_input_cancel(),
           KeyCode::Esc => app.agent_input_cancel(),
+          KeyCode::Enter if ci => match app.ci_input_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            // The method flips back to List only when a row WAS picked —
+            // report the missing URL like the List-mode Enter does (Codex
+            // review #455). A query with no match keeps the filter open.
+            None if app.detail_overlay.mode == crate::tui::state::detail_overlay::DetailMode::List => {
+              app.status = "this check exposes no details URL".into()
+            }
+            None => {}
+          },
           KeyCode::Enter => app.agent_input_submit(),
+          KeyCode::Backspace if ci => app.ci_input_pop(),
           KeyCode::Backspace => app.agent_input_pop(),
+          KeyCode::Down if ci => app.ci_input_next(),
           KeyCode::Down => app.agent_input_next(),
+          KeyCode::Up if ci => app.ci_input_prev(),
           KeyCode::Up => app.agent_input_prev(),
-          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => app.agent_input_push(c),
+          KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if ci {
+              app.ci_input_push(c)
+            } else {
+              app.agent_input_push(c)
+            }
+          }
+          _ => {}
+        }
+      }
+      View::DetailOverlay if app.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks => {
+        match app.resolve_modal(KeyContext::CiChecks, key) {
+          Some(ModalAction::CiChecksClose) => app.close_detail_overlay(),
+          Some(ModalAction::CiChecksNext) => app.detail_overlay.select_next(),
+          Some(ModalAction::CiChecksPrev) => app.detail_overlay.select_prev(),
+          Some(ModalAction::CiChecksOpen) => match app.ci_selected_url() {
+            Some(url) => open_url(&url, &mut app),
+            None => app.status = "this check exposes no details URL".into(),
+          },
+          Some(ModalAction::CiChecksFilter) => app.ci_input_open(),
+          // Validation feedback on PR #455: `f` re-fetches the PR from
+          // inside the overlay; the landing refreshes the rows in place.
+          Some(ModalAction::CiChecksRefresh) => app.ci_checks_refresh(),
           _ => {}
         }
       }
@@ -930,6 +979,7 @@ fn run_action(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, app: &mut A
     Action::Push if !app.picker_mode => app.request_push(),
     // #290: `c` opens the branch-rename modal.
     Action::EditWorktree if !app.picker_mode => app.enter_edit_worktree(),
+    Action::CiChecks if !app.picker_mode => app.enter_ci_checks(),
     // #290: `e` exits TUI and prints selected path to stdout.
     Action::ExitToWorktree => app.exit_to_worktree(),
     // #290: `t` opens the selected worktree in a new mux pane/tab.
