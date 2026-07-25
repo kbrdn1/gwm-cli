@@ -2722,11 +2722,16 @@ fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
 
 #[test]
 fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
-  // Codex review #455 (P2): a refresh can land an empty rollup — a new
-  // commit was just pushed and the workflows have not started yet. Blanking
-  // the rows while leaving the overlay open produced exactly the empty
-  // overlay `enter_ci_checks` refuses to open; close it and say why.
+  // Codex review #455 (P2, twice): a refresh can land an empty rollup — a
+  // new commit was just pushed and the workflows have not started yet.
+  // Blanking the rows while leaving the overlay open produced exactly the
+  // empty overlay `enter_ci_checks` refuses to open; close it and say why.
+  // The result goes through the spine + drain (the real worker path): the
+  // end-of-drain `report_github_refresh_status` used to overwrite the
+  // close message with "github status refreshed", so the status assertion
+  // below pins the whole drain, not just the landing helper.
   use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::TaskMsg;
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
   gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
   app.refresh_link();
@@ -2752,12 +2757,48 @@ fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
   app.enter_ci_checks();
   assert_eq!(app.view, View::DetailOverlay);
 
-  app.apply_pr_fetch_result(Ok(mk_status(vec![])));
+  let generation = request_github_pr(&mut app, 61);
+  app
+    .task_result_sender()
+    .send(TaskMsg::GithubPr(generation, 61, Ok(mk_status(vec![]))))
+    .unwrap();
+  app.drain_task_results();
   assert_eq!(app.view, View::List, "an empty landing closes the overlay");
   assert!(
     app.status.contains("no CI checks"),
-    "the status line explains the close: {}",
+    "the close message survives the end-of-drain refresh report: {}",
     app.status
+  );
+}
+
+#[test]
+fn refresh_closes_the_ci_overlay_when_the_pr_link_is_gone() {
+  // Codex review #455 (P2): with a non-explicit link the refresh re-probes
+  // the PR detection, and a persisted detection can come back None —
+  // leaving no PR at all. The open overlay then shows checks for a PR the
+  // link no longer carries, and with nothing to fetch no landing will ever
+  // refresh or close it. The refresh handles the identity change up front.
+  use gwm::tui::state::detail_overlay::{DetailKind, DetailRole, DetailRow};
+  let (_dir, _repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  assert_eq!(app.github.link.pr, None, "no PR is linked in this fixture");
+  app.detail_overlay.open(
+    DetailKind::CiChecks,
+    "CI Checks".into(),
+    vec![DetailRow {
+      label: "✓".into(),
+      value: "stale-check".into(),
+      role: DetailRole::Success,
+      meta: None,
+      extra: None,
+    }],
+  );
+  app.view = View::DetailOverlay;
+
+  app.refresh_github_status();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a refresh with no linked PR closes the stale CI overlay"
   );
 }
 

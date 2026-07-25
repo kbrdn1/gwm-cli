@@ -1646,7 +1646,10 @@ impl App {
           }
           if let Ok(status) = &result {
             self.persist_loaded_pr_title(status);
-            self.refresh_ci_overlay_on_pr_landing(status);
+            if self.refresh_ci_overlay_on_pr_landing(status) {
+              // The overlay-close message owns the status line this tick.
+              refresh_applied = true;
+            }
           }
           self.github.complete_pr(number, result);
           applied = true;
@@ -4596,6 +4599,19 @@ impl App {
       }
     }
 
+    // The re-probe can also DROP the PR (a persisted detection coming back
+    // None) — or none was ever linked. The open CI checks overlay then
+    // shows checks for a PR the link no longer carries, and with no PR
+    // fetch to land nothing would ever refresh or close it (Codex review
+    // #455). Handle the identity change up front; the flow below owns the
+    // status line ("nothing linked" / "fetching…").
+    if self.view == View::DetailOverlay
+      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
+      && self.github.link.pr.is_none()
+    {
+      self.close_detail_overlay();
+    }
+
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = format!(
         "nothing linked — press {} to link an issue or PR",
@@ -4820,12 +4836,18 @@ impl App {
   /// and the `apply_pr_fetch_result` test seam — so they cannot desync
   /// again (the first cut lived only in the seam, so the running TUI never
   /// refreshed the overlay).
-  fn refresh_ci_overlay_on_pr_landing(&mut self, status: &PrStatus) {
+  ///
+  /// Returns `true` when the landing closed the overlay and claimed the
+  /// status line (empty rollup) so the drain suppresses its end-of-drain
+  /// `report_github_refresh_status` — which otherwise overwrote the close
+  /// message with "github status refreshed" (Codex review #455); same
+  /// guard the sync arm uses.
+  fn refresh_ci_overlay_on_pr_landing(&mut self, status: &PrStatus) -> bool {
     if self.view != View::DetailOverlay
       || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
       || self.github.link.pr != Some(status.number)
     {
-      return;
+      return false;
     }
     // An empty rollup (a fresh commit whose workflows have not started
     // yet) would blank the rows while leaving the overlay open — exactly
@@ -4834,10 +4856,11 @@ impl App {
     if status.checks.is_empty() {
       self.close_detail_overlay();
       self.status = "no CI checks reported by the refreshed PR".into();
-      return;
+      return true;
     }
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
     self.detail_overlay.set_rows(rows);
+    false
   }
 
   fn persist_loaded_issue_title(&mut self, status: &IssueStatus) {
