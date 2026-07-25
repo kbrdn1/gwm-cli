@@ -110,6 +110,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `git@[::1]:group/repo.git`
   was split on the first colon, yielding host `git@[` and a nonsense path. The
   scp-form and port splits are now bracket-aware.
+- **Inherited repository selectors are stripped from the forge CLI**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `$GH_REPO`,
+  `$GITLAB_REPO`, `$REMOTE_ALIAS` and `$GIT_REMOTE_URL_VAR` each override which
+  project the CLI acts on and are inherited from gwm's own environment, so an
+  exported one silently retargeted every call. Host variables are deliberately
+  left alone — gwm does not always know the host.
 - **Both forges' alternate SSH endpoints map back to the API host**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)).
   `ssh://git@ssh.github.com:443/…` and `altssh.gitlab.com` exist for networks

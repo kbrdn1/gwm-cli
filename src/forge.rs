@@ -325,10 +325,10 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   // UI stay on the canonical domain — so pinning it, or building links
   // from it, breaks every call. A short table of documented aliases, not
   // a heuristic: anything unrecognised is left verbatim.
-  let host = match host {
-    "ssh.github.com" => "github.com",
-    "altssh.gitlab.com" => "gitlab.com",
-    other => other,
+  let (host, known_alias) = match host {
+    "ssh.github.com" => ("github.com", true),
+    "altssh.gitlab.com" => ("gitlab.com", true),
+    other => (other, false),
   };
 
   let (web_origin, trust) = match scheme.as_deref() {
@@ -340,6 +340,11 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
       format!("https://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
       OriginTrust::FromUrl,
     ),
+    // A recognised alias resolves to a KNOWN instance, so this is
+    // knowledge rather than inference — and it has to be, or nothing
+    // downstream would pin the host and the CLI would re-read the raw
+    // alternate endpoint from the remote (Codex review #458).
+    _ if known_alias => (format!("https://{host}"), OriginTrust::FromUrl),
     _ => (format!("https://{host}"), OriginTrust::Guessed),
   };
 
@@ -668,6 +673,14 @@ pub struct CliSpawn<'a> {
   /// Working directory. `gh` / `glab` fall back to resolving the instance
   /// from here, so it must be the repo being queried — not gwm's own cwd.
   pub cwd: Option<&'a std::path::Path>,
+  /// Inherited variables to strip from the child (Codex review #458).
+  ///
+  /// Three separate P1s across this review were the same shape: gwm's
+  /// environment is inherited, and something in it redirected the call.
+  /// Rather than name one more variable per round, the backends audit the
+  /// *class* — everything the target CLI documents as overriding which
+  /// project or host it acts on — and clear what gwm knows better.
+  pub env_remove: &'a [&'a str],
   /// Flags whose *value* must not reach the Command Logs transcript.
   pub redact_after: &'a [&'a str],
 }
@@ -689,6 +702,9 @@ where
   let cmdline = cli_command_line_redacted(program, &collected, spawn.redact_after);
   let mut cmd = Command::new(program);
   cmd.args(&collected);
+  for k in spawn.env_remove {
+    cmd.env_remove(k);
+  }
   for (k, v) in spawn.env {
     cmd.env(k, v);
   }

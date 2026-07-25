@@ -548,3 +548,66 @@ fn an_unknown_ssh_host_is_left_alone() {
 
   assert_eq!(r.host, "ssh.gitlab.acme");
 }
+
+// --- Codex review #458, round 9: inherited targeting environment ----------
+
+#[test]
+fn the_repo_selector_env_vars_are_always_cleared() {
+  // The recurring shape behind three separate P1s: the child inherits
+  // gwm's environment, and every one of these overrides WHICH project the
+  // CLI acts on. gwm always knows the project — either the slug, or "the
+  // repo I am spawning you in" — so an inherited selector is never right.
+  // Audited as a class rather than one variable per review round.
+  let gh = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
+  assert_eq!(gwm::github::gh_env_remove(&gh), vec!["GH_REPO"]);
+
+  let gl = forge::parse_remote_url("https://gitlab.com/g/p.git").unwrap();
+  assert_eq!(
+    gwm::gitlab::glab_env_remove(&gl),
+    vec!["GITLAB_REPO", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"]
+  );
+}
+
+#[test]
+fn the_host_env_vars_are_left_alone_when_we_cannot_know_the_host() {
+  // Deliberately NOT symmetrical with the selectors. gwm always knows the
+  // project; it does not always know the host. On an SSH origin the
+  // user's exported `GITLAB_HOST` may be the only correct signal there
+  // is, so it is not cleared out from under them.
+  let ssh = forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap();
+
+  assert!(gwm::gitlab::glab_env(&ssh).is_empty());
+  assert!(
+    !gwm::gitlab::glab_env_remove(&ssh).iter().any(|v| v.contains("HOST")),
+    "a host we cannot determine must not be cleared"
+  );
+}
+
+#[test]
+fn a_known_ssh_alias_is_authoritative_not_a_guess() {
+  // `altssh.gitlab.com` maps to a *known* instance, so normalising it is
+  // knowledge, not inference. Leaving it `Guessed` (round 8) fixed the
+  // URLs but sent neither `GITLAB_HOST` nor `--repo`, so glab re-read the
+  // raw remote and failed on the alternate endpoint.
+  let gl = forge::parse_remote_url("ssh://git@altssh.gitlab.com:443/group/proj.git").unwrap();
+  assert_eq!(gl.trust, forge::OriginTrust::FromUrl);
+  assert_eq!(
+    gwm::gitlab::glab_env(&gl),
+    vec![("GITLAB_HOST".to_string(), "https://gitlab.com".to_string())]
+  );
+
+  let gh = forge::parse_remote_url("ssh://git@ssh.github.com:443/owner/repo.git").unwrap();
+  assert_eq!(gh.trust, forge::OriginTrust::FromUrl);
+}
+
+#[test]
+fn a_known_alias_keeps_its_explicit_repo_selector() {
+  let dir = tempfile::tempdir().unwrap();
+  let f = forge::for_kind_in(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("ssh://git@altssh.gitlab.com:443/group/proj.git").unwrap(),
+    Some(dir.path().to_path_buf()),
+  );
+
+  assert_eq!(f.repo_selector(), "group/proj");
+}

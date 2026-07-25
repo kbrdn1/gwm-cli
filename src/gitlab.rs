@@ -72,6 +72,21 @@ pub fn glab_program() -> OsString {
 /// The cases left unpinned are not left unprotected: the child is spawned
 /// **inside the repo** (see [`forge::Forge::workdir`]), so `glab` resolves
 /// the instance from that repo's own remote rather than from gwm's cwd.
+/// Inherited variables that would redirect `glab` at another project.
+///
+/// `$GITLAB_REPO` is the flag's environment binding, and
+/// `$REMOTE_ALIAS` / `$GIT_REMOTE_URL_VAR` name which git remote glab
+/// reads the project from — all three override the working directory gwm
+/// deliberately sets. Cleared unconditionally: gwm always knows the
+/// project, either as a slug or as "the repo I am spawning you in".
+///
+/// `$GITLAB_HOST` / `$GL_HOST` are **not** here, and the asymmetry is the
+/// point: gwm does not always know the host, and on an SSH origin the
+/// user's exported value may be the only correct signal there is.
+pub fn glab_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
+  vec!["GITLAB_REPO", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"]
+}
+
 pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
@@ -808,6 +823,7 @@ pub struct GitLabForge {
   origin: forge::RemoteRef,
   program: OsString,
   env: Vec<(String, String)>,
+  env_remove: Vec<&'static str>,
   workdir: Option<std::path::PathBuf>,
 }
 
@@ -818,6 +834,7 @@ impl GitLabForge {
   pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
     Self {
       env: glab_env(&origin),
+      env_remove: glab_env_remove(&origin),
       origin,
       program: glab_program(),
       workdir,
@@ -831,6 +848,7 @@ impl GitLabForge {
       &forge::CliSpawn {
         env: &self.env,
         cwd: self.workdir.as_deref(),
+        env_remove: &self.env_remove,
         redact_after: REDACTED_FLAGS,
       },
     )

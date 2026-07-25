@@ -1347,6 +1347,7 @@ pub struct GitHubForge {
   origin: forge::RemoteRef,
   program: OsString,
   env: Vec<(String, String)>,
+  env_remove: Vec<&'static str>,
   workdir: Option<std::path::PathBuf>,
 }
 
@@ -1357,6 +1358,7 @@ impl GitHubForge {
   pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
     Self {
       env: gh_env(&origin),
+      env_remove: gh_env_remove(&origin),
       origin,
       program: gh_program(),
       workdir,
@@ -1374,6 +1376,7 @@ impl GitHubForge {
       &forge::CliSpawn {
         env: &self.env,
         cwd: self.workdir.as_deref(),
+        env_remove: &self.env_remove,
         redact_after: &[],
       },
     )
@@ -1412,6 +1415,21 @@ impl GitHubForge {
 ///
 /// Nothing is pinned only when the slug is empty: that is the caller
 /// asking `gh` to infer the project locally.
+/// Inherited variables that would redirect `gh` at another repository.
+///
+/// `$GH_REPO` names a whole `[HOST/]OWNER/REPO` and wins over both the
+/// working directory and any inference, so an exported one silently
+/// retargets every call. gwm always knows the project — the slug, or
+/// "the repo I am spawning you in" — so an inherited selector is never
+/// the right answer and is cleared unconditionally.
+///
+/// The *host* variables are deliberately not in this list: gwm does not
+/// always know the host (an SSH origin gives only the SSH hostname), and
+/// there the user's exported value may be the only correct signal.
+pub fn gh_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
+  vec!["GH_REPO"]
+}
+
 pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.path.is_empty() {
     return Vec::new();
