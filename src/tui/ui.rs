@@ -5203,8 +5203,12 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
     // in the worktrees context that key opens the rename modal, so the
     // global `ci_checks` binding is advertised instead. An unbound
     // EditWorktree falls back to the global binding (still live in that
-    // context); only when both are unbound does the suffix disappear.
-    let ci_key = if app.sidebar.open && app.sidebar.focused {
+    // context); only when both are unbound does the suffix disappear. In
+    // picker mode (`gwm switch`) run_action drops Action::CiChecks —
+    // printable keys feed the filter — so no key is advertised at all.
+    let ci_key = if app.picker_mode {
+      None
+    } else if app.sidebar.open && app.sidebar.focused {
       app
         .keymap
         .primary_chord(Action::EditWorktree)

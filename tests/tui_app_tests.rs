@@ -2841,6 +2841,85 @@ fn refresh_closes_the_ci_overlay_when_the_detected_pr_changes() {
 }
 
 #[test]
+fn link_refresh_closes_the_ci_overlay_when_the_link_moves() {
+  // Codex review #455 (P2, third round): `refresh_github_status` is not
+  // the only path that mutates the link — `refresh_link` runs on
+  // navigation and on the auto-refresh relist (which can move the
+  // selection when the current worktree disappears), all while the
+  // overlay is up. The identity guard fires there too.
+  let (_dir, repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 62).unwrap();
+
+  app.refresh_link();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a link refresh onto a different PR closes the stale CI overlay"
+  );
+}
+
+#[test]
+fn ci_checks_refuse_to_open_on_a_stale_workspace_selection() {
+  // Codex review #455 (P2): in workspace mode a failed `Repository::open`
+  // for the selected row leaves `github.link` and its cache on the
+  // previously active repo. Opening the overlay then would show — and
+  // `Enter` would browse — the OLD repo's checks. Refuse instead, the
+  // same contract as the project-layer keymap editor (#304).
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  app.close_detail_overlay();
+  app.workspace_active_stale = true;
+
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::List, "a stale selection must not open the overlay");
+  assert!(
+    app.status.contains("unavailable"),
+    "the status line explains the refusal: {}",
+    app.status
+  );
+}
+
+#[test]
+fn pr_line_ci_hint_is_hidden_in_picker_mode() {
+  // Codex review #455 (P2): in picker mode (`gwm switch`) run_action drops
+  // Action::CiChecks — printable keys feed the filter — so the PR line
+  // must not advertise a key that does nothing.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (dir, repo, _app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  let mut app = App::new_picker_at_layered(Some(dir.path()), None).unwrap();
+  assert!(app.picker_mode);
+  app.refresh_link();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 10,
+    checks_total: 10,
+    ci: CiState::Passing,
+    checks: vec![PrCheck {
+      name: "ci".into(),
+      outcome: CheckOutcome::Passing,
+      url: None,
+      workflow_name: None,
+      started_at: None,
+      completed_at: None,
+    }],
+  }));
+  let text: String = gwm::tui::github_status_lines(&app, 120)
+    .iter()
+    .flat_map(|l| l.spans.iter())
+    .map(|s| s.content.as_ref())
+    .collect();
+  assert!(text.contains("10/10"), "the CI indicator itself stays: {text}");
+  assert!(
+    !text.contains("10/10 ["),
+    "picker mode must not advertise the dead ci_checks key: {text}"
+  );
+}
+
+#[test]
 fn ci_checks_refresh_and_filter_mirror_the_list_view_keys() {
   // Validation feedback on PR #455 (2026-07-24): inside the overlay `f`
   // re-fetches and `/` filters — the exact keys the list view uses for

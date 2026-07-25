@@ -535,12 +535,15 @@ pub struct App {
   detail_overlay_target: Option<(PathBuf, Option<String>)>,
 
   /// CI-consumer counterpart of `detail_overlay_target` (Codex review
-  /// #455): the PR number the open CI checks overlay was built for,
-  /// captured by [`Self::enter_ci_checks`]. A refresh whose re-detected
-  /// link disagrees (the PR changed or disappeared) closes the overlay up
-  /// front — otherwise the stale checks stay up through the new fetch,
-  /// and forever if it fails, with `Enter` opening an old PR's check URL.
-  detail_overlay_pr: Option<u64>,
+  /// #455): the `(remote slug, PR number)` the open CI checks overlay was
+  /// built for, captured by [`Self::enter_ci_checks`]. Any link mutation
+  /// that disagrees — the PR changed, disappeared, or (workspace mode)
+  /// the slug moved to another repo whose PR happens to share the
+  /// number — closes the overlay up front via
+  /// [`Self::close_ci_overlay_if_link_disagrees`]; otherwise the stale
+  /// checks stay up through the new fetch, and forever if it fails, with
+  /// `Enter` opening an old PR's check URL.
+  detail_overlay_pr: Option<(Option<String>, u64)>,
 
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
@@ -2712,6 +2715,15 @@ impl App {
   /// linked PR or an empty rollup the overlay would be a bordered void —
   /// explain on the status bar instead.
   pub fn enter_ci_checks(&mut self) {
+    // Workspace mode: a failed `Repository::open` for the selected row
+    // leaves `github.link` and its cache on the previously active repo —
+    // opening now would show (and `Enter` would browse) the OLD repo's
+    // checks. Refuse, the same contract as the project-layer keymap
+    // editor (#304 / Codex review #455).
+    if self.workspace_active_stale {
+      self.status = "workspace: selected repo is unavailable — can't open its CI checks".into();
+      return;
+    }
     let checks = match self.pr_fetch_state() {
       GitHubFetchState::Loaded(pr) if !pr.checks.is_empty() => pr.checks.clone(),
       _ => {
@@ -2728,9 +2740,9 @@ impl App {
     // Drop any stale agents target (an interrupted agents overlay leaves
     // one behind) — it belongs to the agents consumer only (Codex #455).
     self.detail_overlay_target = None;
-    // Pin the overlay to the PR it renders, so a refresh whose re-detected
-    // link disagrees can close it (Codex review #455).
-    self.detail_overlay_pr = self.github.link.pr;
+    // Pin the overlay to the PR it renders, so a link mutation that
+    // disagrees can close it (Codex review #455).
+    self.detail_overlay_pr = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
       "CI Checks".into(),
@@ -4419,6 +4431,26 @@ impl App {
     // worktree's cache. `refresh_link` no longer holds the old issue/PR
     // numbers, so invalidate by predicate.
     self.tasks.invalidate_matching(TaskKind::is_github);
+    // Every link mutation funnels through here or through the
+    // `refresh_github_status` re-probe — both revalidate the CI overlay's
+    // pinned identity (Codex review #455): an auto-refresh relist can move
+    // the selection (the current worktree disappeared) while the overlay
+    // is up, and its checks must not survive their PR.
+    self.close_ci_overlay_if_link_disagrees();
+  }
+
+  /// Close the open CI checks overlay when the link no longer matches the
+  /// `(slug, PR)` it was built for — see `detail_overlay_pr`.
+  fn close_ci_overlay_if_link_disagrees(&mut self) {
+    if self.view != View::DetailOverlay
+      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      return;
+    }
+    let current = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
+    if current != self.detail_overlay_pr {
+      self.close_detail_overlay();
+    }
   }
 
   fn selected_branch_name(&self) -> Option<String> {
@@ -4612,21 +4644,10 @@ impl App {
       }
     }
 
-    // The re-probe can also CHANGE the PR identity — a persisted detection
+    // The re-probe can CHANGE the PR identity — a persisted detection
     // coming back None, or re-detecting a different number (#61 → #62).
-    // The open CI checks overlay then shows checks for a PR the link no
-    // longer carries: with no fetch to land nothing would ever close it,
-    // and on a mere change the stale rows stay up through the new fetch
-    // (forever if it fails), `Enter` opening an old PR's check URL (Codex
-    // review #455, twice). The overlay is pinned to the PR that opened it
-    // (`detail_overlay_pr`); a disagreeing link closes it up front, and
-    // the flow below owns the status line ("nothing linked" / "fetching…").
-    if self.view == View::DetailOverlay
-      && self.detail_overlay.kind == crate::tui::state::detail_overlay::DetailKind::CiChecks
-      && self.github.link.pr != self.detail_overlay_pr
-    {
-      self.close_detail_overlay();
-    }
+    // The flow below owns the status line ("nothing linked" / "fetching…").
+    self.close_ci_overlay_if_link_disagrees();
 
     if self.github.link.issue.is_none() && self.github.link.pr.is_none() {
       self.status = format!(
