@@ -204,15 +204,17 @@ fn user_vs_user_conflict_in_same_context_is_rejected() {
 fn cross_context_reuse_is_not_a_conflict() {
   let mut km = ModalKeymap::defaults();
   // Bind `x` in confirm and in create — different contexts, both fine.
+  // (`next_type` is the create verb that stays bindable on a bare
+  // letter: it lives on the typing-free Type field.)
   km.apply_override(ModalAction::ConfirmConfirm, vec![ch('x')]).unwrap();
-  km.apply_override(ModalAction::CreateCancel, vec![ch('x')]).unwrap();
+  km.apply_override(ModalAction::CreateNextType, vec![ch('x')]).unwrap();
   assert_eq!(
     km.resolve(KeyContext::Confirm, &ch('x')),
     Some(ModalAction::ConfirmConfirm)
   );
   assert_eq!(
     km.resolve(KeyContext::Create, &ch('x')),
-    Some(ModalAction::CreateCancel)
+    Some(ModalAction::CreateNextType)
   );
 }
 

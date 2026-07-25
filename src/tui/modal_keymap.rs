@@ -357,19 +357,26 @@ impl ModalAction {
   }
 
   /// `true` when binding this verb to `stroke` would leave it unreachable
-  /// because a typing route consumes the key first (Codex review #456).
-  /// Context-wide reservations ([`KeyContext::reserved_typing_stroke`])
-  /// apply to every verb; `CreateSubmit` adds a per-verb case: it only
-  /// ever submits from the Description field, where every unmodified
-  /// printable and Backspace are typing — the other create verbs stay
-  /// bindable on bare letters because they act on the Type field.
+  /// or misleading because a typing route consumes the key first (Codex
+  /// review #456). Context-wide reservations
+  /// ([`KeyContext::reserved_typing_stroke`]) apply to every verb; the
+  /// create verbs that must stay operative from the TEXT fields — submit
+  /// (only ever fires from Description), cancel and the field navigation
+  /// — add a per-verb case: every unmodified printable and Backspace is
+  /// typing there. Only the type-cycling verbs keep bare letters: they
+  /// act on the Type field, which takes no text input.
   pub fn reserved_typing_stroke(self, stroke: &KeyStroke) -> bool {
     use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
     if self.context().reserved_typing_stroke(stroke) {
       return true;
     }
-    self == ModalAction::CreateSubmit
-      && !stroke.modifiers.intersects(KM::CONTROL | KM::ALT)
+    matches!(
+      self,
+      ModalAction::CreateSubmit
+        | ModalAction::CreateCancel
+        | ModalAction::CreateNextField
+        | ModalAction::CreatePrevField
+    ) && !stroke.modifiers.intersects(KM::CONTROL | KM::ALT)
       && matches!(stroke.code, KC::Char(_) | KC::Backspace)
   }
 

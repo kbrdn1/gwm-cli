@@ -750,17 +750,12 @@ fn backspace_stays_a_reserved_eraser_in_the_create_form() {
   // `[tui.keys.modal.create] cancel = ["Backspace"]` used to resolve
   // BEFORE the typing fallback, so Backspace cancelled the form and the
   // text fields lost their eraser. The physical Backspace is a reserved
-  // editing control on the input fields now — same contract as the
-  // Keys-tab capture's reserved Esc / Enter / Backspace.
+  // editing control on the input fields (and such rebinds are refused at
+  // config time since iteration 14) — this route is the runtime
+  // backstop.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-  use gwm::tui::keymap::KeyStroke;
-  use gwm::tui::modal_keymap::ModalAction;
   use gwm::tui::CreateKey;
   let (_dir, mut app) = make_app();
-  app
-    .modal_keymap
-    .apply_override(ModalAction::CreateCancel, KeyStroke::parse_chord("Backspace").unwrap())
-    .unwrap();
   app.enter_create();
   app.create_form.field = Field::Issue;
   app.create_push_char('4');
@@ -795,8 +790,11 @@ fn printable_keys_stay_typing_in_the_create_form_despite_rebinds() {
   // Codex review #456 (iteration 8): a modal rebind onto a printable key
   // (`cancel = ["q"]`) resolved before the typing fallback, so `q` closed
   // the form mid-word. On a text field the printable keys are reserved
-  // for typing (the palette convention); modal verbs act through their
-  // non-printable defaults.
+  // for typing (the palette convention, and such rebinds are refused at
+  // config time since iteration 14) — this route is the runtime
+  // backstop. Type-cycling verbs keep bare letters: they only fire on
+  // the Type field, so `next_type = ["q"]` must not steal the letter
+  // from a text field either.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
   use gwm::tui::keymap::KeyStroke;
   use gwm::tui::modal_keymap::ModalAction;
@@ -804,13 +802,18 @@ fn printable_keys_stay_typing_in_the_create_form_despite_rebinds() {
   let (_dir, mut app) = make_app();
   app
     .modal_keymap
-    .apply_override(ModalAction::CreateCancel, KeyStroke::parse_chord("q").unwrap())
+    .apply_override(ModalAction::CreateNextType, KeyStroke::parse_chord("q").unwrap())
     .unwrap();
   app.enter_create();
   app.create_form.field = Field::Desc;
+  let before = app.create_form.type_index;
   let out = app.handle_create_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
   assert_ne!(out, CreateKey::Cancel, "a printable rebind must not fire while typing");
   assert_eq!(app.create_form.desc, "q", "the character types into the field instead");
+  assert_eq!(
+    app.create_form.type_index, before,
+    "the type must not cycle from a text field"
+  );
 }
 
 #[test]
@@ -897,6 +900,57 @@ fn modified_strokes_reach_the_modal_resolution_in_input_modes() {
   assert!(
     !app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
     "Ctrl+Backspace must fall through in the settings editor"
+  );
+}
+
+#[test]
+fn settings_editor_reinjects_unresolved_modified_backspace() {
+  // Codex review #456 (iteration 14): before the reserved-typing routes,
+  // every KeyCode::Backspace erased — including Alt/Ctrl+Backspace. The
+  // modifier-aware route let those reach the modal resolution (correct,
+  // a bound Ctrl+Backspace must fire), but the empty-resolution fallback
+  // only reinjected Char, so an UNBOUND modified Backspace stopped
+  // erasing. Parity restored: it pops one character again.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("ab".into());
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("a"),
+    "an unresolved Alt+Backspace must still erase"
+  );
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some(""),
+    "an unresolved Ctrl+Backspace must still erase"
+  );
+}
+
+#[test]
+fn palette_reinjects_unresolved_modified_backspace() {
+  // Same parity for the command palette (Codex review #456, iteration
+  // 14): an UNBOUND Alt/Ctrl+Backspace falls through the modal
+  // resolution and must still erase, exactly like the pre-#456 routing.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  app.palette_input_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+  app.palette_input_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+  app.palette_unresolved_fallback(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+  assert_eq!(
+    app.palette.buffer(),
+    "a",
+    "an unresolved Alt+Backspace must still erase"
+  );
+  // The charset reinjection (AltGr parity) keeps working through the
+  // same fallback.
+  app.palette_unresolved_fallback(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+  assert_eq!(
+    app.palette.buffer(),
+    "ac",
+    "an unresolved AltGr charset character still types"
   );
 }
 
@@ -995,6 +1049,14 @@ fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
     (ModalAction::ConfigEditCancel, "Backspace"),
     (ModalAction::CreateSubmit, "s"),
     (ModalAction::CreateSubmit, "Backspace"),
+    // Iteration 14: cancel / field navigation must stay reachable from
+    // the create form's TEXT fields, where bare printables and Backspace
+    // are typing — only the type-cycling verbs live on a typing-free
+    // field and keep bare letters.
+    (ModalAction::CreateCancel, "q"),
+    (ModalAction::CreateCancel, "Backspace"),
+    (ModalAction::CreateNextField, "Backspace"),
+    (ModalAction::CreatePrevField, "a"),
   ] {
     assert!(
       modal
@@ -1004,8 +1066,8 @@ fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
     );
   }
   for (action, chord) in [
-    (ModalAction::CreateCancel, "q"),
     (ModalAction::CreateNextType, "n"),
+    (ModalAction::CreateCancel, "Alt+q"),
     (ModalAction::ConfigEditSubmit, "Alt+s"),
     (ModalAction::CommandPaletteClose, "Alt+x"),
   ] {

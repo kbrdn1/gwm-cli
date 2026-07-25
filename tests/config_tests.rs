@@ -2180,9 +2180,11 @@ fn modal_namespace_does_not_collide_with_a_same_named_global_action() {
   let global_path = global.path().join("global.toml");
   std::fs::write(&global_path, "[tui.keys]\ncreate = [\"c\"]\n").unwrap();
   let repo = TempDir::new().unwrap();
+  // `next_type` is the create verb bindable on a bare letter (it lives on
+  // the typing-free Type field — reserved-typing rejection, #456 it. 14).
   std::fs::write(
     repo.path().join(CONFIG_FILE),
-    "[tui.keys.modal.create]\ncancel = [\"x\"]\n",
+    "[tui.keys.modal.create]\nnext_type = [\"x\"]\n",
   )
   .unwrap();
 
@@ -2196,11 +2198,11 @@ fn modal_namespace_does_not_collide_with_a_same_named_global_action() {
     "the global create override must survive a same-named modal context"
   );
 
-  // ...and the modal `create.cancel` override resolves independently.
+  // ...and the modal `create.next_type` override resolves independently.
   let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
   assert_eq!(
     mk.resolve(KeyContext::Create, &kc('x')),
-    Some(ModalAction::CreateCancel)
+    Some(ModalAction::CreateNextType)
   );
 }
 

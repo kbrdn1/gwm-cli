@@ -2148,6 +2148,21 @@ impl App {
     }
   }
 
+  /// Fallback after an EMPTY modal resolution in the palette (Codex
+  /// review #456, iterations 10/14): an unresolved modified charset
+  /// printable is still typing (AltGr/Option characters arrive as
+  /// Char + ALT on some keyboards), and an unresolved modified Backspace
+  /// still erases (parity with the pre-#456 routing).
+  pub fn palette_unresolved_fallback(&mut self, key: KeyEvent) {
+    match key.code {
+      KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+        self.palette_push_char(c);
+      }
+      KeyCode::Backspace => self.palette_pop_char(),
+      _ => {}
+    }
+  }
+
   /// Typing route of the Settings value editor — same reserved-typing
   /// contract as [`Self::palette_input_key`] (Codex review #456). A no-op
   /// (`false`) when no edit is live.
@@ -2185,13 +2200,18 @@ impl App {
     match self.resolve_modal(KeyContext::ConfigEdit, key) {
       Some(ModalAction::ConfigEditSubmit) => self.commit_settings_edit(),
       Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_edit(),
-      _ => {
-        if let KeyCode::Char(c) = key.code {
-          // Best-effort reinjection; a character the field refuses (an
-          // AltGr symbol on a numeric field) is simply dropped.
+      _ => match key.code {
+        // Best-effort reinjection; a character the field refuses (an
+        // AltGr symbol on a numeric field) is simply dropped.
+        KeyCode::Char(c) => {
           let _ = self.config_panel.push_edit_char(c);
         }
-      }
+        // An UNBOUND Alt/Ctrl+Backspace still erases (iteration 14 —
+        // parity with the pre-#456 routing, which erased on every
+        // KeyCode::Backspace).
+        KeyCode::Backspace => self.config_panel.pop_edit_char(),
+        _ => {}
+      },
     }
   }
 

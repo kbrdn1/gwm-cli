@@ -797,15 +797,9 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             }
             Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
             Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
-            _ => {
-              // An unresolved modified charset printable is still typing
-              // (AltGr parity with the settings editor — Codex #456).
-              if let KeyCode::Char(c) = key.code {
-                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
-                  app.palette_push_char(c);
-                }
-              }
-            }
+            // Unresolved keys fall back to typing (AltGr / modified
+            // Backspace parity — Codex #456); testable App method.
+            _ => app.palette_unresolved_fallback(key),
           }
         }
       }
