@@ -12,6 +12,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The `?` help overlay now documents every key context: one section per
+  modal overlay (Browse Links, Link Prompt, Command Palette, Exec
+  Profiles, Clean Reclaim, Agent Sessions, CI Checks, Command Logs,
+  Settings and its numeric editor, Bootstrap Report, the PTY escape
+  hatch, and the overlay's own navigation), each verb resolved live
+  against `[tui.keys.modal.<context>]` so rebinds show through. A new
+  per-section completeness guard extends the #334 one to every
+  `ModalAction` — a modal verb can no longer land undocumented. The
+  statusline which-key was re-audited at the same time: `exec` and
+  `agents` joined the worktrees footer's act-on-worktree family, while
+  clean / mux / macros stay overlay-only (the footer is a teaser, `?`
+  is the manual). (#453)
 - A CI checks overlay. `C` (rebindable `ci_checks`) — or `c` while the
   status pane holds the focus, the same contextual dispatch as the
   `j` / `k` sidebar scroll — lists every `statusCheckRollup` entry of
