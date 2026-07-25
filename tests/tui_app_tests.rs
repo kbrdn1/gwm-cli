@@ -805,6 +805,123 @@ fn backspace_stays_a_reserved_eraser_in_the_link_number_input() {
 }
 
 #[test]
+fn printable_keys_stay_typing_in_the_create_form_despite_rebinds() {
+  // Codex review #456 (iteration 8): a modal rebind onto a printable key
+  // (`cancel = ["q"]`) resolved before the typing fallback, so `q` closed
+  // the form mid-word. On a text field the printable keys are reserved
+  // for typing (the palette convention); modal verbs act through their
+  // non-printable defaults.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::CreateKey;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::CreateCancel, KeyStroke::parse_chord("q").unwrap())
+    .unwrap();
+  app.enter_create();
+  app.create_form.field = Field::Desc;
+  let out = app.handle_create_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert_ne!(out, CreateKey::Cancel, "a printable rebind must not fire while typing");
+  assert_eq!(app.create_form.desc, "q", "the character types into the field instead");
+}
+
+#[test]
+fn printable_keys_stay_typing_in_the_link_number_input_despite_rebinds() {
+  // Same reserved-typing contract for the link prompt's number stage.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  use gwm::tui::LinkPromptKey;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::LinkInputCancel, KeyStroke::parse_chord("5").unwrap())
+    .unwrap();
+  app.enter_link_prompt();
+  app.link_prompt_choose(LinkTarget::Issue);
+  let out = app.handle_link_prompt_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+  assert_ne!(
+    out,
+    LinkPromptKey::Cancel,
+    "a printable rebind must not fire while typing digits"
+  );
+  assert_eq!(
+    app.link_prompt_number_input(),
+    "5",
+    "the digit types into the number instead"
+  );
+}
+
+#[test]
+fn palette_input_routes_typing_before_modal_rebinds() {
+  // Codex review #456 (iteration 8): `palette.close = ["x"]` used to
+  // close the palette instead of filtering. The typing route is a
+  // testable App method now, called before the modal resolution: the
+  // filter charset and Backspace always type / erase.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::CommandPaletteClose, KeyStroke::parse_chord("x").unwrap())
+    .unwrap();
+  app.open_command_palette();
+  assert!(
+    app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)),
+    "a charset key is consumed as typing"
+  );
+  assert_eq!(app.palette.buffer(), "x", "the character filters instead of closing");
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::CommandPaletteAccept,
+      KeyStroke::parse_chord("Backspace").unwrap(),
+    )
+    .unwrap();
+  assert!(
+    app.palette_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+    "Backspace is consumed as the eraser"
+  );
+  assert_eq!(app.palette.buffer(), "", "Backspace erases despite the rebind");
+}
+
+#[test]
+fn settings_editor_routes_typing_before_modal_rebinds() {
+  // Same contract for the Settings value editor (Codex review #456):
+  // `config.edit.submit = ["5"]` must not commit while typing a 5, and a
+  // Backspace rebind must not swallow the eraser.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(ModalAction::ConfigEditSubmit, KeyStroke::parse_chord("5").unwrap())
+    .unwrap();
+  app.config_panel.editing = Some("4".into());
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+    "a printable key is consumed as typing"
+  );
+  assert_eq!(app.config_panel.editing.as_deref(), Some("45"));
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::ConfigEditCancel,
+      KeyStroke::parse_chord("Backspace").unwrap(),
+    )
+    .unwrap();
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
+    "Backspace is consumed as the eraser"
+  );
+  assert_eq!(app.config_panel.editing.as_deref(), Some("4"));
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();

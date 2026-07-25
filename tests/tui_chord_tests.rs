@@ -637,12 +637,14 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
 }
 
 #[test]
-fn picker_help_shows_only_reachable_modal_sections() {
-  // Codex review #456 (iteration 6): `gwm switch` still reaches the
-  // command palette, the Command Logs / Settings overlays and the PTY —
-  // `run_action` only picker-gates the worktree-mutating verbs — yet all
-  // the modal sections were hidden behind `!picker_mode`. The picker help
-  // documents the reachable overlays and keeps the gated ones hidden.
+fn picker_help_hides_every_modal_section() {
+  // Codex review #456 (iteration 8): in a real `gwm switch` the filter
+  // bar is ALWAYS active — its only exits confirm (Enter) or cancel
+  // (Esc) the pick — so no overlay is reachable no matter what
+  // `run_action` would allow: every printable key (`?`, `:`, `3`, `4`,
+  // `o`) types into the filter instead. Advertising the modal sections
+  // there described an impossible state; the picker help documents the
+  // pick/cancel/filter surface only.
   use gwm::tui::help_rows;
   use gwm::tui::keymap::Keymap;
   use gwm::tui::modal_keymap::ModalKeymap;
@@ -656,43 +658,17 @@ fn picker_help_shows_only_reachable_modal_sections() {
       _ => None,
     })
     .collect();
-  for s in [
-    "Command Palette",
-    "Command Logs",
-    "Settings",
-    "PTY Overlay",
-    "Help Overlay",
-  ] {
-    assert!(
-      sections.contains(s),
-      "picker help must document the reachable {s:?} overlay: {sections:?}"
-    );
-  }
-  // And the list-view opener of the palette renders too — documenting how
-  // to USE the palette without the key that opens it would be pointless
-  // (Codex review #456, iteration 7).
+  assert_eq!(
+    sections,
+    ["Global", "List View"].iter().map(|s| s.to_string()).collect(),
+    "the picker help must carry no modal section — none is reachable behind the always-on filter"
+  );
   assert!(
-    rows
+    !rows
       .iter()
       .any(|r| matches!(r, HelpRow::Entry { label, .. } if label == "open the command palette")),
-    "picker help must advertise the palette opener"
+    "the palette opener is dead behind the picker filter and must stay hidden"
   );
-  for s in [
-    "Create Form",
-    "Delete Worktree",
-    "Browse Links",
-    "Link Prompt",
-    "Exec Profiles",
-    "Clean Reclaim",
-    "Agent Sessions",
-    "CI Checks",
-    "Bootstrap Report",
-  ] {
-    assert!(
-      !sections.contains(s),
-      "picker-gated {s:?} must stay hidden in the picker help: {sections:?}"
-    );
-  }
 }
 
 #[test]

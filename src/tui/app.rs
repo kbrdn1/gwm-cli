@@ -2111,6 +2111,54 @@ impl App {
   /// to `View::CommandPalette` and arms the pure state machine on
   /// `self.palette` with a fresh empty buffer. Status bar shows a
   /// short hint so the user knows what to type.
+  /// Typing route of the palette, resolved BEFORE the modal context
+  /// (Codex review #456): during text input the printable keys and
+  /// Backspace are reserved for typing — a rebind like
+  /// `palette.close = ["x"]` must not close the palette mid-word. Returns
+  /// `true` when the key was consumed as input; charset keys type, other
+  /// printable characters are swallowed (no palette entry could match
+  /// them), Ctrl-modified keys fall through to the modal resolution.
+  pub fn palette_input_key(&mut self, key: KeyEvent) -> bool {
+    if key.code == KeyCode::Backspace {
+      self.palette_pop_char();
+      return true;
+    }
+    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+      return false;
+    }
+    match key.code {
+      KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
+        self.palette_push_char(c);
+        true
+      }
+      KeyCode::Char(_) => true,
+      _ => false,
+    }
+  }
+
+  /// Typing route of the Settings value editor — same reserved-typing
+  /// contract as [`Self::palette_input_key`] (Codex review #456). A no-op
+  /// (`false`) when no edit is live.
+  pub fn settings_edit_input_key(&mut self, key: KeyEvent) -> bool {
+    if self.config_panel.editing.is_none() {
+      return false;
+    }
+    if key.code == KeyCode::Backspace {
+      self.config_panel.pop_edit_char();
+      return true;
+    }
+    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+      return false;
+    }
+    match key.code {
+      KeyCode::Char(c) => {
+        self.config_panel.push_edit_char(c);
+        true
+      }
+      _ => false,
+    }
+  }
+
   pub fn open_command_palette(&mut self) {
     self.palette.open();
     self.view = View::CommandPalette;
@@ -3994,14 +4042,28 @@ impl App {
       return CreateKey::Handled;
     }
     let on_type = self.create_form.field == Field::Type;
-    // The physical Backspace is a RESERVED editing control on the text
-    // fields (Codex review #456): a modal rebind like `cancel =
-    // ["Backspace"]` resolved before the typing fallback and left the
-    // field without an eraser. Same contract as the Keys-tab capture's
-    // reserved Esc / Enter / Backspace.
-    if key.code == KeyCode::Backspace && !on_type {
-      self.create_pop_char();
-      return CreateKey::Handled;
+    // Typing is RESERVED on the text fields (Codex review #456): a modal
+    // rebind like `cancel = ["Backspace"]` (or `= ["q"]`) resolved before
+    // the typing fallback, so it stole the eraser / typed characters.
+    // Printable keys and Backspace route to the field first — the palette
+    // convention; modal verbs act through non-printable keys (Ctrl-
+    // modified chars still fall through to the modal resolution).
+    if !on_type {
+      match key.code {
+        KeyCode::Backspace => {
+          self.create_pop_char();
+          return CreateKey::Handled;
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+          if self.create_form.field == Field::Issue && !c.is_ascii_digit() {
+            self.status = "issue accepts digits only".into();
+          } else {
+            self.create_push_char(c);
+          }
+          return CreateKey::Handled;
+        }
+        _ => {}
+      }
     }
     // #219: verbs resolve through the `create` context. The type-cycling
     // verbs (`prev_type` / `next_type`, def arrows + h/l) only fire on the
@@ -5082,10 +5144,18 @@ impl App {
         _ if self.key_matches_action(key, Action::FetchGithub) => return LinkPromptKey::Refresh,
         _ => {}
       },
-      // The physical Backspace stays a reserved digit eraser here (Codex
-      // review #456) — resolved before the stage context so a modal
-      // rebind cannot swallow it. Same contract as the create form.
+      // Typing stays reserved here too (Codex review #456) — digits and
+      // Backspace route to the number before the stage context so a
+      // modal rebind cannot swallow them. Same contract as the create
+      // form; Ctrl-modified chars still reach the modal resolution.
       LinkPromptStage::InputNumber if key.code == KeyCode::Backspace => self.link_prompt_pop_char(),
+      LinkPromptStage::InputNumber
+        if matches!(key.code, KeyCode::Char(_)) && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+      {
+        if let KeyCode::Char(c) = key.code {
+          self.link_prompt_push_char(c);
+        }
+      }
       LinkPromptStage::InputNumber => match self.resolve_modal(KeyContext::LinkInputNumber, key) {
         Some(ModalAction::LinkInputCancel) => return LinkPromptKey::Cancel,
         Some(ModalAction::LinkInputSubmit) => return LinkPromptKey::Submit,

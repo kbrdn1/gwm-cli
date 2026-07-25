@@ -2919,9 +2919,9 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
     ));
   }
   rows.push(entry(Action::Help, "this help"));
-  // run_action does not picker-gate the palette (Codex review #456), so
-  // its opener renders in `gwm switch` too, like its section below.
-  rows.push(entry(Action::CommandPalette, "open the command palette"));
+  if !picker_mode {
+    rows.push(entry(Action::CommandPalette, "open the command palette"));
+  }
   if !picker_mode {
     rows.extend([
       HelpRow::Blank,
@@ -3031,85 +3031,89 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ReportClose, "close"),
     ]);
   }
-  // Reachable from the picker too (`run_action` does not gate them).
-  rows.extend([
-    HelpRow::Blank,
-    HelpRow::Section("Command Palette".to_string()),
-    HelpRow::Blank,
-    modal_entry(ModalAction::CommandPaletteNext, "next command"),
-    modal_entry(ModalAction::CommandPalettePrev, "previous command"),
-    modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
-    fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
-    fixed("Backspace", "delete the last filter character"),
-    modal_entry(ModalAction::CommandPaletteClose, "close"),
-    HelpRow::Blank,
-    HelpRow::Section("Command Logs".to_string()),
-    HelpRow::Blank,
-    modal_entry(ModalAction::CommandLogsScrollDown, "scroll down"),
-    modal_entry(ModalAction::CommandLogsScrollUp, "scroll up"),
-    modal_entry(ModalAction::CommandLogsScrollLeft, "pan left"),
-    modal_entry(ModalAction::CommandLogsScrollRight, "pan right"),
-    modal_entry(ModalAction::CommandLogsScrollTop, "jump to the top"),
-    modal_entry(ModalAction::CommandLogsScrollBottom, "jump to the bottom"),
-    modal_entry(
-      ModalAction::CommandLogsCopy,
-      "copy the full transcript to the clipboard",
-    ),
-    modal_entry(ModalAction::CommandLogsClose, "close"),
-    HelpRow::Blank,
-    HelpRow::Section("Settings".to_string()),
-    HelpRow::Blank,
-    modal_entry(ModalAction::ConfigNextTab, "next tab"),
-    modal_entry(ModalAction::ConfigPrevTab, "previous tab"),
-    modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
-    modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
-    modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
-    modal_entry(
-      ModalAction::ConfigActivate,
-      "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
-    ),
-    modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
-    modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
-    modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
-    modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
-    modal_entry(
-      ModalAction::ConfigEditSubmit,
-      "commit the edited value / the captured global chord",
-    ),
-    modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
-    fixed(
-      "any char",
-      "type the value — free text for text fields, digits for numeric ones",
-    ),
-    fixed(
-      "Backspace",
-      "erase the last character / drop the last stroke of a global capture",
-    ),
-    fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
-    fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
-    modal_entry(ModalAction::ConfigClose, "close"),
-    HelpRow::Blank,
-    HelpRow::Section("PTY Overlay".to_string()),
-    HelpRow::Blank,
-    fixed(
-      "Esc",
-      "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
-    ),
-  ]);
-  // The overlay's own navigation is reachable from the picker too (`?`
-  // opens it there as well), so this section renders in every context.
-  rows.extend([
-    HelpRow::Blank,
-    HelpRow::Section("Help Overlay".to_string()),
-    HelpRow::Blank,
-    modal_entry(ModalAction::HelpScrollDown, "scroll down"),
-    modal_entry(ModalAction::HelpScrollUp, "scroll up"),
-    modal_entry(ModalAction::HelpScrollLeft, "pan left"),
-    modal_entry(ModalAction::HelpScrollRight, "pan right"),
-    modal_entry(ModalAction::HelpScrollTop, "jump to the top"),
-    modal_entry(ModalAction::HelpScrollBottom, "jump to the bottom"),
-    modal_entry(ModalAction::HelpClose, "close"),
-  ]);
+  // In a real `gwm switch` the filter bar is ALWAYS active — its only
+  // exits confirm (Enter) or cancel (Esc) the pick — so no overlay is
+  // reachable there, whatever `run_action` would allow: every printable
+  // key (`?`, `:`, `3`, `4`, `o`) types into the filter instead (Codex
+  // review #456, iteration 8). The modal sections all stay non-picker.
+  if !picker_mode {
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Command Palette".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommandPaletteNext, "next command"),
+      modal_entry(ModalAction::CommandPalettePrev, "previous command"),
+      modal_entry(ModalAction::CommandPaletteAccept, "run the highlighted command"),
+      fixed("a-z 0-9 _ -", "fuzzy-filter the commands (lowercase input only)"),
+      fixed("Backspace", "delete the last filter character"),
+      modal_entry(ModalAction::CommandPaletteClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Command Logs".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::CommandLogsScrollDown, "scroll down"),
+      modal_entry(ModalAction::CommandLogsScrollUp, "scroll up"),
+      modal_entry(ModalAction::CommandLogsScrollLeft, "pan left"),
+      modal_entry(ModalAction::CommandLogsScrollRight, "pan right"),
+      modal_entry(ModalAction::CommandLogsScrollTop, "jump to the top"),
+      modal_entry(ModalAction::CommandLogsScrollBottom, "jump to the bottom"),
+      modal_entry(
+        ModalAction::CommandLogsCopy,
+        "copy the full transcript to the clipboard",
+      ),
+      modal_entry(ModalAction::CommandLogsClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("Settings".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::ConfigNextTab, "next tab"),
+      modal_entry(ModalAction::ConfigPrevTab, "previous tab"),
+      modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
+      modal_entry(ModalAction::ConfigSelectNext, "next setting (All tab: scroll down)"),
+      modal_entry(ModalAction::ConfigSelectPrev, "previous setting (All tab: scroll up)"),
+      modal_entry(
+        ModalAction::ConfigActivate,
+        "toggle / edit the selected setting (Keys tab: start a key capture — a modal verb commits on its first stroke)",
+      ),
+      modal_entry(ModalAction::ConfigScrollLeft, "pan left (All tab)"),
+      modal_entry(ModalAction::ConfigScrollRight, "pan right (All tab)"),
+      modal_entry(ModalAction::ConfigScrollTop, "jump to the top (All tab)"),
+      modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom (All tab)"),
+      modal_entry(
+        ModalAction::ConfigEditSubmit,
+        "commit the edited value / the captured global chord",
+      ),
+      modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
+      fixed(
+        "any char",
+        "type the value — free text for text fields, digits for numeric ones",
+      ),
+      fixed(
+        "Backspace",
+        "erase the last character / drop the last stroke of a global capture",
+      ),
+      fixed("enter", "capture: commit the global chord (reserved, despite rebinds)"),
+      fixed("Esc", "capture: cancel (reserved, despite rebinds)"),
+      modal_entry(ModalAction::ConfigClose, "close"),
+      HelpRow::Blank,
+      HelpRow::Section("PTY Overlay".to_string()),
+      HelpRow::Blank,
+      fixed(
+        "Esc",
+        "close the overlay — other keys pass through (any key but Ctrl-C closes a finished exec run)",
+      ),
+    ]);
+    rows.extend([
+      HelpRow::Blank,
+      HelpRow::Section("Help Overlay".to_string()),
+      HelpRow::Blank,
+      modal_entry(ModalAction::HelpScrollDown, "scroll down"),
+      modal_entry(ModalAction::HelpScrollUp, "scroll up"),
+      modal_entry(ModalAction::HelpScrollLeft, "pan left"),
+      modal_entry(ModalAction::HelpScrollRight, "pan right"),
+      modal_entry(ModalAction::HelpScrollTop, "jump to the top"),
+      modal_entry(ModalAction::HelpScrollBottom, "jump to the bottom"),
+      modal_entry(ModalAction::HelpClose, "close"),
+    ]);
+  }
   rows
 }
 

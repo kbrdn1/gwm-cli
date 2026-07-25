@@ -490,19 +490,21 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // capture — hand-edit `.gwm.toml` for those (same hard-coded escape-hatch
       // trade-off as the rest of the keymap).
       View::Config if app.config_panel.capture.is_some() => app.handle_capture_key(key),
-      // Reserved value eraser for the settings editor too (Codex #456).
-      View::Config if app.config_panel.editing.is_some() && key.code == KeyCode::Backspace => {
-        app.config_panel.pop_edit_char()
+      // Typing routes before the modal context here too (Codex review
+      // #456) — see `App::settings_edit_input_key` (no-op unless an edit
+      // is live, so plain Config navigation falls through).
+      View::Config if app.config_panel.editing.is_some() => {
+        // Typing routes before the modal context here too (Codex review
+        // #456) — see `App::settings_edit_input_key`; only Ctrl-modified
+        // keys and non-character keys reach the modal resolution.
+        if !app.settings_edit_input_key(key) {
+          match app.resolve_modal(KeyContext::ConfigEdit, key) {
+            Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
+            Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
+            _ => {}
+          }
+        }
       }
-      View::Config if app.config_panel.editing.is_some() => match app.resolve_modal(KeyContext::ConfigEdit, key) {
-        Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
-        Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
-        _ => match key.code {
-          KeyCode::Backspace => app.config_panel.pop_edit_char(),
-          KeyCode::Char(c) => app.config_panel.push_edit_char(c),
-          _ => {}
-        },
-      },
       // #219: nav keys resolve through the `config` context. Select vs scroll
       // and the horizontal pan / jump verbs stay gated on the read-only `All`
       // tab exactly as before; the bound global `config_panel` key still
@@ -779,33 +781,34 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Tab still exit or navigate; Backspace edits.
       // #219: close / accept / prev / next resolve through the `palette`
       // context; every other key is literal input into the fuzzy buffer.
-      // The physical Backspace stays a reserved filter eraser (Codex
-      // review #456) — resolved before the palette context so a modal
-      // rebind cannot swallow it. Same contract as the create form.
-      View::CommandPalette if key.code == KeyCode::Backspace => app.palette_pop_char(),
-      View::CommandPalette => match app.resolve_modal(KeyContext::CommandPalette, key) {
-        Some(ModalAction::CommandPaletteClose) => app.close_command_palette(),
-        Some(ModalAction::CommandPaletteAccept) => {
-          if let Some(action) = app.accept_command_palette() {
-            run_palette_action(terminal, &mut app, action)?;
+      // Typing routes before the modal context (Codex review #456) — see
+      // `App::palette_input_key` for the reserved-typing contract (a
+      // testable method, per the repo's TDD rule for event-loop routes).
+      // Typing routes before the modal context (Codex review #456) — see
+      // `App::palette_input_key` for the reserved-typing contract (a
+      // testable method, per the repo's TDD rule for event-loop routes).
+      // Plain `if`, not a match guard: guards cannot borrow mutably.
+      // Typing routes before the modal context (Codex review #456) — see
+      // `App::palette_input_key` for the reserved-typing contract (a
+      // testable method; an `if` in the arm body because match guards
+      // cannot borrow mutably). The charset / swallow rules for plain
+      // characters live in that method now; only Ctrl-modified keys and
+      // non-character keys reach the modal resolution.
+      View::CommandPalette => {
+        if !app.palette_input_key(key) {
+          match app.resolve_modal(KeyContext::CommandPalette, key) {
+            Some(ModalAction::CommandPaletteClose) => app.close_command_palette(),
+            Some(ModalAction::CommandPaletteAccept) => {
+              if let Some(action) = app.accept_command_palette() {
+                run_palette_action(terminal, &mut app, action)?;
+              }
+            }
+            Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
+            Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
+            _ => {}
           }
         }
-        Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
-        Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
-        _ => match key.code {
-          KeyCode::Backspace => app.palette_pop_char(),
-          KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
-            app.palette_push_char(c);
-          }
-          // Any other char (including the palette trigger `:`, the
-          // help glyph `?`, uppercase letters) is dropped — there is
-          // no palette entry name that could match it. Silently
-          // ignoring is friendlier than appending and producing zero
-          // matches with no explanation.
-          KeyCode::Char(_) => {}
-          _ => {}
-        },
-      },
+      }
     }
 
     // Picker contract (Copilot PR #53): only break when the App has
