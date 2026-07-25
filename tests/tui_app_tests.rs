@@ -852,29 +852,18 @@ fn palette_input_routes_typing_before_modal_rebinds() {
 #[test]
 fn settings_editor_routes_typing_before_modal_rebinds() {
   // Same contract for the Settings value editor (Codex review #456):
-  // `config.edit.submit = ["5"]` must not commit while typing a 5, and a
-  // Backspace rebind must not swallow the eraser.
+  // printables and Backspace are consumed as typing before the modal
+  // resolution. Rebinds on those keys are refused at config time
+  // (iteration 13) — this route is the runtime backstop behind that
+  // validation.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-  use gwm::tui::keymap::KeyStroke;
-  use gwm::tui::modal_keymap::ModalAction;
   let (_dir, mut app) = make_app();
-  app
-    .modal_keymap
-    .apply_override(ModalAction::ConfigEditSubmit, KeyStroke::parse_chord("5").unwrap())
-    .unwrap();
   app.config_panel.editing = Some("4".into());
   assert!(
     app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
     "a printable key is consumed as typing"
   );
   assert_eq!(app.config_panel.editing.as_deref(), Some("45"));
-  app
-    .modal_keymap
-    .apply_override(
-      ModalAction::ConfigEditCancel,
-      KeyStroke::parse_chord("Backspace").unwrap(),
-    )
-    .unwrap();
   assert!(
     app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE)),
     "Backspace is consumed as the eraser"
@@ -948,21 +937,16 @@ fn shifted_uppercase_never_counts_as_palette_typing() {
 }
 
 #[test]
-fn rebound_cancel_reaches_resolution_on_a_numeric_field() {
+fn a_character_the_numeric_field_refuses_is_not_claimed_as_typing() {
   // Codex review #456 (iteration 11): on a numeric field push_edit_char
   // refuses non-digits, but settings_edit_input_key still claimed them as
-  // consumed — `config.edit.cancel = ["q"]` became inert. A character the
-  // field refuses is not typing; it falls through to the modal
-  // resolution so the rebound verb fires.
+  // consumed. A character the field refuses is not typing; it falls
+  // through to the modal resolution (where only non-typing strokes can be
+  // bound since iteration 13, so nothing fires and the reinjection drops
+  // it) — the buffer must stay untouched either way.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-  use gwm::tui::keymap::KeyStroke;
-  use gwm::tui::modal_keymap::ModalAction;
   use gwm::tui::{SettingField, SettingsTab};
   let (_dir, mut app) = make_app();
-  app
-    .modal_keymap
-    .apply_override(ModalAction::ConfigEditCancel, KeyStroke::parse_chord("q").unwrap())
-    .unwrap();
   app.config_panel.tab = SettingsTab::Tui;
   app.config_panel.selected = 0;
   while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
@@ -973,23 +957,31 @@ fn rebound_cancel_reaches_resolution_on_a_numeric_field() {
     );
   }
   app.config_panel.begin_edit("4");
-  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
   assert!(
-    app.config_panel.editing.is_none(),
-    "the rebound cancel must fire on a character the numeric field refuses: {:?}",
-    app.config_panel.editing
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)),
+    "a character the numeric field refuses must fall through to the resolution"
+  );
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("4"),
+    "the refused character must not land in the numeric buffer"
   );
 }
 
 #[test]
 fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
-  // Codex review #456 (iteration 12): a VALID config like
+  // Codex review #456 (iterations 12-13): a VALID config like
   // `[tui.keys.modal.palette] close = ["x"]` replaced Esc, then the
   // reserved typing consumed `x` — the overlay had no exit left short of
-  // Ctrl-C killing the whole TUI. The always-typing contexts (palette,
-  // link number input) refuse such bindings up front, at config time.
-  // Create and ConfigEdit stay bindable: their chords live on in
-  // sub-modes without text input (the Type field, the capture).
+  // Ctrl-C killing the whole TUI. Bindings the typing routes would
+  // swallow are refused up front, at config time: every verb of the
+  // always-typing contexts (palette, link number input), the whole
+  // ConfigEdit context (it only exists while a value edit consumes
+  // printables and Backspace), and CreateSubmit (submitting only works
+  // from the Description field, where all printables are typing). The
+  // other create verbs stay bindable on bare letters — they act on the
+  // Type field, which takes no text input.
   use gwm::tui::keymap::KeyStroke;
   use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
   let mut modal = ModalKeymap::defaults();
@@ -998,6 +990,11 @@ fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
     (ModalAction::CommandPaletteAccept, "Backspace"),
     (ModalAction::LinkInputCancel, "5"),
     (ModalAction::LinkInputSubmit, "Backspace"),
+    (ModalAction::ConfigEditSubmit, "5"),
+    (ModalAction::ConfigEditCancel, "x"),
+    (ModalAction::ConfigEditCancel, "Backspace"),
+    (ModalAction::CreateSubmit, "s"),
+    (ModalAction::CreateSubmit, "Backspace"),
   ] {
     assert!(
       modal
@@ -1008,7 +1005,8 @@ fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
   }
   for (action, chord) in [
     (ModalAction::CreateCancel, "q"),
-    (ModalAction::ConfigEditSubmit, "5"),
+    (ModalAction::CreateNextType, "n"),
+    (ModalAction::ConfigEditSubmit, "Alt+s"),
     (ModalAction::CommandPaletteClose, "Alt+x"),
   ] {
     assert!(
@@ -1021,21 +1019,54 @@ fn reserved_typing_keys_cannot_be_rebound_in_input_contexts() {
 }
 
 #[test]
+fn link_number_footer_drops_a_fetch_binding_swallowed_by_typing() {
+  // Codex review #456 (iteration 13): with the global `fetch_github`
+  // rebound to a digit or Backspace, the number-input stage consumes the
+  // key as typing before the fetch fallback — the shortcut cannot fire
+  // there. The footer must drop the dead hint rather than advertise it
+  // (the same convention as a key shadowed by a modal binding).
+  use crossterm::event::{KeyCode, KeyModifiers};
+  use gwm::tui::keymap::{Action, KeyStroke, Keymap};
+  use gwm::tui::modal_keymap::ModalKeymap;
+  use gwm::tui::HintContext;
+
+  let modal = ModalKeymap::defaults();
+  let default = HintContext::LinkInputNumber.resolve(&Keymap::defaults(), &modal);
+  assert!(
+    default.iter().any(|(_, l)| l == "fetch"),
+    "the default fetch binding must be advertised: {default:?}"
+  );
+  let mut km = Keymap::defaults();
+  km_apply(&mut km, Action::FetchGithub, KeyCode::Char('5'));
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "a fetch binding swallowed by digit typing must not be advertised: {resolved:?}"
+  );
+  let mut km = Keymap::defaults();
+  km_apply(&mut km, Action::FetchGithub, KeyCode::Backspace);
+  let resolved = HintContext::LinkInputNumber.resolve(&km, &modal);
+  assert!(
+    !resolved.iter().any(|(_, l)| l == "fetch"),
+    "a fetch binding swallowed by the eraser must not be advertised: {resolved:?}"
+  );
+
+  fn km_apply(km: &mut Keymap, action: Action, code: KeyCode) {
+    km.apply_override(action, vec![vec![KeyStroke::new(code, KeyModifiers::empty())]])
+      .unwrap();
+  }
+}
+
+#[test]
 fn full_edit_buffer_still_consumes_valid_characters() {
   // Codex review #456 (iteration 12): at the buffer limit push_edit_char
-  // refused even VALID characters, so with `cancel = ["5"]` a 5 typed
-  // into a full countdown suddenly cancelled the edit. A type-accepted
-  // character is consumed as a no-op at the limit; only a character the
-  // field refuses outright falls through to the rebinds.
+  // refused even VALID characters, so the stroke leaked through to the
+  // modal resolution mid-typing. A type-accepted character is consumed
+  // as a no-op at the limit; only a character the field refuses outright
+  // falls through.
   use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-  use gwm::tui::keymap::KeyStroke;
-  use gwm::tui::modal_keymap::ModalAction;
   use gwm::tui::{SettingField, SettingsTab};
   let (_dir, mut app) = make_app();
-  app
-    .modal_keymap
-    .apply_override(ModalAction::ConfigEditCancel, KeyStroke::parse_chord("5").unwrap())
-    .unwrap();
   app.config_panel.tab = SettingsTab::Tui;
   app.config_panel.selected = 0;
   while app.config_panel.selected_field() != Some(SettingField::ConfirmCountdown) {
@@ -1046,11 +1077,14 @@ fn full_edit_buffer_still_consumes_valid_characters() {
     );
   }
   app.config_panel.begin_edit("999"); // at the 3-char limit
-  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE));
+  assert!(
+    app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('5'), KeyModifiers::NONE)),
+    "a valid digit at the limit is a consumed no-op — it must not leak to the resolution"
+  );
   assert_eq!(
     app.config_panel.editing.as_deref(),
     Some("999"),
-    "a valid digit at the limit is a consumed no-op, not a cancel"
+    "the buffer must stay at its limit"
   );
 }
 

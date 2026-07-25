@@ -113,26 +113,34 @@ pub enum KeyContext {
 
 impl KeyContext {
   /// Strokes an ALWAYS-typing context reserves for its input (Codex
-  /// review #456): the dispatch routes them into the query / number
-  /// before the modal resolution, so a verb bound to one would be
+  /// review #456): the dispatch routes them into the query / number /
+  /// value before the modal resolution, so a verb bound to one would be
   /// unreachable — and `close = ["x"]` would leave the overlay with no
   /// exit at all. [`ModalKeymap::apply_override`] refuses such bindings
-  /// up front. Create and ConfigEdit are exempt: their chords stay live
-  /// in sub-modes that take no text input (the Type field, the Keys-tab
-  /// capture). Mirrors the dispatch routes exactly
-  /// (`App::palette_input_key`, the link number stage).
+  /// up front. ConfigEdit qualifies too (iteration 13): the context only
+  /// exists while a value edit is live, and a text field consumes every
+  /// unmodified printable (uppercase included) plus Backspace — its two
+  /// verbs are the edit's only exits. Create is exempt at the context
+  /// level (its type-cycling verbs live on the Type field, which takes
+  /// no text input) — the per-verb exception is
+  /// [`ModalAction::reserved_typing_stroke`]. Mirrors the dispatch
+  /// routes (`App::palette_input_key`, the link number stage,
+  /// `App::settings_edit_input_key`).
   pub fn reserved_typing_stroke(self, stroke: &KeyStroke) -> bool {
     use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
     if stroke.modifiers.intersects(KM::CONTROL | KM::ALT) {
       return false;
     }
     match (self, stroke.code) {
-      (KeyContext::CommandPalette | KeyContext::LinkInputNumber, KC::Backspace) => true,
+      (KeyContext::CommandPalette | KeyContext::LinkInputNumber | KeyContext::ConfigEdit, KC::Backspace) => true,
       // A shifted letter is an uppercase (kitty-style) — not palette
       // input, so it stays bindable.
       (KeyContext::CommandPalette, KC::Char(c)) if stroke.modifiers.contains(KM::SHIFT) => c.is_ascii_digit(),
       (KeyContext::CommandPalette, KC::Char(c)) => c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-',
       (KeyContext::LinkInputNumber, KC::Char(c)) => c.is_ascii_digit(),
+      // A text field takes uppercase input, so unlike the palette a
+      // shifted letter IS typing here.
+      (KeyContext::ConfigEdit, KC::Char(_)) => true,
       _ => false,
     }
   }
@@ -348,6 +356,23 @@ impl ModalAction {
     Self::all().find(|a| a.context() == ctx && a.verb() == verb)
   }
 
+  /// `true` when binding this verb to `stroke` would leave it unreachable
+  /// because a typing route consumes the key first (Codex review #456).
+  /// Context-wide reservations ([`KeyContext::reserved_typing_stroke`])
+  /// apply to every verb; `CreateSubmit` adds a per-verb case: it only
+  /// ever submits from the Description field, where every unmodified
+  /// printable and Backspace are typing — the other create verbs stay
+  /// bindable on bare letters because they act on the Type field.
+  pub fn reserved_typing_stroke(self, stroke: &KeyStroke) -> bool {
+    use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+    if self.context().reserved_typing_stroke(stroke) {
+      return true;
+    }
+    self == ModalAction::CreateSubmit
+      && !stroke.modifiers.intersects(KM::CONTROL | KM::ALT)
+      && matches!(stroke.code, KC::Char(_) | KC::Backspace)
+  }
+
   /// Default keystrokes for this verb, parsed. Panics on a malformed
   /// literal — that is a programmer error in the table above, never user
   /// input (same contract as the global keymap's `def`).
@@ -436,17 +461,18 @@ impl ModalKeymap {
   /// user intent wins over a shipped default.
   pub fn apply_override(&mut self, action: ModalAction, keys: Vec<KeyStroke>) -> Result<()> {
     let ctx = action.context();
-    // Refuse a binding the context's reserved typing would swallow (Codex
-    // review #456): with `palette.close = ["x"]` the override replaces
-    // Esc, then the filter typing consumes `x` — the overlay is left with
-    // no exit short of Ctrl-C. Better a clear config error up front.
+    // Refuse a binding the reserved typing would swallow (Codex review
+    // #456): with `palette.close = ["x"]` the override replaces Esc, then
+    // the filter typing consumes `x` — the overlay is left with no exit
+    // short of Ctrl-C. Better a clear config error up front.
     for k in &keys {
-      if ctx.reserved_typing_stroke(k) {
+      if action.reserved_typing_stroke(k) {
         return Err(GwmError::Config(format!(
-          "context {}: key {} is reserved for typing input there and cannot be bound — \
-           the dispatch routes it to the query before the modal resolution",
+          "context {}: key {} is reserved for typing input there and cannot be bound to {} — \
+           the dispatch routes it into the input before the modal resolution",
           ctx.config_path(),
-          k
+          k,
+          action.verb()
         )));
       }
     }

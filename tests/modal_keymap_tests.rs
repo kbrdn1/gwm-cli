@@ -205,14 +205,14 @@ fn cross_context_reuse_is_not_a_conflict() {
   let mut km = ModalKeymap::defaults();
   // Bind `x` in confirm and in create — different contexts, both fine.
   km.apply_override(ModalAction::ConfirmConfirm, vec![ch('x')]).unwrap();
-  km.apply_override(ModalAction::CreateSubmit, vec![ch('x')]).unwrap();
+  km.apply_override(ModalAction::CreateCancel, vec![ch('x')]).unwrap();
   assert_eq!(
     km.resolve(KeyContext::Confirm, &ch('x')),
     Some(ModalAction::ConfirmConfirm)
   );
   assert_eq!(
     km.resolve(KeyContext::Create, &ch('x')),
-    Some(ModalAction::CreateSubmit)
+    Some(ModalAction::CreateCancel)
   );
 }
 

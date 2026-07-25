@@ -1,5 +1,5 @@
 use super::app::{App, GitHubFetchState, LinkPromptStage, LinkTarget, View};
-use super::keymap::{Action, Keymap};
+use super::keymap::{Action, KeyStroke, Keymap};
 use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
@@ -2252,10 +2252,13 @@ impl HintContext {
         // #219: a global verb whose key is claimed by a modal binding in the
         // active context is resolved as that modal verb first — the event loop
         // never reaches the global action. Drop the hint rather than advertise
-        // a duplicate key for an unreachable action.
+        // a duplicate key for an unreachable action. Same for a key the
+        // context's reserved typing consumes (Codex review #456, iteration
+        // 13): `fetch_github` rebound to a digit never fires while typing the
+        // link number.
         Hint::Key(action, label) => keymap
           .primary_chord(*action)
-          .filter(|k| !self.key_shadowed_by_modal(k, modal))
+          .filter(|k| !self.key_shadowed_by_modal(k, modal) && !self.key_swallowed_by_typing(k))
           .map(|k| (k, label.to_string())),
         Hint::Modal(action, label) => modal.primary_key(*action).map(|k| (k, label.to_string())),
         Hint::Lit(key, label) => Some((key.to_string(), label.to_string())),
@@ -2292,6 +2295,21 @@ impl HintContext {
         .bindings_for(ctx)
         .iter()
         .any(|b| b.keys.iter().any(|ks| ks.to_string() == key)),
+      None => false,
+    }
+  }
+
+  /// `true` when this context's reserved typing consumes `key` before any
+  /// resolution — a global fallback on it (e.g. `fetch_github` rebound to a
+  /// digit at the link number stage) can never fire, so its hint is dead.
+  /// A multi-stroke chord dies with its opening stroke: the typing route
+  /// eats it before the pending-chord machinery sees it.
+  fn key_swallowed_by_typing(self, key: &str) -> bool {
+    match self.modal_context() {
+      Some(ctx) => KeyStroke::parse_chord(key)
+        .ok()
+        .and_then(|strokes| strokes.first().cloned())
+        .is_some_and(|ks| ctx.reserved_typing_stroke(&ks)),
       None => false,
     }
   }

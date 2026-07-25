@@ -2128,7 +2128,7 @@ fn modal_keys_config_edit_substage_resolves() {
 close = ["q"]
 
 [tui.keys.modal.config.edit]
-cancel = ["Backspace"]
+cancel = ["Tab"]
 "#,
   )
   .unwrap();
@@ -2136,7 +2136,7 @@ cancel = ["Backspace"]
   let mk = cfg.tui.keys.resolved_modal_keymap().unwrap();
   assert_eq!(mk.resolve(KeyContext::Config, &kc('q')), Some(ModalAction::ConfigClose));
   assert_eq!(
-    mk.resolve(KeyContext::ConfigEdit, &ks(KeyCode::Backspace)),
+    mk.resolve(KeyContext::ConfigEdit, &ks(KeyCode::Tab)),
     Some(ModalAction::ConfigEditCancel)
   );
 }
