@@ -172,8 +172,8 @@ fn resolve_errors_without_an_origin_remote() {
 
 #[test]
 fn pr_noun_follows_the_forge() {
-  let github = forge::for_kind(ForgeKind::GitHub, "github.com".into(), "o/r".into());
-  let gitlab = forge::for_kind(ForgeKind::GitLab, "gitlab.com".into(), "g/p".into());
+  let github = forge::for_kind(ForgeKind::GitHub, "https://github.com".into(), "o/r".into());
+  let gitlab = forge::for_kind(ForgeKind::GitLab, "https://gitlab.com".into(), "g/p".into());
 
   assert_eq!(github.pr_noun(), "PR");
   assert_eq!(gitlab.pr_noun(), "MR");
@@ -183,7 +183,7 @@ fn pr_noun_follows_the_forge() {
 
 #[test]
 fn github_urls_use_the_issues_and_pull_paths() {
-  let f = forge::for_kind(ForgeKind::GitHub, "github.com".into(), "kbrdn1/gwm-cli".into());
+  let f = forge::for_kind(ForgeKind::GitHub, "https://github.com".into(), "kbrdn1/gwm-cli".into());
 
   assert_eq!(f.issue_url(42), "https://github.com/kbrdn1/gwm-cli/issues/42");
   assert_eq!(f.pr_url(61), "https://github.com/kbrdn1/gwm-cli/pull/61");
@@ -191,7 +191,7 @@ fn github_urls_use_the_issues_and_pull_paths() {
 
 #[test]
 fn gitlab_urls_use_the_dash_infix_and_merge_requests_path() {
-  let f = forge::for_kind(ForgeKind::GitLab, "gitlab.com".into(), "group/sub/proj".into());
+  let f = forge::for_kind(ForgeKind::GitLab, "https://gitlab.com".into(), "group/sub/proj".into());
 
   assert_eq!(f.issue_url(42), "https://gitlab.com/group/sub/proj/-/issues/42");
   assert_eq!(f.pr_url(61), "https://gitlab.com/group/sub/proj/-/merge_requests/61");
@@ -202,7 +202,11 @@ fn urls_honour_a_self_hosted_host() {
   // The pre-#419 free functions hardcoded `https://github.com/…`, so a
   // self-hosted instance would have produced links pointing at the wrong
   // server entirely.
-  let f = forge::for_kind(ForgeKind::GitLab, "gitlab.acme.internal".into(), "team/proj".into());
+  let f = forge::for_kind(
+    ForgeKind::GitLab,
+    "https://gitlab.acme.internal".into(),
+    "team/proj".into(),
+  );
 
   assert_eq!(f.issue_url(7), "https://gitlab.acme.internal/team/proj/-/issues/7");
 }
@@ -238,7 +242,7 @@ fn forge_key_rejects_an_unknown_value() {
 
 #[test]
 fn github_pr_head_refspec_uses_refs_pull() {
-  let f = forge::for_kind(ForgeKind::GitHub, "github.com".into(), "o/r".into());
+  let f = forge::for_kind(ForgeKind::GitHub, "https://github.com".into(), "o/r".into());
 
   assert_eq!(f.pr_head_refspec(61), "pull/61/head");
 }
@@ -249,7 +253,47 @@ fn gitlab_mr_head_refspec_uses_refs_merge_requests() {
   // refspec made `gwm review` fail *after* `glab mr view` had already
   // succeeded and printed "resolving MR #61 …", which reads as a gwm bug
   // rather than an unsupported path.
-  let f = forge::for_kind(ForgeKind::GitLab, "gitlab.com".into(), "g/p".into());
+  let f = forge::for_kind(ForgeKind::GitLab, "https://gitlab.com".into(), "g/p".into());
 
   assert_eq!(f.pr_head_refspec(61), "merge-requests/61/head");
+}
+
+// --- web origin: scheme + port survive (Codex review #458, P2) ------------
+
+#[test]
+fn parse_remote_url_keeps_the_scheme_and_port_of_an_http_remote() {
+  // A self-hosted instance on a non-default port or plain HTTP: the port
+  // here IS the web port, so dropping it (and forcing https) produced a
+  // dead link from `gwm open`.
+  let r = forge::parse_remote_url("http://gitlab.acme:8080/g/p.git").unwrap();
+
+  assert_eq!(r.host, "gitlab.acme");
+  assert_eq!(r.web_origin, "http://gitlab.acme:8080");
+  assert_eq!(r.path, "g/p");
+}
+
+#[test]
+fn parse_remote_url_drops_the_ssh_port_from_the_web_origin() {
+  // The opposite case, and why the port cannot be kept blindly: 2222 is
+  // the SSH port, not the web port. Carrying it into an https:// URL
+  // would be just as broken as dropping a real web port.
+  let r = forge::parse_remote_url("ssh://git@gitlab.example.com:2222/group/proj.git").unwrap();
+
+  assert_eq!(r.host, "gitlab.example.com");
+  assert_eq!(r.web_origin, "https://gitlab.example.com");
+}
+
+#[test]
+fn parse_remote_url_scp_syntax_defaults_to_https() {
+  let r = forge::parse_remote_url("git@gitlab.example.com:group/proj.git").unwrap();
+
+  assert_eq!(r.web_origin, "https://gitlab.example.com");
+}
+
+#[test]
+fn urls_are_built_from_the_web_origin_not_a_rebuilt_https_host() {
+  let f = forge::for_kind(ForgeKind::GitLab, "http://gitlab.acme:8080".into(), "g/p".into());
+
+  assert_eq!(f.issue_url(7), "http://gitlab.acme:8080/g/p/-/issues/7");
+  assert_eq!(f.pr_url(9), "http://gitlab.acme:8080/g/p/-/merge_requests/9");
 }

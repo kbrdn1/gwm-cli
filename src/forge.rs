@@ -238,6 +238,15 @@ impl ForgeKind {
 pub struct RemoteRef {
   pub host: String,
   pub path: String,
+  /// Scheme + host + web port, e.g. `https://github.com` or
+  /// `http://gitlab.acme:8080`. Every generated URL is rooted here rather
+  /// than rebuilt as `https://{host}`, which silently broke self-hosted
+  /// instances on plain HTTP or a non-default port (Codex review #458).
+  ///
+  /// Only an `http(s)://` remote contributes a port: on `ssh://host:2222`
+  /// the port is the SSH port, and carrying it into a web URL would be
+  /// just as wrong as dropping a real one.
+  pub web_origin: String,
 }
 
 /// Parse any of the git remote URL flavours into [`RemoteRef`]:
@@ -250,19 +259,28 @@ pub struct RemoteRef {
 /// self-hosted instance parses, and the forge is chosen separately.
 pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   let url = url.trim();
+  let scheme = url.split_once("://").map(|(s, _)| s.to_ascii_lowercase());
   let (host_part, path_part) = split_host_and_path(url)
     .ok_or_else(|| GwmError::Other(format!("origin '{}' is not a recognised git remote URL", url)))?;
 
-  // Drop any `user@` prefix and `:port` suffix from the authority.
-  let host = host_part.rsplit('@').next().unwrap_or(host_part);
-  let host = match host.rsplit_once(':') {
-    // Only strip a trailing `:port`, never an IPv6 segment.
-    Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
-    _ => host,
+  // Drop any `user@` prefix, then split off a `:port` suffix.
+  let authority = host_part.rsplit('@').next().unwrap_or(host_part);
+  let (host, port) = match authority.rsplit_once(':') {
+    // Only split a trailing `:port`, never an IPv6 segment.
+    Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => (h, Some(p)),
+    _ => (authority, None),
   };
   if host.is_empty() {
     return Err(GwmError::Other(format!("origin '{}' has no host", url)));
   }
+  // The port is web-relevant only over http(s). An `ssh://…:2222` port
+  // addresses sshd, not the web UI, and an scp-like remote cannot carry a
+  // port at all.
+  let web_origin = match scheme.as_deref() {
+    Some("http") => format!("http://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
+    Some("https") => format!("https://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
+    _ => format!("https://{host}"),
+  };
 
   let path = trim_git_suffix(path_part.trim_start_matches('/'));
   if path.is_empty() {
@@ -272,6 +290,7 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   Ok(RemoteRef {
     host: host.to_ascii_lowercase(),
     path: path.to_string(),
+    web_origin,
   })
 }
 
@@ -326,7 +345,9 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
   /// The repository path on the forge (`owner/repo`, or a nested
   /// `group/sub/proj` on GitLab).
   fn slug(&self) -> &str;
-  fn host(&self) -> &str;
+  /// Scheme + host + web port (`https://github.com`,
+  /// `http://gitlab.acme:8080`). The root of every generated URL.
+  fn web_origin(&self) -> &str;
 
   /// User-facing noun for a change proposal: `"PR"` or `"MR"`.
   fn pr_noun(&self) -> &'static str {
@@ -375,10 +396,10 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
 /// Build a backend for an explicit kind. Exposed so tests (and the
 /// doctor) can exercise the pure parts — URL building, terminology —
 /// without a repository.
-pub fn for_kind(kind: ForgeKind, host: String, slug: String) -> Arc<dyn Forge> {
+pub fn for_kind(kind: ForgeKind, web_origin: String, slug: String) -> Arc<dyn Forge> {
   match kind {
-    ForgeKind::GitHub => Arc::new(crate::github::GitHubForge::new(host, slug)),
-    ForgeKind::GitLab => Arc::new(crate::gitlab::GitLabForge::new(host, slug)),
+    ForgeKind::GitHub => Arc::new(crate::github::GitHubForge::new(web_origin, slug)),
+    ForgeKind::GitLab => Arc::new(crate::gitlab::GitLabForge::new(web_origin, slug)),
   }
 }
 
@@ -412,11 +433,11 @@ pub fn repo_slug(repo: &Repository) -> Result<String> {
 pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> {
   resolve(repo, config).unwrap_or_else(|_| {
     let kind = config.forge.unwrap_or(ForgeKind::GitHub);
-    let host = match kind {
-      ForgeKind::GitHub => "github.com",
-      ForgeKind::GitLab => "gitlab.com",
+    let origin = match kind {
+      ForgeKind::GitHub => "https://github.com",
+      ForgeKind::GitLab => "https://gitlab.com",
     };
-    for_kind(kind, host.into(), String::new())
+    for_kind(kind, origin.into(), String::new())
   })
 }
 
@@ -426,7 +447,7 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   let parsed = origin_ref(repo)?;
   let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
-  Ok(for_kind(kind, parsed.host, parsed.path))
+  Ok(for_kind(kind, parsed.web_origin, parsed.path))
 }
 
 // ---- shared CLI invocation ----------------------------------------------
@@ -438,11 +459,30 @@ pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
 /// and `pub` so its argv format is unit-testable without spawning the CLI
 /// (which CI runners do not have).
 pub fn cli_command_line(program: &OsStr, args: &[OsString]) -> String {
-  let name = program_name(program);
-  let mut line = name;
+  cli_command_line_redacted(program, args, &[])
+}
+
+/// [`cli_command_line`] that masks the value following any flag named in
+/// `redact_after`.
+///
+/// `glab` has no `--body-file`, so a whole rendered issue / MR body rides
+/// inline in `--description` (Codex review #458). The transcript is ours
+/// to build, so the value is replaced by its length rather than pasted
+/// into a log line the user can scroll and copy. The argv itself still
+/// carries the body and is visible to `ps` — that one is `glab`'s CLI
+/// surface, not something gwm can fix from here.
+pub fn cli_command_line_redacted(program: &OsStr, args: &[OsString], redact_after: &[&str]) -> String {
+  let mut line = program_name(program);
+  let mut redact_next = false;
   for arg in args {
+    let text = arg.to_string_lossy();
     line.push(' ');
-    line.push_str(&arg.to_string_lossy());
+    if redact_next {
+      line.push_str(&format!("<redacted:{} chars>", text.chars().count()));
+    } else {
+      line.push_str(&text);
+    }
+    redact_next = redact_after.contains(&text.as_ref());
   }
   line
 }
@@ -462,13 +502,29 @@ where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
+  run_cli_with(program, args, &[], &[])
+}
+
+/// [`run_cli`] with extra environment for the child and a redaction list
+/// for the transcript. Both exist for the GitLab backend: `$GITLAB_HOST`
+/// pins the instance (otherwise `glab` resolves it from the *process* cwd
+/// and falls back to gitlab.com), and `--description` carries a whole
+/// rendered body that must not land verbatim in Command Logs.
+pub fn run_cli_with<I, S>(program: &OsStr, args: I, env: &[(String, String)], redact_after: &[&str]) -> Result<String>
+where
+  I: IntoIterator<Item = S>,
+  S: AsRef<OsStr>,
+{
   // Collect the args once so they can both drive the spawn and build the
   // human-readable command line stored on the transcript (issue #226).
   let collected: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
   let name = program_name(program);
-  let cmdline = cli_command_line(program, &collected);
+  let cmdline = cli_command_line_redacted(program, &collected, redact_after);
   let mut cmd = Command::new(program);
   cmd.args(&collected);
+  for (k, v) in env {
+    cmd.env(k, v);
+  }
   let output = crate::command_log::run_logged(&mut cmd, cmdline).map_err(|e| {
     GwmError::CommandFailed(format!(
       "{name}: failed to spawn ({e}). Is `{name}` installed and on PATH?"

@@ -46,6 +46,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks overlay. It aggregates as non-green, so a forge state this build
   does not know can no longer paint a passing CI that is not passing.
 
+### Fixed
+
+- **A blocking `manual` GitLab pipeline no longer reads as green**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). It was mapped to
+  passing by analogy with GitHub's `SKIPPED`, but a pipeline reports `manual`
+  while it waits on a *blocking* manual job — suspended, and possibly barring
+  the merge.
+- **Generated URLs keep the remote's scheme and web port**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `http://host:8080/…`
+  was collapsed to the bare host and rebuilt as `https://host/…`, so `gwm open`
+  produced dead links for self-hosted instances. An `ssh://host:2222` port is
+  still dropped — that one addresses sshd, not the web UI.
+- **`$GITLAB_HOST` is pinned on every `glab` call**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `glab` otherwise
+  resolves the instance from the process working directory, which in workspace
+  mode is the workspace root rather than the row's repo — a same-named project
+  on another instance could be read and its iid persisted locally.
+- **Issue / MR bodies are redacted from Command Logs**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `glab` has no
+  `--body-file`, so the rendered body rides in `--description`; the transcript
+  now stores its length instead of its contents.
+- **A milestone `due_on` carrying a time is refused on GitLab**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). GitLab's `due_date`
+  is date-only, so such a value could never converge and was rewritten on every
+  push. It now fails with the cause named.
+
 ### Docs
 
 - New [GitLab (multi-forge)](docs/5.integrations/5.gitlab.md) integration

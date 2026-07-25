@@ -37,7 +37,7 @@ use crate::forge::{
 use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{self, MilestoneSpec, MilestoneState, RemoteMilestone};
 use serde::Deserialize;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::sync::LazyLock;
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
@@ -51,6 +51,24 @@ static MR_URL_RE: LazyLock<regex::Regex> =
 pub fn glab_program() -> OsString {
   std::env::var_os("GWM_GLAB").unwrap_or_else(|| "glab".into())
 }
+
+/// Environment pinned on every `glab` spawn.
+///
+/// Without `$GITLAB_HOST`, `glab` resolves the instance from the *process*
+/// cwd's git remote and otherwise falls back to gitlab.com (Codex review
+/// #458). gwm's cwd is not reliably the repo being queried — in workspace
+/// mode it is the workspace root while the row belongs to a child repo —
+/// so a same-named project on the wrong instance could be read and its
+/// iid persisted into the local git config. The value is the resolved web
+/// origin, which already carries scheme and port.
+pub fn glab_env(web_origin: &str) -> Vec<(String, String)> {
+  vec![("GITLAB_HOST".to_string(), web_origin.to_string())]
+}
+
+/// Flags whose *value* must never reach the Command Logs transcript.
+/// `--description` carries a whole rendered issue / MR body because
+/// `glab` has no `--body-file` counterpart to `gh`'s.
+const REDACTED_FLAGS: &[&str] = &["--description"];
 
 // ---- percent-encoding ----------------------------------------------------
 
@@ -192,16 +210,22 @@ struct RawPipeline {
 
 /// Classify a GitLab pipeline status into the shared [`CheckOutcome`].
 ///
-/// `manual` and `skipped` are treated as accepted (green), mirroring the
-/// GitHub side counting `NEUTRAL` / `SKIPPED`. Anything the list does not
+/// `skipped` is treated as accepted (green), mirroring the GitHub side
+/// counting `NEUTRAL` / `SKIPPED`. Anything the list does not
 /// cover lands on [`CheckOutcome::Unknown`] **by design** (issue #419): a
 /// `_ => Passing` catch-all would let a future GitLab status report a
 /// green CI that is not green, and that failure is silent.
 pub fn classify_pipeline_status(status: &str) -> CheckOutcome {
   match status.trim().to_ascii_lowercase().as_str() {
-    "success" | "skipped" | "manual" => CheckOutcome::Passing,
+    "success" | "skipped" => CheckOutcome::Passing,
     "failed" | "canceled" | "cancelled" | "canceling" | "cancelling" => CheckOutcome::Failing,
-    "created" | "waiting_for_resource" | "preparing" | "pending" | "running" | "scheduled" => CheckOutcome::Running,
+    // `manual` sits here, NOT with `skipped` (Codex review #458): a
+    // pipeline reports `manual` while it waits on a *blocking* manual
+    // job — it is suspended, it can bar the merge, and it is not a
+    // pass. Reading it as GitHub's `SKIPPED` painted a blocked MR green.
+    "created" | "waiting_for_resource" | "preparing" | "pending" | "running" | "scheduled" | "manual" => {
+      CheckOutcome::Running
+    }
     _ => CheckOutcome::Unknown,
   }
 }
@@ -569,6 +593,41 @@ fn due_date_field(due_on: &str) -> &str {
   due_on.split('T').next().unwrap_or(due_on)
 }
 
+/// Refuse a declared `due_on` that carries a time other than end-of-day
+/// (Codex review #458).
+///
+/// GitLab's `due_date` is **date-only**. A spec like `2026-07-15T17:00:00Z`
+/// is written as `2026-07-15`, read back as `2026-07-15T23:59:59Z` — the
+/// form [`crate::milestones::normalize_due_on`] gives a bare date — and so
+/// never compares equal to what was declared. The milestone would show as
+/// changed on every `gwm milestones list` and be PUT again on every push,
+/// without ever reaching the declared state.
+///
+/// The shared diff engine compares timestamps, not dates; making it
+/// date-granular per forge is a larger change than this belongs in. Until
+/// then, failing with the cause named beats looping silently.
+pub fn check_due_on_is_date_only(spec: &MilestoneSpec) -> Result<()> {
+  let Some(due) = spec.due_on.as_deref().filter(|s| !s.is_empty()) else {
+    return Ok(());
+  };
+  // `normalize_due_on` maps a bare `YYYY-MM-DD` to end-of-day UTC, which is
+  // exactly what the GitLab read path reconstructs — so end-of-day is the
+  // one time-of-day that round-trips.
+  let normalized = milestones::normalize_due_on(due)?;
+  if normalized.ends_with("T23:59:59Z") {
+    return Ok(());
+  }
+  Err(GwmError::Config(format!(
+    "milestone '{}': due_on '{}' carries a time of day, but GitLab stores milestone due dates as a date only \
+     ('{}'). The value would be rewritten on every push without ever matching. Declare a bare date \
+     (due_on = \"{}\") instead.",
+    spec.title,
+    due,
+    due_date_field(&normalized),
+    due_date_field(&normalized),
+  )))
+}
+
 /// `state` is not writable on GitLab milestones — closing and reopening
 /// are `state_event` transitions.
 fn state_event(state: MilestoneState) -> &'static str {
@@ -676,7 +735,7 @@ fn parse_created_milestone_id(s: &str) -> Result<u64> {
 /// GitLab implementation of [`Forge`], shelling out to `glab`.
 #[derive(Debug, Clone)]
 pub struct GitLabForge {
-  host: String,
+  web_origin: String,
   slug: String,
   program: OsString,
 }
@@ -685,24 +744,16 @@ impl GitLabForge {
   /// Resolves `$GWM_GLAB` **now**, on the calling thread, so a forge
   /// handed to the TUI's fetch worker never re-reads the process
   /// environment concurrently with env-mutating code (issue #217).
-  pub fn new(host: String, slug: String) -> Self {
+  pub fn new(web_origin: String, slug: String) -> Self {
     Self {
-      host,
+      web_origin,
       slug,
       program: glab_program(),
     }
   }
 
-  fn run<I, S>(&self, args: I) -> Result<String>
-  where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-  {
-    forge::run_cli(&self.program, args)
-  }
-
   fn run_argv(&self, argv: Vec<String>) -> Result<String> {
-    self.run(argv)
+    forge::run_cli_with(&self.program, argv, &glab_env(&self.web_origin), REDACTED_FLAGS)
   }
 }
 
@@ -715,16 +766,16 @@ impl Forge for GitLabForge {
     &self.slug
   }
 
-  fn host(&self) -> &str {
-    &self.host
+  fn web_origin(&self) -> &str {
+    &self.web_origin
   }
 
   fn issue_url(&self, number: u64) -> String {
-    format!("https://{}/{}/-/issues/{}", self.host, self.slug, number)
+    format!("{}/{}/-/issues/{}", self.web_origin, self.slug, number)
   }
 
   fn pr_url(&self, number: u64) -> String {
-    format!("https://{}/{}/-/merge_requests/{}", self.host, self.slug, number)
+    format!("{}/{}/-/merge_requests/{}", self.web_origin, self.slug, number)
   }
 
   fn pr_head_refspec(&self, number: u64) -> String {
@@ -805,6 +856,7 @@ impl Forge for GitLabForge {
   }
 
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
+    check_due_on_is_date_only(spec)?;
     let out = self.run_argv(milestone_create_argv(&self.slug, spec))?;
     // GitLab has no `state` on create, so a declared-closed milestone
     // needs a second call to transition it. Keyed on the id echoed back
@@ -817,6 +869,7 @@ impl Forge for GitLabForge {
   }
 
   fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
+    check_due_on_is_date_only(spec)?;
     self.run_argv(milestone_update_argv(&self.slug, number, spec))?;
     Ok(())
   }

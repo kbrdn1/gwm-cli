@@ -198,7 +198,9 @@ fn pipeline_status_classification_covers_the_gitlab_vocabulary() {
     ("success", CheckOutcome::Passing),
     // Mirrors the GitHub side treating NEUTRAL / SKIPPED as accepted.
     ("skipped", CheckOutcome::Passing),
-    ("manual", CheckOutcome::Passing),
+    // NOT accepted — a blocking manual job suspends the pipeline. See
+    // `a_blocking_manual_pipeline_is_not_green` (Codex review #458).
+    ("manual", CheckOutcome::Running),
     ("failed", CheckOutcome::Failing),
     ("canceled", CheckOutcome::Failing),
     ("canceling", CheckOutcome::Failing),
@@ -657,4 +659,101 @@ fn label_list_argv_paginates() {
     argv,
     vec!["api", "--paginate", "projects/group%2Fproj/labels?per_page=100"]
   );
+}
+
+// --- Codex review #458 ----------------------------------------------------
+
+#[test]
+fn a_blocking_manual_pipeline_is_not_green() {
+  // `manual` is NOT GitHub's `SKIPPED`. A GitLab pipeline sits in `manual`
+  // while it waits on a blocking manual job: it is suspended, it can bar
+  // the merge, and it is emphatically not a pass. Mapping it to `Passing`
+  // by analogy with SKIPPED painted a blocked MR green — the exact
+  // silent-green failure #419 set out to prevent.
+  assert_eq!(gitlab::classify_pipeline_status("manual"), CheckOutcome::Running);
+
+  // `skipped` genuinely is terminal-and-fine, and stays accepted.
+  assert_eq!(gitlab::classify_pipeline_status("skipped"), CheckOutcome::Passing);
+}
+
+#[test]
+fn a_manual_pipeline_does_not_count_as_a_passed_check() {
+  let json = MR_JSON.replace("\"status\": \"success\"", "\"status\": \"manual\"");
+
+  let pr = gitlab::parse_mr_json(&json).unwrap();
+
+  assert_eq!(pr.checks_passed, 0);
+  assert_ne!(pr.ci, CiState::Passing);
+}
+
+#[test]
+fn the_glab_host_is_pinned_from_the_resolved_origin() {
+  // `glab` otherwise resolves the instance from the *process* cwd's git
+  // remote, falling back to gitlab.com. In workspace mode the cwd is the
+  // workspace root, not the row's repo, so a same-named project on the
+  // wrong instance could be queried and its iid persisted locally.
+  let env = gitlab::glab_env("https://gitlab.acme.internal:8443");
+
+  assert_eq!(
+    env,
+    vec![(
+      "GITLAB_HOST".to_string(),
+      "https://gitlab.acme.internal:8443".to_string()
+    )]
+  );
+}
+
+#[test]
+fn the_issue_body_is_redacted_from_the_command_log() {
+  // `glab` has no `--body-file`, so the whole rendered body rides in
+  // `--description`. The Command Logs transcript is ours to build, so the
+  // value is redacted there rather than pasted into a copyable log line.
+  let argv: Vec<std::ffi::OsString> = gitlab::issue_create_argv("g/p", "T", "secret body text", &[])
+    .into_iter()
+    .map(Into::into)
+    .collect();
+
+  let line =
+    gwm::forge::cli_command_line_redacted(std::ffi::OsStr::new("/usr/local/bin/glab"), &argv, &["--description"]);
+
+  assert!(
+    !line.contains("secret body text"),
+    "body must not reach the log: {line}"
+  );
+  assert!(line.contains("--description <redacted:16 chars>"), "line: {line}");
+  assert!(line.starts_with("glab issue create"), "line: {line}");
+}
+
+#[test]
+fn a_due_on_carrying_a_time_is_refused_rather_than_looping_forever() {
+  // GitLab's `due_date` is date-only, so a declared `2026-07-15T17:00:00Z`
+  // is written as `2026-07-15`, read back as `…T23:59:59Z`, and never
+  // matches — an eternal diff issuing a PUT on every push. Refusing with a
+  // named cause beats a silent non-convergence.
+  let spec = MilestoneSpec {
+    title: "v1.5.0".into(),
+    description: None,
+    due_on: Some("2026-07-15T17:00:00Z".into()),
+    state: MilestoneState::Open,
+  };
+
+  let err = gitlab::check_due_on_is_date_only(&spec).unwrap_err();
+  let msg = err.to_string();
+
+  assert!(msg.contains("v1.5.0"), "should name the milestone: {msg}");
+  assert!(msg.contains("date"), "should name the cause: {msg}");
+}
+
+#[test]
+fn an_end_of_day_or_bare_date_due_on_is_accepted() {
+  for due in ["2026-07-15T23:59:59Z", "2026-07-15"] {
+    let spec = MilestoneSpec {
+      title: "v1.5.0".into(),
+      description: None,
+      due_on: Some(due.into()),
+      state: MilestoneState::Open,
+    };
+
+    assert!(gitlab::check_due_on_is_date_only(&spec).is_ok(), "due {due}");
+  }
 }

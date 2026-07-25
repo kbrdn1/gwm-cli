@@ -1296,7 +1296,7 @@ pub fn delete_milestone(slug: &str, number: u64) -> Result<()> {
 /// that pin the `gh` argv contract.
 #[derive(Debug, Clone)]
 pub struct GitHubForge {
-  host: String,
+  web_origin: String,
   slug: String,
   program: OsString,
 }
@@ -1305,9 +1305,9 @@ impl GitHubForge {
   /// Resolves `$GWM_GH` **now**, on the calling thread, so a forge handed
   /// to the TUI's fetch worker never re-reads the process environment
   /// concurrently with env-mutating code (issue #217).
-  pub fn new(host: String, slug: String) -> Self {
+  pub fn new(web_origin: String, slug: String) -> Self {
     Self {
-      host,
+      web_origin,
       slug,
       program: gh_program(),
     }
@@ -1323,16 +1323,16 @@ impl Forge for GitHubForge {
     &self.slug
   }
 
-  fn host(&self) -> &str {
-    &self.host
+  fn web_origin(&self) -> &str {
+    &self.web_origin
   }
 
   fn issue_url(&self, number: u64) -> String {
-    format!("https://{}/{}/issues/{}", self.host, self.slug, number)
+    format!("{}/{}/issues/{}", self.web_origin, self.slug, number)
   }
 
   fn pr_url(&self, number: u64) -> String {
-    format!("https://{}/{}/pull/{}", self.host, self.slug, number)
+    format!("{}/{}/pull/{}", self.web_origin, self.slug, number)
   }
 
   fn pr_head_refspec(&self, number: u64) -> String {
