@@ -3037,6 +3037,54 @@ fn ci_overlay_ticks_running_check_durations() {
 }
 
 #[test]
+fn ci_overlay_ticks_survive_a_pr_cache_invalidation() {
+  // Codex review #455 (P2): the tick read the checks back from the PR
+  // fetch cache, so an invalidation while the overlay was up — a
+  // workspace refresh_link with no bulk refetch, or a failed manual
+  // refresh — silently killed the clock: the ellipsis still claimed an
+  // active check but the duration froze for good. The overlay carries
+  // its own checks now; the tick runs on what the overlay displays.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::TaskKind;
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let started = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+  app.apply_pr_fetch_result(Ok(PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "a".into(),
+      outcome: CheckOutcome::Running,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at: Some(started),
+      completed_at: None,
+    }],
+  }));
+  app.enter_ci_checks();
+
+  // The cache is flushed while the overlay is up (same identity, so the
+  // identity guard keeps it open).
+  app.tasks.invalidate_matching(TaskKind::is_github);
+  app.github.invalidate();
+
+  app.detail_overlay.rows[0].extra = Some("frozen".into());
+  app.tick_ci_overlay_durations();
+  assert_ne!(
+    app.detail_overlay.rows[0].extra.as_deref(),
+    Some("frozen"),
+    "the duration clock survives a PR cache invalidation"
+  );
+}
+
+#[test]
 fn pr_line_ci_hint_is_hidden_in_picker_mode() {
   // Codex review #455 (P2): in picker mode (`gwm switch`) run_action drops
   // Action::CiChecks — printable keys feed the filter — so the PR line

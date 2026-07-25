@@ -545,6 +545,14 @@ pub struct App {
   /// `Enter` opening an old PR's check URL.
   detail_overlay_pr: Option<(Option<String>, u64)>,
 
+  /// The `PrCheck`s the open CI overlay renders (Codex review #455): the
+  /// duration tick used to read them back from the PR fetch cache, so an
+  /// invalidation while the overlay was up — a workspace `refresh_link`
+  /// with no bulk refetch, a failed manual refresh — silently killed the
+  /// clock of a Running check. The overlay owns its checks instead;
+  /// populated at open and on every landing, cleared on close.
+  ci_overlay_checks: Vec<github::PrCheck>,
+
   /// Set by `Action::ExitToWorktree` (#290): the path the main loop
   /// should print to stdout just before quitting so the shell wrapper
   /// (`cd "$(gwm)"`) can change directory. `None` → plain quit.
@@ -667,6 +675,7 @@ impl App {
       detail_overlay: crate::tui::state::detail_overlay::DetailOverlay::default(),
       detail_overlay_target: None,
       detail_overlay_pr: None,
+      ci_overlay_checks: Vec::new(),
       should_exit_to: None,
       edit_original_branch: None,
       edit_original_path: None,
@@ -2755,8 +2764,10 @@ impl App {
     // one behind) — it belongs to the agents consumer only (Codex #455).
     self.detail_overlay_target = None;
     // Pin the overlay to the PR it renders, so a link mutation that
-    // disagrees can close it (Codex review #455).
+    // disagrees can close it (Codex review #455). The checks themselves
+    // are kept too — the duration tick's cache-independent source.
     self.detail_overlay_pr = self.github.link.pr.map(|n| (self.github.link_slug.clone(), n));
+    self.ci_overlay_checks = checks;
     self.detail_overlay.open(
       crate::tui::state::detail_overlay::DetailKind::CiChecks,
       "CI Checks".into(),
@@ -2815,20 +2826,18 @@ impl App {
     {
       return;
     }
-    let Some(n) = self.github.link.pr else {
-      return;
-    };
-    let GitHubFetchState::Loaded(pr) = self.github.pr_fetch_state(n) else {
-      return;
-    };
-    if !pr
-      .checks
+    // The overlay's OWN checks, not the fetch cache (Codex review #455):
+    // an invalidation while the overlay is up — a workspace refresh_link
+    // with no bulk refetch, a failed manual refresh — would empty the
+    // cache and silently kill the clock of a still-Running check.
+    if !self
+      .ci_overlay_checks
       .iter()
       .any(|c| matches!(c.outcome, github::CheckOutcome::Running))
     {
       return;
     }
-    let rows = crate::tui::state::detail_overlay::ci_check_rows(&pr.checks, std::time::SystemTime::now());
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&self.ci_overlay_checks, std::time::SystemTime::now());
     self.detail_overlay.set_rows(rows);
   }
 
@@ -3095,6 +3104,7 @@ impl App {
   pub fn close_detail_overlay(&mut self) {
     self.detail_overlay_target = None;
     self.detail_overlay_pr = None;
+    self.ci_overlay_checks.clear();
     self.view = View::List;
   }
 
@@ -4956,6 +4966,7 @@ impl App {
       return true;
     }
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
+    self.ci_overlay_checks = status.checks.clone();
     self.detail_overlay.set_rows(rows);
     false
   }
