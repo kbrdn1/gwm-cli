@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-# gwm — git worktree manager
+# <picture><source media="(prefers-color-scheme: dark)" srcset="docs/_assets/logo.svg"><source media="(prefers-color-scheme: light)" srcset="docs/_assets/logo-light.svg"><img alt="" src="docs/_assets/logo.svg" width="26" height="26" align="top"></picture> gwm — git worktree manager
 
 [![ci](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/kbrdn1/gwm-cli/actions/workflows/ci.yml)
 [![release](https://img.shields.io/github/v/release/kbrdn1/gwm-cli?display_name=tag&sort=semver)](https://github.com/kbrdn1/gwm-cli/releases)

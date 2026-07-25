@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" shape-rendering="geometricPrecision">
+  <!-- tronc + branches en un seul path : l'union évite les traits de jonction -->
+  <path d="M4.5 4.75 H7 V9.75 H15 V12.25 H7 V17.25 H15 V19.75 H4.5 Z" fill="#e0e0e0"/>
+  <!-- nœuds : repo, worktree clean, worktree actif — liseré de la couleur du fond -->
+  <rect x="3" y="2" width="5.5" height="5.5" fill="#7ab8ff" stroke="#1a1a1a" stroke-width="1"/>
+  <rect x="14.5" y="8.25" width="5.5" height="5.5" fill="#86e89a" stroke="#1a1a1a" stroke-width="1"/>
+  <rect x="14.5" y="15.75" width="5.5" height="5.5" fill="#d4825d" stroke="#1a1a1a" stroke-width="1"/>
+</svg>

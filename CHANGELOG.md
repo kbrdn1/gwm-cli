@@ -47,6 +47,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   offset resets on worktree navigation and on the commits ↔ stashes mode
   toggle, mirroring the Recent Commits scroll contract. (#437)
 
+- A project logo. `docs/_assets/logo.svg` (dark) and
+  `docs/_assets/logo-light.svg` (light) draw what the tool operates on —
+  a trunk, a root node and two worktree nodes — on a 24 grid with square
+  corners, in the palette the rest of the project already uses. It heads
+  the README title through the same `<picture>` dark/light swap as the
+  promo banner, and the banner now carries it beside the wordmark.
+
 ### Changed
 
 - No workflow checkout persists the auto-injected token any more: the
