@@ -951,6 +951,42 @@ fn modified_strokes_reach_the_modal_resolution_in_input_modes() {
 }
 
 #[test]
+fn settings_editor_reinjects_unresolved_modified_characters() {
+  // Codex review #456 (iteration 10): AltGr/Option printables arrive as
+  // Char + ALT on some keyboards. They are not reserved typing (a bound
+  // Alt+x must stay reachable), but when the modal resolution comes up
+  // empty the character IS typing and must reach the buffer — the old
+  // fallback pushed it, the modifier-aware route dropped it, making
+  // characters like @ or { impossible to type.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.config_panel.editing = Some("a".into());
+  app.handle_settings_edit_key(KeyEvent::new(KeyCode::Char('@'), KeyModifiers::ALT));
+  assert_eq!(
+    app.config_panel.editing.as_deref(),
+    Some("a@"),
+    "an unresolved AltGr character must still type"
+  );
+}
+
+#[test]
+fn shifted_uppercase_never_counts_as_palette_typing() {
+  // Codex review #456 (iteration 10): kitty-style terminals report an
+  // uppercase X as Char('x') + SHIFT — the very case KeyStroke::from_event
+  // normalises. The palette only takes lowercase input, so that stroke is
+  // NOT canonical typing and must fall through to the modal resolution
+  // (a binding on "X" stays reachable on every terminal encoding).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::SHIFT)),
+    "a shifted letter is an uppercase, not palette input"
+  );
+  assert_eq!(app.palette.buffer(), "", "nothing must have been typed");
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();

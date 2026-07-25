@@ -2125,6 +2125,13 @@ impl App {
     if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
       return false;
     }
+    // Kitty-style terminals report an uppercase as Char + SHIFT (the case
+    // KeyStroke::from_event normalises): that is an uppercase letter, not
+    // the palette's lowercase input — a binding on "X" must stay
+    // reachable on every terminal encoding (Codex review #456, it. 10).
+    if key.modifiers.contains(Mods::SHIFT) && matches!(key.code, KeyCode::Char(c) if c.is_ascii_alphabetic()) {
+      return false;
+    }
     if key.code == KeyCode::Backspace {
       self.palette_pop_char();
       return true;
@@ -2162,6 +2169,27 @@ impl App {
         true
       }
       _ => false,
+    }
+  }
+
+  /// The whole Settings-editor key route (Codex review #456, iteration
+  /// 10) — one testable method: reserved typing first, then the modal
+  /// resolution, and an unresolved printable is REINJECTED as typing
+  /// (AltGr/Option characters arrive Char + ALT on some keyboards; they
+  /// are not reserved so a bound Alt+x stays reachable, but when nothing
+  /// resolves they are what the user typed).
+  pub fn handle_settings_edit_key(&mut self, key: KeyEvent) {
+    if self.settings_edit_input_key(key) {
+      return;
+    }
+    match self.resolve_modal(KeyContext::ConfigEdit, key) {
+      Some(ModalAction::ConfigEditSubmit) => self.commit_settings_edit(),
+      Some(ModalAction::ConfigEditCancel) => self.config_panel.cancel_edit(),
+      _ => {
+        if let KeyCode::Char(c) = key.code {
+          self.config_panel.push_edit_char(c);
+        }
+      }
     }
   }
 

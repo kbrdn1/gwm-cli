@@ -493,18 +493,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
       // Typing routes before the modal context here too (Codex review
       // #456) — see `App::settings_edit_input_key` (no-op unless an edit
       // is live, so plain Config navigation falls through).
-      View::Config if app.config_panel.editing.is_some() => {
-        // Typing routes before the modal context here too (Codex review
-        // #456) — see `App::settings_edit_input_key`; only Ctrl-modified
-        // keys and non-character keys reach the modal resolution.
-        if !app.settings_edit_input_key(key) {
-          match app.resolve_modal(KeyContext::ConfigEdit, key) {
-            Some(ModalAction::ConfigEditSubmit) => app.commit_settings_edit(),
-            Some(ModalAction::ConfigEditCancel) => app.config_panel.cancel_edit(),
-            _ => {}
-          }
-        }
-      }
+      // The whole route lives in a testable App method (Codex review
+      // #456): reserved typing, then the modal resolution, then the
+      // AltGr reinjection of unresolved printables.
+      View::Config if app.config_panel.editing.is_some() => app.handle_settings_edit_key(key),
       // #219: nav keys resolve through the `config` context. Select vs scroll
       // and the horizontal pan / jump verbs stay gated on the read-only `All`
       // tab exactly as before; the bound global `config_panel` key still
@@ -805,7 +797,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
             }
             Some(ModalAction::CommandPalettePrev) => app.palette_cycle_up(),
             Some(ModalAction::CommandPaletteNext) => app.palette_cycle_down(),
-            _ => {}
+            _ => {
+              // An unresolved modified charset printable is still typing
+              // (AltGr parity with the settings editor — Codex #456).
+              if let KeyCode::Char(c) = key.code {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' {
+                  app.palette_push_char(c);
+                }
+              }
+            }
           }
         }
       }
