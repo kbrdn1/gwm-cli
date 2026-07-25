@@ -1423,9 +1423,27 @@ impl GitHubForge {
 /// "the repo I am spawning you in" — so an inherited selector is never
 /// the right answer and is cleared unconditionally.
 ///
-/// The *host* variables are deliberately not in this list: gwm does not
-/// always know the host (an SSH origin gives only the SSH hostname), and
-/// there the user's exported value may be the only correct signal.
+/// The rule this applies, shared with [`crate::gitlab::glab_env_remove`]
+/// and stated once so it stops being rediscovered one variable per
+/// review round:
+///
+/// 1. **Project selectors are always cleared.** gwm always knows the
+///    project.
+/// 2. **Host overrides are cleared only when gwm has an authoritative
+///    value to replace them with.** gwm sometimes knows the host.
+/// 3. **Authentication and config location are never touched.** gwm
+///    never knows better than the user which identity they meant to use
+///    or where they keep their credentials.
+///
+/// Audited against gh's documented environment. Tier 1: `$GH_REPO`.
+/// Tier 2: none — `$GH_HOST` is pinned by [`gh_env`] and gh publishes
+/// neither an alias for it nor a separate API endpoint override, so
+/// there is nothing to close behind the pin (unlike `glab`). Tier 3:
+/// `$GH_TOKEN` / `$GITHUB_TOKEN`, `$GH_ENTERPRISE_TOKEN` /
+/// `$GITHUB_ENTERPRISE_TOKEN`, `$GH_CONFIG_DIR`. Everything else gh
+/// reads is presentation (`$GH_PAGER`, `$GH_EDITOR`, `$GH_BROWSER`,
+/// `$GH_FORCE_TTY`, `$GH_MDWIDTH`, `$NO_COLOR`), diagnostics
+/// (`$GH_DEBUG`), or telemetry — none of it can retarget a call.
 pub fn gh_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
   vec!["GH_REPO"]
 }

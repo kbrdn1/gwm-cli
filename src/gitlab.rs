@@ -91,6 +91,21 @@ pub fn glab_program() -> OsString {
 /// (it exists for instances that split Git and API onto separate
 /// hostnames). Pinning one while leaving the other two inherited is not
 /// a pin at all: the token still leaves for wherever they point.
+///
+/// Audited against glab's documented environment, under the three-tier
+/// rule stated on [`crate::github::gh_env_remove`]. Tier 1 (always
+/// cleared): `$GITLAB_REPO`, `$GITLAB_GROUP`, `$REMOTE_ALIAS`,
+/// `$GIT_REMOTE_URL_VAR`. Tier 2 (cleared only behind a pin):
+/// `$GITLAB_URI`, `$GITLAB_API_HOST`. Tier 3 (never touched):
+/// `$GITLAB_TOKEN`, `$GITLAB_CLIENT_ID`, `$CI_JOB_TOKEN`,
+/// `$GLAB_ENABLE_CI_AUTOLOGIN`, `$GLAB_CONFIG_DIR` — clearing the last
+/// three would break gwm inside a GitLab pipeline, which is precisely
+/// where that token is the only credential there is. The remainder
+/// (`$BROWSER`, `$EDITOR`/`$VISUAL`, `$GLAB_GLAMOUR_STYLE`,
+/// `$GLAB_FORCE_HYPERLINKS`, `$NO_COLOR`, `$GLAB_NO_PROMPT`,
+/// `$GLAB_DEBUG*`, `$GLAB_CHECK_UPDATE`, `$GLAB_SEND_TELEMETRY`,
+/// `$GITLAB_RELEASE_ASSETS_USE_PACKAGE_REGISTRY`) is presentation,
+/// diagnostics or telemetry and cannot retarget a call.
 pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
   let mut vars = vec!["GITLAB_REPO", "GITLAB_GROUP", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"];
   if !glab_env(origin).is_empty() {

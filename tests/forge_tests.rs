@@ -595,6 +595,45 @@ fn pinning_the_host_also_closes_the_ways_around_the_pin() {
 }
 
 #[test]
+fn authentication_and_config_location_are_never_stripped() {
+  // Tier 3 of the rule, and the one that BOUNDS the other two — without
+  // it "strip anything that could redirect us" eats the user's setup.
+  // gwm knows the project, and sometimes the host. It never knows better
+  // than the user which identity they meant to use or where they keep
+  // their credentials: clearing `$GH_CONFIG_DIR` breaks a deliberately
+  // relocated config, and clearing `$CI_JOB_TOKEN` breaks gwm inside a
+  // GitLab pipeline, where that token is the only credential there is.
+  // A pinning test, not red→green: it locks a decision in place.
+  let gh = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
+  for v in ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR"] {
+    assert!(
+      !gwm::github::gh_env_remove(&gh).contains(&v),
+      "{v} is the user's to set"
+    );
+  }
+
+  // Checked on a PINNED origin, the aggressive case: this is the branch
+  // that clears host variables, so it is the one that could overreach.
+  let gl = forge::parse_remote_url("https://gitlab.example.com/g/p.git").unwrap();
+  assert!(
+    !gwm::gitlab::glab_env(&gl).is_empty(),
+    "precondition: this origin IS pinned"
+  );
+  for v in [
+    "GITLAB_TOKEN",
+    "GITLAB_CLIENT_ID",
+    "CI_JOB_TOKEN",
+    "GLAB_ENABLE_CI_AUTOLOGIN",
+    "GLAB_CONFIG_DIR",
+  ] {
+    assert!(
+      !gwm::gitlab::glab_env_remove(&gl).contains(&v),
+      "{v} is the user's to set"
+    );
+  }
+}
+
+#[test]
 fn an_ssh_alias_matches_regardless_of_case() {
   // DNS is case-insensitive, so `SSH.GITHUB.COM` is a valid spelling of
   // the same host — but the alias table matched before the lowercase, so
