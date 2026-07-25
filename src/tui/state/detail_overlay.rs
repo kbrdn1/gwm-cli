@@ -98,6 +98,12 @@ impl DetailOverlay {
   pub fn set_rows(&mut self, rows: Vec<DetailRow>) {
     self.rows = rows;
     self.selected = self.selected.min(self.rows.len().saturating_sub(1));
+    // The input-mode cursor indexes the FILTERED list (Codex review #455):
+    // a landing with fewer matches than the cursor position left it out of
+    // bounds — no highlight, Enter returning None, a stuck filter.
+    self.input_selected = self
+      .input_selected
+      .min(filter_rows(&self.rows, &self.input).len().saturating_sub(1));
   }
 
   pub fn select_next(&mut self) {

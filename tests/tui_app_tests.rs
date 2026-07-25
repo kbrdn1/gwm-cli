@@ -2879,6 +2879,83 @@ fn ci_checks_refuse_to_open_on_a_stale_workspace_selection() {
 }
 
 #[test]
+fn modal_ci_refresh_reapplies_the_workspace_stale_guard() {
+  // Codex review #455 (P1): the modal dispatch calls the refresh directly,
+  // bypassing run_action's `workspace_active_stale && is_repo_mutating`
+  // guard. A selection gone stale AFTER the overlay opened (an async
+  // relist landing on a repo `Repository::open` can no longer activate)
+  // must not fetch — and persist PR metadata — through the previously
+  // active repo's slug and handle. The overlay closes instead.
+  let (_dir, _repo, mut app) = app_with_open_ci_overlay_on_pr_61();
+  app.workspace_active_stale = true;
+
+  app.ci_checks_refresh();
+  assert_eq!(
+    app.view,
+    View::List,
+    "a stale refresh closes the overlay instead of fetching"
+  );
+  assert!(
+    app.status.contains("unavailable"),
+    "the status line explains the close: {}",
+    app.status
+  );
+}
+
+#[test]
+fn ci_filter_cursor_clamps_when_a_refresh_shrinks_the_matches() {
+  // Codex review #455 (P2): `f` then `/` before the result lands, and the
+  // new rollup has fewer matches than the cursor position — set_rows only
+  // clamped `selected`, leaving `input_selected` out of bounds: no
+  // highlight, Enter returning None, a stuck filter until several `Up`
+  // presses. The filter cursor clamps against the new match count too.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mk_check = |name: &str| PrCheck {
+    name: name.into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  };
+  let mk_status = |checks: Vec<PrCheck>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: checks.len() as u32,
+    checks_total: checks.len() as u32,
+    ci: CiState::Passing,
+    checks,
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(vec![
+    mk_check("check-a"),
+    mk_check("check-b"),
+    mk_check("check-c"),
+  ])));
+  app.enter_ci_checks();
+  app.ci_input_open();
+  app.ci_input_push('c');
+  app.ci_input_next();
+  app.ci_input_next();
+  assert_eq!(
+    app.detail_overlay.input_selected, 2,
+    "the cursor sits on the last of 3 matches"
+  );
+
+  app.apply_pr_fetch_result(Ok(mk_status(vec![mk_check("check-a")])));
+  assert_eq!(app.ci_input_matches().len(), 1, "one match remains after the landing");
+  assert_eq!(
+    app.detail_overlay.input_selected, 0,
+    "the filter cursor clamps to the shrunk match list"
+  );
+}
+
+#[test]
 fn pr_line_ci_hint_is_hidden_in_picker_mode() {
   // Codex review #455 (P2): in picker mode (`gwm switch`) run_action drops
   // Action::CiChecks — printable keys feed the filter — so the PR line

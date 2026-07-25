@@ -2772,6 +2772,22 @@ impl App {
   // Same shell machinery as the agent attach prompt right above (mode +
   // input buffer + candidate cursor), filtering the overlay's own rows.
 
+  /// `f` inside the CI checks overlay — re-fetch the PR; the landing
+  /// refreshes the rows in place (`refresh_ci_overlay_on_pr_landing`).
+  /// The modal dispatch bypasses run_action's workspace guard, so it is
+  /// re-applied here (Codex review #455, P1): a selection gone stale
+  /// AFTER the overlay opened must not fetch — and persist PR metadata —
+  /// through the previously active repo's slug and handle. The overlay
+  /// closes, since its rows belong to that previous repo anyway.
+  pub fn ci_checks_refresh(&mut self) {
+    if self.workspace_active_stale {
+      self.close_detail_overlay();
+      self.status = "workspace: selected repo is unavailable — CI checks closed".into();
+      return;
+    }
+    self.refresh_github_status();
+  }
+
   pub fn ci_input_open(&mut self) {
     self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
     self.detail_overlay.input.clear();
