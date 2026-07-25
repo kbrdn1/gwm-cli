@@ -293,8 +293,11 @@ fn mr_list_argv_pins_the_source_branch_and_all_states() {
       "--all",
       "--output",
       "json",
+      // Not 1: `--source-branch` matches the branch NAME only, so a fork
+      // sharing it lands here too and must be filtered out downstream
+      // (Codex review #458).
       "--per-page",
-      "1",
+      "20",
     ]
   );
 }
@@ -970,4 +973,36 @@ fn every_write_path_honours_the_repo_selector() {
 
   assert!(!issue.iter().any(|a| a == "--repo"), "issue argv: {issue:?}");
   assert!(!mr.iter().any(|a| a == "--repo"), "mr argv: {mr:?}");
+}
+
+#[test]
+fn mr_detection_ignores_a_fork_with_the_same_branch_name() {
+  // `--source-branch` does not constrain the source *project*, so a fork
+  // whose branch happens to share the name could win the `--per-page 1`
+  // race — and its iid was then persisted as this branch's `gwm-pr-detected`,
+  // silently linking the worktree to a stranger's MR. A same-project MR is
+  // the one where `source_project_id` equals the target `project_id`.
+  let json = r#"[{"iid":900,"project_id":7,"source_project_id":99},
+                 {"iid":61,"project_id":7,"source_project_id":7}]"#;
+
+  assert_eq!(gitlab::parse_mr_list_number(json).unwrap(), Some(61));
+}
+
+#[test]
+fn mr_detection_keeps_an_mr_that_does_not_report_its_source_project() {
+  // Older payloads omit the field; dropping those would break detection
+  // outright, so absent means "assume same project".
+  let json = r#"[{"iid":61,"project_id":7}]"#;
+
+  assert_eq!(gitlab::parse_mr_list_number(json).unwrap(), Some(61));
+}
+
+#[test]
+fn mr_list_argv_asks_for_enough_rows_to_filter_forks() {
+  let argv = gitlab::mr_list_argv("g/p", "feat/x");
+
+  assert!(
+    argv.windows(2).any(|w| w[0] == "--per-page" && w[1] == "20"),
+    "one row cannot be filtered: {argv:?}"
+  );
 }

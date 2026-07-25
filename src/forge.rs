@@ -320,6 +320,17 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   // The port is web-relevant only over http(s). An `ssh://…:2222` port
   // addresses sshd, not the web UI, and an scp-like remote cannot carry a
   // port at all.
+  // Both forges publish an alternate SSH endpoint for networks that block
+  // port 22 (Codex review #458). It is an SSH host only — the API and web
+  // UI stay on the canonical domain — so pinning it, or building links
+  // from it, breaks every call. A short table of documented aliases, not
+  // a heuristic: anything unrecognised is left verbatim.
+  let host = match host {
+    "ssh.github.com" => "github.com",
+    "altssh.gitlab.com" => "gitlab.com",
+    other => other,
+  };
+
   let (web_origin, trust) = match scheme.as_deref() {
     Some("http") => (
       format!("http://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),

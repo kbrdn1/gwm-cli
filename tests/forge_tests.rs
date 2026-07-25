@@ -512,3 +512,39 @@ fn gh_host_is_still_unpinned_without_a_slug() {
 
   assert_eq!(f.slug(), "");
 }
+
+// --- Codex review #458, round 8 -------------------------------------------
+
+#[test]
+fn githubs_alternate_ssh_endpoint_maps_back_to_the_api_host() {
+  // `ssh://git@ssh.github.com:443/o/r.git` is GitHub's documented SSH
+  // endpoint for networks that block port 22. The API still lives on
+  // github.com, so pinning `ssh.github.com` — which round 7's
+  // "pin whenever the slug is known" did — broke every call, mutations
+  // included. A named alias, not a heuristic.
+  let r = forge::parse_remote_url("ssh://git@ssh.github.com:443/owner/repo.git").unwrap();
+
+  assert_eq!(r.host, "github.com");
+  assert_eq!(r.web_origin, "https://github.com");
+  assert_eq!(
+    gwm::github::gh_env(&r),
+    vec![("GH_HOST".to_string(), "github.com".to_string())]
+  );
+}
+
+#[test]
+fn gitlabs_alternate_ssh_endpoint_maps_back_too() {
+  let r = forge::parse_remote_url("ssh://git@altssh.gitlab.com:443/group/proj.git").unwrap();
+
+  assert_eq!(r.host, "gitlab.com");
+  assert_eq!(r.web_origin, "https://gitlab.com");
+}
+
+#[test]
+fn an_unknown_ssh_host_is_left_alone() {
+  // Only the two documented aliases are rewritten; anything else stays
+  // verbatim rather than being guessed at.
+  let r = forge::parse_remote_url("git@ssh.gitlab.acme:team/proj.git").unwrap();
+
+  assert_eq!(r.host, "ssh.gitlab.acme");
+}

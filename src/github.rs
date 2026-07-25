@@ -941,9 +941,13 @@ pub fn find_pr_argv(slug: &str, branch: &str) -> Vec<String> {
     "--state".into(),
     "all".into(),
     "--json".into(),
-    "number".into(),
+    // `isCrossRepository` is GitHub's own marker for "opened from a
+    // fork"; `parse_pr_list_number` filters on it (Codex review #458).
+    "number,isCrossRepository".into(),
+    // More than one row on purpose: `--head` matches the branch NAME
+    // only, so a fork carrying the same name can appear.
     "--limit".into(),
-    "1".into(),
+    "20".into(),
   ]
 }
 
@@ -954,12 +958,24 @@ pub fn parse_pr_list_number(s: &str) -> Result<Option<u64>> {
   #[derive(Deserialize)]
   struct PrRef {
     number: u64,
+    /// GitHub's marker for a PR opened from a fork. `--head <branch>`
+    /// matches the branch NAME only, so a fork sharing the name lands in
+    /// the same list — and its number would be persisted as this
+    /// branch's detected PR (Codex review #458). Absent is treated as
+    /// same-repo so an older payload still detects.
+    #[serde(rename = "isCrossRepository", default)]
+    is_cross_repository: Option<bool>,
   }
   let arr: Vec<PrRef> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
     kind: "pr list",
     source: e,
   })?;
-  Ok(arr.into_iter().next().map(|p| p.number))
+  Ok(
+    arr
+      .into_iter()
+      .find(|p| !p.is_cross_repository.unwrap_or(false))
+      .map(|p| p.number),
+  )
 }
 
 fn run_gh<I, S>(args: I) -> Result<String>

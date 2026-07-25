@@ -110,6 +110,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `git@[::1]:group/repo.git`
   was split on the first colon, yielding host `git@[` and a nonsense path. The
   scp-form and port splits are now bracket-aware.
+- **Both forges' alternate SSH endpoints map back to the API host**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)).
+  `ssh://git@ssh.github.com:443/…` and `altssh.gitlab.com` exist for networks
+  that block port 22; the API and web UI stay on the canonical domain, so
+  pinning the SSH host broke every call and produced dead links.
+- **PR / MR auto-detection ignores a fork sharing the branch name**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `--head` /
+  `--source-branch` match the branch *name* only, so a fork's PR could win and
+  be persisted as this branch's detected PR. Filtered on GitHub's
+  `isCrossRepository` and on GitLab's `source_project_id` vs `project_id`.
 - **An SSH origin lets `glab` resolve the project itself**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). No host can honestly
   be pinned from an SSH remote, but passing `--repo <slug>` anyway made glab

@@ -1212,9 +1212,12 @@ fn find_pr_argv_pins_the_gh_pr_list_contract() {
       "--state",
       "all",
       "--json",
-      "number",
+      // `isCrossRepository` joins the field list so a fork's PR sharing
+      // the branch name can be filtered out (Codex review #458), and the
+      // limit rises so there is something to filter.
+      "number,isCrossRepository",
       "--limit",
-      "1",
+      "20",
     ]
   );
 }
@@ -1321,4 +1324,22 @@ fn agent_pins_accumulate_and_detach_individually() {
 
   clear_agent_pins(&repo, &branch).unwrap();
   assert!(agent_pins(&repo, &branch).unwrap().is_empty());
+}
+
+#[test]
+fn pr_detection_ignores_a_fork_with_the_same_branch_name() {
+  // Same hazard as the GitLab side (Codex review #458): `--head <branch>`
+  // matches on the branch name alone, so a fork's PR sharing the name
+  // could be picked and persisted as this branch's detected PR.
+  // `isCrossRepository` is GitHub's own marker for "opened from a fork".
+  let json = r#"[{"number":900,"isCrossRepository":true},{"number":61,"isCrossRepository":false}]"#;
+
+  assert_eq!(github::parse_pr_list_number(json).unwrap(), Some(61));
+}
+
+#[test]
+fn pr_detection_keeps_a_pr_that_does_not_report_cross_repository() {
+  let json = r#"[{"number":61}]"#;
+
+  assert_eq!(github::parse_pr_list_number(json).unwrap(), Some(61));
 }

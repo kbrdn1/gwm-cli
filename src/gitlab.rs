@@ -344,24 +344,48 @@ pub fn mr_list_argv(slug: &str, branch: &str) -> Vec<String> {
     "--all".into(),
     "--output".into(),
     "json".into(),
+    // More than one row on purpose: `--source-branch` matches the branch
+    // NAME only, so a fork carrying the same name can appear. The
+    // same-project MR is picked in `parse_mr_list_number`, which needs
+    // candidates to pick from (Codex review #458).
     "--per-page".into(),
-    "1".into(),
+    "20".into(),
   ]);
   argv
 }
 
 /// Parse the JSON array printed by `glab mr list --output json`,
-/// returning the first MR's `iid` if any.
+/// returning the first MR opened from **this** project.
+///
+/// `--source-branch` constrains the branch name but not the source
+/// project, so a fork whose branch shares the name shows up here too
+/// (Codex review #458) — and its iid would be persisted as this branch's
+/// `gwm-pr-detected`, silently linking the worktree to a stranger's MR.
+/// A same-project MR is the one whose `source_project_id` matches the
+/// target `project_id`; a payload that reports neither is kept, since
+/// dropping it would break detection on older instances outright.
 pub fn parse_mr_list_number(s: &str) -> Result<Option<u64>> {
   #[derive(Deserialize)]
   struct MrRef {
     iid: u64,
+    #[serde(default)]
+    project_id: Option<u64>,
+    #[serde(default)]
+    source_project_id: Option<u64>,
   }
   let arr: Vec<MrRef> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
     kind: "gitlab mr list",
     source: e,
   })?;
-  Ok(arr.into_iter().next().map(|m| m.iid))
+  Ok(
+    arr
+      .into_iter()
+      .find(|m| match (m.project_id, m.source_project_id) {
+        (Some(target), Some(source)) => target == source,
+        _ => true,
+      })
+      .map(|m| m.iid),
+  )
 }
 
 // ---- create --------------------------------------------------------------
