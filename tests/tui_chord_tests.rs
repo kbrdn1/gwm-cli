@@ -552,8 +552,11 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
   let modal = ModalKeymap::defaults();
   let rows = help_rows(&Keymap::defaults(), &modal, HintContext::Worktrees);
 
-  // section title -> the keys strings its entries document.
-  let mut sections: std::collections::HashMap<String, std::collections::HashSet<String>> =
+  // section title -> keys string -> number of entries documenting it. A
+  // COUNT, not a set (Codex review #456): verbs can share their keys
+  // inside one section (both Link Prompt cancels are `Esc`), so mere
+  // presence would let one of them drop out of the overlay unnoticed.
+  let mut sections: std::collections::HashMap<String, std::collections::HashMap<String, usize>> =
     std::collections::HashMap::new();
   let mut current: Option<String> = None;
   for row in &rows {
@@ -561,13 +564,19 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       HelpRow::Section(title) => current = Some(title.clone()),
       HelpRow::Entry { keys, .. } if !keys.is_empty() => {
         if let Some(section) = &current {
-          sections.entry(section.clone()).or_default().insert(keys.clone());
+          *sections
+            .entry(section.clone())
+            .or_default()
+            .entry(keys.clone())
+            .or_default() += 1;
         }
       }
       _ => {}
     }
   }
 
+  // Expected multiset: how many modal verbs bind each (section, keys) pair.
+  let mut expected: std::collections::HashMap<(String, String), usize> = std::collections::HashMap::new();
   for action in ModalAction::all() {
     let keys = modal.keys_display(action);
     assert!(
@@ -575,12 +584,16 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
       "ModalAction::{action:?} has no default binding — the guard identifies \
        verbs by their keys string; bind it (or document the exception)"
     );
-    let section = section_for(action.context());
-    let in_section = sections.get(section).is_some_and(|s| s.contains(&keys));
+    *expected
+      .entry((section_for(action.context()).to_string(), keys))
+      .or_default() += 1;
+  }
+  for ((section, keys), wanted) in &expected {
+    let have = sections.get(section).and_then(|m| m.get(keys)).copied().unwrap_or(0);
     assert!(
-      in_section,
-      "ModalAction::{action:?} (keys {keys:?}) is not documented in the {section:?} \
-       section of the help overlay — add a `modal_entry` there (issue #453)"
+      have >= *wanted,
+      "the {section:?} section documents {have} entr(y/ies) with keys {keys:?} but \
+       {wanted} modal verb(s) bind them — one is missing from `help_rows` (issue #453)"
     );
   }
 }

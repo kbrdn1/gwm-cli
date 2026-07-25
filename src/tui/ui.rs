@@ -3036,16 +3036,19 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::ConfigToggleLayer, "toggle the Project / Global layer"),
       modal_entry(ModalAction::ConfigSelectNext, "next setting"),
       modal_entry(ModalAction::ConfigSelectPrev, "previous setting"),
-      modal_entry(ModalAction::ConfigActivate, "toggle / edit the selected setting"),
+      modal_entry(
+        ModalAction::ConfigActivate,
+        "toggle / edit the selected setting (Keys tab: start a key capture)",
+      ),
       modal_entry(ModalAction::ConfigScrollLeft, "pan left"),
       modal_entry(ModalAction::ConfigScrollRight, "pan right"),
       modal_entry(ModalAction::ConfigScrollTop, "jump to the top"),
       modal_entry(ModalAction::ConfigScrollBottom, "jump to the bottom"),
       modal_entry(
         ModalAction::ConfigEditSubmit,
-        "commit the edited value (numeric editor)",
+        "commit the edited value / the captured chord",
       ),
-      modal_entry(ModalAction::ConfigEditCancel, "cancel the edit (numeric editor)"),
+      modal_entry(ModalAction::ConfigEditCancel, "cancel the edit / the key capture"),
       modal_entry(ModalAction::ConfigClose, "close"),
       HelpRow::Blank,
       HelpRow::Section("Bootstrap Report".to_string()),
@@ -3054,7 +3057,10 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       HelpRow::Blank,
       HelpRow::Section("PTY Overlay".to_string()),
       HelpRow::Blank,
-      fixed("Esc", "close the overlay — every other key passes through"),
+      fixed(
+        "Esc",
+        "close the overlay — other keys pass through (any key closes a finished exec run)",
+      ),
     ]);
   }
   // The overlay's own navigation is reachable from the picker too (`?`
