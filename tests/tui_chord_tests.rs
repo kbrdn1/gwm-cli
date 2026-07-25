@@ -672,58 +672,6 @@ fn picker_help_hides_every_modal_section() {
 }
 
 #[test]
-fn help_hides_modal_chords_swallowed_by_reserved_typing() {
-  // Codex review #456 (iteration 9): with `palette.close = ["x"]` the
-  // overlay advertised `x` although the reserved filter typing consumes
-  // it — the verb is unreachable. Chords swallowed by an always-typing
-  // context (palette / link number / settings editor) are hidden; a
-  // modified binding (`Alt+x`) stays reachable and stays advertised.
-  // The Create context is deliberately NOT filtered: its chords remain
-  // live on the Type field, which takes no text input.
-  use gwm::tui::help_rows;
-  use gwm::tui::keymap::{KeyStroke, Keymap};
-  use gwm::tui::modal_keymap::{ModalAction, ModalKeymap};
-  use gwm::tui::{HelpRow, HintContext};
-
-  let close_keys = |modal: &ModalKeymap| -> Option<String> {
-    let rows = help_rows(&Keymap::defaults(), modal, HintContext::Worktrees);
-    let mut in_palette = false;
-    for row in &rows {
-      match row {
-        HelpRow::Section(t) => in_palette = t == "Command Palette",
-        HelpRow::Entry { keys, label } if in_palette && label == "close" => {
-          return Some(keys.clone());
-        }
-        _ => {}
-      }
-    }
-    None
-  };
-
-  let mut modal = ModalKeymap::defaults();
-  modal
-    .apply_override(ModalAction::CommandPaletteClose, KeyStroke::parse_chord("x").unwrap())
-    .unwrap();
-  assert_eq!(
-    close_keys(&modal).as_deref(),
-    Some(""),
-    "a close bound to a reserved typing key is unreachable and must not be advertised"
-  );
-
-  modal
-    .apply_override(
-      ModalAction::CommandPaletteClose,
-      KeyStroke::parse_chord("Alt+x").unwrap(),
-    )
-    .unwrap();
-  assert_eq!(
-    close_keys(&modal).as_deref(),
-    Some("Alt+x"),
-    "a modified binding stays reachable and stays advertised"
-  );
-}
-
-#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in

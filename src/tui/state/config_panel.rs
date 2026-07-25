@@ -553,24 +553,34 @@ impl ConfigPanel {
   /// Append a character to the edit buffer. `Uint` fields take ASCII digits
   /// only (with per-field caps); `Text` fields take any printable character
   /// (capped at 256).
-  /// Returns whether the character was ACCEPTED by the field (Codex
-  /// review #456): a numeric field refuses non-digits, and a refused
-  /// character is not typing — the caller lets it reach the modal
-  /// resolution so a rebound verb on it still fires.
+  /// Returns whether the character is of the TYPE the field accepts
+  /// (Codex review #456): a numeric field refuses non-digits, and a
+  /// refused character is not typing — the caller lets it reach the
+  /// modal resolution so a rebound verb on it still fires. A valid
+  /// character arriving on a FULL buffer is a consumed no-op (`true`),
+  /// never a fall-through: a digit must not suddenly cancel the edit
+  /// just because the countdown hit its width limit.
   pub fn push_edit_char(&mut self, c: char) -> bool {
     let field = self.selected_field();
     let uint = matches!(field.map(SettingField::kind), Some(FieldKind::Uint));
     let limit = field.map(SettingField::edit_char_limit).unwrap_or(256);
     if let Some(buf) = self.editing.as_mut() {
       if uint {
-        if c.is_ascii_digit() && buf.len() < limit {
-          buf.push(c);
-          return true;
+        if !c.is_ascii_digit() {
+          return false;
         }
-      } else if !c.is_control() && buf.len() < limit {
-        buf.push(c);
+        if buf.len() < limit {
+          buf.push(c);
+        }
         return true;
       }
+      if c.is_control() {
+        return false;
+      }
+      if buf.len() < limit {
+        buf.push(c);
+      }
+      return true;
     }
     false
   }

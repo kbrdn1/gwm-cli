@@ -112,6 +112,31 @@ pub enum KeyContext {
 }
 
 impl KeyContext {
+  /// Strokes an ALWAYS-typing context reserves for its input (Codex
+  /// review #456): the dispatch routes them into the query / number
+  /// before the modal resolution, so a verb bound to one would be
+  /// unreachable — and `close = ["x"]` would leave the overlay with no
+  /// exit at all. [`ModalKeymap::apply_override`] refuses such bindings
+  /// up front. Create and ConfigEdit are exempt: their chords stay live
+  /// in sub-modes that take no text input (the Type field, the Keys-tab
+  /// capture). Mirrors the dispatch routes exactly
+  /// (`App::palette_input_key`, the link number stage).
+  pub fn reserved_typing_stroke(self, stroke: &KeyStroke) -> bool {
+    use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
+    if stroke.modifiers.intersects(KM::CONTROL | KM::ALT) {
+      return false;
+    }
+    match (self, stroke.code) {
+      (KeyContext::CommandPalette | KeyContext::LinkInputNumber, KC::Backspace) => true,
+      // A shifted letter is an uppercase (kitty-style) — not palette
+      // input, so it stays bindable.
+      (KeyContext::CommandPalette, KC::Char(c)) if stroke.modifiers.contains(KM::SHIFT) => c.is_ascii_digit(),
+      (KeyContext::CommandPalette, KC::Char(c)) => c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-',
+      (KeyContext::LinkInputNumber, KC::Char(c)) => c.is_ascii_digit(),
+      _ => false,
+    }
+  }
+
   /// Dotted key under `[tui.keys.modal]` addressing this context's sub-table.
   pub fn config_path(self) -> &'static str {
     match self {
@@ -411,6 +436,20 @@ impl ModalKeymap {
   /// user intent wins over a shipped default.
   pub fn apply_override(&mut self, action: ModalAction, keys: Vec<KeyStroke>) -> Result<()> {
     let ctx = action.context();
+    // Refuse a binding the context's reserved typing would swallow (Codex
+    // review #456): with `palette.close = ["x"]` the override replaces
+    // Esc, then the filter typing consumes `x` — the overlay is left with
+    // no exit short of Ctrl-C. Better a clear config error up front.
+    for k in &keys {
+      if ctx.reserved_typing_stroke(k) {
+        return Err(GwmError::Config(format!(
+          "context {}: key {} is reserved for typing input there and cannot be bound — \
+           the dispatch routes it to the query before the modal resolution",
+          ctx.config_path(),
+          k
+        )));
+      }
+    }
     let claimed: Vec<&KeyStroke> = keys.iter().collect();
 
     // Build the post-override key→action map for this context (excluding the
@@ -499,18 +538,6 @@ impl ModalKeymap {
   /// Every key bound to `action`, comma-joined (`"n, Esc"`) or empty when
   /// unbound — the help-overlay row form, matching the global keymap's
   /// `keys_for` rendering.
-  /// The resolved strokes bound to `action` (empty when unbound). Used by
-  /// the help overlay to filter out strokes the reserved typing of an
-  /// input context swallows (Codex review #456).
-  pub fn keys(&self, action: ModalAction) -> &[KeyStroke] {
-    self
-      .entries
-      .iter()
-      .find(|b| b.action == action)
-      .map(|b| b.keys.as_slice())
-      .unwrap_or(&[])
-  }
-
   pub fn keys_display(&self, action: ModalAction) -> String {
     self
       .entries

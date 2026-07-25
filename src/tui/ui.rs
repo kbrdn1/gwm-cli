@@ -2763,37 +2763,13 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
   // A rebindable modal entry: keys resolved from the contextual keymap
   // (issue #219) so the create-form / delete-confirm rows track
   // `[tui.keys.modal.<context>]` overrides instead of a frozen literal.
-  // A stroke swallowed by an ALWAYS-typing context's reserved input never
-  // reaches the modal resolution (Codex review #456) — a verb bound only
-  // to such strokes is unreachable and must not be advertised. Mirrors
-  // the dispatch routes exactly (palette / link number). The Create and
-  // ConfigEdit contexts are deliberately NOT filtered: Create's chords
-  // stay live on the Type field (no text input there) and ConfigEdit's
-  // stay live in the Keys-tab capture sub-mode, which resolves them
-  // before its own reserved controls (Codex review #456, iteration 10).
-  let stroke_reserved_for_typing = |ctx: KeyContext, stroke: &super::keymap::KeyStroke| -> bool {
-    use crossterm::event::{KeyCode as KC, KeyModifiers as KM};
-    if stroke.modifiers.intersects(KM::CONTROL | KM::ALT) {
-      return false;
-    }
-    match (ctx, stroke.code) {
-      (KeyContext::CommandPalette | KeyContext::LinkInputNumber, KC::Backspace) => true,
-      (KeyContext::CommandPalette, KC::Char(c)) => c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-',
-      (KeyContext::LinkInputNumber, KC::Char(c)) => c.is_ascii_digit(),
-      _ => false,
-    }
-  };
-  let modal_entry = move |action: ModalAction, label: &str| -> HelpRow {
-    let ctx = action.context();
-    let keys = modal
-      .keys(action)
-      .iter()
-      .filter(|k| !stroke_reserved_for_typing(ctx, k))
-      .map(|k| k.to_string())
-      .collect::<Vec<_>>()
-      .join(", ");
+  // No display-side filtering is needed for the always-typing contexts:
+  // a binding their reserved input would swallow is refused at config
+  // time (`ModalKeymap::apply_override`, Codex review #456), so every
+  // advertised chord is reachable by construction.
+  let modal_entry = |action: ModalAction, label: &str| -> HelpRow {
     HelpRow::Entry {
-      keys,
+      keys: modal.keys_display(action),
       label: label.to_string(),
     }
   };
