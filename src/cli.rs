@@ -2744,8 +2744,10 @@ fn cmd_review(
     let _ = worktree::run_git_logged(&workdir, &["fetch", "origin", &refspec]);
     format!("origin/{}", head.base_ref_name)
   });
+  let head_ref = forge.pr_head_refspec(number);
   let rspec = review::ReviewSpec {
     number,
+    head_ref: &head_ref,
     branch: &branch,
     dirname: &dirname,
     target: &target,
@@ -2753,7 +2755,7 @@ fn cmd_review(
   };
   let created = review::materialize(&repo, &workdir, &rspec)?;
   println!("✓ review worktree created at {}", created.display());
-  println!("✓ linked to PR #{number}");
+  println!("✓ linked to {} #{number}", forge.pr_noun());
 
   let post_ctx = pre_ctx.with_cwd(&created);
   match review::run_post_setup(&config, &post_ctx, &workdir, &created, &skips, bootstrap)? {
@@ -3765,7 +3767,8 @@ fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
       build_status_json(&branch, slug.as_deref(), &link, &issue_status, &pr_status)
     );
   } else {
-    print_status_human(&branch, slug.as_deref(), &link, &issue_status, &pr_status);
+    let pr_noun = forge.as_ref().map_or("PR", |f| f.pr_noun());
+    print_status_human(&branch, slug.as_deref(), &link, &issue_status, &pr_status, pr_noun);
   }
   Ok(())
 }
@@ -3829,12 +3832,16 @@ fn print_status_human(
   link: &BranchLink,
   issue: &Option<IssueStatus>,
   pr: &Option<PrStatus>,
+  // "PR" / "MR" (issue #419). The `issue:` / `pr:` field labels below stay
+  // put: they are output *keys* a script greps for, not prose, and the
+  // `--json` payload freezes the same names.
+  pr_noun: &str,
 ) {
   println!("branch: {}", branch);
   if let Some(s) = slug {
     println!("repo:   {}", s);
   }
-  println!("link:   {}", link.summary());
+  println!("link:   {}", link.summary(pr_noun));
 
   if let Some(n) = link.issue {
     print!("issue:  #{}", n);

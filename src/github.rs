@@ -101,12 +101,16 @@ impl BranchLink {
   }
 
   /// One-line human-readable rendering for the CLI / TUI status bar.
-  pub fn summary(&self) -> String {
+  ///
+  /// `pr_noun` comes from [`crate::forge::Forge::pr_noun`] — "PR" on
+  /// GitHub, "MR" on GitLab (issue #419). Passed in rather than read from
+  /// a global so `BranchLink` stays a plain data struct.
+  pub fn summary(&self, pr_noun: &str) -> String {
     match (self.issue, self.pr) {
       (None, None) => "no link".into(),
       (Some(i), None) => format!("issue #{i}"),
-      (None, Some(p)) => format!("PR #{p}"),
-      (Some(i), Some(p)) => format!("issue #{i} · PR #{p}"),
+      (None, Some(p)) => format!("{pr_noun} #{p}"),
+      (Some(i), Some(p)) => format!("issue #{i} · {pr_noun} #{p}"),
     }
   }
 }
@@ -1329,6 +1333,10 @@ impl Forge for GitHubForge {
 
   fn pr_url(&self, number: u64) -> String {
     format!("https://{}/{}/pull/{}", self.host, self.slug, number)
+  }
+
+  fn pr_head_refspec(&self, number: u64) -> String {
+    format!("pull/{number}/head")
   }
 
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {

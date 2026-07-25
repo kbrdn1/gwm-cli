@@ -233,3 +233,23 @@ fn forge_key_rejects_an_unknown_value() {
     err
   );
 }
+
+// --- `gwm review` head refspec --------------------------------------------
+
+#[test]
+fn github_pr_head_refspec_uses_refs_pull() {
+  let f = forge::for_kind(ForgeKind::GitHub, "github.com".into(), "o/r".into());
+
+  assert_eq!(f.pr_head_refspec(61), "pull/61/head");
+}
+
+#[test]
+fn gitlab_mr_head_refspec_uses_refs_merge_requests() {
+  // GitLab does not publish `refs/pull/*` at all. Reusing the GitHub
+  // refspec made `gwm review` fail *after* `glab mr view` had already
+  // succeeded and printed "resolving MR #61 …", which reads as a gwm bug
+  // rather than an unsupported path.
+  let f = forge::for_kind(ForgeKind::GitLab, "gitlab.com".into(), "g/p".into());
+
+  assert_eq!(f.pr_head_refspec(61), "merge-requests/61/head");
+}

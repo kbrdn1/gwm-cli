@@ -99,11 +99,12 @@ pub enum GwmError {
   #[error("{reason}")]
   UnbornHead { reason: String },
 
-  /// Issue #105: failed to deserialize a `gh` CLI JSON payload.
+  /// Issue #105: failed to deserialize a forge CLI JSON payload.
   /// `kind` names the payload (`"issue"`, `"pr"`, `"pr list"`,
-  /// `"labels"`, `"milestones"`) so the user can grep for which
-  /// gh contract changed; `source` carries the underlying
-  /// `serde_json::Error` for downstream introspection.
+  /// `"labels"`, `"milestones"`, and the `"gitlab …"` variants since
+  /// #419) so the user can grep for which forge contract changed;
+  /// `source` carries the underlying `serde_json::Error` for downstream
+  /// introspection.
   #[error("failed to parse {kind} json: {source}")]
   GhJsonParse {
     kind: &'static str,

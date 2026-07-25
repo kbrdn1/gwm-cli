@@ -440,6 +440,14 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
   )
 }
 
+/// Argv for `GET /projects/:id/labels`.
+///
+/// **Unverified assumption**: this deserializes into a single `Vec<_>`, so
+/// `glab api --paginate` must *merge* pages into one JSON array the way
+/// `gh api --paginate` does. If glab instead concatenates arrays
+/// (`[…][…]`), parsing breaks — and only for projects past the 100-row
+/// first page, so it would not show up in light use. Confirm against a
+/// real instance before relying on it at that scale.
 pub fn label_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),
@@ -577,6 +585,13 @@ fn state_event(state: MilestoneState) -> &'static str {
 /// reason as on GitHub — `per_page` caps at 100, and diffing against a
 /// truncated set would make `--prune` propose deleting whatever fell off
 /// the page.
+///
+/// **Unverified assumption**: this deserializes into a single `Vec<_>`, so
+/// `glab api --paginate` must *merge* pages into one JSON array the way
+/// `gh api --paginate` does. If glab instead concatenates arrays
+/// (`[…][…]`), parsing breaks — and only for projects past the 100-row
+/// first page, so it would not show up in light use. Confirm against a
+/// real instance before relying on it at that scale.
 pub fn milestone_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),
@@ -710,6 +725,10 @@ impl Forge for GitLabForge {
 
   fn pr_url(&self, number: u64) -> String {
     format!("https://{}/{}/-/merge_requests/{}", self.host, self.slug, number)
+  }
+
+  fn pr_head_refspec(&self, number: u64) -> String {
+    format!("merge-requests/{number}/head")
   }
 
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {

@@ -339,6 +339,14 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
   fn issue_url(&self, number: u64) -> String;
   fn pr_url(&self, number: u64) -> String;
 
+  /// The `git fetch origin <spec>` left-hand side that resolves the
+  /// change's head commit, for `gwm review`. Forge-specific and NOT
+  /// interchangeable: GitHub publishes `refs/pull/<n>/head`, GitLab
+  /// publishes `refs/merge-requests/<iid>/head` and no `refs/pull/*` at
+  /// all, so a shared literal would fail the fetch *after* the metadata
+  /// lookup already succeeded.
+  fn pr_head_refspec(&self, number: u64) -> String;
+
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus>;
   fn fetch_pr(&self, number: u64) -> Result<PrStatus>;
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead>;

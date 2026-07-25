@@ -1091,7 +1091,7 @@ fn branch_link_summary_renders_human_readable() {
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::Explicit,
   };
-  let s = link.summary();
+  let s = link.summary("PR");
   assert!(s.contains("#42"), "summary should mention issue #42: {}", s);
   assert!(s.contains("#61"), "summary should mention PR #61: {}", s);
 }
@@ -1183,7 +1183,18 @@ fn apply_detected_pr_is_noop_when_nothing_detected() {
 fn detected_pr_renders_in_summary_like_any_pr() {
   let mut link = BranchLink::empty();
   github::apply_detected_pr(&mut link, Some(128));
-  assert_eq!(link.summary(), "PR #128");
+  assert_eq!(link.summary("PR"), "PR #128");
+}
+
+#[test]
+fn summary_uses_the_forge_noun() {
+  // Issue #419: `gwm status` on GitLab must not print "PR #128" for a
+  // merge request. The noun is supplied by the resolved forge.
+  let mut link = BranchLink::empty();
+  github::apply_detected_pr(&mut link, Some(128));
+  link.issue = Some(42);
+
+  assert_eq!(link.summary("MR"), "issue #42 · MR #128");
 }
 
 #[test]
