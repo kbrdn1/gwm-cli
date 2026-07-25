@@ -433,13 +433,19 @@ fn repo_slug_errors_when_no_origin_remote() {
 }
 
 #[test]
-fn repo_slug_errors_when_origin_is_not_github() {
+fn repo_slug_accepts_a_non_github_origin_since_the_forge_split() {
+  // Contract change from issue #419, replacing the pre-#419
+  // `repo_slug_errors_when_origin_is_not_github`: slug extraction is now
+  // host-agnostic, and *which* forge to talk to is decided separately by
+  // `forge::resolve` (config key first, host inference second). Rejecting
+  // non-github.com here would have made a GitLab remote unusable before
+  // the backend ever got a say.
   let (_dir, repo) = init_repo();
   set_origin(&repo, "https://gitlab.com/kbrdn1/something.git");
 
-  let err = github::repo_slug(&repo).unwrap_err();
-  let msg = err.to_string();
-  assert!(msg.contains("github"), "error should mention github: {}", msg);
+  let slug = github::repo_slug(&repo).unwrap();
+
+  assert_eq!(slug, "kbrdn1/something");
 }
 
 // --- JSON parsing --------------------------------------------------------

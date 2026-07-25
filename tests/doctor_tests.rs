@@ -1043,3 +1043,59 @@ fn doctor_fails_on_disk_modal_error_even_when_context_defaulted() {
     c.detail
   );
 }
+
+// Check #4 — the forge CLI is probed only when `forge` is set explicitly
+// (issue #419).
+
+#[test]
+fn forge_cli_is_not_probed_when_the_key_is_unset() {
+  // The non-regression half, and the one that runs identically everywhere:
+  // a config that never opts into a forge must not start warning about a
+  // missing `gh` / `glab` for users who don't touch issue/PR linking.
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+
+  assert!(
+    !missing.contains("glab") && !missing.contains("gh"),
+    "no forge CLI should be probed without an explicit `forge` key, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn an_explicit_gitlab_forge_probes_glab() {
+  let (dir, repo) = init_repo();
+  let config = Config {
+    forge: Some(gwm::forge::ForgeKind::GitLab),
+    ..Default::default()
+  };
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+
+  // `glab` may legitimately be installed on a contributor's machine, so
+  // the positive assertion is scoped to the case where it is genuinely
+  // absent — which is every CI runner. Asserting the warning
+  // unconditionally would be exactly the ambient-`$PATH` flake the repo
+  // rules call out.
+  if which::which("glab").is_err() {
+    assert_eq!(c.status, CheckStatus::Warning, "missing glab must warn: {}", c.detail);
+    assert!(
+      c.detail.contains("glab"),
+      "the missing forge CLI should be named, got: {}",
+      c.detail
+    );
+  }
+  // Env-independent in both directions: selecting GitLab must never probe
+  // for the GitHub CLI.
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+  assert!(
+    !missing.split(',').any(|b| b.trim() == "gh"),
+    "selecting GitLab must not probe for `gh`, got: {}",
+    c.detail
+  );
+}

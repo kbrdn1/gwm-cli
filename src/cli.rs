@@ -5,6 +5,7 @@ use crate::config_cli;
 use crate::doctor::{self, CheckStatus, DoctorCtx};
 use crate::error::{GwmError, LinkKind, Result};
 use crate::exec;
+use crate::forge;
 use crate::github::{self, BranchLink, IssueState, IssueStatus, LinkSource, PrState, PrStatus};
 use crate::gitmoji;
 use crate::history::{self, OpEntry};
@@ -2091,13 +2092,16 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   // can't run, yet clear a stale PR when it ran and found none (issue #38
   // review — resolves the round-4/round-5 tension on a plain `Option`).
   let detected_prs: Vec<Option<Option<u64>>> = if detect_pr {
-    match github::repo_slug(&repo).ok() {
+    // `.gwm.toml` selects the forge (issue #419); an unreadable config
+    // degrades to inferring it from the `origin` host.
+    let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path())).unwrap_or_default();
+    match forge::resolve(&repo, &config).ok() {
       None => vec![None; trees.len()],
-      Some(slug) => trees
+      Some(forge) => trees
         .iter()
         .map(|w| {
           w.branch.as_deref().map(|branch| {
-            github::read_link_with_pr_detection(&repo, branch, &slug)
+            github::read_link_with_pr_detection(&repo, branch, forge.as_ref())
               .ok()
               .and_then(|l| l.pr)
           })
@@ -2287,9 +2291,15 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
       .map(|row| {
         let repo = Repository::open(&row.repo_path).ok()?;
         let branch = row.info.branch.as_deref()?;
-        let slug = github::repo_slug(&repo).ok()?;
+        // Each repo in a workspace picks its own forge: one may be on
+        // GitHub and the next on a self-hosted GitLab, so the `forge`
+        // key is read from that repo's own `.gwm.toml` (issue #419). A
+        // missing / unreadable config degrades to host inference rather
+        // than skipping the row.
+        let config = Config::load_for_repo(&row.repo_path).unwrap_or_default();
+        let forge = forge::resolve(&repo, &config).ok()?;
         Some(
-          github::read_link_with_pr_detection(&repo, branch, &slug)
+          github::read_link_with_pr_detection(&repo, branch, forge.as_ref())
             .ok()
             .and_then(|l| l.pr),
         )
@@ -2660,10 +2670,10 @@ fn cmd_review(
 ) -> Result<()> {
   let RepoContext { repo, workdir, config } = repo_context(None)?;
   let repo_name = worktree::repo_name(&repo);
-  let repo_slug = github::repo_slug(&repo)?;
+  let forge = forge::resolve(&repo, &config)?;
 
-  println!("resolving PR #{number} on {repo_slug} …");
-  let head = github::fetch_pr_head(&repo_slug, number)?;
+  println!("resolving {} #{number} on {} …", forge.pr_noun(), forge.slug());
+  let head = forge.fetch_pr_head(number)?;
   let slug = review::head_slug(&head.head_ref_name);
 
   let branch = name
@@ -2776,12 +2786,11 @@ fn cmd_new(
   let resolved_types = config.resolved_branch_types();
   let spec = BranchSpec::new_with_types(branch_type.clone(), "0", desc, &resolved_types.types)?;
   let draft = issue_templates::render_issue_draft(&repo, &config, &spec.type_, &spec.desc)?;
-  let slug = github::repo_slug(&repo).ok();
-  let created = github::create_issue(&github::IssueCreateRequest {
+  let forge = forge::resolve_or_default(&repo, &config);
+  let created = forge.create_issue(&forge::IssueCreateRequest {
     title: &draft.title,
     body_file: draft.body_file.path(),
     labels: &draft.labels,
-    repo: slug.as_deref(),
   })?;
 
   let label_summary = if draft.labels.is_empty() {
@@ -2852,7 +2861,11 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
       );
     })
     .unwrap_or_default();
-  let repo_slug = github::repo_slug(&repo).unwrap_or_default();
+  // Best-effort: `--render-only` must keep working in a repo with no
+  // `origin`, where the `{{repo}}` placeholder simply renders empty.
+  // The forge is resolved *strictly* further down, only on the path that
+  // actually talks to the network.
+  let repo_slug = forge::repo_slug(&repo).unwrap_or_default();
 
   let ctx = PrTemplateContext {
     branch_type: branch_type.clone(),
@@ -2880,20 +2893,15 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
   body_file.flush()?;
 
   let title = pr_title(&ctx);
-  let slug = if repo_slug.is_empty() {
-    None
-  } else {
-    Some(repo_slug.as_str())
-  };
-  let created = github::create_pr(&github::PrCreateRequest {
+  let forge = forge::resolve_or_default(&repo, &config);
+  let created = forge.create_pr(&forge::PrCreateRequest {
     title: &title,
     body_file: body_file.path(),
     head: &head_name,
     base: Some(base.as_str()),
     draft,
-    repo: slug,
   })?;
-  println!("✓ created PR #{}", created.number);
+  println!("✓ created {} #{}", forge.pr_noun(), created.number);
   println!("  {}", created.url);
   if let Err(e) = github::link_pr(&repo, &head_name, created.number) {
     // Linking is a best-effort convenience: surface the failure but
@@ -3685,7 +3693,8 @@ fn cmd_unlink(target: LinkTarget, worktree: Option<String>) -> Result<()> {
 fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
   let link = github::read_link(&repo, &branch)?;
-  let slug = github::repo_slug(&repo)?;
+  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path())).unwrap_or_default();
+  let forge = forge::resolve(&repo, &config)?;
 
   let url = match target {
     LinkTarget::Issue => {
@@ -3693,14 +3702,14 @@ fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Re
         kind: LinkKind::Issue,
         branch: branch.clone(),
       })?;
-      github::issue_url(&slug, n)
+      forge.issue_url(n)
     }
     LinkTarget::Pr => {
       let n = link.pr.ok_or_else(|| GwmError::LinkMissing {
         kind: LinkKind::Pr,
         branch: branch.clone(),
       })?;
-      github::pr_url(&slug, n)
+      forge.pr_url(n)
     }
   };
 
@@ -3736,17 +3745,19 @@ fn spawn_opener(url: &str) -> Result<()> {
 fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
 
-  // Slug + fetched status are best-effort: if there's no GitHub remote
-  // or `gh` isn't installed, we still print the local link.
-  let slug = github::repo_slug(&repo).ok();
+  // Forge + fetched status are best-effort: if there's no remote or the
+  // forge CLI isn't installed, we still print the local link.
+  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path())).unwrap_or_default();
+  let forge = forge::resolve(&repo, &config).ok();
+  let slug = forge.as_ref().map(|f| f.slug().to_string());
   // When a remote is present, auto-detect the branch's PR if none is
   // explicitly linked (issue #181). Falls back to the plain local read
   // with no remote — keeping the "local link only" mode network-free.
-  let link = match slug.as_deref() {
-    Some(s) => github::read_link_with_pr_detection(&repo, &branch, s)?,
+  let link = match forge.as_ref() {
+    Some(f) => github::read_link_with_pr_detection(&repo, &branch, f.as_ref())?,
     None => github::read_link(&repo, &branch)?,
   };
-  let (issue_status, pr_status) = fetch_link_status(&repo, &branch, &link, slug.as_deref());
+  let (issue_status, pr_status) = fetch_link_status(&repo, &branch, &link, forge.as_deref());
 
   if json {
     println!(
@@ -3763,14 +3774,14 @@ fn fetch_link_status(
   repo: &Repository,
   branch: &str,
   link: &BranchLink,
-  slug: Option<&str>,
+  forge: Option<&dyn forge::Forge>,
 ) -> (Option<IssueStatus>, Option<PrStatus>) {
-  let Some(slug) = slug else {
+  let Some(forge) = forge else {
     return (None, None);
   };
-  // `gh` is optional — if either call fails we degrade gracefully.
-  let issue = link.issue.and_then(|n| github::fetch_issue(slug, n).ok());
-  let pr = link.pr.and_then(|n| github::fetch_pr(slug, n).ok());
+  // The forge CLI is optional — if either call fails we degrade gracefully.
+  let issue = link.issue.and_then(|n| forge.fetch_issue(n).ok());
+  let pr = link.pr.and_then(|n| forge.fetch_pr(n).ok());
   if let Some(issue) = &issue {
     let _ = github::persist_issue_title(repo, branch, &issue.title);
     let _ = github::persist_issue_state(repo, branch, issue.state);
@@ -3943,10 +3954,10 @@ fn cmd_labels_list() -> Result<()> {
   // typo in `.gwm.toml` surfaces "label 'bug' has invalid color: …"
   // rather than the unrelated "no origin remote" error.
   let declared = labels::resolve_labels(&config.labels, false)?;
-  let slug = labels_slug()?;
-  let remote = github::fetch_remote_labels(&slug)?;
+  let forge = labels_forge(&config)?;
+  let remote = forge.fetch_remote_labels()?;
   let diff = labels::diff_labels(&declared, &remote);
-  print_labels_diff(&slug, &declared, &diff);
+  print_labels_diff(forge.slug(), &declared, &diff);
   Ok(())
 }
 
@@ -3957,13 +3968,13 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
     return Ok(());
   }
   let declared = labels::resolve_labels(&config.labels, random_colors)?;
-  let slug = labels_slug()?;
-  let remote = github::fetch_remote_labels(&slug)?;
+  let forge = labels_forge(&config)?;
+  let remote = forge.fetch_remote_labels()?;
   let diff = labels::diff_labels(&declared, &remote);
   let (n_create, n_update, n_match, n_extra) = diff.counts();
 
   if dry_run {
-    print_labels_diff(&slug, &declared, &diff);
+    print_labels_diff(forge.slug(), &declared, &diff);
     let pruned = if prune { n_extra } else { 0 };
     println!(
       "{}",
@@ -3973,16 +3984,16 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
   }
 
   for spec in &diff.to_create {
-    github::push_label(&slug, spec)?;
+    forge.create_label(spec)?;
     println!("✓ created {}", spec.name);
   }
   for upd in &diff.to_update {
-    github::push_label(&slug, &upd.spec)?;
+    forge.update_label(&upd.spec)?;
     println!("✓ updated {}", upd.spec.name);
   }
   if prune {
     for remote_label in &diff.extra_on_remote {
-      github::delete_label(&slug, &remote_label.name)?;
+      forge.delete_label(&remote_label.name)?;
       println!("✗ pruned {}", remote_label.name);
     }
   } else if !diff.extra_on_remote.is_empty() {
@@ -4006,9 +4017,13 @@ fn load_labels_config() -> Result<Config> {
 /// in both subcommands so a config typo (bad colour) surfaces with
 /// the offending label name rather than the unrelated "no origin
 /// remote" error.
-fn labels_slug() -> Result<String> {
+/// Resolve the forge for the discovered repo. Called *after*
+/// `resolve_labels` / `resolve_milestones` in all four subcommands so a
+/// config typo (bad colour, bad due_on) surfaces with the offending entry
+/// name rather than the unrelated "no origin remote" error.
+fn labels_forge(config: &Config) -> Result<std::sync::Arc<dyn forge::Forge>> {
   let repo = worktree::discover_repo(None)?;
-  github::repo_slug(&repo)
+  forge::resolve(&repo, config)
 }
 
 fn print_labels_diff(slug: &str, declared: &[labels::LabelSpec], diff: &LabelDiff) {
@@ -4057,10 +4072,10 @@ fn cmd_milestones_list() -> Result<()> {
   // so a typo in `.gwm.toml` surfaces "milestone 'v0.7.0' has invalid
   // …" rather than the unrelated "no origin remote" error.
   let declared = milestones::resolve_milestones(&config.milestones)?;
-  let slug = milestones_slug()?;
-  let remote = github::fetch_remote_milestones(&slug)?;
+  let forge = labels_forge(&config)?;
+  let remote = forge.fetch_remote_milestones()?;
   let diff = milestones::diff_milestones(&declared, &remote);
-  print_milestones_diff(&slug, &declared, &diff);
+  print_milestones_diff(forge.slug(), &declared, &diff);
   Ok(())
 }
 
@@ -4071,13 +4086,13 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
     return Ok(());
   }
   let declared = milestones::resolve_milestones(&config.milestones)?;
-  let slug = milestones_slug()?;
-  let remote = github::fetch_remote_milestones(&slug)?;
+  let forge = labels_forge(&config)?;
+  let remote = forge.fetch_remote_milestones()?;
   let diff = milestones::diff_milestones(&declared, &remote);
   let (n_create, n_update, n_match, n_extra) = diff.counts();
 
   if dry_run {
-    print_milestones_diff(&slug, &declared, &diff);
+    print_milestones_diff(forge.slug(), &declared, &diff);
     let pruned = if prune { n_extra } else { 0 };
     println!(
       "{}",
@@ -4087,16 +4102,16 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
   }
 
   for spec in &diff.to_create {
-    github::create_milestone(&slug, spec)?;
+    forge.create_milestone(spec)?;
     println!("✓ created {}", spec.title);
   }
   for upd in &diff.to_update {
-    github::update_milestone(&slug, upd.number, &upd.spec)?;
+    forge.update_milestone(upd.number, &upd.spec)?;
     println!("✓ updated {}", upd.spec.title);
   }
   if prune {
     for remote_milestone in &diff.extra_on_remote {
-      github::delete_milestone(&slug, remote_milestone.number)?;
+      forge.delete_milestone(remote_milestone.number)?;
       println!("✗ pruned {}", remote_milestone.title);
     }
   } else if !diff.extra_on_remote.is_empty() {
@@ -4114,15 +4129,6 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
 /// before they touch network or config-resolve logic.
 fn load_milestones_config() -> Result<Config> {
   Ok(repo_context(None)?.config)
-}
-
-/// Resolve the `origin` remote slug. Called *after* `resolve_milestones`
-/// in both subcommands so a config typo (bad due_on / state) surfaces
-/// with the offending milestone title rather than the unrelated "no
-/// origin remote" error.
-fn milestones_slug() -> Result<String> {
-  let repo = worktree::discover_repo(None)?;
-  github::repo_slug(&repo)
 }
 
 fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], diff: &MilestoneDiff) {

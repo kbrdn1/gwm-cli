@@ -8,6 +8,15 @@ pub const CONFIG_FILE: &str = ".gwm.toml";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+  /// `forge` — which code-hosting platform backs issue / PR lookups
+  /// (issue #419). `"github"` (via `gh`) or `"gitlab"` (via `glab`).
+  ///
+  /// Absent means "infer from the `origin` host", which covers
+  /// github.com and gitlab.com. A **self-hosted** instance lives on an
+  /// arbitrary domain and cannot be detected from the URL alone, so this
+  /// key is the supported way in; it always wins over inference.
+  #[serde(default)]
+  pub forge: Option<crate::forge::ForgeKind>,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]

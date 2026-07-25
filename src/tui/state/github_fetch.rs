@@ -110,6 +110,12 @@ pub enum FetchKey {
 pub struct GitHubFetch {
   pub link: BranchLink,
   pub link_slug: Option<String>,
+  /// The resolved forge backend for the active repo (issue #419), or
+  /// `None` when `origin` is missing / unparseable. Re-resolved on every
+  /// [`Self::refresh_link`] rather than cached on the `App`: in workspace
+  /// mode the active repo — and with it the `.gwm.toml` `forge` key — can
+  /// change under the cursor.
+  pub forge: Option<std::sync::Arc<dyn crate::forge::Forge>>,
   /// Per-issue-number cache. Absent keys are `Idle`. Closed over by
   /// the keyed accessor `issue_fetch_state(number)` (#138 fix: the
   /// cache is keyed by number, not a single per-target slot).
@@ -133,6 +139,7 @@ impl GitHubFetch {
     Self {
       link: BranchLink::empty(),
       link_slug: None,
+      forge: None,
       issue_cache: HashMap::new(),
       pr_cache: HashMap::new(),
     }
@@ -145,11 +152,14 @@ impl GitHubFetch {
   /// different `(issue, pr)` tuple and would be misleading if reused.
   /// (`App::refresh_link` separately drops any in-flight GitHub worker
   /// on the spine — see [`Self::invalidate`] for the pairing.)
-  pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>) {
+  pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
     self.link = branch
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
-    self.link_slug = github::repo_slug(repo).ok();
+    self.forge = crate::forge::resolve(repo, config).ok();
+    // Kept in sync with `forge` so the many read-only slug consumers
+    // (detail overlay keys, status strings) need no rewrite.
+    self.link_slug = self.forge.as_ref().map(|f| f.slug().to_string());
     self.invalidate();
   }
 

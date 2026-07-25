@@ -433,6 +433,15 @@ fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
   if ctx.repo_workdir.join(".envrc").exists() {
     needed.insert("direnv".into());
   }
+  // The forge CLI (`gh` / `glab`) is probed only when the user set `forge`
+  // explicitly (issue #419). An explicit key is an opt-in signal — "I talk
+  // to this forge" — so the warning is actionable. Probing unconditionally
+  // would fire a new warning at every user who never touches issue/PR
+  // linking and has no `gh` installed, which is not a regression worth
+  // shipping for a feature they don't use.
+  if let Some(kind) = ctx.config.forge {
+    needed.insert(kind.cli_name().into());
+  }
   // Review launcher is opt-in; only probe when the user actually
   // configured one (`command` or `tool`).
   if let Some(review) = ctx.config.review.resolved() {

@@ -4523,7 +4523,20 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
-  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let link = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      "github.com".into(),
+      "kbrdn1/gwm-cli".into(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
   // The live path must reconcile the persisted cache (#284), not just memory,
   // so no-fetch consumers (table at startup, `gwm open pr`) don't resurrect
   // the stale #128. Capture the stored value before the explicit link below.
@@ -4531,7 +4544,20 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
 
   // Explicit override still wins even over a live re-detection.
   gwm::github::link_pr(&repo, "detect-me", 61).unwrap();
-  let explicit = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let explicit = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      "github.com".into(),
+      "kbrdn1/gwm-cli".into(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
 
   unsafe {
     match prior {
@@ -4588,7 +4614,20 @@ fn read_link_with_pr_detection_keeps_title_when_detected_pr_is_unchanged() {
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
-  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let link = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      "github.com".into(),
+      "kbrdn1/gwm-cli".into(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
 
   unsafe {
     match prior {
@@ -4637,7 +4676,20 @@ fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
-  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let link = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      "github.com".into(),
+      "kbrdn1/gwm-cli".into(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
   let stored = gwm::github::read_link(&repo, "detect-me").unwrap();
   unsafe {
     match prior {

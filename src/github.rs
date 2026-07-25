@@ -1,23 +1,35 @@
-//! Issue ↔ PR ↔ branch link storage + GitHub API fetch (via `gh` CLI).
+//! Issue ↔ PR ↔ branch link storage, and the **GitHub backend** for the
+//! [`crate::forge::Forge`] trait (via the `gh` CLI).
 //!
 //! Storage lives in git branch config: `branch.<name>.gwm-issue` and
 //! `branch.<name>.gwm-pr`. Issue numbers are auto-detected from the
 //! `<type>/#<N>-<slug>` branch convention when no explicit override is set.
+//! Those `branch.<x>.gwm-*` keys are **forge-neutral** and deliberately stay
+//! shared rather than moving behind the trait (issue #419): a GitLab worktree
+//! reads and writes exactly the same keys.
 //!
 //! Fetch shells out to `gh` and parses its JSON output. The parsing functions
 //! (`parse_issue_json`, `parse_pr_json`) are exposed publicly so tests can
 //! cover the JSON contract without depending on a real `gh` binary.
 
 use crate::error::{GwmError, Result};
+use crate::forge::{self, Forge, ForgeKind};
 use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
-use std::process::Command;
 use std::sync::LazyLock;
+
+// The parsed shapes are forge-agnostic and now live in `forge`; re-exported
+// here so the many `github::PrStatus` / `github::CiState` imports across the
+// TUI and CLI keep resolving unchanged.
+pub use crate::forge::{cli_command_line as gh_command_line, repo_slug};
+pub use crate::forge::{
+  CheckOutcome, CiState, CreatedIssue, CreatedPr, IssueCreateRequest, IssueState, IssueStatus, PrCheck,
+  PrCreateRequest, PrHead, PrState, PrStatus,
+};
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
   LazyLock::new(|| regex::Regex::new(r"/issues/(\d+)(?:\b|$)").expect("static issue URL regex compiles"));
@@ -199,13 +211,13 @@ pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
 /// probe rather than being wiped — and the local link is still returned.
 /// This shells out, so callers on hot paths (per-worktree listing) must opt
 /// in deliberately rather than route every read through here.
-pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) -> Result<BranchLink> {
+pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, forge: &dyn Forge) -> Result<BranchLink> {
   let mut link = read_link(repo, branch)?;
   if link.pr_source != LinkSource::Explicit {
     // Re-resolve live. On success, the fresh result replaces any persisted
-    // detection (a vanished PR clears it); on a `gh` failure, keep whatever
+    // detection (a vanished PR clears it); on a CLI failure, keep whatever
     // `read_link` already resolved (possibly a persisted detection).
-    if let Ok(detected) = find_pr_for_branch(slug, branch) {
+    if let Ok(detected) = forge.find_pr_for_branch(branch) {
       let previous_pr = link.pr;
       let previous_pr_source = link.pr_source;
       let previous_pr_title = link.pr_title.clone();
@@ -503,157 +515,7 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
   }
 }
 
-// ---- Repo slug from origin remote --------------------------------------
-
-/// Extract the `owner/repo` slug from the `origin` remote URL.
-/// Supports the two GitHub URL flavours: `git@github.com:owner/repo(.git)?`
-/// and `https://github.com/owner/repo(.git)?`.
-pub fn repo_slug(repo: &Repository) -> Result<String> {
-  let remote = repo
-    .find_remote("origin")
-    .map_err(|_| GwmError::Other("no 'origin' remote configured".into()))?;
-  let url = remote
-    .url()
-    .ok()
-    .ok_or_else(|| GwmError::Other("origin remote has no URL (non-utf8?)".into()))?
-    .to_string();
-  parse_github_slug(&url)
-}
-
-fn parse_github_slug(url: &str) -> Result<String> {
-  // SSH: git@github.com:owner/repo(.git)?
-  if let Some(rest) = url.strip_prefix("git@github.com:") {
-    return Ok(trim_git_suffix(rest).to_string());
-  }
-  // HTTPS: https://github.com/owner/repo(.git)?
-  for prefix in ["https://github.com/", "http://github.com/"] {
-    if let Some(rest) = url.strip_prefix(prefix) {
-      return Ok(trim_git_suffix(rest).to_string());
-    }
-  }
-  Err(GwmError::Other(format!(
-    "origin '{}' is not a github URL (expected git@github.com:… or https://github.com/…)",
-    url
-  )))
-}
-
-fn trim_git_suffix(s: &str) -> &str {
-  // Normalise trailing slashes first so `owner/repo.git/` becomes
-  // `owner/repo.git` before the `.git` strip kicks in. Pre-fix this
-  // returned `owner/repo.git` because `.git` was sought with a trailing
-  // `/` still attached (Copilot PR #68 review).
-  let trimmed = s.trim_end_matches('/');
-  trimmed.strip_suffix(".git").unwrap_or(trimmed)
-}
-
 // ---- Issue / PR status ---------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueState {
-  Open,
-  Closed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IssueStatus {
-  pub number: u64,
-  pub title: String,
-  pub state: IssueState,
-  pub url: String,
-  pub labels: Vec<String>,
-  pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct IssueCreateRequest<'a> {
-  pub title: &'a str,
-  pub body_file: &'a std::path::Path,
-  pub labels: &'a [String],
-  pub repo: Option<&'a str>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatedIssue {
-  pub number: u64,
-  pub url: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PrCreateRequest<'a> {
-  pub title: &'a str,
-  pub body_file: &'a std::path::Path,
-  pub head: &'a str,
-  pub base: Option<&'a str>,
-  pub draft: bool,
-  pub repo: Option<&'a str>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatedPr {
-  pub number: u64,
-  pub url: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrState {
-  Open,
-  Draft,
-  Closed,
-  Merged,
-}
-
-/// Overall CI outcome derived from a PR's `statusCheckRollup` (issue #299).
-/// A single ordered signal so the sidebar can render pass/fail/running at a
-/// glance instead of a bare `N/M` count. Priority is **failing > running >
-/// passing**: the most actionable state always wins, so a red check is never
-/// hidden behind an in-flight one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CiState {
-  /// The PR has no checks at all — render nothing.
-  None,
-  /// Every check completed successfully (counting `NEUTRAL` / `SKIPPED`).
-  Passing,
-  /// At least one check is still in flight and none has failed.
-  Running,
-  /// At least one check completed with a failing conclusion
-  /// (`FAILURE` / `CANCELLED` / `TIMED_OUT` / `ACTION_REQUIRED`).
-  Failing,
-}
-
-/// One classified `statusCheckRollup` entry, kept per-check for the CI
-/// checks overlay (issue #436) — pre-#436 the name and URL were dropped
-/// when the rollup collapsed into [`CiState`]. `name` resolves from the
-/// `CheckRun` `name` or the legacy `StatusContext` `context`; `url` from
-/// `detailsUrl` or `targetUrl` respectively.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrCheck {
-  pub name: String,
-  pub outcome: CheckOutcome,
-  pub url: Option<String>,
-  /// Owning workflow (`workflowName`, CheckRun shape only) — surfaced in
-  /// the overlay's detail column (#436 validation feedback).
-  pub workflow_name: Option<String>,
-  /// RFC 3339 run timestamps (CheckRun shape only): the overlay derives
-  /// the run duration (or the elapsed time of an in-flight run) from them.
-  pub started_at: Option<String>,
-  pub completed_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrStatus {
-  pub number: u64,
-  pub title: String,
-  pub state: PrState,
-  pub url: String,
-  pub updated_at: String,
-  pub checks_passed: u32,
-  pub checks_total: u32,
-  /// Overall CI state derived from the same rollup that feeds
-  /// `checks_passed` / `checks_total` — no extra GitHub request.
-  pub ci: CiState,
-  /// The classified per-check list, same order as the rollup (issue #436).
-  pub checks: Vec<PrCheck>,
-}
 
 #[derive(Deserialize)]
 struct RawIssue {
@@ -787,15 +649,6 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
   })
 }
 
-/// The outcome of a single rollup entry, before the per-PR aggregation.
-/// Public since #436: the CI checks overlay renders one row per check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckOutcome {
-  Passing,
-  Running,
-  Failing,
-}
-
 /// Classify one rollup entry, handling both the `CheckRun` shape
 /// (`status` + `conclusion`) and the legacy `StatusContext` shape
 /// (`state`). A `CheckRun` is only green for an *accepted* terminal
@@ -834,29 +687,11 @@ fn is_accepted_conclusion(conclusion: &str) -> bool {
   )
 }
 
-/// Collapse a `statusCheckRollup` into a single [`CiState`] with the
-/// priority **failing > running > passing** (issue #299). A failing check
-/// wins immediately; any still-pending check downgrades an otherwise-green
-/// rollup to `Running`; an empty rollup is `None`.
+/// Collapse a `statusCheckRollup` into a single [`CiState`]. The
+/// aggregation rule itself is shared with the GitLab backend since #419 —
+/// see [`forge::aggregate_ci_state`].
 fn derive_ci_state(checks: &[RawCheck]) -> CiState {
-  if checks.is_empty() {
-    return CiState::None;
-  }
-  let mut any_running = false;
-  for c in checks {
-    match classify_check(c) {
-      // Failing outranks everything — short-circuit so a red check is never
-      // masked by a later in-flight one.
-      CheckOutcome::Failing => return CiState::Failing,
-      CheckOutcome::Running => any_running = true,
-      CheckOutcome::Passing => {}
-    }
-  }
-  if any_running {
-    CiState::Running
-  } else {
-    CiState::Passing
-  }
+  forge::aggregate_ci_state(checks.iter().map(classify_check))
 }
 
 // ---- gh CLI invocation ---------------------------------------------------
@@ -897,8 +732,8 @@ pub fn gh_program() -> OsString {
   std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into())
 }
 
-pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
-  let mut args: Vec<OsString> = Vec::with_capacity(6 + 2 * req.labels.len() + if req.repo.is_some() { 2 } else { 0 });
+pub fn create_issue(slug: &str, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+  let mut args: Vec<OsString> = Vec::with_capacity(8 + 2 * req.labels.len());
   args.push("issue".into());
   args.push("create".into());
   args.push("--title".into());
@@ -909,9 +744,12 @@ pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
     args.push("--label".into());
     args.push(label.into());
   }
-  if let Some(repo) = req.repo {
+  // An empty slug means `origin` was unresolvable; `gh` then infers the
+  // repo from the local git context, which is the pre-#419 behaviour this
+  // path has always relied on.
+  if !slug.is_empty() {
     args.push("--repo".into());
-    args.push(repo.into());
+    args.push(slug.into());
   }
   let stdout = run_gh(&args)?;
   let stdout = stdout.trim().to_string();
@@ -931,10 +769,9 @@ pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
 /// Shell out to `gh pr create` with a body file already rendered by
 /// [`crate::pr_templates::render_pr_body`]. Parses the URL printed by
 /// gh on success to extract the PR number.
-pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
-  let mut args: Vec<OsString> = Vec::with_capacity(
-    8 + if req.draft { 1 } else { 0 } + if req.base.is_some() { 2 } else { 0 } + if req.repo.is_some() { 2 } else { 0 },
-  );
+pub fn create_pr(slug: &str, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
+  let mut args: Vec<OsString> =
+    Vec::with_capacity(10 + if req.draft { 1 } else { 0 } + if req.base.is_some() { 2 } else { 0 });
   args.push("pr".into());
   args.push("create".into());
   args.push("--title".into());
@@ -950,9 +787,12 @@ pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
   if req.draft {
     args.push("--draft".into());
   }
-  if let Some(repo) = req.repo {
+  // An empty slug means `origin` was unresolvable; `gh` then infers the
+  // repo from the local git context, which is the pre-#419 behaviour this
+  // path has always relied on.
+  if !slug.is_empty() {
     args.push("--repo".into());
-    args.push(repo.into());
+    args.push(slug.into());
   }
   let stdout = run_gh(&args)?;
   let stdout = stdout.trim().to_string();
@@ -991,21 +831,6 @@ pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatu
     ],
   )?;
   parse_pr_json(&stdout)
-}
-
-/// The slice of PR metadata `gwm review` needs to materialise a worktree:
-/// the head ref name (slug source), the author login (path component), and
-/// the base ref (diff base). Distinct from [`PrStatus`] so the TUI's
-/// status/CI path stays untouched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrHead {
-  pub number: u64,
-  /// Author login, e.g. `alice` (`dependabot[bot]` for bot PRs).
-  pub author: String,
-  /// The PR's head branch name, e.g. `feat/spike-x`.
-  pub head_ref_name: String,
-  /// The PR's base branch name, e.g. `main`.
-  pub base_ref_name: String,
 }
 
 #[derive(Deserialize)]
@@ -1117,60 +942,17 @@ where
   run_gh_with(&gh_program(), args)
 }
 
-/// Build the human-readable command line stored on the Command Logs
-/// transcript (issue #226) for a `gh` invocation: the program's *file name*
-/// (so a `GWM_GH=/usr/bin/gh` override still reads as `gh issue view …`
-/// rather than leaking the full path) followed by the resolved args. Kept
-/// pure and `pub` so its argv format is unit-testable without spawning `gh`
-/// (which CI runners do not have).
-pub fn gh_command_line(program: &OsStr, args: &[OsString]) -> String {
-  let name = Path::new(program)
-    .file_name()
-    .map(|n| n.to_string_lossy().into_owned())
-    .unwrap_or_else(|| program.to_string_lossy().into_owned());
-  let mut line = name;
-  for arg in args {
-    line.push(' ');
-    line.push_str(&arg.to_string_lossy());
-  }
-  line
-}
-
 /// [`run_gh`] against an explicitly resolved `gh` program. Lets callers on
 /// a worker thread (issue #217) avoid re-reading `GWM_GH` / the process
-/// environment concurrently with env-mutating code on other threads.
+/// environment concurrently with env-mutating code on other threads. The
+/// spawn + logging + error shape is shared with the GitLab backend since
+/// #419 — see [`forge::run_cli`].
 fn run_gh_with<I, S>(program: &OsStr, args: I) -> Result<String>
 where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  // Collect the args once so they can both drive the spawn and build the
-  // human-readable command line stored on the Command Logs transcript
-  // (issue #226): the resolved `gh <args…>`, not an opaque handle.
-  let collected: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
-  let cmdline = gh_command_line(program, &collected);
-  let mut cmd = Command::new(program);
-  cmd.args(&collected);
-  let output = crate::command_log::run_logged(&mut cmd, cmdline)
-    .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "gh exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Build the canonical GitHub URL for an issue, given the repo slug.
-pub fn issue_url(slug: &str, number: u64) -> String {
-  format!("https://github.com/{}/issues/{}", slug, number)
-}
-
-/// Build the canonical GitHub URL for a PR, given the repo slug.
-pub fn pr_url(slug: &str, number: u64) -> String {
-  format!("https://github.com/{}/pull/{}", slug, number)
+  forge::run_cli(program, args)
 }
 
 // ---- Labels (issue #81) -------------------------------------------------
@@ -1498,4 +1280,113 @@ pub fn delete_milestone(slug: &str, number: u64) -> Result<()> {
   let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
   run_gh(&args)?;
   Ok(())
+}
+
+// ---- The Forge backend (issue #419) -------------------------------------
+
+/// GitHub implementation of [`Forge`], shelling out to `gh`.
+///
+/// A thin binding over the free functions above rather than a rewrite:
+/// they were already the GitHub backend in all but name, and keeping them
+/// `pub` means the extraction reads as a no-op for the existing tests
+/// that pin the `gh` argv contract.
+#[derive(Debug, Clone)]
+pub struct GitHubForge {
+  host: String,
+  slug: String,
+  program: OsString,
+}
+
+impl GitHubForge {
+  /// Resolves `$GWM_GH` **now**, on the calling thread, so a forge handed
+  /// to the TUI's fetch worker never re-reads the process environment
+  /// concurrently with env-mutating code (issue #217).
+  pub fn new(host: String, slug: String) -> Self {
+    Self {
+      host,
+      slug,
+      program: gh_program(),
+    }
+  }
+}
+
+impl Forge for GitHubForge {
+  fn kind(&self) -> ForgeKind {
+    ForgeKind::GitHub
+  }
+
+  fn slug(&self) -> &str {
+    &self.slug
+  }
+
+  fn host(&self) -> &str {
+    &self.host
+  }
+
+  fn issue_url(&self, number: u64) -> String {
+    format!("https://{}/{}/issues/{}", self.host, self.slug, number)
+  }
+
+  fn pr_url(&self, number: u64) -> String {
+    format!("https://{}/{}/pull/{}", self.host, self.slug, number)
+  }
+
+  fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
+    fetch_issue_with(&self.program, &self.slug, number)
+  }
+
+  fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
+    fetch_pr_with(&self.program, &self.slug, number)
+  }
+
+  fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
+    fetch_pr_head(&self.slug, number)
+  }
+
+  fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
+    find_pr_for_branch(&self.slug, branch)
+  }
+
+  fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+    create_issue(&self.slug, req)
+  }
+
+  fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
+    create_pr(&self.slug, req)
+  }
+
+  fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {
+    fetch_remote_labels(&self.slug)
+  }
+
+  fn create_label(&self, spec: &LabelSpec) -> Result<()> {
+    // `gh label create --force` means "create OR update", so both halves
+    // of the trait's create/update split land on the same call here. The
+    // split exists for GitLab, which has no such flag.
+    push_label(&self.slug, spec)
+  }
+
+  fn update_label(&self, spec: &LabelSpec) -> Result<()> {
+    push_label(&self.slug, spec)
+  }
+
+  fn delete_label(&self, name: &str) -> Result<()> {
+    delete_label(&self.slug, name)
+  }
+
+  fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
+    fetch_remote_milestones(&self.slug)
+  }
+
+  fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
+    create_milestone(&self.slug, spec)
+  }
+
+  fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
+    update_milestone(&self.slug, number, spec)
+  }
+
+  fn delete_milestone(&self, number: u64) -> Result<()> {
+    delete_milestone(&self.slug, number)
+  }
 }

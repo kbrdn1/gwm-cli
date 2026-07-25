@@ -4626,7 +4626,7 @@ impl App {
   /// `App`'s `selected()` + `repo.head()` fallback.
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
-    self.github.refresh_link(&self.repo, branch.as_deref());
+    self.github.refresh_link(&self.repo, branch.as_deref(), &self.config);
     // Navigation invariant (issue #255): the cache clear above must be paired
     // with a spine generation-bump so any in-flight `gh` worker for the
     // previous worktree's link is dropped instead of stamping the now-active
@@ -4821,8 +4821,8 @@ impl App {
     // pane/table (Codex review #284). `apply_detected_pr` only fills an empty
     // slot, hence the clear-then-apply to replace a stale detection.
     if self.github.link.pr_source != github::LinkSource::Explicit {
-      if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
-        if let Ok(detected) = github::find_pr_for_branch(slug, &branch) {
+      if let (Some(forge), Some(branch)) = (self.github.forge.clone(), self.selected_branch_name()) {
+        if let Ok(detected) = forge.find_pr_for_branch(&branch) {
           self.github.clear_detected_pr();
           self.github.apply_detected_pr(detected);
           // Persist the detection (issue #283) so the no-fetch table read
@@ -4990,25 +4990,20 @@ impl App {
   /// coalescing / late-drop contract lives on the [`TaskRunner`] spine. A
   /// `send` failure (the `App`/receiver was dropped) is ignored: there is
   /// no longer anyone to apply the result.
-  fn spawn_github_fetch(&self, key: FetchKey, slug: String, generation: u64) {
+  fn spawn_github_fetch(&self, key: FetchKey, _slug: String, generation: u64) {
     let tx = self.task_tx.clone();
-    // Resolve the `gh` program on THIS (main) thread and hand it to the
-    // worker, so the worker never reads `GWM_GH` / the process environment
-    // concurrently with env-mutating code elsewhere (the `env_lock`
-    // unsoundness the worker would otherwise reintroduce — issue #217).
-    let program = github::gh_program();
+    // Clone the resolved forge on THIS (main) thread and hand it to the
+    // worker. The backend captured `$GWM_GH` / `$GWM_GLAB` when it was
+    // built (also on the main thread), so the worker never reads the
+    // process environment concurrently with env-mutating code elsewhere —
+    // the `env_lock` unsoundness it would otherwise reintroduce (#217).
+    let Some(forge) = self.github.forge.clone() else {
+      return;
+    };
     std::thread::spawn(move || {
       let msg = match key {
-        FetchKey::Issue(n) => TaskMsg::GithubIssue(
-          generation,
-          n,
-          github::fetch_issue_with(&program, &slug, n).map_err(|e| e.to_string()),
-        ),
-        FetchKey::Pr(n) => TaskMsg::GithubPr(
-          generation,
-          n,
-          github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string()),
-        ),
+        FetchKey::Issue(n) => TaskMsg::GithubIssue(generation, n, forge.fetch_issue(n).map_err(|e| e.to_string())),
+        FetchKey::Pr(n) => TaskMsg::GithubPr(generation, n, forge.fetch_pr(n).map_err(|e| e.to_string())),
       };
       let _ = tx.send(msg);
     });
@@ -5136,22 +5131,26 @@ impl App {
   /// when the link is missing (the status bar carries the explanation).
   pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
     self.view = View::List;
-    let Some(slug) = self.github.link_slug.clone() else {
-      self.status = "no GitHub remote — cannot build URL".into();
+    let Some(forge) = self.github.forge.clone() else {
+      self.status = "no forge remote — cannot build URL".into();
       return None;
     };
     let url = match target {
       LinkTarget::Issue => match self.github.link.issue {
-        Some(n) => github::issue_url(&slug, n),
+        Some(n) => forge.issue_url(n),
         None => {
           self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
-        Some(n) => github::pr_url(&slug, n),
+        Some(n) => forge.pr_url(n),
         None => {
-          self.status = format!("no PR linked — press {} to link one", self.link_prompt_chord());
+          self.status = format!(
+            "no {} linked — press {} to link one",
+            forge.pr_noun(),
+            self.link_prompt_chord()
+          );
           return None;
         }
       },
