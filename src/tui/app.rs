@@ -2802,6 +2802,36 @@ impl App {
     self.refresh_github_status();
   }
 
+  /// Poll-cadence tick (Codex review #455): a Running check's `extra`
+  /// column carries an elapsed duration formatted when the rows were
+  /// built, which otherwise freezes until the next `f`. Rebuild the rows
+  /// from the cached PR state while at least one check is still running —
+  /// pure in-memory formatting, no I/O — and stay a no-op once every
+  /// check is terminal so idle frames do no churn. `set_rows` keeps the
+  /// selection and the filter cursor clamped.
+  pub fn tick_ci_overlay_durations(&mut self) {
+    if self.view != View::DetailOverlay
+      || self.detail_overlay.kind != crate::tui::state::detail_overlay::DetailKind::CiChecks
+    {
+      return;
+    }
+    let Some(n) = self.github.link.pr else {
+      return;
+    };
+    let GitHubFetchState::Loaded(pr) = self.github.pr_fetch_state(n) else {
+      return;
+    };
+    if !pr
+      .checks
+      .iter()
+      .any(|c| matches!(c.outcome, github::CheckOutcome::Running))
+    {
+      return;
+    }
+    let rows = crate::tui::state::detail_overlay::ci_check_rows(&pr.checks, std::time::SystemTime::now());
+    self.detail_overlay.set_rows(rows);
+  }
+
   pub fn ci_input_open(&mut self) {
     self.detail_overlay.mode = crate::tui::state::detail_overlay::DetailMode::Input;
     self.detail_overlay.input.clear();

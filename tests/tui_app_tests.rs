@@ -2956,6 +2956,58 @@ fn ci_filter_cursor_clamps_when_a_refresh_shrinks_the_matches() {
 }
 
 #[test]
+fn ci_overlay_ticks_running_check_durations() {
+  // Codex review #455 (P2): a Running check's elapsed duration was
+  // formatted once when the rows were built, then froze until the next
+  // `f`. The poll-cadence tick rebuilds the rows from the cached PR state
+  // while a check is still running — and stays a no-op once every check
+  // is terminal, so idle frames do no churn.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let started = (chrono::Utc::now() - chrono::Duration::seconds(90)).to_rfc3339();
+  let mk_status = |outcome: CheckOutcome, started_at: Option<String>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: 1,
+    ci: CiState::Running,
+    checks: vec![PrCheck {
+      name: "a".into(),
+      outcome,
+      url: None,
+      workflow_name: Some("ci".into()),
+      started_at,
+      completed_at: None,
+    }],
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Running, Some(started.clone()))));
+  app.enter_ci_checks();
+  app.detail_overlay.rows[0].extra = Some("frozen".into());
+
+  app.tick_ci_overlay_durations();
+  assert_ne!(
+    app.detail_overlay.rows[0].extra.as_deref(),
+    Some("frozen"),
+    "a running check's duration is recomputed on the tick"
+  );
+
+  // Terminal outcomes: the tick must not rebuild anything.
+  app.apply_pr_fetch_result(Ok(mk_status(CheckOutcome::Passing, Some(started))));
+  app.detail_overlay.rows[0].extra = Some("frozen".into());
+  app.tick_ci_overlay_durations();
+  assert_eq!(
+    app.detail_overlay.rows[0].extra.as_deref(),
+    Some("frozen"),
+    "no running check, no per-tick rebuild"
+  );
+}
+
+#[test]
 fn pr_line_ci_hint_is_hidden_in_picker_mode() {
   // Codex review #455 (P2): in picker mode (`gwm switch`) run_action drops
   // Action::CiChecks — printable keys feed the filter — so the PR line

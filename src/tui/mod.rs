@@ -203,6 +203,10 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>, mut app: App) 
     // reflects the freshly-applied results, and the loader animates below
     // while any of them is still in flight (200ms poll cadence).
     app.drain_task_results();
+    // Advance the elapsed duration of any Running check while the CI
+    // overlay is up (Codex review #455) — same 200ms cadence, no-op
+    // otherwise.
+    app.tick_ci_overlay_durations();
     if app.is_github_loading() || app.is_task_loading() {
       app.spinner.tick();
     }
