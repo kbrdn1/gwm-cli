@@ -4827,6 +4827,15 @@ impl App {
     {
       return;
     }
+    // An empty rollup (a fresh commit whose workflows have not started
+    // yet) would blank the rows while leaving the overlay open — exactly
+    // the empty overlay `enter_ci_checks` refuses to open (Codex review
+    // #455). Close it and say why instead.
+    if status.checks.is_empty() {
+      self.close_detail_overlay();
+      self.status = "no CI checks reported by the refreshed PR".into();
+      return;
+    }
     let rows = crate::tui::state::detail_overlay::ci_check_rows(&status.checks, std::time::SystemTime::now());
     self.detail_overlay.set_rows(rows);
   }

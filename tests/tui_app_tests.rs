@@ -2455,6 +2455,19 @@ fn pr_line_ci_hint_follows_the_focus_context() {
     focused.contains("10/10 [c]"),
     "status focus advertises the contextual c: {focused}"
   );
+
+  // Codex review #455 (P2): with `edit_worktree` explicitly unbound the
+  // contextual key is gone, but the global `ci_checks` binding still opens
+  // the overlay — advertise it instead of dropping the hint entirely.
+  app
+    .keymap
+    .apply_override(gwm::tui::keymap::Action::EditWorktree, vec![])
+    .unwrap();
+  let unbound = text_of(&app);
+  assert!(
+    unbound.contains("10/10 [C]"),
+    "unbound edit_worktree falls back to the global ci_checks key: {unbound}"
+  );
 }
 
 #[test]
@@ -2705,6 +2718,47 @@ fn ci_overlay_refreshes_its_rows_when_a_pr_fetch_lands() {
     "another PR's landing must not clobber the linked PR's rows"
   );
   assert_eq!(app.detail_overlay.rows[0].value, "a");
+}
+
+#[test]
+fn ci_overlay_closes_when_a_refresh_lands_an_empty_rollup() {
+  // Codex review #455 (P2): a refresh can land an empty rollup — a new
+  // commit was just pushed and the workflows have not started yet. Blanking
+  // the rows while leaving the overlay open produced exactly the empty
+  // overlay `enter_ci_checks` refuses to open; close it and say why.
+  use gwm::github::{CheckOutcome, PrCheck};
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  gwm::github::link_pr(&repo, "feat/#42-tui-search", 61).unwrap();
+  app.refresh_link();
+  let mk_status = |checks: Vec<PrCheck>| PrStatus {
+    number: 61,
+    title: "CI checks fixture".into(),
+    state: PrState::Open,
+    url: "https://example.test/pull/61".into(),
+    updated_at: String::new(),
+    checks_passed: 0,
+    checks_total: checks.len() as u32,
+    ci: CiState::Running,
+    checks,
+  };
+  app.apply_pr_fetch_result(Ok(mk_status(vec![PrCheck {
+    name: "a".into(),
+    outcome: CheckOutcome::Running,
+    url: None,
+    workflow_name: None,
+    started_at: None,
+    completed_at: None,
+  }])));
+  app.enter_ci_checks();
+  assert_eq!(app.view, View::DetailOverlay);
+
+  app.apply_pr_fetch_result(Ok(mk_status(vec![])));
+  assert_eq!(app.view, View::List, "an empty landing closes the overlay");
+  assert!(
+    app.status.contains("no CI checks"),
+    "the status line explains the close: {}",
+    app.status
+  );
 }
 
 #[test]

@@ -125,6 +125,45 @@ fn ci_checks_long_name_truncates_and_keeps_the_detail_column() {
   );
 }
 
+/// Codex review #455 (P2): on a narrow terminal a long WORKFLOW name made
+/// the detail column itself wider than the modal — the value truncated to
+/// nothing while the untouched column ran past the clipping edge, and
+/// ratatui cut its right end: the duration, the very info the column
+/// carries. The column is bounded too, truncating from the workflow side
+/// (leading ellipsis) so the duration tail survives.
+#[test]
+fn ci_checks_narrow_terminal_bounds_the_detail_column() {
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::{ci_check_rows, DetailKind};
+  let dir = repo();
+  let mut app = App::new_at_layered(Some(dir.path()), None).unwrap();
+  let checks = vec![PrCheck {
+    name: "build".into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some(format!("release-{}", "w".repeat(80))),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: Some("2026-07-24T14:52:24Z".into()),
+  }];
+  let rows = ci_check_rows(&checks, SystemTime::now());
+  app.detail_overlay.open(DetailKind::CiChecks, "CI Checks".into(), rows);
+  app.view = gwm::tui::View::DetailOverlay;
+
+  let joined = draw_rows(&mut app, 60, 20).join("\n");
+  assert!(
+    joined.contains("build"),
+    "the check name keeps its reserved width: {joined}"
+  );
+  assert!(
+    joined.contains("1m18s"),
+    "the duration tail survives the bounded detail column: {joined}"
+  );
+  assert!(
+    joined.contains('…'),
+    "the oversized detail column truncates with an ellipsis: {joined}"
+  );
+}
+
 /// Codex review on PR #455: the filter's scrollbar rect started at the
 /// query line (`area.y + 4`) instead of the filtered listing (`+ 6`),
 /// overlapping the input and stopping short of the last rows.

@@ -4715,8 +4715,27 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
     // aligned inside that bar, rendered muted. Its width is RESERVED
     // (Codex review #455): a long check name truncates with an ellipsis
     // instead of pushing the detail column past the clipping edge.
-    let extra = row.extra.as_deref().unwrap_or("");
-    let extra_cols = if extra.is_empty() { 0 } else { extra.chars().count() };
+    let mut extra: String = row.extra.as_deref().unwrap_or("").to_string();
+    let mut extra_cols = extra.chars().count();
+    // The detail column is bounded too (Codex review #455): on a narrow
+    // modal an oversized workflow name would run past the clipping edge
+    // and ratatui cuts its RIGHT end — the duration, the very info the
+    // column carries. Truncate from the workflow side instead (leading
+    // ellipsis, the tail survives), reserving the value a dozen columns
+    // or its full width when shorter.
+    if extra_cols > 0 {
+      let reserve = row.value.chars().count().min(12);
+      let extra_budget = inner.saturating_sub(label_w + 2 + reserve + 2);
+      if extra_cols > extra_budget {
+        if extra_budget == 0 {
+          extra.clear();
+        } else {
+          let tail: String = extra.chars().skip(extra_cols - (extra_budget - 1)).collect();
+          extra = format!("…{tail}");
+        }
+        extra_cols = extra.chars().count();
+      }
+    }
     let value_budget = inner.saturating_sub(label_w + 2 + if extra_cols > 0 { extra_cols + 2 } else { 0 });
     let value: String = if row.value.chars().count() > value_budget {
       let mut v: String = row.value.chars().take(value_budget.saturating_sub(1)).collect();
@@ -4744,7 +4763,7 @@ fn draw_detail_overlay(f: &mut Frame, app: &App) {
       Span::styled(format!("{:label_w$}  ", row.label), label_style),
       Span::styled(value, value_style),
       Span::styled(" ".repeat(pad), pad_style),
-      Span::styled(extra.to_string(), extra_style),
+      Span::styled(extra, extra_style),
     ]));
   }
   // #436 validation feedback: the CI checks consumer advertises ITS verbs,
@@ -5182,10 +5201,14 @@ pub fn github_status_lines(app: &App, max_width: usize) -> Vec<Line<'static>> {
     // context-accurate (Codex review #455): the contextual `c`
     // (EditWorktree's chord) only while the status pane holds the focus —
     // in the worktrees context that key opens the rename modal, so the
-    // global `ci_checks` binding is advertised instead. An explicitly
-    // unbound action yields no suffix at all rather than a dead key.
+    // global `ci_checks` binding is advertised instead. An unbound
+    // EditWorktree falls back to the global binding (still live in that
+    // context); only when both are unbound does the suffix disappear.
     let ci_key = if app.sidebar.open && app.sidebar.focused {
-      app.keymap.primary_chord(Action::EditWorktree)
+      app
+        .keymap
+        .primary_chord(Action::EditWorktree)
+        .or_else(|| app.keymap.primary_chord(Action::CiChecks))
     } else {
       app.keymap.primary_chord(Action::CiChecks)
     };
