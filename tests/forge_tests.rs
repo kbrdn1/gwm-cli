@@ -342,19 +342,18 @@ fn an_ssh_remote_yields_a_guessed_origin() {
 }
 
 #[test]
-fn github_enterprise_pins_gh_host_but_github_dot_com_does_not() {
+fn a_github_enterprise_origin_pins_gh_host() {
   // #419 made non-github.com hosts reachable for the first time (the old
   // parser rejected them outright), so `gh` must be told which instance to
   // hit — otherwise it silently targets github.com and could read a
-  // same-named repo on the wrong tenant.
+  // same-named repo on the wrong tenant. github.com is pinned too, see
+  // `gh_host_is_pinned_even_for_github_dot_com`.
   let ghe = forge::parse_remote_url("https://github.acme.internal/team/proj.git").unwrap();
+
   assert_eq!(
     gwm::github::gh_env(&ghe),
     vec![("GH_HOST".to_string(), "github.acme.internal".to_string())]
   );
-
-  let dotcom = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
-  assert!(gwm::github::gh_env(&dotcom).is_empty(), "github.com needs no pin");
 }
 
 #[test]
@@ -365,4 +364,109 @@ fn an_ssh_github_remote_does_not_pin_gh_host() {
     gwm::github::gh_env(&r).is_empty(),
     "a guessed origin must not override gh"
   );
+}
+
+// --- Codex review #458, round 3 -------------------------------------------
+
+#[test]
+fn gh_host_is_pinned_even_for_github_dot_com() {
+  // The child inherits gwm's environment, so a user's ambient
+  // `GH_HOST=github.acme.internal` (routine for enterprise users) would
+  // silently retarget a github.com repo: the argv only carries
+  // `--repo owner/repo`, never a hostname. Exempting github.com left that
+  // hijack open, so an authoritative origin now always states its host.
+  let r = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
+
+  assert_eq!(
+    gwm::github::gh_env(&r),
+    vec![("GH_HOST".to_string(), "github.com".to_string())]
+  );
+}
+
+#[test]
+fn the_forge_child_runs_in_the_repo_not_the_process_cwd() {
+  // The root cause behind the workspace tenant hazard: `gh` / `glab`
+  // resolve the instance from their *working directory* when the flags do
+  // not pin it. gwm's cwd is the workspace root, not the row's repo, so
+  // the child is spawned in the repo instead. This covers SSH remotes,
+  // where the web origin is only a guess and no host can be pinned.
+  let dir = tempfile::tempdir().unwrap();
+  let f = forge::for_kind_in(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("git@gitlab.acme:team/proj.git").unwrap(),
+    Some(dir.path().to_path_buf()),
+  );
+
+  assert_eq!(f.workdir(), Some(dir.path()));
+}
+
+// --- relative-URL (sub-path) self-managed installs ------------------------
+
+#[test]
+fn forge_host_overrides_the_derived_origin_and_strips_the_slug_prefix() {
+  // GitLab supports being installed under a URL prefix. From the remote
+  // alone, `https://example.com/gitlab/group/proj.git` is indistinguishable
+  // from a project at `gitlab/group/proj` on example.com — there is no
+  // algorithmic answer, so the instance root is declared.
+  let (_dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://example.com/gitlab/group/proj.git")
+    .unwrap();
+  let cfg = Config {
+    forge: Some(ForgeKind::GitLab),
+    forge_host: Some("https://example.com/gitlab".into()),
+    ..Default::default()
+  };
+
+  let f = forge::resolve(&repo, &cfg).unwrap();
+
+  assert_eq!(f.slug(), "group/proj");
+  assert_eq!(f.web_origin(), "https://example.com/gitlab");
+  assert_eq!(f.issue_url(7), "https://example.com/gitlab/group/proj/-/issues/7");
+}
+
+#[test]
+fn forge_host_is_authoritative_so_it_pins_the_cli_host() {
+  let (_dir, repo) = init_repo();
+  repo.remote("origin", "git@example.com:gitlab/group/proj.git").unwrap();
+  let cfg = Config {
+    forge: Some(ForgeKind::GitLab),
+    forge_host: Some("https://example.com/gitlab".into()),
+    ..Default::default()
+  };
+
+  let f = forge::resolve(&repo, &cfg).unwrap();
+
+  // An SSH remote alone yields only a guess; an explicit `forge_host` is
+  // the user stating the answer, which is the most authoritative source
+  // there is.
+  assert_eq!(f.slug(), "group/proj");
+  assert_eq!(f.web_origin(), "https://example.com/gitlab");
+}
+
+#[test]
+fn forge_host_that_does_not_prefix_the_remote_leaves_the_slug_alone() {
+  // A mismatch is not silently "fixed": the origin still names the
+  // project, only the instance root is overridden.
+  let (_dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+  let cfg = Config {
+    forge: Some(ForgeKind::GitLab),
+    forge_host: Some("https://mirror.example.com".into()),
+    ..Default::default()
+  };
+
+  let f = forge::resolve(&repo, &cfg).unwrap();
+
+  assert_eq!(f.slug(), "group/proj");
+  assert_eq!(f.web_origin(), "https://mirror.example.com");
+}
+
+#[test]
+fn forge_host_key_parses_and_is_optional() {
+  let set: Config = toml::from_str("forge_host = \"https://example.com/gitlab\"\n").unwrap();
+  assert_eq!(set.forge_host.as_deref(), Some("https://example.com/gitlab"));
+
+  let unset: Config = toml::from_str("").unwrap();
+  assert_eq!(unset.forge_host, None);
 }

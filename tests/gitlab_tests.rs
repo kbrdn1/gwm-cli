@@ -660,18 +660,6 @@ fn milestone_delete_argv_targets_the_numeric_id() {
 }
 
 #[test]
-fn label_list_argv_paginates() {
-  let argv = gitlab::label_list_argv("group/proj");
-
-  assert_eq!(
-    argv,
-    vec!["api", "--paginate", "projects/group%2Fproj/labels?per_page=100"]
-  );
-}
-
-// --- Codex review #458 ----------------------------------------------------
-
-#[test]
 fn a_blocking_manual_pipeline_is_not_green() {
   // `manual` is NOT GitHub's `SKIPPED`. A GitLab pipeline sits in `manual`
   // while it waits on a blocking manual job: it is suspended, it can bar
@@ -858,4 +846,41 @@ fn milestone_create_still_omits_absent_optional_fields() {
 
   assert!(!argv.iter().any(|a| a.starts_with("description=")), "{argv:?}");
   assert!(!argv.iter().any(|a| a.starts_with("due_date=")), "{argv:?}");
+}
+
+// --- Codex review #458, round 3 -------------------------------------------
+
+#[test]
+fn label_list_excludes_ancestor_group_labels() {
+  // `include_ancestor_groups` defaults to **true** on GitLab, so the plain
+  // query returns the parent groups' labels too. The shared diff engine
+  // then reads them as extras: `--prune` proposes deleting labels the
+  // project does not own (a project-scoped DELETE that fails), and the
+  // dry-run count lies.
+  let argv = gitlab::label_list_argv("group/proj");
+
+  assert_eq!(
+    argv,
+    vec![
+      "api",
+      "--paginate",
+      "projects/group%2Fproj/labels?per_page=100&include_ancestor_groups=false",
+    ]
+  );
+}
+
+#[test]
+fn parse_labels_json_drops_group_labels_that_slipped_through() {
+  // Belt and braces behind the query parameter: an older self-managed
+  // instance that ignores `include_ancestor_groups` still must not feed
+  // group labels into a project-scoped prune. `is_project_label` is the
+  // authoritative marker; absent (older payloads), the label is kept.
+  let json = r##"[{"id":1,"name":"proj-only","color":"#d9534f","is_project_label":true},
+                  {"id":2,"name":"from-group","color":"#5319e7","is_project_label":false},
+                  {"id":3,"name":"legacy","color":"#111111"}]"##;
+
+  let labels = gitlab::parse_labels_json(json).unwrap();
+
+  let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
+  assert_eq!(names, vec!["proj-only", "legacy"]);
 }

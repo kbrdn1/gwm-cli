@@ -375,6 +375,17 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
   /// `http://gitlab.acme:8080`). The root of every generated URL.
   fn web_origin(&self) -> &str;
 
+  /// Directory the forge CLI is spawned in, when known.
+  ///
+  /// This is the root fix for the wrong-tenant hazard (Codex review #458):
+  /// `gh` / `glab` resolve the instance from their **working directory**
+  /// whenever the flags do not pin it, and gwm's own cwd is not reliably
+  /// the repo being queried — in workspace mode it is the workspace root
+  /// while the row belongs to a child repo. Running the child inside the
+  /// repo makes it read that repo's own remote, which is correct for SSH
+  /// remotes too, where no host can be honestly pinned.
+  fn workdir(&self) -> Option<&std::path::Path>;
+
   /// User-facing noun for a change proposal: `"PR"` or `"MR"`.
   fn pr_noun(&self) -> &'static str {
     match self.kind() {
@@ -423,9 +434,15 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
 /// doctor) can exercise the pure parts — URL building, terminology —
 /// without a repository.
 pub fn for_kind(kind: ForgeKind, origin: RemoteRef) -> Arc<dyn Forge> {
+  for_kind_in(kind, origin, None)
+}
+
+/// [`for_kind`] with the directory the forge CLI should be spawned in —
+/// the repo's workdir. See [`Forge::workdir`] for why it matters.
+pub fn for_kind_in(kind: ForgeKind, origin: RemoteRef, workdir: Option<std::path::PathBuf>) -> Arc<dyn Forge> {
   match kind {
-    ForgeKind::GitHub => Arc::new(crate::github::GitHubForge::new(origin)),
-    ForgeKind::GitLab => Arc::new(crate::gitlab::GitLabForge::new(origin)),
+    ForgeKind::GitHub => Arc::new(crate::github::GitHubForge::new(origin, workdir)),
+    ForgeKind::GitLab => Arc::new(crate::gitlab::GitLabForge::new(origin, workdir)),
   }
 }
 
@@ -484,9 +501,56 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 /// backend from `.gwm.toml`'s `forge` key when set, else infer it from
 /// the host.
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
-  let parsed = origin_ref(repo)?;
+  let mut parsed = origin_ref(repo)?;
+  if let Some(declared) = config.forge_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    parsed = parsed.with_declared_host(declared);
+  }
   let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
-  Ok(for_kind(kind, parsed))
+  Ok(for_kind_in(kind, parsed, repo.workdir().map(|p| p.to_path_buf())))
+}
+
+impl RemoteRef {
+  /// Re-root this ref on an explicitly declared instance URL
+  /// (`forge_host` in `.gwm.toml`, Codex review #458).
+  ///
+  /// GitLab supports being installed under a **URL prefix**, and from the
+  /// remote alone `https://example.com/gitlab/group/proj.git` cannot be
+  /// told apart from a project at `gitlab/group/proj` on example.com —
+  /// there is no algorithmic answer, only a declared one. When the
+  /// declared root prefixes the remote, the shared segments are stripped
+  /// from the slug; when it does not, only the origin is overridden and
+  /// the slug is left as parsed rather than silently "corrected".
+  ///
+  /// A declared host is [`OriginTrust::FromUrl`]: the user stating the
+  /// answer outranks anything inferred from the URL.
+  pub fn with_declared_host(mut self, declared: &str) -> Self {
+    let declared = declared.trim_end_matches('/');
+    // Strip the declared instance's own path prefix off the slug, e.g.
+    // declared `https://example.com/gitlab` + path `gitlab/group/proj`
+    // ⇒ slug `group/proj`.
+    if let Some((_, after_scheme)) = declared.split_once("://") {
+      if let Some((_, prefix_path)) = after_scheme.split_once('/') {
+        let prefix_path = prefix_path.trim_matches('/');
+        if !prefix_path.is_empty() {
+          if let Some(rest) = self.path.strip_prefix(prefix_path).and_then(|r| r.strip_prefix('/')) {
+            self.path = rest.to_string();
+          }
+        }
+      }
+      self.host = after_scheme
+        .split('/')
+        .next()
+        .unwrap_or(after_scheme)
+        .rsplit_once(':')
+        .filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
+        .map(|(h, _)| h)
+        .unwrap_or_else(|| after_scheme.split('/').next().unwrap_or(after_scheme))
+        .to_ascii_lowercase();
+    }
+    self.web_origin = declared.to_string();
+    self.trust = OriginTrust::FromUrl;
+    self
+  }
 }
 
 // ---- shared CLI invocation ----------------------------------------------
@@ -541,7 +605,19 @@ where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  run_cli_with(program, args, &[], &[])
+  run_cli_with(program, args, &CliSpawn::default())
+}
+
+/// Child-process settings a forge backend needs beyond the argv.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CliSpawn<'a> {
+  /// Extra environment: `$GITLAB_HOST` / `$GH_HOST` pin the instance.
+  pub env: &'a [(String, String)],
+  /// Working directory. `gh` / `glab` fall back to resolving the instance
+  /// from here, so it must be the repo being queried — not gwm's own cwd.
+  pub cwd: Option<&'a std::path::Path>,
+  /// Flags whose *value* must not reach the Command Logs transcript.
+  pub redact_after: &'a [&'a str],
 }
 
 /// [`run_cli`] with extra environment for the child and a redaction list
@@ -549,7 +625,7 @@ where
 /// pins the instance (otherwise `glab` resolves it from the *process* cwd
 /// and falls back to gitlab.com), and `--description` carries a whole
 /// rendered body that must not land verbatim in Command Logs.
-pub fn run_cli_with<I, S>(program: &OsStr, args: I, env: &[(String, String)], redact_after: &[&str]) -> Result<String>
+pub fn run_cli_with<I, S>(program: &OsStr, args: I, spawn: &CliSpawn<'_>) -> Result<String>
 where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
@@ -558,11 +634,14 @@ where
   // human-readable command line stored on the transcript (issue #226).
   let collected: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
   let name = program_name(program);
-  let cmdline = cli_command_line_redacted(program, &collected, redact_after);
+  let cmdline = cli_command_line_redacted(program, &collected, spawn.redact_after);
   let mut cmd = Command::new(program);
   cmd.args(&collected);
-  for (k, v) in env {
+  for (k, v) in spawn.env {
     cmd.env(k, v);
+  }
+  if let Some(cwd) = spawn.cwd {
+    cmd.current_dir(cwd);
   }
   let output = crate::command_log::run_logged(&mut cmd, cmdline).map_err(|e| {
     GwmError::CommandFailed(format!(

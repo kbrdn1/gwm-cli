@@ -67,6 +67,7 @@ pub const CONFIG_SECTIONS: &[&str] = &[
   // Scalar, not a section: `forge = "github" | "gitlab"` (issue #419).
   // Additive and optional, so pre-#419 configs keep parsing unchanged.
   "forge",
+  "forge_host",
   "worktree",
   "bootstrap",
   "hooks",

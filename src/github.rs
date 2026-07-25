@@ -1331,17 +1331,19 @@ pub struct GitHubForge {
   origin: forge::RemoteRef,
   program: OsString,
   env: Vec<(String, String)>,
+  workdir: Option<std::path::PathBuf>,
 }
 
 impl GitHubForge {
   /// Resolves `$GWM_GH` **now**, on the calling thread, so a forge handed
   /// to the TUI's fetch worker never re-reads the process environment
   /// concurrently with env-mutating code (issue #217).
-  pub fn new(origin: forge::RemoteRef) -> Self {
+  pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
     Self {
       env: gh_env(&origin),
       origin,
       program: gh_program(),
+      workdir,
     }
   }
 
@@ -1350,7 +1352,15 @@ impl GitHubForge {
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
   {
-    forge::run_cli_with(&self.program, args, &self.env, &[])
+    forge::run_cli_with(
+      &self.program,
+      args,
+      &forge::CliSpawn {
+        env: &self.env,
+        cwd: self.workdir.as_deref(),
+        redact_after: &[],
+      },
+    )
   }
 }
 
@@ -1362,13 +1372,20 @@ impl GitHubForge {
 /// door, and without the pin `gh` would silently target github.com and
 /// could read a same-named repo on the wrong tenant.
 ///
-/// Nothing is pinned when the origin is github.com (the `gh` default), when
-/// the slug is empty (the caller wants `gh` to infer the project locally),
-/// or when the origin was only **guessed** from an SSH remote — an SSH
-/// hostname is frequently not the web hostname, and overriding a working
-/// `gh` configuration with a guess is worse than leaving it alone.
+/// github.com is pinned like any other host, deliberately: the child
+/// inherits gwm's environment, so a user's ambient `GH_HOST` — routine for
+/// enterprise users — would otherwise retarget a github.com repo, since
+/// the argv only ever carries `--repo owner/repo` and never a hostname
+/// (Codex review #458, round 3).
+///
+/// Nothing is pinned when the slug is empty (the caller wants `gh` to
+/// infer the project locally) or when the origin was only **guessed**
+/// from an SSH remote — an SSH hostname is frequently not the web
+/// hostname, and overriding a working `gh` configuration with a guess is
+/// worse than leaving it alone. That case is covered instead by spawning
+/// the child inside the repo (see [`forge::Forge::workdir`]).
 pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
-  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() || origin.host == "github.com" {
+  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
   }
   vec![("GH_HOST".to_string(), origin.host.clone())]
@@ -1385,6 +1402,10 @@ impl Forge for GitHubForge {
 
   fn web_origin(&self) -> &str {
     &self.origin.web_origin
+  }
+
+  fn workdir(&self) -> Option<&std::path::Path> {
+    self.workdir.as_deref()
   }
 
   fn issue_url(&self, number: u64) -> String {

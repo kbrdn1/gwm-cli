@@ -68,6 +68,10 @@ pub fn glab_program() -> OsString {
 /// An empty slug is likewise left alone — that is the caller asking `glab`
 /// to infer the project locally, and pinning gitlab.com there would create
 /// the issue / MR on the wrong instance entirely.
+///
+/// The cases left unpinned are not left unprotected: the child is spawned
+/// **inside the repo** (see [`forge::Forge::workdir`]), so `glab` resolves
+/// the instance from that repo's own remote rather than from gwm's cwd.
 pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
@@ -443,6 +447,10 @@ fn extract_url(out: &str, marker: &str) -> Option<String> {
 #[derive(Deserialize)]
 struct RawLabel {
   name: String,
+  /// `false` for a label inherited from an ancestor group. Absent on
+  /// older self-managed payloads, where the label is kept.
+  #[serde(default)]
+  is_project_label: Option<bool>,
   /// GitLab serialises `"#D9534F"`. Not `#[serde(default)]` on purpose:
   /// a contract change that dropped the field should be a hard parse
   /// error, not a silent empty string flagging every label as a colour
@@ -465,6 +473,10 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
   Ok(
     raw
       .into_iter()
+      // Belt and braces behind `include_ancestor_groups=false`: an older
+      // self-managed instance that ignores the parameter must still not
+      // feed group labels into a project-scoped prune.
+      .filter(|r| r.is_project_label.unwrap_or(true))
       .map(|r| RemoteLabel {
         name: r.name,
         description: r.description,
@@ -482,11 +494,19 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
 /// (`[…][…]`), parsing breaks — and only for projects past the 100-row
 /// first page, so it would not show up in light use. Confirm against a
 /// real instance before relying on it at that scale.
+/// `include_ancestor_groups=false` is load-bearing (Codex review #458):
+/// GitLab defaults it to **true**, so the plain query also returns the
+/// parent groups' labels. The shared diff engine reads those as extras —
+/// `gwm labels push --prune` then proposes deleting labels the project
+/// does not own, and issues a project-scoped DELETE that fails.
 pub fn label_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),
     "--paginate".into(),
-    format!("{}/labels?per_page=100", project_path(slug)),
+    format!(
+      "{}/labels?per_page=100&include_ancestor_groups=false",
+      project_path(slug)
+    ),
   ]
 }
 
@@ -762,22 +782,32 @@ pub struct GitLabForge {
   origin: forge::RemoteRef,
   program: OsString,
   env: Vec<(String, String)>,
+  workdir: Option<std::path::PathBuf>,
 }
 
 impl GitLabForge {
   /// Resolves `$GWM_GLAB` **now**, on the calling thread, so a forge
   /// handed to the TUI's fetch worker never re-reads the process
   /// environment concurrently with env-mutating code (issue #217).
-  pub fn new(origin: forge::RemoteRef) -> Self {
+  pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
     Self {
       env: glab_env(&origin),
       origin,
       program: glab_program(),
+      workdir,
     }
   }
 
   fn run_argv(&self, argv: Vec<String>) -> Result<String> {
-    forge::run_cli_with(&self.program, argv, &self.env, REDACTED_FLAGS)
+    forge::run_cli_with(
+      &self.program,
+      argv,
+      &forge::CliSpawn {
+        env: &self.env,
+        cwd: self.workdir.as_deref(),
+        redact_after: REDACTED_FLAGS,
+      },
+    )
   }
 }
 
@@ -792,6 +822,10 @@ impl Forge for GitLabForge {
 
   fn web_origin(&self) -> &str {
     &self.origin.web_origin
+  }
+
+  fn workdir(&self) -> Option<&std::path::Path> {
+    self.workdir.as_deref()
   }
 
   fn issue_url(&self, number: u64) -> String {

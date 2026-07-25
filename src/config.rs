@@ -17,6 +17,16 @@ pub struct Config {
   /// key is the supported way in; it always wins over inference.
   #[serde(default)]
   pub forge: Option<crate::forge::ForgeKind>,
+  /// `forge_host` — the instance root URL, when it cannot be derived from
+  /// the `origin` remote (issue #419).
+  ///
+  /// GitLab supports being installed under a **URL prefix**, and
+  /// `https://example.com/gitlab/group/proj.git` is indistinguishable
+  /// from a project at `gitlab/group/proj` on example.com. Declaring
+  /// `forge_host = "https://example.com/gitlab"` re-roots the generated
+  /// URLs, strips the prefix off the slug, and pins the CLI's host.
+  #[serde(default)]
+  pub forge_host: Option<String>,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]
