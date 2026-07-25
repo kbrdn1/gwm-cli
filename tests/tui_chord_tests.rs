@@ -600,6 +600,7 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
   // sub-modes that bypass the rebindable verbs entirely (agents
   // attach-by-id prompt, CI checks filter), and the PTY escape hatch.
   for (section, keys) in [
+    ("Create Form", "0-9"),
     ("Create Form", "any char"),
     ("Create Form", "Backspace"),
     ("Link Prompt", "0-9"),
@@ -608,6 +609,8 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
     ("Command Palette", "Backspace"),
     ("Settings", "any char"),
     ("Settings", "Backspace"),
+    ("Settings", "enter"),
+    ("Settings", "Esc"),
     ("Agent Sessions", "any char"),
     ("Agent Sessions", "Backspace"),
     ("Agent Sessions", "Up/Down"),
