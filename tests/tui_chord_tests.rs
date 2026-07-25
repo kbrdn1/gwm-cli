@@ -516,6 +516,76 @@ fn help_overlay_documents_every_action() {
 }
 
 #[test]
+fn help_overlay_documents_every_modal_action_in_its_section() {
+  // #453: the #334 guard above pins `Action::all()` only, so modal verbs
+  // kept drifting out of the overlay — most of the modal key contexts were
+  // absent entirely. A flat chord-string check would be toothless here
+  // (modal verbs share their defaults: `Esc, q` closes half the modals),
+  // so the guard is per SECTION: each `KeyContext` maps to the section
+  // title expected to document it, and every one of its `ModalAction`s
+  // must surface inside that section with the exact keys string
+  // `modal_entry` renders (`keys_display`). Rebinds show through since
+  // both sides read the same `ModalKeymap`.
+  use gwm::tui::help_rows;
+  use gwm::tui::keymap::Keymap;
+  use gwm::tui::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
+  use gwm::tui::{HelpRow, HintContext};
+
+  let section_for = |ctx: KeyContext| -> &'static str {
+    match ctx {
+      KeyContext::Create => "Create Form",
+      KeyContext::Confirm => "Delete Worktree",
+      KeyContext::Help => "Help Overlay",
+      KeyContext::Detail => "Agent Sessions",
+      KeyContext::CommandLogs => "Command Logs",
+      KeyContext::Config | KeyContext::ConfigEdit => "Settings",
+      KeyContext::Report => "Bootstrap Report",
+      KeyContext::OpenMenu => "Browse Links",
+      KeyContext::CommandPalette => "Command Palette",
+      KeyContext::LinkChooseTarget | KeyContext::LinkInputNumber => "Link Prompt",
+      KeyContext::ExecPicker => "Exec Profiles",
+      KeyContext::Clean => "Clean Reclaim",
+      KeyContext::CiChecks => "CI Checks",
+    }
+  };
+
+  let modal = ModalKeymap::defaults();
+  let rows = help_rows(&Keymap::defaults(), &modal, HintContext::Worktrees);
+
+  // section title -> the keys strings its entries document.
+  let mut sections: std::collections::HashMap<String, std::collections::HashSet<String>> =
+    std::collections::HashMap::new();
+  let mut current: Option<String> = None;
+  for row in &rows {
+    match row {
+      HelpRow::Section(title) => current = Some(title.clone()),
+      HelpRow::Entry { keys, .. } if !keys.is_empty() => {
+        if let Some(section) = &current {
+          sections.entry(section.clone()).or_default().insert(keys.clone());
+        }
+      }
+      _ => {}
+    }
+  }
+
+  for action in ModalAction::all() {
+    let keys = modal.keys_display(action);
+    assert!(
+      !keys.is_empty(),
+      "ModalAction::{action:?} has no default binding — the guard identifies \
+       verbs by their keys string; bind it (or document the exception)"
+    );
+    let section = section_for(action.context());
+    let in_section = sections.get(section).is_some_and(|s| s.contains(&keys));
+    assert!(
+      in_section,
+      "ModalAction::{action:?} (keys {keys:?}) is not documented in the {section:?} \
+       section of the help overlay — add a `modal_entry` there (issue #453)"
+    );
+  }
+}
+
+#[test]
 fn help_lines_is_help_rows_flattened() {
   // #187: `help_lines` must stay a pure flattening of `help_rows` so the
   // legacy `  {keys:<13} {label}` string contract (asserted elsewhere in
