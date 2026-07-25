@@ -41,14 +41,6 @@
 #
 # The key always wins over inference, so it also forces GitHub on a host that
 # would otherwise be read as GitLab.
-#
-# `forge_host` — the instance ROOT URL, for the one case the origin cannot
-# express: GitLab supports being installed under a URL prefix, and
-# `https://example.com/gitlab/group/proj.git` is indistinguishable from a
-# project at `gitlab/group/proj` on example.com. Declaring the root re-roots
-# generated URLs, strips the prefix off the slug, and pins the CLI's host:
-#
-#   forge_host = "https://example.com/gitlab"
 
 [worktree]
 base = "{home}/cc-worktree/{repo}"

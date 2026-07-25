@@ -1378,14 +1378,25 @@ impl GitHubForge {
 /// the argv only ever carries `--repo owner/repo` and never a hostname
 /// (Codex review #458, round 3).
 ///
-/// Nothing is pinned when the slug is empty (the caller wants `gh` to
-/// infer the project locally) or when the origin was only **guessed**
-/// from an SSH remote — an SSH hostname is frequently not the web
-/// hostname, and overriding a working `gh` configuration with a guess is
-/// worse than leaving it alone. That case is covered instead by spawning
-/// the child inside the repo (see [`forge::Forge::workdir`]).
+/// Nothing is pinned when the slug is empty — the caller wants `gh` to
+/// infer the project locally.
+///
+/// A **guessed** (SSH) origin is pinned anyway when its host is not
+/// github.com, which is the one place this diverges from
+/// [`crate::gitlab::glab_env`] (Codex review #458). The reason is that
+/// `gh` cannot be steered any other way here: `--repo owner/repo` carries
+/// no hostname, `gh api repos/<slug>/…` bakes the slug into the request
+/// path, and neither falls back to the working directory. Pinning nothing
+/// therefore means silently querying github.com — where a same-named repo
+/// belonging to someone else may answer. A distinct SSH hostname is a
+/// documented GitLab pattern, not a GitHub one, so the SSH host is the
+/// best available signal; `glab`, which *does* resolve from the working
+/// directory, is left to do so.
 pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
-  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
+  if origin.path.is_empty() {
+    return Vec::new();
+  }
+  if origin.trust != forge::OriginTrust::FromUrl && origin.host == "github.com" {
     return Vec::new();
   }
   vec![("GH_HOST".to_string(), origin.authority().to_string())]

@@ -539,56 +539,9 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 /// backend from `.gwm.toml`'s `forge` key when set, else infer it from
 /// the host.
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
-  let mut parsed = origin_ref(repo)?;
-  if let Some(declared) = config.forge_host.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-    parsed = parsed.with_declared_host(declared);
-  }
+  let parsed = origin_ref(repo)?;
   let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
   Ok(for_kind_in(kind, parsed, repo.workdir().map(|p| p.to_path_buf())))
-}
-
-impl RemoteRef {
-  /// Re-root this ref on an explicitly declared instance URL
-  /// (`forge_host` in `.gwm.toml`, Codex review #458).
-  ///
-  /// GitLab supports being installed under a **URL prefix**, and from the
-  /// remote alone `https://example.com/gitlab/group/proj.git` cannot be
-  /// told apart from a project at `gitlab/group/proj` on example.com —
-  /// there is no algorithmic answer, only a declared one. When the
-  /// declared root prefixes the remote, the shared segments are stripped
-  /// from the slug; when it does not, only the origin is overridden and
-  /// the slug is left as parsed rather than silently "corrected".
-  ///
-  /// A declared host is [`OriginTrust::FromUrl`]: the user stating the
-  /// answer outranks anything inferred from the URL.
-  pub fn with_declared_host(mut self, declared: &str) -> Self {
-    let declared = declared.trim_end_matches('/');
-    // Strip the declared instance's own path prefix off the slug, e.g.
-    // declared `https://example.com/gitlab` + path `gitlab/group/proj`
-    // ⇒ slug `group/proj`.
-    if let Some((_, after_scheme)) = declared.split_once("://") {
-      if let Some((_, prefix_path)) = after_scheme.split_once('/') {
-        let prefix_path = prefix_path.trim_matches('/');
-        if !prefix_path.is_empty() {
-          if let Some(rest) = self.path.strip_prefix(prefix_path).and_then(|r| r.strip_prefix('/')) {
-            self.path = rest.to_string();
-          }
-        }
-      }
-      self.host = after_scheme
-        .split('/')
-        .next()
-        .unwrap_or(after_scheme)
-        .rsplit_once(':')
-        .filter(|(_, port)| !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()))
-        .map(|(h, _)| h)
-        .unwrap_or_else(|| after_scheme.split('/').next().unwrap_or(after_scheme))
-        .to_ascii_lowercase();
-    }
-    self.web_origin = declared.to_string();
-    self.trust = OriginTrust::FromUrl;
-    self
-  }
 }
 
 // ---- shared CLI invocation ----------------------------------------------

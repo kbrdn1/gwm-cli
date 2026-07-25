@@ -22,11 +22,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is inferred from the `origin` host; a **self-hosted** instance lives on
     an arbitrary domain and cannot be detected from the URL, so the explicit
     key is the supported way in and always wins over inference.
-  - New `forge_host` key for the one case the origin cannot express: GitLab
-    installs under a URL prefix (`https://example.com/gitlab`), which is
-    indistinguishable from a project at `gitlab/…` in the remote alone. It
-    re-roots generated URLs, strips its prefix off the slug, and pins the
-    CLI's host.
   - `$GWM_GLAB` overrides the `glab` binary, mirroring `$GWM_GH`.
   - `gwm doctor` probes the forge CLI, but only when `forge` is set
     explicitly, so repos that never opt in gain no new warning.
@@ -115,6 +110,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `git@[::1]:group/repo.git`
   was split on the first colon, yielding host `git@[` and a nonsense path. The
   scp-form and port splits are now bracket-aware.
+- **Hook `{owner}` / `{repo}` placeholders split a nested namespace correctly**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). A GitLab slug can be
+  `group/sub/proj`; splitting on the first separator gave `owner=group`,
+  `repo=sub/proj`. The namespace is everything before the last one.
+- **An enterprise SSH origin pins the GitHub host**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `gh` takes no
+  hostname from `--repo owner/repo`, bakes the slug into `gh api repos/<slug>`,
+  and does not fall back to the working directory, so pinning nothing meant
+  silently querying github.com — where a same-named repo belonging to someone
+  else may answer.
 - **`gwm doctor` honours `$GWM_GH` / `$GWM_GLAB`**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). The forge-CLI probe
   looked for the bare `gh` / `glab` name, warning about a working setup that

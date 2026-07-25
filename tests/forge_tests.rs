@@ -357,16 +357,30 @@ fn a_github_enterprise_origin_pins_gh_host() {
 }
 
 #[test]
-fn an_ssh_github_remote_does_not_pin_gh_host() {
+fn an_ssh_enterprise_remote_still_pins_gh_host() {
+  // Supersedes the round-2 rule for GitHub only. `gh` cannot be steered
+  // any other way here: `--repo owner/repo` carries no hostname,
+  // `gh api repos/<slug>/…` bakes the slug into the request path, and
+  // neither falls back to the working directory the way `glab` does. So
+  // pinning nothing means silently querying github.com, where a
+  // same-named repo owned by someone else may answer. A distinct SSH
+  // hostname is a documented GitLab pattern, not a GitHub one.
   let r = forge::parse_remote_url("git@github.acme.internal:team/proj.git").unwrap();
 
-  assert!(
-    gwm::github::gh_env(&r).is_empty(),
-    "a guessed origin must not override gh"
+  assert_eq!(
+    gwm::github::gh_env(&r),
+    vec![("GH_HOST".to_string(), "github.acme.internal".to_string())]
   );
 }
 
-// --- Codex review #458, round 3 -------------------------------------------
+#[test]
+fn an_ssh_github_dot_com_remote_pins_nothing() {
+  // github.com is the default anyway; pinning it from a guess adds risk
+  // with no benefit.
+  let r = forge::parse_remote_url("git@github.com:o/r.git").unwrap();
+
+  assert!(gwm::github::gh_env(&r).is_empty());
+}
 
 #[test]
 fn gh_host_is_pinned_even_for_github_dot_com() {
@@ -399,79 +413,6 @@ fn the_forge_child_runs_in_the_repo_not_the_process_cwd() {
 
   assert_eq!(f.workdir(), Some(dir.path()));
 }
-
-// --- relative-URL (sub-path) self-managed installs ------------------------
-
-#[test]
-fn forge_host_overrides_the_derived_origin_and_strips_the_slug_prefix() {
-  // GitLab supports being installed under a URL prefix. From the remote
-  // alone, `https://example.com/gitlab/group/proj.git` is indistinguishable
-  // from a project at `gitlab/group/proj` on example.com — there is no
-  // algorithmic answer, so the instance root is declared.
-  let (_dir, repo) = init_repo();
-  repo
-    .remote("origin", "https://example.com/gitlab/group/proj.git")
-    .unwrap();
-  let cfg = Config {
-    forge: Some(ForgeKind::GitLab),
-    forge_host: Some("https://example.com/gitlab".into()),
-    ..Default::default()
-  };
-
-  let f = forge::resolve(&repo, &cfg).unwrap();
-
-  assert_eq!(f.slug(), "group/proj");
-  assert_eq!(f.web_origin(), "https://example.com/gitlab");
-  assert_eq!(f.issue_url(7), "https://example.com/gitlab/group/proj/-/issues/7");
-}
-
-#[test]
-fn forge_host_is_authoritative_so_it_pins_the_cli_host() {
-  let (_dir, repo) = init_repo();
-  repo.remote("origin", "git@example.com:gitlab/group/proj.git").unwrap();
-  let cfg = Config {
-    forge: Some(ForgeKind::GitLab),
-    forge_host: Some("https://example.com/gitlab".into()),
-    ..Default::default()
-  };
-
-  let f = forge::resolve(&repo, &cfg).unwrap();
-
-  // An SSH remote alone yields only a guess; an explicit `forge_host` is
-  // the user stating the answer, which is the most authoritative source
-  // there is.
-  assert_eq!(f.slug(), "group/proj");
-  assert_eq!(f.web_origin(), "https://example.com/gitlab");
-}
-
-#[test]
-fn forge_host_that_does_not_prefix_the_remote_leaves_the_slug_alone() {
-  // A mismatch is not silently "fixed": the origin still names the
-  // project, only the instance root is overridden.
-  let (_dir, repo) = init_repo();
-  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
-  let cfg = Config {
-    forge: Some(ForgeKind::GitLab),
-    forge_host: Some("https://mirror.example.com".into()),
-    ..Default::default()
-  };
-
-  let f = forge::resolve(&repo, &cfg).unwrap();
-
-  assert_eq!(f.slug(), "group/proj");
-  assert_eq!(f.web_origin(), "https://mirror.example.com");
-}
-
-#[test]
-fn forge_host_key_parses_and_is_optional() {
-  let set: Config = toml::from_str("forge_host = \"https://example.com/gitlab\"\n").unwrap();
-  assert_eq!(set.forge_host.as_deref(), Some("https://example.com/gitlab"));
-
-  let unset: Config = toml::from_str("").unwrap();
-  assert_eq!(unset.forge_host, None);
-}
-
-// --- Codex review #458, round 4 -------------------------------------------
 
 #[test]
 fn gh_host_carries_the_port_of_an_enterprise_origin() {
