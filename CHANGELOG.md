@@ -71,6 +71,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). GitLab's `due_date`
   is date-only, so such a value could never converge and was rewritten on every
   push. It now fails with the cause named.
+- **`$GH_HOST` is pinned for a GitHub Enterprise origin**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). Host-agnostic slug
+  parsing made non-github.com hosts reachable for the first time, and without
+  the pin `gh` silently targeted github.com and could read a same-named repo on
+  another tenant.
+- **A guessed origin never overrides the forge CLI's own configuration**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). An SSH remote carries
+  no web scheme or port, so `https://<ssh-host>` is a guess: good enough to
+  build a link, not good enough to force through `$GITLAB_HOST` / `$GH_HOST`
+  over a `glab` / `gh` setup that may name a different web hostname. Same for
+  the no-origin creation fallback, which briefly forced gitlab.com.
+- **Clearing a label or milestone field in `.gwm.toml` clears it upstream**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). Dropping a
+  `description` or `due_on` produced an update that omitted the field
+  entirely, so the remote value survived and the same update replayed on every
+  push. The declared set is the desired state, so absent optionals are now sent
+  empty on the GitLab update path.
+- **A malformed `.gwm.toml` no longer silently picks the wrong forge**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). The forge lookups
+  added here swallowed config errors and fell back to host inference, dropping
+  a `forge = "gitlab"` a self-hosted instance depends on. Single-repo paths now
+  surface the error; a workspace row with a broken config skips detection
+  instead of guessing.
 
 ### Docs
 

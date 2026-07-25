@@ -59,10 +59,20 @@ pub fn glab_program() -> OsString {
 /// #458). gwm's cwd is not reliably the repo being queried — in workspace
 /// mode it is the workspace root while the row belongs to a child repo —
 /// so a same-named project on the wrong instance could be read and its
-/// iid persisted into the local git config. The value is the resolved web
-/// origin, which already carries scheme and port.
-pub fn glab_env(web_origin: &str) -> Vec<(String, String)> {
-  vec![("GITLAB_HOST".to_string(), web_origin.to_string())]
+/// iid persisted into the local git config.
+///
+/// Nothing is pinned unless the origin is **authoritative**: an SSH remote
+/// carries no web scheme or port, so `https://<ssh-host>` is a guess, and
+/// forcing a guess over a working `glab` configuration (different web
+/// hostname, plain HTTP, non-standard port) breaks setups that were fine.
+/// An empty slug is likewise left alone — that is the caller asking `glab`
+/// to infer the project locally, and pinning gitlab.com there would create
+/// the issue / MR on the wrong instance entirely.
+pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
+  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
+    return Vec::new();
+  }
+  vec![("GITLAB_HOST".to_string(), origin.web_origin.clone())]
 }
 
 /// Flags whose *value* must never reach the Command Logs transcript.
@@ -505,22 +515,24 @@ pub fn label_create_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
 /// [`RemoteLabel`] stay id-free and shared with the GitHub backend
 /// (`glab label edit` would have required `--label-id`).
 ///
-/// An absent description is omitted rather than sent empty — GitLab would
-/// otherwise wipe a description the user never meant to touch.
+/// An absent description is sent **empty**, not omitted (Codex review
+/// #458). `.gwm.toml` declares the desired state, so dropping a label's
+/// `description` means "this label has none"; omitting the field left the
+/// remote value in place and the diff replayed the same update forever.
 pub fn label_update_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
-  let mut argv = vec![
+  vec![
     "api".into(),
     "-X".into(),
     "PUT".into(),
     format!("{}/labels/{}", project_path(slug), encode_segment(&spec.name)),
     "--raw-field".into(),
     format!("color=#{}", spec.color),
-  ];
-  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
-    argv.push("--raw-field".into());
-    argv.push(format!("description={}", desc));
-  }
-  argv
+    "--raw-field".into(),
+    format!(
+      "description={}",
+      spec.description.as_deref().filter(|s| !s.is_empty()).unwrap_or("")
+    ),
+  ]
 }
 
 pub fn label_delete_argv(slug: &str, name: &str) -> Vec<String> {
@@ -685,26 +697,38 @@ pub fn milestone_create_argv(slug: &str, spec: &MilestoneSpec) -> Vec<String> {
 }
 
 /// Argv for `PUT /projects/:id/milestones/:milestone_id`.
+///
+/// Absent optionals are sent **empty**, not omitted (Codex review #458):
+/// the declared set is the desired state, so removing `description` or
+/// `due_on` from `.gwm.toml` must clear them upstream. Omitting the fields
+/// left stale remote data in place and made every push replay the same
+/// update without ever converging.
 pub fn milestone_update_argv(slug: &str, number: u64, spec: &MilestoneSpec) -> Vec<String> {
-  let mut argv = vec![
+  vec![
     "api".into(),
     "-X".into(),
     "PUT".into(),
     format!("{}/milestones/{}", project_path(slug), number),
     "--raw-field".into(),
     format!("title={}", spec.title),
-  ];
-  if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
-    argv.push("--raw-field".into());
-    argv.push(format!("description={}", desc));
-  }
-  if let Some(due) = spec.due_on.as_ref().filter(|s| !s.is_empty()) {
-    argv.push("--raw-field".into());
-    argv.push(format!("due_date={}", due_date_field(due)));
-  }
-  argv.push("--raw-field".into());
-  argv.push(format!("state_event={}", state_event(spec.state)));
-  argv
+    "--raw-field".into(),
+    format!(
+      "description={}",
+      spec.description.as_deref().filter(|s| !s.is_empty()).unwrap_or("")
+    ),
+    "--raw-field".into(),
+    format!(
+      "due_date={}",
+      spec
+        .due_on
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(due_date_field)
+        .unwrap_or("")
+    ),
+    "--raw-field".into(),
+    format!("state_event={}", state_event(spec.state)),
+  ]
 }
 
 pub fn milestone_delete_argv(slug: &str, number: u64) -> Vec<String> {
@@ -735,25 +759,25 @@ fn parse_created_milestone_id(s: &str) -> Result<u64> {
 /// GitLab implementation of [`Forge`], shelling out to `glab`.
 #[derive(Debug, Clone)]
 pub struct GitLabForge {
-  web_origin: String,
-  slug: String,
+  origin: forge::RemoteRef,
   program: OsString,
+  env: Vec<(String, String)>,
 }
 
 impl GitLabForge {
   /// Resolves `$GWM_GLAB` **now**, on the calling thread, so a forge
   /// handed to the TUI's fetch worker never re-reads the process
   /// environment concurrently with env-mutating code (issue #217).
-  pub fn new(web_origin: String, slug: String) -> Self {
+  pub fn new(origin: forge::RemoteRef) -> Self {
     Self {
-      web_origin,
-      slug,
+      env: glab_env(&origin),
+      origin,
       program: glab_program(),
     }
   }
 
   fn run_argv(&self, argv: Vec<String>) -> Result<String> {
-    forge::run_cli_with(&self.program, argv, &glab_env(&self.web_origin), REDACTED_FLAGS)
+    forge::run_cli_with(&self.program, argv, &self.env, REDACTED_FLAGS)
   }
 }
 
@@ -763,19 +787,22 @@ impl Forge for GitLabForge {
   }
 
   fn slug(&self) -> &str {
-    &self.slug
+    &self.origin.path
   }
 
   fn web_origin(&self) -> &str {
-    &self.web_origin
+    &self.origin.web_origin
   }
 
   fn issue_url(&self, number: u64) -> String {
-    format!("{}/{}/-/issues/{}", self.web_origin, self.slug, number)
+    format!("{}/{}/-/issues/{}", self.origin.web_origin, self.origin.path, number)
   }
 
   fn pr_url(&self, number: u64) -> String {
-    format!("{}/{}/-/merge_requests/{}", self.web_origin, self.slug, number)
+    format!(
+      "{}/{}/-/merge_requests/{}",
+      self.origin.web_origin, self.origin.path, number
+    )
   }
 
   fn pr_head_refspec(&self, number: u64) -> String {
@@ -783,24 +810,24 @@ impl Forge for GitLabForge {
   }
 
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
-    parse_issue_json(&self.run_argv(issue_view_argv(&self.slug, number))?)
+    parse_issue_json(&self.run_argv(issue_view_argv(&self.origin.path, number))?)
   }
 
   fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
-    parse_mr_json(&self.run_argv(mr_view_argv(&self.slug, number))?)
+    parse_mr_json(&self.run_argv(mr_view_argv(&self.origin.path, number))?)
   }
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
-    parse_mr_head_json(&self.run_argv(mr_view_argv(&self.slug, number))?)
+    parse_mr_head_json(&self.run_argv(mr_view_argv(&self.origin.path, number))?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
-    parse_mr_list_number(&self.run_argv(mr_list_argv(&self.slug, branch))?)
+    parse_mr_list_number(&self.run_argv(mr_list_argv(&self.origin.path, branch))?)
   }
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
     let body = forge::read_body_file(req.body_file)?;
-    let out = self.run_argv(issue_create_argv(&self.slug, req.title, &body, req.labels))?;
+    let out = self.run_argv(issue_create_argv(&self.origin.path, req.title, &body, req.labels))?;
     let number = parse_created_issue_number(&out)?;
     Ok(CreatedIssue {
       number,
@@ -811,7 +838,12 @@ impl Forge for GitLabForge {
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
     let body = forge::read_body_file(req.body_file)?;
     let out = self.run_argv(mr_create_argv(
-      &self.slug, req.title, &body, req.head, req.base, req.draft,
+      &self.origin.path,
+      req.title,
+      &body,
+      req.head,
+      req.base,
+      req.draft,
     ))?;
     let number = parse_created_mr_number(&out)?;
     Ok(CreatedPr {
@@ -821,16 +853,16 @@ impl Forge for GitLabForge {
   }
 
   fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {
-    parse_labels_json(&self.run_argv(label_list_argv(&self.slug))?)
+    parse_labels_json(&self.run_argv(label_list_argv(&self.origin.path))?)
   }
 
   fn create_label(&self, spec: &LabelSpec) -> Result<()> {
-    self.run_argv(label_create_argv(&self.slug, spec))?;
+    self.run_argv(label_create_argv(&self.origin.path, spec))?;
     Ok(())
   }
 
   fn update_label(&self, spec: &LabelSpec) -> Result<()> {
-    self.run_argv(label_update_argv(&self.slug, spec))?;
+    self.run_argv(label_update_argv(&self.origin.path, spec))?;
     Ok(())
   }
 
@@ -847,35 +879,35 @@ impl Forge for GitLabForge {
       };
       GwmError::Config(format!("labels (remote): {} — refusing to delete via `glab`", inner))
     })?;
-    self.run_argv(label_delete_argv(&self.slug, name))?;
+    self.run_argv(label_delete_argv(&self.origin.path, name))?;
     Ok(())
   }
 
   fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
-    parse_milestones_json(&self.run_argv(milestone_list_argv(&self.slug))?)
+    parse_milestones_json(&self.run_argv(milestone_list_argv(&self.origin.path))?)
   }
 
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
     check_due_on_is_date_only(spec)?;
-    let out = self.run_argv(milestone_create_argv(&self.slug, spec))?;
+    let out = self.run_argv(milestone_create_argv(&self.origin.path, spec))?;
     // GitLab has no `state` on create, so a declared-closed milestone
     // needs a second call to transition it. Keyed on the id echoed back
     // by the POST.
     if spec.state == MilestoneState::Closed {
       let id = parse_created_milestone_id(&out)?;
-      self.run_argv(milestone_update_argv(&self.slug, id, spec))?;
+      self.run_argv(milestone_update_argv(&self.origin.path, id, spec))?;
     }
     Ok(())
   }
 
   fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
     check_due_on_is_date_only(spec)?;
-    self.run_argv(milestone_update_argv(&self.slug, number, spec))?;
+    self.run_argv(milestone_update_argv(&self.origin.path, number, spec))?;
     Ok(())
   }
 
   fn delete_milestone(&self, number: u64) -> Result<()> {
-    self.run_argv(milestone_delete_argv(&self.slug, number))?;
+    self.run_argv(milestone_delete_argv(&self.origin.path, number))?;
     Ok(())
   }
 }

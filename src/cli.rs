@@ -2092,9 +2092,12 @@ fn cmd_list(format: ListFormat, detect_pr: bool) -> Result<()> {
   // can't run, yet clear a stale PR when it ran and found none (issue #38
   // review — resolves the round-4/round-5 tension on a plain `Option`).
   let detected_prs: Vec<Option<Option<u64>>> = if detect_pr {
-    // `.gwm.toml` selects the forge (issue #419); an unreadable config
-    // degrades to inferring it from the `origin` host.
-    let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path())).unwrap_or_default();
+    // `.gwm.toml` selects the forge (issue #419), so a malformed file is
+    // surfaced rather than swallowed (Codex review #458): silently falling
+    // back to host inference would drop a `forge = "gitlab"` a self-hosted
+    // instance depends on, and detection could then persist a number read
+    // from an entirely different repo.
+    let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
     match forge::resolve(&repo, &config).ok() {
       None => vec![None; trees.len()],
       Some(forge) => trees
@@ -2292,11 +2295,14 @@ fn cmd_list_workspace(root: &Path, format: ListFormat, detect_pr: bool) -> Resul
         let repo = Repository::open(&row.repo_path).ok()?;
         let branch = row.info.branch.as_deref()?;
         // Each repo in a workspace picks its own forge: one may be on
-        // GitHub and the next on a self-hosted GitLab, so the `forge`
-        // key is read from that repo's own `.gwm.toml` (issue #419). A
-        // missing / unreadable config degrades to host inference rather
-        // than skipping the row.
-        let config = Config::load_for_repo(&row.repo_path).unwrap_or_default();
+        // GitHub and the next on a self-hosted GitLab, so the `forge` key
+        // is read from that repo's own `.gwm.toml` (issue #419). A
+        // malformed config makes the row's forge *unknown*, so detection
+        // is skipped for it (`None` = "did not run") rather than guessed
+        // from the host — a wrong guess would persist a number from
+        // another repo (Codex review #458). One bad child config still
+        // must not abort the whole workspace listing, hence skip-not-fail.
+        let config = Config::load_for_repo(&row.repo_path).ok()?;
         let forge = forge::resolve(&repo, &config).ok()?;
         Some(
           github::read_link_with_pr_detection(&repo, branch, forge.as_ref())
@@ -3695,7 +3701,7 @@ fn cmd_unlink(target: LinkTarget, worktree: Option<String>) -> Result<()> {
 fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
   let link = github::read_link(&repo, &branch)?;
-  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path())).unwrap_or_default();
+  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
   let forge = forge::resolve(&repo, &config)?;
 
   let url = match target {
@@ -3749,7 +3755,7 @@ fn cmd_status(worktree: Option<String>, json: bool) -> Result<()> {
 
   // Forge + fetched status are best-effort: if there's no remote or the
   // forge CLI isn't installed, we still print the local link.
-  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path())).unwrap_or_default();
+  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
   let forge = forge::resolve(&repo, &config).ok();
   let slug = forge.as_ref().map(|f| f.slug().to_string());
   // When a remote is present, auto-detect the branch's PR if none is

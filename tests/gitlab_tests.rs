@@ -509,6 +509,10 @@ fn label_update_argv_keys_on_the_name_not_a_numeric_id() {
       "projects/group%2Fproj/labels/good%20first%20issue",
       "--raw-field",
       "color=#7057ff",
+      // Sent empty, not omitted: the declared set is the desired state, so
+      // an absent description must clear the remote one.
+      "--raw-field",
+      "description=",
     ]
   );
 }
@@ -612,6 +616,10 @@ fn milestone_update_argv_uses_state_event_not_state() {
       "--raw-field",
       "title=v1.0.0",
       "--raw-field",
+      "description=",
+      "--raw-field",
+      "due_date=",
+      "--raw-field",
       "state_event=close",
     ]
   );
@@ -687,23 +695,6 @@ fn a_manual_pipeline_does_not_count_as_a_passed_check() {
 }
 
 #[test]
-fn the_glab_host_is_pinned_from_the_resolved_origin() {
-  // `glab` otherwise resolves the instance from the *process* cwd's git
-  // remote, falling back to gitlab.com. In workspace mode the cwd is the
-  // workspace root, not the row's repo, so a same-named project on the
-  // wrong instance could be queried and its iid persisted locally.
-  let env = gitlab::glab_env("https://gitlab.acme.internal:8443");
-
-  assert_eq!(
-    env,
-    vec![(
-      "GITLAB_HOST".to_string(),
-      "https://gitlab.acme.internal:8443".to_string()
-    )]
-  );
-}
-
-#[test]
 fn the_issue_body_is_redacted_from_the_command_log() {
   // `glab` has no `--body-file`, so the whole rendered body rides in
   // `--description`. The Command Logs transcript is ours to build, so the
@@ -756,4 +747,115 @@ fn an_end_of_day_or_bare_date_due_on_is_accepted() {
 
     assert!(gitlab::check_due_on_is_date_only(&spec).is_ok(), "due {due}");
   }
+}
+
+// --- Codex review #458, round 2 -------------------------------------------
+
+fn origin(url: &str) -> gwm::forge::RemoteRef {
+  gwm::forge::parse_remote_url(url).unwrap()
+}
+
+#[test]
+fn the_host_is_pinned_only_when_the_remote_actually_carried_one() {
+  // An `http(s)` remote states the web endpoint, so pinning it protects
+  // against glab resolving the wrong instance from the process cwd.
+  let http = origin("https://gitlab.acme.internal:8443/team/proj.git");
+  assert_eq!(
+    gitlab::glab_env(&http),
+    vec![(
+      "GITLAB_HOST".to_string(),
+      "https://gitlab.acme.internal:8443".to_string()
+    )]
+  );
+}
+
+#[test]
+fn an_ssh_remote_does_not_override_the_users_glab_configuration() {
+  // An SSH remote carries no web scheme or port, so `https://<ssh-host>`
+  // is a guess. Good enough to build a link; NOT good enough to force onto
+  // glab, whose own config may name a different web hostname, plain HTTP,
+  // or a non-standard port. Forcing the guess broke working setups.
+  assert!(gitlab::glab_env(&origin("ssh://git@gitlab-ssh.acme:2222/team/proj.git")).is_empty());
+  assert!(gitlab::glab_env(&origin("git@gitlab-ssh.acme:team/proj.git")).is_empty());
+}
+
+#[test]
+fn an_empty_slug_never_pins_a_host() {
+  // The `gwm new` / `gwm pr` fallback for a repo with no parseable origin
+  // hands the CLI an empty slug so it infers the project locally. Pinning
+  // gitlab.com there would create the issue/MR on the wrong instance
+  // entirely.
+  let mut o = origin("https://gitlab.com/g/p.git");
+  o.path = String::new();
+
+  assert!(gitlab::glab_env(&o).is_empty());
+}
+
+#[test]
+fn label_update_clears_a_description_the_config_dropped() {
+  // The declared set is the desired state, so an absent description means
+  // "no description". Omitting the field left the remote value in place
+  // and the diff reproduced the same update on every push, forever.
+  let spec = LabelSpec {
+    name: "bug".into(),
+    description: None,
+    color: "d9534f".into(),
+  };
+
+  let argv = gitlab::label_update_argv("g/p", &spec);
+
+  assert!(
+    argv.windows(2).any(|w| w[1] == "description="),
+    "update must send an empty description to clear it: {argv:?}"
+  );
+}
+
+#[test]
+fn label_create_still_omits_an_absent_description() {
+  // Nothing to clear on create — sending `description=` would be noise.
+  let spec = LabelSpec {
+    name: "bug".into(),
+    description: None,
+    color: "d9534f".into(),
+  };
+
+  let argv = gitlab::label_create_argv("g/p", &spec);
+
+  assert!(!argv.iter().any(|a| a.starts_with("description=")), "{argv:?}");
+}
+
+#[test]
+fn milestone_update_clears_optional_fields_the_config_dropped() {
+  let spec = MilestoneSpec {
+    title: "v1.5.0".into(),
+    description: None,
+    due_on: None,
+    state: MilestoneState::Open,
+  };
+
+  let argv = gitlab::milestone_update_argv("g/p", 13, &spec);
+
+  assert!(
+    argv.windows(2).any(|w| w[1] == "description="),
+    "must clear the description: {argv:?}"
+  );
+  assert!(
+    argv.windows(2).any(|w| w[1] == "due_date="),
+    "must clear the due date: {argv:?}"
+  );
+}
+
+#[test]
+fn milestone_create_still_omits_absent_optional_fields() {
+  let spec = MilestoneSpec {
+    title: "v1.5.0".into(),
+    description: None,
+    due_on: None,
+    state: MilestoneState::Open,
+  };
+
+  let argv = gitlab::milestone_create_argv("g/p", &spec);
+
+  assert!(!argv.iter().any(|a| a.starts_with("description=")), "{argv:?}");
+  assert!(!argv.iter().any(|a| a.starts_with("due_date=")), "{argv:?}");
 }

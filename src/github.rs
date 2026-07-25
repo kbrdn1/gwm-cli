@@ -714,19 +714,20 @@ pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
 /// thread never touches `GWM_GH` / the process environment concurrently
 /// with env-mutating callers.
 pub fn fetch_issue_with(program: &OsStr, slug: &str, number: u64) -> Result<IssueStatus> {
-  let stdout = run_gh_with(
-    program,
-    [
-      "issue",
-      "view",
-      &number.to_string(),
-      "--repo",
-      slug,
-      "--json",
-      ISSUE_JSON_FIELDS,
-    ],
-  )?;
-  parse_issue_json(&stdout)
+  parse_issue_json(&run_gh_with(program, issue_view_argv(slug, number))?)
+}
+
+/// Argv for `gh issue view <n> --repo <slug> --json …`.
+pub fn issue_view_argv(slug: &str, number: u64) -> Vec<String> {
+  vec![
+    "issue".into(),
+    "view".into(),
+    number.to_string(),
+    "--repo".into(),
+    slug.into(),
+    "--json".into(),
+    ISSUE_JSON_FIELDS.into(),
+  ]
 }
 
 /// Resolve the `gh` program to invoke: `$GWM_GH` when set (test / override
@@ -737,6 +738,11 @@ pub fn gh_program() -> OsString {
 }
 
 pub fn create_issue(slug: &str, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+  parse_created_issue(&run_gh(issue_create_argv(slug, req))?)
+}
+
+/// Argv for `gh issue create …`.
+pub fn issue_create_argv(slug: &str, req: &IssueCreateRequest<'_>) -> Vec<OsString> {
   let mut args: Vec<OsString> = Vec::with_capacity(8 + 2 * req.labels.len());
   args.push("issue".into());
   args.push("create".into());
@@ -755,7 +761,11 @@ pub fn create_issue(slug: &str, req: &IssueCreateRequest<'_>) -> Result<CreatedI
     args.push("--repo".into());
     args.push(slug.into());
   }
-  let stdout = run_gh(&args)?;
+  args
+}
+
+/// Recover the created issue from the URL `gh issue create` prints.
+pub fn parse_created_issue(stdout: &str) -> Result<CreatedIssue> {
   let stdout = stdout.trim().to_string();
   let Some(caps) = ISSUE_URL_RE.captures(&stdout) else {
     return Err(GwmError::CommandFailed(format!(
@@ -774,6 +784,11 @@ pub fn create_issue(slug: &str, req: &IssueCreateRequest<'_>) -> Result<CreatedI
 /// [`crate::pr_templates::render_pr_body`]. Parses the URL printed by
 /// gh on success to extract the PR number.
 pub fn create_pr(slug: &str, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
+  parse_created_pr(&run_gh(pr_create_argv(slug, req))?)
+}
+
+/// Argv for `gh pr create …`.
+pub fn pr_create_argv(slug: &str, req: &PrCreateRequest<'_>) -> Vec<OsString> {
   let mut args: Vec<OsString> =
     Vec::with_capacity(10 + if req.draft { 1 } else { 0 } + if req.base.is_some() { 2 } else { 0 });
   args.push("pr".into());
@@ -798,7 +813,11 @@ pub fn create_pr(slug: &str, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
     args.push("--repo".into());
     args.push(slug.into());
   }
-  let stdout = run_gh(&args)?;
+  args
+}
+
+/// Recover the created PR from the URL `gh pr create` prints.
+pub fn parse_created_pr(stdout: &str) -> Result<CreatedPr> {
   let stdout = stdout.trim().to_string();
   let Some(caps) = PR_URL_RE.captures(&stdout) else {
     return Err(GwmError::CommandFailed(format!(
@@ -822,19 +841,20 @@ pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
 /// counterpart to [`fetch_issue_with`], used by the TUI off-thread fetch
 /// (issue #217).
 pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatus> {
-  let stdout = run_gh_with(
-    program,
-    [
-      "pr",
-      "view",
-      &number.to_string(),
-      "--repo",
-      slug,
-      "--json",
-      PR_JSON_FIELDS,
-    ],
-  )?;
-  parse_pr_json(&stdout)
+  parse_pr_json(&run_gh_with(program, pr_view_argv(slug, number))?)
+}
+
+/// Argv for `gh pr view <n> --repo <slug> --json …`.
+pub fn pr_view_argv(slug: &str, number: u64) -> Vec<String> {
+  vec![
+    "pr".into(),
+    "view".into(),
+    number.to_string(),
+    "--repo".into(),
+    slug.into(),
+    "--json".into(),
+    PR_JSON_FIELDS.into(),
+  ]
 }
 
 #[derive(Deserialize)]
@@ -878,16 +898,20 @@ pub fn parse_pr_head_json(s: &str) -> Result<PrHead> {
 /// `gwm review` needs (author / head ref / base ref). Works for PRs in any
 /// state — open, draft, closed, or merged.
 pub fn fetch_pr_head(slug: &str, number: u64) -> Result<PrHead> {
-  let stdout = run_gh([
-    "pr",
-    "view",
-    &number.to_string(),
-    "--repo",
-    slug,
-    "--json",
-    PR_HEAD_JSON_FIELDS,
-  ])?;
-  parse_pr_head_json(&stdout)
+  parse_pr_head_json(&run_gh(pr_head_argv(slug, number))?)
+}
+
+/// Argv for `gh pr view <n> --repo <slug> --json number,author,headRefName,baseRefName`.
+pub fn pr_head_argv(slug: &str, number: u64) -> Vec<String> {
+  vec![
+    "pr".into(),
+    "view".into(),
+    number.to_string(),
+    "--repo".into(),
+    slug.into(),
+    "--json".into(),
+    PR_HEAD_JSON_FIELDS.into(),
+  ]
 }
 
 /// Find the most recent PR opened from `branch` (head ref) on the given
@@ -1098,6 +1122,18 @@ pub fn push_label(slug: &str, spec: &LabelSpec) -> Result<()> {
 /// other/repo` retargets the operation. We refuse the prune with a
 /// scoped error instead of running the risky argv.
 pub fn delete_label(slug: &str, name: &str) -> Result<()> {
+  validate_remote_label_name(name)?;
+  let argv = label_delete_argv(slug, name);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Refuse a hostile remote label name before it reaches an argv slot
+/// (issue #100). `gh label delete <name>` takes the name positionally, so
+/// a remote label starting with `-` would be parsed as a flag: `-h` no-ops
+/// the delete with a help banner, `--repo other/repo` retargets it.
+fn validate_remote_label_name(name: &str) -> Result<()> {
   crate::labels::validate_label_name(name).map_err(|e| {
     let inner = match e {
       GwmError::Config(msg) => msg,
@@ -1107,11 +1143,7 @@ pub fn delete_label(slug: &str, name: &str) -> Result<()> {
       "labels (remote): {} — refusing to delete via `gh label delete`",
       inner
     ))
-  })?;
-  let argv = label_delete_argv(slug, name);
-  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-  run_gh(&args)?;
-  Ok(())
+  })
 }
 
 // ---- Milestones (issue #82) ---------------------------------------------
@@ -1296,22 +1328,50 @@ pub fn delete_milestone(slug: &str, number: u64) -> Result<()> {
 /// that pin the `gh` argv contract.
 #[derive(Debug, Clone)]
 pub struct GitHubForge {
-  web_origin: String,
-  slug: String,
+  origin: forge::RemoteRef,
   program: OsString,
+  env: Vec<(String, String)>,
 }
 
 impl GitHubForge {
   /// Resolves `$GWM_GH` **now**, on the calling thread, so a forge handed
   /// to the TUI's fetch worker never re-reads the process environment
   /// concurrently with env-mutating code (issue #217).
-  pub fn new(web_origin: String, slug: String) -> Self {
+  pub fn new(origin: forge::RemoteRef) -> Self {
     Self {
-      web_origin,
-      slug,
+      env: gh_env(&origin),
+      origin,
       program: gh_program(),
     }
   }
+
+  fn run<I, S>(&self, args: I) -> Result<String>
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+  {
+    forge::run_cli_with(&self.program, args, &self.env, &[])
+  }
+}
+
+/// Environment pinned on every `gh` spawn (Codex review #458).
+///
+/// `$GH_HOST` selects the GitHub instance. Before #419 the slug parser
+/// rejected anything that was not github.com, so a GitHub Enterprise host
+/// could not reach this code at all; host-agnostic parsing opened that
+/// door, and without the pin `gh` would silently target github.com and
+/// could read a same-named repo on the wrong tenant.
+///
+/// Nothing is pinned when the origin is github.com (the `gh` default), when
+/// the slug is empty (the caller wants `gh` to infer the project locally),
+/// or when the origin was only **guessed** from an SSH remote — an SSH
+/// hostname is frequently not the web hostname, and overriding a working
+/// `gh` configuration with a guess is worse than leaving it alone.
+pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
+  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() || origin.host == "github.com" {
+    return Vec::new();
+  }
+  vec![("GH_HOST".to_string(), origin.host.clone())]
 }
 
 impl Forge for GitHubForge {
@@ -1320,81 +1380,91 @@ impl Forge for GitHubForge {
   }
 
   fn slug(&self) -> &str {
-    &self.slug
+    &self.origin.path
   }
 
   fn web_origin(&self) -> &str {
-    &self.web_origin
+    &self.origin.web_origin
   }
 
   fn issue_url(&self, number: u64) -> String {
-    format!("{}/{}/issues/{}", self.web_origin, self.slug, number)
+    format!("{}/{}/issues/{}", self.origin.web_origin, self.origin.path, number)
   }
 
   fn pr_url(&self, number: u64) -> String {
-    format!("{}/{}/pull/{}", self.web_origin, self.slug, number)
+    format!("{}/{}/pull/{}", self.origin.web_origin, self.origin.path, number)
   }
 
   fn pr_head_refspec(&self, number: u64) -> String {
     format!("pull/{number}/head")
   }
 
+  // Every method below goes through `self.run`, never the free functions,
+  // so `$GH_HOST` reaches the child (Codex review #458). The free functions
+  // stay for the argv/parse contract the test suite pins.
+
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
-    fetch_issue_with(&self.program, &self.slug, number)
+    parse_issue_json(&self.run(issue_view_argv(&self.origin.path, number))?)
   }
 
   fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
-    fetch_pr_with(&self.program, &self.slug, number)
+    parse_pr_json(&self.run(pr_view_argv(&self.origin.path, number))?)
   }
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
-    fetch_pr_head(&self.slug, number)
+    parse_pr_head_json(&self.run(pr_head_argv(&self.origin.path, number))?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
-    find_pr_for_branch(&self.slug, branch)
+    parse_pr_list_number(&self.run(find_pr_argv(&self.origin.path, branch))?)
   }
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
-    create_issue(&self.slug, req)
+    parse_created_issue(&self.run(issue_create_argv(&self.origin.path, req))?)
   }
 
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
-    create_pr(&self.slug, req)
+    parse_created_pr(&self.run(pr_create_argv(&self.origin.path, req))?)
   }
 
   fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {
-    fetch_remote_labels(&self.slug)
+    parse_labels_json(&self.run(label_list_argv(&self.origin.path))?)
   }
 
   fn create_label(&self, spec: &LabelSpec) -> Result<()> {
     // `gh label create --force` means "create OR update", so both halves
     // of the trait's create/update split land on the same call here. The
     // split exists for GitLab, which has no such flag.
-    push_label(&self.slug, spec)
+    self.run(label_create_argv(&self.origin.path, spec))?;
+    Ok(())
   }
 
   fn update_label(&self, spec: &LabelSpec) -> Result<()> {
-    push_label(&self.slug, spec)
+    self.create_label(spec)
   }
 
   fn delete_label(&self, name: &str) -> Result<()> {
-    delete_label(&self.slug, name)
+    validate_remote_label_name(name)?;
+    self.run(label_delete_argv(&self.origin.path, name))?;
+    Ok(())
   }
 
   fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
-    fetch_remote_milestones(&self.slug)
+    parse_milestones_json(&self.run(milestone_list_argv(&self.origin.path))?)
   }
 
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
-    create_milestone(&self.slug, spec)
+    self.run(milestone_create_argv(&self.origin.path, spec))?;
+    Ok(())
   }
 
   fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
-    update_milestone(&self.slug, number, spec)
+    self.run(milestone_update_argv(&self.origin.path, number, spec))?;
+    Ok(())
   }
 
   fn delete_milestone(&self, number: u64) -> Result<()> {
-    delete_milestone(&self.slug, number)
+    self.run(milestone_delete_argv(&self.origin.path, number))?;
+    Ok(())
   }
 }

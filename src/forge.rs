@@ -234,6 +234,23 @@ impl ForgeKind {
 /// `path` is NOT limited to `owner/repo`: a GitLab project can sit any
 /// number of subgroups deep (`group/sub/deeper/proj`), so the whole path
 /// is kept verbatim.
+/// How much the `web_origin` of a [`RemoteRef`] can be trusted.
+///
+/// The distinction is load-bearing (Codex review #458): a guessed origin
+/// is fine for building a link, but forcing it onto a forge CLI through
+/// `$GITLAB_HOST` / `$GH_HOST` overrides a configuration that is very
+/// likely more correct than the guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OriginTrust {
+  /// Read from an `http(s)://` remote — scheme, host and port name the
+  /// real web endpoint.
+  FromUrl,
+  /// Guessed from an SSH / scp-like remote, which carries no web scheme
+  /// or port. The SSH hostname often differs from the web one, and the
+  /// SSH port is not the web port.
+  Guessed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteRef {
   pub host: String,
@@ -247,6 +264,8 @@ pub struct RemoteRef {
   /// the port is the SSH port, and carrying it into a web URL would be
   /// just as wrong as dropping a real one.
   pub web_origin: String,
+  /// Whether [`Self::web_origin`] was read from the remote or guessed.
+  pub trust: OriginTrust,
 }
 
 /// Parse any of the git remote URL flavours into [`RemoteRef`]:
@@ -276,10 +295,16 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   // The port is web-relevant only over http(s). An `ssh://…:2222` port
   // addresses sshd, not the web UI, and an scp-like remote cannot carry a
   // port at all.
-  let web_origin = match scheme.as_deref() {
-    Some("http") => format!("http://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
-    Some("https") => format!("https://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
-    _ => format!("https://{host}"),
+  let (web_origin, trust) = match scheme.as_deref() {
+    Some("http") => (
+      format!("http://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
+      OriginTrust::FromUrl,
+    ),
+    Some("https") => (
+      format!("https://{}{}", host, port.map(|p| format!(":{p}")).unwrap_or_default()),
+      OriginTrust::FromUrl,
+    ),
+    _ => (format!("https://{host}"), OriginTrust::Guessed),
   };
 
   let path = trim_git_suffix(path_part.trim_start_matches('/'));
@@ -291,6 +316,7 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
     host: host.to_ascii_lowercase(),
     path: path.to_string(),
     web_origin,
+    trust,
   })
 }
 
@@ -396,10 +422,10 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
 /// Build a backend for an explicit kind. Exposed so tests (and the
 /// doctor) can exercise the pure parts — URL building, terminology —
 /// without a repository.
-pub fn for_kind(kind: ForgeKind, web_origin: String, slug: String) -> Arc<dyn Forge> {
+pub fn for_kind(kind: ForgeKind, origin: RemoteRef) -> Arc<dyn Forge> {
   match kind {
-    ForgeKind::GitHub => Arc::new(crate::github::GitHubForge::new(web_origin, slug)),
-    ForgeKind::GitLab => Arc::new(crate::gitlab::GitLabForge::new(web_origin, slug)),
+    ForgeKind::GitHub => Arc::new(crate::github::GitHubForge::new(origin)),
+    ForgeKind::GitLab => Arc::new(crate::gitlab::GitLabForge::new(origin)),
   }
 }
 
@@ -433,11 +459,24 @@ pub fn repo_slug(repo: &Repository) -> Result<String> {
 pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> {
   resolve(repo, config).unwrap_or_else(|_| {
     let kind = config.forge.unwrap_or(ForgeKind::GitHub);
-    let origin = match kind {
-      ForgeKind::GitHub => "https://github.com",
-      ForgeKind::GitLab => "https://gitlab.com",
+    // An empty slug is the signal to let the CLI infer the project from
+    // the local git context, and `Guessed` keeps that inference from being
+    // overridden by a `$GITLAB_HOST` / `$GH_HOST` we have no basis for
+    // (Codex review #458): forcing gitlab.com here would have created the
+    // issue / MR on the wrong instance entirely.
+    let (host, web_origin) = match kind {
+      ForgeKind::GitHub => ("github.com", "https://github.com"),
+      ForgeKind::GitLab => ("gitlab.com", "https://gitlab.com"),
     };
-    for_kind(kind, origin.into(), String::new())
+    for_kind(
+      kind,
+      RemoteRef {
+        host: host.into(),
+        path: String::new(),
+        web_origin: web_origin.into(),
+        trust: OriginTrust::Guessed,
+      },
+    )
   })
 }
 
@@ -447,7 +486,7 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   let parsed = origin_ref(repo)?;
   let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
-  Ok(for_kind(kind, parsed.web_origin, parsed.path))
+  Ok(for_kind(kind, parsed))
 }
 
 // ---- shared CLI invocation ----------------------------------------------

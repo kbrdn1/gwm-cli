@@ -172,8 +172,14 @@ fn resolve_errors_without_an_origin_remote() {
 
 #[test]
 fn pr_noun_follows_the_forge() {
-  let github = forge::for_kind(ForgeKind::GitHub, "https://github.com".into(), "o/r".into());
-  let gitlab = forge::for_kind(ForgeKind::GitLab, "https://gitlab.com".into(), "g/p".into());
+  let github = forge::for_kind(
+    ForgeKind::GitHub,
+    forge::parse_remote_url("https://github.com/o/r").unwrap(),
+  );
+  let gitlab = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("https://gitlab.com/g/p").unwrap(),
+  );
 
   assert_eq!(github.pr_noun(), "PR");
   assert_eq!(gitlab.pr_noun(), "MR");
@@ -183,7 +189,10 @@ fn pr_noun_follows_the_forge() {
 
 #[test]
 fn github_urls_use_the_issues_and_pull_paths() {
-  let f = forge::for_kind(ForgeKind::GitHub, "https://github.com".into(), "kbrdn1/gwm-cli".into());
+  let f = forge::for_kind(
+    ForgeKind::GitHub,
+    forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
+  );
 
   assert_eq!(f.issue_url(42), "https://github.com/kbrdn1/gwm-cli/issues/42");
   assert_eq!(f.pr_url(61), "https://github.com/kbrdn1/gwm-cli/pull/61");
@@ -191,7 +200,10 @@ fn github_urls_use_the_issues_and_pull_paths() {
 
 #[test]
 fn gitlab_urls_use_the_dash_infix_and_merge_requests_path() {
-  let f = forge::for_kind(ForgeKind::GitLab, "https://gitlab.com".into(), "group/sub/proj".into());
+  let f = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("https://gitlab.com/group/sub/proj").unwrap(),
+  );
 
   assert_eq!(f.issue_url(42), "https://gitlab.com/group/sub/proj/-/issues/42");
   assert_eq!(f.pr_url(61), "https://gitlab.com/group/sub/proj/-/merge_requests/61");
@@ -204,8 +216,7 @@ fn urls_honour_a_self_hosted_host() {
   // server entirely.
   let f = forge::for_kind(
     ForgeKind::GitLab,
-    "https://gitlab.acme.internal".into(),
-    "team/proj".into(),
+    forge::parse_remote_url("https://gitlab.acme.internal/team/proj").unwrap(),
   );
 
   assert_eq!(f.issue_url(7), "https://gitlab.acme.internal/team/proj/-/issues/7");
@@ -242,7 +253,10 @@ fn forge_key_rejects_an_unknown_value() {
 
 #[test]
 fn github_pr_head_refspec_uses_refs_pull() {
-  let f = forge::for_kind(ForgeKind::GitHub, "https://github.com".into(), "o/r".into());
+  let f = forge::for_kind(
+    ForgeKind::GitHub,
+    forge::parse_remote_url("https://github.com/o/r").unwrap(),
+  );
 
   assert_eq!(f.pr_head_refspec(61), "pull/61/head");
 }
@@ -253,7 +267,10 @@ fn gitlab_mr_head_refspec_uses_refs_merge_requests() {
   // refspec made `gwm review` fail *after* `glab mr view` had already
   // succeeded and printed "resolving MR #61 …", which reads as a gwm bug
   // rather than an unsupported path.
-  let f = forge::for_kind(ForgeKind::GitLab, "https://gitlab.com".into(), "g/p".into());
+  let f = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("https://gitlab.com/g/p").unwrap(),
+  );
 
   assert_eq!(f.pr_head_refspec(61), "merge-requests/61/head");
 }
@@ -292,8 +309,60 @@ fn parse_remote_url_scp_syntax_defaults_to_https() {
 
 #[test]
 fn urls_are_built_from_the_web_origin_not_a_rebuilt_https_host() {
-  let f = forge::for_kind(ForgeKind::GitLab, "http://gitlab.acme:8080".into(), "g/p".into());
+  let f = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("http://gitlab.acme:8080/g/p").unwrap(),
+  );
 
   assert_eq!(f.issue_url(7), "http://gitlab.acme:8080/g/p/-/issues/7");
   assert_eq!(f.pr_url(9), "http://gitlab.acme:8080/g/p/-/merge_requests/9");
+}
+
+// --- Codex review #458, round 2: origin trust -----------------------------
+
+#[test]
+fn an_http_remote_yields_an_authoritative_origin() {
+  let r = forge::parse_remote_url("https://gitlab.acme:8443/g/p.git").unwrap();
+
+  assert_eq!(r.trust, forge::OriginTrust::FromUrl);
+}
+
+#[test]
+fn an_ssh_remote_yields_a_guessed_origin() {
+  // `https://<ssh-host>` is the best a link builder can do, but it must be
+  // labelled as a guess so nothing forces it onto a forge CLI that already
+  // knows better.
+  for url in [
+    "ssh://git@gitlab.example.com:2222/group/proj.git",
+    "git@gitlab.example.com:group/proj.git",
+  ] {
+    let r = forge::parse_remote_url(url).unwrap();
+    assert_eq!(r.trust, forge::OriginTrust::Guessed, "url {url}");
+  }
+}
+
+#[test]
+fn github_enterprise_pins_gh_host_but_github_dot_com_does_not() {
+  // #419 made non-github.com hosts reachable for the first time (the old
+  // parser rejected them outright), so `gh` must be told which instance to
+  // hit — otherwise it silently targets github.com and could read a
+  // same-named repo on the wrong tenant.
+  let ghe = forge::parse_remote_url("https://github.acme.internal/team/proj.git").unwrap();
+  assert_eq!(
+    gwm::github::gh_env(&ghe),
+    vec![("GH_HOST".to_string(), "github.acme.internal".to_string())]
+  );
+
+  let dotcom = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
+  assert!(gwm::github::gh_env(&dotcom).is_empty(), "github.com needs no pin");
+}
+
+#[test]
+fn an_ssh_github_remote_does_not_pin_gh_host() {
+  let r = forge::parse_remote_url("git@github.acme.internal:team/proj.git").unwrap();
+
+  assert!(
+    gwm::github::gh_env(&r).is_empty(),
+    "a guessed origin must not override gh"
+  );
 }

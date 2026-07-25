@@ -4296,8 +4296,6 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   // ships a Windows fake-gh too).
   let (dir, repo, mut app) = make_app_on_branch("detect-me");
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
-  // Re-resolve the slug now that the remote exists.
-  app.refresh_link();
 
   // Write a fake `gh` (detecting PR `n` via both `pr list` and `pr view`)
   // to its own path. Two distinct scripts — never one rewritten in place —
@@ -4336,6 +4334,13 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_first);
   }
+  // Re-resolve the slug now that the remote exists.
+  // NOTE: `refresh_link` is deliberately called *after* `GWM_GH` is set.
+  // Since #419 the forge captures its program at construction, which is
+  // what keeps the TUI's off-thread fetch from re-reading the environment
+  // (the #217 contract). Resolving the link before the override would pin
+  // the real `gh` and never see the fake.
+  app.refresh_link();
 
   // First refresh: nothing linked → detect PR #128.
   app.refresh_github_status();
@@ -4359,6 +4364,8 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_second);
   }
+  // Re-resolve so the swapped `GWM_GH` is picked up — see the note above.
+  app.refresh_link();
   app.refresh_github_status();
 
   unsafe {
@@ -4425,7 +4432,6 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   // `F` offline should keep showing the PR, not blank it.
   let (dir, repo, mut app) = make_app_on_branch("detect-me");
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
-  app.refresh_link();
 
   // A `gh` that detects PR #128, then a `gh` that always fails (exit 1).
   let gh_ok = dir.path().join("fake-gh-ok");
@@ -4453,6 +4459,11 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_ok);
   }
+  // `refresh_link` after each override: since #419 the forge captures its
+  // program at construction, which is what keeps the off-thread fetch from
+  // re-reading the environment (the #217 contract). Swapping `GWM_GH`
+  // without re-resolving would keep calling the previous fake.
+  app.refresh_link();
   app.refresh_github_status();
   assert_eq!(app.current_link().pr, Some(128), "first refresh detects #128");
 
@@ -4460,6 +4471,7 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_fail);
   }
+  app.refresh_link();
   app.refresh_github_status();
 
   unsafe {
@@ -4531,8 +4543,7 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
     // contract by resolving the env once, up front).
     gwm::forge::for_kind(
       gwm::forge::ForgeKind::GitHub,
-      "github.com".into(),
-      "kbrdn1/gwm-cli".into(),
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
     )
     .as_ref(),
   )
@@ -4552,8 +4563,7 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
     // contract by resolving the env once, up front).
     gwm::forge::for_kind(
       gwm::forge::ForgeKind::GitHub,
-      "github.com".into(),
-      "kbrdn1/gwm-cli".into(),
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
     )
     .as_ref(),
   )
@@ -4622,8 +4632,7 @@ fn read_link_with_pr_detection_keeps_title_when_detected_pr_is_unchanged() {
     // contract by resolving the env once, up front).
     gwm::forge::for_kind(
       gwm::forge::ForgeKind::GitHub,
-      "github.com".into(),
-      "kbrdn1/gwm-cli".into(),
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
     )
     .as_ref(),
   )
@@ -4684,8 +4693,7 @@ fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
     // contract by resolving the env once, up front).
     gwm::forge::for_kind(
       gwm::forge::ForgeKind::GitHub,
-      "github.com".into(),
-      "kbrdn1/gwm-cli".into(),
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
     )
     .as_ref(),
   )
