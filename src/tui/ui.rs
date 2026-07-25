@@ -2091,9 +2091,13 @@ impl HintContext {
         Hint::Key(Create, "new"),
         Hint::Key(DeleteConfirm, "del"),
         Hint::Key(Bootstrap, "boot"),
-        // Act on the selected worktree.
+        // Act on the selected worktree. #453 re-audit: exec and agent
+        // sessions joined the family; clean / mux / macros stay
+        // overlay-only — the footer is a teaser, `?` is the manual.
         Hint::Key(TerminalFullscreen, "open"),
         Hint::Key(LazyGitFullscreen, "git"),
+        Hint::Key(ExecOverlay, "exec"),
+        Hint::Key(AgentSessions, "agents"),
         Hint::Key(ReviewFullscreen, "review"),
         Hint::Key(YankPath, "yank"),
         // Find / navigate panes.
