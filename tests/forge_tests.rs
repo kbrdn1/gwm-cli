@@ -561,11 +561,61 @@ fn the_repo_selector_env_vars_are_always_cleared() {
   let gh = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
   assert_eq!(gwm::github::gh_env_remove(&gh), vec!["GH_REPO"]);
 
+  // `GITLAB_GROUP` belongs to the same class: glab documents it as the
+  // default group for listing merge requests and issues.
   let gl = forge::parse_remote_url("https://gitlab.com/g/p.git").unwrap();
-  assert_eq!(
-    gwm::gitlab::glab_env_remove(&gl),
-    vec!["GITLAB_REPO", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"]
+  for v in ["GITLAB_REPO", "GITLAB_GROUP", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"] {
+    assert!(gwm::gitlab::glab_env_remove(&gl).contains(&v), "{v} must be cleared");
+  }
+}
+
+#[test]
+fn pinning_the_host_also_closes_the_ways_around_the_pin() {
+  // Round 9 pinned `GITLAB_HOST` and stopped there, which is half a pin.
+  // glab documents `GITLAB_API_HOST` as a *separate* endpoint override
+  // ("useful when there are separate (sub)domains or hosts for Git and
+  // the API endpoint") and `GITLAB_URI` as an alias of `GITLAB_HOST`.
+  // Either one, inherited, sends the token to an instance gwm did not
+  // choose while gwm believes it pinned the destination.
+  let gl = forge::parse_remote_url("https://gitlab.example.com/g/p.git").unwrap();
+  let removed = gwm::gitlab::glab_env_remove(&gl);
+
+  assert!(
+    !gwm::gitlab::glab_env(&gl).is_empty(),
+    "precondition: this origin IS pinned"
   );
+  assert!(
+    removed.contains(&"GITLAB_API_HOST"),
+    "the API endpoint bypasses GITLAB_HOST"
+  );
+  assert!(
+    removed.contains(&"GITLAB_URI"),
+    "an alias of the var we pin must not outrank it"
+  );
+}
+
+#[test]
+fn an_ssh_alias_matches_regardless_of_case() {
+  // DNS is case-insensitive, so `SSH.GITHUB.COM` is a valid spelling of
+  // the same host — but the alias table matched before the lowercase, so
+  // it fell through and the SSH endpoint was used as the API host.
+  let r = forge::parse_remote_url("git@SSH.GITHUB.COM:owner/repo.git").unwrap();
+
+  assert_eq!(r.host, "github.com");
+  assert_eq!(r.web_origin, "https://github.com");
+  assert_eq!(r.trust, forge::OriginTrust::FromUrl);
+}
+
+#[test]
+fn the_host_is_normalised_but_the_path_is_not() {
+  // `web_origin` was built from the raw host, so a capitalised remote
+  // pinned `GITLAB_HOST=https://GitLab.Example.COM` and produced links
+  // to match. Repository paths stay verbatim: those ARE case-sensitive.
+  let r = forge::parse_remote_url("https://GitLab.Example.COM/Group/Proj.git").unwrap();
+
+  assert_eq!(r.host, "gitlab.example.com");
+  assert_eq!(r.web_origin, "https://gitlab.example.com");
+  assert_eq!(r.path, "Group/Proj");
 }
 
 #[test]
@@ -577,10 +627,13 @@ fn the_host_env_vars_are_left_alone_when_we_cannot_know_the_host() {
   let ssh = forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap();
 
   assert!(gwm::gitlab::glab_env(&ssh).is_empty());
-  assert!(
-    !gwm::gitlab::glab_env_remove(&ssh).iter().any(|v| v.contains("HOST")),
-    "a host we cannot determine must not be cleared"
-  );
+  let removed = gwm::gitlab::glab_env_remove(&ssh);
+  for v in ["GITLAB_HOST", "GITLAB_URI", "GITLAB_API_HOST"] {
+    assert!(
+      !removed.contains(&v),
+      "{v} must survive: we have no host to put in its place"
+    );
+  }
 }
 
 #[test]

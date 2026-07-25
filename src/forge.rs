@@ -325,7 +325,14 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   // UI stay on the canonical domain — so pinning it, or building links
   // from it, breaks every call. A short table of documented aliases, not
   // a heuristic: anything unrecognised is left verbatim.
-  let (host, known_alias) = match host {
+  // DNS is case-insensitive, so normalise BEFORE the table and before
+  // `web_origin` is built from the result (Codex review #458): matching
+  // raw let `SSH.GITHUB.COM` fall through as an unknown host, and a
+  // merely capitalised remote was pinned verbatim as the CLI's endpoint.
+  // The path is deliberately left alone — repository paths ARE
+  // case-sensitive on both forges.
+  let lower_host = host.to_ascii_lowercase();
+  let (host, known_alias) = match lower_host.as_str() {
     "ssh.github.com" => ("github.com", true),
     "altssh.gitlab.com" => ("gitlab.com", true),
     other => (other, false),
@@ -354,7 +361,7 @@ pub fn parse_remote_url(url: &str) -> Result<RemoteRef> {
   }
 
   Ok(RemoteRef {
-    host: host.to_ascii_lowercase(),
+    host: host.to_string(),
     path: path.to_string(),
     web_origin,
     trust,

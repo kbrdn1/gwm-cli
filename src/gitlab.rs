@@ -74,17 +74,29 @@ pub fn glab_program() -> OsString {
 /// the instance from that repo's own remote rather than from gwm's cwd.
 /// Inherited variables that would redirect `glab` at another project.
 ///
-/// `$GITLAB_REPO` is the flag's environment binding, and
-/// `$REMOTE_ALIAS` / `$GIT_REMOTE_URL_VAR` name which git remote glab
-/// reads the project from — all three override the working directory gwm
-/// deliberately sets. Cleared unconditionally: gwm always knows the
-/// project, either as a slug or as "the repo I am spawning you in".
+/// `$GITLAB_REPO` is the flag's environment binding, `$GITLAB_GROUP` is
+/// the default group for issue / MR listings, and `$REMOTE_ALIAS` /
+/// `$GIT_REMOTE_URL_VAR` name which git remote glab reads the project
+/// from — all four override the working directory gwm deliberately sets.
+/// Cleared unconditionally: gwm always knows the project, either as a
+/// slug or as "the repo I am spawning you in".
 ///
-/// `$GITLAB_HOST` / `$GL_HOST` are **not** here, and the asymmetry is the
-/// point: gwm does not always know the host, and on an SSH origin the
-/// user's exported value may be the only correct signal there is.
-pub fn glab_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
-  vec!["GITLAB_REPO", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"]
+/// The host is the asymmetric case, and it is asymmetric on purpose: gwm
+/// does not always know it, and on an SSH origin the user's exported
+/// value may be the only correct signal there is. So the host variables
+/// are cleared only when [`glab_env`] has an authoritative value to put
+/// in their place — and then *all* of them must go, not just the one we
+/// set. `$GITLAB_URI` is a documented alias of `$GITLAB_HOST`, and
+/// `$GITLAB_API_HOST` overrides the API endpoint independently of both
+/// (it exists for instances that split Git and API onto separate
+/// hostnames). Pinning one while leaving the other two inherited is not
+/// a pin at all: the token still leaves for wherever they point.
+pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
+  let mut vars = vec!["GITLAB_REPO", "GITLAB_GROUP", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"];
+  if !glab_env(origin).is_empty() {
+    vars.extend_from_slice(&["GITLAB_URI", "GITLAB_API_HOST"]);
+  }
+  vars
 }
 
 pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
