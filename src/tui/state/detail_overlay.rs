@@ -209,7 +209,12 @@ fn check_extra(c: &crate::github::PrCheck, now: SystemTime) -> Option<String> {
   };
   let duration = match (parse(&c.started_at), parse(&c.completed_at)) {
     (Some(start), Some(end)) => u64::try_from((end - start).num_seconds()).ok().map(format_run_duration),
-    (Some(start), None) => {
+    // The elapsed form requires the RUNNING outcome (Codex review #455),
+    // not just a missing end: a terminal StatusContext carrying a start
+    // but no completion would otherwise read as still active ("2m…") and
+    // freeze there — the duration tick only rebuilds while an outcome is
+    // Running. A terminal check with an unknown end shows no duration.
+    (Some(start), None) if c.outcome == crate::github::CheckOutcome::Running => {
       let now = chrono::DateTime::<chrono::Utc>::from(now);
       u64::try_from((now - start).num_seconds())
         .ok()

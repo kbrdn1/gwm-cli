@@ -2471,6 +2471,35 @@ fn pr_line_ci_hint_follows_the_focus_context() {
 }
 
 #[test]
+fn terminal_check_without_completion_shows_no_duration() {
+  // Codex review #455 (P2): "in flight" was decided on a missing
+  // completed_at, so a TERMINAL StatusContext carrying a start but no end
+  // read as still active ("2m…") — and froze there, since the duration
+  // tick only rebuilds while an outcome is Running. The elapsed form now
+  // requires the Running outcome; a terminal check with an unknown end
+  // shows no duration at all, just its workflow.
+  use gwm::github::{CheckOutcome, PrCheck};
+  use gwm::tui::state::detail_overlay::ci_check_rows;
+  let now: std::time::SystemTime = chrono::DateTime::parse_from_rfc3339("2026-07-24T14:53:06Z")
+    .unwrap()
+    .into();
+  let checks = vec![PrCheck {
+    name: "status-ctx".into(),
+    outcome: CheckOutcome::Passing,
+    url: None,
+    workflow_name: Some("external".into()),
+    started_at: Some("2026-07-24T14:51:06Z".into()),
+    completed_at: None,
+  }];
+  let rows = ci_check_rows(&checks, now);
+  assert_eq!(
+    rows[0].extra.as_deref(),
+    Some("external"),
+    "a terminal check with no completion timestamp shows no duration"
+  );
+}
+
+#[test]
 fn ci_check_rows_carry_workflow_and_duration_details() {
   // #436 validation feedback: each row surfaces the workflow name and the
   // run duration in `extra` — completed runs show the exact span, running
