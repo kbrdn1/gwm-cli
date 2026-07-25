@@ -1419,6 +1419,18 @@ impl Forge for GitHubForge {
     self.workdir.as_deref()
   }
 
+  fn origin_is_authoritative(&self) -> bool {
+    self.origin.trust == forge::OriginTrust::FromUrl
+  }
+
+  /// Always the slug: `gh` is pinned by `$GH_HOST` even for a guessed
+  /// origin (see [`gh_env`]), so there is no ambiguity to defer to the
+  /// working directory — and `gh api repos/<slug>/…` could not defer
+  /// anyway, the slug being part of the request path.
+  fn repo_selector(&self) -> &str {
+    &self.origin.path
+  }
+
   fn issue_url(&self, number: u64) -> String {
     format!("{}/{}/issues/{}", self.origin.web_origin, self.origin.path, number)
   }

@@ -110,6 +110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `git@[::1]:group/repo.git`
   was split on the first colon, yielding host `git@[` and a nonsense path. The
   scp-form and port splits are now bracket-aware.
+- **An SSH origin lets `glab` resolve the project itself**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). No host can honestly
+  be pinned from an SSH remote, but passing `--repo <slug>` anyway made glab
+  resolve it against its default host — defeating the working directory gwm
+  sets. The flag is dropped in that case, and the REST paths use `glab api`'s
+  `:fullpath` placeholder.
+- **Issue / MR links come from the forge when the local URL would be a guess**
+  ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). `https://<ssh-host>/…`
+  is wrong whenever the SSH hostname is not the web one, or the web UI runs on
+  HTTP or a non-standard port. `gwm open` now asks for the server's `web_url`;
+  the TUI reuses an already-cached status so the render thread issues no
+  request, and both fall back to the constructed URL offline.
 - **Hook `{owner}` / `{repo}` placeholders split a nested namespace correctly**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). A GitLab slug can be
   `group/sub/proj`; splitting on the first separator gave `owner=group`,

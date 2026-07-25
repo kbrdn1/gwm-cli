@@ -463,3 +463,33 @@ fn an_ipv6_https_url_keeps_its_web_port() {
   assert_eq!(r.host, "[2001:db8::1]");
   assert_eq!(r.web_origin, "https://[2001:db8::1]:8443");
 }
+
+// --- canonical URLs for a guessed origin ----------------------------------
+
+#[test]
+fn an_authoritative_origin_builds_its_urls_locally() {
+  // No network: the remote stated the web endpoint, so the constructed
+  // URL is already the right one.
+  let f = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("https://gitlab.acme:8443/team/proj.git").unwrap(),
+  );
+
+  assert!(f.origin_is_authoritative());
+  assert_eq!(f.issue_url(7), "https://gitlab.acme:8443/team/proj/-/issues/7");
+}
+
+#[test]
+fn a_guessed_origin_is_flagged_so_urls_can_be_confirmed_upstream() {
+  // `https://<ssh-host>` is a guess: wrong whenever the SSH hostname is
+  // not the web one, or the web UI runs on HTTP / a non-standard port.
+  // Callers that can afford a fetch ask the server for its own `web_url`
+  // instead; the constructed value stays the offline fallback.
+  let f = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap(),
+  );
+
+  assert!(!f.origin_is_authoritative());
+  assert_eq!(f.issue_url(7), "https://gitlab-ssh.acme/team/proj/-/issues/7");
+}

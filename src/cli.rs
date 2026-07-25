@@ -3710,14 +3710,14 @@ fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Re
         kind: LinkKind::Issue,
         branch: branch.clone(),
       })?;
-      forge.issue_url(n)
+      forge.issue_url_confirmed(n)
     }
     LinkTarget::Pr => {
       let n = link.pr.ok_or_else(|| GwmError::LinkMissing {
         kind: LinkKind::Pr,
         branch: branch.clone(),
       })?;
-      forge.pr_url(n)
+      forge.pr_url_confirmed(n)
     }
   };
 

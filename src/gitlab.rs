@@ -103,10 +103,14 @@ fn encode_segment(s: &str) -> String {
   out
 }
 
-/// `--repo <slug>`, or nothing when the slug is empty. An unresolvable
-/// `origin` is tolerated on the creation paths (see
-/// [`crate::forge::resolve_or_default`]): `glab` then infers the project
-/// from the local git context on its own.
+/// `--repo <slug>`, or nothing when the slug is empty.
+///
+/// Two callers rely on the empty case, both wanting `glab` to infer the
+/// project from its working directory: an unresolvable `origin` on the
+/// creation paths (see [`crate::forge::resolve_or_default`]), and a
+/// guessed SSH origin, where passing a slug would make glab resolve it
+/// against its *default* host (see
+/// [`crate::forge::Forge::repo_selector`]).
 fn repo_flag(slug: &str) -> Vec<String> {
   if slug.is_empty() {
     Vec::new()
@@ -117,7 +121,16 @@ fn repo_flag(slug: &str) -> Vec<String> {
 
 /// `projects/<url-encoded path>` — the REST prefix every `glab api` call
 /// below is rooted at.
+///
+/// An empty slug yields `projects/:fullpath`, the placeholder `glab api`
+/// substitutes from the repo in its working directory (Codex review
+/// #458). That keeps the REST paths on the same rule as the subcommands:
+/// rather than baking a slug that would be resolved against the wrong
+/// host, let glab resolve the project itself.
 fn project_path(slug: &str) -> String {
+  if slug.is_empty() {
+    return "projects/:fullpath".to_string();
+  }
   format!("projects/{}", encode_segment(slug))
 }
 
@@ -162,15 +175,10 @@ pub fn parse_issue_json(s: &str) -> Result<IssueStatus> {
 }
 
 pub fn issue_view_argv(slug: &str, number: u64) -> Vec<String> {
-  vec![
-    "issue".into(),
-    "view".into(),
-    number.to_string(),
-    "--repo".into(),
-    slug.into(),
-    "--output".into(),
-    "json".into(),
-  ]
+  let mut argv = vec!["issue".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--output".into(), "json".into()]);
+  argv
 }
 
 // ---- merge requests ------------------------------------------------------
@@ -316,15 +324,10 @@ pub fn parse_mr_head_json(s: &str) -> Result<PrHead> {
 }
 
 pub fn mr_view_argv(slug: &str, number: u64) -> Vec<String> {
-  vec![
-    "mr".into(),
-    "view".into(),
-    number.to_string(),
-    "--repo".into(),
-    slug.into(),
-    "--output".into(),
-    "json".into(),
-  ]
+  let mut argv = vec!["mr".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--output".into(), "json".into()]);
+  argv
 }
 
 /// Argv for `glab mr list --repo <slug> --source-branch <branch> --all
@@ -333,11 +336,9 @@ pub fn mr_view_argv(slug: &str, number: u64) -> Vec<String> {
 /// branch is still detected, and its state is resolved later via
 /// [`parse_mr_json`].
 pub fn mr_list_argv(slug: &str, branch: &str) -> Vec<String> {
-  vec![
-    "mr".into(),
-    "list".into(),
-    "--repo".into(),
-    slug.into(),
+  let mut argv = vec!["mr".into(), "list".into()];
+  argv.extend(repo_flag(slug));
+  argv.extend([
     "--source-branch".into(),
     branch.into(),
     "--all".into(),
@@ -345,7 +346,8 @@ pub fn mr_list_argv(slug: &str, branch: &str) -> Vec<String> {
     "json".into(),
     "--per-page".into(),
     "1".into(),
-  ]
+  ]);
+  argv
 }
 
 /// Parse the JSON array printed by `glab mr list --output json`,
@@ -828,6 +830,19 @@ impl Forge for GitLabForge {
     self.workdir.as_deref()
   }
 
+  fn origin_is_authoritative(&self) -> bool {
+    self.origin.trust == forge::OriginTrust::FromUrl
+  }
+
+  fn repo_selector(&self) -> &str {
+    // Guessed origin + a repo to stand in: hand glab nothing and let it
+    // read that repo's own remote. Otherwise the slug is the only signal.
+    if self.origin.trust != forge::OriginTrust::FromUrl && self.workdir.is_some() {
+      return "";
+    }
+    &self.origin.path
+  }
+
   fn issue_url(&self, number: u64) -> String {
     format!("{}/{}/-/issues/{}", self.origin.web_origin, self.origin.path, number)
   }
@@ -844,24 +859,24 @@ impl Forge for GitLabForge {
   }
 
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
-    parse_issue_json(&self.run_argv(issue_view_argv(&self.origin.path, number))?)
+    parse_issue_json(&self.run_argv(issue_view_argv(self.repo_selector(), number))?)
   }
 
   fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
-    parse_mr_json(&self.run_argv(mr_view_argv(&self.origin.path, number))?)
+    parse_mr_json(&self.run_argv(mr_view_argv(self.repo_selector(), number))?)
   }
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
-    parse_mr_head_json(&self.run_argv(mr_view_argv(&self.origin.path, number))?)
+    parse_mr_head_json(&self.run_argv(mr_view_argv(self.repo_selector(), number))?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
-    parse_mr_list_number(&self.run_argv(mr_list_argv(&self.origin.path, branch))?)
+    parse_mr_list_number(&self.run_argv(mr_list_argv(self.repo_selector(), branch))?)
   }
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
     let body = forge::read_body_file(req.body_file)?;
-    let out = self.run_argv(issue_create_argv(&self.origin.path, req.title, &body, req.labels))?;
+    let out = self.run_argv(issue_create_argv(self.repo_selector(), req.title, &body, req.labels))?;
     let number = parse_created_issue_number(&out)?;
     Ok(CreatedIssue {
       number,
@@ -887,16 +902,16 @@ impl Forge for GitLabForge {
   }
 
   fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {
-    parse_labels_json(&self.run_argv(label_list_argv(&self.origin.path))?)
+    parse_labels_json(&self.run_argv(label_list_argv(self.repo_selector()))?)
   }
 
   fn create_label(&self, spec: &LabelSpec) -> Result<()> {
-    self.run_argv(label_create_argv(&self.origin.path, spec))?;
+    self.run_argv(label_create_argv(self.repo_selector(), spec))?;
     Ok(())
   }
 
   fn update_label(&self, spec: &LabelSpec) -> Result<()> {
-    self.run_argv(label_update_argv(&self.origin.path, spec))?;
+    self.run_argv(label_update_argv(self.repo_selector(), spec))?;
     Ok(())
   }
 
@@ -913,35 +928,35 @@ impl Forge for GitLabForge {
       };
       GwmError::Config(format!("labels (remote): {} — refusing to delete via `glab`", inner))
     })?;
-    self.run_argv(label_delete_argv(&self.origin.path, name))?;
+    self.run_argv(label_delete_argv(self.repo_selector(), name))?;
     Ok(())
   }
 
   fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
-    parse_milestones_json(&self.run_argv(milestone_list_argv(&self.origin.path))?)
+    parse_milestones_json(&self.run_argv(milestone_list_argv(self.repo_selector()))?)
   }
 
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
     check_due_on_is_date_only(spec)?;
-    let out = self.run_argv(milestone_create_argv(&self.origin.path, spec))?;
+    let out = self.run_argv(milestone_create_argv(self.repo_selector(), spec))?;
     // GitLab has no `state` on create, so a declared-closed milestone
     // needs a second call to transition it. Keyed on the id echoed back
     // by the POST.
     if spec.state == MilestoneState::Closed {
       let id = parse_created_milestone_id(&out)?;
-      self.run_argv(milestone_update_argv(&self.origin.path, id, spec))?;
+      self.run_argv(milestone_update_argv(self.repo_selector(), id, spec))?;
     }
     Ok(())
   }
 
   fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
     check_due_on_is_date_only(spec)?;
-    self.run_argv(milestone_update_argv(&self.origin.path, number, spec))?;
+    self.run_argv(milestone_update_argv(self.repo_selector(), number, spec))?;
     Ok(())
   }
 
   fn delete_milestone(&self, number: u64) -> Result<()> {
-    self.run_argv(milestone_delete_argv(&self.origin.path, number))?;
+    self.run_argv(milestone_delete_argv(self.repo_selector(), number))?;
     Ok(())
   }
 }

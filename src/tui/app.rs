@@ -5127,6 +5127,30 @@ impl App {
     };
   }
 
+  /// The issue's URL as the forge itself reported it, when a fetch has
+  /// already landed (Codex review #458).
+  ///
+  /// For a guessed (SSH) origin the locally constructed URL is only
+  /// `https://<ssh-host>/…`, which is wrong whenever the SSH hostname is
+  /// not the web hostname or the web UI runs on HTTP / a non-standard
+  /// port. The cached status carries the server's own `web_url`, so it is
+  /// preferred whenever it is there — and unlike the CLI path this costs
+  /// no request, which matters on the render thread.
+  fn cached_issue_url(&self, number: u64) -> Option<String> {
+    match self.github.issue_fetch_state(number) {
+      GitHubFetchState::Loaded(s) if !s.url.is_empty() => Some(s.url.clone()),
+      _ => None,
+    }
+  }
+
+  /// PR-side counterpart to [`Self::cached_issue_url`].
+  fn cached_pr_url(&self, number: u64) -> Option<String> {
+    match self.github.pr_fetch_state(number) {
+      GitHubFetchState::Loaded(s) if !s.url.is_empty() => Some(s.url.clone()),
+      _ => None,
+    }
+  }
+
   /// Pick a target from the open menu. Returns the URL to open, or `None`
   /// when the link is missing (the status bar carries the explanation).
   pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
@@ -5137,14 +5161,14 @@ impl App {
     };
     let url = match target {
       LinkTarget::Issue => match self.github.link.issue {
-        Some(n) => forge.issue_url(n),
+        Some(n) => self.cached_issue_url(n).unwrap_or_else(|| forge.issue_url(n)),
         None => {
           self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
-        Some(n) => forge.pr_url(n),
+        Some(n) => self.cached_pr_url(n).unwrap_or_else(|| forge.pr_url(n)),
         None => {
           self.status = format!(
             "no {} linked — press {} to link one",

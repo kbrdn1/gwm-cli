@@ -413,6 +413,23 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
   /// `http://gitlab.acme:8080`). The root of every generated URL.
   fn web_origin(&self) -> &str;
 
+  /// Whether the web origin was read from the remote rather than guessed
+  /// (see [`OriginTrust`]). Callers that can afford a request use it to
+  /// decide between the locally constructed URL and asking the server for
+  /// its own `web_url`.
+  fn origin_is_authoritative(&self) -> bool;
+
+  /// What to pass as the CLI's repository selector — the slug, or `""`
+  /// to let the CLI resolve the project from its working directory.
+  ///
+  /// Empty for a **guessed** origin with a known workdir (Codex review
+  /// #458): no host can honestly be pinned there, and passing an explicit
+  /// slug makes the CLI resolve it against its *default* host, which
+  /// defeats the working directory entirely. Handing it nothing lets it
+  /// read the repo's own remote — right host, right project, and the
+  /// user's own CLI configuration honoured.
+  fn repo_selector(&self) -> &str;
+
   /// Directory the forge CLI is spawned in, when known.
   ///
   /// This is the root fix for the wrong-tenant hazard (Codex review #458):
@@ -434,6 +451,39 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
 
   fn issue_url(&self, number: u64) -> String;
   fn pr_url(&self, number: u64) -> String;
+
+  /// The issue's canonical URL, confirmed upstream when the local one
+  /// would only be a guess (Codex review #458).
+  ///
+  /// An authoritative origin builds it offline. A guessed one asks the
+  /// forge, which returns its own `web_url` — the only correct answer
+  /// when the SSH hostname is not the web hostname, or the web UI runs on
+  /// HTTP or a non-standard port. A failed request falls back to the
+  /// guess rather than returning nothing.
+  fn issue_url_confirmed(&self, number: u64) -> String {
+    if self.origin_is_authoritative() {
+      return self.issue_url(number);
+    }
+    self
+      .fetch_issue(number)
+      .ok()
+      .map(|s| s.url)
+      .filter(|u| !u.is_empty())
+      .unwrap_or_else(|| self.issue_url(number))
+  }
+
+  /// PR/MR counterpart to [`Self::issue_url_confirmed`].
+  fn pr_url_confirmed(&self, number: u64) -> String {
+    if self.origin_is_authoritative() {
+      return self.pr_url(number);
+    }
+    self
+      .fetch_pr(number)
+      .ok()
+      .map(|s| s.url)
+      .filter(|u| !u.is_empty())
+      .unwrap_or_else(|| self.pr_url(number))
+  }
 
   /// The `git fetch origin <spec>` left-hand side that resolves the
   /// change's head commit, for `gwm review`. Forge-specific and NOT

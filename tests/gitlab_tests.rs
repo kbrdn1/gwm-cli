@@ -884,3 +884,76 @@ fn parse_labels_json_drops_group_labels_that_slipped_through() {
   let names: Vec<&str> = labels.iter().map(|l| l.name.as_str()).collect();
   assert_eq!(names, vec!["proj-only", "legacy"]);
 }
+
+// --- Codex review #458, round 6 -------------------------------------------
+
+#[test]
+fn a_guessed_origin_lets_glab_resolve_the_project_from_the_repo() {
+  // The last open hole from round 2/3: for an SSH origin no `GITLAB_HOST`
+  // is pinned (a distinct SSH hostname is a documented GitLab pattern, so
+  // a guess must not override a working config) — but passing
+  // `--repo <slug>` anyway made glab resolve that selector against its
+  // DEFAULT host, defeating the cwd we now set. Dropping the flag lets
+  // glab read the repo's own remote: right host, right project, and the
+  // user's own configuration honoured.
+  let dir = tempfile::tempdir().unwrap();
+  let f = gwm::forge::for_kind_in(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap(),
+    Some(dir.path().to_path_buf()),
+  );
+
+  assert_eq!(f.repo_selector(), "", "a guessed origin must not pin a selector");
+}
+
+#[test]
+fn an_authoritative_origin_keeps_its_explicit_selector() {
+  // With the host pinned there is no ambiguity, and an explicit slug is
+  // more precise than cwd inference — it also works when the cwd is not a
+  // repo at all.
+  let dir = tempfile::tempdir().unwrap();
+  let f = gwm::forge::for_kind_in(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url("https://gitlab.acme/team/proj.git").unwrap(),
+    Some(dir.path().to_path_buf()),
+  );
+
+  assert_eq!(f.repo_selector(), "team/proj");
+}
+
+#[test]
+fn a_guessed_origin_without_a_workdir_still_pins_the_selector() {
+  // Nothing for glab to infer from, so the slug is the only signal left.
+  let f = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap(),
+  );
+
+  assert_eq!(f.repo_selector(), "team/proj");
+}
+
+#[test]
+fn an_empty_selector_drops_the_repo_flag_from_every_builder() {
+  assert!(!gitlab::issue_view_argv("", 42).iter().any(|a| a == "--repo"));
+  assert!(!gitlab::mr_view_argv("", 61).iter().any(|a| a == "--repo"));
+  assert!(!gitlab::mr_list_argv("", "feat/x").iter().any(|a| a == "--repo"));
+}
+
+#[test]
+fn an_empty_selector_makes_glab_api_resolve_the_project_itself() {
+  // `glab api` substitutes `:fullpath` from the repo in its working
+  // directory, so the REST paths follow the same rule as the subcommands
+  // instead of baking a slug that would be resolved on the wrong host.
+  assert_eq!(
+    gitlab::label_list_argv(""),
+    vec![
+      "api",
+      "--paginate",
+      "projects/:fullpath/labels?per_page=100&include_ancestor_groups=false",
+    ]
+  );
+  assert_eq!(
+    gitlab::milestone_list_argv(""),
+    vec!["api", "--paginate", "projects/:fullpath/milestones?per_page=100"]
+  );
+}
