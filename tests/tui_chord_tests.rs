@@ -596,6 +596,25 @@ fn help_overlay_documents_every_modal_action_in_its_section() {
        {wanted} modal verb(s) bind them — one is missing from `help_rows` (issue #453)"
     );
   }
+
+  // Fixed (non-rebindable) controls the contexts handle OUTSIDE ModalAction
+  // (Codex review #456): the palette's fuzzy filter input, the number /
+  // value typing and their Backspace erasers. `ModalAction::all()` cannot
+  // see them, so pin them literally.
+  for (section, keys) in [
+    ("Command Palette", "any char"),
+    ("Command Palette", "Backspace"),
+    ("Link Prompt", "Backspace"),
+    ("Settings", "0-9"),
+    ("Settings", "Backspace"),
+  ] {
+    let present = sections.get(section).is_some_and(|m| m.contains_key(keys));
+    assert!(
+      present,
+      "the {section:?} section must document the fixed {keys:?} control \
+       (handled outside ModalAction — issue #453)"
+    );
+  }
 }
 
 #[test]
