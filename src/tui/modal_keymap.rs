@@ -499,6 +499,18 @@ impl ModalKeymap {
   /// Every key bound to `action`, comma-joined (`"n, Esc"`) or empty when
   /// unbound — the help-overlay row form, matching the global keymap's
   /// `keys_for` rendering.
+  /// The resolved strokes bound to `action` (empty when unbound). Used by
+  /// the help overlay to filter out strokes the reserved typing of an
+  /// input context swallows (Codex review #456).
+  pub fn keys(&self, action: ModalAction) -> &[KeyStroke] {
+    self
+      .entries
+      .iter()
+      .find(|b| b.action == action)
+      .map(|b| b.keys.as_slice())
+      .unwrap_or(&[])
+  }
+
   pub fn keys_display(&self, action: ModalAction) -> String {
     self
       .entries

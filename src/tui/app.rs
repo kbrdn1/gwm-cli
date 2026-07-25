@@ -2119,12 +2119,15 @@ impl App {
   /// printable characters are swallowed (no palette entry could match
   /// them), Ctrl-modified keys fall through to the modal resolution.
   pub fn palette_input_key(&mut self, key: KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers as Mods;
+    // Ctrl/Alt-modified strokes are bindable and must stay reachable
+    // (Codex review #456) — only unmodified legitimate input is reserved.
+    if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
+      return false;
+    }
     if key.code == KeyCode::Backspace {
       self.palette_pop_char();
       return true;
-    }
-    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-      return false;
     }
     match key.code {
       KeyCode::Char(c) if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-' => {
@@ -2142,15 +2145,16 @@ impl App {
   /// contract as [`Self::palette_input_key`] (Codex review #456). A no-op
   /// (`false`) when no edit is live.
   pub fn settings_edit_input_key(&mut self, key: KeyEvent) -> bool {
+    use crossterm::event::KeyModifiers as Mods;
     if self.config_panel.editing.is_none() {
+      return false;
+    }
+    if key.modifiers.intersects(Mods::CONTROL | Mods::ALT) {
       return false;
     }
     if key.code == KeyCode::Backspace {
       self.config_panel.pop_edit_char();
       return true;
-    }
-    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-      return false;
     }
     match key.code {
       KeyCode::Char(c) => {
@@ -4050,7 +4054,11 @@ impl App {
     // Printable keys and Backspace route to the field first — the palette
     // convention; modal verbs act through non-printable keys (Ctrl-
     // modified chars still fall through to the modal resolution).
-    if !on_type {
+    if !on_type
+      && !key
+        .modifiers
+        .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT)
+    {
       match key.code {
         KeyCode::Backspace => {
           self.create_pop_char();
@@ -4061,10 +4069,7 @@ impl App {
         // still reaches the modal resolution (a printable rebind stays
         // honoured, the #293 contract), with the digits-only status hint
         // as the unresolved fallback below.
-        KeyCode::Char(c)
-          if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
-            && (self.create_form.field != Field::Issue || c.is_ascii_digit()) =>
-        {
+        KeyCode::Char(c) if self.create_form.field != Field::Issue || c.is_ascii_digit() => {
           self.create_push_char(c);
           return CreateKey::Handled;
         }
@@ -5154,10 +5159,19 @@ impl App {
       // Backspace route to the number before the stage context so a
       // modal rebind cannot swallow them. Same contract as the create
       // form; Ctrl-modified chars still reach the modal resolution.
-      LinkPromptStage::InputNumber if key.code == KeyCode::Backspace => self.link_prompt_pop_char(),
+      LinkPromptStage::InputNumber
+        if key.code == KeyCode::Backspace
+          && !key
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
+      {
+        self.link_prompt_pop_char()
+      }
       LinkPromptStage::InputNumber
         if matches!(key.code, KeyCode::Char(c) if c.is_ascii_digit())
-          && !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) =>
+          && !key
+            .modifiers
+            .intersects(crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::ALT) =>
       {
         if let KeyCode::Char(c) = key.code {
           self.link_prompt_push_char(c);

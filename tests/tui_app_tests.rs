@@ -922,6 +922,35 @@ fn settings_editor_routes_typing_before_modal_rebinds() {
 }
 
 #[test]
+fn modified_strokes_reach_the_modal_resolution_in_input_modes() {
+  // Codex review #456 (iteration 9): the reserved-typing routes must not
+  // swallow Ctrl/Alt-modified strokes — the parser accepts bindings like
+  // `close = ["Alt+x"]` or `accept = ["Ctrl+Backspace"]` and they have to
+  // stay reachable while typing. Only unmodified legitimate input is
+  // reserved.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.open_command_palette();
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+    "Alt+x must fall through to the modal resolution"
+  );
+  assert!(
+    !app.palette_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+    "Ctrl+Backspace must fall through to the modal resolution"
+  );
+  app.config_panel.editing = Some("1".into());
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
+    "Alt+x must fall through in the settings editor"
+  );
+  assert!(
+    !app.settings_edit_input_key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::CONTROL)),
+    "Ctrl+Backspace must fall through in the settings editor"
+  );
+}
+
+#[test]
 fn create_push_only_digits_on_issue() {
   let (_dir, mut app) = make_app();
   app.enter_create();
