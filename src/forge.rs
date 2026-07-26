@@ -720,20 +720,39 @@ pub fn reconcile_links(repo: &Repository, config: &Config) {
 /// Which backend may drive an authenticated call against `origin`, or
 /// the reason none may.
 ///
-/// Three sources of authority, in order:
+/// The question is **where the authenticated call may go**, not which
+/// CLI makes it. That distinction decides every branch below: `gh` and
+/// `glab` both send the ambient token to whatever host they are pointed
+/// at, with no scoping of their own (verified against glab 1.109.0 and
+/// gh 2.96.0), so the host is the only thing worth gating.
 ///
-/// 1. **The host states it.** `github.com`, `ghe.com`, `gitlab.com` —
-///    see [`known_kind`]. Nothing else is asked.
-/// 2. **The user's own config states it.** `forge` in
-///    `~/.config/gwm/config.toml`. It is not shipped with any repo, so
-///    it is a statement by the person running gwm.
-/// 3. **The repo's `.gwm.toml` states it** — and that file ships with
-///    the repo, so it is only taken from a repo the user has approved
-///    in the TOFU ledger. This is the case the review kept coming back
-///    to (Codex review #458, three rounds): a hostile clone naming its
-///    own server would otherwise get `gh` / `glab` pointed at it, with
-///    whatever token the environment carries, from a plain `gwm
-///    status` or a TUI selection.
+/// Three sources of authority, each answering for a different reason:
+///
+/// 1. **The host states its own forge.** `github.com`, `ghe.com`,
+///    `gitlab.com` — see [`known_kind`]. A vendor domain vouches for
+///    itself, so nothing else is asked. A `forge` key may still steer
+///    *which CLI* drives it, in either direction: the call reaches a
+///    vendor either way, so the worst case is gwm talking to
+///    `gitlab.com` with `gh`.
+/// 2. **The user's own config names the host**, in `[forge_hosts]` in
+///    `~/.config/gwm/config.toml`, with the backend that drives it. No
+///    clone can write to that file, which is what makes it an answer.
+/// 3. **The repo's `.gwm.toml` names the backend** — and that file ships
+///    with the repo, so it counts only for a repo already approved in
+///    the TOFU ledger. This is the case the review kept coming back to
+///    (Codex review #458, three rounds): a hostile clone naming its own
+///    server would otherwise get `gh` / `glab` pointed at it, with
+///    whatever token the environment carries, from a plain `gwm status`
+///    or a TUI selection.
+///
+/// What is deliberately **not** an authority is the bare `forge` key,
+/// wherever it is set. It states which backend the user runs, not which
+/// hosts may receive their token, and honouring it as authorisation left
+/// the gate open for the most ordinary setup there is — one key, set
+/// once, at any GitLab shop, after which every clone's `origin` was
+/// authorised to receive an authenticated call. Hence tier 2 keyed on
+/// the host, which also lets one config describe a mixed fleet that a
+/// single `forge` key never could.
 ///
 /// The ledger is the same one `[[bootstrap.command]]` uses and the
 /// answer is the same shape — approving a repo approves its whole
@@ -741,39 +760,39 @@ pub fn reconcile_links(repo: &Repository, config: &Config) {
 /// non-interactively here because this runs on the TUI's selection
 /// path; `gwm trust add` is how a user answers.
 fn authorised_kind(repo: &Repository, config: &Config, parsed: &RemoteRef) -> Result<ForgeKind> {
+  // 1. The host vouches for itself.
+  if let Some(known) = known_kind(&parsed.host) {
+    return Ok(config.forge.unwrap_or(known));
+  }
+  // 2. The user's own file names this host, and says what drives it.
+  if let Some(kind) = Config::global_forge_host(&parsed.host) {
+    return Ok(kind);
+  }
+  // 3. The repo names a backend — worth taking only once the repo itself
+  //    has been approved.
   let Some(kind) = config.forge else {
-    return known_kind(&parsed.host).ok_or_else(|| {
-      GwmError::Other(format!(
-        "origin host '{}' is not one gwm recognises, so it will not guess a forge and send \
-         an authenticated call there. Name the backend with `forge = \"github\"` or \
-         `forge = \"gitlab\"` in ~/.config/gwm/config.toml, or in the repo's .gwm.toml if \
-         you trust it (`gwm trust add`).",
-        parsed.host
-      ))
-    });
+    return Err(GwmError::Other(format!(
+      "origin host '{}' is not one gwm recognises, so it will not guess a forge and send an \
+       authenticated call there. Authorise it in ~/.config/gwm/config.toml:\n\n    \
+       [forge_hosts]\n    \"{}\" = \"gitlab\"   # or \"github\"\n\nOr name the backend in the \
+       repo's own .gwm.toml and approve the repo with `gwm trust add`.",
+      parsed.host, parsed.host
+    )));
   };
-  // On a host that states its own forge the key still wins outright, in
-  // both directions — that is documented behaviour and costs nothing:
-  // the call goes to a vendor domain either way, so the worst case is
-  // gwm talking to `gitlab.com` with `gh`. The gate below is about
-  // *where* the call goes, not which CLI makes it.
-  if known_kind(&parsed.host).is_some() {
-    return Ok(kind);
-  }
-  if Config::global_forge() == Some(kind) {
-    return Ok(kind);
-  }
   let workdir = repo.workdir().unwrap_or_else(|| repo.path());
   let origin_key = crate::trust::resolve_origin_key(Some(&parsed.web_origin), workdir);
   if crate::trust::config_is_trusted(workdir, &origin_key, crate::trust::resolve_mode(false, false))? {
     return Ok(kind);
   }
   Err(GwmError::Other(format!(
-    "this repo's .gwm.toml points gwm at '{}', a host gwm does not recognise, and the repo \
-     is not in the trust ledger. That file ships with the repo, so approving it is the same \
+    "this repo's .gwm.toml points gwm at '{}', a host gwm does not recognise, and the repo is \
+     not in the trust ledger. That file ships with the repo, so approving it is the same \
      decision as approving its bootstrap commands. Run `gwm trust add` here if you trust it, \
-     or set `forge` in ~/.config/gwm/config.toml to cover the host yourself.",
-    parsed.host
+     or authorise the host yourself in ~/.config/gwm/config.toml:\n\n    [forge_hosts]\n    \
+     \"{}\" = \"{}\"",
+    parsed.host,
+    parsed.host,
+    kind.as_str()
   )))
 }
 

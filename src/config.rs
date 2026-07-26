@@ -17,6 +17,25 @@ pub struct Config {
   /// key is the supported way in; it always wins over inference.
   #[serde(default)]
   pub forge: Option<crate::forge::ForgeKind>,
+  /// `[forge_hosts]` — the hosts this user authorises gwm to make an
+  /// authenticated call against, each with the backend that drives it
+  /// (issue #419).
+  ///
+  /// Only read from the **user-level** config; see
+  /// [`Config::global_forge_host`] for why a repo's copy cannot count.
+  /// Keyed per host rather than sharing the single `forge` key because a
+  /// shop running both a self-hosted GitLab and a GitHub Enterprise has
+  /// no single answer to "which backend" — and because naming the kind
+  /// beside the host is what makes the entry a statement about *that*
+  /// host instead of a blanket one.
+  ///
+  /// ```toml
+  /// [forge_hosts]
+  /// "gitlab.acme.com" = "gitlab"
+  /// "ghe.acme.com"    = "github"
+  /// ```
+  #[serde(default)]
+  pub forge_hosts: BTreeMap<String, crate::forge::ForgeKind>,
   #[serde(default)]
   pub worktree: WorktreeConfig,
   #[serde(default)]
@@ -1438,22 +1457,49 @@ impl Config {
   /// Look for `.gwm.toml` in the given repo root, layered over the
   /// user-level global config at [`global_config_path`] (issue #190).
   /// Falls back to defaults when neither exists.
-  /// The `forge` key from the **user-level** config alone, ignoring the
-  /// repo's `.gwm.toml`.
+  /// The backend the **user-level** config authorises for `host`, or
+  /// `None` if it names no such host.
   ///
-  /// The two layers are not interchangeable for a security decision.
-  /// `merge_layered` lets the repo's file win, and that file ships with
-  /// the repo — so it cannot be what authorises gwm to make an
-  /// authenticated call to an unrecognised host. The user's own file
-  /// can (Codex review #458, and see [`crate::forge::resolve`]).
+  /// Reads `[forge_hosts]` from the global file alone, never the merged
+  /// config. The two layers are not interchangeable for a security
+  /// decision: `merge_layered` lets the repo's `.gwm.toml` win, and that
+  /// file ships with the repo — so nothing in it can be what authorises
+  /// gwm to send an authenticated call somewhere. The user's own file
+  /// can, because no clone can write to it.
   ///
-  /// Tolerant by design: an unreadable or malformed global config
-  /// yields `None` — "the user did not say", which fails closed — and
-  /// leaves the real parse error to the layered load.
-  pub fn global_forge() -> Option<crate::forge::ForgeKind> {
-    let path = global_config_path()?;
-    let value = read_config_value(&path).ok()?;
-    value.get("forge")?.clone().try_into().ok()
+  /// This replaced a check on the bare `forge` key, which asked the
+  /// wrong question. `forge = "gitlab"` states which *backend* the user
+  /// runs, not which *hosts* may receive their token — so reading it as
+  /// authorisation meant the single most ordinary setup (one key, set
+  /// once, at any GitLab shop) authorised every host in existence,
+  /// including one an attacker put in a clone's `origin`. Verified
+  /// against glab 1.109.0: given `GITLAB_HOST`, glab sends the ambient
+  /// `GITLAB_TOKEN` there as `Private-Token`, with no host scoping.
+  ///
+  /// Host comparison is ASCII-case-insensitive, matching
+  /// [`crate::forge::known_kind`] and DNS itself; a config naming
+  /// `GitLab.ACME.com` covers an origin spelled `gitlab.acme.com`.
+  ///
+  /// Tolerant by design: an unreadable or malformed global config yields
+  /// `None` — "the user did not say", which fails closed — and leaves
+  /// the real parse error to the layered load.
+  pub fn global_forge_host(host: &str) -> Option<crate::forge::ForgeKind> {
+    Self::forge_host_in(&global_config_path()?, host)
+  }
+
+  /// [`Self::global_forge_host`] against an explicit config file.
+  ///
+  /// Split out for `gwm doctor`, which threads its global layer as a path
+  /// rather than reading `global_config_path()` ambiently so an injected
+  /// context stays deterministic (issue #219 review). The authorisation
+  /// path has no such caller and uses the ambient one.
+  pub fn forge_host_in(global_path: &Path, host: &str) -> Option<crate::forge::ForgeKind> {
+    let value = read_config_value(global_path).ok()?;
+    let hosts = value.get("forge_hosts")?.as_table()?;
+    hosts
+      .iter()
+      .find(|(k, _)| k.eq_ignore_ascii_case(host))
+      .and_then(|(_, v)| v.clone().try_into().ok())
   }
 
   pub fn load_for_repo(repo_root: &Path) -> Result<Self> {

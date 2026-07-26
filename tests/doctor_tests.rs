@@ -1109,6 +1109,78 @@ fn an_explicit_gitlab_forge_probes_glab() {
 }
 
 #[test]
+fn a_forge_hosts_entry_is_also_an_opt_in_for_the_cli_probe() {
+  // `[forge_hosts]` is the second way to say "I talk to this forge", and it
+  // says it about *this host* specifically — a stronger opt-in signal than
+  // the bare `forge` key, not a weaker one. Probing only on `forge` left a
+  // user who authorises purely through the global table with a clean
+  // `gwm doctor` and no `glab` installed.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://gitlab.acme.internal/team/proj.git")
+    .unwrap();
+  let global = dir.path().join("global.toml");
+  std::fs::write(&global, "[forge_hosts]\n\"gitlab.acme.internal\" = \"gitlab\"\n").unwrap();
+  // No `forge` key anywhere: the host entry is the whole opt-in.
+  let config = Config::default();
+
+  let report = doctor::run(&DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: Some(&global),
+  })
+  .unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+
+  // Same env-independence rule as `an_explicit_gitlab_forge_probes_glab`:
+  // the positive assertion only holds where `glab` is genuinely absent.
+  if which::which("glab").is_err() {
+    assert_eq!(c.status, CheckStatus::Warning, "missing glab must warn: {}", c.detail);
+    assert!(
+      c.detail.contains("glab"),
+      "the forge CLI should be named, got: {}",
+      c.detail
+    );
+  }
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+  assert!(
+    !missing.split(',').any(|b| b.trim() == "gh"),
+    "a GitLab host entry must not probe for `gh`, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn a_forge_hosts_entry_for_another_host_probes_nothing() {
+  // The bound: the table authorises *named* hosts, so an entry that does not
+  // match this repo's origin is not an opt-in for it. Without this, adding
+  // one host to the global config would start warning in every unrelated
+  // repo — the same over-probing the `forge` key was careful to avoid.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/team/proj.git").unwrap();
+  let global = dir.path().join("global.toml");
+  std::fs::write(&global, "[forge_hosts]\n\"gitlab.acme.internal\" = \"gitlab\"\n").unwrap();
+  let config = Config::default();
+
+  let report = doctor::run(&DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: Some(&global),
+  })
+  .unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+
+  assert!(
+    !missing.contains("glab") && !missing.split(',').any(|b| b.trim() == "gh"),
+    "an unrelated host entry must not probe any forge CLI, got: {}",
+    c.detail
+  );
+}
+
+#[test]
 fn the_forge_cli_probe_honours_the_gwm_gh_override() {
   // `$GWM_GH` / `$GWM_GLAB` point at an alternative binary; probing the
   // bare name `gh` regardless warned about a setup that works, and pushed

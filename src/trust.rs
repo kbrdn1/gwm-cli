@@ -143,12 +143,22 @@ pub enum TrustOutcome {
 /// [`crate::forge::resolve`] runs on the TUI's selection path, which
 /// cannot host a prompt. `gwm trust add` is how a user answers it.
 ///
-/// No `.gwm.toml` at all is `true`: there is no repo-controlled file in
-/// play, so whatever asked the question came from the user's own config.
+/// No `.gwm.toml` at all is `false`, and the distinction matters.
+///
+/// This answers "does *the repo's own file* authorise this?", so an
+/// absent file is an absent statement, not a blanket yes. It briefly
+/// returned `true` on the reasoning that with no repo-controlled file in
+/// play the request must have come from the user's own config — which
+/// held only while a bare global `forge` key was itself an authority.
+/// Once that key stopped authorising hosts, the same `true` became the
+/// way around the gate: a repo with no `.gwm.toml` on an unrecognised
+/// host inherits `forge` from the global config by merge, reaches this
+/// question, and was waved through on the strength of the file it does
+/// not have.
 pub fn config_is_trusted(workdir: &Path, origin: &str, mode: TrustMode) -> Result<bool> {
   let bytes = match fs::read(workdir.join(CONFIG_FILE)) {
     Ok(b) => b,
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
     Err(e) => return Err(e.into()),
   };
   match mode {

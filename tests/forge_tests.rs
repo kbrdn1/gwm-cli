@@ -168,10 +168,19 @@ fn resolve_infers_gitlab_from_a_gitlab_dot_com_origin() {
 }
 
 #[test]
-fn config_forge_override_wins_over_host_inference() {
-  // The load-bearing case: a self-hosted GitLab on an arbitrary domain
-  // cannot be detected from the remote URL, so the explicit override is
-  // the only way in (issue #419, "Forge detection").
+fn a_forge_key_alone_does_not_open_an_arbitrary_domain() {
+  // This test used to assert the opposite — that naming the backend was
+  // "the only way in" for a self-hosted instance. It was, and that was the
+  // hole: `forge` says which *backend* is in use, never which *hosts* may
+  // receive an authenticated call, and the key is readable from a
+  // `.gwm.toml` that ships with the repo or a global config that covers
+  // every repo at once. Either way the host was never actually decided by
+  // anyone.
+  //
+  // The backend still has to be named — that part was always right, a
+  // self-hosted instance cannot be detected from a URL. It is just no
+  // longer sufficient. The host is authorised separately, and the refusal
+  // has to say how.
   let (_dir, repo) = init_repo();
   repo.remote("origin", "git@code.acme.internal:team/proj.git").unwrap();
   let cfg = Config {
@@ -179,10 +188,11 @@ fn config_forge_override_wins_over_host_inference() {
     ..Default::default()
   };
 
-  let f = forge::resolve(&repo, &cfg).unwrap();
+  let err = forge::resolve(&repo, &cfg).unwrap_err().to_string();
 
-  assert_eq!(f.kind(), ForgeKind::GitLab);
-  assert_eq!(f.slug(), "team/proj");
+  assert!(err.contains("code.acme.internal"), "must name the host: {err}");
+  assert!(err.contains("gwm trust add"), "must name the per-repo way in: {err}");
+  assert!(err.contains("forge_hosts"), "must name the per-user way in: {err}");
 }
 
 #[test]
@@ -978,7 +988,10 @@ fn a_bare_repo_still_gives_the_cli_a_git_context() {
   // worktrees is a normal gwm layout (Codex review #458).
   let dir = tempfile::tempdir().unwrap();
   let repo = git2::Repository::init_bare(dir.path()).unwrap();
-  repo.remote("origin", "git@ghe-ssh.acme.com:team/proj.git").unwrap();
+  // An SSH origin on a host that states its own forge: the subject here is
+  // the bare repo's git context, so the host must not drag the
+  // authorisation gate into it.
+  repo.remote("origin", "git@ssh.ghe.com:team/proj.git").unwrap();
 
   let f = forge::resolve(&repo, &github_cfg()).unwrap();
 
@@ -997,17 +1010,19 @@ fn flipping_the_backend_drops_the_numbers_the_other_one_wrote() {
   // this cheap. `worktree::list` reads links with no `Config` in hand
   // and is the busiest reader; `forge::resolve` is the one place that
   // decides which backend a repo uses, and it already has both.
+  // A vendor domain, so the backend flip below is the only variable: on a
+  // host that states its own forge the `forge` key still steers which CLI
+  // drives it, which is exactly the flip this test needs — without also
+  // asking the repo to be authorised for an arbitrary host.
   let (_dir, repo) = init_repo();
-  repo
-    .remote("origin", "https://git.acme.internal/team/proj.git")
-    .unwrap();
+  repo.remote("origin", "https://github.com/team/proj.git").unwrap();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
   gwm::github::link_issue(&repo, &branch, 42).unwrap();
 
   // An absent record adopts rather than purges: links written before
   // this key existed must survive the upgrade that introduces it.
   let github = forge::resolve(&repo, &github_cfg()).unwrap();
-  assert_eq!(github.kind(), ForgeKind::GitHub, "precondition: host infers GitHub");
+  assert_eq!(github.kind(), ForgeKind::GitHub, "precondition: resolves as GitHub");
   assert_eq!(
     gwm::github::read_link(&repo, &branch).unwrap().issue,
     Some(42),
@@ -1043,10 +1058,10 @@ fn the_tui_reads_the_links_after_the_reconcile_not_before() {
   // old backend's number until the next refresh, and the open menu would
   // have sent the user to the other forge's real page for it (Codex
   // review #458). Same ordering trap as `gwm open`, one layer up.
+  // Vendor domain: the subject is the read/reconcile ordering, not the
+  // gate (see `flipping_the_backend_drops_the_numbers_the_other_one_wrote`).
   let (_dir, repo) = init_repo();
-  repo
-    .remote("origin", "https://git.acme.internal/team/proj.git")
-    .unwrap();
+  repo.remote("origin", "https://github.com/team/proj.git").unwrap();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
   gwm::github::link_issue(&repo, &branch, 42).unwrap();
 
@@ -1088,10 +1103,10 @@ fn a_purge_that_could_not_finish_does_not_advance_the_marker() {
   // part-way through the branch sweep is the reachable version).
   use std::os::unix::fs::PermissionsExt;
 
+  // Vendor domain, same reason as the sibling flip tests: the subject is
+  // the marker, not the gate.
   let (dir, repo) = init_repo();
-  repo
-    .remote("origin", "https://git.acme.internal/team/proj.git")
-    .unwrap();
+  repo.remote("origin", "https://github.com/team/proj.git").unwrap();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
   gwm::github::link_issue(&repo, &branch, 42).unwrap();
   forge::resolve(&repo, &github_cfg()).unwrap();
@@ -1217,15 +1232,11 @@ fn an_unrecognised_host_is_not_assumed_to_be_github() {
 
   let err = forge::resolve(&repo, &Config::default()).unwrap_err().to_string();
   assert!(err.contains("evil.example"), "must name the host: {err}");
-  assert!(err.contains("forge"), "must name the way out: {err}");
-
-  // Naming the backend is the way in — that is what the config key is
-  // for (a self-hosted instance cannot be detected from a URL).
-  let named = Config {
-    forge: Some(ForgeKind::GitLab),
-    ..Default::default()
-  };
-  assert_eq!(forge::resolve(&repo, &named).unwrap().kind(), ForgeKind::GitLab);
+  assert!(err.contains("forge_hosts"), "must name the way out: {err}");
+  // The ways *in* are deliberately not exercised here — naming the backend
+  // is no longer one of them on its own. See
+  // `a_forge_key_alone_does_not_open_an_arbitrary_domain` for that, and
+  // the `cli_binary` pair for the two paths that do authorise a host.
 }
 
 #[test]

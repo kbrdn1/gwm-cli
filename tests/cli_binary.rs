@@ -6524,3 +6524,103 @@ fn a_repo_cannot_authorise_its_own_host_until_it_is_trusted() {
     .assert()
     .success();
 }
+
+#[test]
+fn a_global_forge_kind_does_not_authorise_an_arbitrary_host() {
+  // `forge = "gitlab"` in the user's own config says which *backend* they
+  // use. It does not say which *hosts* may receive an authenticated call,
+  // and reading it as though it did left the gate wide open for the most
+  // ordinary setup there is: anyone working at a GitLab shop sets that key
+  // once, and from then on every clone — including one whose `origin` an
+  // attacker chose — got `glab` pointed at it.
+  //
+  // That is not theoretical. Verified against glab 1.109.0: with
+  // `GITLAB_HOST` naming an arbitrary host, glab sends the ambient
+  // `GITLAB_TOKEN` there as a `Private-Token` header, with no host
+  // scoping of any kind. The repo does not even need a `.gwm.toml` —
+  // the global value merges in on its own.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://code.acme.internal/team/proj.git")
+    .unwrap();
+
+  let xdg = tempfile::TempDir::new().unwrap();
+  fs::create_dir_all(xdg.path().join("gwm")).unwrap();
+  fs::write(xdg.path().join("gwm").join("config.toml"), "forge = \"gitlab\"\n").unwrap();
+  let ledger = dir.path().join("trust.toml");
+
+  let run = |args: &[&str]| {
+    let mut c = Command::cargo_bin("gwm").unwrap();
+    c.current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("XDG_CONFIG_HOME", xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .args(args);
+    c.assert()
+  };
+
+  // Link first, so the refusal below can only come from the gate. Without
+  // it the command stops at "no issue linked" and the test passes while
+  // the host is still being authorised.
+  run(&["link", "issue", "7"]).success();
+  run(&["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("forge_hosts"));
+}
+
+#[test]
+fn a_global_config_authorises_the_hosts_it_names_with_their_kind() {
+  // The remedy, and the reason the kind lives *per host*: a shop with both
+  // a self-hosted GitLab and a GitHub Enterprise cannot be described by a
+  // single `forge` key. Naming each host with its own backend covers the
+  // mixed fleet, and covers it declaratively — one entry per host, in a
+  // file that never ships with a repo, so nothing a clone carries can add
+  // to it.
+  let xdg = tempfile::TempDir::new().unwrap();
+  fs::create_dir_all(xdg.path().join("gwm")).unwrap();
+  fs::write(
+    xdg.path().join("gwm").join("config.toml"),
+    // `Code.ACME.internal` deliberately mis-cased: hosts are compared
+    // case-insensitively, like DNS and like `known_kind`, so a config that
+    // spells the host the way a human would must still cover the origin.
+    "[forge_hosts]\n\"Code.ACME.internal\" = \"gitlab\"\n\"ghe.acme.internal\" = \"github\"\n",
+  )
+  .unwrap();
+
+  let case = |url: &str, want: &str| {
+    let (dir, repo) = init_repo();
+    repo.remote("origin", url).unwrap();
+    let ledger = dir.path().join("trust.toml");
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("XDG_CONFIG_HOME", xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .args(["link", "issue", "7"])
+      .assert()
+      .success();
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("XDG_CONFIG_HOME", xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .args(["open", "issue", "--print-url"])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains(want));
+  };
+
+  // GitLab nests the issue under `/-/issues`, GitHub does not: the URL
+  // shape is what proves the *kind* came from the host's own entry and
+  // not from a shared default.
+  case(
+    "https://code.acme.internal/team/proj.git",
+    "code.acme.internal/team/proj/-/issues/7",
+  );
+  case(
+    "https://ghe.acme.internal/team/proj.git",
+    "ghe.acme.internal/team/proj/issues/7",
+  );
+}
