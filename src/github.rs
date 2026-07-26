@@ -284,22 +284,54 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, forge: &dyn 
   Ok(link)
 }
 
-/// `<host>/<path>` of the repo's `origin`, or `None` when there is no
-/// origin or it does not parse. A local-only repo therefore stamps
+/// `<web origin>/<path>` of the repo's `origin`, or `None` when there is
+/// no origin or it does not parse. A local-only repo therefore stamps
 /// nothing and is never invalidated — there is no second instance for
 /// its numbers to be confused with.
+///
+/// The web origin rather than the bare host, because it carries the
+/// scheme and the port: two self-hosted instances on one hostname behind
+/// different ports are different instances, and `host/path` collapsed
+/// them into one stamp (Codex review #458). It also keeps `ssh://` and
+/// `https://` spellings of the same repo on the same stamp, so switching
+/// remote protocol does not throw the links away.
 fn origin_identity(repo: &Repository) -> Option<String> {
   let remote = repo.find_remote("origin").ok()?;
   let parsed = forge::parse_remote_url(remote.url().ok()?).ok()?;
-  Some(format!("{}/{}", parsed.host, parsed.path))
+  Some(format!("{}/{}", parsed.web_origin, parsed.path))
 }
 
-/// Stamp the current origin on the branch's links. Best-effort: a
-/// read-only repo must not turn a successful `gwm pr` into an error.
+/// Stamp the current origin on the branch's links, dropping anything the
+/// previous origin left behind.
+///
+/// The eager purge is what makes the stamp trustworthy. One stamp covers
+/// the issue, the explicit PR and the detected PR, so writing just one of
+/// them after a move would rewrite the stamp and silently re-bless the
+/// other two — and the lazy check in [`read_link`] would never fire
+/// again, because the stamp now matches (Codex review #458).
+///
+/// Best-effort throughout: a read-only repo must not turn a successful
+/// `gwm pr` into an error.
 fn stamp_link_origin(repo: &Repository, branch: &str) {
-  if let Some(id) = origin_identity(repo) {
-    let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
+  let Some(id) = origin_identity(repo) else { return };
+  if let Ok(Some(stored)) = read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY) {
+    if stored != id {
+      for key in [
+        ISSUE_CONFIG_KEY,
+        ISSUE_TITLE_CONFIG_KEY,
+        ISSUE_STATE_CONFIG_KEY,
+        PR_CONFIG_KEY,
+        PR_TITLE_CONFIG_KEY,
+        PR_STATE_CONFIG_KEY,
+        DETECTED_PR_CONFIG_KEY,
+        DETECTED_PR_TITLE_CONFIG_KEY,
+        DETECTED_PR_STATE_CONFIG_KEY,
+      ] {
+        let _ = remove_branch_key(repo, branch, key);
+      }
+    }
   }
+  let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
 }
 
 /// `true` when persisted numbers on this branch were written against a
@@ -316,15 +348,15 @@ fn link_origin_is_foreign(repo: &Repository) -> impl Fn(&str) -> bool + '_ {
 }
 
 pub fn link_issue(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)?;
   stamp_link_origin(repo, branch);
+  write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)?;
   remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
   remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn link_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
-  write_branch_u64(repo, branch, PR_CONFIG_KEY, number)?;
   stamp_link_origin(repo, branch);
+  write_branch_u64(repo, branch, PR_CONFIG_KEY, number)?;
   remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
   remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)
 }
@@ -356,9 +388,9 @@ pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
 /// stored value and clears a cached title only when the detected number
 /// actually changed.
 pub fn persist_detected_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
+  stamp_link_origin(repo, branch);
   let previous = read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?;
   write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)?;
-  stamp_link_origin(repo, branch);
   if previous == Some(number) {
     Ok(())
   } else {

@@ -1410,3 +1410,64 @@ fn a_link_written_without_an_origin_is_still_readable() {
 
   assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
 }
+
+#[test]
+fn writing_one_link_after_an_origin_change_does_not_revive_the_others() {
+  // One stamp covers the issue, the explicit PR and the detected PR, so
+  // rewriting it for a freshly created PR re-blessed whatever the
+  // previous origin had left behind. The lazy check in `read_link` never
+  // fires afterwards: the stamp matches again (Codex review #458).
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_issue(&repo, "feat/#42-tui-search", 900).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 7).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.pr, Some(7));
+  assert_eq!(
+    link.issue,
+    Some(42),
+    "the stale explicit issue must be gone, leaving only the branch-name number"
+  );
+}
+
+#[test]
+fn two_instances_on_one_host_with_different_ports_do_not_share_a_stamp() {
+  // `<host>/<path>` collapses two self-hosted instances that differ only
+  // by port, so their numbers were reinterpreted against each other
+  // without ever tripping the mismatch check.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo
+    .remote("origin", "https://git.acme.internal:8443/team/proj.git")
+    .unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo
+    .remote("origin", "https://git.acme.internal:9443/team/proj.git")
+    .unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, None);
+}
+
+#[test]
+fn the_same_repo_over_ssh_and_https_keeps_its_links() {
+  // The negative control for the port fix: both spellings resolve to the
+  // same web origin, so switching remote protocol must not throw the
+  // persisted links away.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "git@github.com:acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+}
