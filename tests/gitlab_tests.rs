@@ -629,13 +629,18 @@ fn origin(url: &str) -> gwm::forge::RemoteRef {
 fn the_host_is_pinned_only_when_the_remote_actually_carried_one() {
   // An `http(s)` remote states the web endpoint, so pinning it protects
   // against glab resolving the wrong instance from the process cwd.
+  // The scheme rides along in `API_PROTOCOL`: glab strips it off the
+  // hostname and reads the protocol from a separate setting.
   let http = origin("https://gitlab.acme.internal:8443/team/proj.git");
   assert_eq!(
     gitlab::glab_env(&http),
-    vec![(
-      "GITLAB_HOST".to_string(),
-      "https://gitlab.acme.internal:8443".to_string()
-    )]
+    vec![
+      (
+        "GITLAB_HOST".to_string(),
+        "https://gitlab.acme.internal:8443".to_string()
+      ),
+      ("API_PROTOCOL".to_string(), "https".to_string()),
+    ]
   );
 }
 
@@ -979,6 +984,7 @@ fn ci_autologin_on_another_instance_is_refused_not_silently_retargeted() {
   // SAFETY: env mutation guarded by the lock above; restored below.
   unsafe {
     std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
     std::env::set_var("CI_SERVER_FQDN", "runner-gitlab.other.example");
   }
   let diverged = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal/team/proj.git"));
@@ -986,6 +992,7 @@ fn ci_autologin_on_another_instance_is_refused_not_silently_retargeted() {
   let agreed = gwm::gitlab::ci_autologin_conflict(&origin("https://runner-gitlab.other.example/team/proj.git"));
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::remove_var("CI_SERVER_FQDN");
   }
 
@@ -1002,6 +1009,7 @@ fn no_ci_autologin_means_no_refusal() {
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::set_var("CI_SERVER_FQDN", "runner-gitlab.other.example");
   }
   let out = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal/team/proj.git"));
@@ -1023,6 +1031,7 @@ fn ci_autologin_compares_host_and_port_not_the_raw_fqdn() {
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   unsafe {
     std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
     std::env::set_var("CI_SERVER_FQDN", "gitlab.acme.internal:8443");
     std::env::remove_var("CI_SERVER_HOST");
     std::env::remove_var("CI_SERVER_PORT");
@@ -1035,6 +1044,7 @@ fn ci_autologin_compares_host_and_port_not_the_raw_fqdn() {
   let port = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal:9443/team/proj.git"));
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::remove_var("CI_SERVER_FQDN");
   }
 
@@ -1054,6 +1064,7 @@ fn ci_guard_stays_out_of_it_when_the_origin_is_only_an_ssh_endpoint() {
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   unsafe {
     std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
     std::env::set_var("CI_SERVER_HOST", "gitlab.acme");
     std::env::remove_var("CI_SERVER_PORT");
     std::env::remove_var("CI_SERVER_FQDN");
@@ -1063,6 +1074,7 @@ fn ci_guard_stays_out_of_it_when_the_origin_is_only_an_ssh_endpoint() {
   let guessed = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.acme:team/proj.git"));
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::remove_var("CI_SERVER_HOST");
   }
 
@@ -1080,6 +1092,7 @@ fn ci_guard_resolves_the_implicit_port_from_the_scheme() {
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   unsafe {
     std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
     std::env::set_var("CI_SERVER_URL", "https://gitlab.acme.internal:8443");
     std::env::remove_var("CI_SERVER_HOST");
     std::env::remove_var("CI_SERVER_PORT");
@@ -1090,6 +1103,7 @@ fn ci_guard_resolves_the_implicit_port_from_the_scheme() {
   let matching = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal:8443/team/proj.git"));
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::remove_var("CI_SERVER_URL");
   }
 
@@ -1111,6 +1125,7 @@ fn ci_guard_compares_an_ssh_origin_against_the_ssh_host_variable() {
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   unsafe {
     std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
     std::env::set_var("CI_SERVER_HOST", "gitlab.acme");
     std::env::set_var("CI_SERVER_SHELL_SSH_HOST", "ssh.gitlab.acme");
     std::env::remove_var("CI_SERVER_PORT");
@@ -1124,6 +1139,7 @@ fn ci_guard_compares_an_ssh_origin_against_the_ssh_host_variable() {
   let theirs = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.other:team/proj.git"));
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::remove_var("CI_SERVER_HOST");
     std::env::remove_var("CI_SERVER_SHELL_SSH_HOST");
   }
@@ -1140,12 +1156,14 @@ fn ci_guard_still_abstains_when_no_ssh_host_is_published() {
   let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
   unsafe {
     std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
     std::env::set_var("CI_SERVER_HOST", "gitlab.acme");
     std::env::remove_var("CI_SERVER_SHELL_SSH_HOST");
   }
   let out = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.acme:team/proj.git"));
   unsafe {
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
     std::env::remove_var("CI_SERVER_HOST");
   }
 
@@ -1194,4 +1212,173 @@ fn a_namespace_that_merely_looks_like_the_subfolder_is_kept() {
   );
 
   assert_eq!(f.repo_selector(), "gitlab/group/proj");
+}
+
+#[test]
+fn the_ci_autologin_gate_mirrors_glabs_own_two_variable_condition() {
+  // glab enables auto-login on `GLAB_ENABLE_CI_AUTOLOGIN == "true" &&
+  // GITLAB_CI == "true"`, compared literally — no trim, no case fold
+  // (`internal/config/config_mapping.go::EnvKeyEquivalence`). gwm read
+  // only the first variable and accepted `1`/`yes`/`TRUE`, so a dev
+  // machine that exports the flag out of habit had every glab call
+  // refused while glab would never have auto-logged in at all. The
+  // protection became the outage — round 16 of this review, again.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let repo = origin("https://gitlab.acme.internal/team/proj.git");
+  // SAFETY: env mutation guarded by the lock above; restored below.
+  unsafe {
+    std::env::set_var("CI_SERVER_FQDN", "runner-gitlab.other.example");
+    std::env::remove_var("GITLAB_CI");
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+  }
+  let no_gitlab_ci = gwm::gitlab::ci_autologin_conflict(&repo);
+  unsafe {
+    std::env::set_var("GITLAB_CI", "true");
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "1");
+  }
+  let truthy_but_not_true = gwm::gitlab::ci_autologin_conflict(&repo);
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "1");
+  }
+  let ci_truthy_but_not_true = gwm::gitlab::ci_autologin_conflict(&repo);
+  unsafe {
+    std::env::set_var("GITLAB_CI", "true");
+  }
+  let both_set = gwm::gitlab::ci_autologin_conflict(&repo);
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
+    std::env::remove_var("CI_SERVER_FQDN");
+  }
+
+  assert!(
+    no_gitlab_ci.is_none(),
+    "outside a pipeline glab never auto-logs in: {no_gitlab_ci:?}"
+  );
+  assert!(
+    truthy_but_not_true.is_none(),
+    "glab compares the literal string `true`: {truthy_but_not_true:?}"
+  );
+  assert!(
+    ci_truthy_but_not_true.is_none(),
+    "`GITLAB_CI=1` is not `true` either: {ci_truthy_but_not_true:?}"
+  );
+  assert!(both_set.is_some(), "the real divergence must still refuse");
+}
+
+#[test]
+fn the_pin_covers_the_api_endpoint_and_its_scheme_not_only_the_host() {
+  // `NewClientFromConfig` reads `api_host` env-first and *host-blind*
+  // (`cfg.Get(repoHost, "api_host")` consults the environment before it
+  // ever looks at `repoHost`), then `resolveHostAndSubfolder` lets that
+  // value replace the base host outright. An inherited `GITLAB_API_HOST`
+  // therefore outranks gwm's `GITLAB_HOST` pin and sends the call — and
+  // the token — to another tenant.
+  //
+  // Clearing it has a replacement, which is the whole test for a tier-2
+  // variable: glab falls back to `apiHost = repoHost`, and `repoHost` is
+  // exactly what gwm pinned. `API_PROTOCOL` is the same story one level
+  // down — `apiProtocol` defaults to https and the scheme carried by
+  // `GITLAB_HOST` is stripped, so an inherited `API_PROTOCOL=http`
+  // downgrades a pinned https instance to cleartext. gwm knows the
+  // scheme, so it sets it rather than merely clearing it.
+  let pinned = gwm::gitlab::glab_env_remove(&origin("https://gitlab.acme/team/proj.git"));
+  let guessed = gwm::gitlab::glab_env_remove(&origin("git@gitlab.acme:team/proj.git"));
+
+  assert!(pinned.contains(&"GITLAB_API_HOST"), "{pinned:?}");
+  // Third documented spelling of the `host` key, alongside `GITLAB_URI`.
+  assert!(pinned.contains(&"GL_HOST"), "{pinned:?}");
+  assert!(
+    !guessed.contains(&"GITLAB_API_HOST"),
+    "without a pin there is nothing to put in its place: {guessed:?}"
+  );
+  assert!(!guessed.contains(&"GL_HOST"), "{guessed:?}");
+
+  let https = gwm::gitlab::glab_env(&origin("https://gitlab.acme/team/proj.git"));
+  let http = gwm::gitlab::glab_env(&origin("http://gitlab.acme:8080/team/proj.git"));
+  assert!(
+    https.iter().any(|(k, v)| k == "API_PROTOCOL" && v == "https"),
+    "{https:?}"
+  );
+  assert!(
+    http.iter().any(|(k, v)| k == "API_PROTOCOL" && v == "http"),
+    "clearing it would force https onto a plain-http instance: {http:?}"
+  );
+  assert!(
+    gwm::gitlab::glab_env(&origin("git@gitlab.acme:team/proj.git")).is_empty(),
+    "a guessed origin still pins nothing"
+  );
+}
+
+#[test]
+fn the_subfolder_falls_back_to_the_ci_server_url_like_glab_does() {
+  // In auto-login mode glab resolves `subfolder` from
+  // `{GITLAB_SUBFOLDER, CI_SERVER_URL}` and derives the second from the
+  // URL's path (`extractSubfolderFromURL`). On an instance served under
+  // `/gitlab` with no explicit `GITLAB_SUBFOLDER`, glab's API base
+  // already carries the prefix while gwm kept `gitlab/group/proj` in the
+  // selector — a 404, or the wrong project.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let url = "https://host.example/gitlab/group/proj.git";
+  unsafe {
+    std::env::remove_var("GITLAB_SUBFOLDER");
+    std::env::set_var("CI_SERVER_URL", "https://host.example/gitlab");
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
+  }
+  let without_autologin = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url(url).unwrap(),
+  )
+  .repo_selector()
+  .to_string();
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("GITLAB_CI", "true");
+  }
+  let with_autologin = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url(url).unwrap(),
+  )
+  .repo_selector()
+  .to_string();
+  unsafe {
+    std::env::set_var("GITLAB_SUBFOLDER", "elsewhere");
+  }
+  let explicit_wins = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url(url).unwrap(),
+  )
+  .repo_selector()
+  .to_string();
+  unsafe {
+    std::env::remove_var("GITLAB_SUBFOLDER");
+    std::env::set_var("CI_SERVER_URL", "https://host.example");
+  }
+  let no_path_in_url = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url(url).unwrap(),
+  )
+  .repo_selector()
+  .to_string();
+  unsafe {
+    std::env::remove_var("CI_SERVER_URL");
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("GITLAB_CI");
+  }
+
+  assert_eq!(
+    without_autologin, "gitlab/group/proj",
+    "outside auto-login glab reads GITLAB_SUBFOLDER alone"
+  );
+  assert_eq!(with_autologin, "group/proj");
+  assert_eq!(
+    explicit_wins, "gitlab/group/proj",
+    "GITLAB_SUBFOLDER is first in glab's own override list"
+  );
+  assert_eq!(
+    no_path_in_url, "gitlab/group/proj",
+    "a URL with no path yields no subfolder"
+  );
 }

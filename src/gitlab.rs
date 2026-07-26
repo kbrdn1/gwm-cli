@@ -69,29 +69,58 @@ pub fn glab_program() -> OsString {
 /// are cleared only when [`glab_env`] has an authoritative value to put
 /// in their place.
 ///
-/// That last clause is the whole test, and it splits two variables that
-/// look alike. `$GITLAB_URI` is a documented **alias** of
-/// `$GITLAB_HOST`: gwm is setting that exact value, so leaving an
-/// inherited alias to outrank it is pure ambiguity, and clearing it
-/// loses nothing. `$GITLAB_API_HOST` is **orthogonal** — it names the
-/// API endpoint for instances that split Git and API onto separate
-/// hostnames, which is precisely the thing a Git remote URL cannot tell
-/// you. gwm has nothing to put in its place, so clearing it does not
-/// harden anything, it just breaks the only setups that need it.
+/// That last clause is the whole test, and rounds 10 and 11 of the #458
+/// review disagreed about which side `$GITLAB_API_HOST` falls on. Round
+/// 10 cleared it, round 11 called it orthogonal — "gwm has nothing to
+/// put in its place" — and restored it. Round 11 was wrong on the fact,
+/// which is why the finding came back five more times: glab's client
+/// builder ends with
 ///
-/// Round 10 of the #458 review cleared both and round 11 caught the
-/// regression. The rule that would have prevented it: **clear only what
-/// you can replace.**
+/// ```go
+/// apiHost, _ := cfg.Get(repoHost, "api_host")
+/// if apiHost == "" { apiHost = repoHost }
+/// ```
 ///
-/// Audited against glab's documented environment, under the three-tier
-/// rule stated on [`crate::github::gh_env_remove`]. Tier 1 (always
-/// cleared): `$GITLAB_REPO`, `$GITLAB_GROUP`, `$REMOTE_ALIAS`,
-/// the five `remote_alias` spellings. Tier 2 (cleared only behind a pin):
-/// `$GITLAB_URI` alone. Tier 3 (never touched): `$GITLAB_TOKEN`,
-/// `$GITLAB_CLIENT_ID`, `$GITLAB_API_HOST`, `$CI_JOB_TOKEN`,
-/// `$GLAB_ENABLE_CI_AUTOLOGIN`, `$GLAB_CONFIG_DIR` — clearing the last
-/// three would break gwm inside a GitLab pipeline, which is precisely
-/// where that token is the only credential there is.
+/// (`internal/api/client.go`). The replacement is the pin itself. And
+/// `cfg.Get` consults the environment **before** it looks at
+/// `repoHost` (`internal/config/config.go::GetWithSource`), while
+/// `resolveHostAndSubfolder` lets the value replace the base host
+/// outright — so an inherited `$GITLAB_API_HOST` silently outranks
+/// `$GITLAB_HOST` and carries the token to another tenant. `api_host`
+/// is `ScopePerHost` in glab's schema; the env var is the global escape
+/// hatch, so a split-host install belongs in `glab config set --host
+/// <h> api_host <v>` rather than in the ambient environment.
+///
+/// `$GITLAB_URI` and `$GL_HOST` are the second and third spellings of
+/// the `host` key itself. `$GITLAB_HOST` is first in glab's list and
+/// the lookup returns the first non-empty, so neither can outrank the
+/// pin — clearing them is tidiness, not hardening, and they are listed
+/// together because the asymmetry is what invites the next audit.
+///
+/// The rule that would have saved six rounds: **clear only what you can
+/// replace** — and check what the replacement actually is before
+/// deciding you have none.
+///
+/// Audited against glab's schema (`internal/config/schema.go`), not its
+/// README: `EnvKeyEquivalence` falls back to the upper-cased key name,
+/// so every setting without an explicit `EnvVars` list still has an env
+/// var. Under the three-tier rule stated on
+/// [`crate::github::gh_env_remove`]. Tier 1 (always cleared):
+/// `$GITLAB_REPO`, `$GITLAB_GROUP`, the five `remote_alias` spellings.
+/// Tier 2 (cleared or replaced only behind a pin): `$GITLAB_URI`,
+/// `$GL_HOST`, `$GITLAB_API_HOST`, and `$API_PROTOCOL` — which
+/// [`glab_env`] *sets* rather than clears, see there. Tier 3 (never
+/// touched): `$GITLAB_TOKEN`, `$GITLAB_CLIENT_ID`, `$JOB_TOKEN` /
+/// `$CI_JOB_TOKEN`, `$GLAB_ENABLE_CI_AUTOLOGIN`, `$GLAB_CONFIG_DIR` —
+/// clearing the last three would break gwm inside a GitLab pipeline,
+/// which is precisely where that token is the only credential there is.
+///
+/// `$PROXY`, `$SKIP_TLS_VERIFY`, `$CA_CERT`, `$CLIENT_CERT`,
+/// `$CLIENT_KEY` and `$CUSTOM_HEADERS` are the synthesized names the
+/// schema fallback produces, and they are tier 3 for the same reason:
+/// they decide how the connection is made, not which project it
+/// targets, and gwm has no corporate proxy or private CA to put in
+/// their place.
 ///
 /// One consequence is worth stating rather than hiding, because it is a
 /// real hole and not an oversight: with `$GLAB_ENABLE_CI_AUTOLOGIN=true`
@@ -124,6 +153,8 @@ pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
   ];
   if !glab_env(origin).is_empty() {
     vars.push("GITLAB_URI");
+    vars.push("GL_HOST");
+    vars.push("GITLAB_API_HOST");
   }
   vars
 }
@@ -148,11 +179,47 @@ pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
 /// The cases left unpinned are not left unprotected: the child is spawned
 /// **inside the repo** (see [`forge::Forge::workdir`]), so `glab` resolves
 /// the instance from that repo's own remote rather than from gwm's cwd.
+///
+/// `$API_PROTOCOL` rides along because the host pin alone does not carry
+/// the scheme: glab strips it off the hostname and takes the protocol
+/// from the separate `api_protocol` setting, defaulting to https
+/// (`internal/api/client.go`, `internal/glinstance/host.go`). That
+/// setting has no explicit `EnvVars` in glab's schema, so
+/// `EnvKeyEquivalence` synthesizes the bare name `API_PROTOCOL` — an
+/// inherited one downgrades a pinned https instance to cleartext, and
+/// merely clearing it would force https onto a plain-http instance. gwm
+/// parses the scheme out of the origin, so it sets the value instead
+/// (Codex review #458).
 pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
   }
-  vec![("GITLAB_HOST".to_string(), origin.web_origin.clone())]
+  let mut env = vec![("GITLAB_HOST".to_string(), origin.web_origin.clone())];
+  if let (Some(scheme), _) = origin_scheme_and_port(origin) {
+    env.push(("API_PROTOCOL".to_string(), scheme));
+  }
+  env
+}
+
+/// `true` when `glab` would sign in from the pipeline's own CI variables.
+///
+/// Both halves of glab's condition, compared the way glab compares them:
+/// `os.Getenv("GLAB_ENABLE_CI_AUTOLOGIN") == "true" &&
+/// os.Getenv("GITLAB_CI") == "true"`
+/// (`internal/config/config_mapping.go::EnvKeyEquivalence`) — a literal
+/// match, no trimming and no case folding. gwm read only the first
+/// variable and accepted `1` / `yes` / `TRUE`, so a developer who
+/// exports the flag outside a pipeline had every glab call refused for a
+/// mode glab would never have entered. Mirroring glab exactly is also
+/// the safe direction: where glab does not auto-login, the pin holds and
+/// there is no divergence left to protect against.
+///
+/// One predicate, two callers ([`ci_autologin_conflict`] and
+/// [`resolve_selector`]) — the gate diverging between them is the
+/// failure this shape prevents.
+fn ci_autologin_active() -> bool {
+  std::env::var("GLAB_ENABLE_CI_AUTOLOGIN").as_deref() == Ok("true")
+    && std::env::var("GITLAB_CI").as_deref() == Ok("true")
 }
 
 /// Refuse to run when glab's CI auto-login would authenticate against a
@@ -174,10 +241,7 @@ pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
 /// Read once, at construction, so the TUI's fetch worker never re-reads
 /// the environment off-thread (issue #217).
 pub fn ci_autologin_conflict(origin: &forge::RemoteRef) -> Option<String> {
-  let enabled = std::env::var("GLAB_ENABLE_CI_AUTOLOGIN")
-    .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-    .unwrap_or(false);
-  if !enabled {
+  if !ci_autologin_active() {
     return None;
   }
 
@@ -322,6 +386,15 @@ fn split_host_port(s: &str) -> (Option<String>, Option<String>) {
 /// review #458). Only the API selector is stripped: the web URLs keep
 /// the full path, because that really is where the pages live.
 ///
+/// Inside a pipeline the variable is not the only source. glab's
+/// auto-login overrides replace the schema's env list for `subfolder`
+/// with `{GITLAB_SUBFOLDER, CI_SERVER_URL}` and derive the second from
+/// the URL's path (`extractSubfolderFromURL`), so an instance served
+/// under `/gitlab` needs no explicit variable for glab's API base to
+/// carry the prefix. gwm mirrors that list, in that order — the
+/// explicit variable still wins, and a `$CI_SERVER_URL` with no path
+/// contributes nothing, exactly as glab's `continue` arm does.
+///
 /// Two limits worth naming rather than leaving silent.
 ///
 /// The config-file half of the setting stays out of reach; gwm does not
@@ -343,11 +416,7 @@ fn resolve_selector(origin: &forge::RemoteRef, has_workdir: bool) -> String {
   if origin.trust != forge::OriginTrust::FromUrl && has_workdir {
     return String::new();
   }
-  let Some(sub) = std::env::var("GITLAB_SUBFOLDER")
-    .ok()
-    .map(|s| s.trim().trim_matches('/').to_string())
-    .filter(|s| !s.is_empty())
-  else {
+  let Some(sub) = subfolder_from_env() else {
     return origin.path.clone();
   };
   origin
@@ -355,6 +424,28 @@ fn resolve_selector(origin: &forge::RemoteRef, has_workdir: bool) -> String {
     .strip_prefix(&format!("{sub}/"))
     .unwrap_or(&origin.path)
     .to_string()
+}
+
+/// The instance subfolder glab would resolve, from the same variables in
+/// the same order. See [`resolve_selector`] for why the CI arm exists.
+fn subfolder_from_env() -> Option<String> {
+  let trimmed = |v: String| {
+    let s = v.trim().trim_matches('/').to_string();
+    (!s.is_empty()).then_some(s)
+  };
+  if let Some(sub) = std::env::var("GITLAB_SUBFOLDER").ok().and_then(trimmed) {
+    return Some(sub);
+  }
+  if !ci_autologin_active() {
+    return None;
+  }
+  // `extractSubfolderFromURL`: the URL's path, slash-trimmed. Empty
+  // means "no subfolder", not "fall back to the default".
+  let url = std::env::var("CI_SERVER_URL").ok()?;
+  let rest = url.trim().split_once("://").map(|(_, r)| r).unwrap_or(url.trim());
+  let (_, path) = rest.split_once('/')?;
+  let path = path.trim_matches('/').to_string();
+  (!path.is_empty()).then_some(path)
 }
 
 /// Percent-encode one URL path segment. A GitLab project path contains

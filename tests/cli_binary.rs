@@ -908,9 +908,11 @@ fn the_glab_child_does_not_inherit_the_environment_that_would_retarget_it() {
     .env("GITLAB_REPO", "someone-else/private")
     .env("GITLAB_GROUP", "someone-else")
     .env("GITLAB_TOKEN", "keep-me")
-    // Split-host self-hosted install: the API lives somewhere the Git
-    // URL cannot express, so this is information gwm does not have.
+    // Outranks the host pin inside glab, and points at another tenant.
     .env("GITLAB_API_HOST", "https://api.gitlab.example.com")
+    .env("GL_HOST", "https://gitlab.other.example")
+    // Would downgrade the pinned https instance to cleartext.
+    .env("API_PROTOCOL", "http")
     .args(["list", "--detect-pr"])
     .assert()
     .success();
@@ -932,9 +934,17 @@ fn the_glab_child_does_not_inherit_the_environment_that_would_retarget_it() {
     calls.contains("GITLAB_TOKEN:keep-me"),
     "authentication is the user's to set and must survive: {calls}"
   );
+  // Behind the pin all three of these have a replacement: glab falls
+  // back to `apiHost = repoHost`, `GITLAB_HOST` already outranks the
+  // other host spellings, and gwm knows the scheme from the origin.
   assert!(
-    calls.contains("GITLAB_API_HOST:https://api.gitlab.example.com"),
-    "gwm cannot supply an API host, so it must not clear one: {calls}"
+    calls.contains("GITLAB_API_HOST:<unset>"),
+    "an inherited API host outranks the pin and must go: {calls}"
+  );
+  assert!(calls.contains("GL_HOST:<unset>"), "{calls}");
+  assert!(
+    calls.contains("API_PROTOCOL:https"),
+    "the scheme is pinned, not merely cleared: {calls}"
   );
 }
 
@@ -2213,6 +2223,8 @@ fn write_recording_glab(root: &Path, mr_list_json: &str, api_json: &str) -> Path
   echo "GITLAB_REPO:${{GITLAB_REPO-<unset>}}"
   echo "GITLAB_GROUP:${{GITLAB_GROUP-<unset>}}"
   echo "GITLAB_API_HOST:${{GITLAB_API_HOST-<unset>}}"
+  echo "GL_HOST:${{GL_HOST-<unset>}}"
+  echo "API_PROTOCOL:${{API_PROTOCOL-<unset>}}"
   echo "GITLAB_TOKEN:${{GITLAB_TOKEN-<unset>}}"
   echo "GLAB_DEBUG_HTTP:${{GLAB_DEBUG_HTTP-<unset>}}"
 }} >> "$GWM_FAKE_LOG"

@@ -538,15 +538,20 @@ fn the_repo_selector_env_vars_are_always_cleared() {
 
 #[test]
 fn pinning_the_host_also_closes_the_ways_around_the_pin() {
-  // "Clear only what you can replace" — and the two variables that look
-  // alike under it but are not. `GITLAB_URI` is a documented ALIAS of
-  // the variable gwm is setting, so an inherited one is pure ambiguity
-  // and clearing it loses nothing. `GITLAB_API_HOST` is ORTHOGONAL: it
-  // names the API endpoint on instances that split Git and API across
-  // hostnames, which is exactly what a Git remote URL cannot reveal.
-  // Round 9 pinned only `GITLAB_HOST`, round 10 cleared both, round 11
-  // caught that the second hardened nothing and broke the only setups
-  // that need it.
+  // "Clear only what you can replace", applied to every way an
+  // inherited variable can get past `GITLAB_HOST`.
+  //
+  // Round 9 pinned only the host. Round 10 cleared `GITLAB_API_HOST`
+  // too. Round 11 reverted that, calling the variable orthogonal —
+  // "gwm has nothing to put in its place" — and the finding then came
+  // back five more times, because that premise is false. glab's client
+  // builder reads `api_host` env-first and host-blind, lets it replace
+  // the base host, and ends with `if apiHost == "" { apiHost = repoHost
+  // }` (`internal/api/client.go`). The replacement is the pin.
+  //
+  // `GL_HOST` is the third spelling of the `host` key
+  // (`internal/config/schema.go`: `GITLAB_HOST, GITLAB_URI, GL_HOST`,
+  // first non-empty wins), so it rides with `GITLAB_URI`.
   let gl = forge::parse_remote_url("https://gitlab.example.com/g/p.git").unwrap();
   let removed = gwm::gitlab::glab_env_remove(&gl);
 
@@ -554,14 +559,18 @@ fn pinning_the_host_also_closes_the_ways_around_the_pin() {
     !gwm::gitlab::glab_env(&gl).is_empty(),
     "precondition: this origin IS pinned"
   );
-  assert!(
-    removed.contains(&"GITLAB_URI"),
-    "an alias of the var we pin must not outrank it"
-  );
-  assert!(
-    !removed.contains(&"GITLAB_API_HOST"),
-    "gwm has no API host to put in its place: clearing it only breaks split-host installs"
-  );
+  for v in ["GITLAB_URI", "GL_HOST", "GITLAB_API_HOST"] {
+    assert!(removed.contains(&v), "{v} must not outrank the pin: {removed:?}");
+  }
+
+  // And the bound that keeps this from becoming round 10 again: with no
+  // pin there is no replacement, so nothing is taken away.
+  let ssh = forge::parse_remote_url("git@gitlab.example.com:g/p.git").unwrap();
+  let kept = gwm::gitlab::glab_env_remove(&ssh);
+  assert!(gwm::gitlab::glab_env(&ssh).is_empty(), "precondition: not pinned");
+  for v in ["GITLAB_URI", "GL_HOST", "GITLAB_API_HOST"] {
+    assert!(!kept.contains(&v), "{v} is the user's only signal here: {kept:?}");
+  }
 }
 
 #[test]
@@ -655,7 +664,10 @@ fn a_known_ssh_alias_is_authoritative_not_a_guess() {
   assert_eq!(gl.trust, forge::OriginTrust::FromUrl);
   assert_eq!(
     gwm::gitlab::glab_env(&gl),
-    vec![("GITLAB_HOST".to_string(), "https://gitlab.com".to_string())]
+    vec![
+      ("GITLAB_HOST".to_string(), "https://gitlab.com".to_string()),
+      ("API_PROTOCOL".to_string(), "https".to_string()),
+    ]
   );
 
   let gh = forge::parse_remote_url("ssh://git@ssh.github.com:443/owner/repo.git").unwrap();
@@ -765,7 +777,10 @@ fn an_authoritative_origin_is_pinned_on_both_backends() {
   );
   assert_eq!(
     gwm::gitlab::glab_env(&web),
-    vec![("GITLAB_HOST".to_string(), "https://ghe.acme.com".to_string())]
+    vec![
+      ("GITLAB_HOST".to_string(), "https://ghe.acme.com".to_string()),
+      ("API_PROTOCOL".to_string(), "https".to_string()),
+    ]
   );
 }
 
