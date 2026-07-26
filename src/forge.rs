@@ -374,6 +374,20 @@ fn split_host_and_path(url: &str) -> Option<(&str, &str)> {
   if let Some((_scheme, rest)) = url.split_once("://") {
     return rest.split_once('/');
   }
+  // `C:\repo` and `C:/repo` have the shape of scp syntax, and parsing
+  // them as one produced host `c` with a bogus path — so a local Windows
+  // checkout aimed network calls at an invented host (Codex review
+  // #458). A drive letter is exactly one ASCII letter, no `user@`, and a
+  // separator right after the colon; a real one-label host like
+  // `git@localhost:team/proj` matches none of that.
+  if !url.contains('@') {
+    let mut chars = url.chars();
+    if let (Some(first), Some(':'), Some(sep)) = (chars.next(), chars.next(), chars.next()) {
+      if first.is_ascii_alphabetic() && (sep == '\\' || sep == '/') {
+        return None;
+      }
+    }
+  }
   // scp-like `[user@]host:path`. The `:` separates host from path, so it
   // must not be confused with a `:port` (which scp syntax cannot express)
   // — nor with the colons inside a bracketed IPv6 literal, which a plain

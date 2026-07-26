@@ -706,3 +706,26 @@ fn a_known_alias_keeps_its_explicit_repo_selector() {
 
   assert_eq!(f.repo_selector(), "group/proj");
 }
+
+#[test]
+fn a_windows_drive_path_is_not_an_scp_remote() {
+  // `C:\repo` has the shape of scp syntax, so it parsed as host `c` with
+  // a bogus path and network calls were aimed at an invented host
+  // (Codex review #458). A local path must be refused, not guessed at.
+  for url in ["C:\\repo", "C:/repo", "d:/work/thing"] {
+    assert!(
+      forge::parse_remote_url(url).is_err(),
+      "{url} is a local path, not a remote"
+    );
+  }
+}
+
+#[test]
+fn a_single_label_host_is_still_a_valid_scp_remote() {
+  // The negative control: the drive-letter rule must not eat a real
+  // one-label host, which is what a LAN or tunnelled remote looks like.
+  let r = forge::parse_remote_url("git@localhost:team/proj.git").unwrap();
+
+  assert_eq!(r.host, "localhost");
+  assert_eq!(r.path, "team/proj");
+}
