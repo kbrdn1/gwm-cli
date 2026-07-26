@@ -56,10 +56,15 @@ const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
 /// stranger's merge request. Stamping the origin lets [`read_link`]
 /// recognise a number that came from somewhere else and ignore it.
 const LINK_ORIGIN_CONFIG_KEY: &str = "gwm-link-origin";
-/// The backend half of the same guard, and repo-level rather than
-/// per-branch because the backend is a property of the repo. See
-/// [`reconcile_link_forge`].
-const LINK_FORGE_CONFIG_KEY: &str = "gwm.link-forge";
+/// The backend half of the same guard. Per branch, like every other key
+/// here: `.gwm.toml` is a versioned file, so two worktrees of one repo
+/// legitimately resolve different backends, and a repo-level record made
+/// each of them wipe the other's links. See [`reconcile_link_forge`].
+const LINK_FORGE_CONFIG_KEY: &str = "gwm-link-forge";
+/// What an absent [`LINK_FORGE_CONFIG_KEY`] means. Not "whatever is
+/// resolving now" — pre-#419 gwm rejected every origin that was not
+/// `github.com`, so nothing else can have written those numbers.
+const LINK_FORGE_BEFORE_THE_KEY: &str = "github";
 const ISSUE_TITLE_CONFIG_KEY: &str = "gwm-issue-title";
 const PR_TITLE_CONFIG_KEY: &str = "gwm-pr-title";
 const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
@@ -424,10 +429,23 @@ fn drop_branch_links(repo: &Repository, branch: &str) -> Result<()> {
 /// succeeded.** Advancing it after a failed removal re-blesses the old
 /// numbers *permanently*: the mismatch never fires again and the other
 /// backend reads them as its own. Same rule [`stamp_link_origin`]
-/// states for the origin stamp. Today the removals and the marker write
-/// share one config lock, so they fail together anyway — the guard is
-/// what makes that a property of the code rather than a coincidence,
-/// and the reachable version is a failure part-way through the sweep.
+/// states for the origin stamp. The removals and the marker write share
+/// one config lock, so they fail together anyway — the guard is what
+/// makes that a property of the code rather than a coincidence.
+///
+/// **Scope — one branch, the one at HEAD.** The marker started
+/// repo-level, on the reasoning that a backend is a property of a repo.
+/// It is not: `.gwm.toml` is versioned, so two worktrees of one repo
+/// legitimately carry different `forge` values, and the purge swept
+/// *every* local branch — running gwm in each in turn wiped the other's
+/// links, both ways, forever (Codex review #458). Repo-wide data loss
+/// out of a per-worktree setting. Per-branch is also the scope every
+/// other key here already uses.
+///
+/// The cost of that scoping, named: `gwm open --worktree <other>`
+/// reconciles the branch at HEAD rather than the target's, so the
+/// target keeps a stale number for that one command. Same class as the
+/// `worktree::list` gap below — a stale read, never a wrong write.
 ///
 /// **Ordering — every link read or write happens *after* a reconcile,
 /// never before.** Read too early and the stale number is served one
@@ -457,27 +475,26 @@ fn drop_branch_links(repo: &Repository, branch: &str) -> Result<()> {
 /// into an error.
 pub(crate) fn reconcile_link_forge(repo: &Repository, kind: crate::forge::ForgeKind) {
   let now = kind.as_str();
-  let Ok(cfg) = repo.config() else { return };
-  match cfg.get_string(LINK_FORGE_CONFIG_KEY) {
-    Ok(stored) if stored == now => return,
-    Ok(_) => {
-      let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) else {
-        return;
-      };
-      for name in branches
-        .filter_map(|b| b.ok())
-        .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
-      {
-        if drop_branch_links(repo, &name).is_err() || remove_branch_key(repo, &name, LINK_ORIGIN_CONFIG_KEY).is_err() {
-          return;
-        }
-      }
-    }
-    Err(_) => {}
+  let Ok(head) = repo.head() else { return };
+  let Some(branch) = pinnable_branch(head.shorthand().ok()).map(str::to_string) else {
+    return;
+  };
+  // An absent record is not "adopt whatever is resolving now": pre-#419
+  // gwm rejected every origin that was not `github.com`, so any number
+  // already on the branch is a GitHub number. Reading absent as
+  // adoption re-blessed all of them as GitLab iids on the first resolve
+  // after an upgrade (Codex review #458).
+  let stored = read_branch_string(repo, &branch, LINK_FORGE_CONFIG_KEY)
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| LINK_FORGE_BEFORE_THE_KEY.to_string());
+  if stored == now {
+    return;
   }
-  if let Ok(mut cfg) = repo.config() {
-    let _ = cfg.set_str(LINK_FORGE_CONFIG_KEY, now);
+  if drop_branch_links(repo, &branch).is_err() || remove_branch_key(repo, &branch, LINK_ORIGIN_CONFIG_KEY).is_err() {
+    return;
   }
+  let _ = write_branch_string(repo, &branch, LINK_FORGE_CONFIG_KEY, now);
 }
 
 /// `true` when persisted numbers on this branch were written against a
@@ -1825,11 +1842,18 @@ impl Forge for GitHubForge {
   /// working directory — and `gh api repos/<slug>/…` could not defer
   /// anyway, the slug being part of the request path.
   fn repo_selector(&self) -> &str {
-    // Guessed origin + a repo to stand in: hand `gh` nothing and let it
-    // read that repo's own remote, for both the host and the slug.
-    // Passing a slug with no pinned host would resolve it against gh's
-    // default instance instead.
-    if self.origin.trust != forge::OriginTrust::FromUrl && self.workdir.is_some() {
+    // The slug and the host pin move together, or the slug resolves
+    // against the wrong instance. Two ways to have no pin: a guessed
+    // origin (round 18), and — since round 27 — an origin `gh` cannot
+    // express, a non-default port or plain http. The second was missed,
+    // so `--repo owner/repo` went out with no `$GH_HOST` and `gh`
+    // resolved it against github.com or an ambient one: a same-named
+    // repo on another tenant, read and pruned (Codex review #458).
+    //
+    // `github.com` is the exception that needs no pin, being gh's own
+    // default instance.
+    let pinned = !gh_env(&self.origin).is_empty() || self.origin.host.eq_ignore_ascii_case("github.com");
+    if !pinned && self.workdir.is_some() {
       return "";
     }
     &self.origin.path

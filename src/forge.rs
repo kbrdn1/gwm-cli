@@ -432,26 +432,33 @@ fn trim_git_suffix(s: &str) -> &str {
 /// guess. This function keeps returning one because callers that
 /// already know the host is legitimate still want a default.
 pub fn detect_kind(host: &str) -> ForgeKind {
+  let lower = host.to_ascii_lowercase();
+  if lower.starts_with("gitlab.") || lower.contains(".gitlab.") {
+    return ForgeKind::GitLab;
+  }
   known_kind(host).unwrap_or(ForgeKind::GitHub)
 }
 
 /// The forge a host **states**, or `None` when the URL does not say.
 ///
-/// The known set is deliberately the public one plus the conventions
-/// each CLI already recognises: `github.com` and the `ghe.com` tenancy
-/// domain, `gitlab.com` and the `gitlab.*` label. A self-hosted
-/// instance on any other domain says nothing about which forge it runs,
-/// and guessing there is what let an arbitrary origin receive an
-/// authenticated call (Codex review #458).
+/// The known set is **only the vendors' own domains**: `github.com`,
+/// the `ghe.com` tenancy domain, `gitlab.com`. Nothing else states
+/// anything, and that includes the `gitlab.*` label — an attacker picks
+/// their own hostname, so `gitlab.evil.example` would have walked
+/// straight through this and collected a `$GITLAB_TOKEN` (Codex review
+/// #458, the second hole in the same gate).
+///
+/// [`detect_kind`] keeps the label convention, because a *default* for
+/// a host already known to be legitimate is a different question from
+/// an *authorisation* for one that is not.
 pub fn known_kind(host: &str) -> Option<ForgeKind> {
   let host = host.to_ascii_lowercase();
-  if host == "gitlab.com" || host.starts_with("gitlab.") || host.contains(".gitlab.") {
-    return Some(ForgeKind::GitLab);
+  match host.as_str() {
+    "gitlab.com" | "www.gitlab.com" => Some(ForgeKind::GitLab),
+    "github.com" | "www.github.com" | "ghe.com" => Some(ForgeKind::GitHub),
+    h if h.ends_with(".ghe.com") => Some(ForgeKind::GitHub),
+    _ => None,
   }
-  if host == "github.com" || host == "ghe.com" || host.ends_with(".ghe.com") {
-    return Some(ForgeKind::GitHub);
-  }
-  None
 }
 
 // ---- the trait -----------------------------------------------------------

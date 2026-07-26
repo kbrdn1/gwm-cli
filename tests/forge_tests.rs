@@ -1231,16 +1231,17 @@ fn an_unrecognised_host_is_not_assumed_to_be_github() {
 #[test]
 fn the_known_hosts_still_need_no_configuration() {
   // The bound on the gate: it must not turn `gwm` into a
-  // configure-before-use tool for the hosts that are recognisable.
-  // `gitlab.acme.internal` is the self-hosted convention `detect_kind`
-  // already reads, and it keeps working with no config key.
+  // configure-before-use tool for the hosts that genuinely state which
+  // forge they run. That set is the vendors' own domains and nothing
+  // else — a `gitlab.*` label is chosen by whoever owns the domain, so
+  // it says nothing (see `a_hostname_label_is_not_a_statement_about_the_forge`).
   let (_dir, repo) = init_repo();
   for (url, want) in [
     ("https://github.com/o/r.git", ForgeKind::GitHub),
     ("git@github.com:o/r.git", ForgeKind::GitHub),
     ("https://acme.ghe.com/o/r.git", ForgeKind::GitHub),
     ("https://gitlab.com/g/p.git", ForgeKind::GitLab),
-    ("https://gitlab.acme.internal/g/p.git", ForgeKind::GitLab),
+    ("git@gitlab.com:g/p.git", ForgeKind::GitLab),
   ] {
     repo.remote_delete("origin").ok();
     repo.remote("origin", url).unwrap();
@@ -1248,4 +1249,131 @@ fn the_known_hosts_still_need_no_configuration() {
       forge::resolve(&repo, &Config::default()).unwrap_or_else(|e| panic!("{url} must resolve without config: {e}"));
     assert_eq!(f.kind(), want, "{url}");
   }
+}
+
+#[test]
+fn a_flip_on_one_branch_leaves_the_other_branches_alone() {
+  // The marker started repo-level and the purge swept every local
+  // branch. `.gwm.toml` is a versioned file, so two worktrees of the
+  // same repo legitimately carry different `forge` values — running gwm
+  // in each in turn then wiped every branch's links, both ways, forever
+  // (Codex review #458). Repo-wide data loss from a per-worktree
+  // setting.
+  //
+  // Per-branch marker, and only the branch at HEAD is reconciled: that
+  // is the branch whose links are about to be read or written.
+  let (_dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/g/p.git").unwrap();
+  let head = repo.head().unwrap().shorthand().unwrap().to_string();
+  let commit = repo.head().unwrap().peel_to_commit().unwrap();
+  repo.branch("other", &commit, false).unwrap();
+
+  gwm::github::link_issue(&repo, &head, 42).unwrap();
+  gwm::github::link_issue(&repo, "other", 7).unwrap();
+  forge::resolve(&repo, &Config::default()).unwrap();
+
+  let flipped = Config {
+    forge: Some(ForgeKind::GitHub),
+    ..Default::default()
+  };
+  forge::resolve(&repo, &flipped).unwrap();
+
+  assert_eq!(
+    gwm::github::read_link(&repo, &head).unwrap().issue,
+    None,
+    "the branch at HEAD is the one being flipped"
+  );
+  assert_eq!(
+    gwm::github::read_link(&repo, "other").unwrap().issue,
+    Some(7),
+    "another worktree's branch is not this branch's business"
+  );
+}
+
+#[test]
+fn links_written_before_the_marker_existed_are_github_links() {
+  // An absent marker was read as "adopt whatever backend is resolving
+  // now". On the first GitLab resolve after an upgrade that silently
+  // re-blessed every number written by pre-#419 gwm — which only ever
+  // spoke to github.com — as a GitLab iid (Codex review #458).
+  //
+  // Absent is not unknown: it means GitHub, because nothing else could
+  // have written it.
+  let (_dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/g/p.git").unwrap();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  gwm::github::link_issue(&repo, &branch, 42).unwrap();
+  // Clear the marker the writer stamps, leaving the pre-#419 shape:
+  // links present, no record of which backend wrote them.
+  repo
+    .config()
+    .unwrap()
+    .remove(&format!("branch.{branch}.gwm-link-forge"))
+    .ok();
+
+  forge::resolve(&repo, &Config::default()).unwrap();
+
+  assert_eq!(
+    gwm::github::read_link(&repo, &branch).unwrap().issue,
+    None,
+    "a GitHub issue number is not a GitLab iid"
+  );
+}
+
+#[test]
+fn a_hostname_label_is_not_a_statement_about_the_forge() {
+  // The gate added last round accepted the `gitlab.*` label as proof.
+  // An attacker picks their own hostname, so `gitlab.evil.example`
+  // walked straight through it and got `$GITLAB_TOKEN` (Codex review
+  // #458). Only the vendors' own domains state anything.
+  let (_dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.evil.example/g/p.git").unwrap();
+
+  assert!(forge::resolve(&repo, &Config::default()).is_err());
+  assert_eq!(forge::known_kind("gitlab.acme.internal"), None);
+  assert_eq!(forge::known_kind("gitlab.com"), Some(ForgeKind::GitLab));
+  assert_eq!(forge::known_kind("github.com"), Some(ForgeKind::GitHub));
+  assert_eq!(forge::known_kind("acme.ghe.com"), Some(ForgeKind::GitHub));
+
+  // The convention still drives the *default* for callers that already
+  // know the host is legitimate — it just cannot authorise a call.
+  assert_eq!(forge::detect_kind("gitlab.acme.internal"), ForgeKind::GitLab);
+}
+
+#[test]
+fn an_unpinnable_github_origin_stops_passing_a_slug_too() {
+  // The pin and the selector have to move together, which is the round
+  // 19/22 lesson. Round 27 made `gh_env` bail for an origin gh cannot
+  // express — a non-default port, or plain http — and left
+  // `repo_selector` handing over `owner/repo` anyway. `gh` then
+  // resolved that slug against github.com, or against an ambient
+  // `$GH_HOST`: a same-named repo on another tenant, read and pruned
+  // (Codex review #458).
+  let dir = tempfile::tempdir().unwrap();
+  let named = Config {
+    forge: Some(ForgeKind::GitHub),
+    ..Default::default()
+  };
+  let _ = &named;
+  for url in [
+    "https://ghe.acme.com:8443/team/proj.git",
+    "http://ghe.acme.com/team/proj.git",
+  ] {
+    let f = forge::for_kind_in(
+      ForgeKind::GitHub,
+      forge::parse_remote_url(url).unwrap(),
+      Some(dir.path().to_path_buf()),
+    );
+    assert!(gwm::github::gh_env(&forge::parse_remote_url(url).unwrap()).is_empty());
+    assert_eq!(f.repo_selector(), "", "{url} pins no host, so it passes no slug");
+  }
+
+  // github.com needs no pin — it is gh's own default instance — so the
+  // slug stays.
+  let f = forge::for_kind_in(
+    ForgeKind::GitHub,
+    forge::parse_remote_url("git@github.com:team/proj.git").unwrap(),
+    None,
+  );
+  assert_eq!(f.repo_selector(), "team/proj");
 }
