@@ -729,3 +729,39 @@ fn a_single_label_host_is_still_a_valid_scp_remote() {
   assert_eq!(r.host, "localhost");
   assert_eq!(r.path, "team/proj");
 }
+
+// --- the two backends pin differently, on purpose (Codex review #458) -----
+
+#[test]
+fn the_backends_disagree_on_pinning_a_guessed_host_and_that_is_correct() {
+  // Round 16 proposed making GitHub behave like GitLab here: leave a
+  // guessed origin unpinned and hand the CLI an empty selector so it
+  // resolves the project from the repo it is spawned in. It does not
+  // port, and the asymmetry is pinned here so the next round does not
+  // re-propose it.
+  //
+  // `glab api` accepts `projects/:fullpath`, a placeholder it fills from
+  // the working directory. `gh api` has no counterpart and this backend
+  // bakes the slug into the path (`repos/{slug}/milestones`), so an empty
+  // selector would produce `repos//milestones`. `--repo owner/repo`
+  // carries no hostname either — pinning the host is the only lever gwm
+  // has on the GitHub side, which is what rounds 4, 5 and 7 concluded
+  // after an ambient `$GH_HOST` was shown to retarget label creates and
+  // milestone deletes at another tenant.
+  let dir = tempfile::tempdir().unwrap();
+  let ssh = forge::parse_remote_url("git@ghe-ssh.acme.com:team/proj.git").unwrap();
+  assert_eq!(ssh.trust, forge::OriginTrust::Guessed);
+
+  // GitLab: nothing pinned, nothing selected — the CLI resolves it.
+  assert!(gwm::gitlab::glab_env(&ssh).is_empty());
+  let gl = forge::for_kind_in(ForgeKind::GitLab, ssh.clone(), Some(dir.path().to_path_buf()));
+  assert_eq!(gl.repo_selector(), "");
+
+  // GitHub: host pinned and slug passed, because there is no third option.
+  assert_eq!(
+    gwm::github::gh_env(&ssh),
+    vec![("GH_HOST".to_string(), "ghe-ssh.acme.com".to_string())]
+  );
+  let gh = forge::for_kind_in(ForgeKind::GitHub, ssh, Some(dir.path().to_path_buf()));
+  assert_eq!(gh.repo_selector(), "team/proj");
+}
