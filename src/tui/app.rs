@@ -1033,12 +1033,7 @@ impl App {
   pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
     use crate::trust::{self, TrustOutcome};
 
-    let origin_url = self
-      .repo
-      .find_remote("origin")
-      .ok()
-      .and_then(|r| r.url().ok().map(String::from));
-    let origin = trust::resolve_origin_key(origin_url.as_deref(), &self.workdir);
+    let origin = trust::origin_key_for_repo(&self.repo, &self.workdir);
 
     match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
       TrustOutcome::Proceed => Ok(None),
@@ -4626,7 +4621,7 @@ impl App {
   /// `App`'s `selected()` + `repo.head()` fallback.
   pub fn refresh_link(&mut self) {
     let branch = self.selected_branch_name();
-    self.github.refresh_link(&self.repo, branch.as_deref());
+    self.github.refresh_link(&self.repo, branch.as_deref(), &self.config);
     // Navigation invariant (issue #255): the cache clear above must be paired
     // with a spine generation-bump so any in-flight `gh` worker for the
     // previous worktree's link is dropped instead of stamping the now-active
@@ -4821,8 +4816,8 @@ impl App {
     // pane/table (Codex review #284). `apply_detected_pr` only fills an empty
     // slot, hence the clear-then-apply to replace a stale detection.
     if self.github.link.pr_source != github::LinkSource::Explicit {
-      if let (Some(slug), Some(branch)) = (slug.as_deref(), self.selected_branch_name()) {
-        if let Ok(detected) = github::find_pr_for_branch(slug, &branch) {
+      if let (Some(forge), Some(branch)) = (self.github.forge.clone(), self.selected_branch_name()) {
+        if let Ok(detected) = forge.find_pr_for_branch(&branch) {
           self.github.clear_detected_pr();
           self.github.apply_detected_pr(detected);
           // Persist the detection (issue #283) so the no-fetch table read
@@ -4990,25 +4985,20 @@ impl App {
   /// coalescing / late-drop contract lives on the [`TaskRunner`] spine. A
   /// `send` failure (the `App`/receiver was dropped) is ignored: there is
   /// no longer anyone to apply the result.
-  fn spawn_github_fetch(&self, key: FetchKey, slug: String, generation: u64) {
+  fn spawn_github_fetch(&self, key: FetchKey, _slug: String, generation: u64) {
     let tx = self.task_tx.clone();
-    // Resolve the `gh` program on THIS (main) thread and hand it to the
-    // worker, so the worker never reads `GWM_GH` / the process environment
-    // concurrently with env-mutating code elsewhere (the `env_lock`
-    // unsoundness the worker would otherwise reintroduce — issue #217).
-    let program = github::gh_program();
+    // Clone the resolved forge on THIS (main) thread and hand it to the
+    // worker. The backend captured `$GWM_GH` / `$GWM_GLAB` when it was
+    // built (also on the main thread), so the worker never reads the
+    // process environment concurrently with env-mutating code elsewhere —
+    // the `env_lock` unsoundness it would otherwise reintroduce (#217).
+    let Some(forge) = self.github.forge.clone() else {
+      return;
+    };
     std::thread::spawn(move || {
       let msg = match key {
-        FetchKey::Issue(n) => TaskMsg::GithubIssue(
-          generation,
-          n,
-          github::fetch_issue_with(&program, &slug, n).map_err(|e| e.to_string()),
-        ),
-        FetchKey::Pr(n) => TaskMsg::GithubPr(
-          generation,
-          n,
-          github::fetch_pr_with(&program, &slug, n).map_err(|e| e.to_string()),
-        ),
+        FetchKey::Issue(n) => TaskMsg::GithubIssue(generation, n, forge.fetch_issue(n).map_err(|e| e.to_string())),
+        FetchKey::Pr(n) => TaskMsg::GithubPr(generation, n, forge.fetch_pr(n).map_err(|e| e.to_string())),
       };
       let _ = tx.send(msg);
     });
@@ -5116,7 +5106,21 @@ impl App {
   pub fn enter_open_menu(&mut self) {
     // Re-resolve link + slug in case the user just linked something
     // (`gwm link …` from a parallel terminal) or moved the origin remote.
-    self.refresh_link();
+    //
+    // Deliberately the non-invalidating variant: `refresh_link` clears
+    // the fetch caches, and those hold the server-reported `web_url`
+    // this menu is about to prefer over a locally built one. Clearing
+    // here meant that URL was never once used (Codex review #458). Safe
+    // because the caches are keyed by number, so a link that really
+    // changed simply misses.
+    let branch = self.selected_branch_name();
+    if self.github.reread_link(&self.repo, branch.as_deref(), &self.config) {
+      // The identity moved, so `reread_link` dropped the caches — the
+      // navigation invariant says the spine generation moves with them,
+      // or an in-flight worker for the previous instance repopulates
+      // what was just cleared (issue #255, Codex review #458).
+      self.tasks.invalidate_matching(TaskKind::is_github);
+    }
     self.open_menu_selected = LinkTarget::Issue;
     self.view = View::OpenMenu;
   }
@@ -5132,30 +5136,73 @@ impl App {
     };
   }
 
+  /// The issue's URL as the forge itself reported it, when a fetch has
+  /// already landed (Codex review #458).
+  ///
+  /// For a guessed (SSH) origin the locally constructed URL is only
+  /// `https://<ssh-host>/…`, which is wrong whenever the SSH hostname is
+  /// not the web hostname or the web UI runs on HTTP / a non-standard
+  /// port. The cached status carries the server's own `web_url`, so it is
+  /// preferred whenever it is there — and unlike the CLI path this costs
+  /// no request, which matters on the render thread.
+  fn cached_issue_url(&self, number: u64) -> Option<String> {
+    match self.github.issue_fetch_state(number) {
+      GitHubFetchState::Loaded(s) if !s.url.is_empty() => Some(s.url.clone()),
+      _ => None,
+    }
+  }
+
+  /// PR-side counterpart to [`Self::cached_issue_url`].
+  fn cached_pr_url(&self, number: u64) -> Option<String> {
+    match self.github.pr_fetch_state(number) {
+      GitHubFetchState::Loaded(s) if !s.url.is_empty() => Some(s.url.clone()),
+      _ => None,
+    }
+  }
+
   /// Pick a target from the open menu. Returns the URL to open, or `None`
   /// when the link is missing (the status bar carries the explanation).
   pub fn open_menu_pick(&mut self, target: LinkTarget) -> Option<String> {
     self.view = View::List;
-    let Some(slug) = self.github.link_slug.clone() else {
-      self.status = "no GitHub remote — cannot build URL".into();
+    let Some(forge) = self.github.forge.clone() else {
+      self.status = "no forge remote — cannot build URL".into();
       return None;
     };
+    // Whether the URL was built locally rather than read off the server.
+    // On a guessed SSH origin the local build uses the SSH hostname, and
+    // the cache is empty until a fetch lands — which on an unreachable
+    // instance is never (Codex review #458). Opening a best guess still
+    // beats a dead menu entry; saying so beats a silent wrong tab.
+    let mut inferred = false;
     let url = match target {
       LinkTarget::Issue => match self.github.link.issue {
-        Some(n) => github::issue_url(&slug, n),
+        Some(n) => self.cached_issue_url(n).unwrap_or_else(|| {
+          inferred = true;
+          forge.issue_url(n)
+        }),
         None => {
           self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
-        Some(n) => github::pr_url(&slug, n),
+        Some(n) => self.cached_pr_url(n).unwrap_or_else(|| {
+          inferred = true;
+          forge.pr_url(n)
+        }),
         None => {
-          self.status = format!("no PR linked — press {} to link one", self.link_prompt_chord());
+          self.status = format!(
+            "no {} linked — press {} to link one",
+            forge.pr_noun(),
+            self.link_prompt_chord()
+          );
           return None;
         }
       },
     };
+    if inferred && !forge.origin_is_authoritative() {
+      self.status = format!("opening a guessed URL — the SSH origin names no web host: {url}");
+    }
     Some(url)
   }
 

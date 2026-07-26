@@ -177,7 +177,7 @@ pub fn agent_detail_rows(agents: Option<&WorktreeAgents>, pinned: &[String], now
 /// Pure — `now` anchors the elapsed time of in-flight runs.
 pub fn ci_check_rows(checks: &[crate::github::PrCheck], now: SystemTime) -> Vec<DetailRow> {
   use crate::github::CheckOutcome;
-  use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON};
+  use crate::tui::ui::{CI_FAILING_ICON, CI_PASSING_ICON, CI_RUNNING_ICON, CI_UNKNOWN_ICON};
   checks
     .iter()
     .map(|c| {
@@ -185,6 +185,10 @@ pub fn ci_check_rows(checks: &[crate::github::PrCheck], now: SystemTime) -> Vec<
         CheckOutcome::Passing => (CI_PASSING_ICON, "passing", DetailRole::Success),
         CheckOutcome::Failing => (CI_FAILING_ICON, "failing", DetailRole::Failure),
         CheckOutcome::Running => (CI_RUNNING_ICON, "running", DetailRole::Running),
+        // Named honestly rather than folded into "running" (issue #419):
+        // the row is telling the user gwm could not classify the state,
+        // which is different from knowing it is in flight.
+        CheckOutcome::Unknown => (CI_UNKNOWN_ICON, "unknown", DetailRole::Muted),
       };
       DetailRow {
         label: format!("{icon} {word}"),

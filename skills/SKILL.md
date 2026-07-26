@@ -1,6 +1,6 @@
 ---
 name: gwm
-description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
+description: Manage git worktrees across any repository with the `gwm` Rust binary (CLI + ratatui TUI). Use when the user asks to create / list / remove / bootstrap / switch / link worktrees, run a command across worktrees (`gwm exec`) or reclaim build artifacts (`gwm clean`), materialise a PR into a worktree (`gwm review`), drive a multi-repo workspace (`--workspace`), run the JSON daemon / statusline (`gwm daemon`, `gwm statusline`), list or pin AI-agent sessions per worktree (`gwm agents`, Claude Code / Codex / opencode / Mistral Vibe detection), seed config from a preset (`gwm init --preset`), diagnose with `gwm doctor`, drive tmux/zellij, or wire `gcd` via `gwm shell-init`. Also covers multi-forge (#419): GitHub via `gh` **or** GitLab via `glab`, the `forge` / `[forge_hosts]` keys, and `gwm trust add`. Triggers on `gwm`, `gwq`, `git worktree`, `.gwm.toml`, `forge`, `forge_hosts`, `glab`, `gwm trust add`, GitLab MR, `gwm create`, `gwm list`, `gwm exec`, `gwm clean`, `gwm review`, `gwm daemon`, `gwm statusline`, `gwm agents`, `gwm bootstrap`, `gwm doctor`, `gwm switch`, `gwm tmux`, `gwm zellij`, `gwm link`, `gwm status`, `gwm shell-init`, `gcd`, `feat/#`, `fix/#`, GitHub issue/PR linking on a worktree.
 allowed-tools: Bash, Read, Edit, Write
 ---
 
@@ -8,11 +8,15 @@ allowed-tools: Bash, Read, Edit, Write
 
 Single-binary Rust tool that manages git worktrees with `libgit2`, a ratatui TUI, a declarative per-repo bootstrap (`.gwm.toml`), GitHub issue/PR linking, multiplexer hand-off (tmux / zellij), and a doctor command. Replaces project-specific bash wrappers with one portable binary that works in any git repo.
 
-Source: https://github.com/kbrdn1/gwm-cli — latest stable: `1.1.1` (machine contracts frozen since 1.0.0 — MSRV 1.86). In development (#408): **agent session detection** — per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts (no process scanning), surfaced as `gwm agents [attach|detach]`, a conditional AGENT column (TUI + `gwm list`), an `a` overlay with attach-by-id, a pinned-only Agents sidebar pane, multi-pins in branch config (`gwm-agent-pin`, multi-valued), an additive experimental `agents` JSON field and a statusline segment. 1.0.0 shipped: `gwm exec` / `gwm clean` (fleet command fan-out + build-artifact reclaim, #313), `gwm review <PR#>` (materialise a PR into a worktree, #308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` stack templates (#37), multi-repo `--workspace` mode (#36), embedded PTY overlays for lazygit / shell (#35), a redesigned & fully-rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree file-explorer pane and a current-PR CI indicator (#300 / #299).
+Source: https://github.com/kbrdn1/gwm-cli — latest stable: **`1.5.0`** (machine contracts frozen since 1.0.0 — MSRV 1.86).
+
+**Multi-forge, shipped in 1.5.0 (#419).** Issue / PR lookups go through a `Forge` trait with two backends — GitHub via `gh`, GitLab via `glab`. `forge = "github" | "gitlab"` in `.gwm.toml` names the backend; `[forge_hosts]` in the **user-level** config authorises a self-hosted host; `gwm trust add` is the per-repo alternative. Worktrees, bootstrap, branch naming and link storage are forge-neutral — only the network layer knows which forge is in play. See [Forge selection](#forge-selection-github--gitlab).
+
+Shipped since 1.0.0: **multi-forge** in 1.5.0 (#419, above); the **help overlay** (`?`, complete by construction — every `Action` must appear, #453) and a trio of TUI polish items in 1.4.0; **agent session detection** in 1.3.0 (#408) — per-worktree AI-agent sessions (Claude Code, Codex, opencode, Mistral Vibe) read from on-disk artefacts, no process scanning, surfaced as `gwm agents [attach|detach]`, a conditional AGENT column, an `a` overlay, a pinned-only Agents sidebar pane and multi-pins in branch config (`gwm-agent-pin`); plus the **Windows daemon** over a named pipe (#439). 1.0.0 shipped: `gwm exec` / `gwm clean` (#313), `gwm review <PR#>` (#308), the JSON API + `gwm daemon` + `gwm statusline` (#38 / #309), `gwm init --preset` (#37), multi-repo `--workspace` (#36), embedded PTY overlays (#35), a rebindable keymap incl. contextual modal keys + a live Settings panel with a Keys tab (#290 / #219 / #294), a Working Tree pane and a current-PR CI indicator (#300 / #299).
 
 ## When to use this skill
 
-- User runs or asks about any `gwm <subcommand>`: `init` (incl. `--preset`), `list` (incl. `--format json`), `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`, `exec`, `clean`, `review`, `daemon`, `statusline`, `agents`, `new`, `pr`, `config`, `history`, `undo`, `trust`, `labels`, `milestones`, `hooks`, `commit-prefix`, `aliases`, `theme`, `tui keys`.
+- User runs or asks about any `gwm <subcommand>`: `init` (incl. `--preset`), `list` (incl. `--format json`), `create`, `remove`, `path` / `cd`, `bootstrap`, `sync`, `prune`, `doctor`, `types`, `completions`, `shell-init`, `switch` (alias `s`), `tmux`, `zellij`, `link`, `unlink`, `open`, `status`, `exec`, `clean`, `review`, `daemon`, `statusline`, `agents`, `new`, `pr`, `config`, `history`, `undo`, `trust`, `labels`, `milestones`, `hooks`, `commit-prefix`, `aliases`, `theme`, `tui keys`. `trust` takes `add | list | revoke | show`.
 - User wants to **fan a command out across worktrees** (`gwm exec -- <cmd>`) or **reclaim build artifacts** (`gwm clean`).
 - User wants to **materialise a GitHub PR into a worktree** to review/test it (`gwm review <PR#>`, cross-fork, safe-by-default).
 - User wants a **multi-repo workspace** (`gwm --workspace <dir>`), the **JSON API / daemon** (`--format=json`, `gwm daemon`, `gwm statusline` for shell prompts), or **stack presets** (`gwm init --preset laravel|node|rust|go|python-uv|generic`).
@@ -36,7 +40,8 @@ Source: https://github.com/kbrdn1/gwm-cli — latest stable: `1.1.1` (machine co
 command -v gwm           # required — installed by `cargo install --path .` from the gwm-cli repo
 command -v cargo         # required at install time (1.86+ — the crate MSRV)
 command -v git           # required at runtime
-command -v gh            # OPTIONAL — needed for live `gwm status` / TUI GitHub state / `R: review` preset
+command -v gh            # OPTIONAL — the GitHub backend: live `gwm status`, TUI state, `R: review` preset
+command -v glab          # OPTIONAL — the GitLab backend (forge = "gitlab"); $GWM_GLAB overrides it
 command -v tmux          # OPTIONAL — needed by `gwm tmux`
 command -v zellij        # OPTIONAL — needed by `gwm zellij` (≥ 0.40 for `--cwd` on new-tab)
 command -v lazygit       # OPTIONAL — default `[git_tui]` binary backing the TUI `l` key
@@ -62,6 +67,19 @@ No Rust toolchain at hand? `cargo binstall gwm-cli` pulls the prebuilt binary fr
 
 Prebuilt releases (Linux x86_64/aarch64, macOS Intel/Apple Silicon, Windows): https://github.com/kbrdn1/gwm-cli/releases. A Homebrew formula ships under `packaging/homebrew/` and a Nix `flake.nix` is at the repo root.
 
+## Environment variables
+
+| Variable | Effect |
+|:---------|:-------|
+| `GWM_GH` / `GWM_GLAB` | Override the forge CLI binary (path or name). Read once, on the thread that resolves the forge, so the TUI's background fetch never races env mutation. |
+| `GWM_ALLOW_BOOTSTRAP=1` | Same as `--allow-bootstrap`: skip the TOFU prompt. Also satisfies the forge host gate — same ledger, same decision. |
+| `GWM_TRUST_LEDGER` | Path to the trust ledger (default `~/.config/gwm/trust.toml`). |
+| `GWM_NO_GLOBAL_CONFIG=1` | Ignore the user-level `~/.config/gwm/config.toml`; repo-only config. |
+| `GWM_HISTORY_FILE` | Path to the destructive-op journal backing `gwm history` / `gwm undo`. |
+| `GWM_AGENTS_HOME` | Override the home scanned for agent session artefacts (test seam). |
+
+Two **global** flags apply before or after any subcommand: `--allow-bootstrap` (skip the TOFU prompt — for CI and other non-interactive runs) and `--deny-bootstrap` (refuse bootstrap even when the ledger says trusted — for a first look at an unfamiliar repo). `--workspace <DIR>` is global too.
+
 ## Default conventions
 
 | What                | Default                              | Override                       |
@@ -82,11 +100,12 @@ Placeholders in patterns: `{home}`, `{repo}` (repo name), `{repo_path}` (main re
 ```bash
 gwm                          # opens the TUI in the current repo
 gwm --workspace <dir>        # TUI / list / create across every git repo one level under <dir> (#36)
-gwm init [--preset <stack>]  # write .gwm.toml (refuses overwrite); seed from a stack preset (#37)
+gwm init [--preset <stack>] [--show]   # write .gwm.toml (refuses overwrite); --show prints it instead
 gwm init --list-presets      # built-in presets: laravel, node/nuxt, rust, go, python-uv, generic
-gwm types                    # list supported branch types
+gwm types [--gitmoji]        # list supported branch types (--gitmoji adds each type's emoji)
 
 gwm create <type> <issue> <desc>          # create branch + worktree + bootstrap
+#   --skip-hooks on create / review / new / remove / bootstrap skips the [hooks.*] phases
 gwm create feat 123 "user-authentication"
 gwm create feat 123 foo --no-bootstrap    # skip the .gwm.toml stages
 gwm create feat 123 foo --reuse-branch    # attach to an existing local branch instead of erroring
@@ -113,19 +132,21 @@ gwm tmux   <pattern> [-p|--split]         # open matched worktree in new tmux wi
 gwm zellij <pattern> [-p|--split]         # open matched worktree in new zellij tab (or pane)
 
 # --- fan-out & disk hygiene (#313) ---
-gwm exec [<slug>...] -- <cmd>             # run <cmd> in each worktree (sequential); ✓/✗ rollup, non-zero on any fail
+gwm exec [<slug>...] [--jobs N] [--profile P] -- <cmd>   # run <cmd> in each worktree; ✓/✗ rollup, non-zero on any fail
+                                          #   --jobs N runs N in parallel; --profile picks an [exec.profiles.*] entry
                                           #   default = all non-main worktrees; slugs before `--`; cmd verbatim after `--`
-gwm clean [<slug>...] [--yes]             # report (or with --yes reclaim) target/ node_modules/ dist/ build/
+gwm clean [<slug>...] [--yes] [--profile P]   # report (or with --yes reclaim) target/ node_modules/ dist/ build/
+                                          #   --profile picks a [clean.profiles.*] dir set
                                           #   --yes deletes ONLY git-ignored dirs holding no tracked files; never follows symlinks
 
-# --- GitHub (needs `gh`) ---
+# --- forge: GitHub (`gh`) or GitLab (`glab`) ---
 gwm new <type> <desc>                     # create issue from a repo template, then its worktree
 gwm pr [--draft] [--base <b>] [--render]  # render [pr_template] body, then `gh pr create`
 gwm review <PR#> [--name <b>] [--bootstrap]   # materialise a PR into a worktree (cross-fork; safe-by-default) (#308)
 gwm link   issue|pr <N> [--worktree PAT]  # bind a worktree to a GitHub issue or PR
 gwm unlink issue|pr      [--worktree PAT] # remove the explicit link
-gwm open   [issue|pr]    [--worktree PAT] # open the linked URL in $BROWSER
-gwm status [--worktree PAT] [--json]      # show link + live GitHub state (needs `gh`)
+gwm open   [issue|pr] [--print-url] [--worktree PAT]   # open the linked URL in $BROWSER (--print-url just prints it)
+gwm status [--worktree PAT] [--json]      # show link + live forge state (needs `gh` / `glab`)
 gwm labels   list|push [--dry-run] [--prune]      # sync the declarative [[labels]] set to origin
 gwm milestones list|push [--dry-run] [--prune]    # sync the declarative [[milestones]] set to origin
 
@@ -145,11 +166,13 @@ gwm agents detach <pat> [<session-id>]    # unpin one session, or every pin when
 
 # --- config / convention / introspection ---
 gwm config get|set|unset|list|validate|path|edit   # git-config-style editing of .gwm.toml (comment-preserving)
-gwm history [--all]                       # recent destructive ops journal (newest first)
+gwm history [--all] [--limit N]           # recent destructive ops journal (newest first)
 gwm undo [--bootstrap]                    # reverse the last destructive op for this repo
-gwm trust list|show|revoke                # TOFU trust ledger for .gwm.toml bootstrap
+gwm trust add|list|show|revoke            # TOFU trust ledger for .gwm.toml — `add` approves the
+                                          #   current repo without running anything (answers the forge
+                                          #   host gate, which is non-interactive by design)
 gwm aliases                               # resolved CLI aliases (built-in + repo + user)
-gwm commit-prefix [<branch>] [--unicode]  # Gitmoji + Conventional commit prefix for the branch
+gwm commit-prefix [<branch>] [--unicode] [--branch <b>]   # Gitmoji + Conventional prefix for the branch
 gwm hooks install commit-msg [--force]    # opt-in git hook that auto-prepends the commit prefix
 gwm theme list|show [<name>]              # role-based [theme] presets
 gwm tui keys                              # resolved keymap (defaults + [tui.keys[.modal.*]] overrides)
@@ -184,7 +207,39 @@ Invoke-Expression (& gwm shell-init powershell | Out-String)
 
 `gcd` (no arg) launches `gwm switch` (the picker) and `cd`s into the chosen entry.
 
-### GitHub linking (`link` / `unlink` / `open` / `status`)
+### Forge selection (GitHub / GitLab)
+
+Two backends implement the same `Forge` trait: **GitHub** via `gh`, **GitLab** via `glab` (which says *MR* where GitHub says *PR*). Everything else — worktrees, bootstrap, branch naming, the `branch.<n>.gwm-*` link storage — is forge-neutral.
+
+**Which backend.** Inferred from the `origin` host for the vendors' own domains (`github.com`, `ghe.com`, `gitlab.com`). A self-hosted instance lives on an arbitrary domain and cannot be detected from a URL, so name it:
+
+```toml
+# .gwm.toml
+forge = "gitlab"     # or "github"
+```
+
+The key always wins over inference, in both directions.
+
+**Which hosts may be called.** A separate question, with a separate answer — `forge` names the backend, it does not authorise a host. On a host gwm does not recognise, authorisation comes from one of:
+
+```toml
+# ~/.config/gwm/config.toml — YOUR file, never shipped with a repo
+[forge_hosts]
+"gitlab.acme.com" = "gitlab"
+"ghe.acme.com"    = "github"
+```
+
+```bash
+gwm trust add        # …or approve this one repo's .gwm.toml, in the repo, once
+```
+
+Per host (not one blanket key) so a mixed fleet — self-hosted GitLab *and* GitHub Enterprise — is describable in one config. Host matching is case-insensitive, and keyed on the host **without** the port.
+
+Why the split: `gh` and `glab` forward whatever token is in the environment to whatever host they are pointed at, with no scoping of their own. Reading a bare `forge` key as authorisation meant one global setting authorised every host in existence, including one an attacker put in a clone's `origin`. The refusal message prints the exact `[forge_hosts]` key to add.
+
+`GWM_ALLOW_BOOTSTRAP=1` satisfies this gate too — same ledger, same file, same decision.
+
+### Forge linking (`link` / `unlink` / `open` / `status`)
 
 Links live in **per-branch git config**:
 
@@ -194,7 +249,9 @@ Links live in **per-branch git config**:
 
 Local, per-branch, survives worktree moves. Issue numbers are auto-detected from the `<type>/#<N>-<slug>` convention when no explicit override is set; PR numbers are **not** auto-detected and must be linked explicitly.
 
-`gwm status` shells out to `gh issue view` / `gh pr view` to fetch state, title, labels, and the CI rollup. Without `gh` (or outside a GitHub repo), it prints only the local link. `--json` emits a stable schema for scripting.
+`gwm status` shells out to the resolved backend (`gh issue view` / `gh pr view`, or `glab issue view` / `glab mr view`) to fetch state, title, labels, and the CI rollup. GitLab hangs one `head_pipeline` off an MR rather than GitHub's per-check array, so the MR collapses to a single synthetic check. Without the backend CLI on `$PATH`, it prints only the local link. `--json` emits a stable schema for scripting.
+
+The backend a link was written under is recorded per branch; flipping `forge` drops the other backend's numbers rather than resolving issue #42 as merge request !42 on the other forge — a real page, the wrong one.
 
 ### Multiplexer hand-off (`tmux` / `zellij`)
 
@@ -399,6 +456,12 @@ A configured `[review]` / `[git_tui]` binary that is not on `$PATH` surfaces as 
 Drop this at the repo root (or use `gwm init` for the annotated example).
 
 ```toml
+# Which backend drives issue / PR lookups. Omitted ⇒ inferred from the
+# `origin` host (github.com / ghe.com / gitlab.com). On any other host this
+# names the BACKEND but does not authorise the HOST — see `[forge_hosts]` in
+# your user-level config, or run `gwm trust add` in the repo.
+forge = "gitlab"     # "github" | "gitlab"
+
 [worktree]
 base           = "{home}/cc-worktree/{repo}"
 path_pattern   = "{type}-{issue}-{desc}"
@@ -468,6 +531,24 @@ when = "file_exists:package.json && !cmd_exists:bun"
 name = "full local build"
 run  = "./scripts/full-build.sh"
 when = "glob_exists:src/**/*.rs && !env_set:CI"
+
+# --- branch types, commit prefixes, issue/PR templates ----------------------
+# `branch_types` replaces the built-in list wholesale (feat, fix, hotfix, docs,
+# test, refactor, chore, perf, ci, build). `[gitmoji]` maps a type to the emoji
+# `gwm commit-prefix` (and the commit-msg hook) prepends.
+branch_types = ["feat", "fix", "chore", "spike"]
+
+[gitmoji]
+spike = "🧪"
+
+# `[issue_template]` / `[pr_template]` drive `gwm new` and `gwm pr` — the body
+# is rendered from the repo's own .github templates plus these defaults.
+[issue_template]
+labels = ["needs-triage"]
+
+[pr_template]
+base  = "dev"
+draft = true
 
 # --- doctor knobs -----------------------------------------------------------
 # Trunks the orphan-branch check treats as merge destinations.
@@ -687,7 +768,9 @@ src/
 ├── workspace.rs         # multi-repo `--workspace` discovery (#36)
 ├── presets.rs           # `gwm init --preset` stack templates (#37)
 ├── history.rs / trust.rs   # destructive-op journal (undo) · TOFU trust ledger for .gwm.toml
-├── github.rs            # issue / PR link storage in git config + `gh` shell-out, BranchLink
+├── forge.rs             # `Forge` trait + forge-agnostic types, origin parsing, host authorisation (#419)
+├── github.rs            # GitHub backend (`gh`) + the shared link storage in git config, BranchLink
+├── gitlab.rs            # GitLab backend (`glab`) — parsers and argv builders (#419)
 ├── issue_templates.rs / pr_templates.rs / templating.rs   # gwm new / gwm pr
 ├── labels.rs / milestones.rs / gitmoji.rs / aliases.rs    # declarative GitHub sets, commit-prefix, CLI aliases
 ├── launcher.rs / multiplexer.rs   # [git_tui]/[review] launcher pipeline · tmux/zellij hand-off
@@ -711,7 +794,7 @@ src/
                          #   async_task, command_logs, config_panel, pty_overlay — one slice per overlay
 ```
 
-Tests under `tests/` mirror this layout — ~73 integration test files, one (or more) per module: e.g. `bootstrap_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `daemon_tests.rs`/`daemon_integration.rs`, `json_api_tests.rs`, `review_tests.rs`/`review_integration.rs`, `statusline_tests.rs`, `workspace_tests.rs`, `presets_tests.rs`, `exec_tests.rs`, `clean_tests.rs`, `worktree_integration.rs`, plus the `tui_*` state-machine suites and `tests/common/` helpers. **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
+Tests under `tests/` mirror this layout — 85 integration test files, one (or more) per module: e.g. `bootstrap_tests.rs`, `cli_binary.rs`, `config_tests.rs`, `doctor_tests.rs`, `daemon_tests.rs`/`daemon_integration.rs`, `json_api_tests.rs`, `review_tests.rs`/`review_integration.rs`, `statusline_tests.rs`, `workspace_tests.rs`, `presets_tests.rs`, `exec_tests.rs`, `clean_tests.rs`, `worktree_integration.rs`, plus the `tui_*` state-machine suites and `tests/common/` helpers. **TDD bar: any new behaviour ships with a matching test file or new assertions in an existing one** (project rule, enforced in `CLAUDE.md`).
 
 ## Differences vs. the bash + gwq stack
 
@@ -726,7 +809,7 @@ Tests under `tests/` mirror this layout — ~73 integration test files, one (or 
 | GitHub linking              | none                  | issue / PR per-branch git config + `gh` live status      |
 | diagnostics                 | none                  | `gwm doctor` (exit 0/1/2, CI-ready)                      |
 | anti-RDS guard              | hardcoded `grep`      | configurable regex deny-list                             |
-| tests                       | 0                     | large suite across ~73 test files (config / bootstrap / when DSL / doctor / github / daemon + JSON API / review / statusline / workspace / presets / exec / clean / multiplexer / TUI state machines + commit graph / launcher / CLI / homebrew / flake / pre-commit hook) |
+| tests                       | 0                     | large suite across 85 test files (config / bootstrap / when DSL / doctor / github / daemon + JSON API / review / statusline / workspace / presets / exec / clean / multiplexer / TUI state machines + commit graph / launcher / CLI / homebrew / flake / pre-commit hook) |
 | install                     | `chmod +x` per repo   | `cargo install --path .` (or Homebrew / Nix / prebuilts) |
 
 ## Troubleshooting
@@ -747,7 +830,19 @@ Tests under `tests/` mirror this layout — ~73 integration test files, one (or 
 
 **`gwm zellij` errors on `--cwd`** — your zellij is older than 0.40. Upgrade, or fall back to opening the path manually.
 
-**`gwm status` shows only the local link, no live data** — `gh` isn't on `$PATH` (or you're outside a GitHub repo). Install GitHub CLI and `gh auth login`.
+**`gwm status` shows only the local link, no live data** — the backend CLI isn't on `$PATH`. Install `gh` (+ `gh auth login`) for GitHub, `glab` (+ `glab auth login`) for GitLab.
+
+**`origin host '…' is not one gwm recognises`** — a self-hosted forge on a domain gwm cannot read a forge from. gwm refuses rather than guessing, because guessing would send an authenticated call — and whatever token is in your environment — to whatever host the remote names. The message prints the exact key to add:
+
+```toml
+# ~/.config/gwm/config.toml
+[forge_hosts]
+"gitlab.acme.com" = "gitlab"
+```
+
+Or name the backend in the repo's `.gwm.toml` and run `gwm trust add` there.
+
+**`this repo's .gwm.toml points gwm at '…' and the repo is not in the trust ledger`** — the repo names a backend for an unrecognised host, which only counts once you have approved that repo: `gwm trust add`. Editing `.gwm.toml` afterwards changes its hash and revokes the approval, by design. `gwm trust list` shows what you approved.
 
 **`cargo install --path .` fails to build libgit2** — install a C toolchain (`xcode-select --install` on macOS, `build-essential` on Debian/Ubuntu). The `git2` crate uses `vendored-libgit2` so it builds from source.
 
@@ -802,7 +897,8 @@ gwm zellij <pat> [-p]        # zellij tab / pane hand-off
 gwm link   issue|pr <N>      # bind to GitHub issue / PR
 gwm unlink issue|pr          # drop the link
 gwm open   [issue|pr]        # open URL in $BROWSER
-gwm status [--json]          # local link + live gh state
+gwm status [--json]          # local link + live forge state (gh / glab)
+gwm trust add                # approve this repo's .gwm.toml (forge host gate + bootstrap)
 ```
 
 ## Related

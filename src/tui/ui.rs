@@ -5438,6 +5438,10 @@ pub const PR_ICON: &str = "\u{f407}";
 pub const CI_PASSING_ICON: &str = "\u{f42e}";
 pub const CI_FAILING_ICON: &str = "\u{f467}";
 pub const CI_RUNNING_ICON: &str = "\u{f46a}";
+/// A check whose state this build does not recognise (issue #419) — most
+/// likely a GitLab pipeline status added upstream. Rendered distinctly so
+/// it never passes for green, and never for a running check with a clock.
+pub const CI_UNKNOWN_ICON: &str = "\u{f059}";
 
 /// The pane's source chip (issue #283): `auto` for a branch-name inference,
 /// `detected` for a live GitHub match. Explicit / none carry no chip — the

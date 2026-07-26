@@ -5,6 +5,14 @@ mod common;
 use common::init_repo;
 use gwm::config::Config;
 use gwm::doctor::{self, CheckStatus, DoctorCtx, Severity};
+use std::sync::{Mutex, OnceLock};
+
+/// Serialise the env-mutating tests in this binary (only the forge-CLI
+/// override probe today), since `set_var` is process-wide.
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 fn ctx_for<'a>(repo: &'a git2::Repository, workdir: &'a std::path::Path, config: &'a Config) -> DoctorCtx<'a> {
   DoctorCtx {
@@ -1040,6 +1048,181 @@ fn doctor_fails_on_disk_modal_error_even_when_context_defaulted() {
   assert!(
     c.detail.contains("single keystroke"),
     "detail must explain the multi-stroke modal chord rejection, got: {}",
+    c.detail
+  );
+}
+
+// Check #4 — the forge CLI is probed only when `forge` is set explicitly
+// (issue #419).
+
+#[test]
+fn forge_cli_is_not_probed_when_the_key_is_unset() {
+  // The non-regression half, and the one that runs identically everywhere:
+  // a config that never opts into a forge must not start warning about a
+  // missing `gh` / `glab` for users who don't touch issue/PR linking.
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+
+  assert!(
+    !missing.contains("glab") && !missing.contains("gh"),
+    "no forge CLI should be probed without an explicit `forge` key, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn an_explicit_gitlab_forge_probes_glab() {
+  let (dir, repo) = init_repo();
+  let config = Config {
+    forge: Some(gwm::forge::ForgeKind::GitLab),
+    ..Default::default()
+  };
+
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+
+  // `glab` may legitimately be installed on a contributor's machine, so
+  // the positive assertion is scoped to the case where it is genuinely
+  // absent — which is every CI runner. Asserting the warning
+  // unconditionally would be exactly the ambient-`$PATH` flake the repo
+  // rules call out.
+  if which::which("glab").is_err() {
+    assert_eq!(c.status, CheckStatus::Warning, "missing glab must warn: {}", c.detail);
+    assert!(
+      c.detail.contains("glab"),
+      "the missing forge CLI should be named, got: {}",
+      c.detail
+    );
+  }
+  // Env-independent in both directions: selecting GitLab must never probe
+  // for the GitHub CLI.
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+  assert!(
+    !missing.split(',').any(|b| b.trim() == "gh"),
+    "selecting GitLab must not probe for `gh`, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn a_forge_hosts_entry_is_also_an_opt_in_for_the_cli_probe() {
+  // `[forge_hosts]` is the second way to say "I talk to this forge", and it
+  // says it about *this host* specifically — a stronger opt-in signal than
+  // the bare `forge` key, not a weaker one. Probing only on `forge` left a
+  // user who authorises purely through the global table with a clean
+  // `gwm doctor` and no `glab` installed.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://gitlab.acme.internal/team/proj.git")
+    .unwrap();
+  let global = dir.path().join("global.toml");
+  std::fs::write(&global, "[forge_hosts]\n\"gitlab.acme.internal\" = \"gitlab\"\n").unwrap();
+  // No `forge` key anywhere: the host entry is the whole opt-in.
+  let config = Config::default();
+
+  let report = doctor::run(&DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: Some(&global),
+  })
+  .unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+
+  // Same env-independence rule as `an_explicit_gitlab_forge_probes_glab`:
+  // the positive assertion only holds where `glab` is genuinely absent.
+  if which::which("glab").is_err() {
+    assert_eq!(c.status, CheckStatus::Warning, "missing glab must warn: {}", c.detail);
+    assert!(
+      c.detail.contains("glab"),
+      "the forge CLI should be named, got: {}",
+      c.detail
+    );
+  }
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+  assert!(
+    !missing.split(',').any(|b| b.trim() == "gh"),
+    "a GitLab host entry must not probe for `gh`, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn a_forge_hosts_entry_for_another_host_probes_nothing() {
+  // The bound: the table authorises *named* hosts, so an entry that does not
+  // match this repo's origin is not an opt-in for it. Without this, adding
+  // one host to the global config would start warning in every unrelated
+  // repo — the same over-probing the `forge` key was careful to avoid.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://github.com/team/proj.git").unwrap();
+  let global = dir.path().join("global.toml");
+  std::fs::write(&global, "[forge_hosts]\n\"gitlab.acme.internal\" = \"gitlab\"\n").unwrap();
+  let config = Config::default();
+
+  let report = doctor::run(&DoctorCtx {
+    repo_workdir: dir.path(),
+    repo: &repo,
+    config: &config,
+    global_config_path: Some(&global),
+  })
+  .unwrap();
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+
+  assert!(
+    !missing.contains("glab") && !missing.split(',').any(|b| b.trim() == "gh"),
+    "an unrelated host entry must not probe any forge CLI, got: {}",
+    c.detail
+  );
+}
+
+#[test]
+fn the_forge_cli_probe_honours_the_gwm_gh_override() {
+  // `$GWM_GH` / `$GWM_GLAB` point at an alternative binary; probing the
+  // bare name `gh` regardless warned about a setup that works, and pushed
+  // the exit code to 1 (Codex review #458).
+  let (dir, repo) = init_repo();
+  // Windows resolves executability from the extension, not a mode bit, so
+  // an extensionless file is genuinely not runnable there — the probe was
+  // right to report it missing and the test was wrong to expect otherwise.
+  // A real override on Windows names a `.exe`, so the fixture does too.
+  let fake = dir.path().join(if cfg!(windows) { "my-gh.exe" } else { "my-gh" });
+  std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&fake).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&fake, perms).unwrap();
+  }
+  let config = Config {
+    forge: Some(gwm::forge::ForgeKind::GitHub),
+    ..Default::default()
+  };
+
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let prior = std::env::var("GWM_GH").ok();
+  // SAFETY: env mutation guarded by the lock above; restored below.
+  unsafe {
+    std::env::set_var("GWM_GH", &fake);
+  }
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+  unsafe {
+    match prior {
+      Some(v) => std::env::set_var("GWM_GH", v),
+      None => std::env::remove_var("GWM_GH"),
+    }
+  }
+
+  let c = report.checks.iter().find(|c| c.name.contains("PATH")).unwrap();
+  let missing = c.detail.split("not on PATH:").nth(1).unwrap_or("");
+  assert!(
+    !missing.contains("gh"),
+    "the overridden binary exists, so nothing should be reported missing: {}",
     c.detail
   );
 }

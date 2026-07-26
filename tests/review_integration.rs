@@ -83,7 +83,7 @@ fn fetch_pr_head_ref_creates_local_branch_at_pr_head() {
   let (origin, pr_sha) = origin_with_pr();
   let (clone, repo) = clone_of(origin.path());
 
-  review::fetch_pr_head_ref(clone.path(), 1, "review/pr-1-alice-x").unwrap();
+  review::fetch_pr_head_ref(clone.path(), "pull/1/head", "review/pr-1-alice-x").unwrap();
 
   let branch = repo
     .find_branch("review/pr-1-alice-x", git2::BranchType::Local)
@@ -100,6 +100,7 @@ fn materialize_attaches_worktree_links_pr_and_records_base() {
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("review-pr-1-alice-x");
   let spec = review::ReviewSpec {
+    head_ref: "pull/1/head",
     number: 1,
     branch: "review/pr-1-alice-x",
     dirname: "review-pr-1-alice-x",
@@ -212,6 +213,7 @@ fn materialize_refuses_when_review_branch_already_exists() {
   let wt_root = TempDir::new().unwrap();
   let target = wt_root.path().join("review-pr-1-alice-x");
   let spec = review::ReviewSpec {
+    head_ref: "pull/1/head",
     number: 1,
     branch: "review/pr-1-alice-x",
     dirname: "review-pr-1-alice-x",

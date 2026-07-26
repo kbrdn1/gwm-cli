@@ -110,6 +110,12 @@ pub enum FetchKey {
 pub struct GitHubFetch {
   pub link: BranchLink,
   pub link_slug: Option<String>,
+  /// The resolved forge backend for the active repo (issue #419), or
+  /// `None` when `origin` is missing / unparseable. Re-resolved on every
+  /// [`Self::refresh_link`] rather than cached on the `App`: in workspace
+  /// mode the active repo — and with it the `.gwm.toml` `forge` key — can
+  /// change under the cursor.
+  pub forge: Option<std::sync::Arc<dyn crate::forge::Forge>>,
   /// Per-issue-number cache. Absent keys are `Idle`. Closed over by
   /// the keyed accessor `issue_fetch_state(number)` (#138 fix: the
   /// cache is keyed by number, not a single per-target slot).
@@ -133,6 +139,7 @@ impl GitHubFetch {
     Self {
       link: BranchLink::empty(),
       link_slug: None,
+      forge: None,
       issue_cache: HashMap::new(),
       pr_cache: HashMap::new(),
     }
@@ -145,12 +152,65 @@ impl GitHubFetch {
   /// different `(issue, pr)` tuple and would be misleading if reused.
   /// (`App::refresh_link` separately drops any in-flight GitHub worker
   /// on the spine — see [`Self::invalidate`] for the pairing.)
-  pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>) {
+  pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
+    let _ = self.reread_link(repo, branch, config);
+    self.invalidate();
+  }
+
+  /// Re-read the link and forge **without** dropping fetched results.
+  ///
+  /// [`Self::refresh_link`] clears the caches on purpose: a selection
+  /// change must not leave the previous row's status on screen (PR #68).
+  /// But the open menu calls it only to catch a link made in another
+  /// terminal, and clearing there wiped the server-reported `web_url` it
+  /// was about to read, so it always fell back to a locally built URL —
+  /// wrong exactly where it matters, on an origin whose web host or port
+  /// gwm cannot infer (Codex review #458).
+  ///
+  /// Preserving is safe as long as the *instance* is unchanged: the
+  /// caches are keyed by number alone, so after an origin move a
+  /// branch-name-derived issue #42 would otherwise reuse the old repo's
+  /// cached URL for #42. The full `<web origin>/<slug>` is compared for
+  /// exactly that — the slug alone is not enough, since `acme/widgets`
+  /// exists identically on github.com and gitlab.com.
+  /// Returns `true` when the identity moved and the caches were
+  /// dropped. The caller **must** pair that with a
+  /// `TaskRunner::invalidate_matching(is_github)`: clearing the result
+  /// cache without bumping the spine generation lets a worker started
+  /// against the previous instance land afterwards and repopulate it —
+  /// the navigation invariant `App::refresh_link` documents (issue
+  /// #255), which this path was quietly breaking (Codex review #458).
+  #[must_use]
+  pub fn reread_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) -> bool {
+    let before = self.forge_identity();
+    // Resolve *first*: it reconciles the persisted links against the
+    // backend about to read them, and reading before that served the
+    // other forge's number for one more refresh (Codex review #458).
+    self.forge = crate::forge::resolve(repo, config).ok();
     self.link = branch
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
-    self.link_slug = github::repo_slug(repo).ok();
-    self.invalidate();
+    // Kept in sync with `forge` so the many read-only slug consumers
+    // (detail overlay keys, status strings) need no rewrite.
+    self.link_slug = self.forge.as_ref().map(|f| f.slug().to_string());
+    if before != self.forge_identity() {
+      self.invalidate();
+      return true;
+    }
+    false
+  }
+
+  /// `<backend> <web origin>/<slug>`, or `None` without a resolved
+  /// forge. Identity of the *instance*, not just the project — and of
+  /// the backend reading it, because `forge = "gitlab"` can flip over an
+  /// unchanged remote and the caches are keyed by number alone, so
+  /// cached issue #42 would otherwise be served as merge request !42
+  /// (Codex review #458).
+  fn forge_identity(&self) -> Option<String> {
+    self
+      .forge
+      .as_ref()
+      .map(|f| format!("{} {}/{}", f.kind().as_str(), f.web_origin(), f.slug()))
   }
 
   /// Flush every cached fetch state. Equivalent to "the cached

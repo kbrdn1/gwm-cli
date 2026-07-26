@@ -202,6 +202,96 @@ fn bound_output(stdout: &[u8], stderr: &[u8]) -> String {
 /// records the entry whether the command succeeded, failed, or could not be
 /// spawned. The returned `Result` is the caller's to handle — this wrapper
 /// only observes, it never swallows the error.
+/// [`run_logged`] with a payload written to the child's stdin.
+///
+/// `glab` has no `--body-file`, so the only way to keep a rendered issue
+/// or MR body off the command line — where `ps` exposes it to every
+/// local process — is `glab api --input -` (issue #459). That needs a
+/// real pipe, which [`run_logged`]'s `Command::output()` cannot give:
+/// it closes stdin.
+///
+/// The payload is written in full before the output is read, so a child
+/// that floods stdout before draining stdin would deadlock once both
+/// pipes fill. Issue and MR bodies are a few KB against a 64 KB pipe
+/// buffer, so this stays well inside the margin; a streaming writer
+/// would be the fix if that ever stops being true.
+///
+/// `redact_output` withholds the captured stdout from the transcript.
+/// Keeping a body off the argv is only half the job when the endpoint
+/// echoes it back: the GitLab create responses carry `description`, so
+/// the text the argv no longer leaks would reappear in the modal. Only
+/// the *log* is redacted — the caller still gets the real stdout, which
+/// it needs to read the new `iid` out of. stderr is kept either way,
+/// since that is what makes a failure diagnosable.
+pub fn run_logged_with_stdin(
+  cmd: &mut Command,
+  command: String,
+  stdin: &[u8],
+  redact_output: bool,
+) -> std::io::Result<Output> {
+  run_logged_inner(cmd, command, Some(stdin), redact_output)
+}
+
+/// [`run_logged`] that withholds the response from the transcript. For
+/// reads whose payload is a whole REST object — `glab issue|mr view`
+/// returns `description` — where there is no stdin to key the redaction
+/// off (Codex review #458).
+pub fn run_logged_redacted(cmd: &mut Command, command: String) -> std::io::Result<Output> {
+  run_logged_inner(cmd, command, None, true)
+}
+
+fn run_logged_inner(
+  cmd: &mut Command,
+  command: String,
+  stdin: Option<&[u8]>,
+  redact_output: bool,
+) -> std::io::Result<Output> {
+  use std::io::Write;
+  let start = Instant::now();
+  let result = match stdin {
+    // No payload: `output()` already closes stdin, and piping one we
+    // never write would only add a way to hang.
+    None => cmd.output(),
+    Some(payload) => {
+      cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+      (|| {
+        let mut child = cmd.spawn()?;
+        // `take()` then drop at the end of the statement: the child
+        // reads until EOF, so holding the handle open would hang it.
+        child.stdin.take().expect("stdin was piped above").write_all(payload)?;
+        child.wait_with_output()
+      })()
+    }
+  };
+  let duration = start.elapsed();
+  match &result {
+    Ok(out) => record(CommandLogEntry {
+      command,
+      duration,
+      status: CommandStatus::Exited(out.status.code()),
+      output: if redact_output {
+        bound_output(WITHHELD_RESPONSE.as_bytes(), &out.stderr)
+      } else {
+        bound_output(&out.stdout, &out.stderr)
+      },
+    }),
+    Err(_) => record(CommandLogEntry {
+      command,
+      duration,
+      status: CommandStatus::Spawn,
+      output: String::new(),
+    }),
+  }
+  result
+}
+
+/// Stands in for a response the transcript must not keep. Says why, so
+/// the modal does not just look broken.
+const WITHHELD_RESPONSE: &str = "<response withheld: it echoes the submitted body>";
+
 pub fn run_logged(cmd: &mut Command, command: String) -> std::io::Result<Output> {
   let start = Instant::now();
   let result = cmd.output();

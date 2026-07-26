@@ -1,6 +1,6 @@
 ---
 title: Integrations
-description: Wire gwm with GitHub (gh), lazygit, AI reviewers, doctor in CI, and the packaged distributions (Homebrew, Nix).
+description: Wire gwm with GitHub (gh) or GitLab (glab), lazygit, AI reviewers, doctor in CI, and the packaged distributions (Homebrew, Nix).
 navigation:
   title: Integrations
 ---
@@ -10,6 +10,7 @@ navigation:
 gwm is small on purpose — it shells out to the tools you already use rather than reimplementing them. These pages cover the supported integration points.
 
 - **[GitHub issue / PR linking](/integrations/github-linking)** — auto-link branches matching `<type>/#<N>-<slug>` to their issue, fetch live state via `gh`, surface in the TUI sidebar.
+- **[GitLab (multi-forge)](/integrations/gitlab)** — point gwm at GitLab instead of GitHub: the `forge` key, the `glab` backend, and the CI-state and terminology differences.
 - **[`gwm doctor`](/integrations/doctor)** — the 8 health checks, exit-code semantics (`0 / 1 / 2`), the launcher-binary probe added in v0.6, and the `[tui.keys]` keymap check added in v0.8.
 - **[Homebrew & Nix](/integrations/homebrew-nix)** — the packaging surface: the Homebrew tap, the Nix flake, `cargo binstall`, and the prebuilt release archives.
 - **[Daemon consumers](/integrations/daemon-consumers)** — the first consumers of `gwm daemon`: the bundled `gwm statusline` for shell prompts, the raw JSON-RPC one-liner, and an editor recipe (Zed / VS Code).

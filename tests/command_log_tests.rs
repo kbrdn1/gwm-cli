@@ -142,3 +142,72 @@ fn run_logged_records_a_nonzero_exit() {
   assert_eq!(mine.status, CommandStatus::Exited(Some(3)));
   assert!(!mine.is_success());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_redacted_run_keeps_the_response_out_of_the_transcript() {
+  // Issue #459, second half. Taking the body off the argv is only half
+  // the job: the GitLab create endpoints echo `description` back in the
+  // response, and the transcript records stdout verbatim, so the text
+  // reappeared there. The caller still needs the real stdout to parse
+  // the new iid, so the redaction has to be on the log, not the return.
+  //
+  // `cat` is the honest fixture here — it echoes stdin to stdout, which
+  // is exactly the shape of the problem.
+  command_log::reset();
+  let mut cmd = std::process::Command::new("cat");
+  let out = command_log::run_logged_with_stdin(&mut cmd, "glab api -X POST …".into(), b"SECRET-BODY", true).unwrap();
+
+  assert!(
+    String::from_utf8_lossy(&out.stdout).contains("SECRET-BODY"),
+    "the caller must still receive the real response"
+  );
+  assert!(
+    !command_log::snapshot().iter().any(|e| e.output.contains("SECRET-BODY")),
+    "the transcript must not: {:?}",
+    command_log::snapshot()
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unredacted_run_still_records_its_output() {
+  // The negative control: redaction is opt-in, and every other logged
+  // command must keep the output that makes the modal useful.
+  command_log::reset();
+  let mut cmd = std::process::Command::new("cat");
+  command_log::run_logged_with_stdin(&mut cmd, "cat".into(), b"ordinary output", false).unwrap();
+
+  assert!(
+    command_log::snapshot()
+      .iter()
+      .any(|e| e.output.contains("ordinary output")),
+    "{:?}",
+    command_log::snapshot()
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn redaction_applies_to_a_call_that_sends_no_stdin() {
+  // `run_cli_with` routed the no-stdin case to `run_logged`, which has no
+  // redaction parameter — so the flag was silently dropped and the read
+  // paths that asked for redaction got none of it (Codex review #458).
+  // The read paths are exactly the ones that pull whole REST objects
+  // back, `description` included.
+  command_log::reset();
+  let mut cmd = std::process::Command::new("sh");
+  cmd.args(["-c", "printf %s 'SECRET-BODY'"]);
+
+  let out = command_log::run_logged_redacted(&mut cmd, "glab issue view 42".into()).unwrap();
+
+  assert!(
+    String::from_utf8_lossy(&out.stdout).contains("SECRET-BODY"),
+    "the caller must still get the response to parse"
+  );
+  assert!(
+    !command_log::snapshot().iter().any(|e| e.output.contains("SECRET-BODY")),
+    "{:?}",
+    command_log::snapshot()
+  );
+}

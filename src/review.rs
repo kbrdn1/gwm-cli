@@ -71,12 +71,16 @@ pub fn dirname_from_branch(branch: &str) -> String {
   branch.replace('/', "-")
 }
 
-/// Fetch the PR's head commit into `branch` via origin's
-/// `refs/pull/<N>/head` ref. The RHS is written as an explicit
-/// `refs/heads/<branch>` so git never has to guess where a bare name
-/// lands. Logged so the call surfaces in the Command Logs modal.
-pub fn fetch_pr_head_ref(workdir: &Path, number: u64, branch: &str) -> Result<()> {
-  let refspec = format!("pull/{number}/head:refs/heads/{branch}");
+/// Fetch the change's head commit into `branch` via origin's head ref.
+///
+/// `head_ref` is the forge-specific LHS — `pull/<N>/head` on GitHub,
+/// `merge-requests/<iid>/head` on GitLab (issue #419) — supplied by
+/// [`crate::forge::Forge::pr_head_refspec`] rather than hardcoded here.
+/// The RHS is written as an explicit `refs/heads/<branch>` so git never
+/// has to guess where a bare name lands. Logged so the call surfaces in
+/// the Command Logs modal.
+pub fn fetch_pr_head_ref(workdir: &Path, head_ref: &str, branch: &str) -> Result<()> {
+  let refspec = format!("{head_ref}:refs/heads/{branch}");
   worktree::run_git_logged(workdir, &["fetch", "origin", &refspec])?;
   Ok(())
 }
@@ -84,8 +88,12 @@ pub fn fetch_pr_head_ref(workdir: &Path, number: u64, branch: &str) -> Result<()
 /// Everything `gwm review` needs to know once the PR metadata is resolved.
 #[derive(Debug, Clone)]
 pub struct ReviewSpec<'a> {
-  /// PR number — feeds the `refs/pull/<N>/head` fetch and the PR link.
+  /// PR / MR number — feeds the PR link and the branch / directory names.
   pub number: u64,
+  /// Forge-specific head ref to fetch (`pull/<N>/head`,
+  /// `merge-requests/<iid>/head`). Issue #419: carried on the spec so
+  /// `materialize` never has to know which forge it is serving.
+  pub head_ref: &'a str,
   /// Local review branch to create (`review/pr-<N>-<author>-<slug>`).
   pub branch: &'a str,
   /// Worktree directory name (`review-pr-<N>-<author>-<slug>`).
@@ -124,7 +132,7 @@ pub fn materialize(repo: &Repository, workdir: &Path, spec: &ReviewSpec) -> Resu
     ));
   }
 
-  fetch_pr_head_ref(workdir, spec.number, spec.branch)?;
+  fetch_pr_head_ref(workdir, spec.head_ref, spec.branch)?;
 
   // The fetch just minted `branch`; reuse it rather than branching from
   // HEAD. If the attach fails, drop the branch so a retry isn't blocked.

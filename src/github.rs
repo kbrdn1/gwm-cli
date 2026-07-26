@@ -1,23 +1,35 @@
-//! Issue ↔ PR ↔ branch link storage + GitHub API fetch (via `gh` CLI).
+//! Issue ↔ PR ↔ branch link storage, and the **GitHub backend** for the
+//! [`crate::forge::Forge`] trait (via the `gh` CLI).
 //!
 //! Storage lives in git branch config: `branch.<name>.gwm-issue` and
 //! `branch.<name>.gwm-pr`. Issue numbers are auto-detected from the
 //! `<type>/#<N>-<slug>` branch convention when no explicit override is set.
+//! Those `branch.<x>.gwm-*` keys are **forge-neutral** and deliberately stay
+//! shared rather than moving behind the trait (issue #419): a GitLab worktree
+//! reads and writes exactly the same keys.
 //!
 //! Fetch shells out to `gh` and parses its JSON output. The parsing functions
 //! (`parse_issue_json`, `parse_pr_json`) are exposed publicly so tests can
 //! cover the JSON contract without depending on a real `gh` binary.
 
 use crate::error::{GwmError, Result};
+use crate::forge::{self, Forge, ForgeKind};
 use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{MilestoneSpec, MilestoneState, RemoteMilestone};
 use crate::naming::parse_branch;
 use git2::Repository;
 use serde::Deserialize;
 use std::ffi::{OsStr, OsString};
-use std::path::Path;
-use std::process::Command;
 use std::sync::LazyLock;
+
+// The parsed shapes are forge-agnostic and now live in `forge`; re-exported
+// here so the many `github::PrStatus` / `github::CiState` imports across the
+// TUI and CLI keep resolving unchanged.
+pub use crate::forge::{cli_command_line as gh_command_line, repo_slug};
+pub use crate::forge::{
+  CheckOutcome, CiState, CreatedIssue, CreatedPr, IssueCreateRequest, IssueState, IssueStatus, PrCheck,
+  PrCreateRequest, PrHead, PrState, PrStatus,
+};
 
 static ISSUE_URL_RE: LazyLock<regex::Regex> =
   LazyLock::new(|| regex::Regex::new(r"/issues/(\d+)(?:\b|$)").expect("static issue URL regex compiles"));
@@ -32,6 +44,27 @@ const PR_CONFIG_KEY: &str = "gwm-pr";
 /// distinction for its `detected` badge, and the explicit override must
 /// still win.
 const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
+/// The forge instance a persisted link belongs to, as `<host>/<path>`
+/// taken from `origin` at write time (Codex review #458).
+///
+/// The link keys themselves are deliberately forge-neutral — that was
+/// the point of keeping them out of the [`crate::forge::Forge`] trait in
+/// issue #419 — but the *numbers* they hold are not. PR #128 on
+/// github.com and MR !128 on gitlab.com are unrelated objects, so once
+/// the forge became switchable a stored number could be reinterpreted
+/// against a different instance and silently link the worktree to a
+/// stranger's merge request. Stamping the origin lets [`read_link`]
+/// recognise a number that came from somewhere else and ignore it.
+const LINK_ORIGIN_CONFIG_KEY: &str = "gwm-link-origin";
+/// The backend half of the same guard. Per branch, like every other key
+/// here: `.gwm.toml` is a versioned file, so two worktrees of one repo
+/// legitimately resolve different backends, and a repo-level record made
+/// each of them wipe the other's links. See [`reconcile_link_forge`].
+const LINK_FORGE_CONFIG_KEY: &str = "gwm-link-forge";
+/// What an absent [`LINK_FORGE_CONFIG_KEY`] means. Not "whatever is
+/// resolving now" — pre-#419 gwm rejected every origin that was not
+/// `github.com`, so nothing else can have written those numbers.
+const LINK_FORGE_BEFORE_THE_KEY: &str = "github";
 const ISSUE_TITLE_CONFIG_KEY: &str = "gwm-issue-title";
 const PR_TITLE_CONFIG_KEY: &str = "gwm-pr-title";
 const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
@@ -89,20 +122,78 @@ impl BranchLink {
   }
 
   /// One-line human-readable rendering for the CLI / TUI status bar.
-  pub fn summary(&self) -> String {
+  ///
+  /// `pr_noun` comes from [`crate::forge::Forge::pr_noun`] — "PR" on
+  /// GitHub, "MR" on GitLab (issue #419). Passed in rather than read from
+  /// a global so `BranchLink` stays a plain data struct.
+  pub fn summary(&self, pr_noun: &str) -> String {
     match (self.issue, self.pr) {
       (None, None) => "no link".into(),
       (Some(i), None) => format!("issue #{i}"),
-      (None, Some(p)) => format!("PR #{p}"),
-      (Some(i), Some(p)) => format!("issue #{i} · PR #{p}"),
+      (None, Some(p)) => format!("{pr_noun} #{p}"),
+      (Some(i), Some(p)) => format!("issue #{i} · {pr_noun} #{p}"),
     }
   }
 }
 
 /// Read the link for `branch`. Explicit overrides win over branch-name auto-detect.
 pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
-  let explicit_issue = read_branch_u64(repo, branch, ISSUE_CONFIG_KEY)?;
-  let explicit_pr = read_branch_u64(repo, branch, PR_CONFIG_KEY)?;
+  // Numbers stamped against another instance are dropped before they are
+  // resolved (Codex review #458). Only the *persisted* values go: the
+  // issue parsed out of the branch name is the user's own naming and
+  // stays valid wherever the repo now points.
+  let foreign = match read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY)? {
+    Some(stored) => link_origin_is_foreign(repo)(&stored),
+    // No stamp means the link predates the key. Invalidating those would
+    // wipe every existing link on upgrade, so they are adopted by the
+    // origin the repo has right now — which is almost always the one
+    // that wrote them, and makes a *later* move invalidate properly
+    // instead of leaving them unscoped forever (Codex review #458).
+    //
+    // Adoption is a one-time write per branch, guarded on there being
+    // something to adopt, so the per-row read path does not touch git
+    // config on every listing. Best-effort: read-only repos keep working
+    // and simply stay unstamped.
+    None => {
+      // Any persisted link value, not just the numbers: an issue derived
+      // from the branch name stores no number at all, only a cached
+      // title and state, and keying adoption on numbers left those
+      // branches unstamped forever (Codex review #458).
+      let mut has_link = false;
+      for key in [
+        ISSUE_CONFIG_KEY,
+        PR_CONFIG_KEY,
+        DETECTED_PR_CONFIG_KEY,
+        ISSUE_TITLE_CONFIG_KEY,
+        ISSUE_STATE_CONFIG_KEY,
+        PR_TITLE_CONFIG_KEY,
+        PR_STATE_CONFIG_KEY,
+        DETECTED_PR_TITLE_CONFIG_KEY,
+        DETECTED_PR_STATE_CONFIG_KEY,
+      ] {
+        if read_branch_string(repo, branch, key)?.is_some() {
+          has_link = true;
+          break;
+        }
+      }
+      if has_link {
+        if let Some(id) = origin_identity(repo) {
+          let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
+        }
+      }
+      false
+    }
+  };
+  let explicit_issue = if foreign {
+    None
+  } else {
+    read_branch_u64(repo, branch, ISSUE_CONFIG_KEY)?
+  };
+  let explicit_pr = if foreign {
+    None
+  } else {
+    read_branch_u64(repo, branch, PR_CONFIG_KEY)?
+  };
 
   let (issue, issue_source) = match explicit_issue {
     Some(n) => (Some(n), LinkSource::Explicit),
@@ -118,18 +209,25 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
   // colour the PR pastille on every row without a per-row `gh` shell-out.
   let (pr, pr_source) = match explicit_pr {
     Some(n) => (Some(n), LinkSource::Explicit),
+    None if foreign => (None, LinkSource::None),
     None => match read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)? {
       Some(n) => (Some(n), LinkSource::Detected),
       None => (None, LinkSource::None),
     },
   };
+  // The cached title and state are as instance-scoped as the numbers.
+  // The issue survives a foreign stamp when the branch name carries it,
+  // and reading the previous tenant's metadata onto that number showed
+  // one instance's issue under the other's title until the next write
+  // purged it — which offline or read-only never comes (Codex review
+  // #458).
   let issue_title = match issue {
-    Some(_) => read_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY)?,
-    None => None,
+    Some(_) if !foreign => read_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY)?,
+    _ => None,
   };
   let issue_state = match issue {
-    Some(_) => read_branch_issue_state(repo, branch)?,
-    None => None,
+    Some(_) if !foreign => read_branch_issue_state(repo, branch)?,
+    _ => None,
   };
   let pr_title = match pr_source {
     LinkSource::Explicit => read_branch_string(repo, branch, PR_TITLE_CONFIG_KEY)?,
@@ -199,13 +297,13 @@ pub fn apply_detected_pr(link: &mut BranchLink, detected: Option<u64>) {
 /// probe rather than being wiped — and the local link is still returned.
 /// This shells out, so callers on hot paths (per-worktree listing) must opt
 /// in deliberately rather than route every read through here.
-pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) -> Result<BranchLink> {
+pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, forge: &dyn Forge) -> Result<BranchLink> {
   let mut link = read_link(repo, branch)?;
   if link.pr_source != LinkSource::Explicit {
     // Re-resolve live. On success, the fresh result replaces any persisted
-    // detection (a vanished PR clears it); on a `gh` failure, keep whatever
+    // detection (a vanished PR clears it); on a CLI failure, keep whatever
     // `read_link` already resolved (possibly a persisted detection).
-    if let Ok(detected) = find_pr_for_branch(slug, branch) {
+    if let Ok(detected) = forge.find_pr_for_branch(branch) {
       let previous_pr = link.pr;
       let previous_pr_source = link.pr_source;
       let previous_pr_title = link.pr_title.clone();
@@ -239,13 +337,188 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, slug: &str) 
   Ok(link)
 }
 
+/// `<web origin>/<path>` of the repo's `origin`, or `None` when there is
+/// no origin or it does not parse. A local-only repo therefore stamps
+/// nothing and is never invalidated — there is no second instance for
+/// its numbers to be confused with.
+///
+/// Covers a change of *instance*, not a change of *backend*: flipping
+/// `forge = "gitlab"` in `.gwm.toml` over an unchanged remote leaves
+/// this identity untouched, so existing numbers are reinterpreted by
+/// the other backend (Codex review #458). Catching it means threading
+/// the resolved forge through `link_issue` / `link_pr` /
+/// `persist_detected_pr` and into `read_link`, which has no `Config` —
+/// deferred as churn out of proportion to a case that needs the backend
+/// switched on a remote that did not move.
+///
+/// The web origin rather than the bare host, because it carries the
+/// scheme and the port: two self-hosted instances on one hostname behind
+/// different ports are different instances, and `host/path` collapsed
+/// them into one stamp (Codex review #458). It also keeps `ssh://` and
+/// `https://` spellings of the same repo on the same stamp, so switching
+/// remote protocol does not throw the links away.
+fn origin_identity(repo: &Repository) -> Option<String> {
+  let remote = repo.find_remote("origin").ok()?;
+  let parsed = forge::parse_remote_url(remote.url().ok()?).ok()?;
+  Some(format!("{}/{}", parsed.web_origin, parsed.path))
+}
+
+/// Stamp the current origin on the branch's links, dropping anything the
+/// previous origin left behind.
+///
+/// The eager purge is what makes the stamp trustworthy. One stamp covers
+/// the issue, the explicit PR and the detected PR, so writing just one of
+/// them after a move would rewrite the stamp and silently re-bless the
+/// other two — and the lazy check in [`read_link`] would never fire
+/// again, because the stamp now matches (Codex review #458).
+///
+/// Best-effort throughout: a read-only repo must not turn a successful
+/// `gwm pr` into an error.
+fn stamp_link_origin(repo: &Repository, branch: &str) {
+  let Some(id) = origin_identity(repo) else { return };
+  if let Ok(Some(stored)) = read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY) {
+    if stored != id && drop_branch_links(repo, branch).is_err() {
+      // Same rule as `reconcile_link_forge`: no purge, no new stamp.
+      return;
+    }
+  }
+  let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
+}
+
+/// Every number, title and state the link layer persists for `branch`.
+/// One list, because a purge that forgets a key silently re-blesses it.
+fn drop_branch_links(repo: &Repository, branch: &str) -> Result<()> {
+  for key in [
+    ISSUE_CONFIG_KEY,
+    ISSUE_TITLE_CONFIG_KEY,
+    ISSUE_STATE_CONFIG_KEY,
+    PR_CONFIG_KEY,
+    PR_TITLE_CONFIG_KEY,
+    PR_STATE_CONFIG_KEY,
+    DETECTED_PR_CONFIG_KEY,
+    DETECTED_PR_TITLE_CONFIG_KEY,
+    DETECTED_PR_STATE_CONFIG_KEY,
+  ] {
+    remove_branch_key(repo, branch, key)?;
+  }
+  Ok(())
+}
+
+/// Drop every persisted link when the repo changes **backend**.
+///
+/// [`origin_identity`] covers a change of instance and cannot cover this
+/// one: flipping `forge = "gitlab"` in `.gwm.toml` leaves the remote,
+/// and therefore `<web origin>/<path>`, exactly as it was. The numbers
+/// survive and the other backend reads them as its own — issue #42
+/// resurfaces as merge request !42, a real page and the wrong one
+/// (Codex review #458).
+///
+/// Called from [`crate::forge::resolve`] rather than from the readers.
+/// The busiest reader is [`crate::worktree::list`], which has no
+/// `Config` and is threaded through most of the test suite; `resolve` is
+/// the single place that decides a repo's backend and already holds
+/// both halves. The cost in the steady state is one config read.
+///
+/// An absent record **adopts**: links written before this key existed
+/// must survive the upgrade that introduces it, exactly as an absent
+/// origin stamp is not treated as a mismatch.
+///
+/// # Two invariants, and where every caller sits against them
+///
+/// **Atomicity — the marker only advances when the purge fully
+/// succeeded.** Advancing it after a failed removal re-blesses the old
+/// numbers *permanently*: the mismatch never fires again and the other
+/// backend reads them as its own. Same rule [`stamp_link_origin`]
+/// states for the origin stamp. The removals and the marker write share
+/// one config lock, so they fail together anyway — the guard is what
+/// makes that a property of the code rather than a coincidence.
+///
+/// **Scope — one branch, the one at HEAD.** The marker started
+/// repo-level, on the reasoning that a backend is a property of a repo.
+/// It is not: `.gwm.toml` is versioned, so two worktrees of one repo
+/// legitimately carry different `forge` values, and the purge swept
+/// *every* local branch — running gwm in each in turn wiped the other's
+/// links, both ways, forever (Codex review #458). Repo-wide data loss
+/// out of a per-worktree setting. Per-branch is also the scope every
+/// other key here already uses.
+///
+/// The cost of that scoping, named: `gwm open --worktree <other>`
+/// reconciles the branch at HEAD rather than the target's, so the
+/// target keeps a stale number for that one command. Same class as the
+/// `worktree::list` gap below — a stale read, never a wrong write.
+///
+/// **Ordering — every link read or write happens *after* a reconcile,
+/// never before.** Read too early and the stale number is served one
+/// more time; write too early and the write lands under the outgoing
+/// marker, so the next reconcile deletes what the user just did. Both
+/// happened (Codex review #458), which is why the whole surface is
+/// enumerated here rather than fixed one call site per round:
+///
+/// | site | reconciles | why |
+/// |---|---|---|
+/// | `cli::cmd_open` | resolves, then reads | fixed: it resolved after `read_link` |
+/// | `cli::cmd_status` | resolves, then reads | already correct |
+/// | `cli::cmd_link` | [`crate::forge::reconcile_links`] | fixed: it never resolved |
+/// | `cli::cmd_unlink` | no | removes keys; a later purge takes no more than it would |
+/// | `cli::cmd_pr` | `resolve_or_default` before `link_pr` | already correct |
+/// | `cli::cmd_review` | `resolve` before `review::materialize` | already correct |
+/// | `tui::GitHubFetch::reread_link` | resolves, then reads | fixed: it read first |
+/// | `tui::App` link prompt | via `reread_link` on selection | already correct |
+/// | [`crate::worktree::list`] | **no** | no `Config`; display only, and it self-heals on the next resolve |
+///
+/// `worktree::list` is the one deliberate gap: it is a pure reader with
+/// no `Config`, so a flip leaves its badges stale until any command or
+/// TUI selection resolves. Nothing is written from there, so a stale
+/// badge is the whole of the damage.
+///
+/// Best-effort throughout — a read-only repo must not turn a resolve
+/// into an error.
+pub(crate) fn reconcile_link_forge(repo: &Repository, kind: crate::forge::ForgeKind) {
+  let now = kind.as_str();
+  let Ok(head) = repo.head() else { return };
+  let Some(branch) = pinnable_branch(head.shorthand().ok()).map(str::to_string) else {
+    return;
+  };
+  // An absent record is not "adopt whatever is resolving now": pre-#419
+  // gwm rejected every origin that was not `github.com`, so any number
+  // already on the branch is a GitHub number. Reading absent as
+  // adoption re-blessed all of them as GitLab iids on the first resolve
+  // after an upgrade (Codex review #458).
+  let stored = read_branch_string(repo, &branch, LINK_FORGE_CONFIG_KEY)
+    .ok()
+    .flatten()
+    .unwrap_or_else(|| LINK_FORGE_BEFORE_THE_KEY.to_string());
+  if stored == now {
+    return;
+  }
+  if drop_branch_links(repo, &branch).is_err() || remove_branch_key(repo, &branch, LINK_ORIGIN_CONFIG_KEY).is_err() {
+    return;
+  }
+  let _ = write_branch_string(repo, &branch, LINK_FORGE_CONFIG_KEY, now);
+}
+
+/// `true` when persisted numbers on this branch were written against a
+/// different origin than the repo has now.
+///
+/// An absent stamp is **not** a mismatch: links written before this key
+/// existed, and links in local-only repos, stay readable.
+fn link_origin_is_foreign(repo: &Repository) -> impl Fn(&str) -> bool + '_ {
+  let current = origin_identity(repo);
+  move |stored: &str| match &current {
+    Some(now) => stored != now,
+    None => false,
+  }
+}
+
 pub fn link_issue(repo: &Repository, branch: &str, number: u64) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)?;
   remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
   remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn link_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_u64(repo, branch, PR_CONFIG_KEY, number)?;
   remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
   remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)
@@ -278,6 +551,7 @@ pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
 /// stored value and clears a cached title only when the detected number
 /// actually changed.
 pub fn persist_detected_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
+  stamp_link_origin(repo, branch);
   let previous = read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?;
   write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)?;
   if previous == Some(number) {
@@ -297,27 +571,41 @@ pub fn clear_persisted_detected_pr(repo: &Repository, branch: &str) -> Result<()
   remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
 }
 
+// Every one of these stamps first. They persist metadata fetched from
+// the origin the repo has *now*, and `read_link` suppresses anything the
+// stamp says came from somewhere else — so writing without stamping left
+// a fresh title permanently suppressed. It only shows on the path where
+// the number comes from the branch name rather than from config, because
+// nothing else re-links it and no other writer restamps (Codex review
+// #458). `persist_detected_pr` stamped from the start; these did not.
+
 pub fn persist_issue_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY, title)
 }
 
 pub fn persist_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, PR_TITLE_CONFIG_KEY, title)
 }
 
 pub fn persist_detected_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY, title)
 }
 
 pub fn persist_issue_state(repo: &Repository, branch: &str, state: IssueState) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, ISSUE_STATE_CONFIG_KEY, issue_state_config_value(state))
 }
 
 pub fn persist_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, PR_STATE_CONFIG_KEY, pr_state_config_value(state))
 }
 
 pub fn persist_detected_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, DETECTED_PR_STATE_CONFIG_KEY, pr_state_config_value(state))
 }
 
@@ -503,157 +791,7 @@ fn remove_branch_key(repo: &Repository, branch: &str, leaf: &str) -> Result<()> 
   }
 }
 
-// ---- Repo slug from origin remote --------------------------------------
-
-/// Extract the `owner/repo` slug from the `origin` remote URL.
-/// Supports the two GitHub URL flavours: `git@github.com:owner/repo(.git)?`
-/// and `https://github.com/owner/repo(.git)?`.
-pub fn repo_slug(repo: &Repository) -> Result<String> {
-  let remote = repo
-    .find_remote("origin")
-    .map_err(|_| GwmError::Other("no 'origin' remote configured".into()))?;
-  let url = remote
-    .url()
-    .ok()
-    .ok_or_else(|| GwmError::Other("origin remote has no URL (non-utf8?)".into()))?
-    .to_string();
-  parse_github_slug(&url)
-}
-
-fn parse_github_slug(url: &str) -> Result<String> {
-  // SSH: git@github.com:owner/repo(.git)?
-  if let Some(rest) = url.strip_prefix("git@github.com:") {
-    return Ok(trim_git_suffix(rest).to_string());
-  }
-  // HTTPS: https://github.com/owner/repo(.git)?
-  for prefix in ["https://github.com/", "http://github.com/"] {
-    if let Some(rest) = url.strip_prefix(prefix) {
-      return Ok(trim_git_suffix(rest).to_string());
-    }
-  }
-  Err(GwmError::Other(format!(
-    "origin '{}' is not a github URL (expected git@github.com:… or https://github.com/…)",
-    url
-  )))
-}
-
-fn trim_git_suffix(s: &str) -> &str {
-  // Normalise trailing slashes first so `owner/repo.git/` becomes
-  // `owner/repo.git` before the `.git` strip kicks in. Pre-fix this
-  // returned `owner/repo.git` because `.git` was sought with a trailing
-  // `/` still attached (Copilot PR #68 review).
-  let trimmed = s.trim_end_matches('/');
-  trimmed.strip_suffix(".git").unwrap_or(trimmed)
-}
-
 // ---- Issue / PR status ---------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IssueState {
-  Open,
-  Closed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IssueStatus {
-  pub number: u64,
-  pub title: String,
-  pub state: IssueState,
-  pub url: String,
-  pub labels: Vec<String>,
-  pub updated_at: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct IssueCreateRequest<'a> {
-  pub title: &'a str,
-  pub body_file: &'a std::path::Path,
-  pub labels: &'a [String],
-  pub repo: Option<&'a str>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatedIssue {
-  pub number: u64,
-  pub url: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct PrCreateRequest<'a> {
-  pub title: &'a str,
-  pub body_file: &'a std::path::Path,
-  pub head: &'a str,
-  pub base: Option<&'a str>,
-  pub draft: bool,
-  pub repo: Option<&'a str>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CreatedPr {
-  pub number: u64,
-  pub url: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrState {
-  Open,
-  Draft,
-  Closed,
-  Merged,
-}
-
-/// Overall CI outcome derived from a PR's `statusCheckRollup` (issue #299).
-/// A single ordered signal so the sidebar can render pass/fail/running at a
-/// glance instead of a bare `N/M` count. Priority is **failing > running >
-/// passing**: the most actionable state always wins, so a red check is never
-/// hidden behind an in-flight one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CiState {
-  /// The PR has no checks at all — render nothing.
-  None,
-  /// Every check completed successfully (counting `NEUTRAL` / `SKIPPED`).
-  Passing,
-  /// At least one check is still in flight and none has failed.
-  Running,
-  /// At least one check completed with a failing conclusion
-  /// (`FAILURE` / `CANCELLED` / `TIMED_OUT` / `ACTION_REQUIRED`).
-  Failing,
-}
-
-/// One classified `statusCheckRollup` entry, kept per-check for the CI
-/// checks overlay (issue #436) — pre-#436 the name and URL were dropped
-/// when the rollup collapsed into [`CiState`]. `name` resolves from the
-/// `CheckRun` `name` or the legacy `StatusContext` `context`; `url` from
-/// `detailsUrl` or `targetUrl` respectively.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrCheck {
-  pub name: String,
-  pub outcome: CheckOutcome,
-  pub url: Option<String>,
-  /// Owning workflow (`workflowName`, CheckRun shape only) — surfaced in
-  /// the overlay's detail column (#436 validation feedback).
-  pub workflow_name: Option<String>,
-  /// RFC 3339 run timestamps (CheckRun shape only): the overlay derives
-  /// the run duration (or the elapsed time of an in-flight run) from them.
-  pub started_at: Option<String>,
-  pub completed_at: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrStatus {
-  pub number: u64,
-  pub title: String,
-  pub state: PrState,
-  pub url: String,
-  pub updated_at: String,
-  pub checks_passed: u32,
-  pub checks_total: u32,
-  /// Overall CI state derived from the same rollup that feeds
-  /// `checks_passed` / `checks_total` — no extra GitHub request.
-  pub ci: CiState,
-  /// The classified per-check list, same order as the rollup (issue #436).
-  pub checks: Vec<PrCheck>,
-}
 
 #[derive(Deserialize)]
 struct RawIssue {
@@ -787,15 +925,6 @@ pub fn parse_pr_json(s: &str) -> Result<PrStatus> {
   })
 }
 
-/// The outcome of a single rollup entry, before the per-PR aggregation.
-/// Public since #436: the CI checks overlay renders one row per check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckOutcome {
-  Passing,
-  Running,
-  Failing,
-}
-
 /// Classify one rollup entry, handling both the `CheckRun` shape
 /// (`status` + `conclusion`) and the legacy `StatusContext` shape
 /// (`state`). A `CheckRun` is only green for an *accepted* terminal
@@ -834,29 +963,11 @@ fn is_accepted_conclusion(conclusion: &str) -> bool {
   )
 }
 
-/// Collapse a `statusCheckRollup` into a single [`CiState`] with the
-/// priority **failing > running > passing** (issue #299). A failing check
-/// wins immediately; any still-pending check downgrades an otherwise-green
-/// rollup to `Running`; an empty rollup is `None`.
+/// Collapse a `statusCheckRollup` into a single [`CiState`]. The
+/// aggregation rule itself is shared with the GitLab backend since #419 —
+/// see [`forge::aggregate_ci_state`].
 fn derive_ci_state(checks: &[RawCheck]) -> CiState {
-  if checks.is_empty() {
-    return CiState::None;
-  }
-  let mut any_running = false;
-  for c in checks {
-    match classify_check(c) {
-      // Failing outranks everything — short-circuit so a red check is never
-      // masked by a later in-flight one.
-      CheckOutcome::Failing => return CiState::Failing,
-      CheckOutcome::Running => any_running = true,
-      CheckOutcome::Passing => {}
-    }
-  }
-  if any_running {
-    CiState::Running
-  } else {
-    CiState::Passing
-  }
+  forge::aggregate_ci_state(checks.iter().map(classify_check))
 }
 
 // ---- gh CLI invocation ---------------------------------------------------
@@ -875,19 +986,44 @@ pub fn fetch_issue(slug: &str, number: u64) -> Result<IssueStatus> {
 /// thread never touches `GWM_GH` / the process environment concurrently
 /// with env-mutating callers.
 pub fn fetch_issue_with(program: &OsStr, slug: &str, number: u64) -> Result<IssueStatus> {
-  let stdout = run_gh_with(
-    program,
-    [
-      "issue",
-      "view",
-      &number.to_string(),
-      "--repo",
-      slug,
-      "--json",
-      ISSUE_JSON_FIELDS,
-    ],
-  )?;
-  parse_issue_json(&stdout)
+  parse_issue_json(&run_gh_with(program, issue_view_argv(slug, number))?)
+}
+
+/// `--repo <slug>`, or nothing when the slug is empty.
+///
+/// Mirrors [`crate::gitlab::repo_flag`]. An empty slug is the caller
+/// asking `gh` to resolve the repository from the directory it is
+/// spawned in, which is also where it infers the host from.
+fn repo_flag(slug: &str) -> Vec<String> {
+  if slug.is_empty() {
+    Vec::new()
+  } else {
+    vec!["--repo".into(), slug.into()]
+  }
+}
+
+/// `repos/<slug>` for a REST path, or `repos/{owner}/{repo}` when the
+/// slug is empty.
+///
+/// `gh api` documents `{owner}`, `{repo}` and `{branch}` as placeholders
+/// "replaced with values from the repository of the current directory".
+/// This is the counterpart to glab's `projects/:fullpath`, and round 16
+/// of the #458 review asserted — wrongly, from a stale code comment
+/// rather than the docs — that no such thing existed.
+fn repo_api_path(slug: &str) -> String {
+  if slug.is_empty() {
+    "repos/{owner}/{repo}".to_string()
+  } else {
+    format!("repos/{slug}")
+  }
+}
+
+/// Argv for `gh issue view <n> --repo <slug> --json …`.
+pub fn issue_view_argv(slug: &str, number: u64) -> Vec<String> {
+  let mut argv: Vec<String> = vec!["issue".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--json".into(), ISSUE_JSON_FIELDS.into()]);
+  argv
 }
 
 /// Resolve the `gh` program to invoke: `$GWM_GH` when set (test / override
@@ -897,8 +1033,13 @@ pub fn gh_program() -> OsString {
   std::env::var_os("GWM_GH").unwrap_or_else(|| "gh".into())
 }
 
-pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
-  let mut args: Vec<OsString> = Vec::with_capacity(6 + 2 * req.labels.len() + if req.repo.is_some() { 2 } else { 0 });
+pub fn create_issue(slug: &str, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+  parse_created_issue(&run_gh(issue_create_argv(slug, req))?)
+}
+
+/// Argv for `gh issue create …`.
+pub fn issue_create_argv(slug: &str, req: &IssueCreateRequest<'_>) -> Vec<OsString> {
+  let mut args: Vec<OsString> = Vec::with_capacity(8 + 2 * req.labels.len());
   args.push("issue".into());
   args.push("create".into());
   args.push("--title".into());
@@ -909,11 +1050,18 @@ pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
     args.push("--label".into());
     args.push(label.into());
   }
-  if let Some(repo) = req.repo {
+  // An empty slug means `origin` was unresolvable; `gh` then infers the
+  // repo from the local git context, which is the pre-#419 behaviour this
+  // path has always relied on.
+  if !slug.is_empty() {
     args.push("--repo".into());
-    args.push(repo.into());
+    args.push(slug.into());
   }
-  let stdout = run_gh(&args)?;
+  args
+}
+
+/// Recover the created issue from the URL `gh issue create` prints.
+pub fn parse_created_issue(stdout: &str) -> Result<CreatedIssue> {
   let stdout = stdout.trim().to_string();
   let Some(caps) = ISSUE_URL_RE.captures(&stdout) else {
     return Err(GwmError::CommandFailed(format!(
@@ -931,10 +1079,14 @@ pub fn create_issue(req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
 /// Shell out to `gh pr create` with a body file already rendered by
 /// [`crate::pr_templates::render_pr_body`]. Parses the URL printed by
 /// gh on success to extract the PR number.
-pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
-  let mut args: Vec<OsString> = Vec::with_capacity(
-    8 + if req.draft { 1 } else { 0 } + if req.base.is_some() { 2 } else { 0 } + if req.repo.is_some() { 2 } else { 0 },
-  );
+pub fn create_pr(slug: &str, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
+  parse_created_pr(&run_gh(pr_create_argv(slug, req))?)
+}
+
+/// Argv for `gh pr create …`.
+pub fn pr_create_argv(slug: &str, req: &PrCreateRequest<'_>) -> Vec<OsString> {
+  let mut args: Vec<OsString> =
+    Vec::with_capacity(10 + if req.draft { 1 } else { 0 } + if req.base.is_some() { 2 } else { 0 });
   args.push("pr".into());
   args.push("create".into());
   args.push("--title".into());
@@ -950,11 +1102,18 @@ pub fn create_pr(req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
   if req.draft {
     args.push("--draft".into());
   }
-  if let Some(repo) = req.repo {
+  // An empty slug means `origin` was unresolvable; `gh` then infers the
+  // repo from the local git context, which is the pre-#419 behaviour this
+  // path has always relied on.
+  if !slug.is_empty() {
     args.push("--repo".into());
-    args.push(repo.into());
+    args.push(slug.into());
   }
-  let stdout = run_gh(&args)?;
+  args
+}
+
+/// Recover the created PR from the URL `gh pr create` prints.
+pub fn parse_created_pr(stdout: &str) -> Result<CreatedPr> {
   let stdout = stdout.trim().to_string();
   let Some(caps) = PR_URL_RE.captures(&stdout) else {
     return Err(GwmError::CommandFailed(format!(
@@ -978,34 +1137,15 @@ pub fn fetch_pr(slug: &str, number: u64) -> Result<PrStatus> {
 /// counterpart to [`fetch_issue_with`], used by the TUI off-thread fetch
 /// (issue #217).
 pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatus> {
-  let stdout = run_gh_with(
-    program,
-    [
-      "pr",
-      "view",
-      &number.to_string(),
-      "--repo",
-      slug,
-      "--json",
-      PR_JSON_FIELDS,
-    ],
-  )?;
-  parse_pr_json(&stdout)
+  parse_pr_json(&run_gh_with(program, pr_view_argv(slug, number))?)
 }
 
-/// The slice of PR metadata `gwm review` needs to materialise a worktree:
-/// the head ref name (slug source), the author login (path component), and
-/// the base ref (diff base). Distinct from [`PrStatus`] so the TUI's
-/// status/CI path stays untouched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrHead {
-  pub number: u64,
-  /// Author login, e.g. `alice` (`dependabot[bot]` for bot PRs).
-  pub author: String,
-  /// The PR's head branch name, e.g. `feat/spike-x`.
-  pub head_ref_name: String,
-  /// The PR's base branch name, e.g. `main`.
-  pub base_ref_name: String,
+/// Argv for `gh pr view <n> --repo <slug> --json …`.
+pub fn pr_view_argv(slug: &str, number: u64) -> Vec<String> {
+  let mut argv: Vec<String> = vec!["pr".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--json".into(), PR_JSON_FIELDS.into()]);
+  argv
 }
 
 #[derive(Deserialize)]
@@ -1049,16 +1189,15 @@ pub fn parse_pr_head_json(s: &str) -> Result<PrHead> {
 /// `gwm review` needs (author / head ref / base ref). Works for PRs in any
 /// state — open, draft, closed, or merged.
 pub fn fetch_pr_head(slug: &str, number: u64) -> Result<PrHead> {
-  let stdout = run_gh([
-    "pr",
-    "view",
-    &number.to_string(),
-    "--repo",
-    slug,
-    "--json",
-    PR_HEAD_JSON_FIELDS,
-  ])?;
-  parse_pr_head_json(&stdout)
+  parse_pr_head_json(&run_gh(pr_head_argv(slug, number))?)
+}
+
+/// Argv for `gh pr view <n> --repo <slug> --json number,author,headRefName,baseRefName`.
+pub fn pr_head_argv(slug: &str, number: u64) -> Vec<String> {
+  let mut argv: Vec<String> = vec!["pr".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--json".into(), PR_HEAD_JSON_FIELDS.into()]);
+  argv
 }
 
 /// Find the most recent PR opened from `branch` (head ref) on the given
@@ -1078,20 +1217,23 @@ pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
 /// closed or merged PR for the branch is still detected (its `PrState`
 /// is resolved later via [`fetch_pr`]).
 pub fn find_pr_argv(slug: &str, branch: &str) -> Vec<String> {
-  vec![
-    "pr".into(),
-    "list".into(),
-    "--repo".into(),
-    slug.into(),
+  let mut argv: Vec<String> = vec!["pr".into(), "list".into()];
+  argv.extend(repo_flag(slug));
+  argv.extend([
     "--head".into(),
     branch.into(),
     "--state".into(),
     "all".into(),
     "--json".into(),
-    "number".into(),
+    // `isCrossRepository` is GitHub's own marker for "opened from a
+    // fork"; `parse_pr_list_number` ranks on it (Codex review #458).
+    "number,isCrossRepository".into(),
+    // More than one row on purpose: `--head` matches the branch NAME
+    // only, so a fork carrying the same name can appear.
     "--limit".into(),
-    "1".into(),
-  ]
+    "20".into(),
+  ]);
+  argv
 }
 
 /// Parse the JSON array printed by `gh pr list --json number --limit 1`,
@@ -1101,12 +1243,37 @@ pub fn parse_pr_list_number(s: &str) -> Result<Option<u64>> {
   #[derive(Deserialize)]
   struct PrRef {
     number: u64,
+    /// GitHub's marker for a PR opened from a fork. `--head <branch>`
+    /// matches the branch NAME only, so a fork sharing the name lands in
+    /// the same list — and its number would be persisted as this
+    /// branch's detected PR (Codex review #458). Absent is treated as
+    /// same-repo so an older payload still detects.
+    #[serde(rename = "isCrossRepository", default)]
+    is_cross_repository: Option<bool>,
   }
   let arr: Vec<PrRef> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
     kind: "pr list",
     source: e,
   })?;
-  Ok(arr.into_iter().next().map(|p| p.number))
+  // Prefer a same-repo PR; fall back to a fork's rather than reporting
+  // nothing. Filtering forks out entirely also removed the standard
+  // contributor workflow — branch locally, push to your own fork, open
+  // the PR against upstream — which is cross-repository by definition
+  // and had been detected before (Codex review #458).
+  //
+  // What is left ambiguous: no same-repo PR *and* a fork PR that might
+  // not be yours. Resolving that needs `headRepositoryOwner` matched
+  // against the repo's configured remotes, which is new machinery in
+  // round 27 of a review — filed as issue #461. Until then this is
+  // still strictly better than the pre-filter behaviour, which took the
+  // first row whatever it was.
+  Ok(
+    arr
+      .iter()
+      .find(|p| !p.is_cross_repository.unwrap_or(false))
+      .or_else(|| arr.first())
+      .map(|p| p.number),
+  )
 }
 
 fn run_gh<I, S>(args: I) -> Result<String>
@@ -1117,60 +1284,17 @@ where
   run_gh_with(&gh_program(), args)
 }
 
-/// Build the human-readable command line stored on the Command Logs
-/// transcript (issue #226) for a `gh` invocation: the program's *file name*
-/// (so a `GWM_GH=/usr/bin/gh` override still reads as `gh issue view …`
-/// rather than leaking the full path) followed by the resolved args. Kept
-/// pure and `pub` so its argv format is unit-testable without spawning `gh`
-/// (which CI runners do not have).
-pub fn gh_command_line(program: &OsStr, args: &[OsString]) -> String {
-  let name = Path::new(program)
-    .file_name()
-    .map(|n| n.to_string_lossy().into_owned())
-    .unwrap_or_else(|| program.to_string_lossy().into_owned());
-  let mut line = name;
-  for arg in args {
-    line.push(' ');
-    line.push_str(&arg.to_string_lossy());
-  }
-  line
-}
-
 /// [`run_gh`] against an explicitly resolved `gh` program. Lets callers on
 /// a worker thread (issue #217) avoid re-reading `GWM_GH` / the process
-/// environment concurrently with env-mutating code on other threads.
+/// environment concurrently with env-mutating code on other threads. The
+/// spawn + logging + error shape is shared with the GitLab backend since
+/// #419 — see [`forge::run_cli`].
 fn run_gh_with<I, S>(program: &OsStr, args: I) -> Result<String>
 where
   I: IntoIterator<Item = S>,
   S: AsRef<OsStr>,
 {
-  // Collect the args once so they can both drive the spawn and build the
-  // human-readable command line stored on the Command Logs transcript
-  // (issue #226): the resolved `gh <args…>`, not an opaque handle.
-  let collected: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_os_string()).collect();
-  let cmdline = gh_command_line(program, &collected);
-  let mut cmd = Command::new(program);
-  cmd.args(&collected);
-  let output = crate::command_log::run_logged(&mut cmd, cmdline)
-    .map_err(|e| GwmError::CommandFailed(format!("gh: failed to spawn ({}). Is `gh` installed and on PATH?", e)))?;
-  if !output.status.success() {
-    return Err(GwmError::CommandFailed(format!(
-      "gh exited {}: {}",
-      output.status,
-      String::from_utf8_lossy(&output.stderr).trim()
-    )));
-  }
-  Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-/// Build the canonical GitHub URL for an issue, given the repo slug.
-pub fn issue_url(slug: &str, number: u64) -> String {
-  format!("https://github.com/{}/issues/{}", slug, number)
-}
-
-/// Build the canonical GitHub URL for a PR, given the repo slug.
-pub fn pr_url(slug: &str, number: u64) -> String {
-  format!("https://github.com/{}/pull/{}", slug, number)
+  forge::run_cli(program, args)
 }
 
 // ---- Labels (issue #81) -------------------------------------------------
@@ -1225,16 +1349,15 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
 /// Extracted so the test suite can pin the contract; callers should
 /// prefer `fetch_remote_labels` which actually shells out.
 pub fn label_list_argv(slug: &str) -> Vec<String> {
-  vec![
-    "label".into(),
-    "list".into(),
-    "--repo".into(),
-    slug.into(),
+  let mut argv: Vec<String> = vec!["label".into(), "list".into()];
+  argv.extend(repo_flag(slug));
+  argv.extend([
     "--json".into(),
     LABEL_JSON_FIELDS.into(),
     "--limit".into(),
     LABEL_LIST_LIMIT.into(),
-  ]
+  ]);
+  argv
 }
 
 /// Argv for `gh label create <name> --color <hex> [--description <desc>] --force --repo <slug>`.
@@ -1245,16 +1368,9 @@ pub fn label_list_argv(slug: &str) -> Vec<String> {
 /// otherwise wipe an existing description that the user didn't intend
 /// to touch.
 pub fn label_create_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
-  let mut argv = vec![
-    "label".into(),
-    "create".into(),
-    spec.name.clone(),
-    "--repo".into(),
-    slug.into(),
-    "--color".into(),
-    spec.color.clone(),
-    "--force".into(),
-  ];
+  let mut argv: Vec<String> = vec!["label".into(), "create".into(), spec.name.clone()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--color".into(), spec.color.clone(), "--force".into()]);
   if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
     argv.push("--description".into());
     argv.push(desc.clone());
@@ -1266,14 +1382,10 @@ pub fn label_create_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
 /// flag bypasses the interactive confirm prompt; without it gh blocks
 /// on a TTY read and `gwm labels push --prune` hangs.
 pub fn label_delete_argv(slug: &str, name: &str) -> Vec<String> {
-  vec![
-    "label".into(),
-    "delete".into(),
-    name.into(),
-    "--repo".into(),
-    slug.into(),
-    "--yes".into(),
-  ]
+  let mut argv: Vec<String> = vec!["label".into(), "delete".into(), name.into()];
+  argv.extend(repo_flag(slug));
+  argv.push("--yes".into());
+  argv
 }
 
 /// Run `gh label list --repo <slug> --json …` and parse the result.
@@ -1312,6 +1424,18 @@ pub fn push_label(slug: &str, spec: &LabelSpec) -> Result<()> {
 /// other/repo` retargets the operation. We refuse the prune with a
 /// scoped error instead of running the risky argv.
 pub fn delete_label(slug: &str, name: &str) -> Result<()> {
+  validate_remote_label_name(name)?;
+  let argv = label_delete_argv(slug, name);
+  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+  run_gh(&args)?;
+  Ok(())
+}
+
+/// Refuse a hostile remote label name before it reaches an argv slot
+/// (issue #100). `gh label delete <name>` takes the name positionally, so
+/// a remote label starting with `-` would be parsed as a flag: `-h` no-ops
+/// the delete with a help banner, `--repo other/repo` retargets it.
+fn validate_remote_label_name(name: &str) -> Result<()> {
   crate::labels::validate_label_name(name).map_err(|e| {
     let inner = match e {
       GwmError::Config(msg) => msg,
@@ -1321,11 +1445,7 @@ pub fn delete_label(slug: &str, name: &str) -> Result<()> {
       "labels (remote): {} — refusing to delete via `gh label delete`",
       inner
     ))
-  })?;
-  let argv = label_delete_argv(slug, name);
-  let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-  run_gh(&args)?;
-  Ok(())
+  })
 }
 
 // ---- Milestones (issue #82) ---------------------------------------------
@@ -1395,7 +1515,11 @@ pub fn milestone_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),
     "--paginate".into(),
-    format!("repos/{}/milestones?state=all&per_page={}", slug, MILESTONE_PER_PAGE),
+    format!(
+      "{}/milestones?state=all&per_page={}",
+      repo_api_path(slug),
+      MILESTONE_PER_PAGE
+    ),
   ]
 }
 
@@ -1408,7 +1532,7 @@ pub fn milestone_create_argv(slug: &str, spec: &MilestoneSpec) -> Vec<String> {
     "api".into(),
     "-X".into(),
     "POST".into(),
-    format!("repos/{}/milestones", slug),
+    format!("{}/milestones", repo_api_path(slug)),
     "-f".into(),
     format!("title={}", spec.title),
     "-f".into(),
@@ -1433,7 +1557,7 @@ pub fn milestone_update_argv(slug: &str, number: u64, spec: &MilestoneSpec) -> V
     "api".into(),
     "-X".into(),
     "PATCH".into(),
-    format!("repos/{}/milestones/{}", slug, number),
+    format!("{}/milestones/{}", repo_api_path(slug), number),
     "-f".into(),
     format!("title={}", spec.title),
     "-f".into(),
@@ -1458,7 +1582,7 @@ pub fn milestone_delete_argv(slug: &str, number: u64) -> Vec<String> {
     "api".into(),
     "-X".into(),
     "DELETE".into(),
-    format!("repos/{}/milestones/{}", slug, number),
+    format!("{}/milestones/{}", repo_api_path(slug), number),
   ]
 }
 
@@ -1498,4 +1622,335 @@ pub fn delete_milestone(slug: &str, number: u64) -> Result<()> {
   let args: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
   run_gh(&args)?;
   Ok(())
+}
+
+// ---- The Forge backend (issue #419) -------------------------------------
+
+/// GitHub implementation of [`Forge`], shelling out to `gh`.
+///
+/// A thin binding over the free functions above rather than a rewrite:
+/// they were already the GitHub backend in all but name, and keeping them
+/// `pub` means the extraction reads as a no-op for the existing tests
+/// that pin the `gh` argv contract.
+#[derive(Debug, Clone)]
+pub struct GitHubForge {
+  origin: forge::RemoteRef,
+  program: OsString,
+  env: Vec<(String, String)>,
+  env_remove: Vec<&'static str>,
+  workdir: Option<std::path::PathBuf>,
+}
+
+impl GitHubForge {
+  /// Resolves `$GWM_GH` **now**, on the calling thread, so a forge handed
+  /// to the TUI's fetch worker never re-reads the process environment
+  /// concurrently with env-mutating code (issue #217).
+  pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
+    Self {
+      env: gh_env(&origin),
+      env_remove: gh_env_remove(&origin, workdir.is_some()),
+      origin,
+      program: gh_program(),
+      workdir,
+    }
+  }
+
+  fn run<I, S>(&self, args: I) -> Result<String>
+  where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+  {
+    forge::run_cli_with(
+      &self.program,
+      args,
+      &forge::CliSpawn {
+        env: &self.env,
+        cwd: self.workdir.as_deref(),
+        env_remove: &self.env_remove,
+        redact_after: &[],
+        redact_output: false,
+        // `gh` takes bodies via `--body-file`, so nothing sensitive ever
+        // needs stdin on this backend (contrast `glab`, issue #459).
+        stdin: None,
+      },
+    )
+  }
+}
+
+/// Environment pinned on every `gh` spawn (Codex review #458).
+///
+/// `$GH_HOST` selects the GitHub instance. Before #419 the slug parser
+/// rejected anything that was not github.com, so a GitHub Enterprise host
+/// could not reach this code at all; host-agnostic parsing opened that
+/// door, and without the pin `gh` would silently target github.com and
+/// could read a same-named repo on the wrong tenant.
+///
+/// github.com is pinned like any other host, deliberately: the child
+/// inherits gwm's environment, so a user's ambient `GH_HOST` — routine for
+/// enterprise users — would otherwise retarget a github.com repo, since
+/// the argv only ever carries `--repo owner/repo` and never a hostname
+/// (Codex review #458, round 3).
+///
+/// The host is pinned whenever a slug is known — including github.com,
+/// and including a **guessed** (SSH) origin. Both were exempted at some
+/// point and both exemptions were wrong (Codex review #458):
+///
+/// - The child inherits gwm's environment, so an ambient `GH_HOST` —
+///   routine for enterprise users — retargets every call, since the argv
+///   only ever carries `--repo owner/repo` and never a hostname. Knowing
+///   the repo is on github.com, gwm says so rather than letting the
+///   environment decide.
+/// - `gh` cannot be steered any other way: `gh api repos/<slug>/…` bakes
+///   the slug into the request path, so unlike `glab` it has no working
+///   directory to fall back to. This is the one place the two backends
+///   diverge — see [`crate::gitlab::glab_env`], where a guessed origin is
+///   deliberately left alone because a distinct SSH hostname *is* a
+///   documented GitLab pattern.
+///
+/// Nothing is pinned only when the slug is empty: that is the caller
+/// asking `gh` to infer the project locally.
+/// Inherited variables that would redirect `gh` at another repository.
+///
+/// `$GH_REPO` names a whole `[HOST/]OWNER/REPO` and wins over both the
+/// working directory and any inference, so an exported one silently
+/// retargets every call. It is cleared whenever gwm supplies a project
+/// of its own — a slug, or a repo to spawn the child inside.
+///
+/// It is **not** cleared when gwm supplies neither. That case is real
+/// and is the one `$GH_REPO` exists for: `resolve_or_default` builds a
+/// forge for a repo with no `origin`, deliberately passing no slug and
+/// carrying no workdir, so `gwm new` / `gwm pr` still work there. gh
+/// cannot infer a project either, and taking the variable away left the
+/// user no way to name one (Codex review #458). Tier 1's premise —
+/// "gwm always knows the project" — was false in exactly that spot.
+///
+/// The rule this applies, shared with [`crate::gitlab::glab_env_remove`]
+/// and stated once so it stops being rediscovered one variable per
+/// review round:
+///
+/// 1. **Project selectors are cleared when gwm supplies a project.**
+///    A slug, or a working directory for the CLI to infer from.
+/// 2. **Host overrides are cleared only when gwm has an authoritative
+///    value to replace them with.** gwm sometimes knows the host.
+/// 3. **Authentication and config location are never touched.** gwm
+///    never knows better than the user which identity they meant to use
+///    or where they keep their credentials.
+///
+/// Tier 3 raises the obvious objection — gwm pins a host read from
+/// `origin` and leaves the global tokens in place, so a repo whose
+/// remote points at a hostile server gets a bearer token sent to it.
+///
+/// An earlier revision of this comment answered "unchanged by any of
+/// this, the pin carries the host `gh` would have resolved unaided".
+/// That was **false**, and it is recorded rather than deleted because
+/// the same mistake produced the `$GITLAB_API_HOST` cycle in
+/// [`crate::gitlab::glab_env_remove`]. Before this PR
+/// `github::repo_slug` accepted `git@github.com:` and
+/// `https://github.com/` and nothing else — every other origin was
+/// rejected with "is not a github URL", so gwm never made an
+/// authenticated call against an arbitrary host at all. Verifying the
+/// mechanism is not verifying the baseline.
+///
+/// Closed where it is actually opened: [`crate::forge::resolve`] no
+/// longer treats an unrecognised host as GitHub by default. The
+/// residual hole is stated there.
+///
+/// Audited against gh's documented environment. Tier 1: `$GH_REPO`.
+/// Tier 2: none — `$GH_HOST` is pinned by [`gh_env`] and gh publishes
+/// neither an alias for it nor a separate API endpoint override, so
+/// there is nothing to close behind the pin (unlike `glab`). Tier 3:
+/// `$GH_TOKEN` / `$GITHUB_TOKEN`, `$GH_ENTERPRISE_TOKEN` /
+/// `$GITHUB_ENTERPRISE_TOKEN`, `$GH_CONFIG_DIR`. Everything else gh
+/// reads is presentation (`$GH_PAGER`, `$GH_EDITOR`, `$GH_BROWSER`,
+/// `$GH_FORCE_TTY`, `$GH_MDWIDTH`, `$NO_COLOR`), diagnostics
+/// (`$GH_DEBUG`), or telemetry — none of it can retarget a call.
+pub fn gh_env_remove(origin: &forge::RemoteRef, has_workdir: bool) -> Vec<&'static str> {
+  if origin.path.is_empty() && !has_workdir {
+    return Vec::new();
+  }
+  vec!["GH_REPO"]
+}
+
+pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
+  // Same rule as [`crate::gitlab::glab_env`]. An SSH remote carries no
+  // web scheme or port, so `https://<ssh-host>` is a guess, and pinning
+  // it as `$GH_HOST` broke a GHE whose SSH endpoint is not its API host.
+  //
+  // Rounds 4, 5 and 7 pinned harder each time, to stop an ambient
+  // `$GH_HOST` retargeting the call; round 16 refused to stop, on the
+  // claim that `gh api` had no way to resolve a repo from the working
+  // directory. That claim was read off a stale code comment and is
+  // wrong. gh documents `{owner}` / `{repo}` as endpoint placeholders
+  // "replaced with values from the repository of the current directory",
+  // and documents `$GH_HOST` as applying only "where a hostname has not
+  // been provided, or cannot be inferred from the context of a local Git
+  // repository". The child is spawned inside the repo, so delegating
+  // closes the retargeting hazard rather than reopening it — the slug
+  // goes away with the pin (see `repo_selector` and `repo_api_path`).
+  //
+  // `$GH_HOST` also cannot carry everything a remote URL can. gh's own
+  // `HostnameValidator` rejects any hostname containing `:`, and
+  // `RESTPrefix` / `GraphQLEndpoint` always build `https://` for
+  // anything but the hardcoded `github.localhost`
+  // (`internal/ghinstance/host.go`). So a non-default port and a plain
+  // http origin are both inexpressible — and mis-pinning them is worse
+  // than a 404, because `IsEnterprise` means "not github.com":
+  // `GH_HOST=github.com:443` reads as Enterprise, so gh picks
+  // `$GH_ENTERPRISE_TOKEN` and sends it to github.com while calling
+  // `/api/v3/`. Round 2 flagged the port as undocumented and passed it
+  // anyway; the answer is no (Codex review #458). Where gwm cannot
+  // express the origin it pins nothing and delegates, which is the same
+  // path a guessed origin already takes.
+  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
+    return Vec::new();
+  }
+  let Some(host) = gh_pinnable_host(origin) else {
+    return Vec::new();
+  };
+  vec![("GH_HOST".to_string(), host)]
+}
+
+/// The origin as a hostname gh will accept, or `None` when it cannot be
+/// expressed. A default port is dropped rather than disqualifying —
+/// `github.com:443` and `github.com` are the same endpoint, and only the
+/// first one reads as Enterprise.
+fn gh_pinnable_host(origin: &forge::RemoteRef) -> Option<String> {
+  let (scheme, rest) = origin.web_origin.split_once("://")?;
+  if !scheme.eq_ignore_ascii_case("https") {
+    return None;
+  }
+  let authority = rest.trim_end_matches('/');
+  match authority.rsplit_once(':') {
+    Some((h, "443")) => Some(h.to_string()),
+    Some(_) => None,
+    None => Some(authority.to_string()),
+  }
+}
+
+impl Forge for GitHubForge {
+  fn kind(&self) -> ForgeKind {
+    ForgeKind::GitHub
+  }
+
+  fn slug(&self) -> &str {
+    // Identity, not the CLI selector: this feeds display and URLs, which
+    // need the real path even when `repo_selector` deliberately returns
+    // nothing. Same as the GitLab backend.
+    &self.origin.path
+  }
+
+  fn web_origin(&self) -> &str {
+    &self.origin.web_origin
+  }
+
+  fn workdir(&self) -> Option<&std::path::Path> {
+    self.workdir.as_deref()
+  }
+
+  fn origin_is_authoritative(&self) -> bool {
+    self.origin.trust == forge::OriginTrust::FromUrl
+  }
+
+  /// Always the slug: `gh` is pinned by `$GH_HOST` even for a guessed
+  /// origin (see [`gh_env`]), so there is no ambiguity to defer to the
+  /// working directory — and `gh api repos/<slug>/…` could not defer
+  /// anyway, the slug being part of the request path.
+  fn repo_selector(&self) -> &str {
+    // The slug and the host pin move together, or the slug resolves
+    // against the wrong instance. Two ways to have no pin: a guessed
+    // origin (round 18), and — since round 27 — an origin `gh` cannot
+    // express, a non-default port or plain http. The second was missed,
+    // so `--repo owner/repo` went out with no `$GH_HOST` and `gh`
+    // resolved it against github.com or an ambient one: a same-named
+    // repo on another tenant, read and pruned (Codex review #458).
+    //
+    // `github.com` is the exception that needs no pin, being gh's own
+    // default instance.
+    let pinned = !gh_env(&self.origin).is_empty() || self.origin.host.eq_ignore_ascii_case("github.com");
+    if !pinned && self.workdir.is_some() {
+      return "";
+    }
+    &self.origin.path
+  }
+
+  fn issue_url(&self, number: u64) -> String {
+    format!("{}/{}/issues/{}", self.origin.web_origin, self.origin.path, number)
+  }
+
+  fn pr_url(&self, number: u64) -> String {
+    format!("{}/{}/pull/{}", self.origin.web_origin, self.origin.path, number)
+  }
+
+  fn pr_head_refspec(&self, number: u64) -> String {
+    format!("pull/{number}/head")
+  }
+
+  // Every method below goes through `self.run`, never the free functions,
+  // so `$GH_HOST` reaches the child (Codex review #458). The free functions
+  // stay for the argv/parse contract the test suite pins.
+
+  fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
+    parse_issue_json(&self.run(issue_view_argv(self.repo_selector(), number))?)
+  }
+
+  fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
+    parse_pr_json(&self.run(pr_view_argv(self.repo_selector(), number))?)
+  }
+
+  fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
+    parse_pr_head_json(&self.run(pr_head_argv(self.repo_selector(), number))?)
+  }
+
+  fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
+    parse_pr_list_number(&self.run(find_pr_argv(self.repo_selector(), branch))?)
+  }
+
+  fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
+    parse_created_issue(&self.run(issue_create_argv(self.repo_selector(), req))?)
+  }
+
+  fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
+    parse_created_pr(&self.run(pr_create_argv(self.repo_selector(), req))?)
+  }
+
+  fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {
+    parse_labels_json(&self.run(label_list_argv(self.repo_selector()))?)
+  }
+
+  fn create_label(&self, spec: &LabelSpec) -> Result<()> {
+    // `gh label create --force` means "create OR update", so both halves
+    // of the trait's create/update split land on the same call here. The
+    // split exists for GitLab, which has no such flag.
+    self.run(label_create_argv(self.repo_selector(), spec))?;
+    Ok(())
+  }
+
+  fn update_label(&self, spec: &LabelSpec) -> Result<()> {
+    self.create_label(spec)
+  }
+
+  fn delete_label(&self, name: &str) -> Result<()> {
+    validate_remote_label_name(name)?;
+    self.run(label_delete_argv(self.repo_selector(), name))?;
+    Ok(())
+  }
+
+  fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
+    parse_milestones_json(&self.run(milestone_list_argv(self.repo_selector()))?)
+  }
+
+  fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
+    self.run(milestone_create_argv(self.repo_selector(), spec))?;
+    Ok(())
+  }
+
+  fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
+    self.run(milestone_update_argv(self.repo_selector(), number, spec))?;
+    Ok(())
+  }
+
+  fn delete_milestone(&self, number: u64) -> Result<()> {
+    self.run(milestone_delete_argv(self.repo_selector(), number))?;
+    Ok(())
+  }
 }

@@ -78,14 +78,40 @@ pub fn env_truthy(key: &str) -> bool {
   }
 }
 
+/// The trust-ledger key for `repo` — [`resolve_origin_key`] fed from the
+/// `origin` remote.
+///
+/// One helper rather than the extraction repeated at each call site.
+/// That repetition is what broke: the doc below used to argue the module
+/// should stay git2-free because "every caller already holds a
+/// Repository and extracts the URL on their side in three lines", and
+/// three of the four callers wrote the same three lines while the fourth
+/// reached for `RemoteRef::web_origin` instead (issue #463).
+///
+/// The difference is not cosmetic. `web_origin` is scheme + host, so the
+/// key stopped identifying a *repo* and started identifying a *host* —
+/// collapsing `(origin, sha256)` into a pair shared by every repo on
+/// that host with an identically-hashing `.gwm.toml`. Since that file is
+/// normally a template copied across a team's repos, identical hashes
+/// are the ordinary case, and a hostile repo could inherit a sibling's
+/// approval by shipping its config verbatim. The two gates also stopped
+/// seeing each other's entries, so `gwm trust add` reported success and
+/// `gwm create` in the same repo still refused.
+pub fn origin_key_for_repo(repo: &git2::Repository, workdir: &Path) -> String {
+  let url = repo
+    .find_remote("origin")
+    .ok()
+    .and_then(|r| r.url().ok().map(String::from));
+  resolve_origin_key(url.as_deref(), workdir)
+}
+
 /// Resolve the trust-ledger key for the current repo: prefer the
 /// `origin` remote URL (the hostile-clone threat axis), fall back to
 /// the canonicalised workdir path (purely-local repos with no remote
 /// still benefit from the drift-detection half of the feature).
 ///
-/// Takes `origin_url: Option<&str>` rather than a `git2::Repository`
-/// so this module stays git2-free — every caller already holds a
-/// Repository and extracts the URL on their side in three lines.
+/// Prefer [`origin_key_for_repo`] when you hold a `Repository`. This
+/// lower-level form stays for callers that genuinely have only a URL.
 pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
   if let Some(url) = origin_url {
     if !url.is_empty() {
@@ -125,6 +151,69 @@ pub enum TrustOutcome {
     ledger: TrustLedger,
     ledger_path: PathBuf,
   },
+}
+
+/// Is the repo's own `.gwm.toml` approved in the ledger?
+///
+/// A second, narrower question than [`evaluate`], and it deliberately
+/// does **not** reuse it. `evaluate` short-circuits to `Proceed` on an
+/// empty bootstrap surface — no commands to run, nothing to gate — and
+/// a `.gwm.toml` whose entire content is `forge = "gitlab"` has exactly
+/// that shape. It is still a file that ships with the repo telling gwm
+/// which host to send an authenticated call to (Codex review #458), so
+/// the surface short-circuit is wrong for this question.
+///
+/// Same ledger, same `(origin, sha256)` key, same `GWM_ALLOW_BOOTSTRAP`
+/// escape hatch: approving a repo approves the whole file, and editing
+/// the file revokes that approval. Non-interactive by construction —
+/// [`crate::forge::resolve`] runs on the TUI's selection path, which
+/// cannot host a prompt. `gwm trust add` is how a user answers it.
+///
+/// No `.gwm.toml` at all is `false`, and the distinction matters.
+///
+/// This answers "does *the repo's own file* authorise this?", so an
+/// absent file is an absent statement, not a blanket yes. It briefly
+/// returned `true` on the reasoning that with no repo-controlled file in
+/// play the request must have come from the user's own config — which
+/// held only while a bare global `forge` key was itself an authority.
+/// Once that key stopped authorising hosts, the same `true` became the
+/// way around the gate: a repo with no `.gwm.toml` on an unrecognised
+/// host inherits `forge` from the global config by merge, reaches this
+/// question, and was waved through on the strength of the file it does
+/// not have.
+pub fn config_is_trusted(workdir: &Path, origin: &str, mode: TrustMode) -> Result<bool> {
+  let bytes = match fs::read(workdir.join(CONFIG_FILE)) {
+    Ok(b) => b,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+    Err(e) => return Err(e.into()),
+  };
+  match mode {
+    TrustMode::Deny => return Ok(false),
+    TrustMode::Allow => return Ok(true),
+    TrustMode::Prompt => {}
+  }
+  let ledger_path = default_ledger_path()?;
+  Ok(TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes)))
+}
+
+/// Record the current repo's `.gwm.toml` as trusted. Backs `gwm trust
+/// add`, which exists because the forge gate above is the first thing
+/// that can refuse on a config with **no** bootstrap surface — nothing
+/// else would ever prompt for it, so without this the refusal would be
+/// unclearable.
+pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option<String>> {
+  let path = workdir.join(CONFIG_FILE);
+  let bytes = match fs::read(&path) {
+    Ok(b) => b,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    Err(e) => return Err(e.into()),
+  };
+  let sha = hash_config(&bytes);
+  let ledger_path = default_ledger_path()?;
+  let mut ledger = TrustLedger::load(&ledger_path)?;
+  ledger.record(origin, &sha, actor);
+  ledger.save(&ledger_path)?;
+  Ok(Some(sha))
 }
 
 /// Silent gate evaluation. Reads `.gwm.toml`, hashes it, applies the

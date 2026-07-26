@@ -287,7 +287,11 @@ impl RepoMeta {
         repo: repo_name,
       };
     };
-    let Some((owner, name)) = slug.split_once('/') else {
+    // `rsplit_once`, not `split_once` (Codex review #458): a GitLab slug
+    // can be `group/sub/proj`, where the namespace is everything before
+    // the LAST separator. Identical behaviour for GitHub's two-segment
+    // `owner/repo`.
+    let Some((owner, name)) = slug.rsplit_once('/') else {
       return Self {
         owner: String::new(),
         repo: repo_name,

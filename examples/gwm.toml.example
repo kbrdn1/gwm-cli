@@ -28,6 +28,34 @@
 # even when trusted. Manage entries with `gwm trust list / revoke / show`.
 # Full threat model: https://github.com/kbrdn1/gwm-cli/blob/main/src/trust.rs
 
+# === forge (issue #419) ====================================================
+# Which code-hosting platform backs issue / PR lookups: "github" (shells out
+# to `gh`) or "gitlab" (shells out to `glab`, and says "MR" where GitHub says
+# "PR"). Everything else — branch links, worktrees, bootstrap — is identical.
+#
+# Omit the key and gwm infers the forge from the `origin` host, which covers
+# github.com, ghe.com and gitlab.com. A SELF-HOSTED instance lives on an
+# arbitrary domain and cannot be detected from the URL alone, so name it:
+#
+#   forge = "gitlab"
+#
+# The key always wins over inference, so it also forces GitHub on a host that
+# would otherwise be read as GitLab.
+#
+# NOTE: on a host gwm does not recognise, this key names the BACKEND but does
+# not authorise the HOST — it ships with the repo, so on its own it would let
+# a clone point `gh` / `glab` at any server it likes, carrying whatever token
+# is in your environment. Either approve this repo once with `gwm trust add`,
+# or authorise the host in YOUR OWN ~/.config/gwm/config.toml (that file is
+# never shipped with a repo, which is what makes it an answer):
+#
+#   [forge_hosts]
+#   "gitlab.acme.com" = "gitlab"
+#   "ghe.acme.com"    = "github"
+#
+# `forge_hosts` is read from the user-level config ONLY — setting it here in a
+# repo's .gwm.toml has no effect, by design.
+
 [worktree]
 base = "{home}/cc-worktree/{repo}"
 # Repo-relative alternative (sibling `worktrees/`, à la Zed `../worktrees`):

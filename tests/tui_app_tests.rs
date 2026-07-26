@@ -4296,8 +4296,6 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   // ships a Windows fake-gh too).
   let (dir, repo, mut app) = make_app_on_branch("detect-me");
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
-  // Re-resolve the slug now that the remote exists.
-  app.refresh_link();
 
   // Write a fake `gh` (detecting PR `n` via both `pr list` and `pr view`)
   // to its own path. Two distinct scripts — never one rewritten in place —
@@ -4336,6 +4334,13 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_first);
   }
+  // Re-resolve the slug now that the remote exists.
+  // NOTE: `refresh_link` is deliberately called *after* `GWM_GH` is set.
+  // Since #419 the forge captures its program at construction, which is
+  // what keeps the TUI's off-thread fetch from re-reading the environment
+  // (the #217 contract). Resolving the link before the override would pin
+  // the real `gh` and never see the fake.
+  app.refresh_link();
 
   // First refresh: nothing linked → detect PR #128.
   app.refresh_github_status();
@@ -4359,6 +4364,8 @@ fn refresh_github_status_auto_detects_pr_for_unlinked_branch() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_second);
   }
+  // Re-resolve so the swapped `GWM_GH` is picked up — see the note above.
+  app.refresh_link();
   app.refresh_github_status();
 
   unsafe {
@@ -4425,7 +4432,6 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   // `F` offline should keep showing the PR, not blank it.
   let (dir, repo, mut app) = make_app_on_branch("detect-me");
   repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
-  app.refresh_link();
 
   // A `gh` that detects PR #128, then a `gh` that always fails (exit 1).
   let gh_ok = dir.path().join("fake-gh-ok");
@@ -4453,6 +4459,11 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_ok);
   }
+  // `refresh_link` after each override: since #419 the forge captures its
+  // program at construction, which is what keeps the off-thread fetch from
+  // re-reading the environment (the #217 contract). Swapping `GWM_GH`
+  // without re-resolving would keep calling the previous fake.
+  app.refresh_link();
   app.refresh_github_status();
   assert_eq!(app.current_link().pr, Some(128), "first refresh detects #128");
 
@@ -4460,6 +4471,7 @@ fn refresh_keeps_persisted_pr_when_gh_detection_fails() {
   unsafe {
     std::env::set_var("GWM_GH", &gh_fail);
   }
+  app.refresh_link();
   app.refresh_github_status();
 
   unsafe {
@@ -4523,7 +4535,19 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
-  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let link = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
   // The live path must reconcile the persisted cache (#284), not just memory,
   // so no-fetch consumers (table at startup, `gwm open pr`) don't resurrect
   // the stale #128. Capture the stored value before the explicit link below.
@@ -4531,7 +4555,19 @@ fn read_link_with_pr_detection_refreshes_a_persisted_detection() {
 
   // Explicit override still wins even over a live re-detection.
   gwm::github::link_pr(&repo, "detect-me", 61).unwrap();
-  let explicit = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let explicit = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
 
   unsafe {
     match prior {
@@ -4588,7 +4624,19 @@ fn read_link_with_pr_detection_keeps_title_when_detected_pr_is_unchanged() {
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
-  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let link = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
 
   unsafe {
     match prior {
@@ -4637,7 +4685,19 @@ fn read_link_with_pr_detection_clears_persisted_cache_when_pr_vanished() {
   unsafe {
     std::env::set_var("GWM_GH", &gh);
   }
-  let link = gwm::github::read_link_with_pr_detection(&repo, "detect-me", "kbrdn1/gwm-cli").unwrap();
+  let link = gwm::github::read_link_with_pr_detection(
+    &repo,
+    "detect-me",
+    // Built here, after `GWM_GH` is set: the backend captures the
+    // program at construction (issue #419 keeps #217's off-thread
+    // contract by resolving the env once, up front).
+    gwm::forge::for_kind(
+      gwm::forge::ForgeKind::GitHub,
+      gwm::forge::parse_remote_url("https://github.com/kbrdn1/gwm-cli").unwrap(),
+    )
+    .as_ref(),
+  )
+  .unwrap();
   let stored = gwm::github::read_link(&repo, "detect-me").unwrap();
   unsafe {
     match prior {
@@ -10333,4 +10393,101 @@ mod agent_overlay_input {
     assert_eq!(app.detail_overlay.mode, DetailMode::Input, "stay for correction");
     assert!(app.status.contains("no agent session"), "got {}", app.status);
   }
+}
+
+#[test]
+fn open_menu_says_so_when_the_url_is_a_guess() {
+  // A guessed SSH origin has no web host in it, so the locally built URL
+  // may point at the SSH endpoint. It is still opened — refusing would
+  // leave a permanently dead menu entry on an unreachable instance — but
+  // the status bar stops it being a silent wrong tab (Codex review #458).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // A host that states its forge: `git.acme.internal` states none, and
+  // `forge::resolve` now refuses to guess rather than send an
+  // authenticated call there. The point here is the *guessed URL*
+  // warning, which an scp-syntax remote still produces on github.com.
+  repo.remote("origin", "git@github.com:team/proj.git").unwrap();
+  app.enter_open_menu();
+
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert!(url.contains("/issues/42"), "{url}");
+  assert!(app.status.contains("guessed"), "status was: {}", app.status);
+}
+
+#[test]
+fn open_menu_stays_quiet_on_an_authoritative_origin() {
+  // The negative control: an https origin names its web host, so the
+  // built URL is not a guess and must not be flagged as one.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.enter_open_menu();
+
+  app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert!(!app.status.contains("guessed"), "status was: {}", app.status);
+}
+
+#[test]
+fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
+  // `enter_open_menu` re-read the link through the invalidating
+  // `refresh_link`, wiping the very cache `cached_issue_url` reads — so
+  // the server-reported `web_url` was never used and the menu always
+  // built a URL locally (Codex review #458). Selection changes must
+  // still invalidate; only this path is exempt, and it is safe because
+  // the caches are keyed by number.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  // A host that states its forge: `git.acme.internal` states none, and
+  // `forge::resolve` now refuses to guess rather than send an
+  // authenticated call there. The point here is the *guessed URL*
+  // warning, which an scp-syntax remote still produces on github.com.
+  repo.remote("origin", "git@github.com:team/proj.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::forge::IssueStatus {
+    number: 42,
+    title: "t".into(),
+    state: gwm::forge::IssueState::Open,
+    url: "https://web.acme.internal:8443/team/proj/-/issues/42".into(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  app.enter_open_menu();
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert_eq!(url, "https://web.acme.internal:8443/team/proj/-/issues/42");
+  assert!(
+    !app.status.contains("guessed"),
+    "a server-reported URL is not a guess: {}",
+    app.status
+  );
+}
+
+#[test]
+fn open_menu_drops_a_cached_url_from_the_previous_origin() {
+  // `reread_link` preserves the fetch caches so the open menu can use
+  // the server-reported URL. Those caches are keyed by number alone, so
+  // an origin move must still clear them: otherwise issue #42 on the new
+  // instance opens the old tenant's #42 (Codex review #458).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::forge::IssueStatus {
+    number: 42,
+    title: "t".into(),
+    state: gwm::forge::IssueState::Open,
+    url: "https://github.com/acme/widgets/issues/42".into(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.enter_open_menu();
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert!(
+    !url.contains("github.com"),
+    "the old tenant's cached URL survived the move: {url}"
+  );
 }

@@ -1,6 +1,6 @@
 ---
 title: Intégrations
-description: Connectez gwm avec GitHub (gh), lazygit, les relecteurs IA, doctor en CI, et les distributions packagées (Homebrew, Nix).
+description: Connectez gwm avec GitHub (gh) ou GitLab (glab), lazygit, les relecteurs IA, doctor en CI, et les distributions packagées (Homebrew, Nix).
 navigation:
   title: Intégrations
 ---
@@ -10,6 +10,7 @@ navigation:
 gwm est volontairement minimal — il délègue aux outils que vous utilisez déjà plutôt que de les réimplémenter. Ces pages couvrent les points d'intégration pris en charge.
 
 - **[Liaison issue / PR GitHub](/fr/integrations/github-linking)** — lie automatiquement les branches au format `<type>/#<N>-<slug>` à leur issue, récupère l'état en temps réel via `gh`, et l'affiche dans la barre latérale du TUI.
+- **[GitLab (multi-forge)](/fr/integrations/gitlab)** — pointer gwm vers GitLab plutôt que GitHub : la clé `forge`, le backend `glab`, et les différences d'état CI et de terminologie.
 - **[`gwm doctor`](/fr/integrations/doctor)** — les 8 vérifications de santé, la sémantique des codes de sortie (`0 / 1 / 2`), la sonde du binaire de lancement ajoutée en v0.6, et la vérification du keymap `[tui.keys]` ajoutée en v0.8.
 - **[Homebrew & Nix](/fr/integrations/homebrew-nix)** — la surface de packaging : le tap Homebrew, le flake Nix, `cargo binstall`, et les archives de release pré-compilées.
 - **[Consommateurs du daemon](/fr/integrations/daemon-consumers)** — les premiers consommateurs de `gwm daemon` : le `gwm statusline` embarqué pour les prompts shell, le one-liner JSON-RPC brut, et une recette éditeur (Zed / VS Code).
