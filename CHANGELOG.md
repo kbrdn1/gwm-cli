@@ -29,7 +29,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     gwm reports that rather than guessing. Guessing would have sent an
     authenticated `gh` call — and a `$GH_ENTERPRISE_TOKEN` — to whatever host
     a cloned repo's `origin` happened to name.
+  - On such a host the key is only honoured from **your own**
+    `~/.config/gwm/config.toml`, or from a repo whose `.gwm.toml` you have
+    approved in the TOFU trust ledger. That file ships with the repo, so
+    letting it name the host would have handed a hostile clone the same
+    capability from a plain `gwm status`. Same ledger as
+    `[[bootstrap.command]]`, checked non-interactively because the TUI's
+    selection path cannot prompt — `gwm trust add` is how you answer, and
+    `GWM_ALLOW_BOOTSTRAP=1` remains the CI escape hatch.
   - `$GWM_GLAB` overrides the `glab` binary, mirroring `$GWM_GH`.
+  - New `gwm trust add`: approve the current repo's `.gwm.toml` without
+    running anything. The existing prompt only fires when the file has a
+    bootstrap surface to execute, so a config that only names `forge` could
+    never be approved through it.
   - `gwm doctor` probes the forge CLI, but only when `forge` is set
     explicitly, so repos that never opt in gain no new warning.
   - GitLab specifics absorbed at the parse boundary: `iid` (not `id`) as the

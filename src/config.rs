@@ -1438,6 +1438,24 @@ impl Config {
   /// Look for `.gwm.toml` in the given repo root, layered over the
   /// user-level global config at [`global_config_path`] (issue #190).
   /// Falls back to defaults when neither exists.
+  /// The `forge` key from the **user-level** config alone, ignoring the
+  /// repo's `.gwm.toml`.
+  ///
+  /// The two layers are not interchangeable for a security decision.
+  /// `merge_layered` lets the repo's file win, and that file ships with
+  /// the repo — so it cannot be what authorises gwm to make an
+  /// authenticated call to an unrecognised host. The user's own file
+  /// can (Codex review #458, and see [`crate::forge::resolve`]).
+  ///
+  /// Tolerant by design: an unreadable or malformed global config
+  /// yields `None` — "the user did not say", which fails closed — and
+  /// leaves the real parse error to the layered load.
+  pub fn global_forge() -> Option<crate::forge::ForgeKind> {
+    let path = global_config_path()?;
+    let value = read_config_value(&path).ok()?;
+    value.get("forge")?.clone().try_into().ok()
+  }
+
   pub fn load_for_repo(repo_root: &Path) -> Result<Self> {
     Self::load_layered(repo_root, global_config_path().as_deref())
   }

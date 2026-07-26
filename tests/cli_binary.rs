@@ -6421,10 +6421,13 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
     .unwrap();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
 
+  let ledger = dir.path().join("trust.toml");
   let gwm = |args: &[&str]| {
     Command::cargo_bin("gwm")
       .unwrap()
       .current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("GWM_NO_GLOBAL_CONFIG", "1")
       .args(args)
       .assert()
       .success();
@@ -6434,11 +6437,17 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
   // backend is named explicitly on both sides of the flip — that is the
   // gate from `forge::resolve`, not part of what this test pins.
   fs::write(dir.path().join(".gwm.toml"), "forge = \"github\"\n").unwrap();
+  gwm(&["trust", "add"]);
   // Record the GitHub backend against the repo.
   gwm(&["link", "issue", "7"]);
   gwm(&["open", "issue", "--print-url"]);
 
   fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n").unwrap();
+  // `git.acme.internal` states no forge, so the repo's own `.gwm.toml`
+  // is what names it — and that file ships with the repo, so it only
+  // counts once the repo is approved. Editing it above changed its
+  // hash, which is why this runs again here.
+  gwm(&["trust", "add"]);
   gwm(&["link", "pr", "42"]);
 
   // Resolves as GitLab. Before the fix this purged the line above and
@@ -6446,6 +6455,8 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
   Command::cargo_bin("gwm")
     .unwrap()
     .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
     .args(["open", "pr", "--print-url"])
     .assert()
     .success()
@@ -6457,4 +6468,59 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
     Some(42),
     "the user linked this under the new backend; nothing may drop it"
   );
+}
+
+#[test]
+fn a_repo_cannot_authorise_its_own_host_until_it_is_trusted() {
+  // The hole three review rounds kept naming: `.gwm.toml` ships with the
+  // repo, so letting its `forge` key point gwm at an unrecognised host
+  // meant a hostile clone could aim `gh` / `glab` at its own server —
+  // and whatever token the environment carries — from a plain
+  // `gwm status` or a TUI selection (Codex review #458).
+  //
+  // Same ledger as `[[bootstrap.command]]`, because it is the same
+  // decision about the same file. It is checked non-interactively, since
+  // `forge::resolve` runs on the TUI's selection path; `gwm trust add`
+  // is how the user answers.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://code.acme.internal/team/proj.git")
+    .unwrap();
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n").unwrap();
+  let ledger = dir.path().join("trust.toml");
+
+  let run = |args: &[&str]| {
+    let mut c = Command::cargo_bin("gwm").unwrap();
+    c.current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("GWM_NO_GLOBAL_CONFIG", "1")
+      .args(args);
+    c.assert()
+  };
+
+  run(&["link", "issue", "7"]).success();
+  run(&["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("gwm trust add"));
+
+  run(&["trust", "add"]).success();
+  run(&["open", "issue", "--print-url"])
+    .success()
+    .stdout(predicate::str::contains("code.acme.internal"));
+
+  // Approving covers the file as it was: editing it revokes that.
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n# changed\n").unwrap();
+  run(&["open", "issue", "--print-url"]).failure();
+
+  // And the escape hatch the rest of the trust surface already has,
+  // for CI runners with no one to answer.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["open", "issue", "--print-url"])
+    .assert()
+    .success();
 }

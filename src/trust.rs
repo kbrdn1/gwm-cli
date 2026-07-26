@@ -127,6 +127,59 @@ pub enum TrustOutcome {
   },
 }
 
+/// Is the repo's own `.gwm.toml` approved in the ledger?
+///
+/// A second, narrower question than [`evaluate`], and it deliberately
+/// does **not** reuse it. `evaluate` short-circuits to `Proceed` on an
+/// empty bootstrap surface — no commands to run, nothing to gate — and
+/// a `.gwm.toml` whose entire content is `forge = "gitlab"` has exactly
+/// that shape. It is still a file that ships with the repo telling gwm
+/// which host to send an authenticated call to (Codex review #458), so
+/// the surface short-circuit is wrong for this question.
+///
+/// Same ledger, same `(origin, sha256)` key, same `GWM_ALLOW_BOOTSTRAP`
+/// escape hatch: approving a repo approves the whole file, and editing
+/// the file revokes that approval. Non-interactive by construction —
+/// [`crate::forge::resolve`] runs on the TUI's selection path, which
+/// cannot host a prompt. `gwm trust add` is how a user answers it.
+///
+/// No `.gwm.toml` at all is `true`: there is no repo-controlled file in
+/// play, so whatever asked the question came from the user's own config.
+pub fn config_is_trusted(workdir: &Path, origin: &str, mode: TrustMode) -> Result<bool> {
+  let bytes = match fs::read(workdir.join(CONFIG_FILE)) {
+    Ok(b) => b,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+    Err(e) => return Err(e.into()),
+  };
+  match mode {
+    TrustMode::Deny => return Ok(false),
+    TrustMode::Allow => return Ok(true),
+    TrustMode::Prompt => {}
+  }
+  let ledger_path = default_ledger_path()?;
+  Ok(TrustLedger::load(&ledger_path)?.lookup(origin, &hash_config(&bytes)))
+}
+
+/// Record the current repo's `.gwm.toml` as trusted. Backs `gwm trust
+/// add`, which exists because the forge gate above is the first thing
+/// that can refuse on a config with **no** bootstrap surface — nothing
+/// else would ever prompt for it, so without this the refusal would be
+/// unclearable.
+pub fn record_config(workdir: &Path, origin: &str, actor: &str) -> Result<Option<String>> {
+  let path = workdir.join(CONFIG_FILE);
+  let bytes = match fs::read(&path) {
+    Ok(b) => b,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+    Err(e) => return Err(e.into()),
+  };
+  let sha = hash_config(&bytes);
+  let ledger_path = default_ledger_path()?;
+  let mut ledger = TrustLedger::load(&ledger_path)?;
+  ledger.record(origin, &sha, actor);
+  ledger.save(&ledger_path)?;
+  Ok(Some(sha))
+}
+
 /// Silent gate evaluation. Reads `.gwm.toml`, hashes it, applies the
 /// short-circuits in this order:
 ///

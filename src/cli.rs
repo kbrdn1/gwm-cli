@@ -909,6 +909,19 @@ pub enum LabelsAction {
 /// surface in CI as inspection helpers.
 #[derive(Debug, Subcommand)]
 pub enum TrustAction {
+  /// Approve the current repo's `.gwm.toml`, recording `(origin, hash)`
+  /// in the ledger without running anything.
+  ///
+  /// The prompt on `gwm create` / `gwm bootstrap` only fires when the
+  /// file has a bootstrap surface to run, so a `.gwm.toml` that only
+  /// names `forge` could never be approved that way — and since #419
+  /// that key decides which host receives an authenticated call
+  /// (Codex review #458). This is how you answer that question
+  /// deliberately, without executing anything.
+  ///
+  /// Approving covers the whole file as it is now: editing `.gwm.toml`
+  /// changes its hash and revokes the approval.
+  Add,
   /// List every recorded `(origin, hash)` pair in the active ledger.
   ///
   /// Empty ledger prints a single line and exits 0 — the no-op fast
@@ -4216,6 +4229,7 @@ fn print_milestones_diff(slug: &str, declared: &[milestones::MilestoneSpec], dif
 
 fn cmd_trust(action: TrustAction) -> Result<()> {
   match action {
+    TrustAction::Add => cmd_trust_add(),
     TrustAction::List => cmd_trust_list(),
     TrustAction::Revoke { origin } => cmd_trust_revoke(origin),
     TrustAction::Show => cmd_trust_show(),
@@ -4277,6 +4291,27 @@ fn cmd_trust_revoke(origin: String) -> Result<()> {
     origin
   );
   Ok(())
+}
+
+fn cmd_trust_add() -> Result<()> {
+  let cwd = std::env::current_dir()?;
+  let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
+  let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+  // Same key `forge::resolve` checks: the origin's web origin when there
+  // is one, the canonical workdir otherwise.
+  let origin = forge::origin_ref(&repo).ok().map(|r| r.web_origin);
+  let key = trust::resolve_origin_key(origin.as_deref(), &workdir);
+  match trust::record_config(&workdir, &key, &trust::current_actor())? {
+    Some(sha) => {
+      let short: String = sha.chars().take(12).collect();
+      println!("✓ trusted {} (.gwm.toml {})", key, short);
+      Ok(())
+    }
+    None => Err(GwmError::Other(format!(
+      "no .gwm.toml in {} — there is nothing to trust here",
+      workdir.display()
+    ))),
+  }
 }
 
 fn cmd_trust_show() -> Result<()> {

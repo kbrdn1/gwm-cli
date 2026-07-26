@@ -717,6 +717,66 @@ pub fn reconcile_links(repo: &Repository, config: &Config) {
 /// backend that will read them — see
 /// [`crate::github::reconcile_link_forge`] for why it lives here and not
 /// in the readers.
+/// Which backend may drive an authenticated call against `origin`, or
+/// the reason none may.
+///
+/// Three sources of authority, in order:
+///
+/// 1. **The host states it.** `github.com`, `ghe.com`, `gitlab.com` —
+///    see [`known_kind`]. Nothing else is asked.
+/// 2. **The user's own config states it.** `forge` in
+///    `~/.config/gwm/config.toml`. It is not shipped with any repo, so
+///    it is a statement by the person running gwm.
+/// 3. **The repo's `.gwm.toml` states it** — and that file ships with
+///    the repo, so it is only taken from a repo the user has approved
+///    in the TOFU ledger. This is the case the review kept coming back
+///    to (Codex review #458, three rounds): a hostile clone naming its
+///    own server would otherwise get `gh` / `glab` pointed at it, with
+///    whatever token the environment carries, from a plain `gwm
+///    status` or a TUI selection.
+///
+/// The ledger is the same one `[[bootstrap.command]]` uses and the
+/// answer is the same shape — approving a repo approves its whole
+/// `.gwm.toml`, editing the file revokes it. It is read
+/// non-interactively here because this runs on the TUI's selection
+/// path; `gwm trust add` is how a user answers.
+fn authorised_kind(repo: &Repository, config: &Config, parsed: &RemoteRef) -> Result<ForgeKind> {
+  let Some(kind) = config.forge else {
+    return known_kind(&parsed.host).ok_or_else(|| {
+      GwmError::Other(format!(
+        "origin host '{}' is not one gwm recognises, so it will not guess a forge and send \
+         an authenticated call there. Name the backend with `forge = \"github\"` or \
+         `forge = \"gitlab\"` in ~/.config/gwm/config.toml, or in the repo's .gwm.toml if \
+         you trust it (`gwm trust add`).",
+        parsed.host
+      ))
+    });
+  };
+  // On a host that states its own forge the key still wins outright, in
+  // both directions — that is documented behaviour and costs nothing:
+  // the call goes to a vendor domain either way, so the worst case is
+  // gwm talking to `gitlab.com` with `gh`. The gate below is about
+  // *where* the call goes, not which CLI makes it.
+  if known_kind(&parsed.host).is_some() {
+    return Ok(kind);
+  }
+  if Config::global_forge() == Some(kind) {
+    return Ok(kind);
+  }
+  let workdir = repo.workdir().unwrap_or_else(|| repo.path());
+  let origin_key = crate::trust::resolve_origin_key(Some(&parsed.web_origin), workdir);
+  if crate::trust::config_is_trusted(workdir, &origin_key, crate::trust::resolve_mode(false, false))? {
+    return Ok(kind);
+  }
+  Err(GwmError::Other(format!(
+    "this repo's .gwm.toml points gwm at '{}', a host gwm does not recognise, and the repo \
+     is not in the trust ledger. That file ships with the repo, so approving it is the same \
+     decision as approving its bootstrap commands. Run `gwm trust add` here if you trust it, \
+     or set `forge` in ~/.config/gwm/config.toml to cover the host yourself.",
+    parsed.host
+  )))
+}
+
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   let parsed = origin_ref(repo)?;
   // An unrecognised host is not assumed to be anything. Before #419
@@ -736,18 +796,7 @@ pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   // making the origin host a trust decision of its own — issue #460.
   // What this does close is the zero-config path, which needed no file
   // from the attacker at all.
-  let kind = match config.forge {
-    Some(k) => k,
-    None => known_kind(&parsed.host).ok_or_else(|| {
-      GwmError::Other(format!(
-        "origin host '{}' is not one gwm recognises, so it will not guess a forge and send \
-         an authenticated call there. Name the backend with `forge = \"github\"` or \
-         `forge = \"gitlab\"` in .gwm.toml, or in ~/.config/gwm/config.toml to cover every \
-         repo on that host.",
-        parsed.host
-      ))
-    })?,
-  };
+  let kind = authorised_kind(repo, config, &parsed)?;
   crate::github::reconcile_link_forge(repo, kind);
   // A bare repo has no workdir, but its own directory is still a valid
   // git context for `gh` / `glab` to resolve remotes from — and losing it
