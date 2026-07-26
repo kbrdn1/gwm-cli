@@ -571,12 +571,15 @@ fn the_repo_selector_env_vars_are_always_cleared() {
 
 #[test]
 fn pinning_the_host_also_closes_the_ways_around_the_pin() {
-  // Round 9 pinned `GITLAB_HOST` and stopped there, which is half a pin.
-  // glab documents `GITLAB_API_HOST` as a *separate* endpoint override
-  // ("useful when there are separate (sub)domains or hosts for Git and
-  // the API endpoint") and `GITLAB_URI` as an alias of `GITLAB_HOST`.
-  // Either one, inherited, sends the token to an instance gwm did not
-  // choose while gwm believes it pinned the destination.
+  // "Clear only what you can replace" — and the two variables that look
+  // alike under it but are not. `GITLAB_URI` is a documented ALIAS of
+  // the variable gwm is setting, so an inherited one is pure ambiguity
+  // and clearing it loses nothing. `GITLAB_API_HOST` is ORTHOGONAL: it
+  // names the API endpoint on instances that split Git and API across
+  // hostnames, which is exactly what a Git remote URL cannot reveal.
+  // Round 9 pinned only `GITLAB_HOST`, round 10 cleared both, round 11
+  // caught that the second hardened nothing and broke the only setups
+  // that need it.
   let gl = forge::parse_remote_url("https://gitlab.example.com/g/p.git").unwrap();
   let removed = gwm::gitlab::glab_env_remove(&gl);
 
@@ -585,12 +588,12 @@ fn pinning_the_host_also_closes_the_ways_around_the_pin() {
     "precondition: this origin IS pinned"
   );
   assert!(
-    removed.contains(&"GITLAB_API_HOST"),
-    "the API endpoint bypasses GITLAB_HOST"
-  );
-  assert!(
     removed.contains(&"GITLAB_URI"),
     "an alias of the var we pin must not outrank it"
+  );
+  assert!(
+    !removed.contains(&"GITLAB_API_HOST"),
+    "gwm has no API host to put in its place: clearing it only breaks split-host installs"
   );
 }
 

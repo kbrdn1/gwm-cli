@@ -85,22 +85,41 @@ pub fn glab_program() -> OsString {
 /// does not always know it, and on an SSH origin the user's exported
 /// value may be the only correct signal there is. So the host variables
 /// are cleared only when [`glab_env`] has an authoritative value to put
-/// in their place — and then *all* of them must go, not just the one we
-/// set. `$GITLAB_URI` is a documented alias of `$GITLAB_HOST`, and
-/// `$GITLAB_API_HOST` overrides the API endpoint independently of both
-/// (it exists for instances that split Git and API onto separate
-/// hostnames). Pinning one while leaving the other two inherited is not
-/// a pin at all: the token still leaves for wherever they point.
+/// in their place.
+///
+/// That last clause is the whole test, and it splits two variables that
+/// look alike. `$GITLAB_URI` is a documented **alias** of
+/// `$GITLAB_HOST`: gwm is setting that exact value, so leaving an
+/// inherited alias to outrank it is pure ambiguity, and clearing it
+/// loses nothing. `$GITLAB_API_HOST` is **orthogonal** — it names the
+/// API endpoint for instances that split Git and API onto separate
+/// hostnames, which is precisely the thing a Git remote URL cannot tell
+/// you. gwm has nothing to put in its place, so clearing it does not
+/// harden anything, it just breaks the only setups that need it.
+///
+/// Round 10 of the #458 review cleared both and round 11 caught the
+/// regression. The rule that would have prevented it: **clear only what
+/// you can replace.**
 ///
 /// Audited against glab's documented environment, under the three-tier
 /// rule stated on [`crate::github::gh_env_remove`]. Tier 1 (always
 /// cleared): `$GITLAB_REPO`, `$GITLAB_GROUP`, `$REMOTE_ALIAS`,
 /// `$GIT_REMOTE_URL_VAR`. Tier 2 (cleared only behind a pin):
-/// `$GITLAB_URI`, `$GITLAB_API_HOST`. Tier 3 (never touched):
-/// `$GITLAB_TOKEN`, `$GITLAB_CLIENT_ID`, `$CI_JOB_TOKEN`,
+/// `$GITLAB_URI` alone. Tier 3 (never touched): `$GITLAB_TOKEN`,
+/// `$GITLAB_CLIENT_ID`, `$GITLAB_API_HOST`, `$CI_JOB_TOKEN`,
 /// `$GLAB_ENABLE_CI_AUTOLOGIN`, `$GLAB_CONFIG_DIR` — clearing the last
 /// three would break gwm inside a GitLab pipeline, which is precisely
-/// where that token is the only credential there is. The remainder
+/// where that token is the only credential there is.
+///
+/// One consequence is worth stating rather than hiding, because it is a
+/// real hole and not an oversight: with `$GLAB_ENABLE_CI_AUTOLOGIN=true`
+/// glab authenticates from `$CI_SERVER_FQDN` / `$CI_JOB_TOKEN` and
+/// documents that it then "ignores host variables like `GITLAB_HOST`",
+/// so inside a pipeline the pin yields to the CI instance. Clearing the
+/// flag would close that, and would also strip gwm of the only
+/// credential a pipeline has. The pin loses on purpose: a job runs on
+/// the instance it runs on, and that is better ground truth than an
+/// origin URL. The remainder
 /// (`$BROWSER`, `$EDITOR`/`$VISUAL`, `$GLAB_GLAMOUR_STYLE`,
 /// `$GLAB_FORCE_HYPERLINKS`, `$NO_COLOR`, `$GLAB_NO_PROMPT`,
 /// `$GLAB_DEBUG*`, `$GLAB_CHECK_UPDATE`, `$GLAB_SEND_TELEMETRY`,
@@ -109,7 +128,7 @@ pub fn glab_program() -> OsString {
 pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
   let mut vars = vec!["GITLAB_REPO", "GITLAB_GROUP", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"];
   if !glab_env(origin).is_empty() {
-    vars.extend_from_slice(&["GITLAB_URI", "GITLAB_API_HOST"]);
+    vars.push("GITLAB_URI");
   }
   vars
 }
