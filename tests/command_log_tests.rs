@@ -186,3 +186,28 @@ fn an_unredacted_run_still_records_its_output() {
     command_log::snapshot()
   );
 }
+
+#[cfg(unix)]
+#[test]
+fn redaction_applies_to_a_call_that_sends_no_stdin() {
+  // `run_cli_with` routed the no-stdin case to `run_logged`, which has no
+  // redaction parameter — so the flag was silently dropped and the read
+  // paths that asked for redaction got none of it (Codex review #458).
+  // The read paths are exactly the ones that pull whole REST objects
+  // back, `description` included.
+  command_log::reset();
+  let mut cmd = std::process::Command::new("sh");
+  cmd.args(["-c", "printf %s 'SECRET-BODY'"]);
+
+  let out = command_log::run_logged_redacted(&mut cmd, "glab issue view 42".into()).unwrap();
+
+  assert!(
+    String::from_utf8_lossy(&out.stdout).contains("SECRET-BODY"),
+    "the caller must still get the response to parse"
+  );
+  assert!(
+    !command_log::snapshot().iter().any(|e| e.output.contains("SECRET-BODY")),
+    "{:?}",
+    command_log::snapshot()
+  );
+}

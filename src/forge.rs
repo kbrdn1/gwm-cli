@@ -747,6 +747,9 @@ where
   }
   let output = match spawn.stdin {
     Some(payload) => crate::command_log::run_logged_with_stdin(&mut cmd, cmdline, payload, spawn.redact_output),
+    // `redact_output` used to be dropped here, which made it inert for
+    // every read that asked for it (Codex review #458).
+    None if spawn.redact_output => crate::command_log::run_logged_redacted(&mut cmd, cmdline),
     None => crate::command_log::run_logged(&mut cmd, cmdline),
   }
   .map_err(|e| {

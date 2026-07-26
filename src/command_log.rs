@@ -229,19 +229,43 @@ pub fn run_logged_with_stdin(
   stdin: &[u8],
   redact_output: bool,
 ) -> std::io::Result<Output> {
+  run_logged_inner(cmd, command, Some(stdin), redact_output)
+}
+
+/// [`run_logged`] that withholds the response from the transcript. For
+/// reads whose payload is a whole REST object — `glab issue|mr view`
+/// returns `description` — where there is no stdin to key the redaction
+/// off (Codex review #458).
+pub fn run_logged_redacted(cmd: &mut Command, command: String) -> std::io::Result<Output> {
+  run_logged_inner(cmd, command, None, true)
+}
+
+fn run_logged_inner(
+  cmd: &mut Command,
+  command: String,
+  stdin: Option<&[u8]>,
+  redact_output: bool,
+) -> std::io::Result<Output> {
   use std::io::Write;
   let start = Instant::now();
-  cmd
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::piped());
-  let result = (|| {
-    let mut child = cmd.spawn()?;
-    // `take()` then drop at the end of the statement: the child reads
-    // until EOF, so holding the handle open would hang it forever.
-    child.stdin.take().expect("stdin was piped above").write_all(stdin)?;
-    child.wait_with_output()
-  })();
+  let result = match stdin {
+    // No payload: `output()` already closes stdin, and piping one we
+    // never write would only add a way to hang.
+    None => cmd.output(),
+    Some(payload) => {
+      cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+      (|| {
+        let mut child = cmd.spawn()?;
+        // `take()` then drop at the end of the statement: the child
+        // reads until EOF, so holding the handle open would hang it.
+        child.stdin.take().expect("stdin was piped above").write_all(payload)?;
+        child.wait_with_output()
+      })()
+    }
+  };
   let duration = start.elapsed();
   match &result {
     Ok(out) => record(CommandLogEntry {

@@ -1077,7 +1077,7 @@ impl GitLabForge {
     // Cleared only for the calls that actually carry a body, so
     // debugging every other operation still works.
     let mut env_remove: Vec<&'static str> = self.env_remove.clone();
-    if stdin.is_some() {
+    if redact_output {
       env_remove.extend_from_slice(&["GLAB_DEBUG_HTTP", "GLAB_DEBUG"]);
     }
     forge::run_cli_with(
@@ -1153,7 +1153,7 @@ impl Forge for GitLabForge {
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
-    parse_mr_list_number(&self.run_argv(mr_list_argv(self.repo_selector(), branch))?)
+    parse_mr_list_number(&self.run_argv_object(mr_list_argv(self.repo_selector(), branch))?)
   }
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
