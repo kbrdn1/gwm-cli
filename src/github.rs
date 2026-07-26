@@ -1604,7 +1604,7 @@ impl GitHubForge {
   pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
     Self {
       env: gh_env(&origin),
-      env_remove: gh_env_remove(&origin),
+      env_remove: gh_env_remove(&origin, workdir.is_some()),
       origin,
       program: gh_program(),
       workdir,
@@ -1669,16 +1669,23 @@ impl GitHubForge {
 ///
 /// `$GH_REPO` names a whole `[HOST/]OWNER/REPO` and wins over both the
 /// working directory and any inference, so an exported one silently
-/// retargets every call. gwm always knows the project — the slug, or
-/// "the repo I am spawning you in" — so an inherited selector is never
-/// the right answer and is cleared unconditionally.
+/// retargets every call. It is cleared whenever gwm supplies a project
+/// of its own — a slug, or a repo to spawn the child inside.
+///
+/// It is **not** cleared when gwm supplies neither. That case is real
+/// and is the one `$GH_REPO` exists for: `resolve_or_default` builds a
+/// forge for a repo with no `origin`, deliberately passing no slug and
+/// carrying no workdir, so `gwm new` / `gwm pr` still work there. gh
+/// cannot infer a project either, and taking the variable away left the
+/// user no way to name one (Codex review #458). Tier 1's premise —
+/// "gwm always knows the project" — was false in exactly that spot.
 ///
 /// The rule this applies, shared with [`crate::gitlab::glab_env_remove`]
 /// and stated once so it stops being rediscovered one variable per
 /// review round:
 ///
-/// 1. **Project selectors are always cleared.** gwm always knows the
-///    project.
+/// 1. **Project selectors are cleared when gwm supplies a project.**
+///    A slug, or a working directory for the CLI to infer from.
 /// 2. **Host overrides are cleared only when gwm has an authoritative
 ///    value to replace them with.** gwm sometimes knows the host.
 /// 3. **Authentication and config location are never touched.** gwm
@@ -1694,7 +1701,10 @@ impl GitHubForge {
 /// reads is presentation (`$GH_PAGER`, `$GH_EDITOR`, `$GH_BROWSER`,
 /// `$GH_FORCE_TTY`, `$GH_MDWIDTH`, `$NO_COLOR`), diagnostics
 /// (`$GH_DEBUG`), or telemetry — none of it can retarget a call.
-pub fn gh_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
+pub fn gh_env_remove(origin: &forge::RemoteRef, has_workdir: bool) -> Vec<&'static str> {
+  if origin.path.is_empty() && !has_workdir {
+    return Vec::new();
+  }
   vec!["GH_REPO"]
 }
 
@@ -1714,10 +1724,44 @@ pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   // repository". The child is spawned inside the repo, so delegating
   // closes the retargeting hazard rather than reopening it — the slug
   // goes away with the pin (see `repo_selector` and `repo_api_path`).
+  //
+  // `$GH_HOST` also cannot carry everything a remote URL can. gh's own
+  // `HostnameValidator` rejects any hostname containing `:`, and
+  // `RESTPrefix` / `GraphQLEndpoint` always build `https://` for
+  // anything but the hardcoded `github.localhost`
+  // (`internal/ghinstance/host.go`). So a non-default port and a plain
+  // http origin are both inexpressible — and mis-pinning them is worse
+  // than a 404, because `IsEnterprise` means "not github.com":
+  // `GH_HOST=github.com:443` reads as Enterprise, so gh picks
+  // `$GH_ENTERPRISE_TOKEN` and sends it to github.com while calling
+  // `/api/v3/`. Round 2 flagged the port as undocumented and passed it
+  // anyway; the answer is no (Codex review #458). Where gwm cannot
+  // express the origin it pins nothing and delegates, which is the same
+  // path a guessed origin already takes.
   if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
   }
-  vec![("GH_HOST".to_string(), origin.authority().to_string())]
+  let Some(host) = gh_pinnable_host(origin) else {
+    return Vec::new();
+  };
+  vec![("GH_HOST".to_string(), host)]
+}
+
+/// The origin as a hostname gh will accept, or `None` when it cannot be
+/// expressed. A default port is dropped rather than disqualifying —
+/// `github.com:443` and `github.com` are the same endpoint, and only the
+/// first one reads as Enterprise.
+fn gh_pinnable_host(origin: &forge::RemoteRef) -> Option<String> {
+  let (scheme, rest) = origin.web_origin.split_once("://")?;
+  if !scheme.eq_ignore_ascii_case("https") {
+    return None;
+  }
+  let authority = rest.trim_end_matches('/');
+  match authority.rsplit_once(':') {
+    Some((h, "443")) => Some(h.to_string()),
+    Some(_) => None,
+    None => Some(authority.to_string()),
+  }
 }
 
 impl Forge for GitHubForge {

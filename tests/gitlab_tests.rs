@@ -1309,8 +1309,8 @@ fn the_pin_covers_the_api_endpoint_and_its_scheme_not_only_the_host() {
   // `GITLAB_HOST` is stripped, so an inherited `API_PROTOCOL=http`
   // downgrades a pinned https instance to cleartext. gwm knows the
   // scheme, so it sets it rather than merely clearing it.
-  let pinned = gwm::gitlab::glab_env_remove(&origin("https://gitlab.acme/team/proj.git"));
-  let guessed = gwm::gitlab::glab_env_remove(&origin("git@gitlab.acme:team/proj.git"));
+  let pinned = gwm::gitlab::glab_env_remove(&origin("https://gitlab.acme/team/proj.git"), false);
+  let guessed = gwm::gitlab::glab_env_remove(&origin("git@gitlab.acme:team/proj.git"), false);
 
   assert!(pinned.contains(&"GITLAB_API_HOST"), "{pinned:?}");
   // Third documented spelling of the `host` key, alongside `GITLAB_URI`.

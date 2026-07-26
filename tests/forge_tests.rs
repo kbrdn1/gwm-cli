@@ -420,15 +420,18 @@ fn the_forge_child_runs_in_the_repo_not_the_process_cwd() {
 }
 
 #[test]
-fn gh_host_carries_the_port_of_an_enterprise_origin() {
-  // Dropping it targeted 443 — guaranteed wrong when the remote states a
-  // port, and possibly a different instance listening there.
+fn gh_host_is_not_pinned_when_the_port_cannot_be_expressed() {
+  // This test used to assert the opposite, on the reasoning that
+  // dropping the port targets 443 and is guaranteed wrong. The premise
+  // was right and the conclusion was not: gh's `HostnameValidator`
+  // rejects any hostname containing `:`
+  // (`internal/ghinstance/host.go`), so `ghe.example:8443` is not a
+  // value gh accepts either. Both options are wrong, which means the
+  // pin is what has to go — gwm delegates and gh reads the remote from
+  // the repo the child runs in (Codex review #458).
   let r = forge::parse_remote_url("https://ghe.example:8443/org/repo.git").unwrap();
 
-  assert_eq!(
-    gwm::github::gh_env(&r),
-    vec![("GH_HOST".to_string(), "ghe.example:8443".to_string())]
-  );
+  assert!(gwm::github::gh_env(&r).is_empty());
 }
 
 #[test]
@@ -557,13 +560,16 @@ fn the_repo_selector_env_vars_are_always_cleared() {
   // repo I am spawning you in" — so an inherited selector is never right.
   // Audited as a class rather than one variable per review round.
   let gh = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
-  assert_eq!(gwm::github::gh_env_remove(&gh), vec!["GH_REPO"]);
+  assert_eq!(gwm::github::gh_env_remove(&gh, false), vec!["GH_REPO"]);
 
   // `GITLAB_GROUP` belongs to the same class: glab documents it as the
   // default group for listing merge requests and issues.
   let gl = forge::parse_remote_url("https://gitlab.com/g/p.git").unwrap();
   for v in ["GITLAB_REPO", "GITLAB_GROUP", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"] {
-    assert!(gwm::gitlab::glab_env_remove(&gl).contains(&v), "{v} must be cleared");
+    assert!(
+      gwm::gitlab::glab_env_remove(&gl, false).contains(&v),
+      "{v} must be cleared"
+    );
   }
 }
 
@@ -584,7 +590,7 @@ fn pinning_the_host_also_closes_the_ways_around_the_pin() {
   // (`internal/config/schema.go`: `GITLAB_HOST, GITLAB_URI, GL_HOST`,
   // first non-empty wins), so it rides with `GITLAB_URI`.
   let gl = forge::parse_remote_url("https://gitlab.example.com/g/p.git").unwrap();
-  let removed = gwm::gitlab::glab_env_remove(&gl);
+  let removed = gwm::gitlab::glab_env_remove(&gl, false);
 
   assert!(
     !gwm::gitlab::glab_env(&gl).is_empty(),
@@ -597,7 +603,7 @@ fn pinning_the_host_also_closes_the_ways_around_the_pin() {
   // And the bound that keeps this from becoming round 10 again: with no
   // pin there is no replacement, so nothing is taken away.
   let ssh = forge::parse_remote_url("git@gitlab.example.com:g/p.git").unwrap();
-  let kept = gwm::gitlab::glab_env_remove(&ssh);
+  let kept = gwm::gitlab::glab_env_remove(&ssh, false);
   assert!(gwm::gitlab::glab_env(&ssh).is_empty(), "precondition: not pinned");
   for v in ["GITLAB_URI", "GL_HOST", "GITLAB_API_HOST"] {
     assert!(!kept.contains(&v), "{v} is the user's only signal here: {kept:?}");
@@ -617,7 +623,7 @@ fn authentication_and_config_location_are_never_stripped() {
   let gh = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
   for v in ["GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN", "GH_CONFIG_DIR"] {
     assert!(
-      !gwm::github::gh_env_remove(&gh).contains(&v),
+      !gwm::github::gh_env_remove(&gh, false).contains(&v),
       "{v} is the user's to set"
     );
   }
@@ -637,7 +643,7 @@ fn authentication_and_config_location_are_never_stripped() {
     "GLAB_CONFIG_DIR",
   ] {
     assert!(
-      !gwm::gitlab::glab_env_remove(&gl).contains(&v),
+      !gwm::gitlab::glab_env_remove(&gl, false).contains(&v),
       "{v} is the user's to set"
     );
   }
@@ -676,7 +682,7 @@ fn the_host_env_vars_are_left_alone_when_we_cannot_know_the_host() {
   let ssh = forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap();
 
   assert!(gwm::gitlab::glab_env(&ssh).is_empty());
-  let removed = gwm::gitlab::glab_env_remove(&ssh);
+  let removed = gwm::gitlab::glab_env_remove(&ssh, false);
   for v in ["GITLAB_HOST", "GITLAB_URI", "GITLAB_API_HOST"] {
     assert!(
       !removed.contains(&v),
@@ -930,7 +936,7 @@ fn every_remote_alias_spelling_is_cleared() {
   // variables able to redirect the call — `push --prune` included
   // (Codex review #458).
   let gl = forge::parse_remote_url("https://gitlab.com/g/p.git").unwrap();
-  let removed = gwm::gitlab::glab_env_remove(&gl);
+  let removed = gwm::gitlab::glab_env_remove(&gl, false);
 
   for v in [
     "REMOTE_ALIAS",
@@ -1095,4 +1101,80 @@ fn a_purge_that_could_not_finish_does_not_advance_the_marker() {
     None,
     "the retry must still see a mismatch to act on"
   );
+}
+
+#[test]
+fn gh_host_is_pinned_only_with_a_value_gh_would_accept() {
+  // gh's own `HostnameValidator` rejects any hostname containing `:`
+  // (`internal/ghinstance/host.go`), and `RESTPrefix` /
+  // `GraphQLEndpoint` always emit `https://` for anything but the
+  // hardcoded `github.localhost`. So a port cannot be expressed through
+  // `GH_HOST` at all, and neither can plain http.
+  //
+  // Worse than a 404: `IsEnterprise` is "not github.com", so
+  // `GH_HOST=github.com:443` reads as Enterprise — gh then picks
+  // `GH_ENTERPRISE_TOKEN` and sends it to github.com, and hits
+  // `/api/v3/` there. This was an open question in the code from round
+  // 2 ("undocumented; we pass it anyway"); it is answered, and the
+  // answer is no.
+  //
+  // Where gwm cannot express the origin it pins nothing and delegates,
+  // exactly as it already does for a guessed origin: the child runs
+  // inside the repo, so gh reads the remote itself.
+  let pin = |url: &str| gwm::github::gh_env(&forge::parse_remote_url(url).unwrap());
+
+  assert_eq!(
+    pin("https://ghe.acme.com/team/proj.git"),
+    vec![("GH_HOST".to_string(), "ghe.acme.com".to_string())]
+  );
+  // A default port is noise, not information — drop it and keep pinning.
+  assert_eq!(
+    pin("https://github.com:443/o/r.git"),
+    vec![("GH_HOST".to_string(), "github.com".to_string())],
+    "443 on https is the default; pinning `github.com:443` reads as Enterprise"
+  );
+  assert!(
+    pin("https://ghe.acme.com:8443/team/proj.git").is_empty(),
+    "a non-default port cannot be expressed, so delegate rather than mis-pin"
+  );
+  assert!(
+    pin("http://ghe.acme.com/team/proj.git").is_empty(),
+    "gh always builds https; pinning would silently upgrade the scheme"
+  );
+}
+
+#[test]
+fn the_project_selector_survives_when_gwm_supplies_no_project() {
+  // Tier 1 says project selectors are always cleared "because gwm always
+  // knows the project". That premise is false in exactly one place: the
+  // `resolve_or_default` fallback for a repo with no `origin`, which
+  // deliberately passes no slug and has no workdir either. `GH_REPO` /
+  // `GITLAB_REPO` are then the user's only way to name the project, and
+  // clearing them regressed `gwm new` / `gwm pr` in the very scenario
+  // that fallback exists to support (Codex review #458).
+  let with_slug = forge::parse_remote_url("https://github.com/o/r.git").unwrap();
+  let nothing = forge::RemoteRef {
+    host: "github.com".into(),
+    path: String::new(),
+    web_origin: "https://github.com".into(),
+    trust: forge::OriginTrust::Guessed,
+  };
+
+  assert!(gwm::github::gh_env_remove(&with_slug, false).contains(&"GH_REPO"));
+  assert!(
+    gwm::github::gh_env_remove(&nothing, true).contains(&"GH_REPO"),
+    "a workdir IS a project signal: gh infers from the repo we spawn in"
+  );
+  assert!(
+    !gwm::github::gh_env_remove(&nothing, false).contains(&"GH_REPO"),
+    "no slug and no repo to infer from: the variable is all the user has"
+  );
+
+  // Same rule on the GitLab side — round 22 was one surface swept in
+  // three passes, so both backends move together here.
+  let gl = forge::parse_remote_url("https://gitlab.com/g/p.git").unwrap();
+  for v in ["GITLAB_REPO", "GITLAB_GROUP"] {
+    assert!(gwm::gitlab::glab_env_remove(&gl, false).contains(&v), "{v}");
+    assert!(!gwm::gitlab::glab_env_remove(&nothing, false).contains(&v), "{v}");
+  }
 }

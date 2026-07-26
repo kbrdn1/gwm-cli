@@ -60,8 +60,10 @@ pub fn glab_program() -> OsString {
 /// `remote_alias` setting that picks which git remote glab reads the
 /// project from. Every one overrides the working directory gwm
 /// deliberately sets.
-/// Cleared unconditionally: gwm always knows the project, either as a
-/// slug or as "the repo I am spawning you in".
+/// Cleared whenever gwm supplies a project of its own — a slug, or the
+/// repo it spawns the child inside. Not cleared when it supplies
+/// neither; see [`crate::github::gh_env_remove`] for why that case is
+/// real and what it costs to get wrong.
 ///
 /// The host is the asymmetric case, and it is asymmetric on purpose: gwm
 /// does not always know it, and on an SSH origin the user's exported
@@ -105,8 +107,9 @@ pub fn glab_program() -> OsString {
 /// README: `EnvKeyEquivalence` falls back to the upper-cased key name,
 /// so every setting without an explicit `EnvVars` list still has an env
 /// var. Under the three-tier rule stated on
-/// [`crate::github::gh_env_remove`]. Tier 1 (always cleared):
-/// `$GITLAB_REPO`, `$GITLAB_GROUP`, the five `remote_alias` spellings.
+/// [`crate::github::gh_env_remove`]. Tier 1 (cleared when gwm supplies a
+/// project): `$GITLAB_REPO`, `$GITLAB_GROUP`, the five `remote_alias`
+/// spellings.
 /// Tier 2 (cleared or replaced only behind a pin): `$GITLAB_URI`,
 /// `$GL_HOST`, `$GITLAB_API_HOST`, and `$API_PROTOCOL` — which
 /// [`glab_env`] *sets* rather than clears, see there. Tier 3 (never
@@ -138,7 +141,15 @@ pub fn glab_program() -> OsString {
 /// `$GLAB_SEND_TELEMETRY`,
 /// `$GITLAB_RELEASE_ASSETS_USE_PACKAGE_REGISTRY`) is presentation,
 /// diagnostics or telemetry and cannot retarget a call.
-pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
+pub fn glab_env_remove(origin: &forge::RemoteRef, has_workdir: bool) -> Vec<&'static str> {
+  // Same bound as [`crate::github::gh_env_remove`]: with no slug and no
+  // repo to infer from, `$GITLAB_REPO` / `$GITLAB_GROUP` are the only
+  // way the user has left to name a project, and gwm has nothing to put
+  // in their place. Both backends move together here — round 22 was one
+  // surface swept in three passes.
+  if origin.path.is_empty() && !has_workdir {
+    return Vec::new();
+  }
   let mut vars = vec![
     "GITLAB_REPO",
     "GITLAB_GROUP",
@@ -1216,7 +1227,7 @@ impl GitLabForge {
   pub fn new(origin: forge::RemoteRef, workdir: Option<std::path::PathBuf>) -> Self {
     Self {
       env: glab_env(&origin),
-      env_remove: glab_env_remove(&origin),
+      env_remove: glab_env_remove(&origin, workdir.is_some()),
       refuse: ci_autologin_conflict(&origin),
       selector: resolve_selector(&origin, workdir.is_some()),
       origin,
