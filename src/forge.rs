@@ -652,9 +652,13 @@ pub fn repo_slug(repo: &Repository) -> Result<String> {
 /// credentials there (Codex review #458). A gate with a fallback around
 /// it is not a gate.
 pub fn resolve_or_default(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
-  // An origin that parses is a decision for `resolve` to make, including
-  // the decision to refuse. Only a missing one lands here.
-  if origin_ref(repo).is_ok() {
+  // The *remote* is the missing input, not the parse. `origin_ref`
+  // reports "no origin", "no URL (non-utf8)" and "unparseable URL" as
+  // one error type, and reading all three as absence sent a malformed
+  // URL into the fallback — which has no project and no workdir, so an
+  // ambient `$GH_REPO` / `$GITLAB_REPO` decided where the issue or PR
+  // was created (Codex review #458). Ask git directly.
+  if repo.find_remote("origin").is_ok() {
     return resolve(repo, config);
   }
   Ok({

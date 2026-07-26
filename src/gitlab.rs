@@ -781,13 +781,25 @@ pub fn parse_mr_list_number(s: &str) -> Result<Option<u64>> {
     kind: "gitlab mr list",
     source: e,
   })?;
+  // Rank the evidence rather than taking the first row that is not a
+  // proven fork. `_ => true` let an MR with missing ids win against a
+  // later one that positively identified itself as ours — and a fork MR
+  // whose source project was deleted reports exactly that shape (Codex
+  // review #458).
+  //
+  // 1. `project_id == source_project_id`: proven ours.
+  // 2. ids absent: older instances omit them, and dropping those rows
+  //    would break detection outright — so they are second, not first.
+  // 3. a proven fork: better than reporting nothing, worse than anything
+  //    that might be ours. Same ranking as the GitHub side.
+  let ours = |m: &MrRef| matches!((m.project_id, m.source_project_id), (Some(t), Some(s)) if t == s);
+  let unidentified = |m: &MrRef| m.project_id.is_none() || m.source_project_id.is_none();
   Ok(
     arr
-      .into_iter()
-      .find(|m| match (m.project_id, m.source_project_id) {
-        (Some(target), Some(source)) => target == source,
-        _ => true,
-      })
+      .iter()
+      .find(|m| ours(m))
+      .or_else(|| arr.iter().find(|m| unidentified(m)))
+      .or_else(|| arr.first())
       .map(|m| m.iid),
   )
 }

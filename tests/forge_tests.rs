@@ -1425,3 +1425,31 @@ fn a_link_made_without_an_origin_is_not_purged_when_one_appears() {
 
   assert_eq!(gwm::github::read_link(&repo, &branch).unwrap().issue, Some(42));
 }
+
+#[test]
+fn only_a_missing_origin_reaches_the_creation_fallback() {
+  // `origin_ref(repo).is_ok()` read every failure as "no origin". A
+  // malformed or non-UTF-8 origin URL therefore landed in the fallback,
+  // which builds a forge with no project *and no workdir* — so `gh` had
+  // no repo to infer from, `GH_REPO` was deliberately left in place
+  // (nothing to replace it with), and an ambient one decided where
+  // `gwm new` / `gwm pr` created the issue or PR (Codex review #458).
+  //
+  // "There is no origin remote" is a missing input. Anything else is a
+  // URL the user meant something by, and guessing past it writes to the
+  // wrong place.
+  let (_dir, repo) = init_repo();
+  assert!(
+    forge::resolve_or_default(&repo, &Config::default()).is_ok(),
+    "no origin remote at all is the fallback's one case"
+  );
+
+  repo.remote("origin", "not-a-url").unwrap();
+  let err = forge::resolve_or_default(&repo, &Config::default())
+    .unwrap_err()
+    .to_string();
+  assert!(
+    !err.contains("no 'origin' remote"),
+    "an unparseable URL is not a missing remote: {err}"
+  );
+}

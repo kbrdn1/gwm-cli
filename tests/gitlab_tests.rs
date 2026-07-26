@@ -1503,3 +1503,35 @@ fn the_api_overrides_go_even_when_the_host_is_only_delegated() {
   };
   assert!(gwm::gitlab::glab_env_remove(&nothing, false).is_empty());
 }
+
+#[test]
+fn a_confirmed_same_project_mr_outranks_an_unidentifiable_one() {
+  // `_ => true` accepted the first row whose ids were missing, so a fork
+  // MR from a deleted source project won the race against a later MR
+  // that positively identified itself as this project's (Codex review
+  // #458). Rank the evidence instead of taking the first thing that is
+  // not a proven fork.
+  let confirmed_second = r#"[
+    {"iid":9,"project_id":1},
+    {"iid":61,"project_id":1,"source_project_id":1}
+  ]"#;
+  assert_eq!(gitlab::parse_mr_list_number(confirmed_second).unwrap(), Some(61));
+
+  // Older instances omit the ids entirely; dropping those rows would
+  // break detection outright, so they are the second choice, not the
+  // first.
+  let no_ids = r#"[{"iid":9},{"iid":61}]"#;
+  assert_eq!(gitlab::parse_mr_list_number(no_ids).unwrap(), Some(9));
+
+  // A proven fork is last, mirroring the GitHub side: better than
+  // reporting nothing, worse than anything that might be ours.
+  let fork_then_unknown = r#"[
+    {"iid":9,"project_id":1,"source_project_id":2},
+    {"iid":61,"project_id":1}
+  ]"#;
+  assert_eq!(gitlab::parse_mr_list_number(fork_then_unknown).unwrap(), Some(61));
+
+  let fork_only = r#"[{"iid":9,"project_id":1,"source_project_id":2}]"#;
+  assert_eq!(gitlab::parse_mr_list_number(fork_only).unwrap(), Some(9));
+  assert_eq!(gitlab::parse_mr_list_number("[]").unwrap(), None);
+}
