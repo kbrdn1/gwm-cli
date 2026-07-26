@@ -1557,3 +1557,35 @@ fn a_cached_title_alone_is_enough_to_adopt_the_origin() {
   assert_eq!(link.issue, Some(42), "the branch name still names an issue");
   assert_eq!(link.issue_title, None, "but not with the other instance's title");
 }
+
+#[test]
+fn a_fork_pr_is_a_fallback_not_a_disqualification() {
+  // `--head <branch>` matches the branch NAME only, so a stranger's fork
+  // carrying the same name lands in the same list and its number could
+  // be persisted as this branch's PR. Filtering `isCrossRepository` out
+  // closed that — and closed the standard fork workflow with it: branch
+  // locally in a clone of upstream, push to your own fork, open the PR
+  // against upstream. That PR *is* cross-repository, and it stopped
+  // being detected at all (Codex review #458).
+  //
+  // Prefer same-repo, fall back to cross-repo. Strictly better than
+  // both: before the filter gwm took the first row whatever it was, and
+  // the ambiguity that remains — no same-repo PR, and a fork PR that
+  // may not be yours — needs the head owner to resolve. Filed as a
+  // follow-up (issue #461) rather than grown here in round 27.
+  let mixed = r#"[{"number":128,"isCrossRepository":true},{"number":61,"isCrossRepository":false}]"#;
+  assert_eq!(
+    github::parse_pr_list_number(mixed).unwrap(),
+    Some(61),
+    "a same-repo PR always wins"
+  );
+
+  let fork_only = r#"[{"number":128,"isCrossRepository":true}]"#;
+  assert_eq!(
+    github::parse_pr_list_number(fork_only).unwrap(),
+    Some(128),
+    "your own fork's PR is the only one there is"
+  );
+
+  assert_eq!(github::parse_pr_list_number("[]").unwrap(), None);
+}

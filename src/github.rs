@@ -1195,7 +1195,7 @@ pub fn find_pr_argv(slug: &str, branch: &str) -> Vec<String> {
     "all".into(),
     "--json".into(),
     // `isCrossRepository` is GitHub's own marker for "opened from a
-    // fork"; `parse_pr_list_number` filters on it (Codex review #458).
+    // fork"; `parse_pr_list_number` ranks on it (Codex review #458).
     "number,isCrossRepository".into(),
     // More than one row on purpose: `--head` matches the branch NAME
     // only, so a fork carrying the same name can appear.
@@ -1224,10 +1224,23 @@ pub fn parse_pr_list_number(s: &str) -> Result<Option<u64>> {
     kind: "pr list",
     source: e,
   })?;
+  // Prefer a same-repo PR; fall back to a fork's rather than reporting
+  // nothing. Filtering forks out entirely also removed the standard
+  // contributor workflow — branch locally, push to your own fork, open
+  // the PR against upstream — which is cross-repository by definition
+  // and had been detected before (Codex review #458).
+  //
+  // What is left ambiguous: no same-repo PR *and* a fork PR that might
+  // not be yours. Resolving that needs `headRepositoryOwner` matched
+  // against the repo's configured remotes, which is new machinery in
+  // round 27 of a review — filed as issue #461. Until then this is
+  // still strictly better than the pre-filter behaviour, which took the
+  // first row whatever it was.
   Ok(
     arr
-      .into_iter()
+      .iter()
       .find(|p| !p.is_cross_repository.unwrap_or(false))
+      .or_else(|| arr.first())
       .map(|p| p.number),
   )
 }
