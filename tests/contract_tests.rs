@@ -300,6 +300,7 @@ fn a_config_with_every_frozen_section_round_trips() {
   // Each frozen section must still parse — `deny_unknown_fields` means a
   // renamed section would make this fail, a second guard on the set above.
   let toml = "\
+forge = \"github\"
 [worktree]
 [bootstrap]
 [hooks]

@@ -841,6 +841,113 @@ fn list_detect_pr_flag_adds_pr_column_with_detected_number() {
     .stdout(predicate::str::contains("#128"));
 }
 
+// --- GitLab dispatch, end to end (issue #419) -----------------------------
+
+#[cfg(unix)]
+#[test]
+fn list_detect_pr_dispatches_to_glab_on_a_gitlab_origin() {
+  // The forge split's most basic observable claim, and until now only
+  // covered by argv unit tests: a GitLab origin must reach `glab`, with
+  // the MR vocabulary and the `--repo` selector, not `gh`.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let log = fake_bin.path().join("calls.log");
+  let fake_glab = write_recording_glab(
+    fake_bin.path(),
+    r#"[{"iid":128,"project_id":7,"source_project_id":7}]"#,
+    "{}",
+  );
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GLAB", &fake_glab)
+    .env("GWM_FAKE_LOG", &log)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--detect-pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("#128"));
+
+  let calls = fs::read_to_string(&log).unwrap();
+  assert!(calls.contains("ARGV:mr list"), "must speak MR, not PR: {calls}");
+  assert!(
+    calls.contains("--repo group/proj"),
+    "must target the origin slug: {calls}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_glab_child_does_not_inherit_the_environment_that_would_retarget_it() {
+  // The end-to-end counterpart to the unit tests on `glab_env_remove`,
+  // and the reason this harness exists: rounds 4, 7, 9 and 10 each found
+  // an inherited variable that silently redirected the CLI, and every
+  // fix was verified only against a pure function. This asserts the
+  // contract where it actually matters — on the spawned process.
+  //
+  // `GITLAB_TOKEN` is in here as the negative control: tier 3 of the
+  // rule says authentication is never stripped, so a test that only
+  // checked "things are cleared" could pass while breaking every auth.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let log = fake_bin.path().join("calls.log");
+  let fake_glab = write_recording_glab(fake_bin.path(), "[]", "{}");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GLAB", &fake_glab)
+    .env("GWM_FAKE_LOG", &log)
+    .env("PATH", prepend_path(fake_bin.path()))
+    // Exported by the user, pointing somewhere else entirely.
+    .env("GITLAB_REPO", "someone-else/private")
+    .env("GITLAB_GROUP", "someone-else")
+    .env("GITLAB_TOKEN", "keep-me")
+    // Outranks the host pin inside glab, and points at another tenant.
+    .env("GITLAB_API_HOST", "https://api.gitlab.example.com")
+    .env("GL_HOST", "https://gitlab.other.example")
+    // Would downgrade the pinned https instance to cleartext.
+    .env("API_PROTOCOL", "http")
+    .args(["list", "--detect-pr"])
+    .assert()
+    .success();
+
+  let calls = fs::read_to_string(&log).unwrap();
+  assert!(
+    calls.contains("GITLAB_REPO:<unset>"),
+    "selector must be cleared: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_GROUP:<unset>"),
+    "selector must be cleared: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_HOST:https://gitlab.com"),
+    "an authoritative origin must be pinned: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_TOKEN:keep-me"),
+    "authentication is the user's to set and must survive: {calls}"
+  );
+  // Behind the pin all three of these have a replacement: glab falls
+  // back to `apiHost = repoHost`, `GITLAB_HOST` already outranks the
+  // other host spellings, and gwm knows the scheme from the origin.
+  assert!(
+    calls.contains("GITLAB_API_HOST:<unset>"),
+    "an inherited API host outranks the pin and must go: {calls}"
+  );
+  assert!(calls.contains("GL_HOST:<unset>"), "{calls}");
+  assert!(
+    calls.contains("API_PROTOCOL:https"),
+    "the scheme is pinned, not merely cleared: {calls}"
+  );
+}
+
 #[test]
 fn list_without_detect_pr_flag_has_no_pr_column() {
   // Default `gwm list` stays network-free: no PR column, no `#` markers.
@@ -2089,6 +2196,57 @@ fi
     .unwrap();
     script
   }
+}
+
+/// A fake `glab` that records how it was invoked before answering.
+///
+/// The existing fakes only stub stdout, which is enough to test parsing
+/// but blind to the contract nine review rounds kept breaking: *which*
+/// binary gets picked, *where* it runs, and *what environment* it
+/// inherits. This one appends `ARGV` / `CWD` / the targeting variables
+/// to `$GWM_FAKE_LOG`, so a test can assert the spawn itself.
+///
+/// Unix-only on purpose: the contract under test (argv, cwd, child
+/// environment) is platform-independent in gwm's own code, whereas a
+/// `.cmd` shim would mostly exercise `cmd.exe` quoting rules.
+#[cfg(unix)]
+fn write_recording_glab(root: &Path, mr_list_json: &str, api_json: &str) -> PathBuf {
+  let script = root.join("glab");
+  fs::write(
+    &script,
+    format!(
+      r#"#!/bin/sh
+{{
+  echo "ARGV:$*"
+  echo "CWD:$(pwd)"
+  echo "GITLAB_HOST:${{GITLAB_HOST-<unset>}}"
+  echo "GITLAB_REPO:${{GITLAB_REPO-<unset>}}"
+  echo "GITLAB_GROUP:${{GITLAB_GROUP-<unset>}}"
+  echo "GITLAB_API_HOST:${{GITLAB_API_HOST-<unset>}}"
+  echo "GL_HOST:${{GL_HOST-<unset>}}"
+  echo "API_PROTOCOL:${{API_PROTOCOL-<unset>}}"
+  echo "GITLAB_TOKEN:${{GITLAB_TOKEN-<unset>}}"
+  echo "GLAB_DEBUG_HTTP:${{GLAB_DEBUG_HTTP-<unset>}}"
+}} >> "$GWM_FAKE_LOG"
+if [ "$1" = "mr" ] && [ "$2" = "list" ]; then
+  printf '%s' '{list}'
+elif [ "$1" = "api" ]; then
+  # Drain the request body so a test can assert what travelled on the
+  # pipe rather than on the command line (issue #459).
+  cat > "$GWM_FAKE_STDIN"
+  printf '%s' '{api}'
+fi
+"#,
+      list = mr_list_json.replace('\'', "'\\''"),
+      api = api_json.replace('\'', "'\\''"),
+    ),
+  )
+  .unwrap();
+  let mut perms = fs::metadata(&script).unwrap().permissions();
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
 }
 
 fn write_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
@@ -4371,6 +4529,83 @@ body = "## Summary\n{desc} (#{issue})\n"
   assert!(gh_body.contains("pr-templates (#84)"), "{gh_body}");
 }
 
+#[cfg(unix)]
+#[test]
+fn pr_body_travels_on_stdin_and_never_reaches_the_glab_argv() {
+  // Issue #459: `glab` has no `--body-file`, so the previous
+  // `glab mr create --description "<body>"` published the whole rendered
+  // document on the command line, readable by any local process through
+  // `ps`. The creation path now goes through `glab api --input -`.
+  //
+  // The assertion is deliberately on the *recorded argv*, not on the
+  // argv builder: a unit test on the builder cannot see a body that some
+  // other layer appends later.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/x.rs",
+    "fn x() {}\n",
+    "✨ feat: x",
+  );
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let log = fake_bin.path().join("calls.log");
+  let stdin_dump = fake_bin.path().join("stdin.json");
+  let fake_glab = write_recording_glab(
+    fake_bin.path(),
+    "[]",
+    r#"{"iid":321,"web_url":"https://gitlab.com/group/proj/-/merge_requests/321"}"#,
+  );
+
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[pr_template.by_type.feat]\nbody = \"## Summary\\nSUPER-SECRET-BODY (#{issue})\\n\"\n",
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GLAB", &fake_glab)
+    .env("GWM_FAKE_LOG", &log)
+    .env("GWM_FAKE_STDIN", &stdin_dump)
+    // Set by a user debugging something else entirely. It makes glab
+    // dump full requests and responses — bodies included — to stderr,
+    // which the transcript keeps and the error path quotes verbatim.
+    .env("GLAB_DEBUG_HTTP", "1")
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created MR #321"))
+    .stdout(predicate::str::contains(
+      "https://gitlab.com/group/proj/-/merge_requests/321",
+    ));
+
+  let calls = fs::read_to_string(&log).unwrap();
+  assert!(
+    !calls.contains("SUPER-SECRET-BODY"),
+    "the body must not be visible in the argv: {calls}"
+  );
+  assert!(calls.contains("--input -"), "{calls}");
+  assert!(
+    calls.contains("GLAB_DEBUG_HTTP:<unset>"),
+    "the HTTP debug dump would print the body straight back out: {calls}"
+  );
+
+  // ...and it must still actually arrive, or the test above would pass
+  // just as well with the body silently dropped.
+  let sent: serde_json::Value = serde_json::from_str(&fs::read_to_string(&stdin_dump).unwrap()).unwrap();
+  assert!(
+    sent["description"].as_str().unwrap().contains("SUPER-SECRET-BODY"),
+    "{sent}"
+  );
+  assert_eq!(sent["source_branch"], "feat/#84-pr-templates");
+}
+
 #[test]
 fn pr_draft_flag_is_forwarded_to_gh() {
   // `gwm pr --draft` passes `--draft` through to `gh pr create` so the
@@ -6166,4 +6401,226 @@ mod agents_cmd {
       .stdout(predicate::str::contains("AGENT"))
       .stdout(predicate::str::contains("codex"));
   }
+}
+
+#[test]
+fn a_link_written_after_a_backend_flip_survives_the_next_command() {
+  // The reconcile lives in `forge::resolve`, and `gwm link` did not
+  // resolve. So after flipping `forge` the write succeeded against the
+  // previous backend's marker, and the next command that *did* resolve
+  // saw the mismatch and deleted what the user had just linked (Codex
+  // review #458).
+  //
+  // `gwm open --print-url` brackets this rather than `gwm list`: the
+  // network-free list never resolves a forge, so it neither records the
+  // marker nor triggers the purge, and a test built on it would pass
+  // against the bug.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://git.acme.internal/team/proj.git")
+    .unwrap();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+  let ledger = dir.path().join("trust.toml");
+  let gwm = |args: &[&str]| {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("GWM_NO_GLOBAL_CONFIG", "1")
+      .args(args)
+      .assert()
+      .success();
+  };
+
+  // `git.acme.internal` says nothing about which forge it runs, so the
+  // backend is named explicitly on both sides of the flip — that is the
+  // gate from `forge::resolve`, not part of what this test pins.
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"github\"\n").unwrap();
+  gwm(&["trust", "add"]);
+  // Record the GitHub backend against the repo.
+  gwm(&["link", "issue", "7"]);
+  gwm(&["open", "issue", "--print-url"]);
+
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n").unwrap();
+  // `git.acme.internal` states no forge, so the repo's own `.gwm.toml`
+  // is what names it — and that file ships with the repo, so it only
+  // counts once the repo is approved. Editing it above changed its
+  // hash, which is why this runs again here.
+  gwm(&["trust", "add"]);
+  gwm(&["link", "pr", "42"]);
+
+  // Resolves as GitLab. Before the fix this purged the line above and
+  // the command failed with "no PR linked".
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .args(["open", "pr", "--print-url"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("/-/merge_requests/42"));
+
+  let reopened = git2::Repository::open(dir.path()).unwrap();
+  assert_eq!(
+    gwm::github::read_link(&reopened, &branch).unwrap().pr,
+    Some(42),
+    "the user linked this under the new backend; nothing may drop it"
+  );
+}
+
+#[test]
+fn a_repo_cannot_authorise_its_own_host_until_it_is_trusted() {
+  // The hole three review rounds kept naming: `.gwm.toml` ships with the
+  // repo, so letting its `forge` key point gwm at an unrecognised host
+  // meant a hostile clone could aim `gh` / `glab` at its own server —
+  // and whatever token the environment carries — from a plain
+  // `gwm status` or a TUI selection (Codex review #458).
+  //
+  // Same ledger as `[[bootstrap.command]]`, because it is the same
+  // decision about the same file. It is checked non-interactively, since
+  // `forge::resolve` runs on the TUI's selection path; `gwm trust add`
+  // is how the user answers.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://code.acme.internal/team/proj.git")
+    .unwrap();
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n").unwrap();
+  let ledger = dir.path().join("trust.toml");
+
+  let run = |args: &[&str]| {
+    let mut c = Command::cargo_bin("gwm").unwrap();
+    c.current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("GWM_NO_GLOBAL_CONFIG", "1")
+      .args(args);
+    c.assert()
+  };
+
+  run(&["link", "issue", "7"]).success();
+  run(&["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("gwm trust add"));
+
+  run(&["trust", "add"]).success();
+  run(&["open", "issue", "--print-url"])
+    .success()
+    .stdout(predicate::str::contains("code.acme.internal"));
+
+  // Approving covers the file as it was: editing it revokes that.
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n# changed\n").unwrap();
+  run(&["open", "issue", "--print-url"]).failure();
+
+  // And the escape hatch the rest of the trust surface already has,
+  // for CI runners with no one to answer.
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_TRUST_LEDGER", &ledger)
+    .env("GWM_NO_GLOBAL_CONFIG", "1")
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["open", "issue", "--print-url"])
+    .assert()
+    .success();
+}
+
+#[test]
+fn a_global_forge_kind_does_not_authorise_an_arbitrary_host() {
+  // `forge = "gitlab"` in the user's own config says which *backend* they
+  // use. It does not say which *hosts* may receive an authenticated call,
+  // and reading it as though it did left the gate wide open for the most
+  // ordinary setup there is: anyone working at a GitLab shop sets that key
+  // once, and from then on every clone — including one whose `origin` an
+  // attacker chose — got `glab` pointed at it.
+  //
+  // That is not theoretical. Verified against glab 1.109.0: with
+  // `GITLAB_HOST` naming an arbitrary host, glab sends the ambient
+  // `GITLAB_TOKEN` there as a `Private-Token` header, with no host
+  // scoping of any kind. The repo does not even need a `.gwm.toml` —
+  // the global value merges in on its own.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://code.acme.internal/team/proj.git")
+    .unwrap();
+
+  let xdg = tempfile::TempDir::new().unwrap();
+  fs::create_dir_all(xdg.path().join("gwm")).unwrap();
+  fs::write(xdg.path().join("gwm").join("config.toml"), "forge = \"gitlab\"\n").unwrap();
+  let ledger = dir.path().join("trust.toml");
+
+  let run = |args: &[&str]| {
+    let mut c = Command::cargo_bin("gwm").unwrap();
+    c.current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("XDG_CONFIG_HOME", xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .args(args);
+    c.assert()
+  };
+
+  // Link first, so the refusal below can only come from the gate. Without
+  // it the command stops at "no issue linked" and the test passes while
+  // the host is still being authorised.
+  run(&["link", "issue", "7"]).success();
+  run(&["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("forge_hosts"));
+}
+
+#[test]
+fn a_global_config_authorises_the_hosts_it_names_with_their_kind() {
+  // The remedy, and the reason the kind lives *per host*: a shop with both
+  // a self-hosted GitLab and a GitHub Enterprise cannot be described by a
+  // single `forge` key. Naming each host with its own backend covers the
+  // mixed fleet, and covers it declaratively — one entry per host, in a
+  // file that never ships with a repo, so nothing a clone carries can add
+  // to it.
+  let xdg = tempfile::TempDir::new().unwrap();
+  fs::create_dir_all(xdg.path().join("gwm")).unwrap();
+  fs::write(
+    xdg.path().join("gwm").join("config.toml"),
+    // `Code.ACME.internal` deliberately mis-cased: hosts are compared
+    // case-insensitively, like DNS and like `known_kind`, so a config that
+    // spells the host the way a human would must still cover the origin.
+    "[forge_hosts]\n\"Code.ACME.internal\" = \"gitlab\"\n\"ghe.acme.internal\" = \"github\"\n",
+  )
+  .unwrap();
+
+  let case = |url: &str, want: &str| {
+    let (dir, repo) = init_repo();
+    repo.remote("origin", url).unwrap();
+    let ledger = dir.path().join("trust.toml");
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("XDG_CONFIG_HOME", xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .args(["link", "issue", "7"])
+      .assert()
+      .success();
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("XDG_CONFIG_HOME", xdg.path())
+      .env_remove("GWM_NO_GLOBAL_CONFIG")
+      .args(["open", "issue", "--print-url"])
+      .assert()
+      .success()
+      .stdout(predicate::str::contains(want));
+  };
+
+  // GitLab nests the issue under `/-/issues`, GitHub does not: the URL
+  // shape is what proves the *kind* came from the host's own entry and
+  // not from a shared default.
+  case(
+    "https://code.acme.internal/team/proj.git",
+    "code.acme.internal/team/proj/-/issues/7",
+  );
+  case(
+    "https://ghe.acme.internal/team/proj.git",
+    "ghe.acme.internal/team/proj/issues/7",
+  );
 }

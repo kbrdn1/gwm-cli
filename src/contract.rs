@@ -64,6 +64,13 @@ pub const DAEMON_NOTIFICATIONS: &[&str] = &["worktrees.changed"];
 /// the fields of [`crate::config::Config`]; the freeze test cross-checks
 /// the two so a renamed section can't silently drift the contract.
 pub const CONFIG_SECTIONS: &[&str] = &[
+  // Scalar, not a section: `forge = "github" | "gitlab"` (issue #419).
+  // Additive and optional, so pre-#419 configs keep parsing unchanged.
+  "forge",
+  // `[forge_hosts]` — host → backend, read from the user-level config
+  // only (issue #419). Also additive; an absent table authorises nothing,
+  // which is the safe default rather than a permissive one.
+  "forge_hosts",
   "worktree",
   "bootstrap",
   "hooks",

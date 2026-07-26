@@ -433,13 +433,19 @@ fn repo_slug_errors_when_no_origin_remote() {
 }
 
 #[test]
-fn repo_slug_errors_when_origin_is_not_github() {
+fn repo_slug_accepts_a_non_github_origin_since_the_forge_split() {
+  // Contract change from issue #419, replacing the pre-#419
+  // `repo_slug_errors_when_origin_is_not_github`: slug extraction is now
+  // host-agnostic, and *which* forge to talk to is decided separately by
+  // `forge::resolve` (config key first, host inference second). Rejecting
+  // non-github.com here would have made a GitLab remote unusable before
+  // the backend ever got a say.
   let (_dir, repo) = init_repo();
   set_origin(&repo, "https://gitlab.com/kbrdn1/something.git");
 
-  let err = github::repo_slug(&repo).unwrap_err();
-  let msg = err.to_string();
-  assert!(msg.contains("github"), "error should mention github: {}", msg);
+  let slug = github::repo_slug(&repo).unwrap();
+
+  assert_eq!(slug, "kbrdn1/something");
 }
 
 // --- JSON parsing --------------------------------------------------------
@@ -1085,7 +1091,7 @@ fn branch_link_summary_renders_human_readable() {
     issue_source: LinkSource::BranchName,
     pr_source: LinkSource::Explicit,
   };
-  let s = link.summary();
+  let s = link.summary("PR");
   assert!(s.contains("#42"), "summary should mention issue #42: {}", s);
   assert!(s.contains("#61"), "summary should mention PR #61: {}", s);
 }
@@ -1177,7 +1183,18 @@ fn apply_detected_pr_is_noop_when_nothing_detected() {
 fn detected_pr_renders_in_summary_like_any_pr() {
   let mut link = BranchLink::empty();
   github::apply_detected_pr(&mut link, Some(128));
-  assert_eq!(link.summary(), "PR #128");
+  assert_eq!(link.summary("PR"), "PR #128");
+}
+
+#[test]
+fn summary_uses_the_forge_noun() {
+  // Issue #419: `gwm status` on GitLab must not print "PR #128" for a
+  // merge request. The noun is supplied by the resolved forge.
+  let mut link = BranchLink::empty();
+  github::apply_detected_pr(&mut link, Some(128));
+  link.issue = Some(42);
+
+  assert_eq!(link.summary("MR"), "issue #42 · MR #128");
 }
 
 #[test]
@@ -1195,9 +1212,12 @@ fn find_pr_argv_pins_the_gh_pr_list_contract() {
       "--state",
       "all",
       "--json",
-      "number",
+      // `isCrossRepository` joins the field list so a fork's PR sharing
+      // the branch name can be filtered out (Codex review #458), and the
+      // limit rises so there is something to filter.
+      "number,isCrossRepository",
       "--limit",
-      "1",
+      "20",
     ]
   );
 }
@@ -1304,4 +1324,306 @@ fn agent_pins_accumulate_and_detach_individually() {
 
   clear_agent_pins(&repo, &branch).unwrap();
   assert!(agent_pins(&repo, &branch).unwrap().is_empty());
+}
+
+#[test]
+fn pr_detection_ignores_a_fork_with_the_same_branch_name() {
+  // Same hazard as the GitLab side (Codex review #458): `--head <branch>`
+  // matches on the branch name alone, so a fork's PR sharing the name
+  // could be picked and persisted as this branch's detected PR.
+  // `isCrossRepository` is GitHub's own marker for "opened from a fork".
+  let json = r#"[{"number":900,"isCrossRepository":true},{"number":61,"isCrossRepository":false}]"#;
+
+  assert_eq!(github::parse_pr_list_number(json).unwrap(), Some(61));
+}
+
+#[test]
+fn pr_detection_keeps_a_pr_that_does_not_report_cross_repository() {
+  let json = r#"[{"number":61}]"#;
+
+  assert_eq!(github::parse_pr_list_number(json).unwrap(), Some(61));
+}
+
+// --- persisted links are scoped to the instance that produced them ---------
+
+#[test]
+fn a_persisted_link_is_dropped_when_the_origin_changes() {
+  // The link keys (`gwm-pr`, `gwm-pr-detected`) are forge-neutral, which
+  // was the right call for #419 — but the *number* they hold is not.
+  // PR #128 on github.com and MR !128 on gitlab.com are different
+  // objects, so once the forge became switchable a stored number could
+  // be reinterpreted against a different instance and silently point
+  // the worktree at a stranger's merge request.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+
+  // The repo moves. The number stored a moment ago means nothing here.
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  assert_eq!(
+    github::read_link(&repo, "feat/#42-tui-search").unwrap().pr,
+    None,
+    "a number from another instance must not be resurfaced"
+  );
+}
+
+#[test]
+fn a_persisted_link_survives_when_the_origin_is_unchanged() {
+  // The negative control. Invalidation that fires on every read would
+  // "fix" this by breaking the feature.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+}
+
+#[test]
+fn the_branch_name_issue_survives_a_change_of_origin() {
+  // Only *persisted* values are instance-scoped. The issue number parsed
+  // out of the branch name is the user's own naming and stays valid.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42));
+}
+
+#[test]
+fn a_link_written_without_an_origin_is_still_readable() {
+  // Local-only repos have no origin to stamp. They must keep working
+  // rather than having every link invalidated on the next read.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+}
+
+#[test]
+fn writing_one_link_after_an_origin_change_does_not_revive_the_others() {
+  // One stamp covers the issue, the explicit PR and the detected PR, so
+  // rewriting it for a freshly created PR re-blessed whatever the
+  // previous origin had left behind. The lazy check in `read_link` never
+  // fires afterwards: the stamp matches again (Codex review #458).
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_issue(&repo, "feat/#42-tui-search", 900).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 7).unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.pr, Some(7));
+  assert_eq!(
+    link.issue,
+    Some(42),
+    "the stale explicit issue must be gone, leaving only the branch-name number"
+  );
+}
+
+#[test]
+fn two_instances_on_one_host_with_different_ports_do_not_share_a_stamp() {
+  // `<host>/<path>` collapses two self-hosted instances that differ only
+  // by port, so their numbers were reinterpreted against each other
+  // without ever tripping the mismatch check.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo
+    .remote("origin", "https://git.acme.internal:8443/team/proj.git")
+    .unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo
+    .remote("origin", "https://git.acme.internal:9443/team/proj.git")
+    .unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, None);
+}
+
+#[test]
+fn the_same_repo_over_ssh_and_https_keeps_its_links() {
+  // The negative control for the port fix: both spellings resolve to the
+  // same web origin, so switching remote protocol must not throw the
+  // persisted links away.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "git@github.com:acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+}
+
+#[test]
+fn a_foreign_stamp_also_hides_the_cached_title_and_state() {
+  // The eager purge only runs on the next *write*. Until then — offline,
+  // read-only, or simply before the next `gwm status` — `read_link` still
+  // fell back to the branch-name issue number and then read the previous
+  // tenant's cached title and state onto it, presenting one instance's
+  // metadata as the other's (Codex review #458).
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_issue(&repo, "feat/#42-tui-search", 42).unwrap();
+  github::persist_issue_title(&repo, "feat/#42-tui-search", "Title from the old tenant").unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42), "the branch name still names an issue");
+  assert_eq!(link.issue_title, None, "but not with the other instance's title");
+}
+
+#[test]
+fn a_link_predating_the_stamp_is_adopted_by_the_current_origin() {
+  // Links written before `gwm-link-origin` existed have no stamp, and an
+  // absent stamp is treated as safe — otherwise upgrading gwm would wipe
+  // every existing link. But leaving them unstamped forever means a
+  // later migration reinterprets their numbers against the new instance
+  // (Codex review #458). The first read adopts them instead: no data
+  // loss now, and a real invalidation later.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+  // Simulate a pre-#419 link: the number is there, the stamp is not.
+  repo
+    .config()
+    .unwrap()
+    .remove("branch.feat/#42-tui-search.gwm-link-origin")
+    .unwrap();
+
+  // A read adopts it for the origin it currently has...
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+
+  // ...so moving the repo afterwards now invalidates it.
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, None);
+}
+
+#[test]
+fn a_cached_title_alone_is_enough_to_adopt_the_origin() {
+  // An issue derived from the branch name persists no number, only
+  // `gwm-issue-title` / `gwm-issue-state`. The adoption trigger looked
+  // for numbers, so those branches stayed unstamped forever and kept
+  // showing the previous tenant's metadata after a move (Codex review
+  // #458).
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::persist_issue_title(&repo, "feat/#42-tui-search", "Title from the old tenant").unwrap();
+  repo
+    .config()
+    .unwrap()
+    .remove("branch.feat/#42-tui-search.gwm-link-origin")
+    .ok();
+
+  // A read adopts it...
+  assert_eq!(
+    github::read_link(&repo, "feat/#42-tui-search")
+      .unwrap()
+      .issue_title
+      .as_deref(),
+    Some("Title from the old tenant")
+  );
+
+  // ...so the move is now caught.
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.issue, Some(42), "the branch name still names an issue");
+  assert_eq!(link.issue_title, None, "but not with the other instance's title");
+}
+
+#[test]
+fn a_fork_pr_is_a_fallback_not_a_disqualification() {
+  // `--head <branch>` matches the branch NAME only, so a stranger's fork
+  // carrying the same name lands in the same list and its number could
+  // be persisted as this branch's PR. Filtering `isCrossRepository` out
+  // closed that — and closed the standard fork workflow with it: branch
+  // locally in a clone of upstream, push to your own fork, open the PR
+  // against upstream. That PR *is* cross-repository, and it stopped
+  // being detected at all (Codex review #458).
+  //
+  // Prefer same-repo, fall back to cross-repo. Strictly better than
+  // both: before the filter gwm took the first row whatever it was, and
+  // the ambiguity that remains — no same-repo PR, and a fork PR that
+  // may not be yours — needs the head owner to resolve. Filed as a
+  // follow-up (issue #461) rather than grown here in round 27.
+  let mixed = r#"[{"number":128,"isCrossRepository":true},{"number":61,"isCrossRepository":false}]"#;
+  assert_eq!(
+    github::parse_pr_list_number(mixed).unwrap(),
+    Some(61),
+    "a same-repo PR always wins"
+  );
+
+  let fork_only = r#"[{"number":128,"isCrossRepository":true}]"#;
+  assert_eq!(
+    github::parse_pr_list_number(fork_only).unwrap(),
+    Some(128),
+    "your own fork's PR is the only one there is"
+  );
+
+  assert_eq!(github::parse_pr_list_number("[]").unwrap(), None);
+}
+
+#[test]
+fn a_refetched_title_is_stamped_with_the_origin_that_produced_it() {
+  // `read_link` suppresses cached metadata written against a previous
+  // origin. After a move, the refetch persists a fresh title and state —
+  // but `persist_issue_title` / `persist_issue_state` wrote them without
+  // touching `gwm-link-origin`, so the stamp still named the old origin
+  // and the next read suppressed the new values too. Permanently blank
+  // (Codex review #458). `persist_detected_pr` already stamped; the
+  // title/state writers did not.
+  let (dir, repo) = common::init_repo();
+  repo.remote("origin", "https://github.com/old/proj.git").unwrap();
+  // The branch NAME carries the number, which is the whole point: no
+  // `gwm link` ever runs, so no writer that takes a number restamps.
+  let branch = "feat/#42-fuzzy-search";
+  github::persist_issue_title(&repo, branch, "before").unwrap();
+  github::persist_issue_state(&repo, branch, github::IssueState::Closed).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://github.com/new/proj.git").unwrap();
+  let stale = github::read_link(&repo, branch).unwrap();
+  assert_eq!(stale.issue, Some(42), "the branch name still carries it");
+  assert_eq!(
+    stale.issue_title, None,
+    "precondition: the old origin's metadata is suppressed"
+  );
+
+  // The number here comes from the BRANCH NAME, not from the config, so
+  // nothing re-links it and `stamp_link_origin` is never reached through
+  // a writer that takes a number. Only the title/state writers run.
+  github::persist_issue_title(&repo, branch, "after").unwrap();
+  github::persist_issue_state(&repo, branch, github::IssueState::Open).unwrap();
+
+  let link = github::read_link(&repo, branch).unwrap();
+  assert_eq!(link.issue_title.as_deref(), Some("after"));
+  assert_eq!(link.issue_state, Some(github::IssueState::Open));
+  drop(dir);
 }
