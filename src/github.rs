@@ -1619,6 +1619,9 @@ impl Forge for GitHubForge {
   }
 
   fn slug(&self) -> &str {
+    // Identity, not the CLI selector: this feeds display and URLs, which
+    // need the real path even when `repo_selector` deliberately returns
+    // nothing. Same as the GitLab backend.
     &self.origin.path
   }
 
@@ -1666,38 +1669,38 @@ impl Forge for GitHubForge {
   // stay for the argv/parse contract the test suite pins.
 
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
-    parse_issue_json(&self.run(issue_view_argv(&self.origin.path, number))?)
+    parse_issue_json(&self.run(issue_view_argv(self.repo_selector(), number))?)
   }
 
   fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
-    parse_pr_json(&self.run(pr_view_argv(&self.origin.path, number))?)
+    parse_pr_json(&self.run(pr_view_argv(self.repo_selector(), number))?)
   }
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
-    parse_pr_head_json(&self.run(pr_head_argv(&self.origin.path, number))?)
+    parse_pr_head_json(&self.run(pr_head_argv(self.repo_selector(), number))?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {
-    parse_pr_list_number(&self.run(find_pr_argv(&self.origin.path, branch))?)
+    parse_pr_list_number(&self.run(find_pr_argv(self.repo_selector(), branch))?)
   }
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
-    parse_created_issue(&self.run(issue_create_argv(&self.origin.path, req))?)
+    parse_created_issue(&self.run(issue_create_argv(self.repo_selector(), req))?)
   }
 
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
-    parse_created_pr(&self.run(pr_create_argv(&self.origin.path, req))?)
+    parse_created_pr(&self.run(pr_create_argv(self.repo_selector(), req))?)
   }
 
   fn fetch_remote_labels(&self) -> Result<Vec<RemoteLabel>> {
-    parse_labels_json(&self.run(label_list_argv(&self.origin.path))?)
+    parse_labels_json(&self.run(label_list_argv(self.repo_selector()))?)
   }
 
   fn create_label(&self, spec: &LabelSpec) -> Result<()> {
     // `gh label create --force` means "create OR update", so both halves
     // of the trait's create/update split land on the same call here. The
     // split exists for GitLab, which has no such flag.
-    self.run(label_create_argv(&self.origin.path, spec))?;
+    self.run(label_create_argv(self.repo_selector(), spec))?;
     Ok(())
   }
 
@@ -1707,26 +1710,26 @@ impl Forge for GitHubForge {
 
   fn delete_label(&self, name: &str) -> Result<()> {
     validate_remote_label_name(name)?;
-    self.run(label_delete_argv(&self.origin.path, name))?;
+    self.run(label_delete_argv(self.repo_selector(), name))?;
     Ok(())
   }
 
   fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
-    parse_milestones_json(&self.run(milestone_list_argv(&self.origin.path))?)
+    parse_milestones_json(&self.run(milestone_list_argv(self.repo_selector()))?)
   }
 
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
-    self.run(milestone_create_argv(&self.origin.path, spec))?;
+    self.run(milestone_create_argv(self.repo_selector(), spec))?;
     Ok(())
   }
 
   fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()> {
-    self.run(milestone_update_argv(&self.origin.path, number, spec))?;
+    self.run(milestone_update_argv(self.repo_selector(), number, spec))?;
     Ok(())
   }
 
   fn delete_milestone(&self, number: u64) -> Result<()> {
-    self.run(milestone_delete_argv(&self.origin.path, number))?;
+    self.run(milestone_delete_argv(self.repo_selector(), number))?;
     Ok(())
   }
 }

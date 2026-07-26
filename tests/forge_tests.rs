@@ -786,3 +786,33 @@ fn an_empty_slug_uses_the_gh_api_placeholders_not_an_empty_path() {
   );
   assert!(!argv.iter().any(|a| a.contains("repos//")), "{argv:?}");
 }
+
+#[test]
+fn no_github_call_smuggles_the_slug_past_the_selector() {
+  // Round 18 added `repo_selector()` returning "" for a guessed origin
+  // and then every method kept reading `self.origin.path` directly, so
+  // the policy was inert — the same shape as the `create_pr` bypass
+  // found in round 7. Asserting on the built argv rather than on the
+  // accessor is what makes that unrepeatable.
+  let dir = tempfile::tempdir().unwrap();
+  let ssh = forge::parse_remote_url("git@ghe-ssh.acme.com:team/proj.git").unwrap();
+  let slug = "team/proj";
+
+  let f = forge::for_kind_in(ForgeKind::GitHub, ssh, Some(dir.path().to_path_buf()));
+  assert_eq!(f.repo_selector(), "");
+
+  // Every argv builder the backend routes through, fed the selector the
+  // backend actually exposes.
+  let argvs = vec![
+    gwm::github::issue_view_argv(f.repo_selector(), 1),
+    gwm::github::pr_view_argv(f.repo_selector(), 1),
+    gwm::github::pr_head_argv(f.repo_selector(), 1),
+    gwm::github::milestone_list_argv(f.repo_selector()),
+  ];
+  for argv in argvs {
+    assert!(
+      !argv.iter().any(|a| a.contains(slug)),
+      "the slug reached the argv despite an empty selector: {argv:?}"
+    );
+  }
+}
