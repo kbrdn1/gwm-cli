@@ -854,7 +854,11 @@ fn list_detect_pr_dispatches_to_glab_on_a_gitlab_origin() {
 
   let fake_bin = tempfile::TempDir::new().unwrap();
   let log = fake_bin.path().join("calls.log");
-  let fake_glab = write_recording_glab(fake_bin.path(), r#"[{"iid":128,"project_id":7,"source_project_id":7}]"#);
+  let fake_glab = write_recording_glab(
+    fake_bin.path(),
+    r#"[{"iid":128,"project_id":7,"source_project_id":7}]"#,
+    "{}",
+  );
 
   Command::cargo_bin("gwm")
     .unwrap()
@@ -892,7 +896,7 @@ fn the_glab_child_does_not_inherit_the_environment_that_would_retarget_it() {
 
   let fake_bin = tempfile::TempDir::new().unwrap();
   let log = fake_bin.path().join("calls.log");
-  let fake_glab = write_recording_glab(fake_bin.path(), "[]");
+  let fake_glab = write_recording_glab(fake_bin.path(), "[]", "{}");
 
   Command::cargo_bin("gwm")
     .unwrap()
@@ -2196,7 +2200,7 @@ fi
 /// environment) is platform-independent in gwm's own code, whereas a
 /// `.cmd` shim would mostly exercise `cmd.exe` quoting rules.
 #[cfg(unix)]
-fn write_recording_glab(root: &Path, mr_list_json: &str) -> PathBuf {
+fn write_recording_glab(root: &Path, mr_list_json: &str, api_json: &str) -> PathBuf {
   let script = root.join("glab");
   fs::write(
     &script,
@@ -2213,9 +2217,15 @@ fn write_recording_glab(root: &Path, mr_list_json: &str) -> PathBuf {
 }} >> "$GWM_FAKE_LOG"
 if [ "$1" = "mr" ] && [ "$2" = "list" ]; then
   printf '%s' '{list}'
+elif [ "$1" = "api" ]; then
+  # Drain the request body so a test can assert what travelled on the
+  # pipe rather than on the command line (issue #459).
+  cat > "$GWM_FAKE_STDIN"
+  printf '%s' '{api}'
 fi
 "#,
       list = mr_list_json.replace('\'', "'\\''"),
+      api = api_json.replace('\'', "'\\''"),
     ),
   )
   .unwrap();
@@ -4504,6 +4514,75 @@ body = "## Summary\n{desc} (#{issue})\n"
   assert!(gh_args.contains("--head feat/#84-pr-templates"), "{gh_args_raw}");
   let gh_body = std::fs::read_to_string(fake_bin.path().join("gh-body.md")).unwrap();
   assert!(gh_body.contains("pr-templates (#84)"), "{gh_body}");
+}
+
+#[cfg(unix)]
+#[test]
+fn pr_body_travels_on_stdin_and_never_reaches_the_glab_argv() {
+  // Issue #459: `glab` has no `--body-file`, so the previous
+  // `glab mr create --description "<body>"` published the whole rendered
+  // document on the command line, readable by any local process through
+  // `ps`. The creation path now goes through `glab api --input -`.
+  //
+  // The assertion is deliberately on the *recorded argv*, not on the
+  // argv builder: a unit test on the builder cannot see a body that some
+  // other layer appends later.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+  make_feature_branch_with_commit(
+    &repo,
+    dir.path(),
+    "feat/#84-pr-templates",
+    "src/x.rs",
+    "fn x() {}\n",
+    "✨ feat: x",
+  );
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let log = fake_bin.path().join("calls.log");
+  let stdin_dump = fake_bin.path().join("stdin.json");
+  let fake_glab = write_recording_glab(
+    fake_bin.path(),
+    "[]",
+    r#"{"iid":321,"web_url":"https://gitlab.com/group/proj/-/merge_requests/321"}"#,
+  );
+
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[pr_template.by_type.feat]\nbody = \"## Summary\\nSUPER-SECRET-BODY (#{issue})\\n\"\n",
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GLAB", &fake_glab)
+    .env("GWM_FAKE_LOG", &log)
+    .env("GWM_FAKE_STDIN", &stdin_dump)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("created MR #321"))
+    .stdout(predicate::str::contains(
+      "https://gitlab.com/group/proj/-/merge_requests/321",
+    ));
+
+  let calls = fs::read_to_string(&log).unwrap();
+  assert!(
+    !calls.contains("SUPER-SECRET-BODY"),
+    "the body must not be visible in the argv: {calls}"
+  );
+  assert!(calls.contains("--input -"), "{calls}");
+
+  // ...and it must still actually arrive, or the test above would pass
+  // just as well with the body silently dropped.
+  let sent: serde_json::Value = serde_json::from_str(&fs::read_to_string(&stdin_dump).unwrap()).unwrap();
+  assert!(
+    sent["description"].as_str().unwrap().contains("SUPER-SECRET-BODY"),
+    "{sent}"
+  );
+  assert_eq!(sent["source_branch"], "feat/#84-pr-templates");
 }
 
 #[test]

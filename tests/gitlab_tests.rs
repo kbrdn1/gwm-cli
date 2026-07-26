@@ -325,114 +325,6 @@ fn mr_view_argv_pins_the_json_output_flag() {
 // --- create ---------------------------------------------------------------
 
 #[test]
-fn issue_create_argv_passes_the_body_inline_and_skips_the_editor() {
-  // `glab issue create` has no `--body-file`; the backend reads the
-  // rendered body and passes it via `--description`, and must suppress
-  // both the editor and the confirmation prompt or the call blocks on a
-  // TTY read.
-  let argv = gitlab::issue_create_argv("group/proj", "My title", "body text", &["bug".into()]);
-
-  assert_eq!(
-    argv,
-    vec![
-      "issue",
-      "create",
-      "--repo",
-      "group/proj",
-      "--title",
-      "My title",
-      "--description",
-      "body text",
-      "--label",
-      "bug",
-      "--no-editor",
-      "--yes",
-    ]
-  );
-}
-
-#[test]
-fn mr_create_argv_carries_branches_and_draft() {
-  let argv = gitlab::mr_create_argv("group/proj", "T", "B", "feat/x", Some("main"), true);
-
-  assert_eq!(
-    argv,
-    vec![
-      "mr",
-      "create",
-      "--repo",
-      "group/proj",
-      "--title",
-      "T",
-      "--description",
-      "B",
-      "--source-branch",
-      "feat/x",
-      "--target-branch",
-      "main",
-      "--draft",
-      "--no-editor",
-      "--yes",
-    ]
-  );
-}
-
-#[test]
-fn create_argv_omits_repo_entirely_when_the_slug_is_empty() {
-  // `gwm new` / `gwm pr` have always tolerated a repo with no `origin`,
-  // letting the forge CLI infer the project from the local git context.
-  // An empty slug must drop the flag rather than pass `--repo ""`, which
-  // glab would reject.
-  let issue = gitlab::issue_create_argv("", "T", "B", &[]);
-  let mr = gitlab::mr_create_argv("", "T", "B", "feat/x", None, false);
-
-  assert!(!issue.iter().any(|a| a == "--repo"), "issue argv: {:?}", issue);
-  assert!(!mr.iter().any(|a| a == "--repo"), "mr argv: {:?}", mr);
-  assert_eq!(issue[..2], ["issue", "create"]);
-  assert_eq!(mr[..2], ["mr", "create"]);
-}
-
-#[test]
-fn mr_create_argv_omits_the_target_branch_when_absent() {
-  let argv = gitlab::mr_create_argv("g/p", "T", "B", "feat/x", None, false);
-
-  assert!(!argv.iter().any(|a| a == "--target-branch"));
-  assert!(!argv.iter().any(|a| a == "--draft"));
-}
-
-#[test]
-fn created_number_is_parsed_from_a_merge_requests_url() {
-  // GitLab's URL shape is `/-/merge_requests/N`, not GitHub's `/pull/N`.
-  let out = "https://gitlab.com/group/proj/-/merge_requests/61";
-
-  assert_eq!(gitlab::parse_created_mr_number(out).unwrap(), 61);
-}
-
-#[test]
-fn created_number_is_parsed_from_an_issues_url() {
-  let out = "https://gitlab.com/group/proj/-/issues/42";
-
-  assert_eq!(gitlab::parse_created_issue_number(out).unwrap(), 42);
-}
-
-#[test]
-fn created_number_parsing_scans_multi_line_output() {
-  // glab prints a banner line before the URL.
-  let out = "!61 My title (feat/x)\n https://gitlab.com/group/proj/-/merge_requests/61\n";
-
-  assert_eq!(gitlab::parse_created_mr_number(out).unwrap(), 61);
-}
-
-#[test]
-fn created_number_parsing_errors_without_a_url() {
-  let err = gitlab::parse_created_mr_number("something went sideways").unwrap_err();
-
-  assert!(err.to_string().contains("URL"), "should mention the URL: {}", err);
-}
-
-// --- labels ---------------------------------------------------------------
-
-#[test]
 fn parse_labels_json_strips_the_leading_hash_and_lowercases() {
   // GitLab serialises `"#D9534F"`; the diff engine compares against bare
   // lowercase 6-hex, so a raw pass-through would flag every label as a
@@ -683,27 +575,6 @@ fn a_manual_pipeline_does_not_count_as_a_passed_check() {
 
   assert_eq!(pr.checks_passed, 0);
   assert_ne!(pr.ci, CiState::Passing);
-}
-
-#[test]
-fn the_issue_body_is_redacted_from_the_command_log() {
-  // `glab` has no `--body-file`, so the whole rendered body rides in
-  // `--description`. The Command Logs transcript is ours to build, so the
-  // value is redacted there rather than pasted into a copyable log line.
-  let argv: Vec<std::ffi::OsString> = gitlab::issue_create_argv("g/p", "T", "secret body text", &[])
-    .into_iter()
-    .map(Into::into)
-    .collect();
-
-  let line =
-    gwm::forge::cli_command_line_redacted(std::ffi::OsStr::new("/usr/local/bin/glab"), &argv, &["--description"]);
-
-  assert!(
-    !line.contains("secret body text"),
-    "body must not reach the log: {line}"
-  );
-  assert!(line.contains("--description <redacted:16 chars>"), "line: {line}");
-  assert!(line.starts_with("glab issue create"), "line: {line}");
 }
 
 #[test]
@@ -962,20 +833,6 @@ fn an_empty_selector_makes_glab_api_resolve_the_project_itself() {
 }
 
 #[test]
-fn every_write_path_honours_the_repo_selector() {
-  // `create_pr` reached past `repo_selector()` for the raw slug, so MR
-  // creation — the one call that *mutates* another tenant rather than
-  // just reading it — still resolved against glab's default host on an
-  // SSH origin. Pinned at the argv level so a future call site cannot
-  // silently reintroduce it.
-  let issue = gitlab::issue_create_argv("", "T", "B", &[]);
-  let mr = gitlab::mr_create_argv("", "T", "B", "feat/x", Some("main"), false);
-
-  assert!(!issue.iter().any(|a| a == "--repo"), "issue argv: {issue:?}");
-  assert!(!mr.iter().any(|a| a == "--repo"), "mr argv: {mr:?}");
-}
-
-#[test]
 fn mr_detection_ignores_a_fork_with_the_same_branch_name() {
   // `--source-branch` does not constrain the source *project*, so a fork
   // whose branch happens to share the name could win the `--per-page 1`
@@ -1005,4 +862,100 @@ fn mr_list_argv_asks_for_enough_rows_to_filter_forks() {
     argv.windows(2).any(|w| w[0] == "--per-page" && w[1] == "20"),
     "one row cannot be filtered: {argv:?}"
   );
+}
+
+// --- creation through `glab api`, keeping bodies off the argv (#459) -------
+
+#[test]
+fn create_argv_never_carries_the_body() {
+  // The whole point of issue #459: `glab` has no `--body-file`, so the
+  // old `glab issue|mr create --description "<body>"` put the rendered
+  // text on the command line, where `ps` exposes it to every local
+  // process. The argv builders must now be body-free by construction.
+  let issue = gwm::gitlab::issue_create_api_argv("group/proj");
+  let mr = gwm::gitlab::mr_create_api_argv("group/proj");
+
+  for argv in [&issue, &mr] {
+    assert!(!argv.iter().any(|a| a == "--description"), "{argv:?}");
+    assert!(
+      argv.windows(2).any(|w| w[0] == "--input" && w[1] == "-"),
+      "the body must travel on stdin: {argv:?}"
+    );
+    assert!(argv.windows(2).any(|w| w[0] == "-X" && w[1] == "POST"), "{argv:?}");
+  }
+  assert!(issue.iter().any(|a| a.ends_with("/issues")), "{issue:?}");
+  assert!(mr.iter().any(|a| a.ends_with("/merge_requests")), "{mr:?}");
+}
+
+#[test]
+fn issue_create_payload_carries_title_description_and_labels() {
+  let labels = vec!["bug".to_string(), "p1".to_string()];
+  let json = gwm::gitlab::issue_create_payload("Title", "Body\nwith newline", &labels);
+  let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+  assert_eq!(v["title"], "Title");
+  assert_eq!(v["description"], "Body\nwith newline");
+  // Comma-separated rather than an array: accepted by every instance,
+  // including the older ones that predate the array form.
+  assert_eq!(v["labels"], "bug,p1");
+}
+
+#[test]
+fn mr_create_payload_carries_both_branches() {
+  let json = gwm::gitlab::mr_create_payload("T", "B", "feat/x", Some("dev"), false).unwrap();
+  let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+  assert_eq!(v["source_branch"], "feat/x");
+  assert_eq!(v["target_branch"], "dev");
+  assert_eq!(v["title"], "T");
+}
+
+#[test]
+fn mr_create_payload_expresses_draft_in_the_title() {
+  // GitLab has no `draft` field on MR creation — `glab mr create
+  // --draft` only prefixes the title client-side, so going through the
+  // API means reproducing that or silently losing the draft state.
+  let json = gwm::gitlab::mr_create_payload("Add thing", "B", "feat/x", Some("dev"), true).unwrap();
+  let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+  assert_eq!(v["title"], "Draft: Add thing");
+}
+
+#[test]
+fn mr_create_payload_requires_a_target_branch() {
+  // `glab mr create` infers the default branch; the REST endpoint makes
+  // `target_branch` mandatory. Erroring is the honest translation —
+  // guessing here would open the MR against the wrong branch.
+  let err = gwm::gitlab::mr_create_payload("T", "B", "feat/x", None, false).unwrap_err();
+
+  assert!(err.to_string().contains("target branch"), "{err}");
+}
+
+#[test]
+fn parse_created_api_reads_the_iid_and_the_server_url() {
+  let (number, url) = gwm::gitlab::parse_created_api(
+    r#"{"iid":42,"web_url":"https://gitlab.com/group/proj/-/issues/42"}"#,
+    "issue",
+  )
+  .unwrap();
+
+  assert_eq!(number, 42);
+  assert_eq!(url, "https://gitlab.com/group/proj/-/issues/42");
+}
+
+#[test]
+fn create_endpoints_stay_project_relative_when_the_slug_is_empty() {
+  // Carried over from the pre-#459 argv tests. `gwm new` / `gwm pr` have
+  // always tolerated a repo with no `origin`, letting glab infer the
+  // project from the local git context — and the same must hold for the
+  // write paths, which mutate another tenant rather than just read it.
+  // `projects/:fullpath` is glab's own placeholder for "the project of
+  // the repo I am running in".
+  let issue = gwm::gitlab::issue_create_api_argv("");
+  let mr = gwm::gitlab::mr_create_api_argv("");
+
+  assert!(issue.iter().any(|a| a == "projects/:fullpath/issues"), "{issue:?}");
+  assert!(mr.iter().any(|a| a == "projects/:fullpath/merge_requests"), "{mr:?}");
+  assert!(!issue.iter().any(|a| a == "--repo"), "{issue:?}");
+  assert!(!mr.iter().any(|a| a == "--repo"), "{mr:?}");
 }

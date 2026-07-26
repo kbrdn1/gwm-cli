@@ -3,10 +3,15 @@
 //!
 //! Two invocation styles, picked per operation rather than uniformly:
 //!
-//! - **issues / merge requests** go through the first-class subcommands
-//!   (`glab issue view`, `glab mr view`, `glab mr list`) with
+//! - **reading issues / merge requests** goes through the first-class
+//!   subcommands (`glab issue view`, `glab mr view`, `glab mr list`) with
 //!   `--output json`. `glab` passes the GitLab REST object through
 //!   unchanged, so the parsers below deserialize the documented API shape.
+//! - **creating issues / merge requests** goes through `glab api` too.
+//!   `glab issue|mr create` only takes the body as `--description
+//!   <text>`, which publishes the whole rendered document on the command
+//!   line for any local process to read via `ps`; `glab api --input -`
+//!   sends it on stdin instead (issue #459).
 //! - **labels / milestones** go through `glab api`. `glab label list`
 //!   caps at 100 rows per page with no `--paginate`, and `glab label edit`
 //!   keys on a numeric `--label-id` that [`crate::labels::RemoteLabel`]
@@ -38,12 +43,6 @@ use crate::labels::{LabelSpec, RemoteLabel};
 use crate::milestones::{self, MilestoneSpec, MilestoneState, RemoteMilestone};
 use serde::Deserialize;
 use std::ffi::OsString;
-use std::sync::LazyLock;
-
-static ISSUE_URL_RE: LazyLock<regex::Regex> =
-  LazyLock::new(|| regex::Regex::new(r"/-/issues/(\d+)").expect("static GitLab issue URL regex compiles"));
-static MR_URL_RE: LazyLock<regex::Regex> =
-  LazyLock::new(|| regex::Regex::new(r"/-/merge_requests/(\d+)").expect("static GitLab MR URL regex compiles"));
 
 /// Resolve the `glab` program to invoke: `$GWM_GLAB` when set (test /
 /// override hook), else `glab` on `PATH`. Mirrors
@@ -52,26 +51,6 @@ pub fn glab_program() -> OsString {
   std::env::var_os("GWM_GLAB").unwrap_or_else(|| "glab".into())
 }
 
-/// Environment pinned on every `glab` spawn.
-///
-/// Without `$GITLAB_HOST`, `glab` resolves the instance from the *process*
-/// cwd's git remote and otherwise falls back to gitlab.com (Codex review
-/// #458). gwm's cwd is not reliably the repo being queried — in workspace
-/// mode it is the workspace root while the row belongs to a child repo —
-/// so a same-named project on the wrong instance could be read and its
-/// iid persisted into the local git config.
-///
-/// Nothing is pinned unless the origin is **authoritative**: an SSH remote
-/// carries no web scheme or port, so `https://<ssh-host>` is a guess, and
-/// forcing a guess over a working `glab` configuration (different web
-/// hostname, plain HTTP, non-standard port) breaks setups that were fine.
-/// An empty slug is likewise left alone — that is the caller asking `glab`
-/// to infer the project locally, and pinning gitlab.com there would create
-/// the issue / MR on the wrong instance entirely.
-///
-/// The cases left unpinned are not left unprotected: the child is spawned
-/// **inside the repo** (see [`forge::Forge::workdir`]), so `glab` resolves
-/// the instance from that repo's own remote rather than from gwm's cwd.
 /// Inherited variables that would redirect `glab` at another project.
 ///
 /// `$GITLAB_REPO` is the flag's environment binding, `$GITLAB_GROUP` is
@@ -119,10 +98,12 @@ pub fn glab_program() -> OsString {
 /// flag would close that, and would also strip gwm of the only
 /// credential a pipeline has. The pin loses on purpose: a job runs on
 /// the instance it runs on, and that is better ground truth than an
-/// origin URL. The remainder
-/// (`$BROWSER`, `$EDITOR`/`$VISUAL`, `$GLAB_GLAMOUR_STYLE`,
-/// `$GLAB_FORCE_HYPERLINKS`, `$NO_COLOR`, `$GLAB_NO_PROMPT`,
-/// `$GLAB_DEBUG*`, `$GLAB_CHECK_UPDATE`, `$GLAB_SEND_TELEMETRY`,
+/// origin URL.
+///
+/// The remainder (`$BROWSER`, `$EDITOR`/`$VISUAL`,
+/// `$GLAB_GLAMOUR_STYLE`, `$GLAB_FORCE_HYPERLINKS`, `$NO_COLOR`,
+/// `$GLAB_NO_PROMPT`, `$GLAB_DEBUG*`, `$GLAB_CHECK_UPDATE`,
+/// `$GLAB_SEND_TELEMETRY`,
 /// `$GITLAB_RELEASE_ASSETS_USE_PACKAGE_REGISTRY`) is presentation,
 /// diagnostics or telemetry and cannot retarget a call.
 pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
@@ -133,6 +114,26 @@ pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
   vars
 }
 
+/// Environment pinned on every `glab` spawn.
+///
+/// Without `$GITLAB_HOST`, `glab` resolves the instance from the *process*
+/// cwd's git remote and otherwise falls back to gitlab.com (Codex review
+/// #458). gwm's cwd is not reliably the repo being queried — in workspace
+/// mode it is the workspace root while the row belongs to a child repo —
+/// so a same-named project on the wrong instance could be read and its
+/// iid persisted into the local git config.
+///
+/// Nothing is pinned unless the origin is **authoritative**: an SSH remote
+/// carries no web scheme or port, so `https://<ssh-host>` is a guess, and
+/// forcing a guess over a working `glab` configuration (different web
+/// hostname, plain HTTP, non-standard port) breaks setups that were fine.
+/// An empty slug is likewise left alone — that is the caller asking `glab`
+/// to infer the project locally, and pinning gitlab.com there would create
+/// the issue / MR on the wrong instance entirely.
+///
+/// The cases left unpinned are not left unprotected: the child is spawned
+/// **inside the repo** (see [`forge::Forge::workdir`]), so `glab` resolves
+/// the instance from that repo's own remote rather than from gwm's cwd.
 pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
@@ -140,19 +141,9 @@ pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   vec![("GITLAB_HOST".to_string(), origin.web_origin.clone())]
 }
 
-/// Flags whose *value* must never reach the Command Logs transcript.
-/// `--description` carries a whole rendered issue / MR body because
-/// `glab` has no `--body-file` counterpart to `gh`'s.
-const REDACTED_FLAGS: &[&str] = &["--description"];
-
-// ---- percent-encoding ----------------------------------------------------
-
-/// Percent-encode one URL path segment, keeping only RFC 3986 unreserved
-/// characters. Load-bearing in two places: the project path (`group/proj`
-/// → `group%2Fproj`, which is how GitLab addresses a project by path) and
-/// a label title used as a key (`good first issue`).
-///
-/// Hand-rolled rather than pulling a dependency for ~10 lines.
+/// Percent-encode one URL path segment. A GitLab project path contains
+/// slashes (`group/sub/proj`) and must arrive as a single encoded
+/// segment for `projects/:id` to resolve it.
 fn encode_segment(s: &str) -> String {
   let mut out = String::with_capacity(s.len());
   for b in s.bytes() {
@@ -451,82 +442,96 @@ pub fn parse_mr_list_number(s: &str) -> Result<Option<u64>> {
 
 // ---- create --------------------------------------------------------------
 
-/// Argv for `glab issue create`.
+// ---- creation via `glab api` (issue #459) --------------------------------
+//
+// `glab issue|mr create` only accepts the body as `--description
+// <text>`, which puts the whole rendered document on the command line
+// where `ps` shows it to every local process. `gh` has `--body-file`,
+// so the GitHub path never had this problem; going through `glab api
+// --input -` gives the GitLab path the same property by sending the
+// request body on stdin.
+
+/// Argv for creating an issue through the REST API. Body-free by
+/// construction: everything sensitive travels on stdin.
+pub fn issue_create_api_argv(slug: &str) -> Vec<String> {
+  api_post_argv(slug, "issues")
+}
+
+/// Argv for creating a merge request through the REST API.
+pub fn mr_create_api_argv(slug: &str) -> Vec<String> {
+  api_post_argv(slug, "merge_requests")
+}
+
+fn api_post_argv(slug: &str, collection: &str) -> Vec<String> {
+  vec![
+    "api".into(),
+    "-X".into(),
+    "POST".into(),
+    format!("{}/{}", project_path(slug), collection),
+    "--input".into(),
+    "-".into(),
+  ]
+}
+
+/// JSON request body for `POST /projects/:id/issues`.
+pub fn issue_create_payload(title: &str, body: &str, labels: &[String]) -> String {
+  // `labels` as a comma-separated string rather than an array: both are
+  // accepted today, the string form also works on older instances.
+  serde_json::json!({
+    "title": title,
+    "description": body,
+    "labels": labels.join(","),
+  })
+  .to_string()
+}
+
+/// JSON request body for `POST /projects/:id/merge_requests`.
 ///
-/// `glab` has no `--body-file`, so the rendered body is passed inline via
-/// `--description`. `--no-editor` and `--yes` are both required: without
-/// them `glab` opens `$EDITOR` and/or blocks on a TTY confirm, which
-/// hangs a non-interactive `gwm issue create`.
-pub fn issue_create_argv(slug: &str, title: &str, body: &str, labels: &[String]) -> Vec<String> {
-  let mut argv = vec!["issue".into(), "create".into()];
-  argv.extend(repo_flag(slug));
-  argv.extend(["--title".into(), title.into(), "--description".into(), body.into()]);
-  for label in labels {
-    argv.push("--label".into());
-    argv.push(label.clone());
-  }
-  argv.push("--no-editor".into());
-  argv.push("--yes".into());
-  argv
-}
-
-/// Argv for `glab mr create`. Same `--no-editor` / `--yes` reasoning as
-/// [`issue_create_argv`].
-pub fn mr_create_argv(slug: &str, title: &str, body: &str, head: &str, base: Option<&str>, draft: bool) -> Vec<String> {
-  let mut argv = vec!["mr".into(), "create".into()];
-  argv.extend(repo_flag(slug));
-  argv.extend([
-    "--title".into(),
-    title.into(),
-    "--description".into(),
-    body.into(),
-    "--source-branch".into(),
-    head.into(),
-  ]);
-  if let Some(base) = base {
-    argv.push("--target-branch".into());
-    argv.push(base.into());
-  }
-  if draft {
-    argv.push("--draft".into());
-  }
-  argv.push("--no-editor".into());
-  argv.push("--yes".into());
-  argv
-}
-
-fn parse_created_number(out: &str, re: &regex::Regex, kind: &str) -> Result<u64> {
-  re.captures(out)
-    .and_then(|c| c.get(1))
-    .and_then(|m| m.as_str().parse::<u64>().ok())
-    .ok_or_else(|| {
-      GwmError::CommandFailed(format!(
-        "glab {} create did not print a URL containing a number: {}",
-        kind,
-        out.trim()
-      ))
+/// Two divergences from `glab mr create` that the CLI hid:
+/// `target_branch` is mandatory on the endpoint (the CLI inferred the
+/// default branch), and there is no `draft` field — draft state is
+/// carried by a `Draft:` title prefix, which is exactly what the CLI
+/// did client-side.
+pub fn mr_create_payload(title: &str, body: &str, head: &str, base: Option<&str>, draft: bool) -> Result<String> {
+  let base = base.ok_or_else(|| {
+    GwmError::Other(
+      "creating a GitLab merge request needs an explicit target branch: the REST endpoint has no default".into(),
+    )
+  })?;
+  let title = if draft {
+    format!("Draft: {title}")
+  } else {
+    title.to_string()
+  };
+  Ok(
+    serde_json::json!({
+      "title": title,
+      "description": body,
+      "source_branch": head,
+      "target_branch": base,
     })
+    .to_string(),
+  )
 }
 
-/// Recover the issue number from `glab issue create` output. GitLab's URL
-/// shape is `/-/issues/N`, not GitHub's `/issues/N` — the `-/` infix is
-/// what keeps the two regexes from cross-matching.
-pub fn parse_created_issue_number(out: &str) -> Result<u64> {
-  parse_created_number(out, &ISSUE_URL_RE, "issue")
-}
-
-/// Recover the MR number from `glab mr create` output (`/-/merge_requests/N`).
-pub fn parse_created_mr_number(out: &str) -> Result<u64> {
-  parse_created_number(out, &MR_URL_RE, "mr")
-}
-
-/// The first whitespace-delimited token in `out` that looks like the
-/// created object's URL. `glab` prints a banner line before it.
-fn extract_url(out: &str, marker: &str) -> Option<String> {
-  out
-    .split_whitespace()
-    .find(|t| t.contains(marker))
-    .map(|t| t.to_string())
+/// Read the `iid` and server-reported `web_url` back off a created
+/// object. Both come from the API response, so the URL is the
+/// instance's own rather than one gwm reconstructed.
+pub fn parse_created_api(s: &str, kind: &'static str) -> Result<(u64, String)> {
+  #[derive(Deserialize)]
+  struct Created {
+    iid: u64,
+    #[serde(default)]
+    web_url: String,
+  }
+  let c: Created = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
+    kind: match kind {
+      "issue" => "gitlab created issue",
+      _ => "gitlab created mr",
+    },
+    source: e,
+  })?;
+  Ok((c.iid, c.web_url))
 }
 
 // ---- labels --------------------------------------------------------------
@@ -888,6 +893,13 @@ impl GitLabForge {
   }
 
   fn run_argv(&self, argv: Vec<String>) -> Result<String> {
+    self.run_argv_with_stdin(argv, None)
+  }
+
+  /// `stdin` carries the request body for the `glab api` creation paths,
+  /// which is the whole reason it exists: it keeps the rendered text out
+  /// of the argv (issue #459).
+  fn run_argv_with_stdin(&self, argv: Vec<String>, stdin: Option<&[u8]>) -> Result<String> {
     forge::run_cli_with(
       &self.program,
       argv,
@@ -895,7 +907,8 @@ impl GitLabForge {
         env: &self.env,
         cwd: self.workdir.as_deref(),
         env_remove: &self.env_remove,
-        redact_after: REDACTED_FLAGS,
+        redact_after: &[],
+        stdin,
       },
     )
   }
@@ -964,28 +977,23 @@ impl Forge for GitLabForge {
 
   fn create_issue(&self, req: &IssueCreateRequest<'_>) -> Result<CreatedIssue> {
     let body = forge::read_body_file(req.body_file)?;
-    let out = self.run_argv(issue_create_argv(self.repo_selector(), req.title, &body, req.labels))?;
-    let number = parse_created_issue_number(&out)?;
+    let payload = issue_create_payload(req.title, &body, req.labels);
+    let out = self.run_argv_with_stdin(issue_create_api_argv(self.repo_selector()), Some(payload.as_bytes()))?;
+    let (number, url) = parse_created_api(&out, "issue")?;
     Ok(CreatedIssue {
       number,
-      url: extract_url(&out, "/-/issues/").unwrap_or_else(|| self.issue_url(number)),
+      url: if url.is_empty() { self.issue_url(number) } else { url },
     })
   }
 
   fn create_pr(&self, req: &PrCreateRequest<'_>) -> Result<CreatedPr> {
     let body = forge::read_body_file(req.body_file)?;
-    let out = self.run_argv(mr_create_argv(
-      self.repo_selector(),
-      req.title,
-      &body,
-      req.head,
-      req.base,
-      req.draft,
-    ))?;
-    let number = parse_created_mr_number(&out)?;
+    let payload = mr_create_payload(req.title, &body, req.head, req.base, req.draft)?;
+    let out = self.run_argv_with_stdin(mr_create_api_argv(self.repo_selector()), Some(payload.as_bytes()))?;
+    let (number, url) = parse_created_api(&out, "mr")?;
     Ok(CreatedPr {
       number,
-      url: extract_url(&out, "/-/merge_requests/").unwrap_or_else(|| self.pr_url(number)),
+      url: if url.is_empty() { self.pr_url(number) } else { url },
     })
   }
 

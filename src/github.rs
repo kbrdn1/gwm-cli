@@ -1378,6 +1378,9 @@ impl GitHubForge {
         cwd: self.workdir.as_deref(),
         env_remove: &self.env_remove,
         redact_after: &[],
+        // `gh` takes bodies via `--body-file`, so nothing sensitive ever
+        // needs stdin on this backend (contrast `glab`, issue #459).
+        stdin: None,
       },
     )
   }

@@ -690,6 +690,9 @@ pub struct CliSpawn<'a> {
   pub env_remove: &'a [&'a str],
   /// Flags whose *value* must not reach the Command Logs transcript.
   pub redact_after: &'a [&'a str],
+  /// Payload written to the child's stdin, for the creation paths that
+  /// must keep a rendered body out of the argv (issue #459).
+  pub stdin: Option<&'a [u8]>,
 }
 
 /// [`run_cli`] with extra environment for the child and a redaction list
@@ -718,7 +721,11 @@ where
   if let Some(cwd) = spawn.cwd {
     cmd.current_dir(cwd);
   }
-  let output = crate::command_log::run_logged(&mut cmd, cmdline).map_err(|e| {
+  let output = match spawn.stdin {
+    Some(payload) => crate::command_log::run_logged_with_stdin(&mut cmd, cmdline, payload),
+    None => crate::command_log::run_logged(&mut cmd, cmdline),
+  }
+  .map_err(|e| {
     GwmError::CommandFailed(format!(
       "{name}: failed to spawn ({e}). Is `{name}` installed and on PATH?"
     ))
