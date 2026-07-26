@@ -1099,3 +1099,55 @@ fn ci_guard_resolves_the_implicit_port_from_the_scheme() {
     "the same instance must not be refused: {matching:?}"
   );
 }
+
+#[test]
+fn ci_guard_compares_an_ssh_origin_against_the_ssh_host_variable() {
+  // Round 18 made the guard abstain on a guessed origin because the SSH
+  // host legitimately differs from the web host — citing the existence
+  // of `CI_SERVER_SHELL_SSH_HOST`. That variable is the comparison
+  // target for exactly this case, not a reason to give up on it: a job
+  // handling an SSH checkout of another instance could still read or
+  // prune the runner tenant's same-named project (Codex review #458).
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("CI_SERVER_HOST", "gitlab.acme");
+    std::env::set_var("CI_SERVER_SHELL_SSH_HOST", "ssh.gitlab.acme");
+    std::env::remove_var("CI_SERVER_PORT");
+    std::env::remove_var("CI_SERVER_FQDN");
+    std::env::remove_var("CI_SERVER_URL");
+    std::env::remove_var("CI_SERVER_PROTOCOL");
+  }
+  // The runner's own SSH endpoint: same instance, must not refuse.
+  let ours = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.acme:team/proj.git"));
+  // Someone else's: now provably a different instance.
+  let theirs = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.other:team/proj.git"));
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("CI_SERVER_HOST");
+    std::env::remove_var("CI_SERVER_SHELL_SSH_HOST");
+  }
+
+  assert!(ours.is_none(), "the runner's own SSH host must not refuse: {ours:?}");
+  assert!(theirs.is_some(), "a foreign SSH host is a provable divergence");
+}
+
+#[test]
+fn ci_guard_still_abstains_when_no_ssh_host_is_published() {
+  // Without `CI_SERVER_SHELL_SSH_HOST` there is nothing to compare an
+  // SSH origin against, and guessing from the web host is what blocked
+  // valid split-host installs in the first place.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("CI_SERVER_HOST", "gitlab.acme");
+    std::env::remove_var("CI_SERVER_SHELL_SSH_HOST");
+  }
+  let out = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.acme:team/proj.git"));
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("CI_SERVER_HOST");
+  }
+
+  assert!(out.is_none(), "{out:?}");
+}

@@ -167,14 +167,27 @@ pub fn ci_autologin_conflict(origin: &forge::RemoteRef) -> Option<String> {
     return None;
   }
 
-  // Only an authoritative origin can prove a divergence. GitLab
-  // publishes `CI_SERVER_SHELL_SSH_HOST` next to `CI_SERVER_HOST`
-  // precisely because the SSH host legitimately differs from the web
-  // host, so on a guessed origin — where all gwm has is the SSH
-  // hostname — comparing the two manufactures a conflict and blocks
-  // every call on a valid install (Codex review #458).
+  // A guessed origin gives only the SSH hostname, so comparing it to
+  // the runner's *web* host manufactures a conflict and blocks every
+  // call on a valid split-host install. But GitLab publishes
+  // `CI_SERVER_SHELL_SSH_HOST` next to `CI_SERVER_HOST`, and that is the
+  // right-hand side for this case rather than a reason to give up on it
+  // (Codex review #458): a job handling an SSH checkout of another
+  // instance can still read or prune the runner tenant's same-named
+  // project. Without the variable there is nothing to compare, and
+  // abstaining beats guessing.
   if origin.trust != forge::OriginTrust::FromUrl {
-    return None;
+    let ssh_host = non_empty(std::env::var("CI_SERVER_SHELL_SSH_HOST").ok())?;
+    if ssh_host.eq_ignore_ascii_case(&origin.host) {
+      return None;
+    }
+    return Some(format!(
+      "refusing to run glab: CI auto-login would authenticate against the instance at \
+       '{ssh_host}' but this repo's origin is '{}'. glab ignores GITLAB_HOST in that \
+       mode, so the call would target the wrong instance. Unset \
+       GLAB_ENABLE_CI_AUTOLOGIN to proceed.",
+      origin.host
+    ));
   }
 
   // `CI_SERVER_FQDN` is `gitlab.example.com:8080` — host AND port —
