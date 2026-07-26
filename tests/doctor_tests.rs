@@ -1114,7 +1114,11 @@ fn the_forge_cli_probe_honours_the_gwm_gh_override() {
   // bare name `gh` regardless warned about a setup that works, and pushed
   // the exit code to 1 (Codex review #458).
   let (dir, repo) = init_repo();
-  let fake = dir.path().join("my-gh");
+  // Windows resolves executability from the extension, not a mode bit, so
+  // an extensionless file is genuinely not runnable there — the probe was
+  // right to report it missing and the test was wrong to expect otherwise.
+  // A real override on Windows names a `.exe`, so the fixture does too.
+  let fake = dir.path().join(if cfg!(windows) { "my-gh.exe" } else { "my-gh" });
   std::fs::write(&fake, "#!/bin/sh\nexit 0\n").unwrap();
   #[cfg(unix)]
   {
