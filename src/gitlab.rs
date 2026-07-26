@@ -903,13 +903,27 @@ impl GitLabForge {
     // A stdin payload is, by construction, the one thing that must not
     // reach the transcript — and the create endpoints echo it back.
     let redact_output = stdin.is_some();
+    // Redacting stdout is not enough on its own: `$GLAB_DEBUG_HTTP`
+    // dumps whole requests and responses, bodies included, to *stderr*,
+    // which the transcript keeps and the error path quotes verbatim
+    // (Codex review #458). The env audit that produced the three-tier
+    // rule filed both debug variables under "cannot retarget a call",
+    // which was true and beside the point — it only ever asked what
+    // could redirect a call, never what could disclose one.
+    //
+    // Cleared only for the calls that actually carry a body, so
+    // debugging every other operation still works.
+    let mut env_remove: Vec<&'static str> = self.env_remove.clone();
+    if stdin.is_some() {
+      env_remove.extend_from_slice(&["GLAB_DEBUG_HTTP", "GLAB_DEBUG"]);
+    }
     forge::run_cli_with(
       &self.program,
       argv,
       &forge::CliSpawn {
         env: &self.env,
         cwd: self.workdir.as_deref(),
-        env_remove: &self.env_remove,
+        env_remove: &env_remove,
         redact_after: &[],
         stdin,
         redact_output,

@@ -2214,6 +2214,7 @@ fn write_recording_glab(root: &Path, mr_list_json: &str, api_json: &str) -> Path
   echo "GITLAB_GROUP:${{GITLAB_GROUP-<unset>}}"
   echo "GITLAB_API_HOST:${{GITLAB_API_HOST-<unset>}}"
   echo "GITLAB_TOKEN:${{GITLAB_TOKEN-<unset>}}"
+  echo "GLAB_DEBUG_HTTP:${{GLAB_DEBUG_HTTP-<unset>}}"
 }} >> "$GWM_FAKE_LOG"
 if [ "$1" = "mr" ] && [ "$2" = "list" ]; then
   printf '%s' '{list}'
@@ -4559,6 +4560,10 @@ fn pr_body_travels_on_stdin_and_never_reaches_the_glab_argv() {
     .env("GWM_GLAB", &fake_glab)
     .env("GWM_FAKE_LOG", &log)
     .env("GWM_FAKE_STDIN", &stdin_dump)
+    // Set by a user debugging something else entirely. It makes glab
+    // dump full requests and responses — bodies included — to stderr,
+    // which the transcript keeps and the error path quotes verbatim.
+    .env("GLAB_DEBUG_HTTP", "1")
     .env("PATH", prepend_path(fake_bin.path()))
     .args(["pr"])
     .assert()
@@ -4574,6 +4579,10 @@ fn pr_body_travels_on_stdin_and_never_reaches_the_glab_argv() {
     "the body must not be visible in the argv: {calls}"
   );
   assert!(calls.contains("--input -"), "{calls}");
+  assert!(
+    calls.contains("GLAB_DEBUG_HTTP:<unset>"),
+    "the HTTP debug dump would print the body straight back out: {calls}"
+  );
 
   // ...and it must still actually arrive, or the test above would pass
   // just as well with the body silently dropped.
