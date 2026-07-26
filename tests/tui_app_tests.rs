@@ -10454,3 +10454,32 @@ fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
     app.status
   );
 }
+
+#[test]
+fn open_menu_drops_a_cached_url_from_the_previous_origin() {
+  // `reread_link` preserves the fetch caches so the open menu can use
+  // the server-reported URL. Those caches are keyed by number alone, so
+  // an origin move must still clear them: otherwise issue #42 on the new
+  // instance opens the old tenant's #42 (Codex review #458).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::forge::IssueStatus {
+    number: 42,
+    title: "t".into(),
+    state: gwm::forge::IssueState::Open,
+    url: "https://github.com/acme/widgets/issues/42".into(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+  app.enter_open_menu();
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert!(
+    !url.contains("github.com"),
+    "the old tenant's cached URL survived the move: {url}"
+  );
+}

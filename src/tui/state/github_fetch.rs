@@ -167,9 +167,14 @@ impl GitHubFetch {
   /// wrong exactly where it matters, on an origin whose web host or port
   /// gwm cannot infer (Codex review #458).
   ///
-  /// Preserving is safe by construction: the caches are keyed by issue /
-  /// PR number, so a link that really did change simply misses.
+  /// Preserving is safe as long as the *instance* is unchanged: the
+  /// caches are keyed by number alone, so after an origin move a
+  /// branch-name-derived issue #42 would otherwise reuse the old repo's
+  /// cached URL for #42. The full `<web origin>/<slug>` is compared for
+  /// exactly that — the slug alone is not enough, since `acme/widgets`
+  /// exists identically on github.com and gitlab.com.
   pub fn reread_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
+    let before = self.forge_identity();
     self.link = branch
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
@@ -177,6 +182,15 @@ impl GitHubFetch {
     // Kept in sync with `forge` so the many read-only slug consumers
     // (detail overlay keys, status strings) need no rewrite.
     self.link_slug = self.forge.as_ref().map(|f| f.slug().to_string());
+    if before != self.forge_identity() {
+      self.invalidate();
+    }
+  }
+
+  /// `<web origin>/<slug>`, or `None` without a resolved forge. Identity
+  /// of the *instance*, not just the project.
+  fn forge_identity(&self) -> Option<String> {
+    self.forge.as_ref().map(|f| format!("{}/{}", f.web_origin(), f.slug()))
   }
 
   /// Flush every cached fetch state. Equivalent to "the cached
