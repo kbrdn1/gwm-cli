@@ -215,7 +215,20 @@ fn bound_output(stdout: &[u8], stderr: &[u8]) -> String {
 /// pipes fill. Issue and MR bodies are a few KB against a 64 KB pipe
 /// buffer, so this stays well inside the margin; a streaming writer
 /// would be the fix if that ever stops being true.
-pub fn run_logged_with_stdin(cmd: &mut Command, command: String, stdin: &[u8]) -> std::io::Result<Output> {
+///
+/// `redact_output` withholds the captured stdout from the transcript.
+/// Keeping a body off the argv is only half the job when the endpoint
+/// echoes it back: the GitLab create responses carry `description`, so
+/// the text the argv no longer leaks would reappear in the modal. Only
+/// the *log* is redacted — the caller still gets the real stdout, which
+/// it needs to read the new `iid` out of. stderr is kept either way,
+/// since that is what makes a failure diagnosable.
+pub fn run_logged_with_stdin(
+  cmd: &mut Command,
+  command: String,
+  stdin: &[u8],
+  redact_output: bool,
+) -> std::io::Result<Output> {
   use std::io::Write;
   let start = Instant::now();
   cmd
@@ -235,7 +248,11 @@ pub fn run_logged_with_stdin(cmd: &mut Command, command: String, stdin: &[u8]) -
       command,
       duration,
       status: CommandStatus::Exited(out.status.code()),
-      output: bound_output(&out.stdout, &out.stderr),
+      output: if redact_output {
+        bound_output(WITHHELD_RESPONSE.as_bytes(), &out.stderr)
+      } else {
+        bound_output(&out.stdout, &out.stderr)
+      },
     }),
     Err(_) => record(CommandLogEntry {
       command,
@@ -246,6 +263,10 @@ pub fn run_logged_with_stdin(cmd: &mut Command, command: String, stdin: &[u8]) -
   }
   result
 }
+
+/// Stands in for a response the transcript must not keep. Says why, so
+/// the modal does not just look broken.
+const WITHHELD_RESPONSE: &str = "<response withheld: it echoes the submitted body>";
 
 pub fn run_logged(cmd: &mut Command, command: String) -> std::io::Result<Output> {
   let start = Instant::now();

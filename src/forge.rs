@@ -693,6 +693,11 @@ pub struct CliSpawn<'a> {
   /// Payload written to the child's stdin, for the creation paths that
   /// must keep a rendered body out of the argv (issue #459).
   pub stdin: Option<&'a [u8]>,
+  /// Withhold the response from the Command Logs transcript. Set on the
+  /// same creation paths: the GitLab endpoints echo `description` back,
+  /// so a body kept off the argv would otherwise land in the modal via
+  /// the reply instead (issue #459).
+  pub redact_output: bool,
 }
 
 /// [`run_cli`] with extra environment for the child and a redaction list
@@ -722,7 +727,7 @@ where
     cmd.current_dir(cwd);
   }
   let output = match spawn.stdin {
-    Some(payload) => crate::command_log::run_logged_with_stdin(&mut cmd, cmdline, payload),
+    Some(payload) => crate::command_log::run_logged_with_stdin(&mut cmd, cmdline, payload, spawn.redact_output),
     None => crate::command_log::run_logged(&mut cmd, cmdline),
   }
   .map_err(|e| {

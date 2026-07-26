@@ -900,6 +900,9 @@ impl GitLabForge {
   /// which is the whole reason it exists: it keeps the rendered text out
   /// of the argv (issue #459).
   fn run_argv_with_stdin(&self, argv: Vec<String>, stdin: Option<&[u8]>) -> Result<String> {
+    // A stdin payload is, by construction, the one thing that must not
+    // reach the transcript — and the create endpoints echo it back.
+    let redact_output = stdin.is_some();
     forge::run_cli_with(
       &self.program,
       argv,
@@ -909,6 +912,7 @@ impl GitLabForge {
         env_remove: &self.env_remove,
         redact_after: &[],
         stdin,
+        redact_output,
       },
     )
   }
