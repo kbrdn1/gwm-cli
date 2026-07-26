@@ -357,23 +357,6 @@ fn a_github_enterprise_origin_pins_gh_host() {
 }
 
 #[test]
-fn an_ssh_enterprise_remote_still_pins_gh_host() {
-  // Supersedes the round-2 rule for GitHub only. `gh` cannot be steered
-  // any other way here: `--repo owner/repo` carries no hostname,
-  // `gh api repos/<slug>/…` bakes the slug into the request path, and
-  // neither falls back to the working directory the way `glab` does. So
-  // pinning nothing means silently querying github.com, where a
-  // same-named repo owned by someone else may answer. A distinct SSH
-  // hostname is a documented GitLab pattern, not a GitHub one.
-  let r = forge::parse_remote_url("git@github.acme.internal:team/proj.git").unwrap();
-
-  assert_eq!(
-    gwm::github::gh_env(&r),
-    vec![("GH_HOST".to_string(), "github.acme.internal".to_string())]
-  );
-}
-
-#[test]
 fn gh_host_is_pinned_even_for_github_dot_com() {
   // The child inherits gwm's environment, so a user's ambient
   // `GH_HOST=github.acme.internal` (routine for enterprise users) would
@@ -486,22 +469,6 @@ fn a_guessed_origin_is_flagged_so_urls_can_be_confirmed_upstream() {
 }
 
 // --- Codex review #458, round 7 -------------------------------------------
-
-#[test]
-fn gh_host_is_pinned_for_an_ssh_github_dot_com_remote_too() {
-  // Round 5 exempted a guessed github.com origin from the pin, which left
-  // the very hazard round 4 closed for `https://` remotes still open for
-  // `git@github.com:` ones: the child inherits gwm's environment, so an
-  // ambient `GH_HOST=github.acme.internal` retargets every call — reads,
-  // label creates, milestone deletes — at a same-named repo on another
-  // tenant. Knowing the repo is on github.com, gwm says so.
-  let r = forge::parse_remote_url("git@github.com:owner/repo.git").unwrap();
-
-  assert_eq!(
-    gwm::github::gh_env(&r),
-    vec![("GH_HOST".to_string(), "github.com".to_string())]
-  );
-}
 
 #[test]
 fn gh_host_is_still_unpinned_without_a_slug() {
@@ -733,40 +700,6 @@ fn a_single_label_host_is_still_a_valid_scp_remote() {
 // --- the two backends pin differently, on purpose (Codex review #458) -----
 
 #[test]
-fn the_backends_disagree_on_pinning_a_guessed_host_and_that_is_correct() {
-  // Round 16 proposed making GitHub behave like GitLab here: leave a
-  // guessed origin unpinned and hand the CLI an empty selector so it
-  // resolves the project from the repo it is spawned in. It does not
-  // port, and the asymmetry is pinned here so the next round does not
-  // re-propose it.
-  //
-  // `glab api` accepts `projects/:fullpath`, a placeholder it fills from
-  // the working directory. `gh api` has no counterpart and this backend
-  // bakes the slug into the path (`repos/{slug}/milestones`), so an empty
-  // selector would produce `repos//milestones`. `--repo owner/repo`
-  // carries no hostname either — pinning the host is the only lever gwm
-  // has on the GitHub side, which is what rounds 4, 5 and 7 concluded
-  // after an ambient `$GH_HOST` was shown to retarget label creates and
-  // milestone deletes at another tenant.
-  let dir = tempfile::tempdir().unwrap();
-  let ssh = forge::parse_remote_url("git@ghe-ssh.acme.com:team/proj.git").unwrap();
-  assert_eq!(ssh.trust, forge::OriginTrust::Guessed);
-
-  // GitLab: nothing pinned, nothing selected — the CLI resolves it.
-  assert!(gwm::gitlab::glab_env(&ssh).is_empty());
-  let gl = forge::for_kind_in(ForgeKind::GitLab, ssh.clone(), Some(dir.path().to_path_buf()));
-  assert_eq!(gl.repo_selector(), "");
-
-  // GitHub: host pinned and slug passed, because there is no third option.
-  assert_eq!(
-    gwm::github::gh_env(&ssh),
-    vec![("GH_HOST".to_string(), "ghe-ssh.acme.com".to_string())]
-  );
-  let gh = forge::for_kind_in(ForgeKind::GitHub, ssh, Some(dir.path().to_path_buf()));
-  assert_eq!(gh.repo_selector(), "team/proj");
-}
-
-#[test]
 fn a_drive_relative_windows_path_is_not_an_scp_remote() {
   // `C:repo` is a valid drive-relative Windows path and slipped past the
   // first guard, which required a `\` or `/` right after the colon
@@ -778,4 +711,78 @@ fn a_drive_relative_windows_path_is_not_an_scp_remote() {
       "{url} is a local path, not a remote"
     );
   }
+}
+
+// --- one pinning rule, shared by both backends (Codex review #458) --------
+
+#[test]
+fn a_guessed_origin_is_delegated_to_the_cli_on_both_backends() {
+  // Supersedes the round-4/5/7 rule of pinning `$GH_HOST` from an SSH
+  // hostname. The hazard those rounds closed is real — the child
+  // inherits gwm's environment, so an ambient `$GH_HOST` could retarget
+  // reads, label creates and milestone deletes at a same-named repo on
+  // another tenant — but pinning was the wrong lever: on a GHE whose SSH
+  // endpoint is not its API host, the guess is simply wrong.
+  //
+  // Round 16 refused to change this on the claim that `gh api` had no
+  // counterpart to glab's `projects/:fullpath`. That came from a stale
+  // code comment, not the docs, and it is false: gh documents `{owner}`
+  // and `{repo}` as endpoint placeholders "replaced with values from the
+  // repository of the current directory", and documents `$GH_HOST` as
+  // applying only "where a hostname ... cannot be inferred from the
+  // context of a local Git repository". Delegating therefore closes the
+  // retargeting hazard instead of reopening it.
+  let dir = tempfile::tempdir().unwrap();
+  let ssh = forge::parse_remote_url("git@ghe-ssh.acme.com:team/proj.git").unwrap();
+  assert_eq!(ssh.trust, forge::OriginTrust::Guessed);
+
+  assert!(
+    gwm::github::gh_env(&ssh).is_empty(),
+    "a guessed host must not be pinned"
+  );
+  assert!(gwm::gitlab::glab_env(&ssh).is_empty(), "and the backends must agree");
+
+  for kind in [ForgeKind::GitHub, ForgeKind::GitLab] {
+    let f = forge::for_kind_in(kind, ssh.clone(), Some(dir.path().to_path_buf()));
+    assert_eq!(
+      f.repo_selector(),
+      "",
+      "{kind:?} still passed a slug for a guessed origin"
+    );
+  }
+}
+
+#[test]
+fn an_authoritative_origin_is_pinned_on_both_backends() {
+  // The negative control. Not pinning is for the case gwm cannot know
+  // the host; an https origin names it, so it is pinned and no ambient
+  // value gets a say.
+  let web = forge::parse_remote_url("https://ghe.acme.com/team/proj.git").unwrap();
+
+  assert_eq!(
+    gwm::github::gh_env(&web),
+    vec![("GH_HOST".to_string(), "ghe.acme.com".to_string())]
+  );
+  assert_eq!(
+    gwm::gitlab::glab_env(&web),
+    vec![("GITLAB_HOST".to_string(), "https://ghe.acme.com".to_string())]
+  );
+}
+
+#[test]
+fn an_empty_slug_uses_the_gh_api_placeholders_not_an_empty_path() {
+  // The mechanism that makes delegation possible on the GitHub side, and
+  // the exact thing round 16 claimed did not exist. Without it an empty
+  // selector would build `repos//milestones`.
+  let dir = tempfile::tempdir().unwrap();
+  let ssh = forge::parse_remote_url("git@ghe-ssh.acme.com:team/proj.git").unwrap();
+  let f = forge::for_kind_in(ForgeKind::GitHub, ssh, Some(dir.path().to_path_buf()));
+
+  let argv = gwm::github::milestone_list_argv(f.repo_selector());
+
+  assert!(
+    argv.iter().any(|a| a.contains("repos/{owner}/{repo}/milestones")),
+    "{argv:?}"
+  );
+  assert!(!argv.iter().any(|a| a.contains("repos//")), "{argv:?}");
 }

@@ -818,17 +818,41 @@ pub fn fetch_issue_with(program: &OsStr, slug: &str, number: u64) -> Result<Issu
   parse_issue_json(&run_gh_with(program, issue_view_argv(slug, number))?)
 }
 
+/// `--repo <slug>`, or nothing when the slug is empty.
+///
+/// Mirrors [`crate::gitlab::repo_flag`]. An empty slug is the caller
+/// asking `gh` to resolve the repository from the directory it is
+/// spawned in, which is also where it infers the host from.
+fn repo_flag(slug: &str) -> Vec<String> {
+  if slug.is_empty() {
+    Vec::new()
+  } else {
+    vec!["--repo".into(), slug.into()]
+  }
+}
+
+/// `repos/<slug>` for a REST path, or `repos/{owner}/{repo}` when the
+/// slug is empty.
+///
+/// `gh api` documents `{owner}`, `{repo}` and `{branch}` as placeholders
+/// "replaced with values from the repository of the current directory".
+/// This is the counterpart to glab's `projects/:fullpath`, and round 16
+/// of the #458 review asserted — wrongly, from a stale code comment
+/// rather than the docs — that no such thing existed.
+fn repo_api_path(slug: &str) -> String {
+  if slug.is_empty() {
+    "repos/{owner}/{repo}".to_string()
+  } else {
+    format!("repos/{slug}")
+  }
+}
+
 /// Argv for `gh issue view <n> --repo <slug> --json …`.
 pub fn issue_view_argv(slug: &str, number: u64) -> Vec<String> {
-  vec![
-    "issue".into(),
-    "view".into(),
-    number.to_string(),
-    "--repo".into(),
-    slug.into(),
-    "--json".into(),
-    ISSUE_JSON_FIELDS.into(),
-  ]
+  let mut argv: Vec<String> = vec!["issue".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--json".into(), ISSUE_JSON_FIELDS.into()]);
+  argv
 }
 
 /// Resolve the `gh` program to invoke: `$GWM_GH` when set (test / override
@@ -947,15 +971,10 @@ pub fn fetch_pr_with(program: &OsStr, slug: &str, number: u64) -> Result<PrStatu
 
 /// Argv for `gh pr view <n> --repo <slug> --json …`.
 pub fn pr_view_argv(slug: &str, number: u64) -> Vec<String> {
-  vec![
-    "pr".into(),
-    "view".into(),
-    number.to_string(),
-    "--repo".into(),
-    slug.into(),
-    "--json".into(),
-    PR_JSON_FIELDS.into(),
-  ]
+  let mut argv: Vec<String> = vec!["pr".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--json".into(), PR_JSON_FIELDS.into()]);
+  argv
 }
 
 #[derive(Deserialize)]
@@ -1004,15 +1023,10 @@ pub fn fetch_pr_head(slug: &str, number: u64) -> Result<PrHead> {
 
 /// Argv for `gh pr view <n> --repo <slug> --json number,author,headRefName,baseRefName`.
 pub fn pr_head_argv(slug: &str, number: u64) -> Vec<String> {
-  vec![
-    "pr".into(),
-    "view".into(),
-    number.to_string(),
-    "--repo".into(),
-    slug.into(),
-    "--json".into(),
-    PR_HEAD_JSON_FIELDS.into(),
-  ]
+  let mut argv: Vec<String> = vec!["pr".into(), "view".into(), number.to_string()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--json".into(), PR_HEAD_JSON_FIELDS.into()]);
+  argv
 }
 
 /// Find the most recent PR opened from `branch` (head ref) on the given
@@ -1330,7 +1344,11 @@ pub fn milestone_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),
     "--paginate".into(),
-    format!("repos/{}/milestones?state=all&per_page={}", slug, MILESTONE_PER_PAGE),
+    format!(
+      "{}/milestones?state=all&per_page={}",
+      repo_api_path(slug),
+      MILESTONE_PER_PAGE
+    ),
   ]
 }
 
@@ -1343,7 +1361,7 @@ pub fn milestone_create_argv(slug: &str, spec: &MilestoneSpec) -> Vec<String> {
     "api".into(),
     "-X".into(),
     "POST".into(),
-    format!("repos/{}/milestones", slug),
+    format!("{}/milestones", repo_api_path(slug)),
     "-f".into(),
     format!("title={}", spec.title),
     "-f".into(),
@@ -1368,7 +1386,7 @@ pub fn milestone_update_argv(slug: &str, number: u64, spec: &MilestoneSpec) -> V
     "api".into(),
     "-X".into(),
     "PATCH".into(),
-    format!("repos/{}/milestones/{}", slug, number),
+    format!("{}/milestones/{}", repo_api_path(slug), number),
     "-f".into(),
     format!("title={}", spec.title),
     "-f".into(),
@@ -1393,7 +1411,7 @@ pub fn milestone_delete_argv(slug: &str, number: u64) -> Vec<String> {
     "api".into(),
     "-X".into(),
     "DELETE".into(),
-    format!("repos/{}/milestones/{}", slug, number),
+    format!("{}/milestones/{}", repo_api_path(slug), number),
   ]
 }
 
@@ -1554,26 +1572,22 @@ pub fn gh_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
 }
 
 pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
-  // Deliberately NOT the same rule as [`crate::gitlab::glab_env`], which
-  // leaves a guessed origin unpinned and hands the CLI an empty selector
-  // so it resolves the project from the repo it is spawned in.
+  // Same rule as [`crate::gitlab::glab_env`]. An SSH remote carries no
+  // web scheme or port, so `https://<ssh-host>` is a guess, and pinning
+  // it as `$GH_HOST` broke a GHE whose SSH endpoint is not its API host.
   //
-  // That strategy does not port to `gh`, and round 16 of the #458 review
-  // proposed it anyway. It rests on `glab api` accepting the
-  // `projects/:fullpath` placeholder; `gh api` has no counterpart, and
-  // this backend bakes the slug straight into the request path
-  // (`repos/{slug}/milestones`), so an empty selector yields
-  // `repos//milestones`. `--repo owner/repo` carries no hostname either.
-  // Pinning the host is the only lever gwm has here, which is what
-  // rounds 4, 5 and 7 each concluded after an ambient `$GH_HOST` was
-  // shown to retarget reads, label creates and milestone deletes at a
-  // same-named repo on another tenant.
-  //
-  // The residual cost is a GHE whose SSH endpoint differs from its API
-  // host: the guess is wrong there. Round 9 handles the documented
-  // aliases; anything else needs a host gwm can trust, which is issue
-  // #460, not a change to this function.
-  if origin.path.is_empty() {
+  // Rounds 4, 5 and 7 pinned harder each time, to stop an ambient
+  // `$GH_HOST` retargeting the call; round 16 refused to stop, on the
+  // claim that `gh api` had no way to resolve a repo from the working
+  // directory. That claim was read off a stale code comment and is
+  // wrong. gh documents `{owner}` / `{repo}` as endpoint placeholders
+  // "replaced with values from the repository of the current directory",
+  // and documents `$GH_HOST` as applying only "where a hostname has not
+  // been provided, or cannot be inferred from the context of a local Git
+  // repository". The child is spawned inside the repo, so delegating
+  // closes the retargeting hazard rather than reopening it — the slug
+  // goes away with the pin (see `repo_selector` and `repo_api_path`).
+  if origin.trust != forge::OriginTrust::FromUrl || origin.path.is_empty() {
     return Vec::new();
   }
   vec![("GH_HOST".to_string(), origin.authority().to_string())]
@@ -1605,8 +1619,13 @@ impl Forge for GitHubForge {
   /// working directory — and `gh api repos/<slug>/…` could not defer
   /// anyway, the slug being part of the request path.
   fn repo_selector(&self) -> &str {
-    // Always the slug — see [`gh_env`] for why the GitLab backend's
-    // empty-selector delegation cannot be mirrored here.
+    // Guessed origin + a repo to stand in: hand `gh` nothing and let it
+    // read that repo's own remote, for both the host and the slug.
+    // Passing a slug with no pinned host would resolve it against gh's
+    // default instance instead.
+    if self.origin.trust != forge::OriginTrust::FromUrl && self.workdir.is_some() {
+      return "";
+    }
     &self.origin.path
   }
 
