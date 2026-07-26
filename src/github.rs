@@ -168,13 +168,19 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
       None => (None, LinkSource::None),
     },
   };
+  // The cached title and state are as instance-scoped as the numbers.
+  // The issue survives a foreign stamp when the branch name carries it,
+  // and reading the previous tenant's metadata onto that number showed
+  // one instance's issue under the other's title until the next write
+  // purged it — which offline or read-only never comes (Codex review
+  // #458).
   let issue_title = match issue {
-    Some(_) => read_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY)?,
-    None => None,
+    Some(_) if !foreign => read_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY)?,
+    _ => None,
   };
   let issue_state = match issue {
-    Some(_) => read_branch_issue_state(repo, branch)?,
-    None => None,
+    Some(_) if !foreign => read_branch_issue_state(repo, branch)?,
+    _ => None,
   };
   let pr_title = match pr_source {
     LinkSource::Explicit => read_branch_string(repo, branch, PR_TITLE_CONFIG_KEY)?,
@@ -1548,6 +1554,25 @@ pub fn gh_env_remove(_origin: &forge::RemoteRef) -> Vec<&'static str> {
 }
 
 pub fn gh_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
+  // Deliberately NOT the same rule as [`crate::gitlab::glab_env`], which
+  // leaves a guessed origin unpinned and hands the CLI an empty selector
+  // so it resolves the project from the repo it is spawned in.
+  //
+  // That strategy does not port to `gh`, and round 16 of the #458 review
+  // proposed it anyway. It rests on `glab api` accepting the
+  // `projects/:fullpath` placeholder; `gh api` has no counterpart, and
+  // this backend bakes the slug straight into the request path
+  // (`repos/{slug}/milestones`), so an empty selector yields
+  // `repos//milestones`. `--repo owner/repo` carries no hostname either.
+  // Pinning the host is the only lever gwm has here, which is what
+  // rounds 4, 5 and 7 each concluded after an ambient `$GH_HOST` was
+  // shown to retarget reads, label creates and milestone deletes at a
+  // same-named repo on another tenant.
+  //
+  // The residual cost is a GHE whose SSH endpoint differs from its API
+  // host: the guess is wrong there. Round 9 handles the documented
+  // aliases; anything else needs a host gwm can trust, which is issue
+  // #460, not a change to this function.
   if origin.path.is_empty() {
     return Vec::new();
   }
@@ -1580,6 +1605,8 @@ impl Forge for GitHubForge {
   /// working directory — and `gh api repos/<slug>/…` could not defer
   /// anyway, the slug being part of the request path.
   fn repo_selector(&self) -> &str {
+    // Always the slug — see [`gh_env`] for why the GitLab backend's
+    // empty-selector delegation cannot be mirrored here.
     &self.origin.path
   }
 

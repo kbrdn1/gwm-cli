@@ -1471,3 +1471,25 @@ fn the_same_repo_over_ssh_and_https_keeps_its_links() {
 
   assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
 }
+
+#[test]
+fn a_foreign_stamp_also_hides_the_cached_title_and_state() {
+  // The eager purge only runs on the next *write*. Until then — offline,
+  // read-only, or simply before the next `gwm status` — `read_link` still
+  // fell back to the branch-name issue number and then read the previous
+  // tenant's cached title and state onto it, presenting one instance's
+  // metadata as the other's (Codex review #458).
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_issue(&repo, "feat/#42-tui-search", 42).unwrap();
+  github::persist_issue_title(&repo, "feat/#42-tui-search", "Title from the old tenant").unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42), "the branch name still names an issue");
+  assert_eq!(link.issue_title, None, "but not with the other instance's title");
+}
