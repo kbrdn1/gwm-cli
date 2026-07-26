@@ -44,6 +44,18 @@ const PR_CONFIG_KEY: &str = "gwm-pr";
 /// distinction for its `detected` badge, and the explicit override must
 /// still win.
 const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
+/// The forge instance a persisted link belongs to, as `<host>/<path>`
+/// taken from `origin` at write time (Codex review #458).
+///
+/// The link keys themselves are deliberately forge-neutral — that was
+/// the point of keeping them out of the [`crate::forge::Forge`] trait in
+/// issue #419 — but the *numbers* they hold are not. PR #128 on
+/// github.com and MR !128 on gitlab.com are unrelated objects, so once
+/// the forge became switchable a stored number could be reinterpreted
+/// against a different instance and silently link the worktree to a
+/// stranger's merge request. Stamping the origin lets [`read_link`]
+/// recognise a number that came from somewhere else and ignore it.
+const LINK_ORIGIN_CONFIG_KEY: &str = "gwm-link-origin";
 const ISSUE_TITLE_CONFIG_KEY: &str = "gwm-issue-title";
 const PR_TITLE_CONFIG_KEY: &str = "gwm-pr-title";
 const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
@@ -117,8 +129,24 @@ impl BranchLink {
 
 /// Read the link for `branch`. Explicit overrides win over branch-name auto-detect.
 pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
-  let explicit_issue = read_branch_u64(repo, branch, ISSUE_CONFIG_KEY)?;
-  let explicit_pr = read_branch_u64(repo, branch, PR_CONFIG_KEY)?;
+  // Numbers stamped against another instance are dropped before they are
+  // resolved (Codex review #458). Only the *persisted* values go: the
+  // issue parsed out of the branch name is the user's own naming and
+  // stays valid wherever the repo now points.
+  let foreign = match read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY)? {
+    Some(stored) => link_origin_is_foreign(repo)(&stored),
+    None => false,
+  };
+  let explicit_issue = if foreign {
+    None
+  } else {
+    read_branch_u64(repo, branch, ISSUE_CONFIG_KEY)?
+  };
+  let explicit_pr = if foreign {
+    None
+  } else {
+    read_branch_u64(repo, branch, PR_CONFIG_KEY)?
+  };
 
   let (issue, issue_source) = match explicit_issue {
     Some(n) => (Some(n), LinkSource::Explicit),
@@ -134,6 +162,7 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
   // colour the PR pastille on every row without a per-row `gh` shell-out.
   let (pr, pr_source) = match explicit_pr {
     Some(n) => (Some(n), LinkSource::Explicit),
+    None if foreign => (None, LinkSource::None),
     None => match read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)? {
       Some(n) => (Some(n), LinkSource::Detected),
       None => (None, LinkSource::None),
@@ -255,14 +284,47 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, forge: &dyn 
   Ok(link)
 }
 
+/// `<host>/<path>` of the repo's `origin`, or `None` when there is no
+/// origin or it does not parse. A local-only repo therefore stamps
+/// nothing and is never invalidated — there is no second instance for
+/// its numbers to be confused with.
+fn origin_identity(repo: &Repository) -> Option<String> {
+  let remote = repo.find_remote("origin").ok()?;
+  let parsed = forge::parse_remote_url(remote.url().ok()?).ok()?;
+  Some(format!("{}/{}", parsed.host, parsed.path))
+}
+
+/// Stamp the current origin on the branch's links. Best-effort: a
+/// read-only repo must not turn a successful `gwm pr` into an error.
+fn stamp_link_origin(repo: &Repository, branch: &str) {
+  if let Some(id) = origin_identity(repo) {
+    let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
+  }
+}
+
+/// `true` when persisted numbers on this branch were written against a
+/// different origin than the repo has now.
+///
+/// An absent stamp is **not** a mismatch: links written before this key
+/// existed, and links in local-only repos, stay readable.
+fn link_origin_is_foreign(repo: &Repository) -> impl Fn(&str) -> bool + '_ {
+  let current = origin_identity(repo);
+  move |stored: &str| match &current {
+    Some(now) => stored != now,
+    None => false,
+  }
+}
+
 pub fn link_issue(repo: &Repository, branch: &str, number: u64) -> Result<()> {
   write_branch_u64(repo, branch, ISSUE_CONFIG_KEY, number)?;
+  stamp_link_origin(repo, branch);
   remove_branch_key(repo, branch, ISSUE_TITLE_CONFIG_KEY)?;
   remove_branch_key(repo, branch, ISSUE_STATE_CONFIG_KEY)
 }
 
 pub fn link_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
   write_branch_u64(repo, branch, PR_CONFIG_KEY, number)?;
+  stamp_link_origin(repo, branch);
   remove_branch_key(repo, branch, PR_TITLE_CONFIG_KEY)?;
   remove_branch_key(repo, branch, PR_STATE_CONFIG_KEY)
 }
@@ -296,6 +358,7 @@ pub fn unlink_pr(repo: &Repository, branch: &str) -> Result<()> {
 pub fn persist_detected_pr(repo: &Repository, branch: &str, number: u64) -> Result<()> {
   let previous = read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?;
   write_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY, number)?;
+  stamp_link_origin(repo, branch);
   if previous == Some(number) {
     Ok(())
   } else {

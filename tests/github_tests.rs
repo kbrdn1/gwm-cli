@@ -1343,3 +1343,70 @@ fn pr_detection_keeps_a_pr_that_does_not_report_cross_repository() {
 
   assert_eq!(github::parse_pr_list_number(json).unwrap(), Some(61));
 }
+
+// --- persisted links are scoped to the instance that produced them ---------
+
+#[test]
+fn a_persisted_link_is_dropped_when_the_origin_changes() {
+  // The link keys (`gwm-pr`, `gwm-pr-detected`) are forge-neutral, which
+  // was the right call for #419 — but the *number* they hold is not.
+  // PR #128 on github.com and MR !128 on gitlab.com are different
+  // objects, so once the forge became switchable a stored number could
+  // be reinterpreted against a different instance and silently point
+  // the worktree at a stranger's merge request.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+
+  // The repo moves. The number stored a moment ago means nothing here.
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  assert_eq!(
+    github::read_link(&repo, "feat/#42-tui-search").unwrap().pr,
+    None,
+    "a number from another instance must not be resurfaced"
+  );
+}
+
+#[test]
+fn a_persisted_link_survives_when_the_origin_is_unchanged() {
+  // The negative control. Invalidation that fires on every read would
+  // "fix" this by breaking the feature.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+}
+
+#[test]
+fn the_branch_name_issue_survives_a_change_of_origin() {
+  // Only *persisted* values are instance-scoped. The issue number parsed
+  // out of the branch name is the user's own naming and stays valid.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+
+  assert_eq!(link.issue, Some(42));
+}
+
+#[test]
+fn a_link_written_without_an_origin_is_still_readable() {
+  // Local-only repos have no origin to stamp. They must keep working
+  // rather than having every link invalidated on the next read.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+}
