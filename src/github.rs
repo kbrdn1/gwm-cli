@@ -146,10 +146,28 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
     // config on every listing. Best-effort: read-only repos keep working
     // and simply stay unstamped.
     None => {
-      if read_branch_u64(repo, branch, ISSUE_CONFIG_KEY)?.is_some()
-        || read_branch_u64(repo, branch, PR_CONFIG_KEY)?.is_some()
-        || read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?.is_some()
-      {
+      // Any persisted link value, not just the numbers: an issue derived
+      // from the branch name stores no number at all, only a cached
+      // title and state, and keying adoption on numbers left those
+      // branches unstamped forever (Codex review #458).
+      let mut has_link = false;
+      for key in [
+        ISSUE_CONFIG_KEY,
+        PR_CONFIG_KEY,
+        DETECTED_PR_CONFIG_KEY,
+        ISSUE_TITLE_CONFIG_KEY,
+        ISSUE_STATE_CONFIG_KEY,
+        PR_TITLE_CONFIG_KEY,
+        PR_STATE_CONFIG_KEY,
+        DETECTED_PR_TITLE_CONFIG_KEY,
+        DETECTED_PR_STATE_CONFIG_KEY,
+      ] {
+        if read_branch_string(repo, branch, key)?.is_some() {
+          has_link = true;
+          break;
+        }
+      }
+      if has_link {
         if let Some(id) = origin_identity(repo) {
           let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
         }

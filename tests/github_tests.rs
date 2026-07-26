@@ -1522,3 +1522,38 @@ fn a_link_predating_the_stamp_is_adopted_by_the_current_origin() {
 
   assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, None);
 }
+
+#[test]
+fn a_cached_title_alone_is_enough_to_adopt_the_origin() {
+  // An issue derived from the branch name persists no number, only
+  // `gwm-issue-title` / `gwm-issue-state`. The adoption trigger looked
+  // for numbers, so those branches stayed unstamped forever and kept
+  // showing the previous tenant's metadata after a move (Codex review
+  // #458).
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::persist_issue_title(&repo, "feat/#42-tui-search", "Title from the old tenant").unwrap();
+  repo
+    .config()
+    .unwrap()
+    .remove("branch.feat/#42-tui-search.gwm-link-origin")
+    .ok();
+
+  // A read adopts it...
+  assert_eq!(
+    github::read_link(&repo, "feat/#42-tui-search")
+      .unwrap()
+      .issue_title
+      .as_deref(),
+    Some("Title from the old tenant")
+  );
+
+  // ...so the move is now caught.
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  let link = github::read_link(&repo, "feat/#42-tui-search").unwrap();
+  assert_eq!(link.issue, Some(42), "the branch name still names an issue");
+  assert_eq!(link.issue_title, None, "but not with the other instance's title");
+}
