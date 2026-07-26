@@ -141,6 +141,44 @@ pub fn glab_env(origin: &forge::RemoteRef) -> Vec<(String, String)> {
   vec![("GITLAB_HOST".to_string(), origin.web_origin.clone())]
 }
 
+/// Refuse to run when glab's CI auto-login would authenticate against a
+/// different instance than the one gwm resolved.
+///
+/// With `$GLAB_ENABLE_CI_AUTOLOGIN=true` glab signs in from
+/// `$CI_SERVER_FQDN` / `$CI_JOB_TOKEN` and documents that it then
+/// "ignores host variables like `GITLAB_HOST`" — so the pin yields and a
+/// same-named project on the runner's instance can be read, or worse
+/// written: `labels push --prune` and `milestones push --prune` delete.
+///
+/// Clearing the flag was the obvious move and the wrong one — it also
+/// strips a pipeline of its only credential, breaking the normal case
+/// where the job runs on the instance that hosts the repo and the two
+/// agree anyway. Comparing them costs nothing there and fails closed
+/// only on a genuine divergence (Codex review #458, raised four times
+/// before this shape was agreed; see issue #460 for the general problem).
+///
+/// Read once, at construction, so the TUI's fetch worker never re-reads
+/// the environment off-thread (issue #217).
+pub fn ci_autologin_conflict(origin: &forge::RemoteRef) -> Option<String> {
+  let enabled = std::env::var("GLAB_ENABLE_CI_AUTOLOGIN")
+    .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+    .unwrap_or(false);
+  if !enabled {
+    return None;
+  }
+  let ci_host = std::env::var("CI_SERVER_FQDN").ok()?;
+  let ci_host = ci_host.trim();
+  if ci_host.is_empty() || ci_host.eq_ignore_ascii_case(&origin.host) {
+    return None;
+  }
+  Some(format!(
+    "refusing to run glab: CI auto-login would authenticate against '{ci_host}' \
+     but this repo's origin is '{}'. glab ignores GITLAB_HOST in that mode, so the \
+     call would target the wrong instance. Unset GLAB_ENABLE_CI_AUTOLOGIN to proceed.",
+    origin.host
+  ))
+}
+
 /// Percent-encode one URL path segment. A GitLab project path contains
 /// slashes (`group/sub/proj`) and must arrive as a single encoded
 /// segment for `projects/:id` to resolve it.
@@ -876,6 +914,9 @@ pub struct GitLabForge {
   env: Vec<(String, String)>,
   env_remove: Vec<&'static str>,
   workdir: Option<std::path::PathBuf>,
+  /// Why this forge must refuse to run, decided once at construction.
+  /// `None` is the normal case.
+  refuse: Option<String>,
 }
 
 impl GitLabForge {
@@ -886,6 +927,7 @@ impl GitLabForge {
     Self {
       env: glab_env(&origin),
       env_remove: glab_env_remove(&origin),
+      refuse: ci_autologin_conflict(&origin),
       origin,
       program: glab_program(),
       workdir,
@@ -900,6 +942,9 @@ impl GitLabForge {
   /// which is the whole reason it exists: it keeps the rendered text out
   /// of the argv (issue #459).
   fn run_argv_with_stdin(&self, argv: Vec<String>, stdin: Option<&[u8]>) -> Result<String> {
+    if let Some(why) = &self.refuse {
+      return Err(GwmError::Other(why.clone()));
+    }
     // A stdin payload is, by construction, the one thing that must not
     // reach the transcript — and the create endpoints echo it back.
     let redact_output = stdin.is_some();

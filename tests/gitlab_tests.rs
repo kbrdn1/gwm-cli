@@ -10,6 +10,14 @@ use gwm::forge::{CheckOutcome, CiState, IssueState, PrState};
 use gwm::gitlab;
 use gwm::labels::LabelSpec;
 use gwm::milestones::{MilestoneSpec, MilestoneState};
+use std::sync::{Mutex, OnceLock};
+
+/// Serialises the tests that mutate process env vars: `set_var` is
+/// unsound with other threads running, and the test harness is threaded.
+fn env_lock() -> &'static Mutex<()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  LOCK.get_or_init(|| Mutex::new(()))
+}
 
 // --- issues ---------------------------------------------------------------
 
@@ -958,4 +966,48 @@ fn create_endpoints_stay_project_relative_when_the_slug_is_empty() {
   assert!(mr.iter().any(|a| a == "projects/:fullpath/merge_requests"), "{mr:?}");
   assert!(!issue.iter().any(|a| a == "--repo"), "{issue:?}");
   assert!(!mr.iter().any(|a| a == "--repo"), "{mr:?}");
+}
+
+#[test]
+fn ci_autologin_on_another_instance_is_refused_not_silently_retargeted() {
+  // `GLAB_ENABLE_CI_AUTOLOGIN` makes glab sign in from `CI_SERVER_FQDN`
+  // and ignore `GITLAB_HOST`, so a same-named project on the runner's
+  // instance could be read — or pruned. Clearing the flag would strip a
+  // pipeline of its only credential, so gwm compares instead and fails
+  // closed only when the two genuinely diverge (Codex review #458).
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  // SAFETY: env mutation guarded by the lock above; restored below.
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("CI_SERVER_FQDN", "runner-gitlab.other.example");
+  }
+  let diverged = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal/team/proj.git"));
+  // Same instance: the normal pipeline, which must keep working.
+  let agreed = gwm::gitlab::ci_autologin_conflict(&origin("https://runner-gitlab.other.example/team/proj.git"));
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("CI_SERVER_FQDN");
+  }
+
+  let msg = diverged.expect("a divergent CI instance must refuse");
+  assert!(msg.contains("runner-gitlab.other.example"), "{msg}");
+  assert!(msg.contains("gitlab.acme.internal"), "{msg}");
+  assert!(agreed.is_none(), "matching hosts must not refuse: {agreed:?}");
+}
+
+#[test]
+fn no_ci_autologin_means_no_refusal() {
+  // The negative control: outside CI the check must be inert, whatever
+  // `CI_SERVER_FQDN` happens to say.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::set_var("CI_SERVER_FQDN", "runner-gitlab.other.example");
+  }
+  let out = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal/team/proj.git"));
+  unsafe {
+    std::env::remove_var("CI_SERVER_FQDN");
+  }
+
+  assert!(out.is_none(), "{out:?}");
 }
