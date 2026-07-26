@@ -641,6 +641,24 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
   })
 }
 
+/// Bring the repo's persisted links in line with its configured backend,
+/// for commands that write links without needing a forge.
+///
+/// `gwm link` is the one that matters: it wrote under the previous
+/// backend's marker, and the next command that *did* resolve then read
+/// the mismatch and deleted the line the user had just added (Codex
+/// review #458). Reconciling first makes the write land under the marker
+/// that will be checked against it.
+///
+/// Best-effort by design — `gwm link` works in a repo with no `origin`,
+/// and a repo with no `origin` stamps nothing to reconcile.
+pub fn reconcile_links(repo: &Repository) {
+  let root = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
+  if let Ok(config) = Config::load_for_repo(&root) {
+    let _ = resolve(repo, &config);
+  }
+}
+
 /// Resolve the forge for `repo`: parse the `origin` remote, then pick the
 /// backend from `.gwm.toml`'s `forge` key when set, else infer it from
 /// the host.

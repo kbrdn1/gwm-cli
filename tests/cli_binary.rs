@@ -6402,3 +6402,55 @@ mod agents_cmd {
       .stdout(predicate::str::contains("codex"));
   }
 }
+
+#[test]
+fn a_link_written_after_a_backend_flip_survives_the_next_command() {
+  // The reconcile lives in `forge::resolve`, and `gwm link` did not
+  // resolve. So after flipping `forge` the write succeeded against the
+  // previous backend's marker, and the next command that *did* resolve
+  // saw the mismatch and deleted what the user had just linked (Codex
+  // review #458).
+  //
+  // `gwm open --print-url` brackets this rather than `gwm list`: the
+  // network-free list never resolves a forge, so it neither records the
+  // marker nor triggers the purge, and a test built on it would pass
+  // against the bug.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://git.acme.internal/team/proj.git")
+    .unwrap();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+
+  let gwm = |args: &[&str]| {
+    Command::cargo_bin("gwm")
+      .unwrap()
+      .current_dir(dir.path())
+      .args(args)
+      .assert()
+      .success();
+  };
+
+  // Record the inferred GitHub backend against the repo.
+  gwm(&["link", "issue", "7"]);
+  gwm(&["open", "issue", "--print-url"]);
+
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"gitlab\"\n").unwrap();
+  gwm(&["link", "pr", "42"]);
+
+  // Resolves as GitLab. Before the fix this purged the line above and
+  // the command failed with "no PR linked".
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["open", "pr", "--print-url"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("/-/merge_requests/42"));
+
+  let reopened = git2::Repository::open(dir.path()).unwrap();
+  assert_eq!(
+    gwm::github::read_link(&reopened, &branch).unwrap().pr,
+    Some(42),
+    "the user linked this under the new backend; nothing may drop it"
+  );
+}

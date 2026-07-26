@@ -976,3 +976,32 @@ fn flipping_the_backend_drops_the_numbers_the_other_one_wrote() {
   forge::resolve(&repo, &flipped).unwrap();
   assert_eq!(gwm::github::read_link(&repo, &branch).unwrap().issue, Some(7));
 }
+
+#[test]
+fn the_tui_reads_the_links_after_the_reconcile_not_before() {
+  // `reread_link` loaded the numbers and *then* resolved the forge, so
+  // the flip's purge landed one call too late: the TUI kept serving the
+  // old backend's number until the next refresh, and the open menu would
+  // have sent the user to the other forge's real page for it (Codex
+  // review #458). Same ordering trap as `gwm open`, one layer up.
+  let (_dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://git.acme.internal/team/proj.git")
+    .unwrap();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  gwm::github::link_issue(&repo, &branch, 42).unwrap();
+
+  let mut fetch = gwm::tui::state::github_fetch::GitHubFetch::new();
+  fetch.reread_link(&repo, Some(&branch), &Config::default());
+  assert_eq!(fetch.link.issue, Some(42), "precondition: adopted, not purged");
+
+  let flipped = Config {
+    forge: Some(ForgeKind::GitLab),
+    ..Default::default()
+  };
+  fetch.reread_link(&repo, Some(&branch), &flipped);
+  assert_eq!(
+    fetch.link.issue, None,
+    "the very first read after a flip must already see the purge"
+  );
+}

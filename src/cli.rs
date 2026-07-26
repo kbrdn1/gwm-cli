@@ -3670,6 +3670,9 @@ fn current_branch(repo: &Repository) -> Result<String> {
 
 fn cmd_link(target: LinkTarget, number: u64, worktree: Option<String>) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
+  // Write under the backend marker that will later be checked against
+  // this line, or the next command that resolves a forge deletes it.
+  forge::reconcile_links(&repo);
   match target {
     LinkTarget::Issue => {
       github::link_issue(&repo, &branch, number)?;

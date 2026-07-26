@@ -175,10 +175,13 @@ impl GitHubFetch {
   /// exists identically on github.com and gitlab.com.
   pub fn reread_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
     let before = self.forge_identity();
+    // Resolve *first*: it reconciles the persisted links against the
+    // backend about to read them, and reading before that served the
+    // other forge's number for one more refresh (Codex review #458).
+    self.forge = crate::forge::resolve(repo, config).ok();
     self.link = branch
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
-    self.forge = crate::forge::resolve(repo, config).ok();
     // Kept in sync with `forge` so the many read-only slug consumers
     // (detail overlay keys, status strings) need no rewrite.
     self.link_slug = self.forge.as_ref().map(|f| f.slug().to_string());
