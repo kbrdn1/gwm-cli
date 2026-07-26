@@ -864,11 +864,40 @@ struct RawLabel {
 /// Colour is normalised to the bare lowercase 6-hex the shared diff
 /// engine compares against — GitLab's leading `#` would otherwise make
 /// every label read as changed on every run.
+/// Read `glab api --paginate` output: **one JSON array per page**, not
+/// one merged array.
+///
+/// `gh api --paginate` merges, and the GitLab side was written assuming
+/// glab did the same. It does not: the request loop calls
+/// `processResponse` once per page and that function ends in
+/// `io.Copy(opts.io.StdOut, responseBody)`
+/// (`internal/commands/api/api.go` @ v1.68.0), so stdout carries
+/// `[…][…]` — concatenated values. `serde_json::from_str` rejects the
+/// second one as trailing characters, and only past the 100-row first
+/// page, which is exactly the project whose `--prune` matters most
+/// (Codex review #458).
+///
+/// Empty input stays an **error**. Reading it as an empty remote would
+/// hand `labels push --prune` / `milestones push --prune` a baseline
+/// that says the remote owns nothing.
+fn parse_paginated_array<T: serde::de::DeserializeOwned>(s: &str, kind: &'static str) -> Result<Vec<T>> {
+  let mut out = Vec::new();
+  let mut pages = 0usize;
+  for page in serde_json::Deserializer::from_str(s).into_iter::<Vec<T>>() {
+    out.extend(page.map_err(|e| GwmError::GhJsonParse { kind, source: e })?);
+    pages += 1;
+  }
+  if pages == 0 {
+    return Err(GwmError::Other(format!(
+      "{kind}: glab returned no JSON at all — treating that as an empty \
+       remote would let --prune run against a baseline it never read"
+    )));
+  }
+  Ok(out)
+}
+
 pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
-  let raw: Vec<RawLabel> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
-    kind: "gitlab labels",
-    source: e,
-  })?;
+  let raw: Vec<RawLabel> = parse_paginated_array(s, "gitlab labels")?;
   Ok(
     raw
       .into_iter()
@@ -887,12 +916,9 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
 
 /// Argv for `GET /projects/:id/labels`.
 ///
-/// **Unverified assumption**: this deserializes into a single `Vec<_>`, so
-/// `glab api --paginate` must *merge* pages into one JSON array the way
-/// `gh api --paginate` does. If glab instead concatenates arrays
-/// (`[…][…]`), parsing breaks — and only for projects past the 100-row
-/// first page, so it would not show up in light use. Confirm against a
-/// real instance before relying on it at that scale.
+/// The pages arrive as separate JSON arrays — see
+/// [`parse_paginated_array`], which is what reads them.
+///
 /// `include_ancestor_groups=false` is load-bearing (Codex review #458):
 /// GitLab defaults it to **true**, so the plain query also returns the
 /// parent groups' labels. The shared diff engine reads those as extras —
@@ -987,10 +1013,7 @@ struct RawMilestone {
 /// change: `active` → open, and the bare `due_date` is widened to the
 /// RFC3339 end-of-day form [`MilestoneSpec::due_on`] carries.
 pub fn parse_milestones_json(s: &str) -> Result<Vec<RemoteMilestone>> {
-  let raw: Vec<RawMilestone> = serde_json::from_str(s).map_err(|e| GwmError::GhJsonParse {
-    kind: "gitlab milestones",
-    source: e,
-  })?;
+  let raw: Vec<RawMilestone> = parse_paginated_array(s, "gitlab milestones")?;
   raw
     .into_iter()
     .map(|r| {
@@ -1074,14 +1097,8 @@ fn state_event(state: MilestoneState) -> &'static str {
 /// when the parameter is omitted. `--paginate` matters for the same
 /// reason as on GitHub — `per_page` caps at 100, and diffing against a
 /// truncated set would make `--prune` propose deleting whatever fell off
-/// the page.
-///
-/// **Unverified assumption**: this deserializes into a single `Vec<_>`, so
-/// `glab api --paginate` must *merge* pages into one JSON array the way
-/// `gh api --paginate` does. If glab instead concatenates arrays
-/// (`[…][…]`), parsing breaks — and only for projects past the 100-row
-/// first page, so it would not show up in light use. Confirm against a
-/// real instance before relying on it at that scale.
+/// the page. The pages arrive as separate JSON arrays — see
+/// [`parse_paginated_array`].
 pub fn milestone_list_argv(slug: &str) -> Vec<String> {
   vec![
     "api".into(),

@@ -1382,3 +1382,46 @@ fn the_subfolder_falls_back_to_the_ci_server_url_like_glab_does() {
     "a URL with no path yields no subfolder"
   );
 }
+
+#[test]
+fn a_paginated_list_arrives_as_one_array_per_page() {
+  // `gh api --paginate` merges pages into a single JSON array; `glab api
+  // --paginate` does not. Its request loop calls `processResponse` per
+  // page and that function ends in `io.Copy(opts.io.StdOut,
+  // responseBody)` (`internal/commands/api/api.go` @ v1.68.0), so stdout
+  // carries `[...][...]` — concatenated values, not one array.
+  //
+  // The parsers assumed glab behaved like gh. That was flagged in the
+  // code as unverified from the start and it turned out to be wrong; the
+  // break only shows past 100 rows, which is exactly the repo whose
+  // `labels push --prune` matters most.
+  // `r##"…"##`: a `#RRGGBB` colour would close a plain `r#"…"#`.
+  let page1 = r##"[{"name":"bug","color":"#d73a4a","description":"a","is_project_label":true}]"##;
+  let page2 = r##"[{"name":"docs","color":"#0075ca","description":null,"is_project_label":true}]"##;
+
+  let merged = gwm::gitlab::parse_labels_json(&format!("{page1}{page2}")).unwrap();
+  assert_eq!(
+    merged.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+    vec!["bug", "docs"]
+  );
+  // glab separates pages with a newline when it printed response
+  // headers, and with nothing when it did not.
+  let spaced = gwm::gitlab::parse_labels_json(&format!("{page1}\n{page2}")).unwrap();
+  assert_eq!(spaced.len(), 2);
+  // The single-page case must not regress.
+  assert_eq!(gwm::gitlab::parse_labels_json(page1).unwrap().len(), 1);
+  assert_eq!(gwm::gitlab::parse_labels_json("[]").unwrap().len(), 0);
+  // Empty stdout is a failure, not an empty remote: reading it as "no
+  // labels" would hand a prune a bogus baseline.
+  assert!(gwm::gitlab::parse_labels_json("").is_err());
+  assert!(gwm::gitlab::parse_labels_json("   ").is_err());
+
+  let m1 = r#"[{"id":1,"iid":1,"title":"v1","description":"","state":"active","due_date":null}]"#;
+  let m2 = r#"[{"id":2,"iid":2,"title":"v2","description":"","state":"closed","due_date":null}]"#;
+  let ms = gwm::gitlab::parse_milestones_json(&format!("{m1}{m2}")).unwrap();
+  assert_eq!(
+    ms.iter().map(|m| m.title.as_str()).collect::<Vec<_>>(),
+    vec!["v1", "v2"]
+  );
+  assert!(gwm::gitlab::parse_milestones_json("").is_err());
+}
