@@ -1315,11 +1315,11 @@ fn the_pin_covers_the_api_endpoint_and_its_scheme_not_only_the_host() {
   assert!(pinned.contains(&"GITLAB_API_HOST"), "{pinned:?}");
   // Third documented spelling of the `host` key, alongside `GITLAB_URI`.
   assert!(pinned.contains(&"GL_HOST"), "{pinned:?}");
-  assert!(
-    !guessed.contains(&"GITLAB_API_HOST"),
-    "without a pin there is nothing to put in its place: {guessed:?}"
-  );
+  // The *host* spellings are what the pin gates; the API endpoint is
+  // not, because glab replaces it with the host it resolved either way
+  // — see `the_api_overrides_go_even_when_the_host_is_only_delegated`.
   assert!(!guessed.contains(&"GL_HOST"), "{guessed:?}");
+  assert!(!guessed.contains(&"GITLAB_URI"), "{guessed:?}");
 
   let https = gwm::gitlab::glab_env(&origin("https://gitlab.acme/team/proj.git"));
   let http = gwm::gitlab::glab_env(&origin("http://gitlab.acme:8080/team/proj.git"));
@@ -1450,4 +1450,49 @@ fn a_paginated_list_arrives_as_one_array_per_page() {
     vec!["v1", "v2"]
   );
   assert!(gwm::gitlab::parse_milestones_json("").is_err());
+}
+
+#[test]
+fn the_api_overrides_go_even_when_the_host_is_only_delegated() {
+  // Round 25 cleared `$GITLAB_API_HOST` behind the pin. That left the
+  // guessed case — an SSH origin, where gwm pins nothing and lets glab
+  // resolve the instance from the repo's own remote — still inheriting
+  // it. And `api_host` wins host-blind, so a repo on instance B read or
+  // pruned the same-named project on A, with `API_PROTOCOL=http`
+  // downgrading the token to cleartext on the way (Codex review #458).
+  //
+  // This looks like round 10, which cleared the variable and was
+  // reverted in round 11. The difference is the fact both rounds
+  // missed: `if apiHost == "" { apiHost = repoHost }`
+  // (`internal/api/client.go`), and `repoHost` is always something glab
+  // resolved correctly — from gwm's pin, or from the repo's own remote
+  // under delegation. There is no state where clearing leaves glab
+  // without an API host, so the replacement exists in *both* cases.
+  //
+  // The cost, named: a split-host or plain-http instance configured
+  // through the environment breaks loudly. The fix is one command, and
+  // it puts the value where glab scopes it per host anyway —
+  // `glab config set --host <h> api_host <v>`.
+  let guessed = gwm::gitlab::glab_env_remove(&origin("git@gitlab-ssh.acme:team/proj.git"), false);
+  let pinned = gwm::gitlab::glab_env_remove(&origin("https://gitlab.acme/team/proj.git"), false);
+
+  for vars in [&guessed, &pinned] {
+    assert!(vars.contains(&"GITLAB_API_HOST"), "{vars:?}");
+    assert!(vars.contains(&"API_PROTOCOL"), "{vars:?}");
+  }
+  // The host spellings stay tied to the pin: without one, an exported
+  // `$GITLAB_HOST` may be the only correct signal there is.
+  assert!(!guessed.contains(&"GITLAB_URI"), "{guessed:?}");
+  assert!(!guessed.contains(&"GL_HOST"), "{guessed:?}");
+  assert!(pinned.contains(&"GITLAB_URI"), "{pinned:?}");
+
+  // And with no project at all there is nothing to protect and nothing
+  // to replace, so the whole set is left alone.
+  let nothing = gwm::forge::RemoteRef {
+    host: "gitlab.com".into(),
+    path: String::new(),
+    web_origin: "https://gitlab.com".into(),
+    trust: gwm::forge::OriginTrust::Guessed,
+  };
+  assert!(gwm::gitlab::glab_env_remove(&nothing, false).is_empty());
 }

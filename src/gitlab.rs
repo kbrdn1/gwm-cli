@@ -99,6 +99,20 @@ pub fn glab_program() -> OsString {
 /// pin — clearing them is tidiness, not hardening, and they are listed
 /// together because the asymmetry is what invites the next audit.
 ///
+/// `$GITLAB_API_HOST` and `$API_PROTOCOL` are **not** tied to the pin,
+/// and that distinction is the whole of round 28's correction. Round 25
+/// cleared them only behind it, which left the delegated case — an SSH
+/// origin, where gwm pins nothing and glab reads the instance from the
+/// repo's own remote — still inheriting them, and `api_host` wins
+/// host-blind. Their replacement never depended on the pin: `repoHost`
+/// is whatever glab resolved, from the pin *or* from that remote. So
+/// they go in both cases.
+///
+/// The cost, named rather than discovered later: a split-host or
+/// plain-http instance configured through the environment breaks
+/// loudly. The fix is `glab config set --host <h> api_host <v>`, which
+/// is where glab scopes the setting per host anyway.
+///
 /// The rule that would have saved six rounds: **clear only what you can
 /// replace** — and check what the replacement actually is before
 /// deciding you have none.
@@ -161,11 +175,21 @@ pub fn glab_env_remove(origin: &forge::RemoteRef, has_workdir: bool) -> Vec<&'st
     "REMOTE_NICKNAME",
     "GIT_REMOTE_NICKNAME",
     "GIT_REMOTE_URL_VAR",
+    // Not tied to the pin, because their replacement does not depend on
+    // it: glab falls back to `apiHost = repoHost`, and `repoHost` is
+    // whatever glab resolved — gwm's pin when there is one, the repo's
+    // own remote when gwm delegates. `api_protocol` falls back to
+    // https. So clearing never leaves glab without an endpoint, in
+    // either case, which is the fact round 10 (cleared, no rationale)
+    // and round 11 (restored, false rationale) both missed.
+    "GITLAB_API_HOST",
+    "API_PROTOCOL",
   ];
   if !glab_env(origin).is_empty() {
+    // These two are spellings of the `host` key itself, so they only
+    // lose to a value gwm actually sets.
     vars.push("GITLAB_URI");
     vars.push("GL_HOST");
-    vars.push("GITLAB_API_HOST");
   }
   vars
 }
