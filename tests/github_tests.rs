@@ -1493,3 +1493,32 @@ fn a_foreign_stamp_also_hides_the_cached_title_and_state() {
   assert_eq!(link.issue, Some(42), "the branch name still names an issue");
   assert_eq!(link.issue_title, None, "but not with the other instance's title");
 }
+
+#[test]
+fn a_link_predating_the_stamp_is_adopted_by_the_current_origin() {
+  // Links written before `gwm-link-origin` existed have no stamp, and an
+  // absent stamp is treated as safe — otherwise upgrading gwm would wipe
+  // every existing link. But leaving them unstamped forever means a
+  // later migration reinterprets their numbers against the new instance
+  // (Codex review #458). The first read adopts them instead: no data
+  // loss now, and a real invalidation later.
+  let (_dir, repo) = init_repo();
+  make_branch(&repo, "feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/acme/widgets.git").unwrap();
+  github::link_pr(&repo, "feat/#42-tui-search", 128).unwrap();
+  // Simulate a pre-#419 link: the number is there, the stamp is not.
+  repo
+    .config()
+    .unwrap()
+    .remove("branch.feat/#42-tui-search.gwm-link-origin")
+    .unwrap();
+
+  // A read adopts it for the origin it currently has...
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, Some(128));
+
+  // ...so moving the repo afterwards now invalidates it.
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://gitlab.com/acme/widgets.git").unwrap();
+
+  assert_eq!(github::read_link(&repo, "feat/#42-tui-search").unwrap().pr, None);
+}

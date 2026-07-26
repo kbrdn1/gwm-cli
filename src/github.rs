@@ -135,7 +135,27 @@ pub fn read_link(repo: &Repository, branch: &str) -> Result<BranchLink> {
   // stays valid wherever the repo now points.
   let foreign = match read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY)? {
     Some(stored) => link_origin_is_foreign(repo)(&stored),
-    None => false,
+    // No stamp means the link predates the key. Invalidating those would
+    // wipe every existing link on upgrade, so they are adopted by the
+    // origin the repo has right now — which is almost always the one
+    // that wrote them, and makes a *later* move invalidate properly
+    // instead of leaving them unscoped forever (Codex review #458).
+    //
+    // Adoption is a one-time write per branch, guarded on there being
+    // something to adopt, so the per-row read path does not touch git
+    // config on every listing. Best-effort: read-only repos keep working
+    // and simply stay unstamped.
+    None => {
+      if read_branch_u64(repo, branch, ISSUE_CONFIG_KEY)?.is_some()
+        || read_branch_u64(repo, branch, PR_CONFIG_KEY)?.is_some()
+        || read_branch_u64(repo, branch, DETECTED_PR_CONFIG_KEY)?.is_some()
+      {
+        if let Some(id) = origin_identity(repo) {
+          let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
+        }
+      }
+      false
+    }
   };
   let explicit_issue = if foreign {
     None
