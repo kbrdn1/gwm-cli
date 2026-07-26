@@ -3986,6 +3986,22 @@ fn cmd_labels_push(dry_run: bool, prune: bool, random_colors: bool) -> Result<()
   let diff = labels::diff_labels(&declared, &remote);
   let (n_create, n_update, n_match, n_extra) = diff.counts();
 
+  // Before the dry-run branch, mirroring the milestone path: a prune
+  // that trips over a hostile remote label name must not have deleted
+  // half the batch first, and a dry-run must not advertise a plan that
+  // cannot run (Codex review #458).
+  if prune {
+    for remote_label in &diff.extra_on_remote {
+      labels::validate_label_name(&remote_label.name).map_err(|e| {
+        let inner = match e {
+          GwmError::Config(msg) => msg,
+          other => other.to_string(),
+        };
+        GwmError::Config(format!("labels (remote): {inner} — refusing to prune"))
+      })?;
+    }
+  }
+
   if dry_run {
     print_labels_diff(forge.slug(), &declared, &diff);
     let pruned = if prune { n_extra } else { 0 };
