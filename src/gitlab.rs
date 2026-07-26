@@ -414,12 +414,16 @@ fn split_host_port(s: &str) -> (Option<String>, Option<String>) {
 ///
 /// And glab scopes `subfolder` **per host** in its config, while the
 /// environment variable is global. gwm resolves a forge per repo, so a
-/// workspace spanning two instances applies one exported value to both
-/// (Codex review #458). The strip is still conditional on the origin
-/// path actually carrying the prefix, so the damage needs a second
-/// instance whose top-level group is named like the first's subfolder —
-/// but tying the value to a host needs a trusted host source, which is
-/// issue #460 rather than another heuristic here.
+/// workspace spanning two instances applies one exported value to both.
+/// The strip is still conditional on the origin path actually carrying
+/// the prefix, so the damage needs a second instance whose top-level
+/// group is named like the first's subfolder.
+///
+/// Raised three times in the #458 review, so this is the decision and
+/// not a gap: tying the value to a host needs a trusted host source,
+/// which is issue #460. Adding a fourth heuristic here is what produced
+/// the round 9-to-16 oscillation, and the `api_host` half of the same
+/// problem is already closed by the pin in [`glab_env_remove`].
 ///
 /// Read here rather than at call time so the TUI's fetch worker never
 /// re-reads the environment off-thread (issue #217).

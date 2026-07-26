@@ -1705,6 +1705,18 @@ impl GitHubForge {
 ///    never knows better than the user which identity they meant to use
 ///    or where they keep their credentials.
 ///
+/// Tier 3 is what raises the obvious objection, so it is answered here
+/// rather than left for the next audit to re-raise: gwm pins a host
+/// read from `origin` while leaving the global tokens in place, so a
+/// repo whose remote points at a hostile server gets a bearer token
+/// sent to it. True, and **unchanged by any of this** — the pin carries
+/// the host `gh` / `glab` would have resolved from that same remote
+/// unaided, so the target is byte-identical with or without gwm. What
+/// would actually close it is a trust decision on the origin host
+/// before the first authenticated call, which is issue #460. Clearing
+/// the tokens instead does not close it (the CLI still reaches the
+/// host, just unauthenticated) and breaks every legitimate setup.
+///
 /// Audited against gh's documented environment. Tier 1: `$GH_REPO`.
 /// Tier 2: none — `$GH_HOST` is pinned by [`gh_env`] and gh publishes
 /// neither an alias for it nor a separate API endpoint override, so
