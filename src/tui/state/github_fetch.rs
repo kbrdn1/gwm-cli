@@ -153,6 +153,23 @@ impl GitHubFetch {
   /// (`App::refresh_link` separately drops any in-flight GitHub worker
   /// on the spine — see [`Self::invalidate`] for the pairing.)
   pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
+    self.reread_link(repo, branch, config);
+    self.invalidate();
+  }
+
+  /// Re-read the link and forge **without** dropping fetched results.
+  ///
+  /// [`Self::refresh_link`] clears the caches on purpose: a selection
+  /// change must not leave the previous row's status on screen (PR #68).
+  /// But the open menu calls it only to catch a link made in another
+  /// terminal, and clearing there wiped the server-reported `web_url` it
+  /// was about to read, so it always fell back to a locally built URL —
+  /// wrong exactly where it matters, on an origin whose web host or port
+  /// gwm cannot infer (Codex review #458).
+  ///
+  /// Preserving is safe by construction: the caches are keyed by issue /
+  /// PR number, so a link that really did change simply misses.
+  pub fn reread_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
     self.link = branch
       .and_then(|b| github::read_link(repo, b).ok())
       .unwrap_or_else(BranchLink::empty);
@@ -160,7 +177,6 @@ impl GitHubFetch {
     // Kept in sync with `forge` so the many read-only slug consumers
     // (detail overlay keys, status strings) need no rewrite.
     self.link_slug = self.forge.as_ref().map(|f| f.slug().to_string());
-    self.invalidate();
   }
 
   /// Flush every cached fetch state. Equivalent to "the cached

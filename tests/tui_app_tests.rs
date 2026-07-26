@@ -10423,3 +10423,34 @@ fn open_menu_stays_quiet_on_an_authoritative_origin() {
 
   assert!(!app.status.contains("guessed"), "status was: {}", app.status);
 }
+
+#[test]
+fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
+  // `enter_open_menu` re-read the link through the invalidating
+  // `refresh_link`, wiping the very cache `cached_issue_url` reads — so
+  // the server-reported `web_url` was never used and the menu always
+  // built a URL locally (Codex review #458). Selection changes must
+  // still invalidate; only this path is exempt, and it is safe because
+  // the caches are keyed by number.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "git@git.acme.internal:team/proj.git").unwrap();
+  app.refresh_link();
+  app.apply_issue_fetch_result(Ok(gwm::forge::IssueStatus {
+    number: 42,
+    title: "t".into(),
+    state: gwm::forge::IssueState::Open,
+    url: "https://web.acme.internal:8443/team/proj/-/issues/42".into(),
+    labels: vec![],
+    updated_at: String::new(),
+  }));
+
+  app.enter_open_menu();
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert_eq!(url, "https://web.acme.internal:8443/team/proj/-/issues/42");
+  assert!(
+    !app.status.contains("guessed"),
+    "a server-reported URL is not a guess: {}",
+    app.status
+  );
+}

@@ -5111,7 +5111,15 @@ impl App {
   pub fn enter_open_menu(&mut self) {
     // Re-resolve link + slug in case the user just linked something
     // (`gwm link …` from a parallel terminal) or moved the origin remote.
-    self.refresh_link();
+    //
+    // Deliberately the non-invalidating variant: `refresh_link` clears
+    // the fetch caches, and those hold the server-reported `web_url`
+    // this menu is about to prefer over a locally built one. Clearing
+    // here meant that URL was never once used (Codex review #458). Safe
+    // because the caches are keyed by number, so a link that really
+    // changed simply misses.
+    let branch = self.selected_branch_name();
+    self.github.reread_link(&self.repo, branch.as_deref(), &self.config);
     self.open_menu_selected = LinkTarget::Issue;
     self.view = View::OpenMenu;
   }

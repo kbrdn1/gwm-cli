@@ -555,6 +555,20 @@ pub trait Forge: Send + Sync + std::fmt::Debug {
   fn delete_label(&self, name: &str) -> Result<()>;
 
   fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>>;
+  /// Reject a milestone this forge cannot accept, before anything is
+  /// sent.
+  ///
+  /// GitLab's `due_date` is date-only while GitHub's `due_on` is
+  /// RFC 3339, so a spec carrying a time is a hard error there. The
+  /// check used to live inside `create_milestone` / `update_milestone`,
+  /// which meant `--dry-run` printed a plan that could not run and a
+  /// real push applied milestones until it reached the bad one, leaving
+  /// the server half-updated (Codex review #458). Validating the whole
+  /// set up front makes both paths fail before the first mutation.
+  fn validate_milestone(&self, _spec: &MilestoneSpec) -> Result<()> {
+    Ok(())
+  }
+
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()>;
   fn update_milestone(&self, number: u64, spec: &MilestoneSpec) -> Result<()>;
   fn delete_milestone(&self, number: u64) -> Result<()>;

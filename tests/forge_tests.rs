@@ -816,3 +816,38 @@ fn no_github_call_smuggles_the_slug_past_the_selector() {
     );
   }
 }
+
+#[test]
+fn a_milestone_the_forge_cannot_accept_is_rejected_before_any_mutation() {
+  // GitLab's `due_date` is date-only; GitHub's `due_on` is RFC 3339. The
+  // check used to live inside `create_milestone` / `update_milestone`,
+  // so `--dry-run` printed a plan that could not run and a real push
+  // applied entries until it reached the bad one, leaving the server
+  // half-updated (Codex review #458). `validate_milestone` is the seam
+  // the push path now runs over the whole set first.
+  let spec = |due: &str| gwm::milestones::MilestoneSpec {
+    title: "v1".into(),
+    description: None,
+    due_on: Some(due.to_string()),
+    state: gwm::milestones::MilestoneState::Open,
+  };
+  let bad = spec("2026-07-26T12:00:00Z");
+  let good = spec("2026-07-26");
+
+  let gl = forge::for_kind(
+    ForgeKind::GitLab,
+    forge::parse_remote_url("https://gitlab.com/g/p").unwrap(),
+  );
+  assert!(
+    gl.validate_milestone(&bad).is_err(),
+    "a timestamp is not a GitLab due date"
+  );
+  assert!(gl.validate_milestone(&good).is_ok());
+
+  // GitHub takes RFC 3339, so the default no-op must stay a no-op.
+  let gh = forge::for_kind(
+    ForgeKind::GitHub,
+    forge::parse_remote_url("https://github.com/o/r").unwrap(),
+  );
+  assert!(gh.validate_milestone(&bad).is_ok(), "GitHub accepts a timestamp");
+}

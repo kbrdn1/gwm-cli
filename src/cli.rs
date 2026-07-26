@@ -4104,6 +4104,16 @@ fn cmd_milestones_push(dry_run: bool, prune: bool) -> Result<()> {
   let diff = milestones::diff_milestones(&declared, &remote);
   let (n_create, n_update, n_match, n_extra) = diff.counts();
 
+  // Before the dry-run branch on purpose: a plan the forge will reject
+  // must not be printed as runnable, and a real push must not apply half
+  // the batch before hitting the bad entry (Codex review #458).
+  for spec in &diff.to_create {
+    forge.validate_milestone(spec)?;
+  }
+  for upd in &diff.to_update {
+    forge.validate_milestone(&upd.spec)?;
+  }
+
   if dry_run {
     print_milestones_diff(forge.slug(), &declared, &diff);
     let pruned = if prune { n_extra } else { 0 };
