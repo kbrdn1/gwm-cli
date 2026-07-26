@@ -79,6 +79,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The trust ledger keys on the repo again, not on its host**
+  ([#463](https://github.com/kbrdn1/gwm-cli/issues/463)). The ledger stores
+  `(origin, sha256(.gwm.toml))`, and the `origin` half had come to be built two
+  different ways: the bootstrap gates used the full `origin` remote URL, while
+  the forge host gate and `gwm trust add` (both new in #419) used
+  `RemoteRef::web_origin` — scheme + host only. That degraded the key from "this
+  repo" to "this host", so approval was shared by every repo on that host whose
+  `.gwm.toml` hashed identically. Since that file is normally a template copied
+  across a team's repos, identical hashes are the ordinary case rather than a
+  corner case, and a hostile repo could inherit a sibling's approval by shipping
+  its config verbatim. The two gates also stopped seeing each other's entries, so
+  `gwm trust add` printed `✓ trusted …` and `gwm create` in the same repo still
+  refused. All four call sites now go through one `trust::origin_key_for_repo`
+  helper, so the key cannot drift again. Ledger entries written before this fix
+  by the bootstrap path are unaffected.
 - **A blocking `manual` GitLab pipeline no longer reads as green**
   ([#419](https://github.com/kbrdn1/gwm-cli/issues/419)). It was mapped to
   passing by analogy with GitHub's `SKIPPED`, but a pipeline reports `manual`
