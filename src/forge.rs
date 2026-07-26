@@ -644,9 +644,15 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 /// Resolve the forge for `repo`: parse the `origin` remote, then pick the
 /// backend from `.gwm.toml`'s `forge` key when set, else infer it from
 /// the host.
+///
+/// This is also where the persisted links are reconciled against the
+/// backend that will read them — see
+/// [`crate::github::reconcile_link_forge`] for why it lives here and not
+/// in the readers.
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   let parsed = origin_ref(repo)?;
   let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
+  crate::github::reconcile_link_forge(repo, kind);
   // A bare repo has no workdir, but its own directory is still a valid
   // git context for `gh` / `glab` to resolve remotes from — and losing it
   // means an unpinned origin falls back to the CLI's default tenant

@@ -925,3 +925,54 @@ fn a_bare_repo_still_gives_the_cli_a_git_context() {
 
   assert!(f.workdir().is_some(), "a bare repo is still a git context");
 }
+
+#[test]
+fn flipping_the_backend_drops_the_numbers_the_other_one_wrote() {
+  // The origin stamp catches a change of *instance*; it cannot catch a
+  // change of *backend*, because flipping `forge = "gitlab"` in
+  // `.gwm.toml` leaves the remote — and therefore `<web origin>/<path>`
+  // — untouched. Issue #42 then comes back as merge request !42 on the
+  // other forge: a real page, the wrong one (Codex review #458).
+  //
+  // Reconciling at resolve time rather than at read time is what keeps
+  // this cheap. `worktree::list` reads links with no `Config` in hand
+  // and is the busiest reader; `forge::resolve` is the one place that
+  // decides which backend a repo uses, and it already has both.
+  let (_dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://git.acme.internal/team/proj.git")
+    .unwrap();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  gwm::github::link_issue(&repo, &branch, 42).unwrap();
+
+  // An absent record adopts rather than purges: links written before
+  // this key existed must survive the upgrade that introduces it.
+  let github = forge::resolve(&repo, &Config::default()).unwrap();
+  assert_eq!(github.kind(), ForgeKind::GitHub, "precondition: host infers GitHub");
+  assert_eq!(
+    gwm::github::read_link(&repo, &branch).unwrap().issue,
+    Some(42),
+    "a first resolve must adopt the existing links, not wipe them"
+  );
+
+  // Same backend, again: idempotent.
+  forge::resolve(&repo, &Config::default()).unwrap();
+  assert_eq!(gwm::github::read_link(&repo, &branch).unwrap().issue, Some(42));
+
+  let flipped = Config {
+    forge: Some(ForgeKind::GitLab),
+    ..Default::default()
+  };
+  forge::resolve(&repo, &flipped).unwrap();
+  assert_eq!(
+    gwm::github::read_link(&repo, &branch).unwrap().issue,
+    None,
+    "a GitHub issue number is not a GitLab issue number"
+  );
+
+  // And the new backend now owns the record, so it does not re-purge
+  // what it writes itself.
+  gwm::github::link_issue(&repo, &branch, 7).unwrap();
+  forge::resolve(&repo, &flipped).unwrap();
+  assert_eq!(gwm::github::read_link(&repo, &branch).unwrap().issue, Some(7));
+}

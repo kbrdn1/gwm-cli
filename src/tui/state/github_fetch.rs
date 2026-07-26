@@ -187,10 +187,17 @@ impl GitHubFetch {
     }
   }
 
-  /// `<web origin>/<slug>`, or `None` without a resolved forge. Identity
-  /// of the *instance*, not just the project.
+  /// `<backend> <web origin>/<slug>`, or `None` without a resolved
+  /// forge. Identity of the *instance*, not just the project — and of
+  /// the backend reading it, because `forge = "gitlab"` can flip over an
+  /// unchanged remote and the caches are keyed by number alone, so
+  /// cached issue #42 would otherwise be served as merge request !42
+  /// (Codex review #458).
   fn forge_identity(&self) -> Option<String> {
-    self.forge.as_ref().map(|f| format!("{}/{}", f.web_origin(), f.slug()))
+    self
+      .forge
+      .as_ref()
+      .map(|f| format!("{} {}/{}", f.kind().as_str(), f.web_origin(), f.slug()))
   }
 
   /// Flush every cached fetch state. Equivalent to "the cached

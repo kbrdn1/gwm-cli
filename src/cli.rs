@@ -3700,9 +3700,13 @@ fn cmd_unlink(target: LinkTarget, worktree: Option<String>) -> Result<()> {
 
 fn cmd_open(target: LinkTarget, worktree: Option<String>, print_url: bool) -> Result<()> {
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
-  let link = github::read_link(&repo, &branch)?;
+  // Resolve first: `forge::resolve` reconciles the persisted links
+  // against the backend about to read them, and `gwm open` is exactly
+  // the command that would otherwise send the user to the stale
+  // number's page one last time.
   let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
   let forge = forge::resolve(&repo, &config)?;
+  let link = github::read_link(&repo, &branch)?;
 
   let url = match target {
     LinkTarget::Issue => {

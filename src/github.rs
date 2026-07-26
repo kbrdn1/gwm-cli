@@ -56,6 +56,10 @@ const DETECTED_PR_CONFIG_KEY: &str = "gwm-pr-detected";
 /// stranger's merge request. Stamping the origin lets [`read_link`]
 /// recognise a number that came from somewhere else and ignore it.
 const LINK_ORIGIN_CONFIG_KEY: &str = "gwm-link-origin";
+/// The backend half of the same guard, and repo-level rather than
+/// per-branch because the backend is a property of the repo. See
+/// [`reconcile_link_forge`].
+const LINK_FORGE_CONFIG_KEY: &str = "gwm.link-forge";
 const ISSUE_TITLE_CONFIG_KEY: &str = "gwm-issue-title";
 const PR_TITLE_CONFIG_KEY: &str = "gwm-pr-title";
 const DETECTED_PR_TITLE_CONFIG_KEY: &str = "gwm-pr-detected-title";
@@ -369,22 +373,72 @@ fn stamp_link_origin(repo: &Repository, branch: &str) {
   let Some(id) = origin_identity(repo) else { return };
   if let Ok(Some(stored)) = read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY) {
     if stored != id {
-      for key in [
-        ISSUE_CONFIG_KEY,
-        ISSUE_TITLE_CONFIG_KEY,
-        ISSUE_STATE_CONFIG_KEY,
-        PR_CONFIG_KEY,
-        PR_TITLE_CONFIG_KEY,
-        PR_STATE_CONFIG_KEY,
-        DETECTED_PR_CONFIG_KEY,
-        DETECTED_PR_TITLE_CONFIG_KEY,
-        DETECTED_PR_STATE_CONFIG_KEY,
-      ] {
-        let _ = remove_branch_key(repo, branch, key);
-      }
+      drop_branch_links(repo, branch);
     }
   }
   let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
+}
+
+/// Every number, title and state the link layer persists for `branch`.
+/// One list, because a purge that forgets a key silently re-blesses it.
+fn drop_branch_links(repo: &Repository, branch: &str) {
+  for key in [
+    ISSUE_CONFIG_KEY,
+    ISSUE_TITLE_CONFIG_KEY,
+    ISSUE_STATE_CONFIG_KEY,
+    PR_CONFIG_KEY,
+    PR_TITLE_CONFIG_KEY,
+    PR_STATE_CONFIG_KEY,
+    DETECTED_PR_CONFIG_KEY,
+    DETECTED_PR_TITLE_CONFIG_KEY,
+    DETECTED_PR_STATE_CONFIG_KEY,
+  ] {
+    let _ = remove_branch_key(repo, branch, key);
+  }
+}
+
+/// Drop every persisted link when the repo changes **backend**.
+///
+/// [`origin_identity`] covers a change of instance and cannot cover this
+/// one: flipping `forge = "gitlab"` in `.gwm.toml` leaves the remote,
+/// and therefore `<web origin>/<path>`, exactly as it was. The numbers
+/// survive and the other backend reads them as its own — issue #42
+/// resurfaces as merge request !42, a real page and the wrong one
+/// (Codex review #458).
+///
+/// Called from [`crate::forge::resolve`] rather than from the readers.
+/// The busiest reader is [`crate::worktree::list`], which has no
+/// `Config` and is threaded through most of the test suite; `resolve` is
+/// the single place that decides a repo's backend and already holds
+/// both halves. The cost in the steady state is one config read.
+///
+/// An absent record **adopts**: links written before this key existed
+/// must survive the upgrade that introduces it, exactly as an absent
+/// origin stamp is not treated as a mismatch.
+///
+/// Best-effort throughout — a read-only repo must not turn a resolve
+/// into an error.
+pub(crate) fn reconcile_link_forge(repo: &Repository, kind: crate::forge::ForgeKind) {
+  let now = kind.as_str();
+  let Ok(cfg) = repo.config() else { return };
+  match cfg.get_string(LINK_FORGE_CONFIG_KEY) {
+    Ok(stored) if stored == now => return,
+    Ok(_) => {
+      if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
+        for name in branches
+          .filter_map(|b| b.ok())
+          .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
+        {
+          drop_branch_links(repo, &name);
+          let _ = remove_branch_key(repo, &name, LINK_ORIGIN_CONFIG_KEY);
+        }
+      }
+    }
+    Err(_) => {}
+  }
+  if let Ok(mut cfg) = repo.config() {
+    let _ = cfg.set_str(LINK_FORGE_CONFIG_KEY, now);
+  }
 }
 
 /// `true` when persisted numbers on this branch were written against a
