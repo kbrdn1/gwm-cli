@@ -765,3 +765,17 @@ fn the_backends_disagree_on_pinning_a_guessed_host_and_that_is_correct() {
   let gh = forge::for_kind_in(ForgeKind::GitHub, ssh, Some(dir.path().to_path_buf()));
   assert_eq!(gh.repo_selector(), "team/proj");
 }
+
+#[test]
+fn a_drive_relative_windows_path_is_not_an_scp_remote() {
+  // `C:repo` is a valid drive-relative Windows path and slipped past the
+  // first guard, which required a `\` or `/` right after the colon
+  // (Codex review #458). A one-letter *hostname* is vanishingly rare
+  // next to a drive letter, so the letter alone is the signal.
+  for url in ["C:repo", "d:work/thing"] {
+    assert!(
+      forge::parse_remote_url(url).is_err(),
+      "{url} is a local path, not a remote"
+    );
+  }
+}

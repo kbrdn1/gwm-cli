@@ -374,16 +374,21 @@ fn split_host_and_path(url: &str) -> Option<(&str, &str)> {
   if let Some((_scheme, rest)) = url.split_once("://") {
     return rest.split_once('/');
   }
-  // `C:\repo` and `C:/repo` have the shape of scp syntax, and parsing
-  // them as one produced host `c` with a bogus path — so a local Windows
-  // checkout aimed network calls at an invented host (Codex review
-  // #458). A drive letter is exactly one ASCII letter, no `user@`, and a
-  // separator right after the colon; a real one-label host like
-  // `git@localhost:team/proj` matches none of that.
+  // `C:\repo`, `C:/repo` and the drive-relative `C:repo` all have the
+  // shape of scp syntax, and parsing them as one produced host `c` with a
+  // bogus path — so a local Windows checkout aimed network calls at an
+  // invented host (Codex review #458).
+  //
+  // The first guard also demanded a separator after the colon, which let
+  // `C:repo` through. The letter alone is the signal: a genuine
+  // single-character hostname is vanishingly rare next to a drive
+  // letter, and `git@localhost:team/proj` — a real one-label host, which
+  // is what a LAN or tunnelled remote looks like — carries a `user@` and
+  // more than one character either way.
   if !url.contains('@') {
     let mut chars = url.chars();
-    if let (Some(first), Some(':'), Some(sep)) = (chars.next(), chars.next(), chars.next()) {
-      if first.is_ascii_alphabetic() && (sep == '\\' || sep == '/') {
+    if let (Some(first), Some(':')) = (chars.next(), chars.next()) {
+      if first.is_ascii_alphabetic() {
         return None;
       }
     }
