@@ -21,7 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New `forge = "github" | "gitlab"` key in `.gwm.toml`. Omitted, the forge
     is inferred from the `origin` host; a **self-hosted** instance lives on
     an arbitrary domain and cannot be detected from the URL, so the explicit
-    key is the supported way in and always wins over inference.
+    key is how you name the backend, and it always wins over inference.
+  - New `[forge_hosts]` table, read from **your own**
+    `~/.config/gwm/config.toml` only — `"host" = "github" | "gitlab"`. This
+    is what authorises gwm to make an authenticated call against a
+    self-hosted host, and it is deliberately separate from `forge`: that key
+    says which *backend* you run, never which *hosts* may receive your
+    token. Keyed per host so one config can describe a mixed fleet (a
+    self-hosted GitLab **and** a GitHub Enterprise), which a single `forge`
+    key cannot. Matching is case-insensitive.
   - A host gwm does not recognise is **not** assumed to be GitHub. Only the
     vendors' own domains resolve without configuration — `github.com`,
     `ghe.com`, `gitlab.com`; a `gitlab.*` hostname is chosen by whoever owns
@@ -29,14 +37,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     gwm reports that rather than guessing. Guessing would have sent an
     authenticated `gh` call — and a `$GH_ENTERPRISE_TOKEN` — to whatever host
     a cloned repo's `origin` happened to name.
-  - On such a host the key is only honoured from **your own**
-    `~/.config/gwm/config.toml`, or from a repo whose `.gwm.toml` you have
-    approved in the TOFU trust ledger. That file ships with the repo, so
-    letting it name the host would have handed a hostile clone the same
-    capability from a plain `gwm status`. Same ledger as
+  - On such a host, authorisation comes from `[forge_hosts]` above, or from
+    a repo whose `.gwm.toml` you have approved in the TOFU trust ledger.
+    That file ships with the repo, so letting it name the host on its own
+    would have handed a hostile clone an authenticated call to its own
+    server from a plain `gwm status` — with whatever token the environment
+    carries. Verified rather than assumed: given `GITLAB_HOST`, `glab`
+    1.109.0 sends the ambient `GITLAB_TOKEN` to whatever it names, as a
+    `Private-Token` header, with no host scoping of its own. Same ledger as
     `[[bootstrap.command]]`, checked non-interactively because the TUI's
     selection path cannot prompt — `gwm trust add` is how you answer, and
-    `GWM_ALLOW_BOOTSTRAP=1` remains the CI escape hatch.
+    `GWM_ALLOW_BOOTSTRAP=1` remains the CI escape hatch (it bypasses this
+    gate too, being the same decision about the same file).
   - `$GWM_GLAB` overrides the `glab` binary, mirroring `$GWM_GH`.
   - New `gwm trust add`: approve the current repo's `.gwm.toml` without
     running anything. The existing prompt only fires when the file has a
