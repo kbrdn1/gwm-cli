@@ -6430,7 +6430,11 @@ fn a_link_written_after_a_backend_flip_survives_the_next_command() {
       .success();
   };
 
-  // Record the inferred GitHub backend against the repo.
+  // `git.acme.internal` says nothing about which forge it runs, so the
+  // backend is named explicitly on both sides of the flip — that is the
+  // gate from `forge::resolve`, not part of what this test pins.
+  fs::write(dir.path().join(".gwm.toml"), "forge = \"github\"\n").unwrap();
+  // Record the GitHub backend against the repo.
   gwm(&["link", "issue", "7"]);
   gwm(&["open", "issue", "--print-url"]);
 

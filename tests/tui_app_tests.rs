@@ -10402,7 +10402,11 @@ fn open_menu_says_so_when_the_url_is_a_guess() {
   // leave a permanently dead menu entry on an unreachable instance — but
   // the status bar stops it being a silent wrong tab (Codex review #458).
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  repo.remote("origin", "git@git.acme.internal:team/proj.git").unwrap();
+  // A host that states its forge: `git.acme.internal` states none, and
+  // `forge::resolve` now refuses to guess rather than send an
+  // authenticated call there. The point here is the *guessed URL*
+  // warning, which an scp-syntax remote still produces on github.com.
+  repo.remote("origin", "git@github.com:team/proj.git").unwrap();
   app.enter_open_menu();
 
   let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
@@ -10433,7 +10437,11 @@ fn open_menu_keeps_the_fetched_url_it_is_about_to_use() {
   // still invalidate; only this path is exempt, and it is safe because
   // the caches are keyed by number.
   let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
-  repo.remote("origin", "git@git.acme.internal:team/proj.git").unwrap();
+  // A host that states its forge: `git.acme.internal` states none, and
+  // `forge::resolve` now refuses to guess rather than send an
+  // authenticated call there. The point here is the *guessed URL*
+  // warning, which an scp-syntax remote still produces on github.com.
+  repo.remote("origin", "git@github.com:team/proj.git").unwrap();
   app.refresh_link();
   app.apply_issue_fetch_result(Ok(gwm::forge::IssueStatus {
     number: 42,

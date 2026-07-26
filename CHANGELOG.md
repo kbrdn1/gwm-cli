@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     is inferred from the `origin` host; a **self-hosted** instance lives on
     an arbitrary domain and cannot be detected from the URL, so the explicit
     key is the supported way in and always wins over inference.
+  - A host gwm does not recognise is **not** assumed to be GitHub. Only
+    `github.com`, `ghe.com`, `gitlab.com` and the `gitlab.*` label resolve
+    without configuration; anything else needs the `forge` key, and gwm
+    reports that rather than guessing. Guessing would have sent an
+    authenticated `gh` call — and a `$GH_ENTERPRISE_TOKEN` — to whatever
+    host a cloned repo's `origin` happened to name.
   - `$GWM_GLAB` overrides the `glab` binary, mirroring `$GWM_GH`.
   - `gwm doctor` probes the forge CLI, but only when `forge` is set
     explicitly, so repos that never opt in gain no new warning.

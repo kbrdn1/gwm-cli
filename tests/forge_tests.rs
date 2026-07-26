@@ -43,6 +43,19 @@ fn clean_env() -> MutexGuard<'static, ()> {
   guard
 }
 
+/// `forge = "github"` as a `Config`.
+///
+/// A host like `git.acme.internal` states no forge, and `resolve`
+/// refuses to guess one rather than send an authenticated call to it
+/// (Codex review #458). These tests are about link scoping, not about
+/// that gate, so they name the backend the way a real user would.
+fn github_cfg() -> Config {
+  Config {
+    forge: Some(ForgeKind::GitHub),
+    ..Default::default()
+  }
+}
+
 // --- origin URL parsing ---------------------------------------------------
 
 #[test]
@@ -600,14 +613,18 @@ fn pinning_the_host_also_closes_the_ways_around_the_pin() {
     assert!(removed.contains(&v), "{v} must not outrank the pin: {removed:?}");
   }
 
-  // And the bound that keeps this from becoming round 10 again: with no
-  // pin there is no replacement, so nothing is taken away.
+  // And the bound that keeps this from becoming round 10 again: the
+  // *host* spellings only lose to a value gwm actually sets, so with no
+  // pin they survive. `GITLAB_API_HOST` is not one of them — its
+  // replacement is glab's own `apiHost = repoHost` fallback, which does
+  // not depend on the pin, so it goes either way (round 28).
   let ssh = forge::parse_remote_url("git@gitlab.example.com:g/p.git").unwrap();
   let kept = gwm::gitlab::glab_env_remove(&ssh, false);
   assert!(gwm::gitlab::glab_env(&ssh).is_empty(), "precondition: not pinned");
-  for v in ["GITLAB_URI", "GL_HOST", "GITLAB_API_HOST"] {
+  for v in ["GITLAB_URI", "GL_HOST"] {
     assert!(!kept.contains(&v), "{v} is the user's only signal here: {kept:?}");
   }
+  assert!(kept.contains(&"GITLAB_API_HOST"), "{kept:?}");
 }
 
 #[test]
@@ -679,11 +696,15 @@ fn the_host_env_vars_are_left_alone_when_we_cannot_know_the_host() {
   // project; it does not always know the host. On an SSH origin the
   // user's exported `GITLAB_HOST` may be the only correct signal there
   // is, so it is not cleared out from under them.
+  //
+  // `GITLAB_API_HOST` is deliberately absent from that list: it names
+  // the API endpoint, not the host, and glab replaces it with whatever
+  // host it resolved — including the one it reads off this very remote.
   let ssh = forge::parse_remote_url("git@gitlab-ssh.acme:team/proj.git").unwrap();
 
   assert!(gwm::gitlab::glab_env(&ssh).is_empty());
   let removed = gwm::gitlab::glab_env_remove(&ssh, false);
-  for v in ["GITLAB_HOST", "GITLAB_URI", "GITLAB_API_HOST"] {
+  for v in ["GITLAB_HOST", "GITLAB_URI"] {
     assert!(
       !removed.contains(&v),
       "{v} must survive: we have no host to put in its place"
@@ -959,7 +980,7 @@ fn a_bare_repo_still_gives_the_cli_a_git_context() {
   let repo = git2::Repository::init_bare(dir.path()).unwrap();
   repo.remote("origin", "git@ghe-ssh.acme.com:team/proj.git").unwrap();
 
-  let f = forge::resolve(&repo, &Config::default()).unwrap();
+  let f = forge::resolve(&repo, &github_cfg()).unwrap();
 
   assert!(f.workdir().is_some(), "a bare repo is still a git context");
 }
@@ -985,7 +1006,7 @@ fn flipping_the_backend_drops_the_numbers_the_other_one_wrote() {
 
   // An absent record adopts rather than purges: links written before
   // this key existed must survive the upgrade that introduces it.
-  let github = forge::resolve(&repo, &Config::default()).unwrap();
+  let github = forge::resolve(&repo, &github_cfg()).unwrap();
   assert_eq!(github.kind(), ForgeKind::GitHub, "precondition: host infers GitHub");
   assert_eq!(
     gwm::github::read_link(&repo, &branch).unwrap().issue,
@@ -994,7 +1015,7 @@ fn flipping_the_backend_drops_the_numbers_the_other_one_wrote() {
   );
 
   // Same backend, again: idempotent.
-  forge::resolve(&repo, &Config::default()).unwrap();
+  forge::resolve(&repo, &github_cfg()).unwrap();
   assert_eq!(gwm::github::read_link(&repo, &branch).unwrap().issue, Some(42));
 
   let flipped = Config {
@@ -1032,7 +1053,7 @@ fn the_tui_reads_the_links_after_the_reconcile_not_before() {
   let mut fetch = gwm::tui::state::github_fetch::GitHubFetch::new();
   // A fresh cache has no identity yet, so the first read is itself a
   // change — the caller must pair it with the spine bump.
-  assert!(fetch.reread_link(&repo, Some(&branch), &Config::default()));
+  assert!(fetch.reread_link(&repo, Some(&branch), &github_cfg()));
   assert_eq!(fetch.link.issue, Some(42), "precondition: adopted, not purged");
 
   let flipped = Config {
@@ -1073,7 +1094,7 @@ fn a_purge_that_could_not_finish_does_not_advance_the_marker() {
     .unwrap();
   let branch = repo.head().unwrap().shorthand().unwrap().to_string();
   gwm::github::link_issue(&repo, &branch, 42).unwrap();
-  forge::resolve(&repo, &Config::default()).unwrap();
+  forge::resolve(&repo, &github_cfg()).unwrap();
 
   // A read-only `.git` blocks the config lock file, so reads still work
   // and writes do not — exactly the shape of a repo on a read-only mount.
@@ -1176,5 +1197,55 @@ fn the_project_selector_survives_when_gwm_supplies_no_project() {
   for v in ["GITLAB_REPO", "GITLAB_GROUP"] {
     assert!(gwm::gitlab::glab_env_remove(&gl, false).contains(&v), "{v}");
     assert!(!gwm::gitlab::glab_env_remove(&nothing, false).contains(&v), "{v}");
+  }
+}
+
+#[test]
+fn an_unrecognised_host_is_not_assumed_to_be_github() {
+  // The security regression this PR introduced, and the one refused in
+  // round 27 on a premise that was never checked against `dev`.
+  // Pre-PR `github::repo_slug` accepted `git@github.com:` and
+  // `https://github.com/` only — every other origin was rejected with
+  // "is not a github URL", so gwm never made an authenticated call
+  // against an arbitrary host. `detect_kind` then started defaulting
+  // any unknown host to GitHub, `gh_env` pinned it as `$GH_HOST`, and
+  // `gh` reads a non-github.com host as Enterprise — so cloning a
+  // hostile repo and running `gwm list --detect-pr` shipped
+  // `$GH_ENTERPRISE_TOKEN` to whatever the remote named.
+  let (_dir, repo) = init_repo();
+  repo.remote("origin", "https://evil.example/team/proj.git").unwrap();
+
+  let err = forge::resolve(&repo, &Config::default()).unwrap_err().to_string();
+  assert!(err.contains("evil.example"), "must name the host: {err}");
+  assert!(err.contains("forge"), "must name the way out: {err}");
+
+  // Naming the backend is the way in — that is what the config key is
+  // for (a self-hosted instance cannot be detected from a URL).
+  let named = Config {
+    forge: Some(ForgeKind::GitLab),
+    ..Default::default()
+  };
+  assert_eq!(forge::resolve(&repo, &named).unwrap().kind(), ForgeKind::GitLab);
+}
+
+#[test]
+fn the_known_hosts_still_need_no_configuration() {
+  // The bound on the gate: it must not turn `gwm` into a
+  // configure-before-use tool for the hosts that are recognisable.
+  // `gitlab.acme.internal` is the self-hosted convention `detect_kind`
+  // already reads, and it keeps working with no config key.
+  let (_dir, repo) = init_repo();
+  for (url, want) in [
+    ("https://github.com/o/r.git", ForgeKind::GitHub),
+    ("git@github.com:o/r.git", ForgeKind::GitHub),
+    ("https://acme.ghe.com/o/r.git", ForgeKind::GitHub),
+    ("https://gitlab.com/g/p.git", ForgeKind::GitLab),
+    ("https://gitlab.acme.internal/g/p.git", ForgeKind::GitLab),
+  ] {
+    repo.remote_delete("origin").ok();
+    repo.remote("origin", url).unwrap();
+    let f =
+      forge::resolve(&repo, &Config::default()).unwrap_or_else(|e| panic!("{url} must resolve without config: {e}"));
+    assert_eq!(f.kind(), want, "{url}");
   }
 }

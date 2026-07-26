@@ -425,15 +425,33 @@ fn trim_git_suffix(s: &str) -> &str {
 /// detected from the URL alone — the `gitlab.*` label convention is a
 /// best-effort nicety, not a contract. `forge = "gitlab"` in `.gwm.toml`
 /// is the supported way in, and it always wins (see [`resolve`]).
-/// Anything unrecognised defaults to GitHub, preserving pre-#419
-/// behaviour for GitHub Enterprise hosts.
+/// Anything unrecognised falls back to GitHub.
+///
+/// That fallback is a *guess*, and [`resolve`] no longer acts on it
+/// unprompted — see [`known_kind`], which is the same rule without the
+/// guess. This function keeps returning one because callers that
+/// already know the host is legitimate still want a default.
 pub fn detect_kind(host: &str) -> ForgeKind {
+  known_kind(host).unwrap_or(ForgeKind::GitHub)
+}
+
+/// The forge a host **states**, or `None` when the URL does not say.
+///
+/// The known set is deliberately the public one plus the conventions
+/// each CLI already recognises: `github.com` and the `ghe.com` tenancy
+/// domain, `gitlab.com` and the `gitlab.*` label. A self-hosted
+/// instance on any other domain says nothing about which forge it runs,
+/// and guessing there is what let an arbitrary origin receive an
+/// authenticated call (Codex review #458).
+pub fn known_kind(host: &str) -> Option<ForgeKind> {
   let host = host.to_ascii_lowercase();
   if host == "gitlab.com" || host.starts_with("gitlab.") || host.contains(".gitlab.") {
-    ForgeKind::GitLab
-  } else {
-    ForgeKind::GitHub
+    return Some(ForgeKind::GitLab);
   }
+  if host == "github.com" || host == "ghe.com" || host.ends_with(".ghe.com") {
+    return Some(ForgeKind::GitHub);
+  }
+  None
 }
 
 // ---- the trait -----------------------------------------------------------
@@ -669,7 +687,35 @@ pub fn reconcile_links(repo: &Repository) {
 /// in the readers.
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   let parsed = origin_ref(repo)?;
-  let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
+  // An unrecognised host is not assumed to be anything. Before #419
+  // `github::repo_slug` accepted `github.com` and rejected every other
+  // origin outright, so gwm never made an authenticated call against an
+  // arbitrary host; defaulting the guess to GitHub turned that hard
+  // refusal into `GH_HOST=<whatever the remote says>`, and gh reads a
+  // non-github.com host as Enterprise — so cloning a hostile repo and
+  // running `gwm list --detect-pr` shipped `$GH_ENTERPRISE_TOKEN` to it
+  // (Codex review #458, refused once on an unverified premise before
+  // the diff against `dev` settled it).
+  //
+  // The residual hole, stated rather than justified: a `.gwm.toml`
+  // committed *in* that repo can still name the forge, and none of the
+  // read paths (`list`, `status`, `open`) pass through the bootstrap
+  // trust gate, so the repo authorises itself. Closing that means
+  // making the origin host a trust decision of its own — issue #460.
+  // What this does close is the zero-config path, which needed no file
+  // from the attacker at all.
+  let kind = match config.forge {
+    Some(k) => k,
+    None => known_kind(&parsed.host).ok_or_else(|| {
+      GwmError::Other(format!(
+        "origin host '{}' is not one gwm recognises, so it will not guess a forge and send \
+         an authenticated call there. Name the backend with `forge = \"github\"` or \
+         `forge = \"gitlab\"` in .gwm.toml, or in ~/.config/gwm/config.toml to cover every \
+         repo on that host.",
+        parsed.host
+      ))
+    })?,
+  };
   crate::github::reconcile_link_forge(repo, kind);
   // A bare repo has no workdir, but its own directory is still a valid
   // git context for `gh` / `glab` to resolve remotes from — and losing it
