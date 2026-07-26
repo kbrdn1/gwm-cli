@@ -1084,11 +1084,9 @@ pub fn find_pr_for_branch(slug: &str, branch: &str) -> Result<Option<u64>> {
 /// closed or merged PR for the branch is still detected (its `PrState`
 /// is resolved later via [`fetch_pr`]).
 pub fn find_pr_argv(slug: &str, branch: &str) -> Vec<String> {
-  vec![
-    "pr".into(),
-    "list".into(),
-    "--repo".into(),
-    slug.into(),
+  let mut argv: Vec<String> = vec!["pr".into(), "list".into()];
+  argv.extend(repo_flag(slug));
+  argv.extend([
     "--head".into(),
     branch.into(),
     "--state".into(),
@@ -1101,7 +1099,8 @@ pub fn find_pr_argv(slug: &str, branch: &str) -> Vec<String> {
     // only, so a fork carrying the same name can appear.
     "--limit".into(),
     "20".into(),
-  ]
+  ]);
+  argv
 }
 
 /// Parse the JSON array printed by `gh pr list --json number --limit 1`,
@@ -1204,16 +1203,15 @@ pub fn parse_labels_json(s: &str) -> Result<Vec<RemoteLabel>> {
 /// Extracted so the test suite can pin the contract; callers should
 /// prefer `fetch_remote_labels` which actually shells out.
 pub fn label_list_argv(slug: &str) -> Vec<String> {
-  vec![
-    "label".into(),
-    "list".into(),
-    "--repo".into(),
-    slug.into(),
+  let mut argv: Vec<String> = vec!["label".into(), "list".into()];
+  argv.extend(repo_flag(slug));
+  argv.extend([
     "--json".into(),
     LABEL_JSON_FIELDS.into(),
     "--limit".into(),
     LABEL_LIST_LIMIT.into(),
-  ]
+  ]);
+  argv
 }
 
 /// Argv for `gh label create <name> --color <hex> [--description <desc>] --force --repo <slug>`.
@@ -1224,16 +1222,9 @@ pub fn label_list_argv(slug: &str) -> Vec<String> {
 /// otherwise wipe an existing description that the user didn't intend
 /// to touch.
 pub fn label_create_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
-  let mut argv = vec![
-    "label".into(),
-    "create".into(),
-    spec.name.clone(),
-    "--repo".into(),
-    slug.into(),
-    "--color".into(),
-    spec.color.clone(),
-    "--force".into(),
-  ];
+  let mut argv: Vec<String> = vec!["label".into(), "create".into(), spec.name.clone()];
+  argv.extend(repo_flag(slug));
+  argv.extend(["--color".into(), spec.color.clone(), "--force".into()]);
   if let Some(desc) = spec.description.as_ref().filter(|s| !s.is_empty()) {
     argv.push("--description".into());
     argv.push(desc.clone());
@@ -1245,14 +1236,10 @@ pub fn label_create_argv(slug: &str, spec: &LabelSpec) -> Vec<String> {
 /// flag bypasses the interactive confirm prompt; without it gh blocks
 /// on a TTY read and `gwm labels push --prune` hangs.
 pub fn label_delete_argv(slug: &str, name: &str) -> Vec<String> {
-  vec![
-    "label".into(),
-    "delete".into(),
-    name.into(),
-    "--repo".into(),
-    slug.into(),
-    "--yes".into(),
-  ]
+  let mut argv: Vec<String> = vec!["label".into(), "delete".into(), name.into()];
+  argv.extend(repo_flag(slug));
+  argv.push("--yes".into());
+  argv
 }
 
 /// Run `gh label list --repo <slug> --json …` and parse the result.

@@ -788,31 +788,54 @@ fn an_empty_slug_uses_the_gh_api_placeholders_not_an_empty_path() {
 }
 
 #[test]
-fn no_github_call_smuggles_the_slug_past_the_selector() {
-  // Round 18 added `repo_selector()` returning "" for a guessed origin
-  // and then every method kept reading `self.origin.path` directly, so
-  // the policy was inert — the same shape as the `create_pr` bypass
-  // found in round 7. Asserting on the built argv rather than on the
-  // accessor is what makes that unrepeatable.
+fn no_github_argv_builder_smuggles_the_slug_past_the_selector() {
+  // Round 18 added `repo_selector()` returning "" for a guessed origin,
+  // round 19 routed the methods through it, and round 22 found four
+  // builders still pushing `--repo` unconditionally — so they emitted
+  // `--repo ""`, which is worse than a wrong target: it fails outright,
+  // silently killing PR detection and label sync (Codex review #458).
+  //
+  // Two partial sweeps in a row, so this list is EVERY builder that
+  // takes a slug. A new one belongs here the day it is written.
   let dir = tempfile::tempdir().unwrap();
   let ssh = forge::parse_remote_url("git@ghe-ssh.acme.com:team/proj.git").unwrap();
-  let slug = "team/proj";
-
   let f = forge::for_kind_in(ForgeKind::GitHub, ssh, Some(dir.path().to_path_buf()));
-  assert_eq!(f.repo_selector(), "");
+  let sel = f.repo_selector();
+  assert_eq!(sel, "");
 
-  // Every argv builder the backend routes through, fed the selector the
-  // backend actually exposes.
-  let argvs = vec![
-    gwm::github::issue_view_argv(f.repo_selector(), 1),
-    gwm::github::pr_view_argv(f.repo_selector(), 1),
-    gwm::github::pr_head_argv(f.repo_selector(), 1),
-    gwm::github::milestone_list_argv(f.repo_selector()),
+  let spec = gwm::labels::LabelSpec {
+    name: "bug".into(),
+    color: "ff0000".into(),
+    description: None,
+  };
+  let ms = gwm::milestones::MilestoneSpec {
+    title: "v1".into(),
+    description: None,
+    due_on: None,
+    state: gwm::milestones::MilestoneState::Open,
+  };
+  let builders: Vec<(&str, Vec<String>)> = vec![
+    ("issue_view", gwm::github::issue_view_argv(sel, 1)),
+    ("pr_view", gwm::github::pr_view_argv(sel, 1)),
+    ("pr_head", gwm::github::pr_head_argv(sel, 1)),
+    ("find_pr", gwm::github::find_pr_argv(sel, "feat/x")),
+    ("label_list", gwm::github::label_list_argv(sel)),
+    ("label_create", gwm::github::label_create_argv(sel, &spec)),
+    ("label_delete", gwm::github::label_delete_argv(sel, "bug")),
+    ("milestone_list", gwm::github::milestone_list_argv(sel)),
+    ("milestone_create", gwm::github::milestone_create_argv(sel, &ms)),
+    ("milestone_update", gwm::github::milestone_update_argv(sel, 1, &ms)),
+    ("milestone_delete", gwm::github::milestone_delete_argv(sel, 1)),
   ];
-  for argv in argvs {
+
+  for (name, argv) in builders {
     assert!(
-      !argv.iter().any(|a| a.contains(slug)),
-      "the slug reached the argv despite an empty selector: {argv:?}"
+      !argv.iter().any(|a| a == "--repo"),
+      "{name} still passes --repo with an empty selector: {argv:?}"
+    );
+    assert!(
+      !argv.iter().any(|a| a.contains("repos//") || a.contains("team/proj")),
+      "{name} built a broken or slug-bearing path: {argv:?}"
     );
   }
 }
