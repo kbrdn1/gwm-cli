@@ -295,6 +295,43 @@ fn split_host_port(s: &str) -> (Option<String>, Option<String>) {
   }
 }
 
+/// The project selector for `glab`, decided once at construction.
+///
+/// Empty for a guessed origin with a repo to stand in: hand glab nothing
+/// and let it read that repo's own remote.
+///
+/// Otherwise the origin path, minus any **instance subfolder**. glab
+/// supports GitLab hosted under a URL prefix (`https://host/gitlab/`)
+/// and reads it from `$GITLAB_SUBFOLDER` as well as its config file, so
+/// its API base already carries the prefix — leaving it on the slug
+/// targets `gitlab/group/proj`, a project that does not exist (Codex
+/// review #458). Only the API selector is stripped: the web URLs keep
+/// the full path, because that really is where the pages live.
+///
+/// The config-file half of the setting stays out of reach; gwm does not
+/// parse glab's config. An instance configured that way, accessed over
+/// https, still needs the slug it would have to guess.
+///
+/// Read here rather than at call time so the TUI's fetch worker never
+/// re-reads the environment off-thread (issue #217).
+fn resolve_selector(origin: &forge::RemoteRef, has_workdir: bool) -> String {
+  if origin.trust != forge::OriginTrust::FromUrl && has_workdir {
+    return String::new();
+  }
+  let Some(sub) = std::env::var("GITLAB_SUBFOLDER")
+    .ok()
+    .map(|s| s.trim().trim_matches('/').to_string())
+    .filter(|s| !s.is_empty())
+  else {
+    return origin.path.clone();
+  };
+  origin
+    .path
+    .strip_prefix(&format!("{sub}/"))
+    .unwrap_or(&origin.path)
+    .to_string()
+}
+
 /// Percent-encode one URL path segment. A GitLab project path contains
 /// slashes (`group/sub/proj`) and must arrive as a single encoded
 /// segment for `projects/:id` to resolve it.
@@ -1033,6 +1070,10 @@ pub struct GitLabForge {
   /// Why this forge must refuse to run, decided once at construction.
   /// `None` is the normal case.
   refuse: Option<String>,
+  /// The project selector handed to `glab`, resolved once at
+  /// construction: the origin path minus any instance subfolder, or
+  /// empty when the CLI should resolve the project itself.
+  selector: String,
 }
 
 impl GitLabForge {
@@ -1044,6 +1085,7 @@ impl GitLabForge {
       env: glab_env(&origin),
       env_remove: glab_env_remove(&origin),
       refuse: ci_autologin_conflict(&origin),
+      selector: resolve_selector(&origin, workdir.is_some()),
       origin,
       program: glab_program(),
       workdir,
@@ -1130,12 +1172,7 @@ impl Forge for GitLabForge {
   }
 
   fn repo_selector(&self) -> &str {
-    // Guessed origin + a repo to stand in: hand glab nothing and let it
-    // read that repo's own remote. Otherwise the slug is the only signal.
-    if self.origin.trust != forge::OriginTrust::FromUrl && self.workdir.is_some() {
-      return "";
-    }
-    &self.origin.path
+    &self.selector
   }
 
   fn issue_url(&self, number: u64) -> String {
@@ -1224,6 +1261,10 @@ impl Forge for GitLabForge {
 
   fn fetch_remote_milestones(&self) -> Result<Vec<RemoteMilestone>> {
     parse_milestones_json(&self.run_argv(milestone_list_argv(self.repo_selector()))?)
+  }
+
+  fn validate_milestone(&self, spec: &MilestoneSpec) -> Result<()> {
+    check_due_on_is_date_only(spec)
   }
 
   fn create_milestone(&self, spec: &MilestoneSpec) -> Result<()> {

@@ -1151,3 +1151,47 @@ fn ci_guard_still_abstains_when_no_ssh_host_is_published() {
 
   assert!(out.is_none(), "{out:?}");
 }
+
+#[test]
+fn the_instance_subfolder_is_stripped_from_the_api_selector() {
+  // glab supports an instance subfolder (`https://host/gitlab/`) and
+  // reads it from `GITLAB_SUBFOLDER` as well as its config file. Its API
+  // base already carries that prefix, so a slug parsed straight out of
+  // the origin — `gitlab/group/proj` — targets a project that does not
+  // exist (Codex review #458).
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::set_var("GITLAB_SUBFOLDER", "gitlab");
+  }
+  let dir = tempfile::tempdir().unwrap();
+  let f = gwm::forge::for_kind_in(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url("https://host.example/gitlab/group/proj.git").unwrap(),
+    Some(dir.path().to_path_buf()),
+  );
+  let selector = f.repo_selector().to_string();
+  let issue_url = f.issue_url(5);
+  unsafe {
+    std::env::remove_var("GITLAB_SUBFOLDER");
+  }
+
+  assert_eq!(selector, "group/proj", "the API base already has the subfolder");
+  // The *web* URL keeps it: that path really is where the page lives.
+  assert_eq!(issue_url, "https://host.example/gitlab/group/proj/-/issues/5");
+}
+
+#[test]
+fn a_namespace_that_merely_looks_like_the_subfolder_is_kept() {
+  // Without the variable set there is nothing to strip, and a group
+  // genuinely named `gitlab` must survive.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::remove_var("GITLAB_SUBFOLDER");
+  }
+  let f = gwm::forge::for_kind(
+    gwm::forge::ForgeKind::GitLab,
+    gwm::forge::parse_remote_url("https://gitlab.com/gitlab/group/proj.git").unwrap(),
+  );
+
+  assert_eq!(f.repo_selector(), "gitlab/group/proj");
+}
