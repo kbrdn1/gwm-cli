@@ -4297,10 +4297,8 @@ fn cmd_trust_add() -> Result<()> {
   let cwd = std::env::current_dir()?;
   let repo = Repository::discover(&cwd).map_err(|_| GwmError::NotInGitRepo)?;
   let workdir = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
-  // Same key `forge::resolve` checks: the origin's web origin when there
-  // is one, the canonical workdir otherwise.
-  let origin = forge::origin_ref(&repo).ok().map(|r| r.web_origin);
-  let key = trust::resolve_origin_key(origin.as_deref(), &workdir);
+  // Same key every other gate uses — see `trust::origin_key_for_repo`.
+  let key = trust::origin_key_for_repo(&repo, &workdir);
   match trust::record_config(&workdir, &key, &trust::current_actor())? {
     Some(sha) => {
       let short: String = sha.chars().take(12).collect();
@@ -4350,8 +4348,10 @@ fn cmd_trust_show() -> Result<()> {
 /// the drift-detection half of the feature even when the threat model
 /// is weaker.
 fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -> Result<()> {
-  let origin = origin_url_for_repo(repo);
-  let origin_key = trust::resolve_origin_key(origin.as_deref(), workdir);
+  let origin_key = match repo {
+    Some(r) => trust::origin_key_for_repo(r, workdir),
+    None => trust::resolve_origin_key(None, workdir),
+  };
 
   match trust::evaluate(workdir, &origin_key, mode)? {
     TrustOutcome::Proceed => Ok(()),
@@ -4397,12 +4397,6 @@ fn trust_or_prompt(workdir: &Path, repo: Option<&Repository>, mode: TrustMode) -
 /// is one. Returns `None` for repos with no `origin` remote — caller
 /// (or `trust::resolve_origin_key`) falls back to the canonical
 /// workdir path in that case.
-fn origin_url_for_repo(repo: Option<&Repository>) -> Option<String> {
-  let r = repo?;
-  let remote = r.find_remote("origin").ok()?;
-  remote.url().ok().map(|s| s.to_string())
-}
-
 /// Interactive y/N/show loop. Prints a one-shot summary of the
 /// bootstrap surface (copy targets, guards, command lines, no-symlink
 /// declarations) so the user has the relevant signal before answering.

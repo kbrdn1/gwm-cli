@@ -6624,3 +6624,82 @@ fn a_global_config_authorises_the_hosts_it_names_with_their_kind() {
     "ghe.acme.internal/team/proj/issues/7",
   );
 }
+
+#[test]
+fn approving_one_repo_does_not_approve_its_neighbour_on_the_same_host() {
+  // The ledger is keyed on `(origin, sha256(.gwm.toml))`, and the `origin`
+  // half has to identify the *repo*. Building it from `RemoteRef::web_origin`
+  // degraded it to the *host*, so the pair collapsed to
+  // `(https://code.acme.internal, <hash>)` — shared by every repo on that
+  // host whose config hashes the same.
+  //
+  // That is not a corner case: `.gwm.toml` is normally a template copied
+  // across a team's repos, so byte-identical files are the common shape. A
+  // hostile repo could ship a sibling's config verbatim and inherit its
+  // approval, which is exactly the capability the #419 gate exists to
+  // withhold.
+  let ledger = tempfile::TempDir::new().unwrap();
+  let ledger = ledger.path().join("trust.toml");
+  let config = "forge = \"gitlab\"\n";
+
+  let make = |slug: &str| {
+    let (dir, repo) = init_repo();
+    repo
+      .remote("origin", &format!("https://code.acme.internal/{slug}.git"))
+      .unwrap();
+    fs::write(dir.path().join(".gwm.toml"), config).unwrap();
+    dir
+  };
+  let mine = make("team/mine");
+  let theirs = make("team/theirs");
+
+  let run = |dir: &tempfile::TempDir, args: &[&str]| {
+    let mut c = Command::cargo_bin("gwm").unwrap();
+    c.current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("GWM_NO_GLOBAL_CONFIG", "1")
+      .args(args);
+    c.assert()
+  };
+
+  run(&mine, &["link", "issue", "7"]).success();
+  run(&theirs, &["link", "issue", "7"]).success();
+  run(&mine, &["trust", "add"]).success();
+
+  run(&mine, &["open", "issue", "--print-url"]).success();
+  run(&theirs, &["open", "issue", "--print-url"])
+    .failure()
+    .stderr(predicate::str::contains("trust ledger"));
+}
+
+#[test]
+fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
+  // `gwm trust add` printed `✓ trusted …` and `gwm create` in the same repo
+  // still refused, because the two wrote and read different keys. One helper
+  // now builds both, so approving a repo means the same thing everywhere.
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://code.acme.internal/team/proj.git")
+    .unwrap();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    "forge = \"gitlab\"\n\n[[bootstrap.command]]\nname = \"noop\"\nrun = \"true\"\n",
+  )
+  .unwrap();
+  let ledger = dir.path().join("trust.toml");
+
+  let run = |args: &[&str]| {
+    let mut c = Command::cargo_bin("gwm").unwrap();
+    c.current_dir(dir.path())
+      .env("GWM_TRUST_LEDGER", &ledger)
+      .env("GWM_NO_GLOBAL_CONFIG", "1")
+      .args(args);
+    c.assert()
+  };
+
+  run(&["trust", "add"]).success();
+  // Both gates, one approval: the forge host gate and the bootstrap gate.
+  run(&["link", "issue", "7"]).success();
+  run(&["open", "issue", "--print-url"]).success();
+  run(&["bootstrap"]).success();
+}
