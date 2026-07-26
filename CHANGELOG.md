@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+
+- `changelogs/1.5.0.md` was corrected after the `v1.5.0` tag: its caveat said
+  the GitLab backend had been verified from `glab`'s documentation, when it had
+  in fact been driven end to end by the real `glab` 1.109.0 binary against a
+  local fake GitLab server. The published release body was re-sourced from the
+  corrected file with `gh release edit --notes-file`, so this diff on an
+  archived version file is deliberate and already live on the release page. The
+  `v1.5.0` tag itself is untouched.
+
 ## Past releases
 
 In reverse chronological order:
