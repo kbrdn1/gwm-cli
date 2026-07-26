@@ -791,7 +791,14 @@ pub fn parse_mr_list_number(s: &str) -> Result<Option<u64>> {
   // 2. ids absent: older instances omit them, and dropping those rows
   //    would break detection outright — so they are second, not first.
   // 3. a proven fork: better than reporting nothing, worse than anything
-  //    that might be ours. Same ranking as the GitHub side.
+  //    that might be ours. Same ranking as the GitHub side, and for the
+  //    same reason — `source_project_id != project_id` is exactly the
+  //    shape of the standard contributor workflow (fork the project,
+  //    push the branch, open the MR upstream), so treating it as a
+  //    disqualification stops detecting the MR the user actually
+  //    opened. It is positive evidence of a fork, not of someone
+  //    else's fork; separating those needs the source project's owner
+  //    matched against the repo's remotes (issue #461).
   let ours = |m: &MrRef| matches!((m.project_id, m.source_project_id), (Some(t), Some(s)) if t == s);
   let unidentified = |m: &MrRef| m.project_id.is_none() || m.source_project_id.is_none();
   Ok(
