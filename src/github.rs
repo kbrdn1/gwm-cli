@@ -333,6 +333,15 @@ pub fn read_link_with_pr_detection(repo: &Repository, branch: &str, forge: &dyn 
 /// nothing and is never invalidated — there is no second instance for
 /// its numbers to be confused with.
 ///
+/// Covers a change of *instance*, not a change of *backend*: flipping
+/// `forge = "gitlab"` in `.gwm.toml` over an unchanged remote leaves
+/// this identity untouched, so existing numbers are reinterpreted by
+/// the other backend (Codex review #458). Catching it means threading
+/// the resolved forge through `link_issue` / `link_pr` /
+/// `persist_detected_pr` and into `read_link`, which has no `Config` —
+/// deferred as churn out of proportion to a case that needs the backend
+/// switched on a remote that did not move.
+///
 /// The web origin rather than the bare host, because it carries the
 /// scheme and the port: two self-hosted instances on one hostname behind
 /// different ports are different instances, and `host/path` collapsed

@@ -322,9 +322,20 @@ fn split_host_port(s: &str) -> (Option<String>, Option<String>) {
 /// review #458). Only the API selector is stripped: the web URLs keep
 /// the full path, because that really is where the pages live.
 ///
+/// Two limits worth naming rather than leaving silent.
+///
 /// The config-file half of the setting stays out of reach; gwm does not
 /// parse glab's config. An instance configured that way, accessed over
 /// https, still needs the slug it would have to guess.
+///
+/// And glab scopes `subfolder` **per host** in its config, while the
+/// environment variable is global. gwm resolves a forge per repo, so a
+/// workspace spanning two instances applies one exported value to both
+/// (Codex review #458). The strip is still conditional on the origin
+/// path actually carrying the prefix, so the damage needs a second
+/// instance whose top-level group is named like the first's subfolder —
+/// but tying the value to a host needs a trusted host source, which is
+/// issue #460 rather than another heuristic here.
 ///
 /// Read here rather than at call time so the TUI's fetch worker never
 /// re-reads the environment off-thread (issue #217).
