@@ -1033,12 +1033,7 @@ impl App {
   pub fn check_trust_for_bootstrap(&self) -> Result<Option<String>> {
     use crate::trust::{self, TrustOutcome};
 
-    let origin_url = self
-      .repo
-      .find_remote("origin")
-      .ok()
-      .and_then(|r| r.url().ok().map(String::from));
-    let origin = trust::resolve_origin_key(origin_url.as_deref(), &self.workdir);
+    let origin = trust::origin_key_for_repo(&self.repo, &self.workdir);
 
     match trust::evaluate(&self.workdir, &origin, self.trust_mode)? {
       TrustOutcome::Proceed => Ok(None),

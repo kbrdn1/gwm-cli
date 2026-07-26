@@ -78,14 +78,40 @@ pub fn env_truthy(key: &str) -> bool {
   }
 }
 
+/// The trust-ledger key for `repo` — [`resolve_origin_key`] fed from the
+/// `origin` remote.
+///
+/// One helper rather than the extraction repeated at each call site.
+/// That repetition is what broke: the doc below used to argue the module
+/// should stay git2-free because "every caller already holds a
+/// Repository and extracts the URL on their side in three lines", and
+/// three of the four callers wrote the same three lines while the fourth
+/// reached for `RemoteRef::web_origin` instead (issue #463).
+///
+/// The difference is not cosmetic. `web_origin` is scheme + host, so the
+/// key stopped identifying a *repo* and started identifying a *host* —
+/// collapsing `(origin, sha256)` into a pair shared by every repo on
+/// that host with an identically-hashing `.gwm.toml`. Since that file is
+/// normally a template copied across a team's repos, identical hashes
+/// are the ordinary case, and a hostile repo could inherit a sibling's
+/// approval by shipping its config verbatim. The two gates also stopped
+/// seeing each other's entries, so `gwm trust add` reported success and
+/// `gwm create` in the same repo still refused.
+pub fn origin_key_for_repo(repo: &git2::Repository, workdir: &Path) -> String {
+  let url = repo
+    .find_remote("origin")
+    .ok()
+    .and_then(|r| r.url().ok().map(String::from));
+  resolve_origin_key(url.as_deref(), workdir)
+}
+
 /// Resolve the trust-ledger key for the current repo: prefer the
 /// `origin` remote URL (the hostile-clone threat axis), fall back to
 /// the canonicalised workdir path (purely-local repos with no remote
 /// still benefit from the drift-detection half of the feature).
 ///
-/// Takes `origin_url: Option<&str>` rather than a `git2::Repository`
-/// so this module stays git2-free — every caller already holds a
-/// Repository and extracts the URL on their side in three lines.
+/// Prefer [`origin_key_for_repo`] when you hold a `Repository`. This
+/// lower-level form stays for callers that genuinely have only a URL.
 pub fn resolve_origin_key(origin_url: Option<&str>, workdir: &Path) -> String {
   if let Some(url) = origin_url {
     if !url.is_empty() {
