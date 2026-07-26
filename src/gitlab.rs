@@ -54,9 +54,12 @@ pub fn glab_program() -> OsString {
 /// Inherited variables that would redirect `glab` at another project.
 ///
 /// `$GITLAB_REPO` is the flag's environment binding, `$GITLAB_GROUP` is
-/// the default group for issue / MR listings, and `$REMOTE_ALIAS` /
-/// `$GIT_REMOTE_URL_VAR` name which git remote glab reads the project
-/// from — all four override the working directory gwm deliberately sets.
+/// the default group for issue / MR listings, and five further names —
+/// `$REMOTE_ALIAS`, `$GIT_REMOTE_ALIAS`, `$REMOTE_NICKNAME`,
+/// `$GIT_REMOTE_NICKNAME`, `$GIT_REMOTE_URL_VAR` — all bind the single
+/// `remote_alias` setting that picks which git remote glab reads the
+/// project from. Every one overrides the working directory gwm
+/// deliberately sets.
 /// Cleared unconditionally: gwm always knows the project, either as a
 /// slug or as "the repo I am spawning you in".
 ///
@@ -83,7 +86,7 @@ pub fn glab_program() -> OsString {
 /// Audited against glab's documented environment, under the three-tier
 /// rule stated on [`crate::github::gh_env_remove`]. Tier 1 (always
 /// cleared): `$GITLAB_REPO`, `$GITLAB_GROUP`, `$REMOTE_ALIAS`,
-/// `$GIT_REMOTE_URL_VAR`. Tier 2 (cleared only behind a pin):
+/// the five `remote_alias` spellings. Tier 2 (cleared only behind a pin):
 /// `$GITLAB_URI` alone. Tier 3 (never touched): `$GITLAB_TOKEN`,
 /// `$GITLAB_CLIENT_ID`, `$GITLAB_API_HOST`, `$CI_JOB_TOKEN`,
 /// `$GLAB_ENABLE_CI_AUTOLOGIN`, `$GLAB_CONFIG_DIR` — clearing the last
@@ -107,7 +110,18 @@ pub fn glab_program() -> OsString {
 /// `$GITLAB_RELEASE_ASSETS_USE_PACKAGE_REGISTRY`) is presentation,
 /// diagnostics or telemetry and cannot retarget a call.
 pub fn glab_env_remove(origin: &forge::RemoteRef) -> Vec<&'static str> {
-  let mut vars = vec!["GITLAB_REPO", "GITLAB_GROUP", "REMOTE_ALIAS", "GIT_REMOTE_URL_VAR"];
+  let mut vars = vec![
+    "GITLAB_REPO",
+    "GITLAB_GROUP",
+    // Five spellings of one setting (`remote_alias`), per glab's config
+    // schema. The README documents a subset, which is how the first
+    // audit came away with two of them (Codex review #458).
+    "REMOTE_ALIAS",
+    "GIT_REMOTE_ALIAS",
+    "REMOTE_NICKNAME",
+    "GIT_REMOTE_NICKNAME",
+    "GIT_REMOTE_URL_VAR",
+  ];
   if !glab_env(origin).is_empty() {
     vars.push("GITLAB_URI");
   }

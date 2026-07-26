@@ -874,3 +874,39 @@ fn a_milestone_the_forge_cannot_accept_is_rejected_before_any_mutation() {
   );
   assert!(gh.validate_milestone(&bad).is_ok(), "GitHub accepts a timestamp");
 }
+
+#[test]
+fn every_remote_alias_spelling_is_cleared() {
+  // glab's config schema binds one setting, `remote_alias`, to five
+  // environment names. The README documents a subset, which is how the
+  // first audit came away with two of them and left three inherited
+  // variables able to redirect the call — `push --prune` included
+  // (Codex review #458).
+  let gl = forge::parse_remote_url("https://gitlab.com/g/p.git").unwrap();
+  let removed = gwm::gitlab::glab_env_remove(&gl);
+
+  for v in [
+    "REMOTE_ALIAS",
+    "GIT_REMOTE_ALIAS",
+    "REMOTE_NICKNAME",
+    "GIT_REMOTE_NICKNAME",
+    "GIT_REMOTE_URL_VAR",
+  ] {
+    assert!(removed.contains(&v), "{v} still reaches the child: {removed:?}");
+  }
+}
+
+#[test]
+fn a_bare_repo_still_gives_the_cli_a_git_context() {
+  // `workdir()` is `None` for a bare repo, and passing that through left
+  // `gh` / `glab` with no directory to resolve remotes from — so an
+  // unpinned origin fell back to the CLI's default tenant. Bare plus
+  // worktrees is a normal gwm layout (Codex review #458).
+  let dir = tempfile::tempdir().unwrap();
+  let repo = git2::Repository::init_bare(dir.path()).unwrap();
+  repo.remote("origin", "git@ghe-ssh.acme.com:team/proj.git").unwrap();
+
+  let f = forge::resolve(&repo, &Config::default()).unwrap();
+
+  assert!(f.workdir().is_some(), "a bare repo is still a git context");
+}

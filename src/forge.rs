@@ -647,7 +647,15 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 pub fn resolve(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
   let parsed = origin_ref(repo)?;
   let kind = config.forge.unwrap_or_else(|| detect_kind(&parsed.host));
-  Ok(for_kind_in(kind, parsed, repo.workdir().map(|p| p.to_path_buf())))
+  // A bare repo has no workdir, but its own directory is still a valid
+  // git context for `gh` / `glab` to resolve remotes from — and losing it
+  // means an unpinned origin falls back to the CLI's default tenant
+  // (Codex review #458). Bare + worktrees is a normal gwm layout.
+  let cwd = repo
+    .workdir()
+    .map(|p| p.to_path_buf())
+    .or_else(|| Some(repo.path().to_path_buf()));
+  Ok(for_kind_in(kind, parsed, cwd))
 }
 
 // ---- shared CLI invocation ----------------------------------------------
