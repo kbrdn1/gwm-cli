@@ -5159,16 +5159,28 @@ impl App {
       self.status = "no forge remote — cannot build URL".into();
       return None;
     };
+    // Whether the URL was built locally rather than read off the server.
+    // On a guessed SSH origin the local build uses the SSH hostname, and
+    // the cache is empty until a fetch lands — which on an unreachable
+    // instance is never (Codex review #458). Opening a best guess still
+    // beats a dead menu entry; saying so beats a silent wrong tab.
+    let mut inferred = false;
     let url = match target {
       LinkTarget::Issue => match self.github.link.issue {
-        Some(n) => self.cached_issue_url(n).unwrap_or_else(|| forge.issue_url(n)),
+        Some(n) => self.cached_issue_url(n).unwrap_or_else(|| {
+          inferred = true;
+          forge.issue_url(n)
+        }),
         None => {
           self.status = format!("no issue linked — press {} to link one", self.link_prompt_chord());
           return None;
         }
       },
       LinkTarget::Pr => match self.github.link.pr {
-        Some(n) => self.cached_pr_url(n).unwrap_or_else(|| forge.pr_url(n)),
+        Some(n) => self.cached_pr_url(n).unwrap_or_else(|| {
+          inferred = true;
+          forge.pr_url(n)
+        }),
         None => {
           self.status = format!(
             "no {} linked — press {} to link one",
@@ -5179,6 +5191,9 @@ impl App {
         }
       },
     };
+    if inferred && !forge.origin_is_authoritative() {
+      self.status = format!("opening a guessed URL — the SSH origin names no web host: {url}");
+    }
     Some(url)
   }
 

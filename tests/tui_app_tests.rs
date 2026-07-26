@@ -10394,3 +10394,32 @@ mod agent_overlay_input {
     assert!(app.status.contains("no agent session"), "got {}", app.status);
   }
 }
+
+#[test]
+fn open_menu_says_so_when_the_url_is_a_guess() {
+  // A guessed SSH origin has no web host in it, so the locally built URL
+  // may point at the SSH endpoint. It is still opened — refusing would
+  // leave a permanently dead menu entry on an unreachable instance — but
+  // the status bar stops it being a silent wrong tab (Codex review #458).
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "git@git.acme.internal:team/proj.git").unwrap();
+  app.enter_open_menu();
+
+  let url = app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert!(url.contains("/issues/42"), "{url}");
+  assert!(app.status.contains("guessed"), "status was: {}", app.status);
+}
+
+#[test]
+fn open_menu_stays_quiet_on_an_authoritative_origin() {
+  // The negative control: an https origin names its web host, so the
+  // built URL is not a guess and must not be flagged as one.
+  let (_dir, repo, mut app) = make_app_on_branch("feat/#42-tui-search");
+  repo.remote("origin", "https://github.com/kbrdn1/gwm-cli.git").unwrap();
+  app.enter_open_menu();
+
+  app.open_menu_pick(LinkTarget::Issue).unwrap();
+
+  assert!(!app.status.contains("guessed"), "status was: {}", app.status);
+}
