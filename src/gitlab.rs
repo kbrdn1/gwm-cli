@@ -167,53 +167,106 @@ pub fn ci_autologin_conflict(origin: &forge::RemoteRef) -> Option<String> {
     return None;
   }
 
-  // `CI_SERVER_FQDN` is documented as `gitlab.example.com:8080` — host
-  // AND port — while `origin.host` never carries one. Comparing them raw
-  // refused every legitimate pipeline on a non-standard port, a worse
-  // failure than the divergence being guarded (Codex review #458).
-  // GitLab publishes the two halves separately, so prefer those and fall
-  // back to splitting the FQDN.
-  let fqdn = std::env::var("CI_SERVER_FQDN").ok();
-  let (fqdn_host, fqdn_port) = match &fqdn {
+  // Only an authoritative origin can prove a divergence. GitLab
+  // publishes `CI_SERVER_SHELL_SSH_HOST` next to `CI_SERVER_HOST`
+  // precisely because the SSH host legitimately differs from the web
+  // host, so on a guessed origin — where all gwm has is the SSH
+  // hostname — comparing the two manufactures a conflict and blocks
+  // every call on a valid install (Codex review #458).
+  if origin.trust != forge::OriginTrust::FromUrl {
+    return None;
+  }
+
+  // `CI_SERVER_FQDN` is `gitlab.example.com:8080` — host AND port —
+  // while `origin.host` never carries one, so comparing them raw refused
+  // legitimate pipelines. GitLab publishes the pieces separately;
+  // prefer those, fall back to splitting the FQDN or the URL.
+  let (url_host, url_port, url_scheme) = match std::env::var("CI_SERVER_URL").ok() {
+    Some(u) => split_origin_url(u.trim()),
+    None => (None, None, None),
+  };
+  let (fqdn_host, fqdn_port) = match std::env::var("CI_SERVER_FQDN").ok() {
     Some(f) => split_host_port(f.trim()),
     None => (None, None),
   };
-  let ci_host = std::env::var("CI_SERVER_HOST")
-    .ok()
-    .map(|h| h.trim().to_string())
-    .filter(|h| !h.is_empty())
+  let ci_host = non_empty(std::env::var("CI_SERVER_HOST").ok())
+    .or(url_host)
     .or(fqdn_host)?;
-  let ci_port = std::env::var("CI_SERVER_PORT")
-    .ok()
-    .map(|p| p.trim().to_string())
-    .filter(|p| !p.is_empty())
+  let ci_scheme = non_empty(std::env::var("CI_SERVER_PROTOCOL").ok()).or(url_scheme);
+  let ci_port = non_empty(std::env::var("CI_SERVER_PORT").ok())
+    .or(url_port)
     .or(fqdn_port);
 
-  let origin_port = origin
-    .authority()
-    .rsplit_once(':')
-    .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
-    .map(|(_, p)| p.to_string());
+  // Resolve the implicit port from the scheme on both sides: an https
+  // origin on 443 and a runner on `:8443` are two instances, and
+  // comparing only the *explicit* ports called them equal.
+  let ci = (
+    ci_host.to_ascii_lowercase(),
+    effective_port(ci_port.as_deref(), ci_scheme.as_deref()),
+  );
+  let (origin_scheme, origin_port) = origin_scheme_and_port(origin);
+  let ours = (
+    origin.host.to_ascii_lowercase(),
+    effective_port(origin_port.as_deref(), origin_scheme.as_deref()),
+  );
 
-  // Ports are compared only when both sides name one: an absent port
-  // means "the default", which we cannot resolve without knowing the
-  // scheme both ends used.
-  let host_differs = !ci_host.eq_ignore_ascii_case(&origin.host);
-  let port_differs = matches!((&ci_port, &origin_port), (Some(a), Some(b)) if a != b);
+  // Ports decide only when both sides resolve one. An unknown port is
+  // not evidence of anything, and treating it as one turned the guard
+  // into a blanket refusal the moment the runner published no scheme.
+  let host_differs = ci.0 != ours.0;
+  let port_differs = matches!((&ci.1, &ours.1), (Some(a), Some(b)) if a != b);
   if !host_differs && !port_differs {
     return None;
   }
 
-  let ci = match &ci_port {
-    Some(p) => format!("{ci_host}:{p}"),
-    None => ci_host,
-  };
   Some(format!(
-    "refusing to run glab: CI auto-login would authenticate against '{ci}' but this \
+    "refusing to run glab: CI auto-login would authenticate against '{}' but this \
      repo's origin is '{}'. glab ignores GITLAB_HOST in that mode, so the call would \
      target the wrong instance. Unset GLAB_ENABLE_CI_AUTOLOGIN to proceed.",
-    origin.authority()
+    render(&ci),
+    render(&ours),
   ))
+}
+
+fn non_empty(v: Option<String>) -> Option<String> {
+  v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn render((host, port): &(String, Option<String>)) -> String {
+  match port {
+    Some(p) => format!("{host}:{p}"),
+    None => host.clone(),
+  }
+}
+
+/// The port actually addressed: the explicit one, else the scheme's
+/// default. `None` only when neither is known.
+fn effective_port(port: Option<&str>, scheme: Option<&str>) -> Option<String> {
+  if let Some(p) = port {
+    return Some(p.to_string());
+  }
+  match scheme.map(|s| s.to_ascii_lowercase()).as_deref() {
+    Some("https") => Some("443".into()),
+    Some("http") => Some("80".into()),
+    _ => None,
+  }
+}
+
+fn origin_scheme_and_port(origin: &forge::RemoteRef) -> (Option<String>, Option<String>) {
+  let (_, port, scheme) = split_origin_url(&origin.web_origin);
+  (scheme, port)
+}
+
+/// Split `scheme://host[:port]` into its three parts.
+fn split_origin_url(url: &str) -> (Option<String>, Option<String>, Option<String>) {
+  let (scheme, rest) = match url.split_once("://") {
+    Some((s, r)) => (Some(s.to_string()), r),
+    None => (None, url),
+  };
+  let rest = rest.trim_end_matches('/');
+  let rest = rest.split('/').next().unwrap_or(rest);
+  let (host, port) = split_host_port(rest);
+  (host, port, scheme)
 }
 
 /// Split `host[:port]`, keeping the port only when it is all digits.

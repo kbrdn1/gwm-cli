@@ -1042,3 +1042,60 @@ fn ci_autologin_compares_host_and_port_not_the_raw_fqdn() {
   assert!(other.is_some(), "a different host must refuse");
   assert!(port.is_some(), "a different port is a different instance");
 }
+
+#[test]
+fn ci_guard_stays_out_of_it_when_the_origin_is_only_an_ssh_endpoint() {
+  // GitLab publishes `CI_SERVER_SHELL_SSH_HOST` alongside
+  // `CI_SERVER_HOST` precisely because the SSH host legitimately differs
+  // from the web host. On a guessed origin all gwm has is the SSH
+  // hostname, so comparing it to the runner's web host manufactures a
+  // divergence and blocks every glab call on a valid install (Codex
+  // review #458).
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("CI_SERVER_HOST", "gitlab.acme");
+    std::env::remove_var("CI_SERVER_PORT");
+    std::env::remove_var("CI_SERVER_FQDN");
+    std::env::remove_var("CI_SERVER_URL");
+    std::env::remove_var("CI_SERVER_PROTOCOL");
+  }
+  let guessed = gwm::gitlab::ci_autologin_conflict(&origin("git@ssh.gitlab.acme:team/proj.git"));
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("CI_SERVER_HOST");
+  }
+
+  assert!(
+    guessed.is_none(),
+    "an SSH-only origin cannot prove a divergence: {guessed:?}"
+  );
+}
+
+#[test]
+fn ci_guard_resolves_the_implicit_port_from_the_scheme() {
+  // An https origin on the default 443 and a runner on `:8443` are two
+  // instances, but comparing only *explicit* ports called them equal —
+  // so `--prune` could still hit the wrong one.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("CI_SERVER_URL", "https://gitlab.acme.internal:8443");
+    std::env::remove_var("CI_SERVER_HOST");
+    std::env::remove_var("CI_SERVER_PORT");
+    std::env::remove_var("CI_SERVER_FQDN");
+    std::env::remove_var("CI_SERVER_PROTOCOL");
+  }
+  let implicit = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal/team/proj.git"));
+  let matching = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal:8443/team/proj.git"));
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("CI_SERVER_URL");
+  }
+
+  assert!(implicit.is_some(), "443 and 8443 are different instances");
+  assert!(
+    matching.is_none(),
+    "the same instance must not be refused: {matching:?}"
+  );
+}
