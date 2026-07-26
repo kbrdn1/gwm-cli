@@ -13,6 +13,42 @@
 //! forge-neutral, so both backends share them as-is. Keeping persistence
 //! common roughly halves the surface that needed abstracting.
 //!
+//! ## The security invariant
+//!
+//! > **gwm never runs `gh` / `glab` against a host that neither the
+//! > vendor, the user's own config, nor an approved repo vouched for.**
+//!
+//! Written down because the review of #458 kept finding another way
+//! around it, one finding at a time, and a finding-by-finding defence
+//! cannot show that the last one is closed. This one is finite, so it
+//! can be enumerated instead. A forge only reaches a CLI by being
+//! constructed, and **in this tree** there are exactly two construction
+//! sites, both in this module:
+//!
+//! | Site | Gated by |
+//! |---|---|
+//! | [`resolve`] | `authorised_kind` — the three tiers |
+//! | [`resolve_or_default`], no-`origin` fallback | nothing, and it needs nothing (below) |
+//!
+//! Everything reaching a forge CLI goes through one of those two, and
+//! from there through the single [`run_cli_with`] spawn. `for_kind` /
+//! `for_kind_in` are `pub` for `tests/forge_tests.rs`, so this is an
+//! in-tree enumeration, not a type-level guarantee; the crate is
+//! `#![doc(hidden)]` and exists as a test seam.
+//!
+//! The fallback is ungated because it directs nothing: no `origin` means
+//! no slug, no host pin and no env override, so the CLI resolves the
+//! project from its own configuration exactly as it would if the user
+//! had typed the command themselves. Verified rather than reasoned:
+//! `glab` refuses a repo whose remotes point nowhere it knows — *"None
+//! of the git remotes configured for this repository point to a known
+//! GitLab host"* — so an arbitrary `upstream` cannot become a target
+//! that way.
+//!
+//! One escape hatch is deliberate: `GWM_ALLOW_BOOTSTRAP=1` satisfies
+//! tier 3 as it does every other trust check, since it is the same
+//! decision about the same file.
+//!
 //! ## Terminology
 //!
 //! GitHub says "pull request", GitLab says "merge request". The parsed
