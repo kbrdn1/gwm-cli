@@ -841,6 +841,99 @@ fn list_detect_pr_flag_adds_pr_column_with_detected_number() {
     .stdout(predicate::str::contains("#128"));
 }
 
+// --- GitLab dispatch, end to end (issue #419) -----------------------------
+
+#[cfg(unix)]
+#[test]
+fn list_detect_pr_dispatches_to_glab_on_a_gitlab_origin() {
+  // The forge split's most basic observable claim, and until now only
+  // covered by argv unit tests: a GitLab origin must reach `glab`, with
+  // the MR vocabulary and the `--repo` selector, not `gh`.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let log = fake_bin.path().join("calls.log");
+  let fake_glab = write_recording_glab(fake_bin.path(), r#"[{"iid":128,"project_id":7,"source_project_id":7}]"#);
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GLAB", &fake_glab)
+    .env("GWM_FAKE_LOG", &log)
+    .env("PATH", prepend_path(fake_bin.path()))
+    .args(["list", "--detect-pr"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("#128"));
+
+  let calls = fs::read_to_string(&log).unwrap();
+  assert!(calls.contains("ARGV:mr list"), "must speak MR, not PR: {calls}");
+  assert!(
+    calls.contains("--repo group/proj"),
+    "must target the origin slug: {calls}"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_glab_child_does_not_inherit_the_environment_that_would_retarget_it() {
+  // The end-to-end counterpart to the unit tests on `glab_env_remove`,
+  // and the reason this harness exists: rounds 4, 7, 9 and 10 each found
+  // an inherited variable that silently redirected the CLI, and every
+  // fix was verified only against a pure function. This asserts the
+  // contract where it actually matters — on the spawned process.
+  //
+  // `GITLAB_TOKEN` is in here as the negative control: tier 3 of the
+  // rule says authentication is never stripped, so a test that only
+  // checked "things are cleared" could pass while breaking every auth.
+  let (dir, repo) = init_repo();
+  repo.remote("origin", "https://gitlab.com/group/proj.git").unwrap();
+
+  let fake_bin = tempfile::TempDir::new().unwrap();
+  let log = fake_bin.path().join("calls.log");
+  let fake_glab = write_recording_glab(fake_bin.path(), "[]");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_GLAB", &fake_glab)
+    .env("GWM_FAKE_LOG", &log)
+    .env("PATH", prepend_path(fake_bin.path()))
+    // Exported by the user, pointing somewhere else entirely.
+    .env("GITLAB_REPO", "someone-else/private")
+    .env("GITLAB_GROUP", "someone-else")
+    .env("GITLAB_TOKEN", "keep-me")
+    // Split-host self-hosted install: the API lives somewhere the Git
+    // URL cannot express, so this is information gwm does not have.
+    .env("GITLAB_API_HOST", "https://api.gitlab.example.com")
+    .args(["list", "--detect-pr"])
+    .assert()
+    .success();
+
+  let calls = fs::read_to_string(&log).unwrap();
+  assert!(
+    calls.contains("GITLAB_REPO:<unset>"),
+    "selector must be cleared: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_GROUP:<unset>"),
+    "selector must be cleared: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_HOST:https://gitlab.com"),
+    "an authoritative origin must be pinned: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_TOKEN:keep-me"),
+    "authentication is the user's to set and must survive: {calls}"
+  );
+  assert!(
+    calls.contains("GITLAB_API_HOST:https://api.gitlab.example.com"),
+    "gwm cannot supply an API host, so it must not clear one: {calls}"
+  );
+}
+
 #[test]
 fn list_without_detect_pr_flag_has_no_pr_column() {
   // Default `gwm list` stays network-free: no PR column, no `#` markers.
@@ -2089,6 +2182,48 @@ fi
     .unwrap();
     script
   }
+}
+
+/// A fake `glab` that records how it was invoked before answering.
+///
+/// The existing fakes only stub stdout, which is enough to test parsing
+/// but blind to the contract nine review rounds kept breaking: *which*
+/// binary gets picked, *where* it runs, and *what environment* it
+/// inherits. This one appends `ARGV` / `CWD` / the targeting variables
+/// to `$GWM_FAKE_LOG`, so a test can assert the spawn itself.
+///
+/// Unix-only on purpose: the contract under test (argv, cwd, child
+/// environment) is platform-independent in gwm's own code, whereas a
+/// `.cmd` shim would mostly exercise `cmd.exe` quoting rules.
+#[cfg(unix)]
+fn write_recording_glab(root: &Path, mr_list_json: &str) -> PathBuf {
+  let script = root.join("glab");
+  fs::write(
+    &script,
+    format!(
+      r#"#!/bin/sh
+{{
+  echo "ARGV:$*"
+  echo "CWD:$(pwd)"
+  echo "GITLAB_HOST:${{GITLAB_HOST-<unset>}}"
+  echo "GITLAB_REPO:${{GITLAB_REPO-<unset>}}"
+  echo "GITLAB_GROUP:${{GITLAB_GROUP-<unset>}}"
+  echo "GITLAB_API_HOST:${{GITLAB_API_HOST-<unset>}}"
+  echo "GITLAB_TOKEN:${{GITLAB_TOKEN-<unset>}}"
+}} >> "$GWM_FAKE_LOG"
+if [ "$1" = "mr" ] && [ "$2" = "list" ]; then
+  printf '%s' '{list}'
+fi
+"#,
+      list = mr_list_json.replace('\'', "'\\''"),
+    ),
+  )
+  .unwrap();
+  let mut perms = fs::metadata(&script).unwrap().permissions();
+  use std::os::unix::fs::PermissionsExt;
+  perms.set_mode(0o755);
+  fs::set_permissions(&script, perms).unwrap();
+  script
 }
 
 fn write_fake_gh(root: &Path, issue_url: &str) -> PathBuf {
