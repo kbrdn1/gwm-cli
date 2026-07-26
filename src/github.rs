@@ -372,8 +372,9 @@ fn origin_identity(repo: &Repository) -> Option<String> {
 fn stamp_link_origin(repo: &Repository, branch: &str) {
   let Some(id) = origin_identity(repo) else { return };
   if let Ok(Some(stored)) = read_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY) {
-    if stored != id {
-      drop_branch_links(repo, branch);
+    if stored != id && drop_branch_links(repo, branch).is_err() {
+      // Same rule as `reconcile_link_forge`: no purge, no new stamp.
+      return;
     }
   }
   let _ = write_branch_string(repo, branch, LINK_ORIGIN_CONFIG_KEY, &id);
@@ -381,7 +382,7 @@ fn stamp_link_origin(repo: &Repository, branch: &str) {
 
 /// Every number, title and state the link layer persists for `branch`.
 /// One list, because a purge that forgets a key silently re-blesses it.
-fn drop_branch_links(repo: &Repository, branch: &str) {
+fn drop_branch_links(repo: &Repository, branch: &str) -> Result<()> {
   for key in [
     ISSUE_CONFIG_KEY,
     ISSUE_TITLE_CONFIG_KEY,
@@ -393,8 +394,9 @@ fn drop_branch_links(repo: &Repository, branch: &str) {
     DETECTED_PR_TITLE_CONFIG_KEY,
     DETECTED_PR_STATE_CONFIG_KEY,
   ] {
-    let _ = remove_branch_key(repo, branch, key);
+    remove_branch_key(repo, branch, key)?;
   }
+  Ok(())
 }
 
 /// Drop every persisted link when the repo changes **backend**.
@@ -416,6 +418,41 @@ fn drop_branch_links(repo: &Repository, branch: &str) {
 /// must survive the upgrade that introduces it, exactly as an absent
 /// origin stamp is not treated as a mismatch.
 ///
+/// # Two invariants, and where every caller sits against them
+///
+/// **Atomicity — the marker only advances when the purge fully
+/// succeeded.** Advancing it after a failed removal re-blesses the old
+/// numbers *permanently*: the mismatch never fires again and the other
+/// backend reads them as its own. Same rule [`stamp_link_origin`]
+/// states for the origin stamp. Today the removals and the marker write
+/// share one config lock, so they fail together anyway — the guard is
+/// what makes that a property of the code rather than a coincidence,
+/// and the reachable version is a failure part-way through the sweep.
+///
+/// **Ordering — every link read or write happens *after* a reconcile,
+/// never before.** Read too early and the stale number is served one
+/// more time; write too early and the write lands under the outgoing
+/// marker, so the next reconcile deletes what the user just did. Both
+/// happened (Codex review #458), which is why the whole surface is
+/// enumerated here rather than fixed one call site per round:
+///
+/// | site | reconciles | why |
+/// |---|---|---|
+/// | `cli::cmd_open` | resolves, then reads | fixed: it resolved after `read_link` |
+/// | `cli::cmd_status` | resolves, then reads | already correct |
+/// | `cli::cmd_link` | [`crate::forge::reconcile_links`] | fixed: it never resolved |
+/// | `cli::cmd_unlink` | no | removes keys; a later purge takes no more than it would |
+/// | `cli::cmd_pr` | `resolve_or_default` before `link_pr` | already correct |
+/// | `cli::cmd_review` | `resolve` before `review::materialize` | already correct |
+/// | `tui::GitHubFetch::reread_link` | resolves, then reads | fixed: it read first |
+/// | `tui::App` link prompt | via `reread_link` on selection | already correct |
+/// | [`crate::worktree::list`] | **no** | no `Config`; display only, and it self-heals on the next resolve |
+///
+/// `worktree::list` is the one deliberate gap: it is a pure reader with
+/// no `Config`, so a flip leaves its badges stale until any command or
+/// TUI selection resolves. Nothing is written from there, so a stale
+/// badge is the whole of the damage.
+///
 /// Best-effort throughout — a read-only repo must not turn a resolve
 /// into an error.
 pub(crate) fn reconcile_link_forge(repo: &Repository, kind: crate::forge::ForgeKind) {
@@ -424,13 +461,15 @@ pub(crate) fn reconcile_link_forge(repo: &Repository, kind: crate::forge::ForgeK
   match cfg.get_string(LINK_FORGE_CONFIG_KEY) {
     Ok(stored) if stored == now => return,
     Ok(_) => {
-      if let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) {
-        for name in branches
-          .filter_map(|b| b.ok())
-          .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
-        {
-          drop_branch_links(repo, &name);
-          let _ = remove_branch_key(repo, &name, LINK_ORIGIN_CONFIG_KEY);
+      let Ok(branches) = repo.branches(Some(git2::BranchType::Local)) else {
+        return;
+      };
+      for name in branches
+        .filter_map(|b| b.ok())
+        .filter_map(|(b, _)| b.name().ok().flatten().map(str::to_string))
+      {
+        if drop_branch_links(repo, &name).is_err() || remove_branch_key(repo, &name, LINK_ORIGIN_CONFIG_KEY).is_err() {
+          return;
         }
       }
     }

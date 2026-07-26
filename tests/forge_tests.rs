@@ -11,6 +11,37 @@ mod common;
 use common::init_repo;
 use gwm::config::Config;
 use gwm::forge::{self, ForgeKind};
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
+/// Take a process-wide lock and neutralise every variable a GitLab forge
+/// reads when it is constructed.
+///
+/// `gitlab::resolve_selector` reads `$GITLAB_SUBFOLDER`, and
+/// `$CI_SERVER_URL` under auto-login, at construction time — so any test
+/// asserting a GitLab selector is only deterministic once those are
+/// gone. `GITLAB_SUBFOLDER=group cargo test --test forge_tests` failed
+/// here reproducibly; the same class was reported against
+/// `gitlab_tests.rs` and swept there in the same pass rather than one
+/// test per review round (Codex review #458).
+fn clean_env() -> MutexGuard<'static, ()> {
+  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+  let guard = LOCK
+    .get_or_init(|| Mutex::new(()))
+    .lock()
+    .unwrap_or_else(|p| p.into_inner());
+  // SAFETY: env mutation guarded by the lock just taken.
+  unsafe {
+    for v in [
+      "GITLAB_SUBFOLDER",
+      "CI_SERVER_URL",
+      "GLAB_ENABLE_CI_AUTOLOGIN",
+      "GITLAB_CI",
+    ] {
+      std::env::remove_var(v);
+    }
+  }
+  guard
+}
 
 // --- origin URL parsing ---------------------------------------------------
 
@@ -676,6 +707,7 @@ fn a_known_ssh_alias_is_authoritative_not_a_guess() {
 
 #[test]
 fn a_known_alias_keeps_its_explicit_repo_selector() {
+  let _env = clean_env();
   let dir = tempfile::tempdir().unwrap();
   let f = forge::for_kind_in(
     ForgeKind::GitLab,
@@ -992,16 +1024,75 @@ fn the_tui_reads_the_links_after_the_reconcile_not_before() {
   gwm::github::link_issue(&repo, &branch, 42).unwrap();
 
   let mut fetch = gwm::tui::state::github_fetch::GitHubFetch::new();
-  fetch.reread_link(&repo, Some(&branch), &Config::default());
+  // A fresh cache has no identity yet, so the first read is itself a
+  // change — the caller must pair it with the spine bump.
+  assert!(fetch.reread_link(&repo, Some(&branch), &Config::default()));
   assert_eq!(fetch.link.issue, Some(42), "precondition: adopted, not purged");
 
   let flipped = Config {
     forge: Some(ForgeKind::GitLab),
     ..Default::default()
   };
-  fetch.reread_link(&repo, Some(&branch), &flipped);
+  assert!(
+    fetch.reread_link(&repo, Some(&branch), &flipped),
+    "the backend moved, so the caches went and the spine must follow"
+  );
   assert_eq!(
     fetch.link.issue, None,
     "the very first read after a flip must already see the purge"
+  );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_purge_that_could_not_finish_does_not_advance_the_marker() {
+  // The marker is only trustworthy if it means "everything written under
+  // the previous backend is gone". Advancing it after a failed removal
+  // re-blesses the old numbers permanently: the mismatch never fires
+  // again, and the other backend reads them as its own (Codex review
+  // #458). Same invariant `stamp_link_origin` already states for the
+  // origin stamp — an eager purge, or no new stamp.
+  //
+  // Honest about what this pins: the removals and the marker write go
+  // through the same config lock, so they fail together and the marker
+  // would have stayed put even without the explicit guard. This locks
+  // the *observable* contract — a blocked reconcile stays pending — so
+  // it holds if that coincidence ever stops holding (a partial failure
+  // part-way through the branch sweep is the reachable version).
+  use std::os::unix::fs::PermissionsExt;
+
+  let (dir, repo) = init_repo();
+  repo
+    .remote("origin", "https://git.acme.internal/team/proj.git")
+    .unwrap();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  gwm::github::link_issue(&repo, &branch, 42).unwrap();
+  forge::resolve(&repo, &Config::default()).unwrap();
+
+  // A read-only `.git` blocks the config lock file, so reads still work
+  // and writes do not — exactly the shape of a repo on a read-only mount.
+  let gitdir = dir.path().join(".git");
+  let original = std::fs::metadata(&gitdir).unwrap().permissions();
+  std::fs::set_permissions(&gitdir, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+  let flipped = Config {
+    forge: Some(ForgeKind::GitLab),
+    ..Default::default()
+  };
+  forge::resolve(&repo, &flipped).unwrap();
+
+  std::fs::set_permissions(&gitdir, original).unwrap();
+
+  // Writable again: the flip must still be pending, not silently blessed.
+  assert_eq!(
+    gwm::github::read_link(&repo, &branch).unwrap().issue,
+    Some(42),
+    "precondition: the purge really did fail"
+  );
+  forge::resolve(&repo, &flipped).unwrap();
+  assert_eq!(
+    gwm::github::read_link(&repo, &branch).unwrap().issue,
+    None,
+    "the retry must still see a mismatch to act on"
   );
 }

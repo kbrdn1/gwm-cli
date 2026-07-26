@@ -19,6 +19,31 @@ fn env_lock() -> &'static Mutex<()> {
   LOCK.get_or_init(|| Mutex::new(()))
 }
 
+/// Take the lock **and** neutralise every variable a GitLab forge reads
+/// at construction time.
+///
+/// `resolve_selector` reads `$GITLAB_SUBFOLDER`, plus `$CI_SERVER_URL`
+/// under auto-login, when the backend is built — so a test that builds
+/// one and asserts a selector is only deterministic once those are gone.
+/// Without this, `GITLAB_SUBFOLDER=team cargo test` failed reproducibly
+/// (Codex review #458), which is the class CLAUDE.md warns about: a test
+/// that reads ambient state and was only ever run in one environment.
+fn clean_env() -> std::sync::MutexGuard<'static, ()> {
+  let guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  // SAFETY: env mutation guarded by the lock just taken.
+  unsafe {
+    for v in [
+      "GITLAB_SUBFOLDER",
+      "CI_SERVER_URL",
+      "GLAB_ENABLE_CI_AUTOLOGIN",
+      "GITLAB_CI",
+    ] {
+      std::env::remove_var(v);
+    }
+  }
+  guard
+}
+
 // --- issues ---------------------------------------------------------------
 
 /// `glab issue view <iid> -R <slug> --output json`.
@@ -776,6 +801,7 @@ fn parse_labels_json_drops_group_labels_that_slipped_through() {
 
 #[test]
 fn a_guessed_origin_lets_glab_resolve_the_project_from_the_repo() {
+  let _env = clean_env();
   // The last open hole from round 2/3: for an SSH origin no `GITLAB_HOST`
   // is pinned (a distinct SSH hostname is a documented GitLab pattern, so
   // a guess must not override a working config) — but passing
@@ -795,6 +821,7 @@ fn a_guessed_origin_lets_glab_resolve_the_project_from_the_repo() {
 
 #[test]
 fn an_authoritative_origin_keeps_its_explicit_selector() {
+  let _env = clean_env();
   // With the host pinned there is no ambiguity, and an explicit slug is
   // more precise than cwd inference — it also works when the cwd is not a
   // repo at all.
@@ -810,6 +837,7 @@ fn an_authoritative_origin_keeps_its_explicit_selector() {
 
 #[test]
 fn a_guessed_origin_without_a_workdir_still_pins_the_selector() {
+  let _env = clean_env();
   // Nothing for glab to infer from, so the slug is the only signal left.
   let f = gwm::forge::for_kind(
     gwm::forge::ForgeKind::GitLab,
@@ -1177,7 +1205,8 @@ fn the_instance_subfolder_is_stripped_from_the_api_selector() {
   // base already carries that prefix, so a slug parsed straight out of
   // the origin — `gitlab/group/proj` — targets a project that does not
   // exist (Codex review #458).
-  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let _env = clean_env();
+  // SAFETY: env mutation guarded by the lock `clean_env` holds.
   unsafe {
     std::env::set_var("GITLAB_SUBFOLDER", "gitlab");
   }
@@ -1202,10 +1231,7 @@ fn the_instance_subfolder_is_stripped_from_the_api_selector() {
 fn a_namespace_that_merely_looks_like_the_subfolder_is_kept() {
   // Without the variable set there is nothing to strip, and a group
   // genuinely named `gitlab` must survive.
-  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
-  unsafe {
-    std::env::remove_var("GITLAB_SUBFOLDER");
-  }
+  let _env = clean_env();
   let f = gwm::forge::for_kind(
     gwm::forge::ForgeKind::GitLab,
     gwm::forge::parse_remote_url("https://gitlab.com/gitlab/group/proj.git").unwrap(),
@@ -1319,10 +1345,10 @@ fn the_subfolder_falls_back_to_the_ci_server_url_like_glab_does() {
   // `/gitlab` with no explicit `GITLAB_SUBFOLDER`, glab's API base
   // already carries the prefix while gwm kept `gitlab/group/proj` in the
   // selector — a 404, or the wrong project.
-  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  let _env = clean_env();
   let url = "https://host.example/gitlab/group/proj.git";
+  // SAFETY: env mutation guarded by the lock `clean_env` holds.
   unsafe {
-    std::env::remove_var("GITLAB_SUBFOLDER");
     std::env::set_var("CI_SERVER_URL", "https://host.example/gitlab");
     std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
     std::env::remove_var("GITLAB_CI");

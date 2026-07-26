@@ -153,7 +153,7 @@ impl GitHubFetch {
   /// (`App::refresh_link` separately drops any in-flight GitHub worker
   /// on the spine — see [`Self::invalidate`] for the pairing.)
   pub fn refresh_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
-    self.reread_link(repo, branch, config);
+    let _ = self.reread_link(repo, branch, config);
     self.invalidate();
   }
 
@@ -173,7 +173,15 @@ impl GitHubFetch {
   /// cached URL for #42. The full `<web origin>/<slug>` is compared for
   /// exactly that — the slug alone is not enough, since `acme/widgets`
   /// exists identically on github.com and gitlab.com.
-  pub fn reread_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) {
+  /// Returns `true` when the identity moved and the caches were
+  /// dropped. The caller **must** pair that with a
+  /// `TaskRunner::invalidate_matching(is_github)`: clearing the result
+  /// cache without bumping the spine generation lets a worker started
+  /// against the previous instance land afterwards and repopulate it —
+  /// the navigation invariant `App::refresh_link` documents (issue
+  /// #255), which this path was quietly breaking (Codex review #458).
+  #[must_use]
+  pub fn reread_link(&mut self, repo: &Repository, branch: Option<&str>, config: &crate::config::Config) -> bool {
     let before = self.forge_identity();
     // Resolve *first*: it reconciles the persisted links against the
     // backend about to read them, and reading before that served the
@@ -187,7 +195,9 @@ impl GitHubFetch {
     self.link_slug = self.forge.as_ref().map(|f| f.slug().to_string());
     if before != self.forge_identity() {
       self.invalidate();
+      return true;
     }
+    false
   }
 
   /// `<backend> <web origin>/<slug>`, or `None` without a resolved

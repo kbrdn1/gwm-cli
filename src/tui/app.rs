@@ -5119,7 +5119,13 @@ impl App {
     // because the caches are keyed by number, so a link that really
     // changed simply misses.
     let branch = self.selected_branch_name();
-    self.github.reread_link(&self.repo, branch.as_deref(), &self.config);
+    if self.github.reread_link(&self.repo, branch.as_deref(), &self.config) {
+      // The identity moved, so `reread_link` dropped the caches — the
+      // navigation invariant says the spine generation moves with them,
+      // or an in-flight worker for the previous instance repopulates
+      // what was just cleared (issue #255, Codex review #458).
+      self.tasks.invalidate_matching(TaskKind::is_github);
+    }
     self.open_menu_selected = LinkTarget::Issue;
     self.view = View::OpenMenu;
   }
