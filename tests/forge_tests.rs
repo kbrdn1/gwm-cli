@@ -522,7 +522,7 @@ fn gh_host_is_still_unpinned_without_a_slug() {
   // The `gwm new` / `gwm pr` fallback for an unparseable origin: the
   // caller wants `gh` to infer everything locally.
   let (_dir, repo) = init_repo();
-  let f = forge::resolve_or_default(&repo, &Config::default());
+  let f = forge::resolve_or_default(&repo, &Config::default()).unwrap();
 
   assert_eq!(f.slug(), "");
 }
@@ -1376,4 +1376,52 @@ fn an_unpinnable_github_origin_stops_passing_a_slug_too() {
     None,
   );
   assert_eq!(f.repo_selector(), "team/proj");
+}
+
+#[test]
+fn the_no_origin_fallback_does_not_swallow_the_host_refusal() {
+  // `resolve_or_default` absorbed *every* resolve error, so the gate on
+  // unrecognised hosts stopped at the read paths: `gwm new` and `gwm pr`
+  // fell through to a guessed forge with an empty slug and let the CLI
+  // infer the repo from the cwd — which reads the very remote that was
+  // just refused, and sends the inherited credentials there (Codex
+  // review #458).
+  //
+  // The fallback exists for a repo with *no* origin. That is the only
+  // case it covers now.
+  let (_dir, repo) = init_repo();
+  assert!(
+    forge::resolve_or_default(&repo, &Config::default()).is_ok(),
+    "no origin at all is what the fallback is for"
+  );
+
+  repo.remote("origin", "https://evil.example/team/proj.git").unwrap();
+  let err = forge::resolve_or_default(&repo, &Config::default())
+    .unwrap_err()
+    .to_string();
+  assert!(err.contains("evil.example"), "{err}");
+}
+
+#[test]
+fn a_link_made_without_an_origin_is_not_purged_when_one_appears() {
+  // `reconcile_links` gave up when `resolve` failed, and with
+  // `forge = "gitlab"` but no origin yet that meant no marker was
+  // written. Adding the origin later then read the absent marker as
+  // "pre-#419 GitHub links" and purged the line the user had just made
+  // (Codex review #458). The config names the backend; the origin is not
+  // needed to know it.
+  let (_dir, repo) = init_repo();
+  let branch = repo.head().unwrap().shorthand().unwrap().to_string();
+  let gitlab = Config {
+    forge: Some(ForgeKind::GitLab),
+    ..Default::default()
+  };
+
+  forge::reconcile_links(&repo, &gitlab);
+  gwm::github::link_issue(&repo, &branch, 42).unwrap();
+
+  repo.remote("origin", "https://gitlab.com/g/p.git").unwrap();
+  forge::resolve(&repo, &gitlab).unwrap();
+
+  assert_eq!(gwm::github::read_link(&repo, &branch).unwrap().issue, Some(42));
 }

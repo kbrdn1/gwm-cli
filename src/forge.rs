@@ -636,14 +636,28 @@ pub fn repo_slug(repo: &Repository) -> Result<String> {
   Ok(origin_ref(repo)?.path)
 }
 
-/// [`resolve`] that never fails, for the two creation paths (`gwm new`,
-/// `gwm pr`) that predate #419 and deliberately tolerate a repo with no
-/// `origin`: `gh` / `glab` can infer the project from the local git
-/// context on their own, so the backend simply omits `--repo` when the
-/// slug is empty. Every other call site uses the strict [`resolve`],
-/// because an unresolvable slug there means an unbuildable URL.
-pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> {
-  resolve(repo, config).unwrap_or_else(|_| {
+/// [`resolve`], falling back to a project-less forge for the two creation
+/// paths (`gwm new`, `gwm pr`) that predate #419 and deliberately
+/// tolerate a repo with **no `origin`**: `gh` / `glab` can infer the
+/// project from the local git context on their own, so the backend
+/// simply omits `--repo` when the slug is empty. Every other call site
+/// uses the strict [`resolve`], because an unresolvable slug there means
+/// an unbuildable URL.
+///
+/// "No origin" is the whole of the fallback. It used to absorb *every*
+/// resolve error, which quietly exempted these two commands from the
+/// unrecognised-host refusal: they fell through to a guessed forge with
+/// an empty slug and let the CLI infer the repo from the cwd — reading
+/// the very remote that had just been refused, and sending the inherited
+/// credentials there (Codex review #458). A gate with a fallback around
+/// it is not a gate.
+pub fn resolve_or_default(repo: &Repository, config: &Config) -> Result<Arc<dyn Forge>> {
+  // An origin that parses is a decision for `resolve` to make, including
+  // the decision to refuse. Only a missing one lands here.
+  if origin_ref(repo).is_ok() {
+    return resolve(repo, config);
+  }
+  Ok({
     let kind = config.forge.unwrap_or(ForgeKind::GitHub);
     // An empty slug is the signal to let the CLI infer the project from
     // the local git context, and `Guessed` keeps that inference from being
@@ -677,10 +691,17 @@ pub fn resolve_or_default(repo: &Repository, config: &Config) -> Arc<dyn Forge> 
 ///
 /// Best-effort by design — `gwm link` works in a repo with no `origin`,
 /// and a repo with no `origin` stamps nothing to reconcile.
-pub fn reconcile_links(repo: &Repository) {
-  let root = repo.workdir().unwrap_or_else(|| repo.path()).to_path_buf();
-  if let Ok(config) = Config::load_for_repo(&root) {
-    let _ = resolve(repo, &config);
+pub fn reconcile_links(repo: &Repository, config: &Config) {
+  if resolve(repo, config).is_ok() {
+    return;
+  }
+  // `resolve` needs an origin; knowing which backend wrote a link does
+  // not. With `forge = "gitlab"` and no origin yet, giving up here left
+  // the marker unwritten — and an absent marker means "pre-#419 GitHub
+  // links", so adding the origin later purged the line the user had just
+  // made (Codex review #458).
+  if let Some(kind) = config.forge {
+    crate::github::reconcile_link_forge(repo, kind);
   }
 }
 

@@ -571,27 +571,41 @@ pub fn clear_persisted_detected_pr(repo: &Repository, branch: &str) -> Result<()
   remove_branch_key(repo, branch, DETECTED_PR_STATE_CONFIG_KEY)
 }
 
+// Every one of these stamps first. They persist metadata fetched from
+// the origin the repo has *now*, and `read_link` suppresses anything the
+// stamp says came from somewhere else — so writing without stamping left
+// a fresh title permanently suppressed. It only shows on the path where
+// the number comes from the branch name rather than from config, because
+// nothing else re-links it and no other writer restamps (Codex review
+// #458). `persist_detected_pr` stamped from the start; these did not.
+
 pub fn persist_issue_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, ISSUE_TITLE_CONFIG_KEY, title)
 }
 
 pub fn persist_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, PR_TITLE_CONFIG_KEY, title)
 }
 
 pub fn persist_detected_pr_title(repo: &Repository, branch: &str, title: &str) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, DETECTED_PR_TITLE_CONFIG_KEY, title)
 }
 
 pub fn persist_issue_state(repo: &Repository, branch: &str, state: IssueState) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, ISSUE_STATE_CONFIG_KEY, issue_state_config_value(state))
 }
 
 pub fn persist_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, PR_STATE_CONFIG_KEY, pr_state_config_value(state))
 }
 
 pub fn persist_detected_pr_state(repo: &Repository, branch: &str, state: PrState) -> Result<()> {
+  stamp_link_origin(repo, branch);
   write_branch_string(repo, branch, DETECTED_PR_STATE_CONFIG_KEY, pr_state_config_value(state))
 }
 

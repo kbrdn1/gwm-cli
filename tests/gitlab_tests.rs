@@ -328,9 +328,10 @@ fn mr_list_argv_pins_the_source_branch_and_all_states() {
       "json",
       // Not 1: `--source-branch` matches the branch NAME only, so a fork
       // sharing it lands here too and must be filtered out downstream
-      // (Codex review #458).
+      // (Codex review #458). A full page, not a sample — see
+      // `mr_list_argv_asks_for_a_full_page_not_a_sample`.
       "--per-page",
-      "20",
+      "100",
     ]
   );
 }
@@ -896,11 +897,17 @@ fn mr_detection_keeps_an_mr_that_does_not_report_its_source_project() {
 }
 
 #[test]
-fn mr_list_argv_asks_for_enough_rows_to_filter_forks() {
+fn mr_list_argv_asks_for_a_full_page_not_a_sample() {
+  // The filtering downstream can only pick from what arrives, and the
+  // call is not paginated. Twenty rows meant the project's own MR could
+  // sit behind twenty fork MRs sharing the branch name and never be
+  // examined at all — detection then returned nothing, silently (Codex
+  // review #458). 100 is GitLab's page cap, and there is no server-side
+  // "source project = this one" filter to narrow the set instead.
   let argv = gitlab::mr_list_argv("g/p", "feat/x");
 
   assert!(
-    argv.windows(2).any(|w| w[0] == "--per-page" && w[1] == "20"),
+    argv.windows(2).any(|w| w[0] == "--per-page" && w[1] == "100"),
     "one row cannot be filtered: {argv:?}"
   );
 }

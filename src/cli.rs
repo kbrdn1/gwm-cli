@@ -2794,7 +2794,7 @@ fn cmd_new(
   let resolved_types = config.resolved_branch_types();
   let spec = BranchSpec::new_with_types(branch_type.clone(), "0", desc, &resolved_types.types)?;
   let draft = issue_templates::render_issue_draft(&repo, &config, &spec.type_, &spec.desc)?;
-  let forge = forge::resolve_or_default(&repo, &config);
+  let forge = forge::resolve_or_default(&repo, &config)?;
   let created = forge.create_issue(&forge::IssueCreateRequest {
     title: &draft.title,
     body_file: draft.body_file.path(),
@@ -2901,7 +2901,7 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
   body_file.flush()?;
 
   let title = pr_title(&ctx);
-  let forge = forge::resolve_or_default(&repo, &config);
+  let forge = forge::resolve_or_default(&repo, &config)?;
   let created = forge.create_pr(&forge::PrCreateRequest {
     title: &title,
     body_file: body_file.path(),
@@ -3672,7 +3672,8 @@ fn cmd_link(target: LinkTarget, number: u64, worktree: Option<String>) -> Result
   let (repo, branch, _path) = resolve_target_repo(worktree)?;
   // Write under the backend marker that will later be checked against
   // this line, or the next command that resolves a forge deletes it.
-  forge::reconcile_links(&repo);
+  let config = Config::load_for_repo(repo.workdir().unwrap_or_else(|| repo.path()))?;
+  forge::reconcile_links(&repo, &config);
   match target {
     LinkTarget::Issue => {
       github::link_issue(&repo, &branch, number)?;

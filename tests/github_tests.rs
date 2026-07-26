@@ -1589,3 +1589,41 @@ fn a_fork_pr_is_a_fallback_not_a_disqualification() {
 
   assert_eq!(github::parse_pr_list_number("[]").unwrap(), None);
 }
+
+#[test]
+fn a_refetched_title_is_stamped_with_the_origin_that_produced_it() {
+  // `read_link` suppresses cached metadata written against a previous
+  // origin. After a move, the refetch persists a fresh title and state —
+  // but `persist_issue_title` / `persist_issue_state` wrote them without
+  // touching `gwm-link-origin`, so the stamp still named the old origin
+  // and the next read suppressed the new values too. Permanently blank
+  // (Codex review #458). `persist_detected_pr` already stamped; the
+  // title/state writers did not.
+  let (dir, repo) = common::init_repo();
+  repo.remote("origin", "https://github.com/old/proj.git").unwrap();
+  // The branch NAME carries the number, which is the whole point: no
+  // `gwm link` ever runs, so no writer that takes a number restamps.
+  let branch = "feat/#42-fuzzy-search";
+  github::persist_issue_title(&repo, branch, "before").unwrap();
+  github::persist_issue_state(&repo, branch, github::IssueState::Closed).unwrap();
+
+  repo.remote_delete("origin").unwrap();
+  repo.remote("origin", "https://github.com/new/proj.git").unwrap();
+  let stale = github::read_link(&repo, branch).unwrap();
+  assert_eq!(stale.issue, Some(42), "the branch name still carries it");
+  assert_eq!(
+    stale.issue_title, None,
+    "precondition: the old origin's metadata is suppressed"
+  );
+
+  // The number here comes from the BRANCH NAME, not from the config, so
+  // nothing re-links it and `stamp_link_origin` is never reached through
+  // a writer that takes a number. Only the title/state writers run.
+  github::persist_issue_title(&repo, branch, "after").unwrap();
+  github::persist_issue_state(&repo, branch, github::IssueState::Open).unwrap();
+
+  let link = github::read_link(&repo, branch).unwrap();
+  assert_eq!(link.issue_title.as_deref(), Some("after"));
+  assert_eq!(link.issue_state, Some(github::IssueState::Open));
+  drop(dir);
+}

@@ -746,8 +746,14 @@ pub fn mr_list_argv(slug: &str, branch: &str) -> Vec<String> {
     // NAME only, so a fork carrying the same name can appear. The
     // same-project MR is picked in `parse_mr_list_number`, which needs
     // candidates to pick from (Codex review #458).
+    //
+    // A page, not a sample: 20 rows meant the project's own MR could sit
+    // behind twenty fork MRs sharing the branch name and never be looked
+    // at, so detection returned nothing at all. 100 is GitLab's page cap,
+    // and there is no server-side filter for "source project = this one"
+    // to narrow it further.
     "--per-page".into(),
-    "20".into(),
+    "100".into(),
   ]);
   argv
 }
