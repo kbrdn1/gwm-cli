@@ -166,17 +166,67 @@ pub fn ci_autologin_conflict(origin: &forge::RemoteRef) -> Option<String> {
   if !enabled {
     return None;
   }
-  let ci_host = std::env::var("CI_SERVER_FQDN").ok()?;
-  let ci_host = ci_host.trim();
-  if ci_host.is_empty() || ci_host.eq_ignore_ascii_case(&origin.host) {
+
+  // `CI_SERVER_FQDN` is documented as `gitlab.example.com:8080` — host
+  // AND port — while `origin.host` never carries one. Comparing them raw
+  // refused every legitimate pipeline on a non-standard port, a worse
+  // failure than the divergence being guarded (Codex review #458).
+  // GitLab publishes the two halves separately, so prefer those and fall
+  // back to splitting the FQDN.
+  let fqdn = std::env::var("CI_SERVER_FQDN").ok();
+  let (fqdn_host, fqdn_port) = match &fqdn {
+    Some(f) => split_host_port(f.trim()),
+    None => (None, None),
+  };
+  let ci_host = std::env::var("CI_SERVER_HOST")
+    .ok()
+    .map(|h| h.trim().to_string())
+    .filter(|h| !h.is_empty())
+    .or(fqdn_host)?;
+  let ci_port = std::env::var("CI_SERVER_PORT")
+    .ok()
+    .map(|p| p.trim().to_string())
+    .filter(|p| !p.is_empty())
+    .or(fqdn_port);
+
+  let origin_port = origin
+    .authority()
+    .rsplit_once(':')
+    .filter(|(_, p)| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+    .map(|(_, p)| p.to_string());
+
+  // Ports are compared only when both sides name one: an absent port
+  // means "the default", which we cannot resolve without knowing the
+  // scheme both ends used.
+  let host_differs = !ci_host.eq_ignore_ascii_case(&origin.host);
+  let port_differs = matches!((&ci_port, &origin_port), (Some(a), Some(b)) if a != b);
+  if !host_differs && !port_differs {
     return None;
   }
+
+  let ci = match &ci_port {
+    Some(p) => format!("{ci_host}:{p}"),
+    None => ci_host,
+  };
   Some(format!(
-    "refusing to run glab: CI auto-login would authenticate against '{ci_host}' \
-     but this repo's origin is '{}'. glab ignores GITLAB_HOST in that mode, so the \
-     call would target the wrong instance. Unset GLAB_ENABLE_CI_AUTOLOGIN to proceed.",
-    origin.host
+    "refusing to run glab: CI auto-login would authenticate against '{ci}' but this \
+     repo's origin is '{}'. glab ignores GITLAB_HOST in that mode, so the call would \
+     target the wrong instance. Unset GLAB_ENABLE_CI_AUTOLOGIN to proceed.",
+    origin.authority()
   ))
+}
+
+/// Split `host[:port]`, keeping the port only when it is all digits.
+fn split_host_port(s: &str) -> (Option<String>, Option<String>) {
+  if s.is_empty() {
+    return (None, None);
+  }
+  match s.rsplit_once(':') {
+    Some((h, p)) if !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) => {
+      (Some(h.to_string()), Some(p.to_string()))
+    }
+    _ => (Some(s.to_string()), None),
+  }
 }
 
 /// Percent-encode one URL path segment. A GitLab project path contains
@@ -938,16 +988,31 @@ impl GitLabForge {
     self.run_argv_with_stdin(argv, None)
   }
 
+  /// A read whose response is a whole REST object, so the transcript
+  /// gets the outcome and not the payload.
+  ///
+  /// `glab issue|mr view --output json` returns `description` — the same
+  /// text #459 went to the trouble of keeping off the argv on the way
+  /// out. Withholding it on create and printing it back on the next read
+  /// is not a rule, it is a gap (Codex review #458).
+  fn run_argv_object(&self, argv: Vec<String>) -> Result<String> {
+    self.run_spawn(argv, None, true)
+  }
+
   /// `stdin` carries the request body for the `glab api` creation paths,
   /// which is the whole reason it exists: it keeps the rendered text out
   /// of the argv (issue #459).
   fn run_argv_with_stdin(&self, argv: Vec<String>, stdin: Option<&[u8]>) -> Result<String> {
+    let redact = stdin.is_some();
+    self.run_spawn(argv, stdin, redact)
+  }
+
+  fn run_spawn(&self, argv: Vec<String>, stdin: Option<&[u8]>, redact_output: bool) -> Result<String> {
     if let Some(why) = &self.refuse {
       return Err(GwmError::Other(why.clone()));
     }
     // A stdin payload is, by construction, the one thing that must not
     // reach the transcript — and the create endpoints echo it back.
-    let redact_output = stdin.is_some();
     // Redacting stdout is not enough on its own: `$GLAB_DEBUG_HTTP`
     // dumps whole requests and responses, bodies included, to *stderr*,
     // which the transcript keeps and the error path quotes verbatim
@@ -1023,15 +1088,15 @@ impl Forge for GitLabForge {
   }
 
   fn fetch_issue(&self, number: u64) -> Result<IssueStatus> {
-    parse_issue_json(&self.run_argv(issue_view_argv(self.repo_selector(), number))?)
+    parse_issue_json(&self.run_argv_object(issue_view_argv(self.repo_selector(), number))?)
   }
 
   fn fetch_pr(&self, number: u64) -> Result<PrStatus> {
-    parse_mr_json(&self.run_argv(mr_view_argv(self.repo_selector(), number))?)
+    parse_mr_json(&self.run_argv_object(mr_view_argv(self.repo_selector(), number))?)
   }
 
   fn fetch_pr_head(&self, number: u64) -> Result<PrHead> {
-    parse_mr_head_json(&self.run_argv(mr_view_argv(self.repo_selector(), number))?)
+    parse_mr_head_json(&self.run_argv_object(mr_view_argv(self.repo_selector(), number))?)
   }
 
   fn find_pr_for_branch(&self, branch: &str) -> Result<Option<u64>> {

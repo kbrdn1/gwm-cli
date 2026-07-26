@@ -1011,3 +1011,34 @@ fn no_ci_autologin_means_no_refusal() {
 
   assert!(out.is_none(), "{out:?}");
 }
+
+#[test]
+fn ci_autologin_compares_host_and_port_not_the_raw_fqdn() {
+  // `CI_SERVER_FQDN` is documented as `gitlab.example.com:8080` — it
+  // carries the port, and `origin.host` never does. Comparing them raw
+  // refused every legitimate pipeline on a non-standard port, which is a
+  // worse failure than the divergence it was guarding (Codex review
+  // #458). GitLab also publishes `CI_SERVER_HOST` / `CI_SERVER_PORT`
+  // separately, which is what the check reads.
+  let _env = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+  unsafe {
+    std::env::set_var("GLAB_ENABLE_CI_AUTOLOGIN", "true");
+    std::env::set_var("CI_SERVER_FQDN", "gitlab.acme.internal:8443");
+    std::env::remove_var("CI_SERVER_HOST");
+    std::env::remove_var("CI_SERVER_PORT");
+  }
+  // Same instance, port only on the CI side: must NOT refuse.
+  let same = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal:8443/team/proj.git"));
+  // Genuinely another host: must still refuse.
+  let other = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.other.example/team/proj.git"));
+  // Same host, different port — two instances behind one name.
+  let port = gwm::gitlab::ci_autologin_conflict(&origin("https://gitlab.acme.internal:9443/team/proj.git"));
+  unsafe {
+    std::env::remove_var("GLAB_ENABLE_CI_AUTOLOGIN");
+    std::env::remove_var("CI_SERVER_FQDN");
+  }
+
+  assert!(same.is_none(), "a legitimate pipeline must not be refused: {same:?}");
+  assert!(other.is_some(), "a different host must refuse");
+  assert!(port.is_some(), "a different port is a different instance");
+}
