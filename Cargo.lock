@@ -896,7 +896,7 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gwm-cli"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
