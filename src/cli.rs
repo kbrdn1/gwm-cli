@@ -18,7 +18,7 @@ use crate::milestones::{self, MilestoneDiff};
 use crate::multiplexer::{
   build_tmux_command, build_zellij_command, detect_tmux, detect_zellij, Multiplexer, SpawnMode,
 };
-use crate::naming::{parse_branch, BranchSpec};
+use crate::naming::{parse_branch, BranchSpec, WorktreeName};
 use crate::pr_templates::{self, PrTemplateContext};
 use crate::presets;
 use crate::review;
@@ -182,14 +182,25 @@ pub enum Command {
   /// Create a new worktree (and matching branch).
   Create {
     /// Branch type (feat, fix, hotfix, docs, test, refactor, chore, perf, ci, build).
-    #[arg()]
-    branch_type: String,
+    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    branch_type: Option<String>,
     /// Issue number (digits only).
-    #[arg()]
-    issue: String,
+    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    issue: Option<String>,
     /// Short description (kebab-case, will be normalized).
-    #[arg()]
-    desc: String,
+    #[arg(required_unless_present = "name", conflicts_with = "name")]
+    desc: Option<String>,
+    /// Name the worktree freely instead of using the <TYPE> <ISSUE> <DESC>
+    /// triple (issue #416), e.g. `gwm create --name spike-redis`. The name
+    /// becomes the branch verbatim; `branch_pattern` / `path_pattern` do not
+    /// apply because it has no `{type}` / `{issue}` / `{desc}` to expand.
+    /// Features that read the branch name back (issue auto-linking, gitmoji)
+    /// stay inactive on it — `gwm link` remains available.
+    ///
+    /// Exclusive with the positional triple: the mode is chosen explicitly,
+    /// never inferred from how many arguments were supplied.
+    #[arg(long, value_name = "NAME", conflicts_with_all = ["branch_type", "issue", "desc"])]
+    name: Option<String>,
     /// Skip bootstrap after creation.
     #[arg(long)]
     no_bootstrap: bool,
@@ -1038,6 +1049,7 @@ pub fn run(cli: Cli) -> Result<()> {
       branch_type,
       issue,
       desc,
+      name,
       no_bootstrap,
       reuse_branch,
       skip_hooks,
@@ -1051,6 +1063,7 @@ pub fn run(cli: Cli) -> Result<()> {
         branch_type,
         issue,
         desc,
+        name,
         no_bootstrap,
         reuse_branch,
         skip_hooks,
@@ -2604,9 +2617,10 @@ fn resolve_workspace_create_repo(root: &Path, repo: Option<String>) -> Result<Pa
 // of this dispatcher follows, so the arg count is deliberate here.
 #[allow(clippy::too_many_arguments)]
 fn cmd_create(
-  branch_type: String,
-  issue: String,
-  desc: String,
+  branch_type: Option<String>,
+  issue: Option<String>,
+  desc: Option<String>,
+  name: Option<String>,
   no_bootstrap: bool,
   reuse_branch: bool,
   skip_hooks: Option<String>,
@@ -2616,11 +2630,34 @@ fn cmd_create(
   let RepoContext { repo, workdir, config } = repo_context(start)?;
   let repo_name = worktree::repo_name(&repo);
 
-  let resolved_types = config.resolved_branch_types();
-  let spec = BranchSpec::new_with_types(branch_type, issue, desc, &resolved_types.types)?;
-  let branch = spec.branch_name(&config.worktree, &repo_name)?;
-  let dirname = spec.worktree_dirname(&config.worktree, &repo_name)?;
-  let target = spec.worktree_path(&config.worktree, &repo_name, &workdir)?;
+  // clap guarantees exactly one of the two shapes reaches here:
+  // `--name` conflicts with all three positionals, and each positional is
+  // `required_unless_present = "name"`, so a partial triple is rejected
+  // before dispatch rather than silently read as a free-form request.
+  let wt_name = match name {
+    Some(name) => WorktreeName::freeform(&name)?,
+    None => {
+      let resolved_types = config.resolved_branch_types();
+      let (branch_type, issue, desc) = match (branch_type, issue, desc) {
+        (Some(t), Some(i), Some(d)) => (t, i, d),
+        _ => {
+          return Err(GwmError::Other(
+            "`gwm create` needs <TYPE> <ISSUE> <DESC> or --name".into(),
+          ))
+        }
+      };
+      WorktreeName::Structured(BranchSpec::new_with_types(
+        branch_type,
+        issue,
+        desc,
+        &resolved_types.types,
+      )?)
+    }
+  };
+
+  let branch = wt_name.branch_name(&config.worktree, &repo_name)?;
+  let dirname = wt_name.worktree_dirname(&config.worktree, &repo_name)?;
+  let target = wt_name.worktree_path(&config.worktree, &repo_name, &workdir)?;
   let skips = HookSkips::parse(skip_hooks.as_deref())?;
 
   // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
@@ -2633,7 +2670,14 @@ fn cmd_create(
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
 
-  let pre_ctx = HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, &spec);
+  // A free-form worktree genuinely has no type / issue / desc, so its hook
+  // placeholders resolve empty. That is the honest value, not a degradation:
+  // `for_worktree` derives exactly what a later `gwm remove` on the same
+  // worktree would see, so the two phases agree.
+  let pre_ctx = match &wt_name {
+    WorktreeName::Structured(spec) => HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, spec),
+    WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch)),
+  };
   let report = lifecycle::run_phase(&config, HookPhase::PreCreate, &pre_ctx, &skips, false)?;
   print_lifecycle_report(&report);
 
@@ -2832,9 +2876,12 @@ fn cmd_new(
   println!("creating linked worktree for {}", branch);
 
   cmd_create(
-    spec.type_,
-    issue,
-    spec.desc,
+    Some(spec.type_),
+    Some(issue),
+    Some(spec.desc),
+    // `gwm new` always produces a structured worktree — it has just created
+    // the issue whose number the branch carries.
+    None,
     no_bootstrap,
     reuse_branch,
     skip_hooks,
@@ -3497,10 +3544,16 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
     }
   };
 
+  // Issue #416: a free-form branch reaches here legitimately. This command
+  // exists solely to derive a prefix from the branch *type*, and a name the
+  // user chose has none — there is no honest default to fall back to, so it
+  // stays an error. The message says the shape is unavailable rather than
+  // implying the branch is wrong.
   let spec = parse_branch(&branch_name).ok_or_else(|| {
     GwmError::Other(format!(
-      "branch '{}' does not follow the gwm convention <type>/#<issue>-<slug> — \
-       cannot derive a commit prefix from it",
+      "branch '{}' carries no <type>/#<issue>-<slug> to read — a commit prefix is derived from the \
+       branch type, so a free-form branch has none. Pass --branch <structured-name>, or write the \
+       prefix by hand",
       branch_name
     ))
   })?;

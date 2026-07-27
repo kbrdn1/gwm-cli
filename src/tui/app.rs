@@ -3846,8 +3846,12 @@ impl App {
       return;
     };
     let Some(spec) = crate::naming::parse_branch(&branch) else {
+      // Issue #416: a free-form worktree lands here by design, not by
+      // mistake. The edit form rebuilds a `<type>/#<issue>-<desc>` triple,
+      // which a name the user chose on purpose has none of — so state that
+      // this form does not apply rather than implying a malformed branch.
       self.status = format!(
-        "branch '{}' doesn't match <type>/#<issue>-<desc>; can't rename here",
+        "'{}' is a free-form branch — the edit form rebuilds <type>/#<issue>-<desc>; rename it with git",
         branch
       );
       return;
