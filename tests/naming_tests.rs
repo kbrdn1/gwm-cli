@@ -289,7 +289,7 @@ fn the_probe_expands_repo_with_the_real_repo_name() {
   let w = branch_pattern_warning("{repo}/#{issue}-{desc}", "gwm-cli", &default_branch_types())
     .expect("must warn for this repo");
   assert!(
-    w.contains("matches nothing"),
+    w.contains("match nothing at all"),
     "in a repo whose name has a dash this pattern parses back to nothing: {}",
     w
   );
@@ -329,8 +329,8 @@ fn a_partially_parseable_pattern_is_not_generalised_to_every_branch() {
   let w = branch_pattern_warning("{desc}/#{issue}-{type}", "gwm-cli", &default_branch_types())
     .expect("a lossy pattern must warn");
   assert!(
-    w.contains("round-trips only for some values"),
-    "the warning must scope itself to the values that break: {}",
+    w.contains("match nothing at all") && w.contains("parse but read back"),
+    "both outcomes occur here, so both must be reported: {}",
     w
   );
 }
@@ -345,8 +345,8 @@ fn a_digits_only_desc_is_probed_so_the_verdict_stays_partial() {
   let w = branch_pattern_warning("{type}/#{desc}-{issue}", "gwm-cli", &default_branch_types())
     .expect("a swapped pattern must warn");
   assert!(
-    w.contains("round-trips only for some values"),
-    "a digits-only desc parses, so the loss is partial, not total: {}",
+    w.contains("match nothing at all") && w.contains("parse but read back"),
+    "a digits-only desc parses, so the verdict carries both counts, not a total loss: {}",
     w
   );
 }
@@ -361,21 +361,95 @@ fn a_partly_lossy_pattern_quantifies_instead_of_generalising() {
   let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types())
     .expect("a hardcoded type must warn");
   assert!(
-    w.contains("does not round-trip for every branch it can produce") && w.contains(" of the "),
-    "the warning must count the shapes that lose something, not claim all of them do: {}",
+    w.contains("of the ") && w.contains("branch shapes probed"),
+    "the warning must count the shapes it probed, not claim all branches lose something: {}",
     w
   );
 }
 
-/// The universal case still reads as one: every probe loses `desc` here, so
-/// there is nothing to quantify.
+/// The verdict is observational in *every* shape. No message may claim
+/// anything about branches outside the probe set: which values matter
+/// depends on the pattern, so that set cannot be closed without deriving
+/// the parser from the pattern (#417). A class the probes miss can only
+/// make the counts smaller — never make the statement false.
 #[test]
-fn a_wholly_lossy_pattern_states_it_plainly() {
-  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}", "gwm-cli", &default_branch_types())
-    .expect("a lossy pattern must warn");
-  assert!(
-    !w.contains("of the") && w.contains("does not round-trip: "),
-    "every probe loses `desc`, so no count is needed: {}",
-    w
+fn every_verdict_is_scoped_to_the_shapes_actually_probed() {
+  for pattern in [
+    "{type}-{issue}-{desc}",
+    "{type}/#{issue}-prefix-{desc}",
+    "feat/#{issue}-{desc}",
+    "{desc}/#{issue}-{type}",
+    "{type}/#{issue}{desc}",
+  ] {
+    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
+      .unwrap_or_else(|| panic!("`{}` must warn", pattern));
+    assert!(
+      w.contains("of the ") && w.contains("branch shapes probed"),
+      "`{}` produced an unquantified verdict: {}",
+      pattern,
+      w
+    );
+  }
+}
+
+/// Guard for the "which patterns actually work today" table in
+/// `docs/4.configuration/1.gwm-toml.md` (EN + FR). The docs make concrete
+/// promises about specific patterns; this pins them so the table cannot
+/// drift away from the code. Every expectation below was read off the real
+/// `branch_pattern_warning` output, not assumed.
+#[test]
+fn the_documented_pattern_table_matches_reality() {
+  // Round-trips: the default, for any set of configured types.
+  assert_eq!(
+    branch_pattern_warning("{type}/#{issue}-{desc}", "gwm-cli", &default_branch_types()),
+    None
   );
+
+  // Round-trips: a literal type, but only when it is the *only* configured
+  // branch type — `BRANCH_RE` reads the literal back as the type.
+  let only_feat = vec![BranchType {
+    name: "feat".into(),
+    description: "New feature implementation".into(),
+  }];
+  assert_eq!(
+    branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &only_feat),
+    None
+  );
+
+  // Documented as "nothing parses": any change to the `<type>/#<issue>-<desc>`
+  // skeleton the hardcoded parser expects.
+  for pattern in [
+    "{type}/{issue}-{desc}",         // no `#`
+    "{type}-{issue}-{desc}",         // no `/`
+    "{type}/#{issue}_{desc}",        // `_` instead of `-`
+    "{type}/#{issue}",               // no desc
+    "{repo}/{type}/#{issue}-{desc}", // extra leading segment
+    "wt/{type}/#{issue}-{desc}",     // extra leading segment
+  ] {
+    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
+      .unwrap_or_else(|| panic!("`{}` is documented as fully broken but did not warn", pattern));
+    assert!(
+      w.contains("match nothing at all"),
+      "`{}` is documented as fully unparseable: {}",
+      pattern,
+      w
+    );
+  }
+
+  // Documented as "parses, wrong desc": anything glued after `{desc}`, or a
+  // literal wedged between the `-` and `{desc}`.
+  for pattern in [
+    "{type}/#{issue}-{desc}-{repo}",
+    "{type}/#{issue}-{desc}{desc}",
+    "{type}/#{issue}-prefix-{desc}",
+  ] {
+    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
+      .unwrap_or_else(|| panic!("`{}` is documented as lossy but did not warn", pattern));
+    assert!(
+      w.contains("parse but read back `desc`") && !w.contains("match nothing at all"),
+      "`{}` is documented as parseable-but-wrong-desc: {}",
+      pattern,
+      w
+    );
+  }
 }

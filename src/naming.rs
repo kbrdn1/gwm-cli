@@ -199,28 +199,28 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 /// for the same reason: a type gwm would refuse to create must not produce a
 /// warning about branches that cannot exist.
 ///
-/// **Invariant.** Round-trip is value-dependent, so a probe at a handful of
-/// arbitrary values proves nothing either way. The probe space here is the
-/// value space `BranchSpec::validate_against` actually admits, enumerated by
-/// construction rather than sampled:
+/// **Invariant: this function reports what it observed, and never
+/// generalises.** Whether a pattern round-trips depends on the values put
+/// through it, and which values matter depends on the pattern — the
+/// separator ambiguity of `{desc}-{issue}` is not the ambiguity of
+/// `{issue}{desc}`. That space cannot be closed by any fixed value set, only
+/// by deriving the parser from the pattern (#417). So the probe set is
+/// deliberately described as *classes worth probing*, not as exhaustive, and
+/// every message is phrased over "the N branch shapes probed". A class this
+/// set happens to miss can only make the counts smaller — it can never make
+/// the statement false.
 ///
-/// - `type` — every configured branch type. Finite, so this is exhaustive.
-/// - `issue` — `ISSUE_RE` is `\d+`: one single-digit, one multi-digit, the
-///   only distinction `BRANCH_RE`'s `\d+` can split on.
-/// - `desc` — `DESC_RE` is `[a-z0-9][a-z0-9-]*`: one with the `-` it allows,
-///   one without, and one all-digits. The dash is the only character that
-///   makes a desc collide with a literal separator; the digits-only case is
-///   the only one that can be swallowed by `BRANCH_RE`'s `\d+` issue group
-///   (`{type}/#{desc}-{issue}` parses for `desc = "123"` and for nothing
-///   else, which is a partial round-trip, not a total loss).
-///
-/// A pattern that round-trips over all of it is the strongest claim this
-/// check can make without deriving the parser from the pattern (#417), and
-/// a pattern that breaks on part of it is reported as breaking on *part* —
-/// never generalised to every branch.
+/// - `type` — every configured branch type. Finite, so this one *is*
+///   exhaustive, and a type gwm would refuse to create is excluded.
+/// - `issue` — `ISSUE_RE` is `\d+`: single-digit and multi-digit.
+/// - `desc` — `DESC_RE` is `[a-z0-9][a-z0-9-]*`: a plain word, one carrying
+///   the `-` it allows, one all-digits, and one that starts with digits and
+///   then carries a `-`. The dash collides with a literal separator; leading
+///   digits get swallowed by `BRANCH_RE`'s `\d+` issue group
+///   (`{type}/#{issue}{desc}` parses only for a desc starting with digits).
 pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -> Option<String> {
   const ISSUES: [&str; 2] = ["7", "42"];
-  const DESCS: [&str; 3] = ["probe", "probe-desc", "123"];
+  const DESCS: [&str; 4] = ["probe", "probe-desc", "123", "123-probe"];
 
   let (mut unparseable, mut parsed, mut lossy) = (None::<String>, 0usize, 0usize);
   let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
@@ -264,82 +264,48 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
     return None;
   }
 
-  if let Some(formatted) = unparseable {
-    if parsed == 0 {
-      return Some(format!(
-        "worktree.branch_pattern `{}` produces branch names gwm cannot parse back (`{}` matches nothing); issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check will be inactive on branches created with this pattern",
-        pattern, formatted
-      ));
-    }
-    // Some values parse and some do not — say exactly that. Claiming the
-    // whole pattern is unreadable would be as wrong as claiming it is fine.
-    let mut msg = format!(
-      "worktree.branch_pattern `{}` round-trips only for some values: `{}` matches nothing, so issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on the branches that come out like it",
-      pattern, formatted
-    );
-    if lossy > 0 {
-      msg.push_str(&format!(
-        "; and on {} of the {} that do parse, gwm reads back the wrong {}",
-        lossy,
-        parsed,
-        segment_list(bad_type, bad_issue, bad_desc)
-      ));
-    }
-    return Some(msg);
-  }
-
-  // Every segment feeds `HookContext::for_worktree` (hook placeholders) and
-  // the TUI rename, on top of its own headline consumer — naming only the
-  // headline would under-report exactly what this warning promises to name.
-  let mut broken: Vec<&str> = Vec::new();
-  if bad_type {
-    broken
-      .push("`type`, so gitmoji selection, lifecycle hook placeholders and the TUI rename read the wrong branch type");
-  }
-  if bad_issue {
-    broken
-      .push("`issue`, so issue/PR auto-linking, lifecycle hook placeholders and the TUI rename target the wrong issue");
-  }
-  if bad_desc {
-    broken.push("`desc`, so lifecycle hook placeholders and the TUI rename see the wrong description");
-  }
-  if broken.is_empty() {
+  let unparsed = probes - parsed;
+  if unparsed == 0 && lossy == 0 {
     return None;
   }
-  // Scope to the probes that actually lost something. `lossy == probes` is
-  // the universal case and reads as one; anything less is quantified, never
-  // generalised to every branch the pattern can produce.
-  Some(if lossy == probes {
-    format!(
-      "worktree.branch_pattern `{}` does not round-trip: gwm reads back {}",
-      pattern,
-      broken.join("; ")
-    )
-  } else {
-    format!(
-      "worktree.branch_pattern `{}` does not round-trip for every branch it can produce: on {} of the {} branch shapes probed, gwm reads back {}",
-      pattern,
-      lossy,
-      probes,
-      broken.join("; ")
-    )
-  })
-}
 
-/// Render the set of segments that came back wrong somewhere, for the
-/// count-scoped clause. Kept separate from the prose list above because the
-/// mixed verdict names segments without repeating each one's consumers —
-/// the sentence already carries them.
-fn segment_list(bad_type: bool, bad_issue: bool, bad_desc: bool) -> String {
-  [
-    bad_type.then_some("`type`"),
-    bad_issue.then_some("`issue`"),
-    bad_desc.then_some("`desc`"),
-  ]
-  .into_iter()
-  .flatten()
-  .collect::<Vec<_>>()
-  .join(" / ")
+  // One message shape, always a count over the probed shapes. There is no
+  // branch that says "every branch created with this pattern", because that
+  // is precisely the claim the probe set cannot support.
+  let mut parts: Vec<String> = Vec::new();
+  if let Some(example) = unparseable {
+    parts.push(format!(
+      "{} match nothing at all (e.g. `{}`), so issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on those",
+      unparsed, example
+    ));
+  }
+  if lossy > 0 {
+    // Every segment feeds `HookContext::for_worktree` (hook placeholders) and
+    // the TUI rename, on top of its own headline consumer — naming only the
+    // headline would under-report exactly what this warning promises to name.
+    let mut broken: Vec<&str> = Vec::new();
+    if bad_type {
+      broken.push(
+        "`type`, so gitmoji selection, lifecycle hook placeholders and the TUI rename read the wrong branch type",
+      );
+    }
+    if bad_issue {
+      broken.push(
+        "`issue`, so issue/PR auto-linking, lifecycle hook placeholders and the TUI rename target the wrong issue",
+      );
+    }
+    if bad_desc {
+      broken.push("`desc`, so lifecycle hook placeholders and the TUI rename see the wrong description");
+    }
+    parts.push(format!("{} parse but read back {}", lossy, broken.join("; ")));
+  }
+
+  Some(format!(
+    "worktree.branch_pattern `{}` does not round-trip: of the {} branch shapes probed, {}",
+    pattern,
+    probes,
+    parts.join("; and ")
+  ))
 }
 
 pub fn kebab(input: &str) -> String {
