@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `gwm doctor` and `gwm config validate` now warn when
+  `worktree.branch_pattern` differs from the default `{type}/#{issue}-{desc}`.
+  The pattern drives how a branch name is *written* but not how one is *read
+  back* — the parser is still a hardcoded regex — so customising it silently
+  disabled issue/PR auto-linking, gitmoji selection and the branch-convention
+  check. The warning names those consequences instead of leaving the user to
+  discover them. `gwm config validate` prints it on stderr and still exits `0`:
+  a custom pattern is valid configuration, not an error. This states the
+  limitation, it does not remove it — deriving the parser from the pattern is
+  tracked by #417. ([#415](https://github.com/kbrdn1/gwm-cli/issues/415))
+
 ### Docs
 
 - `changelogs/1.5.0.md` was corrected after the `v1.5.0` tag: its caveat said
