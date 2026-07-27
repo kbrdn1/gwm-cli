@@ -28,7 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only some values is reported as breaking on only some values. `gwm config validate` prints it on
   stderr, reads the *effective* pattern so one set only in the global
   `~/.config/gwm/config.toml` is caught too, and still exits `0`: a custom
-  pattern is valid configuration, not an error. This states the limitation, it
+  pattern is valid configuration, not an error (`gwm doctor` reports it as a
+  `!` check, so that command exits `1` like any other Warning). The
+  config-supplied pattern is neutralised for control characters before it is
+  echoed — neither command goes through the trust gate, so an unvetted
+  `.gwm.toml` must not get a terminal escape channel out of a health check. This states the limitation, it
   does not remove it — deriving the parser from the pattern is tracked by #417.
   ([#415](https://github.com/kbrdn1/gwm-cli/issues/415))
 

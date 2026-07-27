@@ -487,3 +487,53 @@ fn an_unusable_branch_type_never_makes_the_default_pattern_look_broken() {
     None
   );
 }
+
+/// Issue #415 (Codex review, P1): `branch_pattern` is repo-supplied and
+/// neither `gwm doctor` nor `gwm config validate` goes through the TOFU
+/// trust gate, so running either in an unvetted repo must not hand its
+/// `.gwm.toml` a terminal escape channel (OSC 52 clipboard write, title
+/// rewrite). Both the pattern and the formatted example are echoed, so both
+/// have to be neutralised.
+#[test]
+fn control_characters_in_the_pattern_never_reach_the_terminal() {
+  // OSC 52 clipboard-write shape: ESC ] 52 ; c ; <payload> BEL
+  let hostile = "{type}/#{issue}-{desc}\u{1b}]52;c;cHduZWQ=\u{7}";
+  let w = branch_pattern_warning(hostile, "gwm-cli", &default_branch_types())
+    .expect("a pattern carrying control bytes must warn");
+  assert!(
+    !w.chars().any(|c| c.is_control()),
+    "no control character may survive into the message: {:?}",
+    w
+  );
+  // The value stays recognisable — neutralised, not silently dropped.
+  assert!(w.contains("{type}/#{issue}-{desc}"), "got: {}", w);
+
+  // Same for the formatted example, which is built from the pattern.
+  let w = branch_pattern_warning("{type}\u{1b}[2J{issue}", "gwm-cli", &default_branch_types()).expect("must warn");
+  assert!(
+    !w.chars().any(|c| c.is_control()),
+    "the `e.g.` example is echoed too: {:?}",
+    w
+  );
+}
+
+/// Issue #415 (Codex review): PR/MR detection goes through
+/// `Forge::find_pr_for_branch`, which queries the forge with the *whole*
+/// branch name and never parses it — it keeps working whatever the pattern.
+/// `gwm pr` does call `parse_branch`, for `[pr_template.by_type]` and its
+/// body placeholders, and that consumer has to be named.
+#[test]
+fn the_consumer_mapping_matches_the_call_sites() {
+  let w = branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli", &default_branch_types())
+    .expect("an unparseable pattern must warn");
+  assert!(
+    w.contains("PR/MR detection is unaffected"),
+    "PR detection survives an unreadable pattern — do not claim otherwise: {}",
+    w
+  );
+  assert!(
+    w.contains("`gwm pr` template selection and placeholders"),
+    "`gwm pr` parses the branch and must be named as broken: {}",
+    w
+  );
+}

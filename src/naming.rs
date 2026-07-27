@@ -287,37 +287,57 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   let mut parts: Vec<String> = Vec::new();
   if let Some(example) = unparseable {
     parts.push(format!(
-      "{} match nothing at all (e.g. `{}`), so issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on those",
-      unparsed, example
+      "{} match nothing at all (e.g. `{}`), so issue auto-linking from the branch name, gitmoji / `gwm commit-prefix`, `gwm pr` template selection and placeholders, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on those (PR/MR detection is unaffected — it queries the forge with the full branch name)",
+      unparsed,
+      sanitise_for_terminal(&example)
     ));
   }
   if lossy > 0 {
-    // Every segment feeds `HookContext::for_worktree` (hook placeholders) and
-    // the TUI rename, on top of its own headline consumer — naming only the
-    // headline would under-report exactly what this warning promises to name.
+    // Every segment feeds `HookContext::for_worktree` (hook placeholders),
+    // the TUI rename and `cmd_pr`'s template context, on top of its own
+    // headline consumer — naming only the headline would under-report
+    // exactly what this warning promises to name. `issue` is specifically
+    // *issue* linking: PR/MR detection goes through
+    // `Forge::find_pr_for_branch`, which takes the whole branch name and
+    // never parses it, so it keeps working whatever the pattern.
     let mut broken: Vec<&str> = Vec::new();
     if bad_type {
       broken.push(
-        "`type`, so gitmoji selection, lifecycle hook placeholders and the TUI rename read the wrong branch type",
+        "`type`, so gitmoji / `gwm commit-prefix`, `[pr_template.by_type]` selection, lifecycle hook placeholders and the TUI rename read the wrong branch type",
       );
     }
     if bad_issue {
       broken.push(
-        "`issue`, so issue/PR auto-linking, lifecycle hook placeholders and the TUI rename target the wrong issue",
+        "`issue`, so issue auto-linking from the branch name, `gwm pr` body placeholders, lifecycle hook placeholders and the TUI rename target the wrong issue",
       );
     }
     if bad_desc {
-      broken.push("`desc`, so lifecycle hook placeholders and the TUI rename see the wrong description");
+      broken.push(
+        "`desc`, so `gwm pr` body placeholders, lifecycle hook placeholders and the TUI rename see the wrong description",
+      );
     }
     parts.push(format!("{} parse but read back {}", lossy, broken.join("; ")));
   }
 
   Some(format!(
     "worktree.branch_pattern `{}` does not round-trip: of the {} branch shapes probed, {}",
-    pattern,
+    sanitise_for_terminal(pattern),
     probes,
     parts.join("; and ")
   ))
+}
+
+/// Neutralise control characters before echoing a config-supplied value.
+///
+/// `branch_pattern` comes from a repo's `.gwm.toml`, and neither `gwm doctor`
+/// nor `gwm config validate` goes through the TOFU trust gate — running
+/// either inside a repo you have not vetted is meant to be safe. Echoing the
+/// raw value would hand an untrusted `.gwm.toml` a terminal escape channel
+/// (an OSC 52 clipboard write, a title rewrite, cursor games). Same idiom as
+/// [`crate::tui::wt_tree::sanitize_name`]: replace, don't strip, so the value
+/// stays recognisable and its length is not silently altered.
+fn sanitise_for_terminal(s: &str) -> String {
+  s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
 }
 
 pub fn kebab(input: &str) -> String {
