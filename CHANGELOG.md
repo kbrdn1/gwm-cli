@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   segments actually break: a custom pattern is not automatically a broken one
   (`{type}/#{issue}-prefix-{desc}` still recovers `type` and `issue`, only
   `desc` comes back wrong), and claiming otherwise would defeat the point of a
-  warning whose whole value is accuracy. `gwm config validate` prints it on
+  warning whose whole value is accuracy. The probe enumerates the value space
+  `gwm create` admits rather than sampling it — every configured branch type,
+  a single- and a multi-digit issue, a desc with and without the `-` it
+  allows, and the real repo name for `{repo}` — so a pattern that breaks on
+  only some values is reported as breaking on only some values. `gwm config validate` prints it on
   stderr, reads the *effective* pattern so one set only in the global
   `~/.config/gwm/config.toml` is caught too, and still exits `0`: a custom
   pattern is valid configuration, not an error. This states the limitation, it
