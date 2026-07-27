@@ -350,3 +350,32 @@ fn a_digits_only_desc_is_probed_so_the_verdict_stays_partial() {
     w
   );
 }
+
+/// Issue #415 (Codex review): the per-segment flags accumulate across probes,
+/// so reporting them as if they held for every parsed branch over-claims.
+/// `feat/#{issue}-{desc}` round-trips for the `feat` probes and loses the
+/// type for every other configured type — the verdict has to be quantified,
+/// not universal.
+#[test]
+fn a_partly_lossy_pattern_quantifies_instead_of_generalising() {
+  let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types())
+    .expect("a hardcoded type must warn");
+  assert!(
+    w.contains("does not round-trip for every branch it can produce") && w.contains(" of the "),
+    "the warning must count the shapes that lose something, not claim all of them do: {}",
+    w
+  );
+}
+
+/// The universal case still reads as one: every probe loses `desc` here, so
+/// there is nothing to quantify.
+#[test]
+fn a_wholly_lossy_pattern_states_it_plainly() {
+  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}", "gwm-cli", &default_branch_types())
+    .expect("a lossy pattern must warn");
+  assert!(
+    !w.contains("of the") && w.contains("does not round-trip: "),
+    "every probe loses `desc`, so no count is needed: {}",
+    w
+  );
+}

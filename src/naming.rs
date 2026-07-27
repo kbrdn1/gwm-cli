@@ -222,7 +222,7 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   const ISSUES: [&str; 2] = ["7", "42"];
   const DESCS: [&str; 3] = ["probe", "probe-desc", "123"];
 
-  let (mut unparseable, mut parsed) = (None::<String>, 0usize);
+  let (mut unparseable, mut parsed, mut lossy) = (None::<String>, 0usize, 0usize);
   let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
   let mut probes = 0usize;
 
@@ -239,9 +239,18 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
           }
           Some(back) => {
             parsed += 1;
-            bad_type |= back.type_ != type_;
-            bad_issue |= back.issue != issue;
-            bad_desc |= back.desc != desc;
+            let (t, i, d) = (back.type_ != type_, back.issue != issue, back.desc != desc);
+            // `lossy` counts probes, the flags accumulate across them. The
+            // distinction matters: the flags say *which* segments can come
+            // back wrong somewhere, `lossy` says *how many* shapes they came
+            // back wrong on. Reporting the flags as if they held for every
+            // parsed probe is the over-claim this counter exists to stop —
+            // `{desc}/#{issue}-{type}` has probes that round-trip perfectly
+            // alongside probes that swap two segments.
+            lossy += usize::from(t || i || d);
+            bad_type |= t;
+            bad_issue |= i;
+            bad_desc |= d;
           }
         }
       }
@@ -268,19 +277,13 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
       "worktree.branch_pattern `{}` round-trips only for some values: `{}` matches nothing, so issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on the branches that come out like it",
       pattern, formatted
     );
-    if bad_type || bad_issue || bad_desc {
-      msg.push_str("; and on the ones that do parse, gwm reads back the wrong ");
-      msg.push_str(
-        &[
-          bad_type.then_some("`type`"),
-          bad_issue.then_some("`issue`"),
-          bad_desc.then_some("`desc`"),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" / "),
-      );
+    if lossy > 0 {
+      msg.push_str(&format!(
+        "; and on {} of the {} that do parse, gwm reads back the wrong {}",
+        lossy,
+        parsed,
+        segment_list(bad_type, bad_issue, bad_desc)
+      ));
     }
     return Some(msg);
   }
@@ -303,11 +306,40 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   if broken.is_empty() {
     return None;
   }
-  Some(format!(
-    "worktree.branch_pattern `{}` does not round-trip: gwm reads back {}",
-    pattern,
-    broken.join("; ")
-  ))
+  // Scope to the probes that actually lost something. `lossy == probes` is
+  // the universal case and reads as one; anything less is quantified, never
+  // generalised to every branch the pattern can produce.
+  Some(if lossy == probes {
+    format!(
+      "worktree.branch_pattern `{}` does not round-trip: gwm reads back {}",
+      pattern,
+      broken.join("; ")
+    )
+  } else {
+    format!(
+      "worktree.branch_pattern `{}` does not round-trip for every branch it can produce: on {} of the {} branch shapes probed, gwm reads back {}",
+      pattern,
+      lossy,
+      probes,
+      broken.join("; ")
+    )
+  })
+}
+
+/// Render the set of segments that came back wrong somewhere, for the
+/// count-scoped clause. Kept separate from the prose list above because the
+/// mixed verdict names segments without repeating each one's consumers —
+/// the sentence already carries them.
+fn segment_list(bad_type: bool, bad_issue: bool, bad_desc: bool) -> String {
+  [
+    bad_type.then_some("`type`"),
+    bad_issue.then_some("`issue`"),
+    bad_desc.then_some("`desc`"),
+  ]
+  .into_iter()
+  .flatten()
+  .collect::<Vec<_>>()
+  .join(" / ")
 }
 
 pub fn kebab(input: &str) -> String {
