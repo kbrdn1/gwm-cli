@@ -161,6 +161,115 @@ impl BranchSpec {
   }
 }
 
+/// How a worktree got its name (issue #416).
+///
+/// [`Self::Structured`] is the canonical `<type>/#<issue>-<desc>` triple that
+/// `branch_pattern` / `path_pattern` expand. [`Self::Freeform`] is a name the
+/// user simply chose — `gwm create --name spike-redis` — and it deliberately
+/// escapes the convention: no branch type, no issue, no `DESC_RE`.
+///
+/// The patterns do not apply to a free-form name, because they are written in
+/// terms of `{type}` / `{issue}` / `{desc}` and it has none of them. `base`
+/// still applies (it only uses `{home}` / `{repo}`), so a free-form worktree
+/// lands beside the structured ones rather than somewhere else.
+#[derive(Debug, Clone)]
+pub enum WorktreeName {
+  Structured(BranchSpec),
+  /// Already validated by [`WorktreeName::freeform`] — constructing this
+  /// variant directly bypasses the ref/path checks.
+  Freeform(String),
+}
+
+impl WorktreeName {
+  /// Validate a user-supplied free-form name.
+  ///
+  /// The bar is deliberately low: git-ref legality and single-path-component
+  /// safety, nothing else. `Spike_Redis`, `2026.07.27` and `réécriture` are
+  /// all fine — refusing them would defeat the point of the flag.
+  ///
+  /// Ref legality is delegated to libgit2's own
+  /// [`git2::Reference::is_valid_name`] against the real `refs/heads/<name>`
+  /// the branch will occupy, rather than a hand-written rule list: the
+  /// authority on what git accepts is git.
+  pub fn freeform(input: &str) -> Result<Self> {
+    let name = input.trim();
+    let reject = |reason: &str| {
+      Err(GwmError::InvalidWorktreeName {
+        name: input.to_string(),
+        reason: reason.to_string(),
+      })
+    };
+
+    if name.is_empty() {
+      return reject("empty");
+    }
+    // Checked before the ref oracle so the message points at the real
+    // problem: git happily accepts `..` inside a longer component, but a
+    // worktree directory named `..` would escape the base directory.
+    if name.split('/').any(|part| part == "." || part == "..") {
+      return reject("`.` and `..` are not usable as a directory name");
+    }
+    if name.contains('\0') {
+      return reject("contains a NUL byte");
+    }
+    // Not a git rule: libgit2 accepts `refs/heads/-x` quite happily
+    // (verified — the ref oracle below lets it through). It is an
+    // *ergonomics* rule. A leading `-` makes the name unusable as an
+    // argument to every command that would take it back: `gwm remove -x`,
+    // `git branch -d -x`, `cd -x` all read it as a flag.
+    if name.starts_with('-') {
+      return reject("a leading `-` makes the name unusable as a command argument");
+    }
+
+    // The branch will live at `refs/heads/<name>`; validate exactly that.
+    if !git2::Reference::is_valid_name(&format!("refs/heads/{}", name)) {
+      return reject(
+        "not a valid git branch name — git rejects spaces, `~ ^ : ? * [ \\`, `@{`, `..`, \
+         leading/trailing `/`, a trailing `.` and a `.lock` suffix",
+      );
+    }
+
+    Ok(Self::Freeform(name.to_string()))
+  }
+
+  /// The branch this worktree gets. Structured names expand
+  /// `branch_pattern`; free-form names are the branch.
+  pub fn branch_name(&self, cfg: &WorktreeConfig, repo: &str) -> Result<String> {
+    match self {
+      Self::Structured(spec) => spec.branch_name(cfg, repo),
+      Self::Freeform(name) => Ok(name.clone()),
+    }
+  }
+
+  /// The worktree directory name. A branch may carry `/`; a directory is a
+  /// single path component, so it flattens to `-` — the same relationship
+  /// the default `branch_pattern` / `path_pattern` pair already has
+  /// (`feat/#42-x` on disk is `feat-42-x`).
+  pub fn worktree_dirname(&self, cfg: &WorktreeConfig, repo: &str) -> Result<String> {
+    match self {
+      Self::Structured(spec) => spec.worktree_dirname(cfg, repo),
+      Self::Freeform(name) => Ok(name.replace('/', "-")),
+    }
+  }
+
+  /// Absolute worktree path: `base` (expanded) joined with the directory
+  /// name. `base` applies in both modes.
+  pub fn worktree_path(
+    &self,
+    cfg: &WorktreeConfig,
+    repo: &str,
+    repo_path: &std::path::Path,
+  ) -> Result<std::path::PathBuf> {
+    match self {
+      Self::Structured(spec) => spec.worktree_path(cfg, repo, repo_path),
+      Self::Freeform(_) => {
+        let base = expand_placeholders(&cfg.base, repo, None, None, None, Some(repo_path))?;
+        Ok(std::path::PathBuf::from(base).join(self.worktree_dirname(cfg, repo)?))
+      }
+    }
+  }
+}
+
 /// Try to recover a BranchSpec from a free-form branch name like `feat/#123-my-desc`.
 pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
   let cap = BRANCH_RE.captures(branch)?;

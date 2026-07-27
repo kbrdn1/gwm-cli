@@ -1,5 +1,7 @@
 use gwm::config::{BranchType, WorktreeConfig};
-use gwm::naming::{branch_pattern_warning, default_branch_types, kebab, parse_branch, BranchSpec, BRANCH_TYPES};
+use gwm::naming::{
+  branch_pattern_warning, default_branch_types, kebab, parse_branch, BranchSpec, WorktreeName, BRANCH_TYPES,
+};
 
 #[test]
 fn naming_regexes_compile_at_first_use() {
@@ -541,4 +543,101 @@ fn the_consumer_mapping_matches_the_call_sites() {
     "`gwm create` passes the original BranchSpec to its hooks — only remove/bootstrap re-parse: {}",
     w
   );
+}
+
+// ---------------------------------------------------------------------
+// Issue #416 — free-form worktree naming. `WorktreeName` splits the
+// structured triple from a name the user simply chose. Free-form names
+// are checked for git-ref and filesystem safety only, never against
+// `DESC_RE` — the whole point is not having to obey the convention.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_freeform_name_is_kept_as_typed_when_it_is_already_safe() {
+  let n = WorktreeName::freeform("spike-redis").expect("a plain slug is valid");
+  let cfg = WorktreeConfig::default();
+  assert_eq!(n.branch_name(&cfg, "gwm-cli").unwrap(), "spike-redis");
+  assert_eq!(n.worktree_dirname(&cfg, "gwm-cli").unwrap(), "spike-redis");
+}
+
+/// Free-form means free-form: shapes `DESC_RE` rejects are fine here.
+#[test]
+fn a_freeform_name_is_not_held_to_the_desc_convention() {
+  for name in ["Spike_Redis", "2026.07.27", "réécriture", "WIP"] {
+    assert!(
+      WorktreeName::freeform(name).is_ok(),
+      "`{}` is a legal git ref and must be accepted",
+      name
+    );
+  }
+}
+
+/// `branch_pattern` / `path_pattern` are defined in terms of `{type}`,
+/// `{issue}` and `{desc}`, none of which a free-form name has, so they do
+/// not apply. `base` still does — it only uses `{home}` / `{repo}`.
+#[test]
+fn patterns_do_not_apply_to_a_freeform_name_but_base_still_does() {
+  let cfg = WorktreeConfig {
+    base: "/tmp/{repo}".into(),
+    path_pattern: "{type}-{issue}-{desc}".into(),
+    branch_pattern: "{type}/#{issue}-{desc}".into(),
+  };
+  let n = WorktreeName::freeform("spike-redis").unwrap();
+  assert_eq!(n.branch_name(&cfg, "r").unwrap(), "spike-redis");
+  let p = n.worktree_path(&cfg, "r", std::path::Path::new("/repos/r")).unwrap();
+  assert_eq!(p, std::path::Path::new("/tmp/r/spike-redis"));
+}
+
+/// A `/` is legal in a branch name and a common convention, but a worktree
+/// directory is a single path component — same split the structured mode
+/// already makes between `branch_pattern` and `path_pattern`.
+#[test]
+fn a_slash_survives_in_the_branch_and_flattens_in_the_directory() {
+  let n = WorktreeName::freeform("spike/redis").expect("a slash is a legal ref");
+  let cfg = WorktreeConfig::default();
+  assert_eq!(n.branch_name(&cfg, "r").unwrap(), "spike/redis");
+  assert_eq!(n.worktree_dirname(&cfg, "r").unwrap(), "spike-redis");
+}
+
+/// Rejected against libgit2's own `refs/heads/<name>` check rather than a
+/// hand-written rule list, plus the path-component rules a ref check does
+/// not cover.
+#[test]
+fn a_freeform_name_that_git_or_the_filesystem_would_refuse_is_rejected() {
+  for bad in [
+    "",            // empty
+    "   ",         // whitespace only
+    "..",          // path traversal
+    "a..b",        // git: no double dot
+    "-leading",    // git: no leading dash on a ref component
+    "trailing.",   // git: no trailing dot
+    "has space",   // git: no space
+    "tilde~1",     // git: no tilde
+    "caret^",      // git: no caret
+    "colon:",      // git: no colon
+    "quest?",      // git: no question mark
+    "star*",       // git: no asterisk
+    "brack[et",    // git: no open bracket
+    "back\\slash", // git: no backslash
+    "at@{brace",   // git: no @{
+    "ends.lock",   // git: no .lock suffix
+    "ctrl\u{7}x",  // control byte
+    "/leading",    // empty ref component
+    "trailing/",   // empty ref component
+    "double//slash",
+  ] {
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` must be rejected as a worktree name",
+      bad
+    );
+  }
+}
+
+/// The rejection has to say what is wrong, not just that something is.
+#[test]
+fn the_rejection_names_the_offending_value() {
+  let err = WorktreeName::freeform("has space").unwrap_err();
+  let msg = format!("{}", err);
+  assert!(msg.contains("has space"), "the message must quote the input: {}", msg);
 }
