@@ -536,4 +536,9 @@ fn the_consumer_mapping_matches_the_call_sites() {
     "`gwm pr` parses the branch and must be named as broken: {}",
     w
   );
+  assert!(
+    w.contains("remove/bootstrap hook placeholders") && !w.contains("lifecycle hook placeholders"),
+    "`gwm create` passes the original BranchSpec to its hooks — only remove/bootstrap re-parse: {}",
+    w
+  );
 }

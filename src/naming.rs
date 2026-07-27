@@ -287,33 +287,40 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   let mut parts: Vec<String> = Vec::new();
   if let Some(example) = unparseable {
     parts.push(format!(
-      "{} match nothing at all (e.g. `{}`), so issue auto-linking from the branch name, gitmoji / `gwm commit-prefix`, `gwm pr` template selection and placeholders, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on those (PR/MR detection is unaffected — it queries the forge with the full branch name)",
+      "{} match nothing at all (e.g. `{}`), so issue auto-linking from the branch name, gitmoji / `gwm commit-prefix`, `gwm pr` template selection and placeholders, remove/bootstrap hook placeholders, the TUI rename and the branch-convention check are inactive on those (PR/MR detection is unaffected — it queries the forge with the full branch name)",
       unparsed,
       sanitise_for_terminal(&example)
     ));
   }
   if lossy > 0 {
-    // Every segment feeds `HookContext::for_worktree` (hook placeholders),
-    // the TUI rename and `cmd_pr`'s template context, on top of its own
-    // headline consumer — naming only the headline would under-report
-    // exactly what this warning promises to name. `issue` is specifically
-    // *issue* linking: PR/MR detection goes through
-    // `Forge::find_pr_for_branch`, which takes the whole branch name and
-    // never parses it, so it keeps working whatever the pattern.
+    // Every segment feeds the TUI rename and `cmd_pr`'s template context on
+    // top of its own headline consumer — naming only the headline would
+    // under-report exactly what this warning promises to name. Two
+    // boundaries keep the claim honest:
+    //
+    // - `issue` is specifically *issue* linking. PR/MR detection goes through
+    //   `Forge::find_pr_for_branch`, which takes the whole branch name and
+    //   never parses it, so it keeps working whatever the pattern.
+    // - hook placeholders break on the **remove / bootstrap** paths only.
+    //   Those rebuild the context with `HookContext::for_worktree`, which
+    //   re-parses the branch. `gwm create` uses `HookContext::for_create` and
+    //   passes the original `BranchSpec` straight through, so its own hooks
+    //   keep the right `type` / `issue` / `desc` however unreadable the
+    //   pattern is.
     let mut broken: Vec<&str> = Vec::new();
     if bad_type {
       broken.push(
-        "`type`, so gitmoji / `gwm commit-prefix`, `[pr_template.by_type]` selection, lifecycle hook placeholders and the TUI rename read the wrong branch type",
+        "`type`, so gitmoji / `gwm commit-prefix`, `[pr_template.by_type]` selection, remove/bootstrap hook placeholders and the TUI rename read the wrong branch type",
       );
     }
     if bad_issue {
       broken.push(
-        "`issue`, so issue auto-linking from the branch name, `gwm pr` body placeholders, lifecycle hook placeholders and the TUI rename target the wrong issue",
+        "`issue`, so issue auto-linking from the branch name, `gwm pr` body placeholders, remove/bootstrap hook placeholders and the TUI rename target the wrong issue",
       );
     }
     if bad_desc {
       broken.push(
-        "`desc`, so `gwm pr` body placeholders, lifecycle hook placeholders and the TUI rename see the wrong description",
+        "`desc`, so `gwm pr` body placeholders, remove/bootstrap hook placeholders and the TUI rename see the wrong description",
       );
     }
     parts.push(format!("{} parse but read back {}", lossy, broken.join("; ")));
