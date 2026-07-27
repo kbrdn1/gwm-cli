@@ -439,12 +439,17 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
   // file on disk carries a broken one — a false `✓` from the one check
   // whose whole job is catching a silent failure. Fall back to `ctx.config`
   // only when the *merge* fails, which `check_config_parses` already flags.
-  let pattern = match Config::merge_layered(ctx.repo_workdir, ctx.global_config_path) {
-    Ok(cfg) => cfg.worktree.branch_pattern,
-    Err(_) => ctx.config.worktree.branch_pattern.clone(),
+  let effective = match Config::merge_layered(ctx.repo_workdir, ctx.global_config_path) {
+    Ok(cfg) => cfg,
+    Err(_) => ctx.config.clone(),
   };
+  let types = effective.resolved_branch_types().types;
 
-  match branch_pattern_warning(&pattern, &worktree::repo_name(ctx.repo)) {
+  match branch_pattern_warning(
+    &effective.worktree.branch_pattern,
+    &worktree::repo_name(ctx.repo),
+    &types,
+  ) {
     // The hint stays neutral on purpose: which workaround applies depends
     // on which segment broke, and the detail above already names it.
     // Recommending `gwm link` unconditionally was wrong for a pattern

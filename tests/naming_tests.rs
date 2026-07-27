@@ -186,12 +186,16 @@ fn worktree_path_resolves_repo_parent_base() {
 
 #[test]
 fn the_default_pattern_round_trips_so_no_warning() {
-  assert_eq!(branch_pattern_warning("{type}/#{issue}-{desc}", "gwm-cli"), None);
+  assert_eq!(
+    branch_pattern_warning("{type}/#{issue}-{desc}", "gwm-cli", &default_branch_types()),
+    None
+  );
 }
 
 #[test]
 fn an_unparseable_pattern_warns_that_everything_is_inactive() {
-  let w = branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli").expect("an unparseable pattern must warn");
+  let w = branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli", &default_branch_types())
+    .expect("an unparseable pattern must warn");
   assert!(w.contains("branch_pattern"), "the warning must name the key: {}", w);
   for expected in ["auto-linking", "gitmoji", "branch-convention"] {
     assert!(
@@ -209,7 +213,8 @@ fn an_unparseable_pattern_warns_that_everything_is_inactive() {
 /// Claiming auto-linking and gitmoji are inactive here would be false.
 #[test]
 fn a_pattern_whose_type_and_issue_survive_warns_only_about_desc() {
-  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}", "gwm-cli").expect("a lossy pattern must still warn");
+  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}", "gwm-cli", &default_branch_types())
+    .expect("a lossy pattern must still warn");
   assert!(
     w.contains("desc"),
     "the warning must name the segment that breaks: {}",
@@ -224,7 +229,8 @@ fn a_pattern_whose_type_and_issue_survive_warns_only_about_desc() {
 
 #[test]
 fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
-  let w = branch_pattern_warning("{type}/#1-{desc}", "gwm-cli").expect("a pattern with a frozen issue must warn");
+  let w = branch_pattern_warning("{type}/#1-{desc}", "gwm-cli", &default_branch_types())
+    .expect("a pattern with a frozen issue must warn");
   assert!(
     w.contains("auto-linking"),
     "a pattern that hardcodes the issue breaks auto-linking: {}",
@@ -239,7 +245,8 @@ fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
 /// type. Two probes with distinct values close that false negative.
 #[test]
 fn a_pattern_that_hardcodes_the_type_is_not_a_false_negative() {
-  let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli").expect("a hardcoded type must warn");
+  let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types())
+    .expect("a hardcoded type must warn");
   assert!(
     w.contains("type"),
     "the warning must name `type` as the broken segment: {}",
@@ -249,7 +256,8 @@ fn a_pattern_that_hardcodes_the_type_is_not_a_false_negative() {
 
 #[test]
 fn a_pattern_that_hardcodes_the_desc_is_not_a_false_negative() {
-  let w = branch_pattern_warning("{type}/#{issue}-fixed", "gwm-cli").expect("a hardcoded desc must warn");
+  let w = branch_pattern_warning("{type}/#{issue}-fixed", "gwm-cli", &default_branch_types())
+    .expect("a hardcoded desc must warn");
   assert!(
     w.contains("desc"),
     "the warning must name `desc` as the broken segment: {}",
@@ -261,7 +269,8 @@ fn a_pattern_that_hardcodes_the_desc_is_not_a_false_negative() {
 /// placeholders and the TUI rename, not only gitmoji / auto-linking.
 #[test]
 fn the_warning_names_every_consumer_of_a_broken_segment() {
-  let w = branch_pattern_warning("{type}/#1-{desc}", "gwm-cli").expect("a frozen issue must warn");
+  let w =
+    branch_pattern_warning("{type}/#1-{desc}", "gwm-cli", &default_branch_types()).expect("a frozen issue must warn");
   assert!(w.contains("auto-linking"), "issue feeds auto-linking: {}", w);
   assert!(
     w.contains("hook placeholders") && w.contains("rename"),
@@ -277,7 +286,8 @@ fn the_warning_names_every_consumer_of_a_broken_segment() {
 /// `[a-z]+` does not match a name carrying a dash.
 #[test]
 fn the_probe_expands_repo_with_the_real_repo_name() {
-  let w = branch_pattern_warning("{repo}/#{issue}-{desc}", "gwm-cli").expect("must warn for this repo");
+  let w = branch_pattern_warning("{repo}/#{issue}-{desc}", "gwm-cli", &default_branch_types())
+    .expect("must warn for this repo");
   assert!(
     w.contains("matches nothing"),
     "in a repo whose name has a dash this pattern parses back to nothing: {}",
@@ -286,6 +296,41 @@ fn the_probe_expands_repo_with_the_real_repo_name() {
   assert!(
     w.contains("auto-linking"),
     "so every consumer is inactive, not just type: {}",
+    w
+  );
+}
+
+/// Issue #415 (Codex review): a type gwm would refuse to create must not
+/// produce a warning about branches that cannot exist. With
+/// `[[branch_types]]` narrowed to `feat`, `feat/#{issue}-{desc}` round-trips
+/// for every branch gwm accepts, so there is nothing to warn about.
+#[test]
+fn a_hardcoded_type_is_fine_when_it_is_the_only_configured_type() {
+  let only_feat = vec![BranchType {
+    name: "feat".into(),
+    description: "New feature implementation".into(),
+  }];
+  assert_eq!(
+    branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &only_feat),
+    None
+  );
+  // …and it is still a real problem once a second type can be created.
+  assert!(branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types()).is_some());
+}
+
+/// Issue #415 (Codex review): parsability is value-dependent. With
+/// `{desc}/#{issue}-{type}` a desc carrying a `-` yields
+/// `probe-desc/#42-feat`, which `[a-z]+` rejects, while a plain `probe`
+/// yields `probe/#42-feat`, which parses and keeps the issue. Reporting
+/// "everything is inactive on this pattern" would be false for half the
+/// branches it produces.
+#[test]
+fn a_partially_parseable_pattern_is_not_generalised_to_every_branch() {
+  let w = branch_pattern_warning("{desc}/#{issue}-{type}", "gwm-cli", &default_branch_types())
+    .expect("a lossy pattern must warn");
+  assert!(
+    w.contains("round-trips only for some values"),
+    "the warning must scope itself to the values that break: {}",
     w
   );
 }

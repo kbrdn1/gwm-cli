@@ -195,39 +195,91 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 /// placeholder: `{repo}` is a supported token, and a name carrying a `-`
 /// (`gwm-cli`) is rejected by `BRANCH_RE`'s `[a-z]+` type charset while a
 /// dummy `repo` sails through. The verdict is genuinely repo-dependent.
-pub fn branch_pattern_warning(pattern: &str, repo: &str) -> Option<String> {
-  // Two probes, no value shared between them. One is not enough: a pattern
-  // that hardcodes a segment — `feat/#{issue}-{desc}` — round-trips
-  // perfectly against a probe that happens to use `feat`, while
-  // `gwm create fix …` writes a `feat/` branch and reads back the wrong
-  // type. Distinct values on every segment collapse that false negative.
-  // Each desc carries the `-` that `DESC_RE` allows, so a greedy-adjacency
-  // split shows up here rather than in the user's branch names.
-  const PROBES: [(&str, &str, &str); 2] = [("feat", "42", "probe-desc"), ("chore", "7", "other-slug")];
+/// `types` must be the repo's [`crate::config::Config::resolved_branch_types`]
+/// for the same reason: a type gwm would refuse to create must not produce a
+/// warning about branches that cannot exist.
+///
+/// **Invariant.** Round-trip is value-dependent, so a probe at a handful of
+/// arbitrary values proves nothing either way. The probe space here is the
+/// value space `BranchSpec::validate_against` actually admits, enumerated by
+/// construction rather than sampled:
+///
+/// - `type` — every configured branch type. Finite, so this is exhaustive.
+/// - `issue` — `ISSUE_RE` is `\d+`: one single-digit, one multi-digit, the
+///   only distinction `BRANCH_RE`'s `\d+` can split on.
+/// - `desc` — `DESC_RE` is `[a-z0-9][a-z0-9-]*`: one with the `-` it allows,
+///   one without. The dash is the only character that makes a desc collide
+///   with a literal separator in the pattern.
+///
+/// A pattern that round-trips over all of it is the strongest claim this
+/// check can make without deriving the parser from the pattern (#417), and
+/// a pattern that breaks on part of it is reported as breaking on *part* —
+/// never generalised to every branch.
+pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -> Option<String> {
+  const ISSUES: [&str; 2] = ["7", "42"];
+  const DESCS: [&str; 2] = ["probe", "probe-desc"];
 
-  let mut unparseable: Option<String> = None;
+  let (mut unparseable, mut parsed) = (None::<String>, 0usize);
   let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
+  let mut probes = 0usize;
 
-  for (type_, issue, desc) in PROBES {
-    // A pattern that does not expand at all is a different, *loud* failure:
-    // `gwm create` errors on it outright. Not this warning's business.
-    let formatted = expand_placeholders(pattern, repo, Some(type_), Some(issue), Some(desc), None).ok()?;
-    match parse_branch(&formatted) {
-      None => unparseable.get_or_insert(formatted),
-      Some(back) => {
-        bad_type |= back.type_ != type_;
-        bad_issue |= back.issue != issue;
-        bad_desc |= back.desc != desc;
-        continue;
+  for type_ in types.iter().map(|t| t.name.as_str()) {
+    for issue in ISSUES {
+      for desc in DESCS {
+        // A pattern that does not expand at all is a different, *loud*
+        // failure: `gwm create` errors on it outright. Not our business.
+        let formatted = expand_placeholders(pattern, repo, Some(type_), Some(issue), Some(desc), None).ok()?;
+        probes += 1;
+        match parse_branch(&formatted) {
+          None => {
+            unparseable.get_or_insert(formatted);
+          }
+          Some(back) => {
+            parsed += 1;
+            bad_type |= back.type_ != type_;
+            bad_issue |= back.issue != issue;
+            bad_desc |= back.desc != desc;
+          }
+        }
       }
-    };
+    }
+  }
+
+  // No configured types at all would leave the verdict unprobed — say
+  // nothing rather than guess. `resolved_branch_types` never yields this
+  // (it falls back to the built-ins), so it is a guard, not a path.
+  if probes == 0 {
+    return None;
   }
 
   if let Some(formatted) = unparseable {
-    return Some(format!(
-      "worktree.branch_pattern `{}` produces branch names gwm cannot parse back (`{}` matches nothing); issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check will be inactive on branches created with this pattern",
+    if parsed == 0 {
+      return Some(format!(
+        "worktree.branch_pattern `{}` produces branch names gwm cannot parse back (`{}` matches nothing); issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check will be inactive on branches created with this pattern",
+        pattern, formatted
+      ));
+    }
+    // Some values parse and some do not — say exactly that. Claiming the
+    // whole pattern is unreadable would be as wrong as claiming it is fine.
+    let mut msg = format!(
+      "worktree.branch_pattern `{}` round-trips only for some values: `{}` matches nothing, so issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check are inactive on the branches that come out like it",
       pattern, formatted
-    ));
+    );
+    if bad_type || bad_issue || bad_desc {
+      msg.push_str("; and on the ones that do parse, gwm reads back the wrong ");
+      msg.push_str(
+        &[
+          bad_type.then_some("`type`"),
+          bad_issue.then_some("`issue`"),
+          bad_desc.then_some("`desc`"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" / "),
+      );
+    }
+    return Some(msg);
   }
 
   // Every segment feeds `HookContext::for_worktree` (hook placeholders) and

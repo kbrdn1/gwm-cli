@@ -175,8 +175,9 @@ pub fn validate() -> Result<()> {
   // broken global layer is not this command's business — it reports on
   // `path` — so fall back to the repo-only value it just validated.
   let effective = Config::merge_layered(&root, crate::config::global_config_path().as_deref()).unwrap_or(cfg);
+  let types = effective.resolved_branch_types().types;
   if let Some(warning) =
-    crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern, &worktree::repo_name(&repo))
+    crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern, &worktree::repo_name(&repo), &types)
   {
     eprintln!("warning: {}", warning);
   }
