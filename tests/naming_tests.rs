@@ -334,3 +334,19 @@ fn a_partially_parseable_pattern_is_not_generalised_to_every_branch() {
     w
   );
 }
+
+/// Issue #415 (Codex review): `DESC_RE` accepts an all-digits desc, and it
+/// is the only desc class `BRANCH_RE`'s `\d+` issue group can swallow. With
+/// `{type}/#{desc}-{issue}` a word desc never parses while `123` yields
+/// `feat/#123-42`, which parses with the segments swapped — a partial
+/// round-trip, not a total loss.
+#[test]
+fn a_digits_only_desc_is_probed_so_the_verdict_stays_partial() {
+  let w = branch_pattern_warning("{type}/#{desc}-{issue}", "gwm-cli", &default_branch_types())
+    .expect("a swapped pattern must warn");
+  assert!(
+    w.contains("round-trips only for some values"),
+    "a digits-only desc parses, so the loss is partial, not total: {}",
+    w
+  );
+}

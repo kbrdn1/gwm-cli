@@ -493,6 +493,11 @@ branch_pattern = "{type}-{issue}-{desc}"
     .unwrap()
     .current_dir(dir.path())
     .env("XDG_CONFIG_HOME", xdg.path())
+    // CI sets `GWM_NO_GLOBAL_CONFIG=1` workflow-wide (ci.yml) so the suite
+    // ignores the runner's own config. This test is *about* the global
+    // layer, so it has to opt back in explicitly — inheriting the flag made
+    // it pass locally and fail on all three runners.
+    .env_remove("GWM_NO_GLOBAL_CONFIG")
     .args(["config", "validate"])
     .assert()
     .success()

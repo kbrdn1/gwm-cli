@@ -208,8 +208,11 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 /// - `issue` — `ISSUE_RE` is `\d+`: one single-digit, one multi-digit, the
 ///   only distinction `BRANCH_RE`'s `\d+` can split on.
 /// - `desc` — `DESC_RE` is `[a-z0-9][a-z0-9-]*`: one with the `-` it allows,
-///   one without. The dash is the only character that makes a desc collide
-///   with a literal separator in the pattern.
+///   one without, and one all-digits. The dash is the only character that
+///   makes a desc collide with a literal separator; the digits-only case is
+///   the only one that can be swallowed by `BRANCH_RE`'s `\d+` issue group
+///   (`{type}/#{desc}-{issue}` parses for `desc = "123"` and for nothing
+///   else, which is a partial round-trip, not a total loss).
 ///
 /// A pattern that round-trips over all of it is the strongest claim this
 /// check can make without deriving the parser from the pattern (#417), and
@@ -217,7 +220,7 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 /// never generalised to every branch.
 pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -> Option<String> {
   const ISSUES: [&str; 2] = ["7", "42"];
-  const DESCS: [&str; 2] = ["probe", "probe-desc"];
+  const DESCS: [&str; 3] = ["probe", "probe-desc", "123"];
 
   let (mut unparseable, mut parsed) = (None::<String>, 0usize);
   let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
