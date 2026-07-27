@@ -186,12 +186,12 @@ fn worktree_path_resolves_repo_parent_base() {
 
 #[test]
 fn the_default_pattern_round_trips_so_no_warning() {
-  assert_eq!(branch_pattern_warning("{type}/#{issue}-{desc}"), None);
+  assert_eq!(branch_pattern_warning("{type}/#{issue}-{desc}", "gwm-cli"), None);
 }
 
 #[test]
 fn an_unparseable_pattern_warns_that_everything_is_inactive() {
-  let w = branch_pattern_warning("{type}-{issue}-{desc}").expect("an unparseable pattern must warn");
+  let w = branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli").expect("an unparseable pattern must warn");
   assert!(w.contains("branch_pattern"), "the warning must name the key: {}", w);
   for expected in ["auto-linking", "gitmoji", "branch-convention"] {
     assert!(
@@ -209,7 +209,7 @@ fn an_unparseable_pattern_warns_that_everything_is_inactive() {
 /// Claiming auto-linking and gitmoji are inactive here would be false.
 #[test]
 fn a_pattern_whose_type_and_issue_survive_warns_only_about_desc() {
-  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}").expect("a lossy pattern must still warn");
+  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}", "gwm-cli").expect("a lossy pattern must still warn");
   assert!(
     w.contains("desc"),
     "the warning must name the segment that breaks: {}",
@@ -224,7 +224,7 @@ fn a_pattern_whose_type_and_issue_survive_warns_only_about_desc() {
 
 #[test]
 fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
-  let w = branch_pattern_warning("{type}/#1-{desc}").expect("a pattern with a frozen issue must warn");
+  let w = branch_pattern_warning("{type}/#1-{desc}", "gwm-cli").expect("a pattern with a frozen issue must warn");
   assert!(
     w.contains("auto-linking"),
     "a pattern that hardcodes the issue breaks auto-linking: {}",
@@ -239,7 +239,7 @@ fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
 /// type. Two probes with distinct values close that false negative.
 #[test]
 fn a_pattern_that_hardcodes_the_type_is_not_a_false_negative() {
-  let w = branch_pattern_warning("feat/#{issue}-{desc}").expect("a hardcoded type must warn");
+  let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli").expect("a hardcoded type must warn");
   assert!(
     w.contains("type"),
     "the warning must name `type` as the broken segment: {}",
@@ -249,7 +249,7 @@ fn a_pattern_that_hardcodes_the_type_is_not_a_false_negative() {
 
 #[test]
 fn a_pattern_that_hardcodes_the_desc_is_not_a_false_negative() {
-  let w = branch_pattern_warning("{type}/#{issue}-fixed").expect("a hardcoded desc must warn");
+  let w = branch_pattern_warning("{type}/#{issue}-fixed", "gwm-cli").expect("a hardcoded desc must warn");
   assert!(
     w.contains("desc"),
     "the warning must name `desc` as the broken segment: {}",
@@ -261,11 +261,31 @@ fn a_pattern_that_hardcodes_the_desc_is_not_a_false_negative() {
 /// placeholders and the TUI rename, not only gitmoji / auto-linking.
 #[test]
 fn the_warning_names_every_consumer_of_a_broken_segment() {
-  let w = branch_pattern_warning("{type}/#1-{desc}").expect("a frozen issue must warn");
+  let w = branch_pattern_warning("{type}/#1-{desc}", "gwm-cli").expect("a frozen issue must warn");
   assert!(w.contains("auto-linking"), "issue feeds auto-linking: {}", w);
   assert!(
     w.contains("hook placeholders") && w.contains("rename"),
     "issue also feeds lifecycle hook placeholders and the TUI rename: {}",
+    w
+  );
+}
+
+/// Issue #415 (Codex review): `{repo}` is a supported placeholder, so the
+/// probe has to expand it with the real repo name. A dummy value makes the
+/// verdict repo-dependent: `{repo}/#{issue}-{desc}` parses fine as `repo/…`
+/// but produces `gwm-cli/#42-…`, which `BRANCH_RE` rejects outright because
+/// `[a-z]+` does not match a name carrying a dash.
+#[test]
+fn the_probe_expands_repo_with_the_real_repo_name() {
+  let w = branch_pattern_warning("{repo}/#{issue}-{desc}", "gwm-cli").expect("must warn for this repo");
+  assert!(
+    w.contains("matches nothing"),
+    "in a repo whose name has a dash this pattern parses back to nothing: {}",
+    w
+  );
+  assert!(
+    w.contains("auto-linking"),
+    "so every consumer is inactive, not just type: {}",
     w
   );
 }

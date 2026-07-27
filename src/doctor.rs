@@ -444,7 +444,7 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
     Err(_) => ctx.config.worktree.branch_pattern.clone(),
   };
 
-  match branch_pattern_warning(&pattern) {
+  match branch_pattern_warning(&pattern, &worktree::repo_name(ctx.repo)) {
     // The hint stays neutral on purpose: which workaround applies depends
     // on which segment broke, and the detail above already names it.
     // Recommending `gwm link` unconditionally was wrong for a pattern

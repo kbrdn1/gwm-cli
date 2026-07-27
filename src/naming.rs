@@ -191,7 +191,11 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 /// `gwm doctor` and `gwm config validate` consume; issue #417 derives the
 /// parser from the pattern and replaces this body without moving either
 /// call site.
-pub fn branch_pattern_warning(pattern: &str) -> Option<String> {
+/// `repo` must be the real repo name ([`crate::worktree::repo_name`]), not a
+/// placeholder: `{repo}` is a supported token, and a name carrying a `-`
+/// (`gwm-cli`) is rejected by `BRANCH_RE`'s `[a-z]+` type charset while a
+/// dummy `repo` sails through. The verdict is genuinely repo-dependent.
+pub fn branch_pattern_warning(pattern: &str, repo: &str) -> Option<String> {
   // Two probes, no value shared between them. One is not enough: a pattern
   // that hardcodes a segment — `feat/#{issue}-{desc}` — round-trips
   // perfectly against a probe that happens to use `feat`, while
@@ -207,7 +211,7 @@ pub fn branch_pattern_warning(pattern: &str) -> Option<String> {
   for (type_, issue, desc) in PROBES {
     // A pattern that does not expand at all is a different, *loud* failure:
     // `gwm create` errors on it outright. Not this warning's business.
-    let formatted = expand_placeholders(pattern, "repo", Some(type_), Some(issue), Some(desc), None).ok()?;
+    let formatted = expand_placeholders(pattern, repo, Some(type_), Some(issue), Some(desc), None).ok()?;
     match parse_branch(&formatted) {
       None => unparseable.get_or_insert(formatted),
       Some(back) => {

@@ -155,7 +155,11 @@ pub fn list(prefix: Option<&str>) -> Result<()> {
 }
 
 pub fn validate() -> Result<()> {
-  let root = repo_root()?;
+  // Discover once: the warning below needs the repo *name* too (`{repo}` is
+  // a supported `branch_pattern` token and the verdict depends on it), and
+  // `repo_root` drops the handle it opened.
+  let repo = worktree::discover_repo(None)?;
+  let root = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let path = config_path(&root);
   let cfg = validate_file(&path)?;
   println!("{} is valid", path.display());
@@ -171,7 +175,9 @@ pub fn validate() -> Result<()> {
   // broken global layer is not this command's business — it reports on
   // `path` — so fall back to the repo-only value it just validated.
   let effective = Config::merge_layered(&root, crate::config::global_config_path().as_deref()).unwrap_or(cfg);
-  if let Some(warning) = crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern) {
+  if let Some(warning) =
+    crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern, &worktree::repo_name(&repo))
+  {
     eprintln!("warning: {}", warning);
   }
   Ok(())
