@@ -231,3 +231,41 @@ fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
     w
   );
 }
+
+/// A single probe value collides with a pattern that hardcodes that same
+/// value: `feat/#{issue}-{desc}` formats `feat/#42-…` and parses back
+/// `type = "feat"`, which matches a probe that also used `feat`. But
+/// `gwm create fix 42 …` writes a `feat/` branch and reads back the wrong
+/// type. Two probes with distinct values close that false negative.
+#[test]
+fn a_pattern_that_hardcodes_the_type_is_not_a_false_negative() {
+  let w = branch_pattern_warning("feat/#{issue}-{desc}").expect("a hardcoded type must warn");
+  assert!(
+    w.contains("type"),
+    "the warning must name `type` as the broken segment: {}",
+    w
+  );
+}
+
+#[test]
+fn a_pattern_that_hardcodes_the_desc_is_not_a_false_negative() {
+  let w = branch_pattern_warning("{type}/#{issue}-fixed").expect("a hardcoded desc must warn");
+  assert!(
+    w.contains("desc"),
+    "the warning must name `desc` as the broken segment: {}",
+    w
+  );
+}
+
+/// Issue #415 (Codex review): `type` and `issue` also feed lifecycle hook
+/// placeholders and the TUI rename, not only gitmoji / auto-linking.
+#[test]
+fn the_warning_names_every_consumer_of_a_broken_segment() {
+  let w = branch_pattern_warning("{type}/#1-{desc}").expect("a frozen issue must warn");
+  assert!(w.contains("auto-linking"), "issue feeds auto-linking: {}", w);
+  assert!(
+    w.contains("hook placeholders") && w.contains("rename"),
+    "issue also feeds lifecycle hook placeholders and the TUI rename: {}",
+    w
+  );
+}

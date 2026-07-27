@@ -192,41 +192,61 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 /// parser from the pattern and replaces this body without moving either
 /// call site.
 pub fn branch_pattern_warning(pattern: &str) -> Option<String> {
-  // Probe values chosen to exercise every segment's charset: a real branch
-  // type, a multi-digit issue, and a desc that already contains the `-`
-  // that `DESC_RE` allows (so a greedy-adjacency bug shows up here).
-  const TYPE: &str = "feat";
-  const ISSUE: &str = "42";
-  const DESC: &str = "probe-desc";
+  // Two probes, no value shared between them. One is not enough: a pattern
+  // that hardcodes a segment — `feat/#{issue}-{desc}` — round-trips
+  // perfectly against a probe that happens to use `feat`, while
+  // `gwm create fix …` writes a `feat/` branch and reads back the wrong
+  // type. Distinct values on every segment collapse that false negative.
+  // Each desc carries the `-` that `DESC_RE` allows, so a greedy-adjacency
+  // split shows up here rather than in the user's branch names.
+  const PROBES: [(&str, &str, &str); 2] = [("feat", "42", "probe-desc"), ("chore", "7", "other-slug")];
 
-  // A pattern that does not expand at all is a different, *loud* failure:
-  // `gwm create` errors on it outright. Not this warning's business.
-  let formatted = expand_placeholders(pattern, "repo", Some(TYPE), Some(ISSUE), Some(DESC), None).ok()?;
+  let mut unparseable: Option<String> = None;
+  let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
 
-  let Some(back) = parse_branch(&formatted) else {
+  for (type_, issue, desc) in PROBES {
+    // A pattern that does not expand at all is a different, *loud* failure:
+    // `gwm create` errors on it outright. Not this warning's business.
+    let formatted = expand_placeholders(pattern, "repo", Some(type_), Some(issue), Some(desc), None).ok()?;
+    match parse_branch(&formatted) {
+      None => unparseable.get_or_insert(formatted),
+      Some(back) => {
+        bad_type |= back.type_ != type_;
+        bad_issue |= back.issue != issue;
+        bad_desc |= back.desc != desc;
+        continue;
+      }
+    };
+  }
+
+  if let Some(formatted) = unparseable {
     return Some(format!(
-      "worktree.branch_pattern `{}` produces branch names gwm cannot parse back (`{}` matches nothing); issue/PR auto-linking, gitmoji and the branch-convention check will be inactive on branches created with this pattern",
+      "worktree.branch_pattern `{}` produces branch names gwm cannot parse back (`{}` matches nothing); issue/PR auto-linking, gitmoji, lifecycle hook placeholders, the TUI rename and the branch-convention check will be inactive on branches created with this pattern",
       pattern, formatted
     ));
-  };
+  }
 
+  // Every segment feeds `HookContext::for_worktree` (hook placeholders) and
+  // the TUI rename, on top of its own headline consumer — naming only the
+  // headline would under-report exactly what this warning promises to name.
   let mut broken: Vec<&str> = Vec::new();
-  if back.type_ != TYPE {
-    broken.push("`type`, so gitmoji selection reads the wrong branch type");
+  if bad_type {
+    broken
+      .push("`type`, so gitmoji selection, lifecycle hook placeholders and the TUI rename read the wrong branch type");
   }
-  if back.issue != ISSUE {
-    broken.push("`issue`, so issue/PR auto-linking targets the wrong issue");
+  if bad_issue {
+    broken
+      .push("`issue`, so issue/PR auto-linking, lifecycle hook placeholders and the TUI rename target the wrong issue");
   }
-  if back.desc != DESC {
+  if bad_desc {
     broken.push("`desc`, so lifecycle hook placeholders and the TUI rename see the wrong description");
   }
   if broken.is_empty() {
     return None;
   }
   Some(format!(
-    "worktree.branch_pattern `{}` does not round-trip: gwm writes `{}` and reads back {}",
+    "worktree.branch_pattern `{}` does not round-trip: gwm reads back {}",
     pattern,
-    formatted,
     broken.join("; ")
   ))
 }

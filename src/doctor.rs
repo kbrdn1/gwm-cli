@@ -431,9 +431,27 @@ fn extract_launcher_binary(command: &str) -> Option<String> {
 /// derived from the pattern in #417.
 fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
   let name = "worktree.branch_pattern round-trips through the parser";
-  match branch_pattern_warning(&ctx.config.worktree.branch_pattern) {
+
+  // Re-derive from disk for the same reason `check_tui_keymap` does:
+  // `repo_context_lenient` substitutes `Config::default()` when the user's
+  // file fails to load for an unrelated semantic reason, and reading
+  // `ctx.config` there would report the default pattern as fine while the
+  // file on disk carries a broken one — a false `✓` from the one check
+  // whose whole job is catching a silent failure. Fall back to `ctx.config`
+  // only when the *merge* fails, which `check_config_parses` already flags.
+  let pattern = match Config::merge_layered(ctx.repo_workdir, ctx.global_config_path) {
+    Ok(cfg) => cfg.worktree.branch_pattern,
+    Err(_) => ctx.config.worktree.branch_pattern.clone(),
+  };
+
+  match branch_pattern_warning(&pattern) {
+    // The hint stays neutral on purpose: which workaround applies depends
+    // on which segment broke, and the detail above already names it.
+    // Recommending `gwm link` unconditionally was wrong for a pattern
+    // whose `issue` survives — auto-linking works there, and `gwm link`
+    // fixes neither the hook placeholders nor the TUI rename.
     Some(detail) => Check::warning(name, detail).with_hint(
-      "restore the default `{type}/#{issue}-{desc}`, or keep the custom pattern and attach issues/PRs by hand with `gwm link`",
+      "restore the default `{type}/#{issue}-{desc}`, or keep the pattern and accept exactly the loss named above",
     ),
     None => Check::ok(name, "`parse_branch` reads back the segments `branch_name` writes"),
   }
