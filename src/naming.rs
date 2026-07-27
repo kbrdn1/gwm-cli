@@ -171,6 +171,29 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
   })
 }
 
+/// Issue #415 — `worktree.branch_pattern` drives [`BranchSpec::branch_name`]
+/// (formatting) but not [`parse_branch`], which matches the hardcoded
+/// `BRANCH_RE`. A pattern that differs from the default therefore writes
+/// branch names the parser cannot read back, and every feature keyed on the
+/// re-parsed segments — issue/PR auto-linking, gitmoji selection, the
+/// `doctor` branch-convention check, lifecycle placeholders — silently
+/// becomes a no-op.
+///
+/// Returns the user-facing warning when the pattern diverges, `None` when
+/// the parser follows it. This is the single predicate both `gwm doctor`
+/// and `gwm config validate` consume; issue #417 derives the parser from
+/// the pattern and replaces this body without moving either call site.
+pub fn branch_pattern_warning(pattern: &str) -> Option<String> {
+  let default = crate::config::default_branch_pattern();
+  if pattern == default {
+    return None;
+  }
+  Some(format!(
+    "worktree.branch_pattern `{}` differs from the default `{}`; structured parsing does not follow it, so issue/PR auto-linking, gitmoji and the branch-convention check will be inactive on branches created with this pattern",
+    pattern, default
+  ))
+}
+
 pub fn kebab(input: &str) -> String {
   // Lowercase, then collapse every non-alphanumeric run into a single `-`.
   let lower = input.to_lowercase();

@@ -1226,3 +1226,48 @@ fn the_forge_cli_probe_honours_the_gwm_gh_override() {
     c.detail
   );
 }
+
+/// Issue #415: `worktree.branch_pattern` drives the formatter but not the
+/// parser, so customising it silently disables every feature that re-parses
+/// a branch name. Until the parser is derived from the pattern (#417),
+/// `gwm doctor` states the limitation instead of leaving it silent.
+#[test]
+fn custom_branch_pattern_warns_that_the_parser_ignores_it() {
+  let (dir, repo) = init_repo();
+  let mut config = Config::default();
+  config.worktree.branch_pattern = "{type}-{issue}-{desc}".into();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("branch_pattern"))
+    .expect("expected a `branch_pattern` check in the report");
+
+  assert_eq!(check.status, CheckStatus::Warning);
+  // The message has to name the consequence, not just the divergence —
+  // the whole point is connecting cause to effect.
+  for expected in ["auto-linking", "gitmoji", "branch-convention"] {
+    assert!(
+      check.detail.contains(expected),
+      "warning should name the '{}' consequence, got: {}",
+      expected,
+      check.detail
+    );
+  }
+}
+
+#[test]
+fn default_branch_pattern_does_not_warn() {
+  let (dir, repo) = init_repo();
+  let config = Config::default();
+  let report = doctor::run(&ctx_for(&repo, dir.path(), &config)).unwrap();
+
+  let check = report
+    .checks
+    .iter()
+    .find(|c| c.name.contains("branch_pattern"))
+    .expect("expected a `branch_pattern` check in the report");
+
+  assert_eq!(check.status, CheckStatus::Ok);
+}

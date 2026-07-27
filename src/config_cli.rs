@@ -157,8 +157,14 @@ pub fn list(prefix: Option<&str>) -> Result<()> {
 pub fn validate() -> Result<()> {
   let root = repo_root()?;
   let path = config_path(&root);
-  validate_file(&path)?;
+  let cfg = validate_file(&path)?;
   println!("{} is valid", path.display());
+  // Issue #415: a customised `branch_pattern` is *valid* — it just silently
+  // disables everything that re-parses a branch name. Stated on stderr so
+  // the exit code stays 0 and piped consumers of stdout are unaffected.
+  if let Some(warning) = crate::naming::branch_pattern_warning(&cfg.worktree.branch_pattern) {
+    eprintln!("warning: {}", warning);
+  }
   Ok(())
 }
 
@@ -211,7 +217,7 @@ fn write_and_validate(path: &Path, doc: &DocumentMut) -> Result<()> {
   let rendered = doc.to_string();
   match validate_rendered(path, &rendered) {
     // The edit is valid — write it.
-    Ok(()) => {
+    Ok(_) => {
       std::fs::write(path, rendered)?;
       Ok(())
     }
@@ -232,9 +238,12 @@ fn write_and_validate(path: &Path, doc: &DocumentMut) -> Result<()> {
   }
 }
 
-fn validate_file(path: &Path) -> Result<()> {
+/// Returns the validated `Config` so callers can inspect the resolved
+/// values without re-parsing the file — an absent config yields the
+/// defaults, which is exactly what the loader would have produced.
+fn validate_file(path: &Path) -> Result<Config> {
   if !path.exists() {
-    return Ok(());
+    return Ok(Config::default());
   }
   let raw = std::fs::read_to_string(path)?;
   validate_rendered(path, &raw)
@@ -244,7 +253,7 @@ fn validate_file(path: &Path) -> Result<()> {
 /// checks `gwm config validate` runs). `path` is only used for error
 /// coordinates. Shared by [`validate_file`] (on-disk) and the
 /// validate-before-write path in [`write_and_validate`].
-fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
+fn validate_rendered(path: &Path, raw: &str) -> Result<Config> {
   let cfg = toml::from_str::<Config>(raw).map_err(|e| config_de_error(path, raw, e))?;
   cfg.validate_branch_types()?;
   cfg.validate_bootstrap_paths()?;
@@ -263,7 +272,7 @@ fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
   // check `load_for_repo` does — otherwise `gwm config validate` greenlights a
   // profile the loader and the new commands reject (issue #324 review).
   cfg.validate_profiles()?;
-  Ok(())
+  Ok(cfg)
 }
 
 fn resolved_value(cfg: &Config, key: &str) -> Result<toml::Value> {

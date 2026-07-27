@@ -419,3 +419,49 @@ fn write_windows_editor_script(root: &Path) -> std::path::PathBuf {
   .unwrap();
   script
 }
+
+/// Issue #415: `gwm config validate` still exits 0 for a customised
+/// `worktree.branch_pattern` — it is a valid config — but it says on stderr
+/// that structured parsing will not follow it.
+#[test]
+fn config_validate_warns_when_branch_pattern_is_customised() {
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[worktree]
+branch_pattern = "{type}-{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["config", "validate"])
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("branch_pattern"))
+    .stderr(predicate::str::contains("auto-linking"));
+}
+
+#[test]
+fn config_validate_is_quiet_for_the_default_branch_pattern() {
+  let (dir, _repo) = init_repo();
+  fs::write(
+    dir.path().join(".gwm.toml"),
+    r#"
+[worktree]
+branch_pattern = "{type}/#{issue}-{desc}"
+"#,
+  )
+  .unwrap();
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["config", "validate"])
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("branch_pattern").not());
+}

@@ -338,7 +338,10 @@ fn default_path_pattern() -> String {
   "{type}-{issue}-{desc}".into()
 }
 
-fn default_branch_pattern() -> String {
+/// `pub(crate)` rather than private so [`crate::naming::branch_pattern_warning`]
+/// can compare a configured pattern against the one the hardcoded parser
+/// actually understands (issue #415).
+pub(crate) fn default_branch_pattern() -> String {
   "{type}/#{issue}-{desc}".into()
 }
 

@@ -4,7 +4,7 @@
 
 use crate::config::{expand_placeholders, Config, CONFIG_FILE};
 use crate::error::Result;
-use crate::naming::parse_branch;
+use crate::naming::{branch_pattern_warning, parse_branch};
 use crate::worktree;
 use git2::BranchType;
 use std::collections::BTreeSet;
@@ -140,6 +140,7 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
 
   report.checks.push(check_base_dir_writable(ctx));
   report.checks.push(check_tui_keymap(ctx));
+  report.checks.push(check_branch_pattern(ctx));
   Ok(report)
 }
 
@@ -417,6 +418,25 @@ fn extract_launcher_binary(command: &str) -> Option<String> {
 /// users. Configured launchers ([git_tui], [review] — issue #75) are
 /// added to the same set so the user gets one consolidated warning.
 ///
+/// Issue #415: `worktree.branch_pattern` is honoured when a branch name is
+/// *written* and ignored when one is *read back*, so customising it quietly
+/// turns off issue/PR auto-linking, gitmoji selection and the
+/// branch-convention check below.
+///
+/// Warning rather than Failed: the config is valid and the worktrees it
+/// produces are perfectly usable — only the structured extras go silent.
+/// This check does not fix the divergence, it states it; the parser is
+/// derived from the pattern in #417.
+fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "worktree.branch_pattern round-trips through the parser";
+  match branch_pattern_warning(&ctx.config.worktree.branch_pattern) {
+    Some(detail) => Check::warning(name, detail).with_hint(
+      "restore the default `{type}/#{issue}-{desc}`, or keep the custom pattern and attach issues/PRs by hand with `gwm link`",
+    ),
+    None => Check::ok(name, "default pattern — `parse_branch` reads back what `branch_name` writes"),
+  }
+}
+
 /// Missing binaries are surfaced as Warning, not Failed — the user may not
 /// rely on that step at all, but the visibility matters.
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
