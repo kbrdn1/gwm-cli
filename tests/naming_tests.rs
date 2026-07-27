@@ -1,5 +1,5 @@
 use gwm::config::{BranchType, WorktreeConfig};
-use gwm::naming::{default_branch_types, kebab, parse_branch, BranchSpec, BRANCH_TYPES};
+use gwm::naming::{branch_pattern_warning, default_branch_types, kebab, parse_branch, BranchSpec, BRANCH_TYPES};
 
 #[test]
 fn naming_regexes_compile_at_first_use() {
@@ -174,5 +174,60 @@ fn worktree_path_resolves_repo_parent_base() {
   assert_eq!(
     p,
     std::path::Path::new("/Users/me/Projects/Perso/worktrees/feat-175-repo-path")
+  );
+}
+
+// ---------------------------------------------------------------------
+// Issue #415 — `branch_pattern_warning` probes an actual format/parse
+// round-trip rather than comparing the pattern to the default string.
+// A pattern can differ from the default and still be readable, and the
+// warning must not claim otherwise.
+// ---------------------------------------------------------------------
+
+#[test]
+fn the_default_pattern_round_trips_so_no_warning() {
+  assert_eq!(branch_pattern_warning("{type}/#{issue}-{desc}"), None);
+}
+
+#[test]
+fn an_unparseable_pattern_warns_that_everything_is_inactive() {
+  let w = branch_pattern_warning("{type}-{issue}-{desc}").expect("an unparseable pattern must warn");
+  assert!(w.contains("branch_pattern"), "the warning must name the key: {}", w);
+  for expected in ["auto-linking", "gitmoji", "branch-convention"] {
+    assert!(
+      w.contains(expected),
+      "warning should name the '{}' consequence: {}",
+      expected,
+      w
+    );
+  }
+}
+
+/// The finding that killed the string-equality version: this pattern
+/// differs from the default, yet `feat/#42-…` still matches `BRANCH_RE`,
+/// so `type` and `issue` ARE recovered. Only `desc` comes back wrong.
+/// Claiming auto-linking and gitmoji are inactive here would be false.
+#[test]
+fn a_pattern_whose_type_and_issue_survive_warns_only_about_desc() {
+  let w = branch_pattern_warning("{type}/#{issue}-prefix-{desc}").expect("a lossy pattern must still warn");
+  assert!(
+    w.contains("desc"),
+    "the warning must name the segment that breaks: {}",
+    w
+  );
+  assert!(
+    !w.contains("auto-linking") && !w.contains("gitmoji"),
+    "type and issue are recovered from this pattern — the warning must not claim otherwise: {}",
+    w
+  );
+}
+
+#[test]
+fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
+  let w = branch_pattern_warning("{type}/#1-{desc}").expect("a pattern with a frozen issue must warn");
+  assert!(
+    w.contains("auto-linking"),
+    "a pattern that hardcodes the issue breaks auto-linking: {}",
+    w
   );
 }

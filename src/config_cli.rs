@@ -159,10 +159,19 @@ pub fn validate() -> Result<()> {
   let path = config_path(&root);
   let cfg = validate_file(&path)?;
   println!("{} is valid", path.display());
-  // Issue #415: a customised `branch_pattern` is *valid* — it just silently
-  // disables everything that re-parses a branch name. Stated on stderr so
-  // the exit code stays 0 and piped consumers of stdout are unaffected.
-  if let Some(warning) = crate::naming::branch_pattern_warning(&cfg.worktree.branch_pattern) {
+  // Issue #415: a `branch_pattern` the parser cannot read back is *valid*
+  // config — it just silently breaks everything keyed on the re-parsed
+  // segments. Stated on stderr so the exit code stays 0 and piped
+  // consumers of stdout are unaffected.
+  //
+  // Read the *effective* pattern, not the repo file's: `branch_pattern`
+  // set only in the user-level global config still applies at runtime
+  // through `merge_layered`, and validating `path` alone would stay quiet
+  // about it while `gwm doctor` (which sees the merged view) warns. A
+  // broken global layer is not this command's business — it reports on
+  // `path` — so fall back to the repo-only value it just validated.
+  let effective = Config::merge_layered(&root, crate::config::global_config_path().as_deref()).unwrap_or(cfg);
+  if let Some(warning) = crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern) {
     eprintln!("warning: {}", warning);
   }
   Ok(())

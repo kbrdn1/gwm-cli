@@ -173,24 +173,61 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
 
 /// Issue #415 — `worktree.branch_pattern` drives [`BranchSpec::branch_name`]
 /// (formatting) but not [`parse_branch`], which matches the hardcoded
-/// `BRANCH_RE`. A pattern that differs from the default therefore writes
-/// branch names the parser cannot read back, and every feature keyed on the
-/// re-parsed segments — issue/PR auto-linking, gitmoji selection, the
-/// `doctor` branch-convention check, lifecycle placeholders — silently
-/// becomes a no-op.
+/// `BRANCH_RE`. When the two disagree, every feature keyed on the re-parsed
+/// segments quietly reads the wrong thing: gitmoji selection off `type`
+/// (`cli.rs` commit prefix), issue/PR auto-linking off `issue`, lifecycle
+/// hook placeholders and the TUI rename off `desc`, plus the `doctor`
+/// branch-convention check which only asks whether the name parses at all.
 ///
-/// Returns the user-facing warning when the pattern diverges, `None` when
-/// the parser follows it. This is the single predicate both `gwm doctor`
-/// and `gwm config validate` consume; issue #417 derives the parser from
-/// the pattern and replaces this body without moving either call site.
+/// The check is an actual round-trip probe, not a comparison against the
+/// default string: "differs from the default" and "breaks the parser" are
+/// not the same set. `{type}/#{issue}-prefix-{desc}` is customised yet
+/// still yields `feat/#42-…`, so `type` and `issue` survive and only
+/// `desc` comes back wrong — claiming auto-linking is dead there would be
+/// false, and a warning whose whole value is accuracy cannot afford that.
+///
+/// Returns the user-facing warning naming what actually breaks, or `None`
+/// when the pattern round-trips. This is the single predicate both
+/// `gwm doctor` and `gwm config validate` consume; issue #417 derives the
+/// parser from the pattern and replaces this body without moving either
+/// call site.
 pub fn branch_pattern_warning(pattern: &str) -> Option<String> {
-  let default = crate::config::default_branch_pattern();
-  if pattern == default {
+  // Probe values chosen to exercise every segment's charset: a real branch
+  // type, a multi-digit issue, and a desc that already contains the `-`
+  // that `DESC_RE` allows (so a greedy-adjacency bug shows up here).
+  const TYPE: &str = "feat";
+  const ISSUE: &str = "42";
+  const DESC: &str = "probe-desc";
+
+  // A pattern that does not expand at all is a different, *loud* failure:
+  // `gwm create` errors on it outright. Not this warning's business.
+  let formatted = expand_placeholders(pattern, "repo", Some(TYPE), Some(ISSUE), Some(DESC), None).ok()?;
+
+  let Some(back) = parse_branch(&formatted) else {
+    return Some(format!(
+      "worktree.branch_pattern `{}` produces branch names gwm cannot parse back (`{}` matches nothing); issue/PR auto-linking, gitmoji and the branch-convention check will be inactive on branches created with this pattern",
+      pattern, formatted
+    ));
+  };
+
+  let mut broken: Vec<&str> = Vec::new();
+  if back.type_ != TYPE {
+    broken.push("`type`, so gitmoji selection reads the wrong branch type");
+  }
+  if back.issue != ISSUE {
+    broken.push("`issue`, so issue/PR auto-linking targets the wrong issue");
+  }
+  if back.desc != DESC {
+    broken.push("`desc`, so lifecycle hook placeholders and the TUI rename see the wrong description");
+  }
+  if broken.is_empty() {
     return None;
   }
   Some(format!(
-    "worktree.branch_pattern `{}` differs from the default `{}`; structured parsing does not follow it, so issue/PR auto-linking, gitmoji and the branch-convention check will be inactive on branches created with this pattern",
-    pattern, default
+    "worktree.branch_pattern `{}` does not round-trip: gwm writes `{}` and reads back {}",
+    pattern,
+    formatted,
+    broken.join("; ")
   ))
 }
 

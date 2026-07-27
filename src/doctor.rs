@@ -419,9 +419,11 @@ fn extract_launcher_binary(command: &str) -> Option<String> {
 /// added to the same set so the user gets one consolidated warning.
 ///
 /// Issue #415: `worktree.branch_pattern` is honoured when a branch name is
-/// *written* and ignored when one is *read back*, so customising it quietly
-/// turns off issue/PR auto-linking, gitmoji selection and the
-/// branch-convention check below.
+/// *written* and ignored when one is *read back*, so a pattern the parser
+/// cannot follow quietly turns off issue/PR auto-linking, gitmoji selection
+/// and the branch-convention check above. [`branch_pattern_warning`] probes
+/// the round-trip and names whichever segments actually break — a custom
+/// pattern is not automatically a broken one.
 ///
 /// Warning rather than Failed: the config is valid and the worktrees it
 /// produces are perfectly usable — only the structured extras go silent.
@@ -433,7 +435,7 @@ fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
     Some(detail) => Check::warning(name, detail).with_hint(
       "restore the default `{type}/#{issue}-{desc}`, or keep the custom pattern and attach issues/PRs by hand with `gwm link`",
     ),
-    None => Check::ok(name, "default pattern — `parse_branch` reads back what `branch_name` writes"),
+    None => Check::ok(name, "`parse_branch` reads back the segments `branch_name` writes"),
   }
 }
 

@@ -13,15 +13,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `gwm doctor` and `gwm config validate` now warn when
-  `worktree.branch_pattern` differs from the default `{type}/#{issue}-{desc}`.
+  `worktree.branch_pattern` does not survive a format-then-parse round-trip.
   The pattern drives how a branch name is *written* but not how one is *read
-  back* — the parser is still a hardcoded regex — so customising it silently
-  disabled issue/PR auto-linking, gitmoji selection and the branch-convention
-  check. The warning names those consequences instead of leaving the user to
-  discover them. `gwm config validate` prints it on stderr and still exits `0`:
-  a custom pattern is valid configuration, not an error. This states the
-  limitation, it does not remove it — deriving the parser from the pattern is
-  tracked by #417. ([#415](https://github.com/kbrdn1/gwm-cli/issues/415))
+  back* — the parser is still a hardcoded regex — so a mismatched pattern
+  silently broke issue/PR auto-linking, gitmoji selection, lifecycle hook
+  placeholders and the branch-convention check. The warning names whichever
+  segments actually break: a custom pattern is not automatically a broken one
+  (`{type}/#{issue}-prefix-{desc}` still recovers `type` and `issue`, only
+  `desc` comes back wrong), and claiming otherwise would defeat the point of a
+  warning whose whole value is accuracy. `gwm config validate` prints it on
+  stderr, reads the *effective* pattern so one set only in the global
+  `~/.config/gwm/config.toml` is caught too, and still exits `0`: a custom
+  pattern is valid configuration, not an error. This states the limitation, it
+  does not remove it — deriving the parser from the pattern is tracked by #417.
+  ([#415](https://github.com/kbrdn1/gwm-cli/issues/415))
 
 ### Docs
 
