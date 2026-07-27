@@ -155,10 +155,32 @@ pub fn list(prefix: Option<&str>) -> Result<()> {
 }
 
 pub fn validate() -> Result<()> {
-  let root = repo_root()?;
+  // Discover once: the warning below needs the repo *name* too (`{repo}` is
+  // a supported `branch_pattern` token and the verdict depends on it), and
+  // `repo_root` drops the handle it opened.
+  let repo = worktree::discover_repo(None)?;
+  let root = repo.workdir().ok_or(GwmError::NotInGitRepo)?.to_path_buf();
   let path = config_path(&root);
-  validate_file(&path)?;
+  let cfg = validate_file(&path)?;
   println!("{} is valid", path.display());
+  // Issue #415: a `branch_pattern` the parser cannot read back is *valid*
+  // config — it just silently breaks everything keyed on the re-parsed
+  // segments. Stated on stderr so the exit code stays 0 and piped
+  // consumers of stdout are unaffected.
+  //
+  // Read the *effective* pattern, not the repo file's: `branch_pattern`
+  // set only in the user-level global config still applies at runtime
+  // through `merge_layered`, and validating `path` alone would stay quiet
+  // about it while `gwm doctor` (which sees the merged view) warns. A
+  // broken global layer is not this command's business — it reports on
+  // `path` — so fall back to the repo-only value it just validated.
+  let effective = Config::merge_layered(&root, crate::config::global_config_path().as_deref()).unwrap_or(cfg);
+  let types = effective.resolved_branch_types().types;
+  if let Some(warning) =
+    crate::naming::branch_pattern_warning(&effective.worktree.branch_pattern, &worktree::repo_name(&repo), &types)
+  {
+    eprintln!("warning: {}", warning);
+  }
   Ok(())
 }
 
@@ -211,7 +233,7 @@ fn write_and_validate(path: &Path, doc: &DocumentMut) -> Result<()> {
   let rendered = doc.to_string();
   match validate_rendered(path, &rendered) {
     // The edit is valid — write it.
-    Ok(()) => {
+    Ok(_) => {
       std::fs::write(path, rendered)?;
       Ok(())
     }
@@ -232,9 +254,12 @@ fn write_and_validate(path: &Path, doc: &DocumentMut) -> Result<()> {
   }
 }
 
-fn validate_file(path: &Path) -> Result<()> {
+/// Returns the validated `Config` so callers can inspect the resolved
+/// values without re-parsing the file — an absent config yields the
+/// defaults, which is exactly what the loader would have produced.
+fn validate_file(path: &Path) -> Result<Config> {
   if !path.exists() {
-    return Ok(());
+    return Ok(Config::default());
   }
   let raw = std::fs::read_to_string(path)?;
   validate_rendered(path, &raw)
@@ -244,7 +269,7 @@ fn validate_file(path: &Path) -> Result<()> {
 /// checks `gwm config validate` runs). `path` is only used for error
 /// coordinates. Shared by [`validate_file`] (on-disk) and the
 /// validate-before-write path in [`write_and_validate`].
-fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
+fn validate_rendered(path: &Path, raw: &str) -> Result<Config> {
   let cfg = toml::from_str::<Config>(raw).map_err(|e| config_de_error(path, raw, e))?;
   cfg.validate_branch_types()?;
   cfg.validate_bootstrap_paths()?;
@@ -263,7 +288,7 @@ fn validate_rendered(path: &Path, raw: &str) -> Result<()> {
   // check `load_for_repo` does — otherwise `gwm config validate` greenlights a
   // profile the loader and the new commands reject (issue #324 review).
   cfg.validate_profiles()?;
-  Ok(())
+  Ok(cfg)
 }
 
 fn resolved_value(cfg: &Config, key: &str) -> Result<toml::Value> {

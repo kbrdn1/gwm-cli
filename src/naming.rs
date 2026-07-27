@@ -171,6 +171,182 @@ pub fn parse_branch(branch: &str) -> Option<BranchSpec> {
   })
 }
 
+/// Issue #415 — `worktree.branch_pattern` drives [`BranchSpec::branch_name`]
+/// (formatting) but not [`parse_branch`], which matches the hardcoded
+/// `BRANCH_RE`. When the two disagree, every feature keyed on the re-parsed
+/// segments quietly reads the wrong thing: gitmoji selection off `type`
+/// (`cli.rs` commit prefix), issue/PR auto-linking off `issue`, lifecycle
+/// hook placeholders and the TUI rename off `desc`, plus the `doctor`
+/// branch-convention check which only asks whether the name parses at all.
+///
+/// The check is an actual round-trip probe, not a comparison against the
+/// default string: "differs from the default" and "breaks the parser" are
+/// not the same set. `{type}/#{issue}-prefix-{desc}` is customised yet
+/// still yields `feat/#42-…`, so `type` and `issue` survive and only
+/// `desc` comes back wrong — claiming auto-linking is dead there would be
+/// false, and a warning whose whole value is accuracy cannot afford that.
+///
+/// Returns the user-facing warning naming what actually breaks, or `None`
+/// when the pattern round-trips. This is the single predicate both
+/// `gwm doctor` and `gwm config validate` consume; issue #417 derives the
+/// parser from the pattern and replaces this body without moving either
+/// call site.
+/// `repo` must be the real repo name ([`crate::worktree::repo_name`]), not a
+/// placeholder: `{repo}` is a supported token, and a name carrying a `-`
+/// (`gwm-cli`) is rejected by `BRANCH_RE`'s `[a-z]+` type charset while a
+/// dummy `repo` sails through. The verdict is genuinely repo-dependent.
+/// `types` must be the repo's [`crate::config::Config::resolved_branch_types`]
+/// for the same reason: a type gwm would refuse to create must not produce a
+/// warning about branches that cannot exist.
+///
+/// **Invariant: this function reports what it observed, and never
+/// generalises.** Whether a pattern round-trips depends on the values put
+/// through it, and which values matter depends on the pattern — the
+/// separator ambiguity of `{desc}-{issue}` is not the ambiguity of
+/// `{issue}{desc}`. That space cannot be closed by any fixed value set, only
+/// by deriving the parser from the pattern (#417). So the probe set is
+/// deliberately described as *classes worth probing*, not as exhaustive, and
+/// every message is phrased over "the N branch shapes probed". A class this
+/// set happens to miss can only make the counts smaller — it can never make
+/// the statement false.
+///
+/// - `type` — every configured branch type. Finite, so this one *is*
+///   exhaustive, and a type gwm would refuse to create is excluded.
+/// - `issue` — `ISSUE_RE` is `\d+`: single-digit and multi-digit.
+/// - `desc` — `DESC_RE` is `[a-z0-9][a-z0-9-]*`: a plain word, one carrying
+///   the `-` it allows, one all-digits, and one that starts with digits and
+///   then carries a `-`. The dash collides with a literal separator; leading
+///   digits get swallowed by `BRANCH_RE`'s `\d+` issue group
+///   (`{type}/#{issue}{desc}` parses only for a desc starting with digits).
+pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -> Option<String> {
+  const ISSUES: [&str; 2] = ["7", "42"];
+  const DESCS: [&str; 4] = ["probe", "probe-desc", "123", "123-probe"];
+
+  let (mut unparseable, mut parsed, mut lossy) = (None::<String>, 0usize, 0usize);
+  let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
+  let mut probes = 0usize;
+
+  // Probe only types `gwm create` would actually accept. `merge_layered`
+  // deserialises `[[branch_types]]` without running `validate_branch_types`,
+  // so the effective list can carry a name like `Feat` that the config
+  // validator rejects outright — probing it would report the *default*
+  // pattern as broken, because `BRANCH_RE`'s `[a-z]+` cannot match it. The
+  // invalid config is reported by its own check; this one stays quiet
+  // rather than blaming the pattern for it.
+  let usable = types
+    .iter()
+    .map(|t| t.name.as_str())
+    .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase()));
+
+  for type_ in usable {
+    for issue in ISSUES {
+      for desc in DESCS {
+        // A pattern that does not expand at all is a different, *loud*
+        // failure: `gwm create` errors on it outright. Not our business.
+        let formatted = expand_placeholders(pattern, repo, Some(type_), Some(issue), Some(desc), None).ok()?;
+        probes += 1;
+        match parse_branch(&formatted) {
+          None => {
+            unparseable.get_or_insert(formatted);
+          }
+          Some(back) => {
+            parsed += 1;
+            let (t, i, d) = (back.type_ != type_, back.issue != issue, back.desc != desc);
+            // `lossy` counts probes, the flags accumulate across them. The
+            // distinction matters: the flags say *which* segments can come
+            // back wrong somewhere, `lossy` says *how many* shapes they came
+            // back wrong on. Reporting the flags as if they held for every
+            // parsed probe is the over-claim this counter exists to stop —
+            // `{desc}/#{issue}-{type}` has probes that round-trip perfectly
+            // alongside probes that swap two segments.
+            lossy += usize::from(t || i || d);
+            bad_type |= t;
+            bad_issue |= i;
+            bad_desc |= d;
+          }
+        }
+      }
+    }
+  }
+
+  // No configured types at all would leave the verdict unprobed — say
+  // nothing rather than guess. `resolved_branch_types` never yields this
+  // (it falls back to the built-ins), so it is a guard, not a path.
+  if probes == 0 {
+    return None;
+  }
+
+  let unparsed = probes - parsed;
+  if unparsed == 0 && lossy == 0 {
+    return None;
+  }
+
+  // One message shape, always a count over the probed shapes. There is no
+  // branch that says "every branch created with this pattern", because that
+  // is precisely the claim the probe set cannot support.
+  let mut parts: Vec<String> = Vec::new();
+  if let Some(example) = unparseable {
+    parts.push(format!(
+      "{} match nothing at all (e.g. `{}`), so issue auto-linking from the branch name, gitmoji / `gwm commit-prefix`, `gwm pr` template selection and placeholders, remove/bootstrap hook placeholders, the TUI rename and the branch-convention check are inactive on those (PR/MR detection is unaffected — it queries the forge with the full branch name)",
+      unparsed,
+      sanitise_for_terminal(&example)
+    ));
+  }
+  if lossy > 0 {
+    // Every segment feeds the TUI rename and `cmd_pr`'s template context on
+    // top of its own headline consumer — naming only the headline would
+    // under-report exactly what this warning promises to name. Two
+    // boundaries keep the claim honest:
+    //
+    // - `issue` is specifically *issue* linking. PR/MR detection goes through
+    //   `Forge::find_pr_for_branch`, which takes the whole branch name and
+    //   never parses it, so it keeps working whatever the pattern.
+    // - hook placeholders break on the **remove / bootstrap** paths only.
+    //   Those rebuild the context with `HookContext::for_worktree`, which
+    //   re-parses the branch. `gwm create` uses `HookContext::for_create` and
+    //   passes the original `BranchSpec` straight through, so its own hooks
+    //   keep the right `type` / `issue` / `desc` however unreadable the
+    //   pattern is.
+    let mut broken: Vec<&str> = Vec::new();
+    if bad_type {
+      broken.push(
+        "`type`, so gitmoji / `gwm commit-prefix`, `[pr_template.by_type]` selection, remove/bootstrap hook placeholders and the TUI rename read the wrong branch type",
+      );
+    }
+    if bad_issue {
+      broken.push(
+        "`issue`, so issue auto-linking from the branch name, `gwm pr` body placeholders, remove/bootstrap hook placeholders and the TUI rename target the wrong issue",
+      );
+    }
+    if bad_desc {
+      broken.push(
+        "`desc`, so `gwm pr` body placeholders, remove/bootstrap hook placeholders and the TUI rename see the wrong description",
+      );
+    }
+    parts.push(format!("{} parse but read back {}", lossy, broken.join("; ")));
+  }
+
+  Some(format!(
+    "worktree.branch_pattern `{}` does not round-trip: of the {} branch shapes probed, {}",
+    sanitise_for_terminal(pattern),
+    probes,
+    parts.join("; and ")
+  ))
+}
+
+/// Neutralise control characters before echoing a config-supplied value.
+///
+/// `branch_pattern` comes from a repo's `.gwm.toml`, and neither `gwm doctor`
+/// nor `gwm config validate` goes through the TOFU trust gate — running
+/// either inside a repo you have not vetted is meant to be safe. Echoing the
+/// raw value would hand an untrusted `.gwm.toml` a terminal escape channel
+/// (an OSC 52 clipboard write, a title rewrite, cursor games). Same idiom as
+/// [`crate::tui::wt_tree::sanitize_name`]: replace, don't strip, so the value
+/// stays recognisable and its length is not silently altered.
+fn sanitise_for_terminal(s: &str) -> String {
+  s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
+}
+
 pub fn kebab(input: &str) -> String {
   // Lowercase, then collapse every non-alphanumeric run into a single `-`.
   let lower = input.to_lowercase();

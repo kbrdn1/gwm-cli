@@ -4,7 +4,7 @@
 
 use crate::config::{expand_placeholders, Config, CONFIG_FILE};
 use crate::error::Result;
-use crate::naming::parse_branch;
+use crate::naming::{branch_pattern_warning, parse_branch};
 use crate::worktree;
 use git2::BranchType;
 use std::collections::BTreeSet;
@@ -140,6 +140,7 @@ pub fn run(ctx: &DoctorCtx<'_>) -> Result<DoctorReport> {
 
   report.checks.push(check_base_dir_writable(ctx));
   report.checks.push(check_tui_keymap(ctx));
+  report.checks.push(check_branch_pattern(ctx));
   Ok(report)
 }
 
@@ -417,6 +418,50 @@ fn extract_launcher_binary(command: &str) -> Option<String> {
 /// users. Configured launchers ([git_tui], [review] — issue #75) are
 /// added to the same set so the user gets one consolidated warning.
 ///
+/// Issue #415: `worktree.branch_pattern` is honoured when a branch name is
+/// *written* and ignored when one is *read back*, so a pattern the parser
+/// cannot follow quietly turns off issue/PR auto-linking, gitmoji selection
+/// and the branch-convention check above. [`branch_pattern_warning`] probes
+/// the round-trip and names whichever segments actually break — a custom
+/// pattern is not automatically a broken one.
+///
+/// Warning rather than Failed: the config is valid and the worktrees it
+/// produces are perfectly usable — only the structured extras go silent.
+/// This check does not fix the divergence, it states it; the parser is
+/// derived from the pattern in #417.
+fn check_branch_pattern(ctx: &DoctorCtx<'_>) -> Check {
+  let name = "worktree.branch_pattern round-trips through the parser";
+
+  // Re-derive from disk for the same reason `check_tui_keymap` does:
+  // `repo_context_lenient` substitutes `Config::default()` when the user's
+  // file fails to load for an unrelated semantic reason, and reading
+  // `ctx.config` there would report the default pattern as fine while the
+  // file on disk carries a broken one — a false `✓` from the one check
+  // whose whole job is catching a silent failure. Fall back to `ctx.config`
+  // only when the *merge* fails, which `check_config_parses` already flags.
+  let effective = match Config::merge_layered(ctx.repo_workdir, ctx.global_config_path) {
+    Ok(cfg) => cfg,
+    Err(_) => ctx.config.clone(),
+  };
+  let types = effective.resolved_branch_types().types;
+
+  match branch_pattern_warning(
+    &effective.worktree.branch_pattern,
+    &worktree::repo_name(ctx.repo),
+    &types,
+  ) {
+    // The hint stays neutral on purpose: which workaround applies depends
+    // on which segment broke, and the detail above already names it.
+    // Recommending `gwm link` unconditionally was wrong for a pattern
+    // whose `issue` survives — auto-linking works there, and `gwm link`
+    // fixes neither the hook placeholders nor the TUI rename.
+    Some(detail) => Check::warning(name, detail).with_hint(
+      "restore the default `{type}/#{issue}-{desc}`, or keep the pattern and accept exactly the loss named above",
+    ),
+    None => Check::ok(name, "`parse_branch` reads back the segments `branch_name` writes"),
+  }
+}
+
 /// Missing binaries are surfaced as Warning, not Failed — the user may not
 /// rely on that step at all, but the visibility matters.
 fn check_binaries_on_path(ctx: &DoctorCtx<'_>) -> Check {
