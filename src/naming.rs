@@ -226,7 +226,19 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
   let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);
   let mut probes = 0usize;
 
-  for type_ in types.iter().map(|t| t.name.as_str()) {
+  // Probe only types `gwm create` would actually accept. `merge_layered`
+  // deserialises `[[branch_types]]` without running `validate_branch_types`,
+  // so the effective list can carry a name like `Feat` that the config
+  // validator rejects outright — probing it would report the *default*
+  // pattern as broken, because `BRANCH_RE`'s `[a-z]+` cannot match it. The
+  // invalid config is reported by its own check; this one stays quiet
+  // rather than blaming the pattern for it.
+  let usable = types
+    .iter()
+    .map(|t| t.name.as_str())
+    .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase()));
+
+  for type_ in usable {
     for issue in ISSUES {
       for desc in DESCS {
         // A pattern that does not expand at all is a different, *loud*

@@ -453,3 +453,37 @@ fn the_documented_pattern_table_matches_reality() {
     );
   }
 }
+
+/// Issue #415 (Codex review): `Config::merge_layered` deserialises
+/// `[[branch_types]]` without running `validate_branch_types`, so the
+/// effective list can carry a name `gwm create` would refuse. Probing it
+/// would report the *default* pattern as broken — `BRANCH_RE`'s `[a-z]+`
+/// cannot match `Feat` — which blames the pattern for a config error that
+/// has its own diagnostic.
+#[test]
+fn an_unusable_branch_type_never_makes_the_default_pattern_look_broken() {
+  let invalid = vec![
+    BranchType {
+      name: "Feat".into(), // rejected by `validate_branch_types` (^[a-z]+$)
+      description: String::new(),
+    },
+    BranchType {
+      name: "fix".into(),
+      description: String::new(),
+    },
+  ];
+  assert_eq!(
+    branch_pattern_warning("{type}/#{issue}-{desc}", "gwm-cli", &invalid),
+    None
+  );
+
+  // Nothing probeable at all: stay quiet rather than guess.
+  let all_invalid = vec![BranchType {
+    name: "Feat".into(),
+    description: String::new(),
+  }];
+  assert_eq!(
+    branch_pattern_warning("{type}-{issue}-{desc}", "gwm-cli", &all_invalid),
+    None
+  );
+}
