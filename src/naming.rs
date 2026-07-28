@@ -27,16 +27,27 @@ static DESC_RE: LazyLock<Regex> =
 ///
 /// These mirror the validators the *formatter* side enforces, so the parser
 /// accepts exactly the strings [`BranchSpec::branch_name`] can emit and
-/// nothing more: `{issue}` is `ISSUE_RE`, `{desc}` is `DESC_RE`. `{type}`
-/// has no charset of its own — it becomes an alternation of the repo's
-/// configured branch types, which is what makes a slash-less pattern like
-/// `{type}-{issue}-{desc}` unambiguous.
+/// nothing more: `{issue}` is `ISSUE_RE`, `{desc}` is `DESC_RE`, and `{type}`
+/// is the `^[a-z]+$` that `validate_branch_types` pins on every configured
+/// name.
+///
+/// `{type}` is deliberately *not* an alternation of the repo's configured
+/// types, which issue #417 proposed. It would narrow the parser to branches
+/// the repo can create *today*, so a branch created before a type was retired
+/// from `.gwm.toml` would stop being recognised as gwm's — a regression on a
+/// name the previous release read fine. Nothing needs the narrowing either:
+/// once adjacent placeholders are refused, `[a-z]+` splits every pattern the
+/// alternation splits (measured across the whole documented pattern table),
+/// and the one consumer that genuinely requires a *configured* type — the TUI
+/// rename — checks the resolved list itself and says so precisely.
+const TYPE_GROUP: &str = r"(?P<type>[a-z]+)";
 const ISSUE_GROUP: &str = r"(?P<issue>\d+)";
 const DESC_GROUP: &str = r"(?P<desc>[a-z0-9][a-z0-9-]*)";
-/// Fallback type charset when the caller supplies no usable branch type.
-/// `resolved_branch_types` always yields at least the built-ins, so this is
-/// a guard for direct callers of [`BranchParser::compile`], not a live path.
-const TYPE_CHARSET_FALLBACK: &str = "[a-z]+";
+
+/// The three segments a branch name carries, in the order constants are
+/// resolved: strictest oracle first, so a token that could serve two segments
+/// goes to the one that can be sure about it.
+const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 
 /// Built-in branch types — the fallback when `.gwm.toml` carries no
 /// `[[branch_types]]` block. Kept as a `&[(&str, &str)]` const so the
@@ -402,9 +413,19 @@ impl WorktreeName {
 /// a pattern starting with `~` does not round-trip. That is reported rather
 /// than hidden: [`branch_pattern_warning`] probes the compiled parser and
 /// names the loss.
+/// A pattern may also **freeze** a segment instead of writing it from a
+/// placeholder: `feat/#{issue}-{desc}` hardcodes the type, `{type}/#1-{desc}`
+/// hardcodes the issue number. Those are recovered as constants (see
+/// [`BranchParser::constants`]), because the previous release read them out of
+/// the branch name and dropping them would take gitmoji or auto-linking away
+/// from a repo that had them working.
 #[derive(Debug, Clone)]
 pub struct BranchParser {
   re: Regex,
+  /// Segments the pattern freezes as literal text, in [`SEGMENTS`] order.
+  /// Never overlaps the regex's capture groups: a segment is either written
+  /// by a placeholder or frozen by a literal, never both.
+  constants: Vec<(&'static str, String)>,
 }
 
 impl BranchParser {
@@ -430,9 +451,14 @@ impl BranchParser {
   ///    reading that back needs a backreference, which this engine has not
   ///    got, and a second group of the same name will not compile.
   pub fn compile(pattern: &str, repo: &str, types: &[BranchType]) -> Result<Self> {
-    let type_group = format!("(?P<type>{})", type_alternation(types));
     let mut re = String::from("^");
     let mut seen: Vec<&str> = Vec::new();
+    // Literal text the *pattern author* wrote, kept for constant recovery.
+    // Deliberately not fed by `{repo}` / `{home}`: the user wrote `feat` in
+    // `feat/#{issue}-{desc}` and meant it, but nobody chose the repo's name
+    // for this purpose, and a repo that happens to be called `docs` must not
+    // turn `{repo}/{issue}-{desc}` into a docs-typed branch.
+    let mut authored = String::new();
     // Tracks whether the last thing emitted was a capture group that nothing
     // literal has separated from what comes next. A `{repo}` that expands to
     // an empty string leaves two groups adjacent just as surely as writing
@@ -443,16 +469,19 @@ impl BranchParser {
 
     while !rest.is_empty() {
       let Some(open) = rest.find('{') else {
+        authored.push_str(rest);
         push_literal(&mut re, rest, &mut open_capture);
         break;
       };
       if open > 0 {
+        authored.push_str(&rest[..open]);
         push_literal(&mut re, &rest[..open], &mut open_capture);
       }
       let after = &rest[open..];
       // An unbalanced `{` is literal on the formatter side too (`str::replace`
       // only ever matches a complete token), so it stays literal here.
       let Some(close) = after.find('}') else {
+        authored.push_str(after);
         push_literal(&mut re, after, &mut open_capture);
         break;
       };
@@ -460,7 +489,7 @@ impl BranchParser {
       rest = &after[close + 1..];
 
       let group = match token {
-        "{type}" => Some(("type", type_group.as_str())),
+        "{type}" => Some(("type", TYPE_GROUP)),
         "{issue}" => Some(("issue", ISSUE_GROUP)),
         "{desc}" => Some(("desc", DESC_GROUP)),
         _ => None,
@@ -500,7 +529,10 @@ impl BranchParser {
             .to_string();
           push_literal(&mut re, &home, &mut open_capture);
         }
-        None => push_literal(&mut re, token, &mut open_capture),
+        None => {
+          authored.push_str(token);
+          push_literal(&mut re, token, &mut open_capture);
+        }
       }
     }
 
@@ -512,7 +544,8 @@ impl BranchParser {
         e
       ))
     })?;
-    Ok(Self { re })
+    let constants = literal_constants(&authored, &seen, types);
+    Ok(Self { re, constants })
   }
 
   /// The parser for a repo's effective config. The single lookup site that
@@ -561,14 +594,23 @@ impl BranchParser {
     &BUILTIN
   }
 
-  /// Does the compiled parser recover `segment` (`type` / `issue` / `desc`)?
+  /// Does this parser recover `segment` (`type` / `issue` / `desc`) at all?
   ///
-  /// `false` means the pattern never writes it, so no branch name it produces
-  /// can carry it — a permanent absence rather than a parse that goes wrong.
-  /// Read off the compiled regex rather than by re-scanning the pattern
-  /// string, so the answer comes from the artefact that does the reading.
-  pub fn captures_segment(&self, segment: &str) -> bool {
+  /// True when the pattern writes it from a placeholder *or* freezes it as a
+  /// literal. False means no branch name the pattern produces can carry it: a
+  /// permanent absence rather than a parse that goes wrong.
+  pub fn reads_segment(&self, segment: &str) -> bool {
     self.re.capture_names().flatten().any(|name| name == segment)
+      || self.constants.iter().any(|(name, _)| *name == segment)
+  }
+
+  /// The segments this pattern freezes as literal text, `(segment, value)`.
+  ///
+  /// Disclosure, not decoration: `gwm doctor` names these on its OK line, so a
+  /// pattern that quietly pins every branch to one issue number says so rather
+  /// than looking like it read one out of the branch.
+  pub fn constants(&self) -> &[(&'static str, String)] {
+    &self.constants
   }
 
   /// A parser that matches nothing. `\z\A` can never match: it demands the
@@ -576,20 +618,34 @@ impl BranchParser {
   fn inert() -> Self {
     Self {
       re: Regex::new(r"\z\A").expect("static inert regex compiles"),
+      constants: Vec::new(),
     }
   }
 
   /// Recover the segments from a branch name, or `None` when the name was not
   /// written by this pattern.
   ///
-  /// A token the pattern omits comes back empty rather than blocking the
-  /// parse: `{type}/{desc}` carries no issue number, and reporting the type
-  /// and desc it *does* carry beats reporting nothing. Callers that need a
-  /// segment check it — see `gwm commit-prefix`, which is defined in terms of
-  /// the type and the issue and says so when either is missing.
+  /// A segment the pattern neither writes nor freezes comes back empty rather
+  /// than blocking the parse: `{type}/{desc}` carries no issue number, and
+  /// reporting the type and desc it *does* carry beats reporting nothing.
+  /// Callers that need a segment check it — see `gwm commit-prefix`, which is
+  /// defined in terms of the type and the issue and says so when either is
+  /// missing.
   pub fn parse(&self, branch: &str) -> Option<BranchSpec> {
     let cap = self.re.captures(branch)?;
-    let seg = |name: &str| cap.name(name).map(|m| m.as_str().to_string()).unwrap_or_default();
+    let seg = |name: &str| {
+      cap
+        .name(name)
+        .map(|m| m.as_str().to_string())
+        .or_else(|| {
+          self
+            .constants
+            .iter()
+            .find(|(seg, _)| *seg == name)
+            .map(|(_, value)| value.clone())
+        })
+        .unwrap_or_default()
+    };
     Some(BranchSpec {
       type_: seg("type"),
       issue: seg("issue"),
@@ -611,26 +667,132 @@ fn push_literal(re: &mut String, text: &str, open_capture: &mut Option<&str>) {
   *open_capture = None;
 }
 
-/// The `{type}` alternation: the configured branch types, longest first so
-/// the leftmost-first engine prefers `feature` over `feat` without relying on
-/// backtracking to correct itself.
+/// Recover the segments a pattern freezes as literal text instead of writing
+/// from a placeholder.
 ///
-/// Types that `gwm create` would refuse are excluded. `merge_layered`
-/// deserialises `[[branch_types]]` without running `validate_branch_types`,
-/// so the effective list can carry a name like `Feat`; a branch gwm cannot
-/// create is not a branch this parser should claim to read.
-fn type_alternation(types: &[BranchType]) -> String {
-  let mut names: Vec<&str> = types
-    .iter()
-    .map(|t| t.name.as_str())
-    .filter(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_lowercase()))
-    .collect();
-  if names.is_empty() {
-    return TYPE_CHARSET_FALLBACK.to_string();
+/// `feat/#{issue}-{desc}` has no `{type}`, yet every branch it writes *is* a
+/// `feat` branch, and the release before this one read that back because its
+/// hardcoded regex happened to have a group in that position. Dropping it here
+/// would take gitmoji, `[pr_template.by_type]` and `gwm commit-prefix` away
+/// from a repo where they work today, so the literal is recovered on purpose.
+///
+/// `authored` is the literal text **the user wrote in the pattern**, never the
+/// expansion of `{repo}` / `{home}`: nobody picked the repo's name for this,
+/// and a repo that happens to be called `docs` must not turn
+/// `{repo}/{issue}-{desc}` into a docs-typed branch.
+///
+/// Each segment gets its own oracle, applied strictest first so a token that
+/// could serve two goes to the one that can be sure of it:
+///
+/// - **`type`** — an exact match against a configured branch type. Finite
+///   list, so `feature/{issue}-{desc}` recovers nothing (the pattern names a
+///   namespace, not a type) while `feat/#{issue}-{desc}` recovers `feat`.
+/// - **`issue`** — an all-digits token, which nothing else in a branch name
+///   is in isolation.
+/// - **`desc`** — anything `DESC_RE` accepts, which is a superset of both
+///   above, so it runs last on what they left.
+///
+/// A segment is only recovered when **exactly one** candidate survives. Two
+/// candidates mean the pattern is genuinely ambiguous about which literal is
+/// the value, and inventing one would be worse than reporting none.
+///
+/// The `desc` oracle is the weak one, and knowingly so: `wt/{type}/#{issue}`
+/// has no description, yet `wt` is the one `DESC_RE`-shaped token in it and is
+/// recovered as one. That is why every constant is disclosed by `gwm doctor`
+/// rather than applied silently.
+fn literal_constants(authored: &str, captured: &[&str], types: &[BranchType]) -> Vec<(&'static str, String)> {
+  let tokens = literal_tokens(authored);
+  let mut claimed: Vec<usize> = Vec::new();
+  let mut out: Vec<(&'static str, String)> = Vec::new();
+
+  for segment in SEGMENTS {
+    if captured.contains(&segment) {
+      continue;
+    }
+    // `desc` is the only segment whose charset spans the `-`, so it is the
+    // only one that looks at dash-joined runs; `type` and `issue` see single
+    // tokens. Running it last means those runs are built from what the
+    // stricter oracles left, which is what keeps `feat/#1-fixed` from reading
+    // its description as `1-fixed`.
+    let candidates: Vec<(Vec<usize>, String)> = if segment == "desc" {
+      dash_joined_runs(&tokens, &claimed)
+    } else {
+      tokens
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !claimed.contains(index))
+        .map(|(index, (text, _))| (vec![index], (*text).to_string()))
+        .collect()
+    };
+
+    let mut hits = candidates.into_iter().filter(|(_, value)| match segment {
+      "type" => types.iter().any(|t| t.name == *value),
+      "issue" => ISSUE_RE.is_match(value),
+      _ => DESC_RE.is_match(value),
+    });
+    let (Some((indices, value)), None) = (hits.next(), hits.next()) else {
+      continue;
+    };
+    claimed.extend(indices);
+    out.push((segment, value));
   }
-  names.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
-  names.dedup();
-  names.iter().map(|n| regex::escape(n)).collect::<Vec<_>>().join("|")
+  out
+}
+
+/// Maximal `[a-z0-9]` runs in the literal text, each paired with whether a
+/// single `-` joins it to the run that follows. Everything else in the pattern
+/// is a separator.
+fn literal_tokens(text: &str) -> Vec<(&str, bool)> {
+  let mut out: Vec<(&str, bool)> = Vec::new();
+  let mut chars = text.char_indices().peekable();
+  while let Some((start, c)) = chars.next() {
+    if !(c.is_ascii_lowercase() || c.is_ascii_digit()) {
+      continue;
+    }
+    let mut end = start + c.len_utf8();
+    while let Some((index, next)) = chars.peek().copied() {
+      if next.is_ascii_lowercase() || next.is_ascii_digit() {
+        end = index + next.len_utf8();
+        chars.next();
+      } else {
+        break;
+      }
+    }
+    // A trailing `-`, or a doubled one, does not join anything: it has to be
+    // followed by another token for the two to be one value.
+    let joined = text[end..].starts_with('-')
+      && text[end + 1..]
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    out.push((&text[start..end], joined));
+  }
+  out
+}
+
+/// Every maximal run of consecutive unclaimed tokens joined by a single `-`,
+/// as `(indices, joined value)`. `feat/#1-fixed` with `feat` and `1` already
+/// claimed yields just `fixed`; `{type}/#{issue}-my-fix` yields `my-fix`.
+fn dash_joined_runs(tokens: &[(&str, bool)], claimed: &[usize]) -> Vec<(Vec<usize>, String)> {
+  let mut runs: Vec<(Vec<usize>, String)> = Vec::new();
+  let mut index = 0;
+  while index < tokens.len() {
+    if claimed.contains(&index) {
+      index += 1;
+      continue;
+    }
+    let mut indices = vec![index];
+    let mut value = tokens[index].0.to_string();
+    while tokens[index].1 && index + 1 < tokens.len() && !claimed.contains(&(index + 1)) {
+      index += 1;
+      value.push('-');
+      value.push_str(tokens[index].0);
+      indices.push(index);
+    }
+    runs.push((indices, value));
+    index += 1;
+  }
+  runs
 }
 
 /// What each branch segment feeds, shared by both shapes of the warning.
@@ -728,18 +890,14 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
     Err(e) => return Some(format!("{}", e)),
   };
 
-  // A segment the pattern does not carry is a different report from a
-  // segment that reads back wrong, and conflating them was misleading in
-  // both directions. `feat/#{issue}-{desc}` hardcodes the type: there is no
-  // ambiguity to resolve and no probe that could ever recover it, so saying
-  // "N of the shapes probed read back the wrong type" both over-quantifies
-  // and hides the one-line fix. Ask the compiled parser rather than
-  // re-scanning the pattern string, so the verdict comes from the artefact
-  // that actually does the reading.
-  let missing: Vec<&str> = ["type", "issue", "desc"]
-    .into_iter()
-    .filter(|seg| !parser.captures_segment(seg))
-    .collect();
+  // A segment the pattern cannot supply at all is a different report from a
+  // segment that reads back wrong, and conflating them was misleading in both
+  // directions: saying "N of the shapes probed read back the wrong type" both
+  // over-quantifies a permanent absence and hides the one-line fix. Ask the
+  // compiled parser rather than re-scanning the pattern string, so the verdict
+  // comes from the artefact that does the reading — and so a segment the
+  // pattern *freezes* as a literal counts as supplied, because it is.
+  let missing: Vec<&str> = SEGMENTS.into_iter().filter(|seg| !parser.reads_segment(seg)).collect();
 
   let (mut unparseable, mut parsed, mut lossy) = (None::<String>, 0usize, 0usize);
   let (mut bad_type, mut bad_issue, mut bad_desc) = (false, false, false);

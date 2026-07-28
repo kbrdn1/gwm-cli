@@ -3863,16 +3863,17 @@ impl App {
     // `worktree.branch_pattern` writes, so the branch is read back with it.
     let parser = crate::naming::BranchParser::from_config(&self.config, &crate::worktree::repo_name(&self.repo));
     let Some(spec) = parser.parse(&branch) else {
-      // Issue #416: a free-form worktree lands here by design, not by mistake.
-      // Issue #417 folded a second case into the same branch: `{type}` compiles
-      // to an alternation of the configured types, so a branch carrying a type
-      // this repo does not declare no longer parses either. Both are "this form
-      // cannot rebuild that name", so the message names the pattern and both
-      // reasons rather than asserting the branch is free-form when it may just
-      // carry a retired type.
+      // Issue #416: a free-form worktree lands here by design, not by
+      // mistake. The edit form rebuilds a `<type>/#<issue>-<desc>` triple,
+      // which a name the user chose on purpose has none of — so state that
+      // this form does not apply rather than implying a malformed branch.
+      //
+      // Issue #417 deliberately did NOT fold "type not configured" into this
+      // arm: `{type}` stays `[a-z]+`, so `zzz/#7-thing` still parses and the
+      // type-index lookup below refuses it with the precise reason.
       self.status = format!(
-        "'{}' does not match this repo's branch pattern '{}' — free-form, or a type that is not configured; rename it with git",
-        branch, self.config.worktree.branch_pattern
+        "'{}' is a free-form branch — the edit form rebuilds <type>/#<issue>-<desc>; rename it with git",
+        branch
       );
       return;
     };

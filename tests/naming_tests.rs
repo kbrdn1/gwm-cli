@@ -261,35 +261,30 @@ fn a_pattern_that_drops_the_issue_warns_about_auto_linking() {
   );
 }
 
-/// Issue #417: a literal in the type's position is text, not a type. The
-/// derived parser declines to guess that `feat/` denotes `feat`, so nothing
-/// reads a branch type back and the warning names the placeholder that would
-/// fix it.
-///
-/// This is the one capability #417 narrows. Under the hardcoded `[a-z]+` the
-/// literal happened to land in the type group, so gitmoji worked; #415's
-/// review pinned that as intended behaviour for a single-type repo. Deriving
-/// the parser cannot preserve it without inferring intent from literal text,
-/// which is guesswork on any repo where a type name is also a normal word.
-/// The warning is on-demand (`doctor` / `config validate`), not a per-command
-/// nag, and it is actionable, so stating the loss beats guessing.
+/// Issue #415 (Codex review): a type gwm would refuse to create must not
+/// produce a warning about branches that cannot exist. With `[[branch_types]]`
+/// narrowed to `feat`, `feat/#{issue}-{desc}` writes what every branch of this
+/// repo *is*, so there is nothing to warn about — and #417's constant recovery
+/// reads that frozen `feat` back, so gitmoji and `gwm commit-prefix` work.
 #[test]
-fn a_literal_in_the_type_position_is_not_read_back_as_a_type() {
-  for types in [
-    default_branch_types(),
-    vec![BranchType {
-      name: "feat".into(),
-      description: "the only configured type".into(),
-    }],
-  ] {
-    let w = branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &types)
-      .expect("a hardcoded type must warn, however many types are configured");
-    assert!(
-      w.contains("`{type}`") && w.contains("gitmoji"),
-      "the warning must name the missing placeholder and what it costs: {}",
-      w
-    );
-  }
+fn a_hardcoded_type_is_fine_when_it_is_the_only_configured_type() {
+  let only_feat = vec![BranchType {
+    name: "feat".into(),
+    description: "New feature implementation".into(),
+  }];
+  assert_eq!(
+    branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &only_feat),
+    None
+  );
+  let spec = BranchParser::compile("feat/#{issue}-{desc}", "gwm-cli", &only_feat)
+    .expect("compiles")
+    .parse("feat/#42-x")
+    .expect("parses");
+  assert_eq!(spec.type_, "feat", "the frozen type is what every branch here is");
+
+  // …and it is still a real loss once a second type can be created, because
+  // `gwm create fix 42 x` writes a branch that reads back as `feat`.
+  assert!(branch_pattern_warning("feat/#{issue}-{desc}", "gwm-cli", &default_branch_types()).is_some());
 }
 
 #[test]
@@ -359,10 +354,12 @@ fn every_probe_derived_verdict_is_scoped_to_the_shapes_actually_probed() {
     w
   );
 
-  let w = branch_pattern_warning("{type}/#1-{desc}", "gwm-cli", &default_branch_types()).expect("must warn");
+  // `{type}/{desc}` has no `{issue}` and no digits to freeze one from, so the
+  // absence is total and needs no probing to state.
+  let w = branch_pattern_warning("{type}/{desc}", "gwm-cli", &default_branch_types()).expect("must warn");
   assert!(
-    !w.contains("branch shapes probed") && w.contains("carries no"),
-    "a missing placeholder is not a probe result and must not borrow its hedging: {}",
+    !w.contains("branch shapes probed") && w.contains("carries no `{issue}`"),
+    "a segment the pattern cannot supply at all is not a probe result and must not borrow its hedging: {}",
     w
   );
 }
@@ -421,17 +418,46 @@ fn the_documented_pattern_table_matches_reality() {
     );
   }
 
-  // Documented as "compiles, but drops a segment".
+  // Documented as "freezes a segment": the literal is read back, so the
+  // features keep working, but the pattern ignores what `gwm create` was
+  // asked for, and that is the loss the warning names.
+  for (pattern, segment, frozen) in [
+    ("feat/#{issue}-{desc}", "type", "feat"),
+    ("{type}/#1-{desc}", "issue", "1"),
+    ("{type}/#{issue}-fixed", "desc", "fixed"),
+  ] {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).expect("compiles");
+    assert_eq!(
+      parser.constants(),
+      &[(segment, frozen.to_string())][..],
+      "`{}` is documented as freezing {} to `{}`",
+      pattern,
+      segment,
+      frozen
+    );
+    let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
+      .unwrap_or_else(|| panic!("`{}` is documented as losing what create asked for", pattern));
+    assert!(
+      w.contains(&format!("read back `{}`", segment)),
+      "`{}` is documented as losing the {} create was given: {}",
+      pattern,
+      segment,
+      w
+    );
+  }
+
+  // Documented as "carries no such segment at all": nothing in the pattern
+  // could freeze one, so the absence needs no probing to state.
   for (pattern, token) in [
-    ("feat/#{issue}-{desc}", "`{type}`"),
-    ("{type}/#1-{desc}", "`{issue}`"),
+    ("{issue}-{desc}", "`{type}`"),
+    ("{type}/{desc}", "`{issue}`"),
     ("{type}/#{issue}", "`{desc}`"),
   ] {
     let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
-      .unwrap_or_else(|| panic!("`{}` is documented as dropping a segment but did not warn", pattern));
+      .unwrap_or_else(|| panic!("`{}` is documented as carrying no segment but did not warn", pattern));
     assert!(
       w.contains(&format!("carries no {}", token)),
-      "`{}` is documented as dropping {}: {}",
+      "`{}` is documented as carrying no {}: {}",
       pattern,
       token,
       w
@@ -920,28 +946,6 @@ fn the_same_token_twice_is_refused_rather_than_compiled_into_a_second_group() {
 }
 
 #[test]
-fn a_type_the_repo_has_not_configured_is_not_claimed() {
-  // `{type}` compiles to an alternation of the configured types, not to
-  // `[a-z]+`. A branch whose type this repo would refuse to create is a
-  // branch gwm does not own: `gwm doctor` leaves it alone instead of
-  // reporting it as an orphan, and the TUI rename (which already refuses an
-  // unconfigured type) stays consistent with the parser feeding it.
-  //
-  // This is the one behaviour narrowing in #417: `wip/#1-x` used to parse
-  // under the hardcoded `[a-z]+`.
-  let types = vec![BranchType {
-    name: "feat".into(),
-    description: "only this one".into(),
-  }];
-  let parser = BranchParser::compile("{type}/#{issue}-{desc}", "gwm-cli", &types).expect("compiles");
-  assert!(parser.parse("feat/#1-x").is_some());
-  assert!(
-    parser.parse("wip/#1-x").is_none(),
-    "an unconfigured type must not be claimed"
-  );
-}
-
-#[test]
 fn a_pattern_that_cannot_be_compiled_reads_nothing_rather_than_the_default_shape() {
   // Falling back to the built-in parser here would reproduce exactly the
   // defect #417 removes: the repo writes one shape, gwm reads another, and
@@ -1025,4 +1029,149 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
       token
     );
   }
+}
+
+// ---------------------------------------------------------------------
+// Issue #417 — no-regression baseline.
+//
+// The set of branches gwm 1.5.0 could read is exactly the set matching its
+// hardcoded `^([a-z]+)/#(\d+)-([a-z0-9-]+)$`, read verbatim off the `v1.5.0`
+// tag. Every pattern below writes names in that set, so every one of them
+// worked before this issue and has to keep working after it. The expected
+// triples were computed by running that regex, not by reasoning about the
+// new parser.
+// ---------------------------------------------------------------------
+
+/// Patterns whose output 1.5.0 parsed, with what it read back.
+///
+/// The last two are the ones it read *wrongly* — `{desc}` swallowed the
+/// literal that followed it — and #415's warning existed to say so. Those are
+/// listed separately below, because matching 1.5.0 there would mean keeping
+/// the bug.
+const V1_5_0_PARSED: [(&str, &str, &str, &str); 4] = [
+  // pattern, type, issue, desc
+  ("{type}/#{issue}-{desc}", "feat", "42", "my-desc"),
+  // Freezes the type. 1.5.0's `([a-z]+)` group happened to sit exactly where
+  // the literal does, so it read `feat` back and gitmoji worked.
+  ("feat/#{issue}-{desc}", "feat", "42", "my-desc"),
+  // Freezes the issue number.
+  ("{type}/#1-{desc}", "feat", "1", "my-desc"),
+  // Freezes the description.
+  ("{type}/#{issue}-fixed", "feat", "42", "fixed"),
+];
+
+#[test]
+fn every_branch_1_5_0_could_read_is_still_read_the_same_way() {
+  for (pattern, want_type, want_issue, want_desc) in V1_5_0_PARSED {
+    let (branch, back) = round_trip(pattern, "feat", "42", "my-desc");
+    assert_eq!(
+      back,
+      Some((want_type.into(), want_issue.into(), want_desc.into())),
+      "`{}` wrote `{}`; gwm 1.5.0 read it as ({}, {}, {}) and this must not regress",
+      pattern,
+      branch,
+      want_type,
+      want_issue,
+      want_desc
+    );
+  }
+}
+
+#[test]
+fn the_two_patterns_1_5_0_read_wrongly_are_read_correctly_now() {
+  // 1.5.0's `([a-z0-9-]+)$` desc group ran to the end of the name, so a
+  // literal after `{desc}` was swallowed into it. #415 reported it; deriving
+  // the parser fixes it. Matching 1.5.0 here would mean keeping the bug.
+  let (_, back) = round_trip("{type}/#{issue}-prefix-{desc}", "feat", "42", "my-desc");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "my-desc".into())));
+  //                                                  ^ 1.5.0 said `prefix-my-desc`
+
+  let (_, back) = round_trip("{type}/#{issue}-{desc}-{repo}", "feat", "42", "my-desc");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "my-desc".into())));
+  //                                                  ^ 1.5.0 said `my-desc-gwm-cli`
+}
+
+#[test]
+fn a_branch_type_the_repo_no_longer_declares_is_still_read() {
+  // `{type}` is `[a-z]+`, not an alternation of the configured types. A
+  // branch created while `wip` was configured keeps being recognised as
+  // gwm's after `wip` is dropped from `.gwm.toml`: `doctor` still counts it
+  // for the orphan check, `gwm commit-prefix` still renders (with the unknown
+  // -type gitmoji), and the TUI rename refuses it with the precise reason
+  // rather than a generic "does not match the pattern".
+  //
+  // Narrowing `{type}` to the configured list would have made all three go
+  // quiet on a name the previous release read fine.
+  let only_feat = vec![BranchType {
+    name: "feat".into(),
+    description: "the only configured type".into(),
+  }];
+  let parser = BranchParser::compile("{type}/#{issue}-{desc}", "gwm-cli", &only_feat).expect("compiles");
+  let spec = parser.parse("wip/#1-x").expect("an unconfigured type still parses");
+  assert_eq!(spec.type_, "wip");
+  assert_eq!(spec.issue, "1");
+}
+
+#[test]
+fn a_frozen_segment_is_recovered_from_the_literal_that_freezes_it() {
+  let types = default_branch_types();
+  let c = |p: &str| {
+    BranchParser::compile(p, "gwm-cli", &types)
+      .expect("compiles")
+      .constants()
+      .iter()
+      .map(|(seg, value)| (*seg, value.clone()))
+      .collect::<Vec<_>>()
+  };
+
+  assert_eq!(c("feat/#{issue}-{desc}"), vec![("type", "feat".into())]);
+  assert_eq!(c("{type}/#1-{desc}"), vec![("issue", "1".into())]);
+  assert_eq!(c("{type}/#{issue}-fixed"), vec![("desc", "fixed".into())]);
+  // A hardcoded description carrying the `-` `DESC_RE` allows.
+  assert_eq!(c("{type}/#{issue}-my-fix"), vec![("desc", "my-fix".into())]);
+  // All three at once: each oracle claims its own token and removes it from
+  // the pool the next one sees.
+  assert_eq!(
+    c("feat/#1-fixed"),
+    vec![("type", "feat".into()), ("issue", "1".into()), ("desc", "fixed".into())]
+  );
+  // Nothing frozen when every placeholder is present.
+  assert!(c("{type}/#{issue}-{desc}").is_empty());
+}
+
+#[test]
+fn a_namespace_literal_is_not_mistaken_for_a_branch_type() {
+  // The `type` oracle is an exact match against the configured list, so a
+  // literal that merely *contains* a type name, or that is a plain namespace,
+  // recovers nothing. This is what keeps the recovery from being guesswork.
+  let types = default_branch_types();
+  for pattern in [
+    "feature/{issue}-{desc}", // contains `feat`, is not `feat`
+    "wt/{issue}-{desc}",
+    "{repo}/{issue}-{desc}", // the repo name is not pattern text the user authored
+  ] {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &types).expect("compiles");
+    assert!(
+      !parser.reads_segment("type"),
+      "`{}` must not invent a branch type",
+      pattern
+    );
+  }
+
+  // Two configured types in the literal: genuinely ambiguous, so neither is
+  // claimed rather than picking one.
+  let parser = BranchParser::compile("feat/fix-{issue}-{desc}", "gwm-cli", &types).expect("compiles");
+  assert!(!parser.reads_segment("type"));
+}
+
+#[test]
+fn a_repo_named_after_a_branch_type_does_not_type_its_branches() {
+  // `{repo}` is resolved by the formatter, so it is fixed text in the branch
+  // name — but it is not text the *pattern author* chose, and a repo called
+  // `docs` would otherwise make every branch a docs branch.
+  let types = default_branch_types();
+  let parser = BranchParser::compile("{repo}/#{issue}-{desc}", "docs", &types).expect("compiles");
+  assert!(!parser.reads_segment("type"));
+  let spec = parser.parse("docs/#42-x").expect("parses");
+  assert_eq!(spec.type_, "");
 }

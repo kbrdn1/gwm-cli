@@ -3581,11 +3581,12 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
     ))
   })?;
 
-  // Issue #417: a pattern that hardcodes the type (`feat/#{issue}-{desc}`) or
-  // drops the issue parses perfectly and yields an empty segment. Rendering
-  // `resolve_prefix` from that prints ` (#):` — a broken prefix shipped as a
-  // success, straight into a commit message. Refuse with the same shape as
-  // above and name the placeholder that would fix it.
+  // Issue #417: a pattern that carries no `{type}` or `{issue}` *and* freezes
+  // neither as a literal — `{type}/{desc}`, `{issue}-{desc}` — parses
+  // perfectly and yields an empty segment. Rendering `resolve_prefix` from
+  // that prints ` (#):`, a broken prefix shipped as a success straight into a
+  // commit message. A pattern that hardcodes one (`feat/#{issue}-{desc}`) does
+  // not land here: the literal is recovered, so the prefix is right.
   if spec.type_.is_empty() || spec.issue.is_empty() {
     let want = match (spec.type_.is_empty(), spec.issue.is_empty()) {
       (true, true) => "`{type}` or `{issue}`",

@@ -111,16 +111,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one valid split. `gwm doctor` and `gwm config validate` report the refusal
   with the fix in it.
 
-  Two narrowings ship with this, both deliberate and both reported rather than
-  silent. `{type}` compiles to an alternation of the repo's configured branch
-  types instead of `[a-z]+`, so a branch carrying a type the repo does not
-  declare is no longer claimed as gwm's: `doctor` leaves it alone and the TUI
-  rename refuses it, which is what that modal already did one step later. And a
-  literal in the type's position is text rather than a type, so
-  `feat/#{issue}-{desc}` no longer yields a branch type even when `feat` is the
-  only configured one; inferring intent from literal text is guesswork on any
-  repo where a type name is also an ordinary word. `gwm doctor` names the
-  missing placeholder and how to get it back.
+  A pattern that **freezes** a segment as a literal instead of writing it from
+  a placeholder keeps working exactly as before. `feat/#{issue}-{desc}` and
+  `{type}/#1-{desc}` were readable in 1.5.0 only because the hardcoded regex
+  happened to have a group where the literal sits; the derived parser recovers
+  the literal on purpose, so gitmoji, `gwm commit-prefix` and auto-linking
+  still work on those repos. The recovery is an exact match rather than a
+  guess: a branch type is looked up in the repo's configured list (so
+  `feature/{issue}-{desc}` recovers nothing, since `feature` names a namespace),
+  an issue number has to be all digits, and a description is whatever `DESC_RE`
+  accepts. `{repo}` is deliberately not a source, so a repo called `docs` does
+  not type its own branches. What such a pattern costs is reported separately
+  and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
+  writes a `feat/` branch, so the type you asked for is not the one anyone
+  reads back.
+
+  `{type}` matches `[a-z]+`, not an alternation of the configured branch types,
+  which is what the issue proposed. The alternation would have stopped
+  recognising a branch created before a type was retired from `.gwm.toml`,
+  taking `doctor`'s orphan check and `gwm commit-prefix` away from a name the
+  previous release read fine. Nothing needs it either: once adjacent
+  placeholders are refused, `[a-z]+` splits every pattern in the documented
+  table, and the TUI rename, which does require a configured type, checks the
+  resolved list itself and says so precisely.
   ([#417](https://github.com/kbrdn1/gwm-cli/issues/417))
 
 ### Docs
