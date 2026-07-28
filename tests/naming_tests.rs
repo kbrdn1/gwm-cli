@@ -574,7 +574,8 @@ fn a_freeform_name_is_not_held_to_the_desc_convention() {
 
 /// `branch_pattern` / `path_pattern` are defined in terms of `{type}`,
 /// `{issue}` and `{desc}`, none of which a free-form name has, so they do
-/// not apply. `base` still does — it only uses `{home}` / `{repo}`.
+/// not apply. `base` still does, for the placeholders it documents
+/// (`{home}` / `{repo}` / `{repo_path}` / `{repo_parent}`).
 #[test]
 fn patterns_do_not_apply_to_a_freeform_name_but_base_still_does() {
   let cfg = WorktreeConfig {
@@ -586,6 +587,28 @@ fn patterns_do_not_apply_to_a_freeform_name_but_base_still_does() {
   assert_eq!(n.branch_name(&cfg, "r").unwrap(), "spike-redis");
   let p = n.worktree_path(&cfg, "r", std::path::Path::new("/repos/r")).unwrap();
   assert_eq!(p, std::path::Path::new("/tmp/r/spike-redis"));
+}
+
+/// `base` is only expanded with the placeholders a free-form name can
+/// supply. The structured path feeds `{type}` / `{issue}` / `{desc}` into
+/// `base` too, so a base written with one of them has nothing to resolve
+/// against here — and `expand_placeholders` leaves an unfed placeholder
+/// *literal*, which would silently create a directory named `{type}`.
+/// Refusing beats creating the wrong path (Codex review on PR #474).
+#[test]
+fn a_base_written_with_the_structured_placeholders_is_refused_not_left_literal() {
+  for base in ["/srv/{type}", "/srv/{repo}-{issue}", "{home}/wt/{desc}"] {
+    let cfg = WorktreeConfig {
+      base: base.into(),
+      ..WorktreeConfig::default()
+    };
+    let n = WorktreeName::freeform("spike-redis").unwrap();
+    let err = n
+      .worktree_path(&cfg, "r", std::path::Path::new("/repos/r"))
+      .expect_err(&format!("`{}` has no value to resolve for a free-form name", base));
+    let msg = format!("{}", err);
+    assert!(msg.contains("base"), "the message must point at worktree.base: {}", msg);
+  }
 }
 
 /// A `/` is legal in a branch name and a common convention, but a worktree
@@ -632,6 +655,46 @@ fn a_freeform_name_that_git_or_the_filesystem_would_refuse_is_rejected() {
       bad
     );
   }
+}
+
+/// The name becomes the branch verbatim, so it has to be validated
+/// verbatim. Trimming would accept `--name " spike"` and quietly create
+/// `spike` — a different branch from the one that was asked for. Git
+/// already refuses the space; letting it say so is the honest answer
+/// (Codex review on PR #474).
+#[test]
+fn surrounding_whitespace_is_refused_rather_than_silently_stripped() {
+  for bad in [" spike", "spike ", "\tspike", "spike\n"] {
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{:?}` must be refused, not trimmed into a different branch",
+      bad
+    );
+  }
+}
+
+/// The branch and the directory have different length limits: a ref is a
+/// path of components (each ≤ 255 bytes), a worktree directory is a single
+/// one. `a×130/b×130` is a legal ref and a 261-byte directory name, so the
+/// branch gets created and `repo.worktree` then fails — leaving an orphan
+/// branch behind. Reproduced against the branch binary before the fix
+/// (Codex review on PR #474); the structured path cannot reach it, because
+/// the `.lock` suffix makes git's own limit one byte stricter than the
+/// directory's.
+#[test]
+fn a_name_that_would_overflow_a_path_component_is_refused_before_anything_is_created() {
+  let long = format!("{}/{}", "a".repeat(130), "b".repeat(130));
+  assert!(
+    git2::Reference::is_valid_name(&format!("refs/heads/{}", long)),
+    "precondition: git accepts this ref, so only our own check can stop it"
+  );
+  assert!(
+    WorktreeName::freeform(&long).is_err(),
+    "a 261-byte directory name must be refused up front"
+  );
+  // Right at the edge: 255 bytes is a legal component, 256 is not.
+  assert!(WorktreeName::freeform(&"a".repeat(255)).is_ok(), "255 bytes is legal");
+  assert!(WorktreeName::freeform(&"a".repeat(256)).is_err(), "256 bytes is not");
 }
 
 /// The rejection has to say what is wrong, not just that something is.

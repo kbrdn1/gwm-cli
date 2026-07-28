@@ -170,8 +170,23 @@ impl BranchSpec {
 ///
 /// The patterns do not apply to a free-form name, because they are written in
 /// terms of `{type}` / `{issue}` / `{desc}` and it has none of them. `base`
-/// still applies (it only uses `{home}` / `{repo}`), so a free-form worktree
-/// lands beside the structured ones rather than somewhere else.
+/// still applies, so a free-form worktree lands beside the structured ones
+/// rather than somewhere else — but only for the placeholders it documents
+/// (`{home}` / `{repo}` / `{repo_path}` / `{repo_parent}`). The structured
+/// path also feeds `{type}` / `{issue}` / `{desc}` through `base`; a `base`
+/// written with one of those is refused here rather than expanded literally.
+/// Max bytes in a single path component. `NAME_MAX` is 255 on every
+/// filesystem gwm targets; git's own ref check is silent about length,
+/// so the worktree directory is the binding constraint.
+const MAX_DIR_COMPONENT_BYTES: usize = 255;
+
+/// The `base` placeholders only the structured triple can supply. A
+/// free-form name has no value for any of them, and `expand_placeholders`
+/// leaves an unfed placeholder literal, so a `base` written with one of
+/// these has to be refused rather than turned into a directory called
+/// `{type}`.
+const STRUCTURED_BASE_PLACEHOLDERS: [&str; 3] = ["{type}", "{issue}", "{desc}"];
+
 #[derive(Debug, Clone)]
 pub enum WorktreeName {
   Structured(BranchSpec),
@@ -191,8 +206,13 @@ impl WorktreeName {
   /// [`git2::Reference::is_valid_name`] against the real `refs/heads/<name>`
   /// the branch will occupy, rather than a hand-written rule list: the
   /// authority on what git accepts is git.
+  ///
+  /// The name is validated exactly as typed. Trimming would accept
+  /// `--name " spike"` and create `spike` instead — a different branch from
+  /// the one that was asked for, which the "the name becomes the branch"
+  /// contract does not allow.
   pub fn freeform(input: &str) -> Result<Self> {
-    let name = input.trim();
+    let name = input;
     let reject = |reason: &str| {
       Err(GwmError::InvalidWorktreeName {
         name: input.to_string(),
@@ -219,6 +239,18 @@ impl WorktreeName {
     // `git branch -d -x`, `cd -x` all read it as a flag.
     if name.starts_with('-') {
       return reject("a leading `-` makes the name unusable as a command argument");
+    }
+    // A ref is a *path* of components, a worktree directory is a single one,
+    // so `a×130/b×130` is a legal ref and an illegal directory name. Without
+    // this check `worktree::add` creates the branch, then fails on the
+    // directory and leaves the branch orphaned. `/` → `-` is 1:1, so the
+    // flattened dirname has exactly the name's byte length.
+    if name.len() > MAX_DIR_COMPONENT_BYTES {
+      return reject(&format!(
+        "{} bytes long — a worktree directory is a single path component, capped at {}",
+        name.len(),
+        MAX_DIR_COMPONENT_BYTES
+      ));
     }
 
     // The branch will live at `refs/heads/<name>`; validate exactly that.
@@ -263,6 +295,14 @@ impl WorktreeName {
     match self {
       Self::Structured(spec) => spec.worktree_path(cfg, repo, repo_path),
       Self::Freeform(_) => {
+        if let Some(ph) = STRUCTURED_BASE_PLACEHOLDERS.iter().find(|ph| cfg.base.contains(**ph)) {
+          return Err(GwmError::Config(format!(
+            "worktree.base `{}` uses `{}`, which a free-form name has no value for \
+             (it would be left literal in the path) — drop it from base, or create \
+             the worktree with <type> <issue> <desc>",
+            cfg.base, ph
+          )));
+        }
         let base = expand_placeholders(&cfg.base, repo, None, None, None, Some(repo_path))?;
         Ok(std::path::PathBuf::from(base).join(self.worktree_dirname(cfg, repo)?))
       }
