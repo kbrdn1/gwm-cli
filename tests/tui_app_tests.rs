@@ -8921,6 +8921,39 @@ fn ctrl_t_does_not_flip_the_rename_modal_into_free_form_mode() {
 }
 
 #[test]
+fn the_mode_status_names_the_live_toggle_key_not_the_default() {
+  // Same contract as the confirm countdown (#219 review): never advertise a
+  // key that is no longer bound. The status hard-coded `ctrl-t`, so rebinding
+  // `toggle_mode = ["Ctrl+y"]` left the overlay telling the user to press a
+  // combination that does nothing (Codex review on PR #474).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::CreateToggleMode,
+      vec![KeyStroke::new(KeyCode::Char('y'), KeyModifiers::CONTROL)],
+    )
+    .expect("Ctrl+y is bindable");
+  app.enter_create();
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+
+  assert!(
+    app.status.to_lowercase().contains("ctrl-y") || app.status.to_lowercase().contains("ctrl+y"),
+    "the status must name the live binding: {}",
+    app.status
+  );
+  assert!(
+    !app.status.to_lowercase().contains("ctrl-t"),
+    "the status must not advertise the vacated default: {}",
+    app.status
+  );
+}
+
+#[test]
 fn ctrl_t_still_flips_the_create_modal_into_free_form_mode() {
   // The counterpart: scoping the verb to `View::Create` must not disarm it
   // where it belongs.

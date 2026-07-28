@@ -4144,11 +4144,19 @@ impl App {
       Some(ModalAction::CreateToggleMode) if self.view != View::Create => {}
       Some(ModalAction::CreateToggleMode) => {
         self.create_form.toggle_mode();
+        // Name the LIVE binding, and drop the clause when the verb is
+        // unbound — same contract as the confirm countdown above: never
+        // advertise a key that does nothing (Codex review on PR #474).
+        let back = self
+          .modal_keymap
+          .primary_key(ModalAction::CreateToggleMode)
+          .map(|k| format!(" — {k}: "))
+          .unwrap_or_default();
         self.status = match self.create_form.mode {
-          Mode::Freeform => {
-            "free-form: name the worktree anything git accepts — ctrl-t: back to type/issue/desc".into()
-          }
-          Mode::Structured => "tab/shift-tab: switch field — enter on desc: submit — ctrl-t: free-form".into(),
+          Mode::Freeform if back.is_empty() => "free-form: name the worktree anything git accepts".into(),
+          Mode::Freeform => format!("free-form: name the worktree anything git accepts{back}back to type/issue/desc"),
+          Mode::Structured if back.is_empty() => "tab/shift-tab: switch field — enter on desc: submit".into(),
+          Mode::Structured => format!("tab/shift-tab: switch field — enter on desc: submit{back}free-form"),
         };
       }
       Some(ModalAction::CreateSubmit) => {
