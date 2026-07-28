@@ -6703,3 +6703,80 @@ fn trust_add_satisfies_the_gate_that_bootstrap_checks() {
   run(&["open", "issue", "--print-url"]).success();
   run(&["bootstrap"]).success();
 }
+
+// --- create --name (issue #416) -----------------------------------------
+
+#[test]
+fn create_name_flag_appears_in_help() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "--help"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("--name"));
+}
+
+/// The mode is chosen by an explicit flag, never inferred from how many
+/// positionals were supplied — two of the three is a typo, not a request
+/// for free-form naming.
+#[test]
+fn create_rejects_a_partial_triple() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "feat", "42"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("<DESC>").or(predicate::str::contains("required")));
+}
+
+#[test]
+fn create_name_conflicts_with_the_structured_triple() {
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .args(["create", "--name", "spike-redis", "feat", "42", "x"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("cannot be used with").or(predicate::str::contains("conflict")));
+}
+
+#[test]
+fn create_name_makes_a_worktree_whose_branch_is_the_name() {
+  let (dir, repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "--name", "spike-redis"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("spike-redis"))
+    .stdout(predicate::str::contains("worktree created"));
+
+  // `path_pattern` is `{type}-{issue}-{desc}` in the test config and must
+  // NOT have been applied — a free-form name has none of those tokens.
+  let wt_dir = base.path().join("spike-redis");
+  assert!(wt_dir.exists(), "worktree dir must be the name verbatim");
+  assert!(
+    repo.find_branch("spike-redis", git2::BranchType::Local).is_ok(),
+    "the branch must be the name verbatim"
+  );
+}
+
+#[test]
+fn create_name_rejects_a_name_git_would_refuse() {
+  let (dir, _repo) = init_repo();
+  let base = tempfile::TempDir::new().unwrap();
+  write_test_config(dir.path(), base.path());
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .env("GWM_ALLOW_BOOTSTRAP", "1")
+    .args(["create", "--name", "has space"])
+    .assert()
+    .failure()
+    .stderr(predicate::str::contains("has space"));
+}

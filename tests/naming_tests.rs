@@ -1,5 +1,7 @@
 use gwm::config::{BranchType, WorktreeConfig};
-use gwm::naming::{branch_pattern_warning, default_branch_types, kebab, parse_branch, BranchSpec, BRANCH_TYPES};
+use gwm::naming::{
+  branch_pattern_warning, default_branch_types, kebab, parse_branch, BranchSpec, WorktreeName, BRANCH_TYPES,
+};
 
 #[test]
 fn naming_regexes_compile_at_first_use() {
@@ -541,4 +543,243 @@ fn the_consumer_mapping_matches_the_call_sites() {
     "`gwm create` passes the original BranchSpec to its hooks — only remove/bootstrap re-parse: {}",
     w
   );
+}
+
+// ---------------------------------------------------------------------
+// Issue #416 — free-form worktree naming. `WorktreeName` splits the
+// structured triple from a name the user simply chose. Free-form names
+// are checked for git-ref and filesystem safety only, never against
+// `DESC_RE` — the whole point is not having to obey the convention.
+// ---------------------------------------------------------------------
+
+#[test]
+fn a_freeform_name_is_kept_as_typed_when_it_is_already_safe() {
+  let n = WorktreeName::freeform("spike-redis").expect("a plain slug is valid");
+  let cfg = WorktreeConfig::default();
+  assert_eq!(n.branch_name(&cfg, "gwm-cli").unwrap(), "spike-redis");
+  assert_eq!(n.worktree_dirname(&cfg, "gwm-cli").unwrap(), "spike-redis");
+}
+
+/// Free-form means free-form: shapes `DESC_RE` rejects are fine here.
+#[test]
+fn a_freeform_name_is_not_held_to_the_desc_convention() {
+  for name in ["Spike_Redis", "2026.07.27", "réécriture", "WIP"] {
+    assert!(
+      WorktreeName::freeform(name).is_ok(),
+      "`{}` is a legal git ref and must be accepted",
+      name
+    );
+  }
+}
+
+/// `branch_pattern` / `path_pattern` are defined in terms of `{type}`,
+/// `{issue}` and `{desc}`, none of which a free-form name has, so they do
+/// not apply. `base` still does, for the placeholders it documents
+/// (`{home}` / `{repo}` / `{repo_path}` / `{repo_parent}`).
+#[test]
+fn patterns_do_not_apply_to_a_freeform_name_but_base_still_does() {
+  let cfg = WorktreeConfig {
+    base: "/tmp/{repo}".into(),
+    path_pattern: "{type}-{issue}-{desc}".into(),
+    branch_pattern: "{type}/#{issue}-{desc}".into(),
+  };
+  let n = WorktreeName::freeform("spike-redis").unwrap();
+  assert_eq!(n.branch_name(&cfg, "r").unwrap(), "spike-redis");
+  let p = n.worktree_path(&cfg, "r", std::path::Path::new("/repos/r")).unwrap();
+  assert_eq!(p, std::path::Path::new("/tmp/r/spike-redis"));
+}
+
+/// `base` is only expanded with the placeholders a free-form name can
+/// supply. The structured path feeds `{type}` / `{issue}` / `{desc}` into
+/// `base` too, so a base written with one of them has nothing to resolve
+/// against here — and `expand_placeholders` leaves an unfed placeholder
+/// *literal*, which would silently create a directory named `{type}`.
+/// Refusing beats creating the wrong path (Codex review on PR #474).
+#[test]
+fn a_base_written_with_the_structured_placeholders_is_refused_not_left_literal() {
+  for base in ["/srv/{type}", "/srv/{repo}-{issue}", "{home}/wt/{desc}"] {
+    let cfg = WorktreeConfig {
+      base: base.into(),
+      ..WorktreeConfig::default()
+    };
+    let n = WorktreeName::freeform("spike-redis").unwrap();
+    let err = n
+      .worktree_path(&cfg, "r", std::path::Path::new("/repos/r"))
+      .expect_err(&format!("`{}` has no value to resolve for a free-form name", base));
+    let msg = format!("{}", err);
+    assert!(msg.contains("base"), "the message must point at worktree.base: {}", msg);
+  }
+}
+
+/// A `/` is legal in a branch name and a common convention, but a worktree
+/// directory is a single path component — same split the structured mode
+/// already makes between `branch_pattern` and `path_pattern`.
+#[test]
+fn a_slash_survives_in_the_branch_and_flattens_in_the_directory() {
+  let n = WorktreeName::freeform("spike/redis").expect("a slash is a legal ref");
+  let cfg = WorktreeConfig::default();
+  assert_eq!(n.branch_name(&cfg, "r").unwrap(), "spike/redis");
+  assert_eq!(n.worktree_dirname(&cfg, "r").unwrap(), "spike-redis");
+}
+
+/// Rejected against libgit2's own `refs/heads/<name>` check rather than a
+/// hand-written rule list, plus the path-component rules a ref check does
+/// not cover.
+#[test]
+fn a_freeform_name_that_git_or_the_filesystem_would_refuse_is_rejected() {
+  for bad in [
+    "",            // empty
+    "   ",         // whitespace only
+    "..",          // path traversal
+    "a..b",        // git: no double dot
+    "-leading",    // git: no leading dash on a ref component
+    "trailing.",   // git: no trailing dot
+    "has space",   // git: no space
+    "tilde~1",     // git: no tilde
+    "caret^",      // git: no caret
+    "colon:",      // git: no colon
+    "quest?",      // git: no question mark
+    "star*",       // git: no asterisk
+    "brack[et",    // git: no open bracket
+    "back\\slash", // git: no backslash
+    "at@{brace",   // git: no @{
+    "ends.lock",   // git: no .lock suffix
+    "ctrl\u{7}x",  // control byte
+    "/leading",    // empty ref component
+    "trailing/",   // empty ref component
+    "double//slash",
+  ] {
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` must be rejected as a worktree name",
+      bad
+    );
+  }
+}
+
+/// The name becomes the branch verbatim, so it has to be validated
+/// verbatim. Trimming would accept `--name " spike"` and quietly create
+/// `spike` — a different branch from the one that was asked for. Git
+/// already refuses the space; letting it say so is the honest answer
+/// (Codex review on PR #474).
+#[test]
+fn surrounding_whitespace_is_refused_rather_than_silently_stripped() {
+  for bad in [" spike", "spike ", "\tspike", "spike\n"] {
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{:?}` must be refused, not trimmed into a different branch",
+      bad
+    );
+  }
+}
+
+/// The branch and the directory have different length limits: a ref is a
+/// path of components (each ≤ 255 bytes), a worktree directory is a single
+/// one. `a×130/b×130` is a legal ref and a 261-byte directory name, so the
+/// branch gets created and `repo.worktree` then fails — leaving an orphan
+/// branch behind. Reproduced against the branch binary before the fix
+/// (Codex review on PR #474); the structured path cannot reach it, because
+/// the `.lock` suffix makes git's own limit one byte stricter than the
+/// directory's.
+#[test]
+fn a_name_that_would_overflow_a_path_component_is_refused_before_anything_is_created() {
+  let long = format!("{}/{}", "a".repeat(130), "b".repeat(130));
+  assert!(
+    git2::Reference::is_valid_name(&format!("refs/heads/{}", long)),
+    "precondition: git accepts this ref, so only our own check can stop it"
+  );
+  assert!(
+    WorktreeName::freeform(&long).is_err(),
+    "a 261-byte directory name must be refused up front"
+  );
+  // Right at the edge: 255 bytes of directory name is legal, 256 is not.
+  // Split so the *final* ref component stays clear of the `.lock` rule the
+  // next test pins — this one is about the directory, not the ref.
+  let edge = format!("{}/{}", "a".repeat(251), "b".repeat(3));
+  assert_eq!(edge.len(), 255);
+  assert!(WorktreeName::freeform(&edge).is_ok(), "255 bytes is legal");
+  assert!(
+    WorktreeName::freeform(&format!("{}b", edge)).is_err(),
+    "256 bytes is not"
+  );
+}
+
+/// The other five bytes. Git writes `refs/heads/<name>.lock` *before* the
+/// ref itself, so the ref's final path component carries a suffix the
+/// directory name never sees — and `Branch::name_is_valid` only checks
+/// syntax, never length. Measured against the branch binary: a 250-byte
+/// final segment creates, 251 fails, and it fails after `pre_create` hooks
+/// have already run (Codex review on PR #474).
+///
+/// Only the final segment: an earlier one gets no suffix, so it may use the
+/// full directory budget. Capping every segment would refuse names git and
+/// the filesystem both accept.
+#[test]
+fn the_final_segment_leaves_room_for_git_s_lock_file() {
+  assert!(
+    WorktreeName::freeform(&"a".repeat(250)).is_ok(),
+    "250 + `.lock` is exactly 255 — legal"
+  );
+  assert!(
+    WorktreeName::freeform(&"a".repeat(251)).is_err(),
+    "251 + `.lock` overflows the component git has to create first"
+  );
+  let front_heavy = format!("{}/{}", "a".repeat(251), "b".repeat(3));
+  assert!(
+    WorktreeName::freeform(&front_heavy).is_ok(),
+    "a 251-byte segment is fine when it is not the one carrying `.lock`"
+  );
+}
+
+/// A free-form name has to survive three consumers, and the rules are
+/// enumerated from those rather than sampled from whatever a reviewer
+/// happened to try (Codex review on PR #474 raised three findings of this
+/// same class before the invariant got written down):
+///
+/// 1. it is a **git branch** — checked with the branch-level oracle, not the
+///    reference-level one, because they do not agree;
+/// 2. it is a **single filesystem path component** — bounded and free of
+///    `.` / `..`;
+/// 3. it is a **literal value in placeholder expansion** — so it must not
+///    itself look like a placeholder.
+///
+/// This test pins (1): the ref-level oracle accepts `refs/heads/HEAD`, but
+/// `git branch HEAD` is refused and the name collides with the HEAD
+/// pseudo-ref.
+#[test]
+fn a_name_git_refuses_as_a_branch_is_refused_even_when_the_ref_syntax_is_legal() {
+  assert!(
+    git2::Reference::is_valid_name("refs/heads/HEAD"),
+    "precondition: the ref-level oracle lets `HEAD` through, so only the branch-level one can stop it"
+  );
+  assert!(
+    !git2::Branch::name_is_valid("HEAD").unwrap(),
+    "precondition: the branch-level oracle is the one that refuses it"
+  );
+  assert!(WorktreeName::freeform("HEAD").is_err(), "`HEAD` is not a branch name");
+}
+
+/// (3) `lifecycle::expand_placeholders` substitutes sequentially — `{branch}`
+/// first, then `{type}` / `{issue}` / `{desc}` / `{repo}` — so a branch whose
+/// own name contains a token gets that token rewritten inside the value that
+/// was just substituted: a hook receiving `{branch}` for `spike-{issue}` sees
+/// `spike-`. `DESC_RE` made this unreachable for structured names; free-form
+/// names reach it, so they are refused at the boundary.
+#[test]
+fn a_name_that_looks_like_a_placeholder_is_refused() {
+  for bad in ["spike-{issue}", "{repo}-spike", "{branch}", "closing}brace"] {
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` would be re-substituted during hook expansion",
+      bad
+    );
+  }
+}
+
+/// The rejection has to say what is wrong, not just that something is.
+#[test]
+fn the_rejection_names_the_offending_value() {
+  let err = WorktreeName::freeform("has space").unwrap_err();
+  let msg = format!("{}", err);
+  assert!(msg.contains("has space"), "the message must quote the input: {}", msg);
 }

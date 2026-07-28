@@ -10,6 +10,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Free-form worktree naming. `gwm create --name spike-redis` skips the
+  `<type> <issue> <desc>` triple entirely — not every worktree corresponds to
+  an issue. In the TUI, `Ctrl-T` toggles the create form between the
+  structured triple and a single `Name` field. The flag is exclusive with the
+  positionals, so a partial triple is still the typo it always was; the mode
+  is chosen explicitly, never inferred from how many arguments arrived.
+
+  The name becomes the branch verbatim, and is validated verbatim: `--name
+  " spike"` is refused rather than trimmed into `spike`, which would be a
+  different branch from the one asked for. `branch_pattern` / `path_pattern`
+  do not apply — they are written in terms of `{type}` / `{issue}` / `{desc}`,
+  and a free-form name has none of them — while `[worktree].base` still does,
+  so free-form worktrees land beside the structured ones. `base` is only
+  expanded with the placeholders it documents, though: the structured path
+  feeds `{type}` / `{issue}` / `{desc}` through `base` too, and since an
+  unfed placeholder is left *literal*, a base written with one of them is
+  refused here rather than turned into a directory called `{type}`.
+
+  What a free-form worktree gives up is stated rather than discovered: issue
+  auto-linking goes inactive (`gwm link` remains), `gwm commit-prefix` errors
+  because a prefix is derived from the branch type and there is none, and
+  create/remove/bootstrap hook placeholders resolve empty. PR/MR detection is
+  unaffected — it queries the forge with the whole branch name. `doctor`
+  treats the branch as user-managed and never flags it. All of which applies
+  to a name that does *not* match the branch convention: nothing records how
+  a worktree was named, only what its branch is, so `--name 'feat/#42-x'` is
+  read back as structured and keeps every one of those.
+
+  The accepted-name rules are enumerated from the three things a free-form
+  name has to be at once, rather than accreted one example at a time. It is a
+  **git branch** — validated with libgit2's branch-level oracle, which is
+  stricter than the reference-level one (`refs/heads/HEAD` is a valid
+  reference name, `HEAD` is not a usable branch name). It is a **single
+  filesystem path component**, which a branch name is not: no `.` / `..`
+  component, and at most 255 bytes, since `a×130/b×130` is a legal ref and an
+  illegal directory name and without the cap the branch is created before the
+  directory fails, leaving it orphaned. And it is a **literal value during
+  hook expansion**, so no `{` / `}`: placeholders are substituted in sequence,
+  and `spike-{issue}` would have its own name rewritten inside the `{branch}`
+  value a hook receives. Plus one rule belonging to none of them: no leading
+  `-`, which git accepts but `gwm remove` and `git branch -d` read as a flag.
+  Windows-specific path rules are deliberately **not** covered — they cannot
+  be measured from a Unix machine, and the gap is tracked by
+  [#475](https://github.com/kbrdn1/gwm-cli/issues/475) rather than guessed at
+  here.
+  No `SCHEMA_VERSION` bump — `JsonWorktree` carries no `type` / `desc`, so
+  the wire format is unchanged.
+  ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))
+
 ### Fixed
 
 - `gwm doctor` and `gwm config validate` now warn when

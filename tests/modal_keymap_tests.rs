@@ -219,6 +219,30 @@ fn cross_context_reuse_is_not_a_conflict() {
 }
 
 #[test]
+fn toggle_mode_refuses_a_bare_printable_the_text_fields_would_swallow() {
+  // #456's contract: `handle_create_key` routes an unmodified printable into
+  // the focused text field BEFORE resolving the modal verb, so `toggle_mode =
+  // ["x"]` would be accepted by config and then never fire — and in free-form
+  // mode, where `Name` is the only field, it would leave no way back to the
+  // structured form. `Ctrl+t` is the default precisely because of this, but
+  // the guard has to cover the verb too (Codex review on PR #474).
+  let mut km = ModalKeymap::defaults();
+  let err = km
+    .apply_override(ModalAction::CreateToggleMode, vec![ch('x')])
+    .expect_err("a bare printable must be refused for toggle_mode");
+  assert!(
+    err.to_string().contains("reserved for typing"),
+    "the message must explain why: {err}"
+  );
+  // Ctrl-modified stays bindable — that is the escape hatch the default uses.
+  km.apply_override(
+    ModalAction::CreateToggleMode,
+    vec![KeyStroke::new(KeyCode::Char('y'), KeyModifiers::CONTROL)],
+  )
+  .expect("a Ctrl-modified stroke is not typing input");
+}
+
+#[test]
 fn override_marks_source_as_user_config() {
   let mut km = ModalKeymap::defaults();
   km.apply_override(ModalAction::ConfirmConfirm, vec![ch('o')]).unwrap();

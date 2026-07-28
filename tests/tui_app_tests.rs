@@ -8886,6 +8886,90 @@ fn enter_edit_worktree_prefills_create_form_from_branch() {
 }
 
 #[test]
+fn ctrl_t_does_not_flip_the_rename_modal_into_free_form_mode() {
+  // The rename modal reuses `handle_create_key` (`tui/mod.rs`, #290), so
+  // #416's free-form toggle became reachable from it — but `draw_edit_worktree`
+  // never renders the `Name` field and `submit_edit_worktree` never reads it.
+  // Toggling there sent keystrokes into an invisible buffer and made Enter
+  // submit the untouched triple, i.e. "no change" (Codex review on PR #474).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("fix/#42-broken-thing".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  assert_eq!(
+    app.create_form.mode,
+    Mode::Structured,
+    "the rename modal has no free-form mode to switch to"
+  );
+  assert_eq!(
+    app.create_form.field,
+    Field::Desc,
+    "focus must stay on the field the modal actually renders"
+  );
+  assert_eq!(
+    app.create_form.desc, "broken-thing",
+    "swallowing the verb must not leak `t` into the description as literal input"
+  );
+}
+
+#[test]
+fn the_mode_status_names_the_live_toggle_key_not_the_default() {
+  // Same contract as the confirm countdown (#219 review): never advertise a
+  // key that is no longer bound. The status hard-coded `ctrl-t`, so rebinding
+  // `toggle_mode = ["Ctrl+y"]` left the overlay telling the user to press a
+  // combination that does nothing (Codex review on PR #474).
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::keymap::KeyStroke;
+  use gwm::tui::modal_keymap::ModalAction;
+  let (_dir, mut app) = make_app();
+  app
+    .modal_keymap
+    .apply_override(
+      ModalAction::CreateToggleMode,
+      vec![KeyStroke::new(KeyCode::Char('y'), KeyModifiers::CONTROL)],
+    )
+    .expect("Ctrl+y is bindable");
+  app.enter_create();
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+
+  assert!(
+    app.status.to_lowercase().contains("ctrl-y") || app.status.to_lowercase().contains("ctrl+y"),
+    "the status must name the live binding: {}",
+    app.status
+  );
+  assert!(
+    !app.status.to_lowercase().contains("ctrl-t"),
+    "the status must not advertise the vacated default: {}",
+    app.status
+  );
+}
+
+#[test]
+fn ctrl_t_still_flips_the_create_modal_into_free_form_mode() {
+  // The counterpart: scoping the verb to `View::Create` must not disarm it
+  // where it belongs.
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  use gwm::tui::state::create_form::Mode;
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  assert_eq!(app.view, View::Create);
+
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+
+  assert_eq!(app.create_form.mode, Mode::Freeform);
+  assert_eq!(app.create_form.field, Field::Name);
+}
+
+#[test]
 fn enter_edit_worktree_rejects_unparseable_branch() {
   // A branch that isn't `<type>/#<issue>-<desc>` (e.g. `main`) can't be
   // decomposed into the form, so the modal refuses to open.

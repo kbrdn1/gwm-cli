@@ -694,3 +694,71 @@ fn settings_tui_tab_keeps_the_selected_field_visible_on_a_short_terminal() {
     );
   }
 }
+
+/// The hint row has to describe the mode that is on screen. Free-form has a
+/// single field and no type selector, so `field` and `type` advertise verbs
+/// that do nothing there — and `toggle_mode`, the only way between the two
+/// modes, was advertised by neither. Caught on the install-and-validate pass:
+/// the verb existed in the keymap and the help overlay but never reached the
+/// footer, which is where a user actually looks.
+#[test]
+fn the_create_hint_row_describes_the_mode_that_is_on_screen() {
+  use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  let buf = render(&mut app);
+  assert_present(&buf, "free-form", "structured mode must advertise the way across");
+  assert_present(&buf, "field", "structured mode still rotates fields");
+
+  // Through the real key route, not `toggle_mode()` directly: the status
+  // line is part of what the user reads, and only the key handler updates
+  // it. Toggling the form behind its back would leave the structured
+  // message on screen and hide exactly the kind of mismatch this pins.
+  app.handle_create_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
+  let buf = render(&mut app);
+  assert_present(&buf, "structured", "free-form must advertise the way back");
+
+  // Scoped to the overlay's own hint row — the row inside the modal box that
+  // carries `submit`. The status line legitimately says "back to
+  // type/issue/desc" as prose, and the worktree table behind the modal can
+  // hold anything; neither is the row under test.
+  let hint_row = row_strings(&buf)
+    .into_iter()
+    .find(|r| r.contains("submit") && r.contains('│'))
+    .expect("the create overlay renders a hint row inside its box");
+  for absent in ["field", "type"] {
+    assert!(
+      !hint_row.contains(absent),
+      "`{}` names a verb that does nothing in free-form mode — hint row: {}",
+      absent,
+      hint_row.trim()
+    );
+  }
+}
+
+/// Issue #416: free-form mode presents a single `Name` field and drops the
+/// inputs it has no notion of — the branch type selector and the issue
+/// number. Showing them inert would suggest they still apply.
+#[test]
+fn create_modal_in_freeform_mode_shows_only_the_name_field() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.toggle_mode();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "free-form", "the title states the active mode");
+  assert_present(&buf, "Name", "the free-form name field");
+  // The preview rows survive — they are what makes the resolved branch and
+  // directory legible while typing.
+  assert_present(&buf, "Branch", "branch preview label");
+  assert_present(&buf, "Dir", "dir preview label");
+
+  for absent in ["Issue", "Type"] {
+    assert!(
+      !buffer_contains(&buf, absent),
+      "`{}` has no meaning in free-form mode and must not be rendered — buffer rows:\n{}",
+      absent,
+      row_strings(&buf).join("\n")
+    );
+  }
+}
