@@ -982,8 +982,12 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   // set. `BranchSpec::branch_name` passes `None` for `repo_path`, so those
   // tokens are NOT substituted on the branch path and survive verbatim —
   // which is exactly what the compiler's literal fallback expects.
+  // Line endings are normalised first: the Windows runner checks the source
+  // out with CRLF, so the closing-brace anchor below never matched there and
+  // the test failed on the read rather than on the compiler.
   let src = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config.rs"))
-    .expect("read src/config.rs");
+    .expect("read src/config.rs")
+    .replace("\r\n", "\n");
   let body = src
     .split_once("pub fn expand_placeholders(")
     .expect("expand_placeholders is still named that")
