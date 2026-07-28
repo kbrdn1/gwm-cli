@@ -585,29 +585,6 @@ impl BranchParser {
           } else {
             repo.to_string()
           };
-          // The formatter substitutes in a fixed order and each `str::replace`
-          // runs over what the previous ones produced, so an expansion that
-          // itself contains a later token is substituted *again*. A repo
-          // directory literally named `{type}` makes `{repo}/#{issue}-{desc}`
-          // write `feat/#42-x` while this treats the expansion as final text.
-          // Replaying the whole chain for an input nobody has is not worth it;
-          // reading nothing back without saying why is worse. Refuse.
-          let later: &[&str] = if token == "{home}" {
-            &["{repo}", "{type}", "{issue}", "{desc}"]
-          } else {
-            &["{type}", "{issue}", "{desc}"]
-          };
-          if let Some(found) = later.iter().find(|later| text.contains(**later)) {
-            return Err(GwmError::Config(format!(
-              "worktree.branch_pattern `{}` expands `{}` to text containing `{}`, which the \
-               formatter then substitutes again, so the branch name it writes cannot be read \
-               back — drop `{}` from the pattern, or rename the directory it resolves to",
-              sanitise_for_terminal(pattern),
-              token,
-              found,
-              token
-            )));
-          }
           authored.push(SEGMENT_BREAK);
           push_literal(&mut re, &text, &mut pending);
         }
@@ -623,7 +600,63 @@ impl BranchParser {
       ))
     })?;
     let constants = literal_constants(&authored, &seen, types);
-    Ok(Self { re, constants })
+    let parser = Self { re, constants };
+    parser.mirrors_formatter(pattern, repo)?;
+    Ok(parser)
+  }
+
+  /// Check the parser just built against the formatter it is derived from.
+  ///
+  /// "The compiler mirrors `expand_placeholders`" was argued rather than
+  /// checked, and review found it wrong three times: a brace before a
+  /// placeholder, an expansion carrying another token, a token formed across
+  /// an expansion boundary. Each fix closed one instance and the next pass
+  /// found the next. So the property is verified instead — one probe branch
+  /// through the real formatter, read back with this parser — and a pattern
+  /// the two disagree on is refused rather than compiled into a parser that
+  /// recognises none of the branches it creates.
+  ///
+  /// Two deliberate exclusions:
+  ///
+  /// - **A `~` prefix.** `expand_placeholders` ends with `shellexpand::tilde`,
+  ///   which no parser can undo. That divergence is known, documented, and
+  ///   reported in full by [`branch_pattern_warning`]'s probe; refusing it
+  ///   here would replace a verdict that names every affected feature with a
+  ///   bare compile error.
+  /// - **A pattern the formatter itself cannot expand.** It fails at
+  ///   `gwm create` with its own error, so refusing to build a parser for it
+  ///   adds nothing.
+  fn mirrors_formatter(&self, pattern: &str, repo: &str) -> Result<()> {
+    if pattern.starts_with('~') {
+      return Ok(());
+    }
+    const PROBE: (&str, &str, &str) = ("feat", "42", "probe");
+    let Ok(written) = expand_placeholders(pattern, repo, Some(PROBE.0), Some(PROBE.1), Some(PROBE.2), None) else {
+      return Ok(());
+    };
+    // Only the segments this parser captures: one the pattern freezes comes
+    // back as its literal by design, and one it omits comes back empty.
+    let agrees = self.parse(&written).is_some_and(|spec| {
+      SEGMENTS.iter().all(|segment| {
+        !self.re.capture_names().flatten().any(|name| name == *segment)
+          || match *segment {
+            "type" => spec.type_ == PROBE.0,
+            "issue" => spec.issue == PROBE.1,
+            _ => spec.desc == PROBE.2,
+          }
+      })
+    });
+    if agrees {
+      return Ok(());
+    }
+    Err(GwmError::Config(format!(
+      "worktree.branch_pattern `{}` writes `{}`, which the parser derived from it does not read \
+       back, so gwm would recognise none of the branches this pattern creates — a `{{repo}}` or \
+       `{{home}}` that expands to text containing another placeholder does this, because the \
+       formatter substitutes what its own expansions produce",
+      sanitise_for_terminal(pattern),
+      sanitise_for_terminal(&written)
+    )))
   }
 
   /// The parser for a repo's effective config. The single lookup site that

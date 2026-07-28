@@ -1060,25 +1060,47 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   }
 }
 
-/// Codex review on PR #476, fourth pass. `expand_placeholders` substitutes in
-/// a fixed order — `{home}`, `{repo}`, then the three capturing tokens — and
-/// each `str::replace` runs over what the previous ones produced. So a repo
-/// directory literally named `{type}` makes `{repo}/#{issue}-{desc}` write
-/// `feat/#42-x`, while the compiler treats the expansion as final text and
-/// demands `{type}/#42-x` back. Mirroring that would mean replaying the whole
-/// substitution chain for an input nobody has; leaving it alone means every
-/// read-back feature is silently off. Refuse, and name what was found.
+/// Codex review on PR #476, fourth and fifth passes — and the reason the
+/// mirror is now *checked* rather than argued.
+///
+/// `expand_placeholders` substitutes in a fixed order (`{home}`, `{repo}`,
+/// then the three capturing tokens) and each `str::replace` runs over what the
+/// previous ones produced, so an expansion can be substituted again. Both
+/// shapes below were reported separately, one review pass apart, because the
+/// first fix inspected the expansion in isolation and the second token was
+/// formed with the literals around it. Replaying the whole chain for inputs
+/// nobody has is not worth it; compiling a parser that recognises none of the
+/// branches the pattern creates is worse. So `compile` writes one probe branch
+/// with the real formatter and refuses the pattern when it cannot read it back
+/// — which closes the class rather than these two instances.
 #[test]
-fn an_expansion_that_carries_another_token_is_refused_rather_than_read_wrong() {
+fn a_pattern_the_parser_and_the_formatter_disagree_on_is_refused() {
   let types = default_branch_types();
-  let err = BranchParser::compile("{repo}/#{issue}-{desc}", "{type}", &types)
-    .map(|_| String::new())
-    .unwrap_or_else(|e| e.to_string());
-  assert!(
-    err.contains("{repo}") && err.contains("{type}"),
-    "the message must name both the expansion and what it carries: {}",
-    err
-  );
+  for (pattern, repo) in [
+    // The token sits inside the expansion.
+    ("{repo}/#{issue}-{desc}", "{type}"),
+    // The token is formed with the braces the pattern wrote around it.
+    ("{{repo}}/#{issue}-{desc}", "type"),
+  ] {
+    // The formatter really does substitute twice — assert that rather than
+    // assume it, since the refusal is only correct if it does.
+    let written =
+      gwm::config::expand_placeholders(pattern, repo, Some("feat"), Some("42"), Some("x"), None).expect("formats");
+    assert_eq!(
+      written, "feat/#42-x",
+      "`{}` in a repo called `{}` is expected to substitute twice",
+      pattern, repo
+    );
+
+    let err = BranchParser::compile(pattern, repo, &types)
+      .map(|_| String::new())
+      .unwrap_or_else(|e| e.to_string());
+    assert!(
+      err.contains(pattern) && err.contains("does not read back"),
+      "the message must name the pattern and say the parser cannot read it back: {}",
+      err
+    );
+  }
 
   // A repo name with no token in it is the ordinary case and must be unaffected.
   let parser = BranchParser::compile("{repo}/#{issue}-{desc}", "gwm-cli", &types).expect("compiles");

@@ -121,6 +121,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does not. The same placeholder twice is refused too. `gwm doctor` and
   `gwm config validate` report every refusal with the fix in it.
 
+  The parser is checked against the formatter rather than argued to mirror it:
+  `compile` writes one probe branch with `expand_placeholders` and refuses the
+  pattern when it cannot read that back. `{repo}` / `{home}` expansions are
+  substituted again by the formatter, so a repo directory named `{type}` (or
+  named `type` under a `{{repo}}` pattern) made every read-back feature go
+  quiet with nothing saying why; the check closes that class rather than its
+  two known instances. A `~` prefix stays out of it — `shellexpand::tilde` is a
+  divergence no parser can undo, and `gwm doctor` already names every feature
+  it takes down.
+
   The rule is pinned by enumeration rather than by examples: a test generates
   every pattern over the three placeholders and a set of separators, decides
   independently whether each one round-trips, and requires the compiler to
