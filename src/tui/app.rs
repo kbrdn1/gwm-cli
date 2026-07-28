@@ -2323,7 +2323,7 @@ impl App {
   pub fn hint_context(&self) -> super::ui::HintContext {
     use super::ui::HintContext;
     match self.view {
-      View::Create => HintContext::Create,
+      View::Create => self.create_hint_context(),
       View::Confirm => HintContext::Confirm,
       View::OpenMenu => HintContext::OpenMenu,
       // #219: the two link-prompt stages advertise different keys — the
@@ -2359,6 +2359,20 @@ impl App {
         }
       }
       View::List => self.pane_hint_context(),
+    }
+  }
+
+  /// Which hint row the create overlay advertises (issue #416). The two
+  /// modes present different inputs, so they advertise different verbs:
+  /// free-form has one field and no type selector, and `toggle_mode` is the
+  /// only way between them — a verb a user cannot guess from the visible
+  /// inputs, unlike Tab or the arrows. Both the statusbar and the overlay's
+  /// own footer read this, so the two can never disagree.
+  pub fn create_hint_context(&self) -> super::ui::HintContext {
+    use super::ui::HintContext;
+    match self.create_form.mode {
+      Mode::Freeform => HintContext::CreateFreeform,
+      Mode::Structured => HintContext::Create,
     }
   }
 

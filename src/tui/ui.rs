@@ -2011,8 +2011,13 @@ pub enum HintContext {
   Status,
   /// `gwm switch` picker — mutating verbs are inert, Enter/Esc pick/cancel.
   Picker,
-  /// Create-worktree form modal.
+  /// Create-worktree form modal, structured `<type> <issue> <desc>` mode.
   Create,
+  /// Create-worktree form modal, free-form mode (issue #416). A separate
+  /// context because the two modes present different inputs: free-form has
+  /// one field and no type selector, so the `field` / `type` hints would
+  /// name verbs that do nothing there.
+  CreateFreeform,
   /// Confirm-delete modal.
   Confirm,
   /// Open issue/PR URL menu.
@@ -2057,7 +2062,7 @@ impl HintContext {
       HintContext::Worktrees => "worktrees",
       HintContext::Status => "status",
       HintContext::Picker => "switch",
-      HintContext::Create => "create",
+      HintContext::Create | HintContext::CreateFreeform => "create",
       HintContext::Confirm => "confirm",
       HintContext::OpenMenu => "open",
       HintContext::LinkPrompt => "link",
@@ -2147,6 +2152,17 @@ impl HintContext {
       HintContext::Create => &[
         Hint::Modal(ModalAction::CreateNextField, "field"),
         Hint::Lit("↑/↓", "type"),
+        Hint::Modal(ModalAction::CreateToggleMode, "free-form"),
+        Hint::Modal(ModalAction::CreateSubmit, "submit"),
+        Hint::Modal(ModalAction::CreateCancel, "cancel"),
+      ],
+      // Free-form has one field and no type selector, so `field` and `type`
+      // are dropped rather than shown inert — the same reason `draw_create`
+      // stops rendering those rows. `toggle_mode` leads the row: it is the
+      // only way back, and unlike the create form's other verbs it is not
+      // guessable from the visible inputs.
+      HintContext::CreateFreeform => &[
+        Hint::Modal(ModalAction::CreateToggleMode, "structured"),
         Hint::Modal(ModalAction::CreateSubmit, "submit"),
         Hint::Modal(ModalAction::CreateCancel, "cancel"),
       ],
@@ -2271,7 +2287,7 @@ impl HintContext {
   /// hint key shadowed by a modal binding in the same context.
   fn modal_context(self) -> Option<KeyContext> {
     Some(match self {
-      HintContext::Create | HintContext::Rename => KeyContext::Create,
+      HintContext::Create | HintContext::CreateFreeform | HintContext::Rename => KeyContext::Create,
       HintContext::Confirm => KeyContext::Confirm,
       HintContext::OpenMenu => KeyContext::OpenMenu,
       HintContext::LinkPrompt => KeyContext::LinkChooseTarget,
@@ -3867,7 +3883,7 @@ fn draw_create(f: &mut Frame, app: &App) {
     );
     f.render_widget(
       Paragraph::new(modal_hint_for_context(
-        HintContext::Create,
+        app.create_hint_context(),
         &app.keymap,
         &app.modal_keymap,
         &app.theme,
