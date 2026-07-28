@@ -3955,6 +3955,28 @@ impl App {
         return Ok(());
       }
     };
+    // Issue #417 / Codex review on PR #476: a segment the pattern *freezes* as
+    // a literal is not editable. `branch_name` has no placeholder to write it
+    // into, so changing it leaves the branch alone while `path_pattern` still
+    // moves the directory — a rename that renames nothing. Scoped to a frozen
+    // segment the user actually changed, so `feat/#{issue}-{desc}`, whose
+    // rename worked before #417, keeps renaming its issue and description.
+    let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
+    if let Some((segment, frozen)) = parser.constants().iter().find(|(segment, frozen)| {
+      let submitted = match *segment {
+        "type" => &spec.type_,
+        "issue" => &spec.issue,
+        _ => &spec.desc,
+      };
+      submitted != frozen
+    }) {
+      self.edit_failure = Some(format!(
+        "worktree.branch_pattern freezes {{{}}} to '{}', so this form cannot change it",
+        segment, frozen
+      ));
+      return Ok(());
+    }
+
     let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
     let new_path = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;

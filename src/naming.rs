@@ -585,6 +585,29 @@ impl BranchParser {
           } else {
             repo.to_string()
           };
+          // The formatter substitutes in a fixed order and each `str::replace`
+          // runs over what the previous ones produced, so an expansion that
+          // itself contains a later token is substituted *again*. A repo
+          // directory literally named `{type}` makes `{repo}/#{issue}-{desc}`
+          // write `feat/#42-x` while this treats the expansion as final text.
+          // Replaying the whole chain for an input nobody has is not worth it;
+          // reading nothing back without saying why is worse. Refuse.
+          let later: &[&str] = if token == "{home}" {
+            &["{repo}", "{type}", "{issue}", "{desc}"]
+          } else {
+            &["{type}", "{issue}", "{desc}"]
+          };
+          if let Some(found) = later.iter().find(|later| text.contains(**later)) {
+            return Err(GwmError::Config(format!(
+              "worktree.branch_pattern `{}` expands `{}` to text containing `{}`, which the \
+               formatter then substitutes again, so the branch name it writes cannot be read \
+               back — drop `{}` from the pattern, or rename the directory it resolves to",
+              sanitise_for_terminal(pattern),
+              token,
+              found,
+              token
+            )));
+          }
           authored.push(SEGMENT_BREAK);
           push_literal(&mut re, &text, &mut pending);
         }

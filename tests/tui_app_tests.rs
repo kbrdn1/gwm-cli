@@ -10630,3 +10630,69 @@ fn enter_edit_worktree_opens_when_the_pattern_freezes_a_segment() {
   assert_eq!(app.create_form.issue, "42");
   assert_eq!(app.create_form.desc, "my-desc");
 }
+
+#[test]
+fn submit_edit_worktree_refuses_to_change_a_segment_the_pattern_freezes() {
+  // Codex review on PR #476, fourth pass. `{type}-1-{desc}` freezes the issue
+  // number, and #417 recovers it, so the form opens with `1` in the issue
+  // field. Editing it to `2` writes the *same* branch — `branch_name` has no
+  // `{issue}` to substitute — while `path_pattern` still has one, so the only
+  // effect is moving the directory. A rename form that renames nothing and
+  // moves the worktree instead is worse than one that says no.
+  //
+  // The refusal is scoped to a frozen segment the user actually changed:
+  // `feat/#{issue}-{desc}` freezes the type and its rename worked in 1.5.0, so
+  // editing the issue or the description there must stay possible.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}-1-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat-1-my-desc".into());
+  wt.path = app.workdir.join("feat-1-my-desc");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the frozen issue is supplied, so the form opens");
+  assert_eq!(app.create_form.issue, "1");
+
+  app.create_form.issue = "2".into();
+  app
+    .submit_edit_worktree()
+    .expect("the refusal is a form failure, not an error");
+
+  assert_eq!(app.view, View::Edit, "the form stays open on a refusal");
+  let failure = app
+    .edit_failure
+    .clone()
+    .expect("the refusal must be reported in the form");
+  assert!(
+    failure.contains("{issue}") && failure.contains('1'),
+    "the message must name the frozen placeholder and its value: {}",
+    failure
+  );
+}
+
+#[test]
+fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
+  // The other side of the same guard, and the reason it is scoped to the
+  // segment rather than to the pattern: `feat/#{issue}-{desc}` freezes the
+  // type, and renaming the issue or the description under it worked before
+  // #417. It has to keep working.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.create_form.desc = "other-desc".into();
+  app.submit_edit_worktree().expect("submits");
+
+  assert_eq!(
+    app.edit_failure, None,
+    "editing a segment the pattern writes is not a frozen-segment change"
+  );
+}

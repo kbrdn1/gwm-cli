@@ -1060,6 +1060,34 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   }
 }
 
+/// Codex review on PR #476, fourth pass. `expand_placeholders` substitutes in
+/// a fixed order — `{home}`, `{repo}`, then the three capturing tokens — and
+/// each `str::replace` runs over what the previous ones produced. So a repo
+/// directory literally named `{type}` makes `{repo}/#{issue}-{desc}` write
+/// `feat/#42-x`, while the compiler treats the expansion as final text and
+/// demands `{type}/#42-x` back. Mirroring that would mean replaying the whole
+/// substitution chain for an input nobody has; leaving it alone means every
+/// read-back feature is silently off. Refuse, and name what was found.
+#[test]
+fn an_expansion_that_carries_another_token_is_refused_rather_than_read_wrong() {
+  let types = default_branch_types();
+  let err = BranchParser::compile("{repo}/#{issue}-{desc}", "{type}", &types)
+    .map(|_| String::new())
+    .unwrap_or_else(|e| e.to_string());
+  assert!(
+    err.contains("{repo}") && err.contains("{type}"),
+    "the message must name both the expansion and what it carries: {}",
+    err
+  );
+
+  // A repo name with no token in it is the ordinary case and must be unaffected.
+  let parser = BranchParser::compile("{repo}/#{issue}-{desc}", "gwm-cli", &types).expect("compiles");
+  assert_eq!(
+    parser.parse("gwm-cli/#42-x").map(|s| (s.issue, s.desc)),
+    Some(("42".into(), "x".into()))
+  );
+}
+
 /// Codex review on PR #476, third pass. Knowing the same *set* of tokens as
 /// the formatter is not enough — the compiler has to find them the same way.
 ///
