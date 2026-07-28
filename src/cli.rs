@@ -3562,10 +3562,16 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
     (Some(cfg), Some(repo)) => crate::naming::BranchParser::from_config(cfg, repo),
     _ => crate::naming::BranchParser::builtin().clone(),
   };
-  let pattern = config
-    .as_ref()
-    .map(|c| c.worktree.branch_pattern.clone())
-    .unwrap_or_else(crate::config::default_branch_pattern);
+  // Neutralised before it is ever quoted: `branch_pattern` is repo-supplied
+  // and this command does not go through the trust gate, so an unvetted
+  // `.gwm.toml` must not get a terminal escape channel out of an error message
+  // (Codex review on PR #476).
+  let pattern = crate::naming::sanitise_for_terminal(
+    &config
+      .as_ref()
+      .map(|c| c.worktree.branch_pattern.clone())
+      .unwrap_or_else(crate::config::default_branch_pattern),
+  );
 
   // Issue #416: a free-form branch reaches here legitimately. This command
   // exists solely to derive a prefix from the branch *type* and issue, and a

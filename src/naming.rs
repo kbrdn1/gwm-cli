@@ -446,7 +446,18 @@ impl BranchParser {
   ///    required to sit outside the left token's charset — `{desc}-{issue}`
   ///    round-trips, because `{issue}` cannot contain the `-` and greedy
   ///    backtracking therefore has exactly one split to find.
-  /// 2. **The same capturing token twice.** The formatter's `str::replace`
+  /// 2. **A separator both neighbours could swallow.** A non-empty literal is
+  ///    not automatically a safe boundary. `{type}-{issue}9{desc}` writes
+  ///    `feat-42919x` from issue `42` and desc `19x`, and the greedy `\d+`
+  ///    slides right across the `9` to read issue `4291` and desc `x`. The
+  ///    condition is two-sided, which is what keeps it narrower than the rule
+  ///    issue #417's body proposed: the separator's first character has to be
+  ///    swallowable by the placeholder on its **left** *and* producible by the
+  ///    one on its **right**, so the displaced text can hand back a
+  ///    replacement separator. `-` after `{desc}` satisfies the first half and
+  ///    not the second, since `\d+` can never contain it, which is why
+  ///    `{desc}-{issue}` has exactly one valid split and stays legal.
+  /// 3. **The same capturing token twice.** The formatter's `str::replace`
   ///    substitutes every occurrence, so `{desc}-{desc}` writes `foo-foo`;
   ///    reading that back needs a backreference, which this engine has not
   ///    got, and a second group of the same name will not compile.
@@ -464,25 +475,29 @@ impl BranchParser {
     // an empty string leaves two groups adjacent just as surely as writing
     // them side by side, so the flag follows the emitted *text*, not the
     // token kind.
-    let mut open_capture: Option<&str> = None;
+    let mut open_capture: Option<&'static str> = None;
+    // The literal boundary closing the last capture: `(that capture, the
+    // literal's first character)`. Only the first character matters, because
+    // that is the one a greedy left-hand group can absorb to shift the split.
+    let mut boundary: Option<(&'static str, char)> = None;
     let mut rest = pattern;
 
     while !rest.is_empty() {
       let Some(open) = rest.find('{') else {
         authored.push_str(rest);
-        push_literal(&mut re, rest, &mut open_capture);
+        push_literal(&mut re, rest, &mut open_capture, &mut boundary);
         break;
       };
       if open > 0 {
         authored.push_str(&rest[..open]);
-        push_literal(&mut re, &rest[..open], &mut open_capture);
+        push_literal(&mut re, &rest[..open], &mut open_capture, &mut boundary);
       }
       let after = &rest[open..];
       // An unbalanced `{` is literal on the formatter side too (`str::replace`
       // only ever matches a complete token), so it stays literal here.
       let Some(close) = after.find('}') else {
         authored.push_str(after);
-        push_literal(&mut re, after, &mut open_capture);
+        push_literal(&mut re, after, &mut open_capture, &mut boundary);
         break;
       };
       let token = &after[..=close];
@@ -514,6 +529,24 @@ impl BranchParser {
               name
             )));
           }
+          // The separator between the previous capture and this one has to be
+          // a boundary neither side can move. Refusing here rather than
+          // reporting it later is the point: the mis-split is deterministic,
+          // so every probe agrees with it and the pattern would be declared
+          // valid while auto-linking targeted the wrong issue.
+          if let Some((left, sep)) = boundary.take() {
+            if segment_accepts(left, sep) && segment_accepts(name, sep) {
+              return Err(GwmError::Config(format!(
+                "worktree.branch_pattern `{}` separates `{{{}}}` from `{{{}}}` with `{}`, which \
+                 could be read as part of either, so a branch it writes splits at the wrong place \
+                 — separate them with a character neither can contain (`/`, `_`, `#`, `.`, …)",
+                sanitise_for_terminal(pattern),
+                left,
+                name,
+                sep
+              )));
+            }
+          }
           seen.push(name);
           re.push_str(group);
           open_capture = Some(name);
@@ -521,17 +554,17 @@ impl BranchParser {
         // Resolved by the formatter, so fixed text by the time a branch name
         // exists. `{home}` is looked up lazily: a pattern that does not use it
         // must not fail to compile on a machine with no resolvable `$HOME`.
-        None if token == "{repo}" => push_literal(&mut re, repo, &mut open_capture),
+        None if token == "{repo}" => push_literal(&mut re, repo, &mut open_capture, &mut boundary),
         None if token == "{home}" => {
           let home = dirs::home_dir()
             .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
             .to_string_lossy()
             .to_string();
-          push_literal(&mut re, &home, &mut open_capture);
+          push_literal(&mut re, &home, &mut open_capture, &mut boundary);
         }
         None => {
           authored.push_str(token);
-          push_literal(&mut re, token, &mut open_capture);
+          push_literal(&mut re, token, &mut open_capture, &mut boundary);
         }
       }
     }
@@ -659,12 +692,40 @@ impl BranchParser {
 /// actually non-empty. `{repo}` in a repo whose name failed to resolve
 /// contributes nothing, and pretending it separated two groups would let an
 /// ambiguous pattern through.
-fn push_literal(re: &mut String, text: &str, open_capture: &mut Option<&str>) {
+fn push_literal(
+  re: &mut String,
+  text: &str,
+  open_capture: &mut Option<&'static str>,
+  boundary: &mut Option<(&'static str, char)>,
+) {
   if text.is_empty() {
     return;
   }
+  // Record the boundary the moment a capture is closed, and only then: a
+  // literal run may arrive in several chunks (`{issue}` `-` `{repo}` `-`
+  // `{desc}`), and it is the *first* character after the capture that decides
+  // whether the split can shift.
+  if let Some(previous) = open_capture.take() {
+    if let Some(first) = text.chars().next() {
+      *boundary = Some((previous, first));
+    }
+  }
   re.push_str(&regex::escape(text));
-  *open_capture = None;
+}
+
+/// Can `segment` contain `c`? Mirrors the charsets the capture groups use, so
+/// the boundary check asks about the same characters the regex would match.
+///
+/// `desc`'s answer includes the `-` its tail allows even though its first
+/// character cannot be one: the question here is whether a greedy group could
+/// swallow the separator, and for a `-` to matter as a shared character the
+/// right-hand side would have to be `desc` too, which is refused as a repeat.
+fn segment_accepts(segment: &str, c: char) -> bool {
+  match segment {
+    "type" => c.is_ascii_lowercase(),
+    "issue" => c.is_ascii_digit(),
+    _ => c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-',
+  }
 }
 
 /// Recover the segments a pattern freezes as literal text instead of writing
@@ -1020,14 +1081,19 @@ pub fn branch_pattern_warning(pattern: &str, repo: &str, types: &[BranchType]) -
 
 /// Neutralise control characters before echoing a config-supplied value.
 ///
-/// `branch_pattern` comes from a repo's `.gwm.toml`, and neither `gwm doctor`
-/// nor `gwm config validate` goes through the TOFU trust gate — running
-/// either inside a repo you have not vetted is meant to be safe. Echoing the
-/// raw value would hand an untrusted `.gwm.toml` a terminal escape channel
-/// (an OSC 52 clipboard write, a title rewrite, cursor games). Same idiom as
+/// `branch_pattern` comes from a repo's `.gwm.toml`, and none of the commands
+/// that quote it — `gwm doctor`, `gwm config validate`, `gwm commit-prefix` —
+/// goes through the TOFU trust gate, because running them inside a repo you
+/// have not vetted is meant to be safe. Echoing the raw value would hand an
+/// untrusted `.gwm.toml` a terminal escape channel (an OSC 52 clipboard write,
+/// a title rewrite, cursor games). Same idiom as
 /// [`crate::tui::wt_tree::sanitize_name`]: replace, don't strip, so the value
 /// stays recognisable and its length is not silently altered.
-fn sanitise_for_terminal(s: &str) -> String {
+///
+/// `pub(crate)` rather than private because every site that quotes a
+/// config-supplied pattern has to use it; a second copy would be a second
+/// thing to forget.
+pub(crate) fn sanitise_for_terminal(s: &str) -> String {
   s.chars().map(|c| if c.is_control() { '?' } else { c }).collect()
 }
 

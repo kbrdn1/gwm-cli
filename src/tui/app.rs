@@ -3877,6 +3877,25 @@ impl App {
       );
       return;
     };
+    // A pattern that neither writes nor freezes a segment leaves it empty, and
+    // the form cannot be submitted without it: `submit_edit_worktree` runs
+    // `BranchSpec::new_with_types`, which rejects an empty issue or desc, and
+    // supplying one by hand would not help since the pattern has nowhere to
+    // write it. Refuse up front and name the placeholder, the same shape as
+    // `gwm commit-prefix` (Codex review on PR #476).
+    if let Some(missing) = ["type", "issue", "desc"].into_iter().find(|segment| match *segment {
+      "type" => spec.type_.is_empty(),
+      "issue" => spec.issue.is_empty(),
+      _ => spec.desc.is_empty(),
+    }) {
+      self.status = format!(
+        "branch pattern '{}' carries no {{{}}}, so this form cannot rebuild '{}' — add it to worktree.branch_pattern, or rename with git",
+        crate::naming::sanitise_for_terminal(&self.config.worktree.branch_pattern),
+        missing,
+        branch
+      );
+      return;
+    }
     // Refuse rather than silently preselect type index 0: a branch whose
     // parsed type isn't configured (config change, manual branch) would
     // otherwise be renamed to the first configured type on Enter (Codex

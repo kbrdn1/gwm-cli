@@ -101,15 +101,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{type}_{issue}_{desc}`, `{type}/{issue}-{desc}`, `wt/{type}/#{issue}-{desc}`,
   `{desc}/#{issue}-{type}` and a literal wedged anywhere all round-trip.
 
-  Two patterns are refused rather than compiled into a parser that reads back
-  the wrong thing: two placeholders written back to back (`{issue}{desc}` reads
-  `42123-x` as `4212` + `3-x`; `{desc}{issue}` is ambiguous outright, since
-  `a12` is what both `a` + `12` and `a1` + `2` produce), and the same
-  placeholder twice. Note that adjacency is the whole rule: a separator drawn
-  from the left placeholder's own charset is fine, so `{desc}-{issue}` works,
-  because an issue number cannot contain the `-` and there is therefore exactly
-  one valid split. `gwm doctor` and `gwm config validate` report the refusal
-  with the fix in it.
+  A pattern whose split can move is refused rather than compiled into a parser
+  that reads back the wrong thing. Two placeholders written back to back leave
+  no boundary at all (`{issue}{desc}` reads `42123-x` as `4212` + `3-x`;
+  `{desc}{issue}` is ambiguous outright, since `a12` is what both `a` + `12`
+  and `a1` + `2` produce), and a non-empty separator is not automatically safe
+  either: `{type}-{issue}9{desc}` writes `feat-42919x` from issue `42` and desc
+  `19x`, and the greedy `\d+` slides right across the `9` to read issue `4291`.
+  The condition is two-sided, the separator's first character having to be
+  swallowable by the placeholder on its left *and* producible by the one on its
+  right. That is narrower than "the separator must sit outside the left
+  placeholder's charset", which would reject a pattern that works: `-` after
+  `{desc}` never satisfies the second half, since an issue number cannot
+  contain it, so `{desc}-{issue}` stays legal. The same placeholder twice is
+  refused too. `gwm doctor` and `gwm config validate` report every refusal with
+  the fix in it.
 
   A pattern that **freezes** a segment as a literal instead of writing it from
   a placeholder keeps working exactly as before. `feat/#{issue}-{desc}` and

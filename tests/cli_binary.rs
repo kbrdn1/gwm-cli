@@ -6809,3 +6809,53 @@ fn commit_prefix_reads_a_branch_written_with_a_custom_pattern() {
     .success()
     .stdout(predicate::str::contains(":sparkles: feat(#41):"));
 }
+
+#[test]
+fn commit_prefix_never_echoes_control_bytes_from_the_branch_pattern() {
+  // Codex review on PR #476. `branch_pattern` comes from a repo's `.gwm.toml`
+  // and `gwm commit-prefix` does not go through the TOFU trust gate, so
+  // running it inside a repo you have not vetted must stay safe. Both errors
+  // #417 added quote the pattern, and quoting it raw hands an unvetted config
+  // the same terminal escape channel (OSC 52 clipboard write, screen clear)
+  // that `branch_pattern_warning` already neutralises.
+  let (dir, _repo) = init_repo();
+  // OSC 52 clipboard-write shape: ESC ] 52 ; c ; <payload> BEL
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    // TOML basic-string escapes: `\u001B` is ESC, `\u0007` is BEL. Written this
+    // way rather than as raw bytes because TOML forbids control characters
+    // inside a string, and a config that fails to parse would fall back to the
+    // default pattern and quietly make this test vacuous.
+    "[worktree]\nbranch_pattern = \"{type}/{desc}\\u001B]52;c;cHduZWQ=\\u0007\"\n",
+  )
+  .expect("seed .gwm.toml");
+
+  // A branch that does not match, so the "does not match this pattern" error
+  // fires and quotes the pattern.
+  let assert = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "nothing-like-it"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+  assert!(
+    !stderr.chars().any(|c| c.is_control() && c != '\n'),
+    "no control character may reach the terminal: {:?}",
+    stderr
+  );
+
+  // …and the "carries no {issue}" error, which quotes it too.
+  let assert = Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat/x"])
+    .assert()
+    .failure();
+  let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+  assert!(
+    !stderr.chars().any(|c| c.is_control() && c != '\n'),
+    "the second error quotes the pattern too: {:?}",
+    stderr
+  );
+}

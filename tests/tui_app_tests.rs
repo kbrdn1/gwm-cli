@@ -10581,3 +10581,52 @@ fn open_menu_drops_a_cached_url_from_the_previous_origin() {
     "the old tenant's cached URL survived the move: {url}"
   );
 }
+
+#[test]
+fn enter_edit_worktree_refuses_a_pattern_that_carries_no_issue() {
+  // Codex review on PR #476. Before #417 a branch written by `{type}/{desc}`
+  // did not parse at all, so the rename modal refused to open. Deriving the
+  // parser made it parse with `issue == ""`, which opened a form the user
+  // cannot submit: `submit_edit_worktree` runs `BranchSpec::new_with_types`,
+  // which rejects an empty issue, and inventing one would not help either
+  // since the pattern has no `{issue}` to write it into.
+  //
+  // Refuse up front and name what is missing, the same shape as
+  // `gwm commit-prefix`.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::List, "an unsubmittable form must not open");
+  assert!(app.edit_original_branch.is_none());
+  assert!(
+    app.status.contains("{issue}") && app.status.contains("branch pattern"),
+    "status must name the missing placeholder: {}",
+    app.status
+  );
+}
+
+#[test]
+fn enter_edit_worktree_opens_when_the_pattern_freezes_a_segment() {
+  // The other side of the same guard: `feat/#{issue}-{desc}` hardcodes the
+  // type, and #417 recovers it as a constant, so every segment has a value and
+  // the rename is perfectly submittable. Refusing here would take the modal
+  // away from a repo where it works.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "a fully-supplied triple must open the form");
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "my-desc");
+}

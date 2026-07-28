@@ -1175,3 +1175,65 @@ fn a_repo_named_after_a_branch_type_does_not_type_its_branches() {
   let spec = parser.parse("docs/#42-x").expect("parses");
   assert_eq!(spec.type_, "");
 }
+
+#[test]
+fn a_separator_both_neighbours_could_swallow_is_refused() {
+  // Codex review on PR #476. The adjacency rule is necessary but not
+  // sufficient: a *non-empty* literal between two placeholders is not
+  // automatically a safe boundary. `{type}-{issue}9{desc}` writes
+  // `feat-42919x` from issue `42` and desc `19x`, and the greedy `\d+` slides
+  // right across the `9` to read issue `4291` and desc `x`. Deterministic,
+  // wrong, and — before this guard — reported as a perfectly valid pattern,
+  // which is exactly the silent mis-split #417 exists to remove.
+  //
+  // The condition is two-sided, which is what distinguishes it from the rule
+  // #417's body proposed: the separator has to be swallowable by the
+  // placeholder on its left AND suppliable by the one on its right, so the
+  // shifted text can hand back a replacement separator. `-` after `{desc}` is
+  // in the description's own charset but can never appear inside `\d+`, so
+  // `{desc}-{issue}` has exactly one valid split and stays legal.
+  for pattern in [
+    "{type}-{issue}9{desc}", // a digit between `\d+` and a desc that may hold digits
+    "{type}a{desc}",         // a letter between `[a-z]+` and a desc that may hold letters
+    "{desc}1{issue}",        // a digit between a desc and `\d+`
+  ] {
+    let err = BranchParser::compile(pattern, "gwm-cli", &default_branch_types())
+      .map(|_| String::new())
+      .unwrap_or_else(|e| e.to_string());
+    assert!(!err.is_empty(), "`{}` must be refused, not compiled", pattern);
+    assert!(
+      err.contains("could be read as part of"),
+      "the message must explain which side swallows the separator: {}",
+      err
+    );
+  }
+}
+
+#[test]
+fn a_separator_only_the_left_side_could_swallow_stays_legal() {
+  // The other half of the two-sided rule, and the reason it is not the
+  // over-strict rule #417's body proposed. Every one of these round-trips.
+  for pattern in [
+    "{desc}-{issue}",
+    "{type}/#{issue}-{desc}",
+    "{type}-{issue}-{desc}",
+    "{type}_{issue}_{desc}",
+    "{type}/{issue}-{desc}",
+    "{type}/#{issue}_{desc}",
+    "{repo}/{type}/#{issue}-{desc}",
+    "wt/{type}/#{issue}-{desc}",
+    "{type}/#{issue}-prefix-{desc}",
+    "{type}/#{issue}-{desc}-{repo}",
+    "{desc}/#{issue}-{type}",
+    "{type}/#{desc}-{issue}",
+    "feat/#{issue}-{desc}",
+    "{type}/#1-{desc}",
+    "{type}/#{issue}-fixed",
+  ] {
+    assert!(
+      BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).is_ok(),
+      "`{}` is a legal pattern and must still compile",
+      pattern
+    );
+  }
+}
