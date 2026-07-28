@@ -2907,9 +2907,15 @@ fn cmd_pr(render_only: bool, draft: bool, base_override: Option<String>) -> Resu
   // read the branch back, so they read it with this repo's own pattern.
   let branch_spec = crate::naming::BranchParser::from_config(&config, &worktree::repo_name(&repo)).parse(&head_name);
 
+  // `.filter` and not just `.map`: since #417 a pattern with no `{type}` still
+  // parses, reporting the segments it *does* carry, so the type comes back
+  // empty rather than as a failed parse. An empty type selects no
+  // `[pr_template.by_type]` entry and renders `{type}` blank, which is exactly
+  // what this fallback exists to prevent.
   let branch_type = branch_spec
     .as_ref()
     .map(|s| s.type_.clone())
+    .filter(|t| !t.is_empty())
     .unwrap_or_else(|| "chore".into());
   let issue = branch_spec.as_ref().map(|s| s.issue.clone()).unwrap_or_default();
   let desc = branch_spec.as_ref().map(|s| s.desc.clone()).unwrap_or_default();

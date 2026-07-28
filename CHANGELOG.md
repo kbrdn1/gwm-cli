@@ -102,20 +102,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `{desc}/#{issue}-{type}` and a literal wedged anywhere all round-trip.
 
   A pattern whose split can move is refused rather than compiled into a parser
-  that reads back the wrong thing. Two placeholders written back to back leave
-  no boundary at all (`{issue}{desc}` reads `42123-x` as `4212` + `3-x`;
-  `{desc}{issue}` is ambiguous outright, since `a12` is what both `a` + `12`
-  and `a1` + `2` produce), and a non-empty separator is not automatically safe
-  either: `{type}-{issue}9{desc}` writes `feat-42919x` from issue `42` and desc
-  `19x`, and the greedy `\d+` slides right across the `9` to read issue `4291`.
-  The condition is two-sided, the separator's first character having to be
-  swallowable by the placeholder on its left *and* producible by the one on its
-  right. That is narrower than "the separator must sit outside the left
-  placeholder's charset", which would reject a pattern that works: `-` after
-  `{desc}` never satisfies the second half, since an issue number cannot
-  contain it, so `{desc}-{issue}` stays legal. The same placeholder twice is
-  refused too. `gwm doctor` and `gwm config validate` report every refusal with
-  the fix in it.
+  that reads back the wrong thing. The test is never "is there a separator" but
+  "can the boundary between two placeholders land in more than one place":
+  `{issue}{desc}` reads `42123-x` as `4212` + `3-x`, `{desc}{issue}` is
+  ambiguous outright since `a12` is what both `a` + `12` and `a1` + `2`
+  produce, and a non-empty separator guarantees nothing either —
+  `{type}-{issue}9{desc}` writes `feat-42919x` from issue `42` and desc `19x`,
+  and the greedy `\d+` slides right across the `9` to read issue `4291`.
+
+  Both halves of the rule are narrower than they look, so patterns that read
+  back perfectly well are not refused along the way. Adjacency is fine when the
+  alphabets are disjoint (`{type}{issue}` writes `feat42`, and `[a-z]+` stops
+  at the first digit while `\d+` stops at the first letter). A separator inside
+  the left placeholder's charset is fine when the right one cannot supply it
+  back, which is why `{desc}-{issue}` stays legal. And a multi-character
+  separator only counts when the left side can eat a *repeating* prefix of it,
+  which is why `{type}-{issue}9-{desc}` works where `{type}-{issue}9{desc}`
+  does not. The same placeholder twice is refused too. `gwm doctor` and
+  `gwm config validate` report every refusal with the fix in it.
+
+  The rule is pinned by enumeration rather than by examples: a test generates
+  every pattern over the three placeholders and a set of separators, decides
+  independently whether each one round-trips, and requires the compiler to
+  accept exactly those — so neither a silent mis-split nor an over-strict
+  refusal can survive.
 
   A pattern that **freezes** a segment as a literal instead of writing it from
   a placeholder keeps working exactly as before. `feat/#{issue}-{desc}` and

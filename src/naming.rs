@@ -49,6 +49,13 @@ const DESC_GROUP: &str = r"(?P<desc>[a-z0-9][a-z0-9-]*)";
 /// goes to the one that can be sure about it.
 const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 
+/// Marks where a placeholder stood in the literal text [`literal_constants`]
+/// reads. The two literals in `1{type}2-{desc}` are not one token: fused into
+/// `12`, the recovery froze an issue number that no branch the pattern writes
+/// ever contains, and auto-linking then pointed at #12. Any character outside
+/// `[a-z0-9-]` would do; NUL is the one no branch name can carry.
+const SEGMENT_BREAK: char = '\0';
+
 /// Built-in branch types — the fallback when `.gwm.toml` carries no
 /// `[[branch_types]]` block. Kept as a `&[(&str, &str)]` const so the
 /// static string table stays compile-time and zero-alloc; the runtime
@@ -439,28 +446,26 @@ impl BranchParser {
   /// Two patterns are refused rather than compiled into a parser that reads
   /// back the wrong thing:
   ///
-  /// 1. **Two capturing tokens with no literal between them.** `{issue}{desc}`
-  ///    is deterministic but wrong (`42` + `123-x` reads back as `4212` +
-  ///    `3-x`); `{desc}{issue}` is ambiguous outright, since `a12` is what
-  ///    both `a` + `12` and `a1` + `2` format to. A literal separator is not
-  ///    required to sit outside the left token's charset — `{desc}-{issue}`
-  ///    round-trips, because `{issue}` cannot contain the `-` and greedy
-  ///    backtracking therefore has exactly one split to find.
-  /// 2. **A separator both neighbours could swallow.** A non-empty literal is
-  ///    not automatically a safe boundary. `{type}-{issue}9{desc}` writes
-  ///    `feat-42919x` from issue `42` and desc `19x`, and the greedy `\d+`
-  ///    slides right across the `9` to read issue `4291` and desc `x`. The
-  ///    condition is two-sided, which is what keeps it narrower than the rule
-  ///    issue #417's body proposed: the separator's first character has to be
-  ///    swallowable by the placeholder on its **left** *and* producible by the
-  ///    one on its **right**, so the displaced text can hand back a
-  ///    replacement separator. `-` after `{desc}` satisfies the first half and
-  ///    not the second, since `\d+` can never contain it, which is why
-  ///    `{desc}-{issue}` has exactly one valid split and stays legal.
-  /// 3. **The same capturing token twice.** The formatter's `str::replace`
+  /// 1. **A boundary between two capturing tokens that can move.** The
+  ///    question is never "is there a separator" but "can the split between
+  ///    these two land in more than one place", and [`boundary_can_shift`]
+  ///    answers it from the charsets. Adjacent placeholders are only refused
+  ///    when their alphabets overlap: `{issue}{desc}` reads `42` + `123-x`
+  ///    back as `4212` + `3-x`, but `{type}{issue}` is safe, because `[a-z]+`
+  ///    stops at the first digit and `\d+` at the first letter. A separator is
+  ///    not required to sit outside the left token's charset either —
+  ///    `{desc}-{issue}` round-trips, since `\d+` can never contain the `-`
+  ///    that would have to reappear after the shift.
+  /// 2. **The same capturing token twice.** The formatter's `str::replace`
   ///    substitutes every occurrence, so `{desc}-{desc}` writes `foo-foo`;
   ///    reading that back needs a backreference, which this engine has not
   ///    got, and a second group of the same name will not compile.
+  ///
+  /// The rule as a whole is pinned by
+  /// `tests/naming_tests.rs::the_ambiguity_rule_accepts_exactly_the_patterns_that_round_trip`,
+  /// which enumerates the pattern space rather than sampling it: three
+  /// separate review findings landed here, and every one of them was a pattern
+  /// the hand-picked examples did not cover.
   pub fn compile(pattern: &str, repo: &str, types: &[BranchType]) -> Result<Self> {
     let mut re = String::from("^");
     let mut seen: Vec<&str> = Vec::new();
@@ -470,34 +475,30 @@ impl BranchParser {
     // for this purpose, and a repo that happens to be called `docs` must not
     // turn `{repo}/{issue}-{desc}` into a docs-typed branch.
     let mut authored = String::new();
-    // Tracks whether the last thing emitted was a capture group that nothing
-    // literal has separated from what comes next. A `{repo}` that expands to
-    // an empty string leaves two groups adjacent just as surely as writing
-    // them side by side, so the flag follows the emitted *text*, not the
-    // token kind.
-    let mut open_capture: Option<&'static str> = None;
-    // The literal boundary closing the last capture: `(that capture, the
-    // literal's first character)`. Only the first character matters, because
-    // that is the one a greedy left-hand group can absorb to shift the split.
-    let mut boundary: Option<(&'static str, char)> = None;
+    // The last capture emitted, paired with every literal character emitted
+    // since — the separator the next capture would sit behind. An empty string
+    // means the two are adjacent, which a `{repo}` expanding to nothing
+    // achieves just as surely as writing them side by side, so the state
+    // follows the emitted *text* and not the token kind.
+    let mut pending: Option<(&'static str, String)> = None;
     let mut rest = pattern;
 
     while !rest.is_empty() {
       let Some(open) = rest.find('{') else {
         authored.push_str(rest);
-        push_literal(&mut re, rest, &mut open_capture, &mut boundary);
+        push_literal(&mut re, rest, &mut pending);
         break;
       };
       if open > 0 {
         authored.push_str(&rest[..open]);
-        push_literal(&mut re, &rest[..open], &mut open_capture, &mut boundary);
+        push_literal(&mut re, &rest[..open], &mut pending);
       }
       let after = &rest[open..];
       // An unbalanced `{` is literal on the formatter side too (`str::replace`
       // only ever matches a complete token), so it stays literal here.
       let Some(close) = after.find('}') else {
         authored.push_str(after);
-        push_literal(&mut re, after, &mut open_capture, &mut boundary);
+        push_literal(&mut re, after, &mut pending);
         break;
       };
       let token = &after[..=close];
@@ -511,16 +512,8 @@ impl BranchParser {
       };
       match group {
         Some((name, group)) => {
-          if let Some(prev) = open_capture {
-            return Err(GwmError::Config(format!(
-              "worktree.branch_pattern `{}` puts `{{{}}}` straight after `{{{}}}` with nothing \
-               between them, so a branch it writes cannot be read back unambiguously — separate \
-               them with a literal (`-`, `_`, `/`, …)",
-              sanitise_for_terminal(pattern),
-              name,
-              prev
-            )));
-          }
+          // Before the boundary check, so `{desc}-{desc}` is diagnosed as the
+          // repeat it is rather than as a separator it could swallow.
           if seen.contains(&name) {
             return Err(GwmError::Config(format!(
               "worktree.branch_pattern `{}` uses `{{{}}}` more than once; every occurrence expands \
@@ -529,42 +522,61 @@ impl BranchParser {
               name
             )));
           }
-          // The separator between the previous capture and this one has to be
-          // a boundary neither side can move. Refusing here rather than
-          // reporting it later is the point: the mis-split is deterministic,
-          // so every probe agrees with it and the pattern would be declared
-          // valid while auto-linking targeted the wrong issue.
-          if let Some((left, sep)) = boundary.take() {
-            if segment_accepts(left, sep) && segment_accepts(name, sep) {
-              return Err(GwmError::Config(format!(
-                "worktree.branch_pattern `{}` separates `{{{}}}` from `{{{}}}` with `{}`, which \
-                 could be read as part of either, so a branch it writes splits at the wrong place \
-                 — separate them with a character neither can contain (`/`, `_`, `#`, `.`, …)",
-                sanitise_for_terminal(pattern),
-                left,
-                name,
-                sep
-              )));
+          // The split between the previous capture and this one has to be the
+          // only one a branch name admits. Refusing here rather than reporting
+          // it later is the point: a mis-split is deterministic, so every probe
+          // agrees with it and the pattern would be declared valid while
+          // auto-linking targeted the wrong issue.
+          if let Some((left, sep)) = pending.as_ref() {
+            if boundary_can_shift(left, sep, name) {
+              return Err(GwmError::Config(if sep.is_empty() {
+                format!(
+                  "worktree.branch_pattern `{}` puts `{{{}}}` straight after `{{{}}}` with nothing \
+                   between them and both can hold the same characters, so a branch it writes cannot \
+                   be read back unambiguously — separate them with a literal (`-`, `_`, `/`, …)",
+                  sanitise_for_terminal(pattern),
+                  name,
+                  left
+                )
+              } else {
+                format!(
+                  "worktree.branch_pattern `{}` separates `{{{}}}` from `{{{}}}` with `{}`, which \
+                   could be read as part of either, so a branch it writes splits at the wrong place \
+                   — separate them with a character neither can contain (`/`, `_`, `#`, `.`, …)",
+                  sanitise_for_terminal(pattern),
+                  left,
+                  name,
+                  sanitise_for_terminal(sep)
+                )
+              }));
             }
           }
           seen.push(name);
           re.push_str(group);
-          open_capture = Some(name);
+          authored.push(SEGMENT_BREAK);
+          pending = Some((name, String::new()));
         }
         // Resolved by the formatter, so fixed text by the time a branch name
         // exists. `{home}` is looked up lazily: a pattern that does not use it
         // must not fail to compile on a machine with no resolvable `$HOME`.
-        None if token == "{repo}" => push_literal(&mut re, repo, &mut open_capture, &mut boundary),
+        //
+        // Both break the literal run they sit in: they put real text between
+        // the literals either side, so those literals are not one token.
+        None if token == "{repo}" => {
+          authored.push(SEGMENT_BREAK);
+          push_literal(&mut re, repo, &mut pending);
+        }
         None if token == "{home}" => {
           let home = dirs::home_dir()
             .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
             .to_string_lossy()
             .to_string();
-          push_literal(&mut re, &home, &mut open_capture, &mut boundary);
+          authored.push(SEGMENT_BREAK);
+          push_literal(&mut re, &home, &mut pending);
         }
         None => {
           authored.push_str(token);
-          push_literal(&mut re, token, &mut open_capture, &mut boundary);
+          push_literal(&mut re, token, &mut pending);
         }
       }
     }
@@ -687,39 +699,86 @@ impl BranchParser {
   }
 }
 
-/// Append fixed text to the regex under construction, escaping it, and clear
-/// the "a capture group is still open" flag — but only when the text is
-/// actually non-empty. `{repo}` in a repo whose name failed to resolve
-/// contributes nothing, and pretending it separated two groups would let an
-/// ambiguous pattern through.
-fn push_literal(
-  re: &mut String,
-  text: &str,
-  open_capture: &mut Option<&'static str>,
-  boundary: &mut Option<(&'static str, char)>,
-) {
+/// Append fixed text to the regex under construction, escaping it, and record
+/// it as part of the separator behind the capture still open — but only when
+/// the text is actually non-empty. `{repo}` in a repo whose name failed to
+/// resolve contributes nothing, and pretending it separated two groups would
+/// let an ambiguous pattern through.
+fn push_literal(re: &mut String, text: &str, pending: &mut Option<(&'static str, String)>) {
   if text.is_empty() {
     return;
   }
-  // Record the boundary the moment a capture is closed, and only then: a
-  // literal run may arrive in several chunks (`{issue}` `-` `{repo}` `-`
-  // `{desc}`), and it is the *first* character after the capture that decides
-  // whether the split can shift.
-  if let Some(previous) = open_capture.take() {
-    if let Some(first) = text.chars().next() {
-      *boundary = Some((previous, first));
-    }
+  // A separator may arrive in several chunks (`{issue}` `-` `{repo}` `-`
+  // `{desc}`), so it accumulates rather than being decided by the first one.
+  if let Some((_, sep)) = pending.as_mut() {
+    sep.push_str(text);
   }
   re.push_str(&regex::escape(text));
 }
 
+/// Can the split between two consecutive captures land in more than one place?
+///
+/// `left` and `right` are the captures and `sep` the literal text the pattern
+/// puts between them, empty when they are adjacent. The formatter writes
+/// `left · sep · right`; this asks whether some branch name it produces also
+/// reads as a *different* pair.
+///
+/// With no separator the answer is yes as soon as one character can both end
+/// `left` and start `right`: that character crosses the split. `{type}{issue}`
+/// is therefore safe — `[a-z]+` stops at the first digit and `\d+` at the first
+/// letter — while `{issue}{desc}` is not.
+///
+/// With a separator, moving the split `d` characters to the right means `left`
+/// swallows `sep[..d]`, the separator then has to match `d` characters further
+/// along — which requires `sep` to repeat with period `d` — and `right` has to
+/// supply the `d` characters of separator that are no longer covered. All three
+/// have to hold at once, which is what keeps `{type}-{issue}9-{desc}` legal
+/// (`\d+` can eat the `9` but never the `-` that would have to follow it) while
+/// `{type}-{issue}9{desc}` is refused.
+///
+/// Known ceiling: the last test approximates "what `right` can supply" by its
+/// charset, which is exact only while the displaced separator is no longer than
+/// the value beside it. No combination of the three segment charsets makes a
+/// longer one reachable, and the enumeration in `tests/naming_tests.rs` is what
+/// checks that claim rather than this comment.
+fn boundary_can_shift(left: &str, sep: &str, right: &str) -> bool {
+  let sep: Vec<char> = sep.chars().collect();
+  if sep.is_empty() {
+    return WITNESSES
+      .iter()
+      .any(|&c| segment_accepts(left, c) && segment_starts(right, c));
+  }
+  (1..=sep.len()).any(|d| {
+    sep[..d].iter().all(|&c| segment_accepts(left, c))
+      && sep[..sep.len() - d] == sep[d..]
+      && segment_can_start_with(right, &sep[sep.len() - d..])
+  })
+}
+
+/// One character per class the three capture groups are built from. Every
+/// charset is a union of these, so testing them decides any "can both sides
+/// hold the same character" question without walking Unicode.
+const WITNESSES: [char; 3] = ['a', '0', '-'];
+
+/// Can `segment` *begin* with `c`? Only `desc` differs from
+/// [`segment_accepts`]: its tail allows the `-` its first character cannot be.
+fn segment_starts(segment: &str, c: char) -> bool {
+  match segment {
+    "desc" => c.is_ascii_lowercase() || c.is_ascii_digit(),
+    _ => segment_accepts(segment, c),
+  }
+}
+
+/// Can `segment` begin with the whole of `prefix`?
+fn segment_can_start_with(segment: &str, prefix: &[char]) -> bool {
+  match prefix.split_first() {
+    None => true,
+    Some((first, rest)) => segment_starts(segment, *first) && rest.iter().all(|&c| segment_accepts(segment, c)),
+  }
+}
+
 /// Can `segment` contain `c`? Mirrors the charsets the capture groups use, so
 /// the boundary check asks about the same characters the regex would match.
-///
-/// `desc`'s answer includes the `-` its tail allows even though its first
-/// character cannot be one: the question here is whether a greedy group could
-/// swallow the separator, and for a `-` to matter as a shared character the
-/// right-hand side would have to be `desc` too, which is refused as a repeat.
 fn segment_accepts(segment: &str, c: char) -> bool {
   match segment {
     "type" => c.is_ascii_lowercase(),

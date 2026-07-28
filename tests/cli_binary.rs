@@ -6859,3 +6859,29 @@ fn commit_prefix_never_echoes_control_bytes_from_the_branch_pattern() {
     stderr
   );
 }
+
+#[test]
+fn pr_falls_back_to_chore_when_the_pattern_carries_no_type() {
+  // Codex review on PR #476, second pass. Before #417 the parser either
+  // matched or returned `None`, so `unwrap_or_else(|| "chore")` covered every
+  // branch with no readable type. #417 let a partial pattern parse and report
+  // the segments it *does* carry, which hands `gwm pr` a `Some` holding an
+  // empty type — and an empty type selects no `[pr_template.by_type]` entry
+  // and renders `{type}` blank. The fallback has to survive the loosening.
+  let (dir, repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"{issue}-{desc}\"\n\n\
+     [pr_template.by_type.chore]\nbody = \"chore body for {desc} (#{issue})\\n\"\n",
+  )
+  .expect("seed .gwm.toml");
+  make_feature_branch_with_commit(&repo, dir.path(), "42-tidy-up", "note.md", "x\n", "🔧 chore: tidy");
+
+  Command::cargo_bin("gwm")
+    .unwrap()
+    .current_dir(dir.path())
+    .args(["pr", "--render"])
+    .assert()
+    .success()
+    .stdout(predicate::str::contains("chore body for tidy-up (#42)"));
+}

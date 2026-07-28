@@ -397,6 +397,10 @@ fn the_documented_pattern_table_matches_reality() {
     "{type}/#{issue}-prefix-{desc}",
     "{type}/#{issue}-{desc}-{repo}",
     "{desc}/#{issue}-{type}",
+    "{type}/#{desc}-{issue}",
+    "{type}{issue}-{desc}",
+    "{issue}{type}-{desc}",
+    "{type}-{issue}9-{desc}",
   ] {
     assert_eq!(
       branch_pattern_warning(pattern, "gwm-cli", &default_branch_types()),
@@ -407,11 +411,19 @@ fn the_documented_pattern_table_matches_reality() {
   }
 
   // Documented as "refused as unreadable".
-  for pattern in ["{issue}{desc}", "{desc}{issue}", "{type}{desc}", "{desc}-{desc}"] {
+  for pattern in [
+    "{issue}{desc}",
+    "{desc}{issue}",
+    "{type}{desc}",
+    "{type}-{issue}9{desc}",
+    "{type}a{desc}",
+    "{desc}1{issue}",
+    "{desc}-{desc}",
+  ] {
     let w = branch_pattern_warning(pattern, "gwm-cli", &default_branch_types())
       .unwrap_or_else(|| panic!("`{}` is documented as refused but did not warn", pattern));
     assert!(
-      w.contains("nothing between them") || w.contains("more than once"),
+      w.contains("nothing between them") || w.contains("could be read as part of") || w.contains("more than once"),
       "`{}` is documented as refused by the compiler: {}",
       pattern,
       w
@@ -921,7 +933,13 @@ fn two_tokens_with_nothing_between_them_are_refused_at_compile_time() {
   // `42123-x`, which reads back as `4212` + `3-x`. `{desc}{issue}` is worse
   // than wrong, it is ambiguous — `a` + `12` and `a1` + `2` both write
   // `a12`, so no parser can be correct.
-  for pattern in ["{issue}{desc}", "{desc}{issue}", "{type}{desc}", "{type}{issue}-{desc}"] {
+  //
+  // What they have in common is a shared character, not the adjacency: it is
+  // the digit that can end an issue *and* open a description that moves the
+  // split. Codex review on PR #476 caught the first version of this rule
+  // refusing adjacency outright, which took the whole parser away from
+  // patterns that read back perfectly well — see below.
+  for pattern in ["{issue}{desc}", "{desc}{issue}", "{type}{desc}"] {
     let err = BranchParser::compile(pattern, "gwm-cli", &default_branch_types())
       .expect_err(&format!("`{}` must be refused, not compiled", pattern));
     let msg = format!("{}", err);
@@ -931,6 +949,17 @@ fn two_tokens_with_nothing_between_them_are_refused_at_compile_time() {
       msg
     );
   }
+
+  // `[a-z]+` stops at the first digit and `\d+` at the first letter, so there
+  // is exactly one place the split between them can be — no separator needed,
+  // and refusing these would have made `from_config` fall back to the inert
+  // parser for a config that works.
+  let (branch, back) = round_trip("{type}{issue}-{desc}", "feat", "42", "9-my");
+  assert_eq!(branch, "feat42-9-my");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "9-my".into())));
+  let (branch, back) = round_trip("{issue}{type}-{desc}", "feat", "42", "x9");
+  assert_eq!(branch, "42feat-x9");
+  assert_eq!(back, Some(("feat".into(), "42".into(), "x9".into())));
 }
 
 #[test]
@@ -1176,64 +1205,320 @@ fn a_repo_named_after_a_branch_type_does_not_type_its_branches() {
   assert_eq!(spec.type_, "");
 }
 
+/// Every pattern the compiler is expected to accept.
+///
+/// Membership is not an opinion: [`every_legal_pattern_round_trips`] writes a
+/// branch from each of these with the real formatter and reads it back, so a
+/// pattern only belongs here if it survives that.
+const LEGAL: [&str; 20] = [
+  "{desc}-{issue}",
+  "{type}/#{issue}-{desc}",
+  "{type}-{issue}-{desc}",
+  "{type}_{issue}_{desc}",
+  "{type}/{issue}-{desc}",
+  "{type}/#{issue}_{desc}",
+  "{repo}/{type}/#{issue}-{desc}",
+  "wt/{type}/#{issue}-{desc}",
+  "{type}/#{issue}-prefix-{desc}",
+  "{type}/#{issue}-{desc}-{repo}",
+  "{desc}/#{issue}-{type}",
+  "{type}/#{desc}-{issue}",
+  "feat/#{issue}-{desc}",
+  "{type}/#1-{desc}",
+  "{type}/#{issue}-fixed",
+  // Adjacent, but over disjoint alphabets: `[a-z]+` stops at the first digit
+  // and `\d+` stops at the first letter, so the split cannot move.
+  "{type}{issue}-{desc}",
+  "{issue}{type}-{desc}",
+  "{type}{issue}",
+  // A multi-character separator the left-hand group can only eat part of.
+  "{type}-{issue}9-{desc}",
+  "{issue}9-{desc}",
+];
+
+/// Every pattern the compiler is expected to refuse, with the phrase its
+/// message must carry. Same contract as [`LEGAL`], read from the other side:
+/// [`every_refused_pattern_really_is_ambiguous`] proves each one can write a
+/// branch name it would then read back wrong.
+const REFUSED: [(&str, &str); 8] = [
+  // Adjacent over overlapping alphabets.
+  ("{issue}{desc}", "nothing between them"),
+  ("{desc}{issue}", "nothing between them"),
+  ("{type}{desc}", "nothing between them"),
+  ("{desc}{type}", "nothing between them"),
+  // Separated, but by a character both neighbours can hold.
+  ("{type}-{issue}9{desc}", "could be read as part of"),
+  ("{type}a{desc}", "could be read as part of"),
+  ("{desc}1{issue}", "could be read as part of"),
+  // The same value written twice needs a backreference to read back.
+  ("{desc}-{desc}", "more than once"),
+];
+
+/// The triples the round-trip property is checked over. Small on purpose, but
+/// picked to attack the boundary rule rather than to look representative: a
+/// description that opens with a digit is what turns `{type}-{issue}9{desc}`
+/// into a mis-split, one that opens with the separator's own character is what
+/// lets a greedy group slide, and issue numbers of three different lengths are
+/// what make a shifted split observable at all.
+const TYPES: [&str; 2] = ["feat", "fix"];
+const ISSUES: [&str; 4] = ["1", "4", "42", "429"];
+const DESCS: [&str; 10] = ["a", "foo", "a-b", "9-my", "19x", "2-a-b", "x9", "fix", "bar", "b9c"];
+
+/// The arbiter for the whole ambiguity rule, and the reason it stopped being
+/// argued one hand-picked branch name at a time.
+///
+/// Three separate Codex findings landed on this rule in two review passes —
+/// one false negative, two over-strict refusals — because each was checked
+/// against a string chosen to illustrate it. This decides the question by
+/// construction instead: for every legal pattern, write a branch with the real
+/// formatter for every triple, read it back with the parser, and require the
+/// segments the pattern actually writes to come back unchanged. A pattern that
+/// fails here does not belong in [`LEGAL`], whatever the rule says.
 #[test]
-fn a_separator_both_neighbours_could_swallow_is_refused() {
-  // Codex review on PR #476. The adjacency rule is necessary but not
-  // sufficient: a *non-empty* literal between two placeholders is not
-  // automatically a safe boundary. `{type}-{issue}9{desc}` writes
-  // `feat-42919x` from issue `42` and desc `19x`, and the greedy `\d+` slides
-  // right across the `9` to read issue `4291` and desc `x`. Deterministic,
-  // wrong, and — before this guard — reported as a perfectly valid pattern,
-  // which is exactly the silent mis-split #417 exists to remove.
-  //
-  // The condition is two-sided, which is what distinguishes it from the rule
-  // #417's body proposed: the separator has to be swallowable by the
-  // placeholder on its left AND suppliable by the one on its right, so the
-  // shifted text can hand back a replacement separator. `-` after `{desc}` is
-  // in the description's own charset but can never appear inside `\d+`, so
-  // `{desc}-{issue}` has exactly one valid split and stays legal.
-  for pattern in [
-    "{type}-{issue}9{desc}", // a digit between `\d+` and a desc that may hold digits
-    "{type}a{desc}",         // a letter between `[a-z]+` and a desc that may hold letters
-    "{desc}1{issue}",        // a digit between a desc and `\d+`
-  ] {
+fn every_legal_pattern_round_trips() {
+  let types = default_branch_types();
+  for pattern in LEGAL {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &types)
+      .unwrap_or_else(|e| panic!("`{}` is a legal pattern and must compile: {}", pattern, e));
+    let cfg = WorktreeConfig {
+      branch_pattern: pattern.into(),
+      ..WorktreeConfig::default()
+    };
+    for type_ in TYPES {
+      for issue in ISSUES {
+        for desc in DESCS {
+          let spec = BranchSpec::new_with_types(type_, issue, desc, &types).expect("a valid triple");
+          let name = spec.branch_name(&cfg, "gwm-cli").expect("the formatter writes it");
+          let read = parser
+            .parse(&name)
+            .unwrap_or_else(|| panic!("`{}` wrote `{}` and cannot read it back", pattern, name));
+          // Only the segments the pattern writes from a placeholder: one it
+          // freezes as a literal is not carrying this triple's value, and one
+          // it omits is not carrying a value at all.
+          for (token, written, got) in [
+            ("{type}", &spec.type_, &read.type_),
+            ("{issue}", &spec.issue, &read.issue),
+            ("{desc}", &spec.desc, &read.desc),
+          ] {
+            if pattern.contains(token) {
+              assert_eq!(
+                written,
+                got,
+                "`{}` wrote `{}` from {:?} and read {} back as `{}`",
+                pattern,
+                name,
+                (type_, issue, desc),
+                token,
+                got
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+/// The named half of the refusals: each one is refused, and refused for the
+/// reason its message states. The *general* claim — that these are exactly the
+/// patterns that cannot be read back — is
+/// [`the_ambiguity_rule_accepts_exactly_the_patterns_that_round_trip`].
+#[test]
+fn every_refused_pattern_is_refused_for_the_stated_reason() {
+  for (pattern, phrase) in REFUSED {
     let err = BranchParser::compile(pattern, "gwm-cli", &default_branch_types())
       .map(|_| String::new())
       .unwrap_or_else(|e| e.to_string());
     assert!(!err.is_empty(), "`{}` must be refused, not compiled", pattern);
     assert!(
-      err.contains("could be read as part of"),
-      "the message must explain which side swallows the separator: {}",
+      err.contains(phrase),
+      "`{}` must be refused for the stated reason (`{}`): {}",
+      pattern,
+      phrase,
       err
     );
   }
 }
 
+/// The rule itself, decided by enumeration rather than argued from examples.
+///
+/// Three Codex findings landed on the ambiguity rule across two review passes —
+/// one pattern wrongly accepted, two wrongly refused — and every one of them
+/// was invisible to the sample branch names the rule was being checked against.
+/// So this stops sampling. It generates every pattern over the three
+/// placeholders and a set of separators chosen to attack the rule, decides
+/// independently whether each one round-trips (with a regex the *test* builds
+/// from the same three charsets), and requires `compile` to accept exactly
+/// those.
+///
+/// Accepting a pattern that does not round-trip is the silent mis-split #417
+/// exists to remove. Refusing one that does makes `from_config` fall back to
+/// the inert parser, which takes auto-linking, `commit-prefix`, the hooks and
+/// the TUI rename away from a config that works. This test is the only place
+/// that can fail for both.
 #[test]
-fn a_separator_only_the_left_side_could_swallow_stays_legal() {
-  // The other half of the two-sided rule, and the reason it is not the
-  // over-strict rule #417's body proposed. Every one of these round-trips.
-  for pattern in [
-    "{desc}-{issue}",
-    "{type}/#{issue}-{desc}",
-    "{type}-{issue}-{desc}",
-    "{type}_{issue}_{desc}",
-    "{type}/{issue}-{desc}",
-    "{type}/#{issue}_{desc}",
-    "{repo}/{type}/#{issue}-{desc}",
-    "wt/{type}/#{issue}-{desc}",
-    "{type}/#{issue}-prefix-{desc}",
-    "{type}/#{issue}-{desc}-{repo}",
-    "{desc}/#{issue}-{type}",
-    "{type}/#{desc}-{issue}",
-    "feat/#{issue}-{desc}",
-    "{type}/#1-{desc}",
-    "{type}/#{issue}-fixed",
-  ] {
+fn the_ambiguity_rule_accepts_exactly_the_patterns_that_round_trip() {
+  // The oracle's own copy of the capture groups. Deliberately not imported
+  // from `naming.rs`: an oracle that shares the code under test cannot
+  // contradict it. `every_legal_pattern_round_trips` is what pins the two
+  // together, so drift between them fails there.
+  const GROUPS: [(&str, &str); 3] = [
+    ("{type}", r"(?P<type>[a-z]+)"),
+    ("{issue}", r"(?P<issue>\d+)"),
+    ("{desc}", r"(?P<desc>[a-z0-9][a-z0-9-]*)"),
+  ];
+  // Separators picked for what they do to the rule, not for what a user would
+  // write: the empty one makes placeholders adjacent, `9` / `a` belong to a
+  // neighbouring charset, `9-` and `-9` are multi-character boundaries only
+  // half of which a greedy group can eat.
+  const SEPS: [&str; 8] = ["", "-", "/", "#", "_", "9", "a", "9-"];
+
+  let types = default_branch_types();
+  let mut orders: Vec<Vec<usize>> = Vec::new();
+  for a in 0..3 {
+    for b in 0..3 {
+      if a == b {
+        continue;
+      }
+      orders.push(vec![a, b]);
+      for c in 0..3 {
+        if c != a && c != b {
+          orders.push(vec![a, b, c]);
+        }
+      }
+    }
+  }
+
+  let mut checked = 0usize;
+  for order in &orders {
+    for seps in separator_tuples(order.len() - 1, &SEPS) {
+      let mut pattern = String::new();
+      let mut oracle = String::from("^");
+      for (position, &segment) in order.iter().enumerate() {
+        if position > 0 {
+          pattern.push_str(seps[position - 1]);
+          oracle.push_str(&regex::escape(seps[position - 1]));
+        }
+        pattern.push_str(GROUPS[segment].0);
+        oracle.push_str(GROUPS[segment].1);
+      }
+      oracle.push('$');
+      let oracle = regex::Regex::new(&oracle).expect("the oracle regex compiles");
+
+      let round_trips = round_trips_every_value(&pattern, &oracle);
+      let accepted = BranchParser::compile(&pattern, "gwm-cli", &types).is_ok();
+      assert_eq!(
+        accepted, round_trips,
+        "`{}` round-trips: {}, but the compiler accepts it: {}",
+        pattern, round_trips, accepted
+      );
+      checked += 1;
+    }
+  }
+  // The enumeration is the evidence, so it has to have actually happened.
+  assert_eq!(checked, 6 * SEPS.len() + 6 * SEPS.len() * SEPS.len());
+}
+
+/// Every tuple of `n` separators drawn from `pool`, in order.
+fn separator_tuples(n: usize, pool: &'static [&'static str]) -> Vec<Vec<&'static str>> {
+  let mut out: Vec<Vec<&'static str>> = vec![Vec::new()];
+  for _ in 0..n {
+    out = out
+      .into_iter()
+      .flat_map(|prefix| {
+        pool.iter().map(move |sep| {
+          let mut next = prefix.clone();
+          next.push(sep);
+          next
+        })
+      })
+      .collect();
+  }
+  out
+}
+
+/// Every non-empty string over `alphabet` up to `max` characters long.
+///
+/// Generated rather than curated on purpose: the two rounds of Codex findings
+/// this test exists to close were both invisible to hand-picked values, and a
+/// third gap showed up while writing it — the mis-split needs a value that
+/// *ends* in the separator's own character, which is precisely the kind of
+/// input nobody writes down. The alphabets below therefore include every
+/// character the separator pool uses.
+fn values(alphabet: &[char], max: usize) -> Vec<String> {
+  let mut out: Vec<String> = Vec::new();
+  let mut frontier: Vec<String> = vec![String::new()];
+  for _ in 0..max {
+    frontier = frontier
+      .iter()
+      .flat_map(|prefix| {
+        alphabet.iter().map(move |c| {
+          let mut next = prefix.clone();
+          next.push(*c);
+          next
+        })
+      })
+      .collect();
+    out.extend(frontier.iter().cloned());
+  }
+  out
+}
+
+/// Does `pattern` survive a write-then-read for every value the three
+/// placeholders can hold, judged by `oracle` rather than by the parser under
+/// test?
+///
+/// The formatter is called directly rather than through [`BranchSpec`] so the
+/// values are not restricted to the repo's configured branch types: the parser
+/// reads `{type}` as `[a-z]+`, so that is the space the rule has to be right
+/// over.
+fn round_trips_every_value(pattern: &str, oracle: &regex::Regex) -> bool {
+  for type_ in values(&['a', 'b'], 2) {
+    for issue in values(&['9', '1'], 2) {
+      for desc in values(&['a', '9', '-'], 3) {
+        if !DESC_SHAPE.is_match(&desc) {
+          continue;
+        }
+        let name = gwm::config::expand_placeholders(pattern, "", Some(&type_), Some(&issue), Some(&desc), None)
+          .expect("the formatter writes it");
+        let Some(cap) = oracle.captures(&name) else {
+          return false;
+        };
+        for (token, written) in [("type", &type_), ("issue", &issue), ("desc", &desc)] {
+          if pattern.contains(&format!("{{{}}}", token)) && cap.name(token).map(|m| m.as_str()) != Some(written) {
+            return false;
+          }
+        }
+      }
+    }
+  }
+  true
+}
+
+/// The oracle's own copy of the description shape, for the same reason its
+/// copy of the capture groups is: an oracle that imports the code under test
+/// cannot contradict it.
+static DESC_SHAPE: std::sync::LazyLock<regex::Regex> =
+  std::sync::LazyLock::new(|| regex::Regex::new(r"^[a-z0-9][a-z0-9-]*$").unwrap());
+
+/// Codex review on PR #476, second pass. Literal text either side of a
+/// placeholder is not one run: `1{type}2-{desc}` writes `1feat2-foo`, whose
+/// only digits are the `1` and the `2` the pattern itself contributes. Fusing
+/// them into `12` made the constant recovery freeze an issue number no branch
+/// the pattern can write ever contains, and auto-linking then pointed at #12.
+///
+/// `{repo}` and `{home}` break the run for the same reason: they are real text
+/// in the branch name, so the literals they sit between are not adjacent.
+#[test]
+fn a_placeholder_between_two_literals_does_not_fuse_them() {
+  let types = default_branch_types();
+  for pattern in ["1{type}2-{desc}", "1{repo}2/{type}-{desc}", "1{home}2/{type}-{desc}"] {
+    let parser = BranchParser::compile(pattern, "x", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
     assert!(
-      BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).is_ok(),
-      "`{}` is a legal pattern and must still compile",
-      pattern
+      !parser.reads_segment("issue"),
+      "`{}` froze an issue number out of literals a placeholder separates: {:?}",
+      pattern,
+      parser.constants()
     );
   }
 }
