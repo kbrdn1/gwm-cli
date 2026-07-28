@@ -33,18 +33,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   What a free-form worktree gives up is stated rather than discovered: issue
   auto-linking goes inactive (`gwm link` remains), `gwm commit-prefix` errors
   because a prefix is derived from the branch type and there is none, and
-  remove/bootstrap hook placeholders resolve empty. PR/MR detection is
+  create/remove/bootstrap hook placeholders resolve empty. PR/MR detection is
   unaffected — it queries the forge with the whole branch name. `doctor`
-  treats the branch as user-managed and never flags it.
+  treats the branch as user-managed and never flags it. All of which applies
+  to a name that does *not* match the branch convention: nothing records how
+  a worktree was named, only what its branch is, so `--name 'feat/#42-x'` is
+  read back as structured and keeps every one of those.
 
-  Names are validated against libgit2's own branch-name rules rather than a
-  hand-written list, plus three rules of our own: no `.` / `..` path component
-  (a worktree directory named `..` would escape the base), no leading `-`
-  (git accepts it; `gwm remove` and `git branch -d` would not), and a 255-byte
-  cap — a branch name is a *path* of components while the worktree directory
-  is a single one, so `a×130/b×130` is a legal ref and an illegal directory
-  name, and without the cap the branch is created before the directory fails,
-  leaving it orphaned.
+  The accepted-name rules are enumerated from the three things a free-form
+  name has to be at once, rather than accreted one example at a time. It is a
+  **git branch** — validated with libgit2's branch-level oracle, which is
+  stricter than the reference-level one (`refs/heads/HEAD` is a valid
+  reference name, `HEAD` is not a usable branch name). It is a **single
+  filesystem path component**, which a branch name is not: no `.` / `..`
+  component, and at most 255 bytes, since `a×130/b×130` is a legal ref and an
+  illegal directory name and without the cap the branch is created before the
+  directory fails, leaving it orphaned. And it is a **literal value during
+  hook expansion**, so no `{` / `}`: placeholders are substituted in sequence,
+  and `spike-{issue}` would have its own name rewritten inside the `{branch}`
+  value a hook receives. Plus one rule belonging to none of them: no leading
+  `-`, which git accepts but `gwm remove` and `git branch -d` read as a flag.
+  Windows-specific path rules are deliberately **not** covered — they cannot
+  be measured from a Unix machine, and the gap is tracked by
+  [#475](https://github.com/kbrdn1/gwm-cli/issues/475) rather than guessed at
+  here.
   No `SCHEMA_VERSION` bump — `JsonWorktree` carries no `type` / `desc`, so
   the wire format is unchanged.
   ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))

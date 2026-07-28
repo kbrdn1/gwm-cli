@@ -2670,10 +2670,13 @@ fn cmd_create(
     trust_or_prompt(&workdir, Some(&repo), trust_mode)?;
   }
 
-  // A free-form worktree genuinely has no type / issue / desc, so its hook
-  // placeholders resolve empty. That is the honest value, not a degradation:
-  // `for_worktree` derives exactly what a later `gwm remove` on the same
-  // worktree would see, so the two phases agree.
+  // `for_worktree` derives the context by re-parsing the branch, exactly as
+  // a later `gwm remove` on the same worktree would, so the two phases
+  // agree. Note what that means: the placeholders resolve empty only when
+  // the name does not match the branch convention. `--name 'feat/#42-x'`
+  // parses, so its context populates — and that is right, because nothing
+  // downstream knows how a worktree was named, only what its branch is
+  // (Codex review on PR #474).
   let pre_ctx = match &wt_name {
     WorktreeName::Structured(spec) => HookContext::for_create(&repo, &workdir, &workdir, &target, &branch, spec),
     WorktreeName::Freeform(_) => HookContext::for_worktree(&repo, &workdir, &workdir, &target, Some(&branch)),
