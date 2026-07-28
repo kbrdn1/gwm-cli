@@ -306,7 +306,14 @@ fn expand(template: &str, ctx: &HookContext, escape: bool) -> String {
     };
     let token = &tail[..=close];
     match placeholder_value(token, ctx) {
-      Some(value) if escape => out.push_str(&shell_words::quote(&value)),
+      // An empty value has nothing to inject, and quoting it would change
+      // arity rather than safety: `quote("")` is `''`, so `mycmd {issue}`
+      // would start passing an argument where every release up to 1.5.0
+      // passed none — on any branch that does not match the convention,
+      // since `{type}` / `{issue}` / `{desc}` are empty there. Letting it
+      // through keeps this change's blast radius to the vulnerability
+      // itself, which is what a security patch owes the people applying it.
+      Some(value) if escape && !value.is_empty() => out.push_str(&shell_words::quote(&value)),
       Some(value) => out.push_str(&value),
       None => out.push_str(token),
     }

@@ -349,11 +349,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own name rewritten — and with escaping in play that would have spliced
   quote characters into the middle of another value.
 
-  One behaviour change falls out of this: an **empty** placeholder expands to
-  an empty argument rather than to nothing. On a branch that does not match
-  the branch convention `{type}` / `{issue}` / `{desc}` are empty, so
-  `mycmd {issue}` now passes one empty argument where it passed none. Inside
-  a larger word (`mycmd issue={issue}`) nothing changes.
+  An **empty** placeholder is left alone rather than escaped. It has nothing
+  to inject, and `shell_words::quote("")` is `''` — escaping it would mean
+  `mycmd {issue}` started passing an empty argument where it passed none,
+  on every branch that does not match the convention. Hooks therefore see no
+  change at all beyond the one this fixes.
 
 ### Docs
 

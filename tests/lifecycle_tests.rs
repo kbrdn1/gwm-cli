@@ -218,3 +218,31 @@ fn post_create_hook_is_recorded_on_the_command_log() {
   assert!(mine.is_success(), "the echo hook exited cleanly");
   assert!(mine.output.contains(sentinel), "captured stdout is stored");
 }
+
+#[test]
+fn an_empty_placeholder_expands_to_nothing_not_to_an_empty_argument() {
+  // `shell_words::quote("")` is `''`, so escaping an empty value would turn
+  // `mycmd {issue}` into `mycmd ''` — one argument where every release up to
+  // 1.5.0 passed none. `{type}` / `{issue}` / `{desc}` are empty on any
+  // branch that does not match the convention, so that is not a rare shape.
+  //
+  // An empty value has nothing to inject, so it passes through untouched.
+  // That keeps the escaping's blast radius to exactly the vulnerability it
+  // closes: a user applying a security patch should not also be absorbing an
+  // unrelated semantic change they did not opt into.
+  let dir = tempfile::tempdir().unwrap();
+  let mut ctx = ctx_at(dir.path());
+  ctx.issue = String::new();
+  let out = run_one_hook(dir.path(), &ctx, "set -- {issue}; echo $#", HashMap::new());
+  assert_eq!(
+    out.trim(),
+    "0",
+    "an empty placeholder must not start passing an empty argument"
+  );
+
+  // The escaping still applies the moment there is anything to escape.
+  let mut hostile = ctx_at(dir.path());
+  hostile.issue = "1;id".into();
+  let out = run_one_hook(dir.path(), &hostile, "set -- {issue}; echo $#", HashMap::new());
+  assert_eq!(out.trim(), "1", "a non-empty value stays a single quoted argument");
+}
