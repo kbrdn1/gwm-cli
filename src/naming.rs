@@ -198,14 +198,32 @@ pub enum WorktreeName {
 impl WorktreeName {
   /// Validate a user-supplied free-form name.
   ///
-  /// The bar is deliberately low: git-ref legality and single-path-component
-  /// safety, nothing else. `Spike_Redis`, `2026.07.27` and `réécriture` are
-  /// all fine — refusing them would defeat the point of the flag.
+  /// The bar is deliberately low. `Spike_Redis`, `2026.07.27` and
+  /// `réécriture` are all fine — refusing them would defeat the point of the
+  /// flag. The rules are enumerated from the three things the name has to be
+  /// at once, rather than accreted one reviewer example at a time:
   ///
-  /// Ref legality is delegated to libgit2's own
-  /// [`git2::Reference::is_valid_name`] against the real `refs/heads/<name>`
-  /// the branch will occupy, rather than a hand-written rule list: the
-  /// authority on what git accepts is git.
+  /// 1. **A git branch.** Delegated to libgit2's own
+  ///    [`git2::Branch::name_is_valid`] — the branch-level oracle, not the
+  ///    reference-level one, because they disagree: `refs/heads/HEAD` is a
+  ///    syntactically valid *reference* name while `HEAD` is not a usable
+  ///    *branch* name. The authority on what git accepts is git.
+  /// 2. **A single filesystem path component** — the worktree directory. A
+  ///    branch name is a *path* of components, so the two have different
+  ///    limits: bounded at [`MAX_DIR_COMPONENT_BYTES`], and no `.` / `..`.
+  /// 3. **A literal value in placeholder expansion.**
+  ///    `lifecycle::expand_placeholders` substitutes sequentially, so a name
+  ///    that itself contains a token gets rewritten inside its own
+  ///    substituted value.
+  ///
+  /// Plus one rule that belongs to none of them: no leading `-`, which is a
+  /// CLI-ergonomics rule (git accepts it).
+  ///
+  /// What is deliberately **not** checked is the Windows-specific character
+  /// and reserved-device-name set (`< > " |`, `CON`, `NUL`, `COM1`…). That
+  /// gap is real and tracked separately — it cannot be verified from a Unix
+  /// machine, and a rule that only runs on one platform's CI is a rule
+  /// nobody can pre-validate.
   ///
   /// The name is validated exactly as typed. Trimming would accept
   /// `--name " spike"` and create `spike` instead — a different branch from
@@ -232,13 +250,22 @@ impl WorktreeName {
     if name.contains('\0') {
       return reject("contains a NUL byte");
     }
-    // Not a git rule: libgit2 accepts `refs/heads/-x` quite happily
-    // (verified — the ref oracle below lets it through). It is an
-    // *ergonomics* rule. A leading `-` makes the name unusable as an
-    // argument to every command that would take it back: `gwm remove -x`,
-    // `git branch -d -x`, `cd -x` all read it as a flag.
+    // Not a git rule: libgit2 accepts `-x` as a branch name quite happily
+    // (verified — the oracle below lets it through). It is an *ergonomics*
+    // rule. A leading `-` makes the name unusable as an argument to every
+    // command that would take it back: `gwm remove -x`, `git branch -d -x`,
+    // `cd -x` all read it as a flag.
     if name.starts_with('-') {
       return reject("a leading `-` makes the name unusable as a command argument");
+    }
+    // Consumer (3): `lifecycle::expand_placeholders` replaces `{branch}`
+    // first and `{type}` / `{issue}` / `{desc}` / `{repo}` after, so a hook
+    // asking for `{branch}` on `spike-{issue}` receives `spike-` — the
+    // second pass rewrites the value the first one just substituted.
+    // `DESC_RE` kept structured names out of this; free-form names reach it,
+    // so the boundary is where it gets closed.
+    if name.contains('{') || name.contains('}') {
+      return reject("`{` and `}` would be re-substituted when a lifecycle hook expands its placeholders");
     }
     // A ref is a *path* of components, a worktree directory is a single one,
     // so `a×130/b×130` is a legal ref and an illegal directory name. Without
@@ -253,11 +280,13 @@ impl WorktreeName {
       ));
     }
 
-    // The branch will live at `refs/heads/<name>`; validate exactly that.
-    if !git2::Reference::is_valid_name(&format!("refs/heads/{}", name)) {
+    // Consumer (1). The branch-level oracle, not `Reference::is_valid_name`
+    // on `refs/heads/<name>`: that one accepts `HEAD`, which `git branch`
+    // refuses and which would collide with the HEAD pseudo-ref.
+    if !git2::Branch::name_is_valid(name).unwrap_or(false) {
       return reject(
         "not a valid git branch name — git rejects spaces, `~ ^ : ? * [ \\`, `@{`, `..`, \
-         leading/trailing `/`, a trailing `.` and a `.lock` suffix",
+         leading/trailing `/`, a trailing `.`, a `.lock` suffix and `HEAD`",
       );
     }
 

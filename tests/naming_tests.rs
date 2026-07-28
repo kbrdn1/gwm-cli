@@ -697,6 +697,51 @@ fn a_name_that_would_overflow_a_path_component_is_refused_before_anything_is_cre
   assert!(WorktreeName::freeform(&"a".repeat(256)).is_err(), "256 bytes is not");
 }
 
+/// A free-form name has to survive three consumers, and the rules are
+/// enumerated from those rather than sampled from whatever a reviewer
+/// happened to try (Codex review on PR #474 raised three findings of this
+/// same class before the invariant got written down):
+///
+/// 1. it is a **git branch** — checked with the branch-level oracle, not the
+///    reference-level one, because they do not agree;
+/// 2. it is a **single filesystem path component** — bounded and free of
+///    `.` / `..`;
+/// 3. it is a **literal value in placeholder expansion** — so it must not
+///    itself look like a placeholder.
+///
+/// This test pins (1): the ref-level oracle accepts `refs/heads/HEAD`, but
+/// `git branch HEAD` is refused and the name collides with the HEAD
+/// pseudo-ref.
+#[test]
+fn a_name_git_refuses_as_a_branch_is_refused_even_when_the_ref_syntax_is_legal() {
+  assert!(
+    git2::Reference::is_valid_name("refs/heads/HEAD"),
+    "precondition: the ref-level oracle lets `HEAD` through, so only the branch-level one can stop it"
+  );
+  assert!(
+    !git2::Branch::name_is_valid("HEAD").unwrap(),
+    "precondition: the branch-level oracle is the one that refuses it"
+  );
+  assert!(WorktreeName::freeform("HEAD").is_err(), "`HEAD` is not a branch name");
+}
+
+/// (3) `lifecycle::expand_placeholders` substitutes sequentially — `{branch}`
+/// first, then `{type}` / `{issue}` / `{desc}` / `{repo}` — so a branch whose
+/// own name contains a token gets that token rewritten inside the value that
+/// was just substituted: a hook receiving `{branch}` for `spike-{issue}` sees
+/// `spike-`. `DESC_RE` made this unreachable for structured names; free-form
+/// names reach it, so they are refused at the boundary.
+#[test]
+fn a_name_that_looks_like_a_placeholder_is_refused() {
+  for bad in ["spike-{issue}", "{repo}-spike", "{branch}", "closing}brace"] {
+    assert!(
+      WorktreeName::freeform(bad).is_err(),
+      "`{}` would be re-substituted during hook expansion",
+      bad
+    );
+  }
+}
+
 /// The rejection has to say what is wrong, not just that something is.
 #[test]
 fn the_rejection_names_the_offending_value() {
