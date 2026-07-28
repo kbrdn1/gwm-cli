@@ -9053,12 +9053,19 @@ fn request_pull_refuses_while_another_mutation_runs() {
 
 #[test]
 fn enter_edit_worktree_refuses_unconfigured_branch_type() {
-  // Codex review on PR #292: a branch whose parsed type is not in branch_types
-  // must refuse to open the rename modal rather than silently preselecting the
+  // Codex review on PR #292: a branch whose type is not in branch_types must
+  // refuse to open the rename modal rather than silently preselecting the
   // first configured type (which Enter would then rename the branch to).
+  //
+  // Issue #417 moved *where* it is refused, not whether. `{type}` compiles to
+  // an alternation of the configured types, so `zzz/#7-thing` no longer parses
+  // at all and the refusal now comes from the parser rather than from the
+  // type-index lookup behind it. The message covers both reasons, because from
+  // here they are indistinguishable and claiming "free-form" about a branch
+  // that plainly carries a type would be wrong.
   let (_dir, mut app) = make_app();
   let mut wt = worktree_fixture("foo");
-  // `zzz` is a well-formed <type>/#<issue>-<desc> but not a configured type.
+  // `zzz` looks like a <type>/#<issue>-<desc> but is not a configured type.
   wt.branch = Some("zzz/#7-thing".into());
   app.worktrees = vec![wt];
   app.list_state.select(Some(0));
@@ -9068,8 +9075,8 @@ fn enter_edit_worktree_refuses_unconfigured_branch_type() {
   assert_eq!(app.view, View::List, "unconfigured type must not open the modal");
   assert!(app.edit_original_branch.is_none());
   assert!(
-    app.status.contains("not configured"),
-    "status must explain: {}",
+    app.status.contains("not configured") && app.status.contains("zzz/#7-thing"),
+    "status must name the branch and the reason: {}",
     app.status
   );
 }

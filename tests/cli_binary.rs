@@ -6780,3 +6780,32 @@ fn create_name_rejects_a_name_git_would_refuse() {
     .failure()
     .stderr(predicate::str::contains("has space"));
 }
+
+#[test]
+fn commit_prefix_reads_a_branch_written_with_a_custom_pattern() {
+  // Issue #417. `worktree.branch_pattern` drives `BranchSpec::branch_name`,
+  // so a repo configured with `{type}-{issue}-{desc}` creates
+  // `feat-41-foo` and every gwm surface that re-reads the branch has to
+  // recognise it. The parser matched a hardcoded `<type>/#<issue>-<desc>`
+  // instead, so the branch this very repo told gwm to create came back
+  // unreadable: no gitmoji, no issue in the prefix.
+  //
+  // Slash-less is the point, not an edge case — `-` sits in neither the
+  // type charset (`[a-z]+`) nor the issue charset (`\d+`), so the split is
+  // unambiguous and there is no reason for it to fail.
+  let (dir, _repo) = init_repo();
+  std::fs::write(
+    dir.path().join(".gwm.toml"),
+    "[worktree]\nbranch_pattern = \"{type}-{issue}-{desc}\"\n",
+  )
+  .expect("seed .gwm.toml");
+
+  let mut cmd = Command::cargo_bin("gwm").unwrap();
+  cmd
+    .current_dir(dir.path())
+    .args(["commit-prefix", "--branch", "feat-41-foo"]);
+  cmd
+    .assert()
+    .success()
+    .stdout(predicate::str::contains(":sparkles: feat(#41):"));
+}

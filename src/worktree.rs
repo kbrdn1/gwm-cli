@@ -194,6 +194,13 @@ pub fn repo_name(repo: &Repository) -> String {
 pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
   let mut out = Vec::new();
 
+  // Issue #417: every row's issue/PR pastille comes from re-reading the
+  // branch name, so the parser has to be this repo's own — compiled from its
+  // `worktree.branch_pattern`, not from the built-in shape. Compiled once
+  // here rather than inside `read_link`, which would re-read `.gwm.toml` and
+  // recompile the regex for every worktree in the listing.
+  let parser = crate::naming::BranchParser::for_repo(repo);
+
   // The main worktree is not listed by git2::Repository::worktrees(); add it manually.
   if let Some(workdir) = repo.workdir() {
     let head_ref = repo.head().ok();
@@ -203,7 +210,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
     let head = head_ref.as_ref().and_then(|r| r.target().map(|o| o.to_string()));
     let link = branch
       .as_deref()
-      .and_then(|b| github::read_link(repo, b).ok())
+      .and_then(|b| github::read_link_with(repo, b, &parser).ok())
       .unwrap_or_else(BranchLink::empty);
     let age = branch.as_deref().and_then(|b| branch_age(repo, b));
     let main_name = workdir
@@ -271,7 +278,7 @@ pub fn list(repo: &Repository) -> Result<Vec<WorktreeInfo>> {
 
     let link = branch
       .as_deref()
-      .and_then(|b| github::read_link(repo, b).ok())
+      .and_then(|b| github::read_link_with(repo, b, &parser).ok())
       .unwrap_or_else(BranchLink::empty);
     // Display name = basename of the on-disk path (tracks `git worktree move`);
     // id = the `repo.worktrees()` entry (stable, used for remove/find).
