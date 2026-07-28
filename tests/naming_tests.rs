@@ -1060,6 +1060,60 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   }
 }
 
+/// Codex review on PR #476, third pass. Knowing the same *set* of tokens as
+/// the formatter is not enough — the compiler has to find them the same way.
+///
+/// `expand_placeholders` is a chain of `str::replace`, so it sees `{type}` at
+/// offset 1 of `{{type}` and writes `{feat`. The compiler scanned for `{`
+/// instead, took `{{type}` for one unknown token, and compiled a regex
+/// demanding that text literally — so no branch the pattern wrote was ever
+/// read back, and auto-linking, the hooks, `[pr_template.by_type]` and the TUI
+/// rename all went quiet on a pattern that formats perfectly well.
+#[test]
+fn the_compiler_finds_placeholders_where_the_formatter_substitutes_them() {
+  let types = default_branch_types();
+  for (pattern, expected_name) in [
+    // A literal brace immediately before a placeholder.
+    ("{{type}/#{issue}-{desc}", "{feat/#42-x"),
+    // A token that only starts after another one has opened.
+    ("{type{issue}}-{desc}", "{type42}-x"),
+    // A trailing brace that closes nothing.
+    ("{type}/#{issue}-{desc}}", "feat/#42-x}"),
+    // An unknown token: literal to the formatter, so literal to the compiler.
+    ("{foo}/{type}/#{issue}-{desc}", "{foo}/feat/#42-x"),
+  ] {
+    let cfg = WorktreeConfig {
+      branch_pattern: pattern.into(),
+      ..WorktreeConfig::default()
+    };
+    let spec = BranchSpec::new_with_types("feat", "42", "x", &types).expect("a valid triple");
+    let name = spec.branch_name(&cfg, "gwm-cli").expect("the formatter writes it");
+    assert_eq!(
+      name, expected_name,
+      "`{}` does not write what the test assumes",
+      pattern
+    );
+
+    let parser = BranchParser::compile(pattern, "gwm-cli", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
+    let read = parser
+      .parse(&name)
+      .unwrap_or_else(|| panic!("`{}` wrote `{}` and cannot read it back", pattern, name));
+    for (token, written, got) in [
+      ("{type}", "feat", &read.type_),
+      ("{issue}", "42", &read.issue),
+      ("{desc}", "x", &read.desc),
+    ] {
+      if pattern.contains(token) {
+        assert_eq!(
+          got, written,
+          "`{}` wrote `{}` and read {} back as `{}`",
+          pattern, name, token, got
+        );
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------------
 // Issue #417 — no-regression baseline.
 //

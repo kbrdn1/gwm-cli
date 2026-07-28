@@ -44,6 +44,23 @@ const TYPE_GROUP: &str = r"(?P<type>[a-z]+)";
 const ISSUE_GROUP: &str = r"(?P<issue>\d+)";
 const DESC_GROUP: &str = r"(?P<desc>[a-z0-9][a-z0-9-]*)";
 
+/// Every token [`crate::config::expand_placeholders`] substitutes on the branch
+/// path, paired with the capture group it compiles to — `None` for the two the
+/// formatter resolves to fixed text before a branch name exists.
+///
+/// `{repo_path}` / `{repo_parent}` are absent on purpose: `BranchSpec::branch_name`
+/// passes no `repo_path`, so the formatter leaves them verbatim and so does the
+/// compiler. `tests/naming_tests.rs` reads the token list back out of
+/// `expand_placeholders` and fails if the two drift apart.
+type Token = (&'static str, Option<(&'static str, &'static str)>);
+const TOKENS: [Token; 5] = [
+  ("{type}", Some(("type", TYPE_GROUP))),
+  ("{issue}", Some(("issue", ISSUE_GROUP))),
+  ("{desc}", Some(("desc", DESC_GROUP))),
+  ("{repo}", None),
+  ("{home}", None),
+];
+
 /// The three segments a branch name carries, in the order constants are
 /// resolved: strictest oracle first, so a token that could serve two segments
 /// goes to the one that can be sure about it.
@@ -484,32 +501,28 @@ impl BranchParser {
     let mut rest = pattern;
 
     while !rest.is_empty() {
-      let Some(open) = rest.find('{') else {
+      // Find tokens the way `expand_placeholders` does — by searching for each
+      // one, not by scanning for `{`. The two disagree the moment a brace sits
+      // next to a placeholder: `str::replace` sees `{type}` at offset 1 of
+      // `{{type}` and writes `{feat`, whereas a `{`-scanner takes `{{type}` for
+      // one unknown token and demands that text back verbatim. Everything the
+      // formatter leaves alone — an unknown `{foo}`, an unbalanced brace — is
+      // literal here for the same reason.
+      let Some((at, token, group)) = TOKENS
+        .iter()
+        .filter_map(|(token, group)| rest.find(token).map(|at| (at, *token, *group)))
+        .min_by_key(|(at, ..)| *at)
+      else {
         authored.push_str(rest);
         push_literal(&mut re, rest, &mut pending);
         break;
       };
-      if open > 0 {
-        authored.push_str(&rest[..open]);
-        push_literal(&mut re, &rest[..open], &mut pending);
+      if at > 0 {
+        authored.push_str(&rest[..at]);
+        push_literal(&mut re, &rest[..at], &mut pending);
       }
-      let after = &rest[open..];
-      // An unbalanced `{` is literal on the formatter side too (`str::replace`
-      // only ever matches a complete token), so it stays literal here.
-      let Some(close) = after.find('}') else {
-        authored.push_str(after);
-        push_literal(&mut re, after, &mut pending);
-        break;
-      };
-      let token = &after[..=close];
-      rest = &after[close + 1..];
+      rest = &rest[at + token.len()..];
 
-      let group = match token {
-        "{type}" => Some(("type", TYPE_GROUP)),
-        "{issue}" => Some(("issue", ISSUE_GROUP)),
-        "{desc}" => Some(("desc", DESC_GROUP)),
-        _ => None,
-      };
       match group {
         Some((name, group)) => {
           // Before the boundary check, so `{desc}-{desc}` is diagnosed as the
@@ -556,27 +569,24 @@ impl BranchParser {
           authored.push(SEGMENT_BREAK);
           pending = Some((name, String::new()));
         }
-        // Resolved by the formatter, so fixed text by the time a branch name
-        // exists. `{home}` is looked up lazily: a pattern that does not use it
-        // must not fail to compile on a machine with no resolvable `$HOME`.
+        // `{repo}` / `{home}`: resolved by the formatter, so fixed text by the
+        // time a branch name exists. `{home}` is looked up lazily, since a
+        // pattern that does not use it must not fail to compile on a machine
+        // with no resolvable `$HOME`.
         //
         // Both break the literal run they sit in: they put real text between
         // the literals either side, so those literals are not one token.
-        None if token == "{repo}" => {
-          authored.push(SEGMENT_BREAK);
-          push_literal(&mut re, repo, &mut pending);
-        }
-        None if token == "{home}" => {
-          let home = dirs::home_dir()
-            .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
-            .to_string_lossy()
-            .to_string();
-          authored.push(SEGMENT_BREAK);
-          push_literal(&mut re, &home, &mut pending);
-        }
         None => {
-          authored.push_str(token);
-          push_literal(&mut re, token, &mut pending);
+          let text = if token == "{home}" {
+            dirs::home_dir()
+              .ok_or_else(|| GwmError::Config("cannot resolve $HOME".into()))?
+              .to_string_lossy()
+              .to_string()
+          } else {
+            repo.to_string()
+          };
+          authored.push(SEGMENT_BREAK);
+          push_literal(&mut re, &text, &mut pending);
         }
       }
     }
