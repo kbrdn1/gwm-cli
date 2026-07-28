@@ -692,9 +692,43 @@ fn a_name_that_would_overflow_a_path_component_is_refused_before_anything_is_cre
     WorktreeName::freeform(&long).is_err(),
     "a 261-byte directory name must be refused up front"
   );
-  // Right at the edge: 255 bytes is a legal component, 256 is not.
-  assert!(WorktreeName::freeform(&"a".repeat(255)).is_ok(), "255 bytes is legal");
-  assert!(WorktreeName::freeform(&"a".repeat(256)).is_err(), "256 bytes is not");
+  // Right at the edge: 255 bytes of directory name is legal, 256 is not.
+  // Split so the *final* ref component stays clear of the `.lock` rule the
+  // next test pins — this one is about the directory, not the ref.
+  let edge = format!("{}/{}", "a".repeat(251), "b".repeat(3));
+  assert_eq!(edge.len(), 255);
+  assert!(WorktreeName::freeform(&edge).is_ok(), "255 bytes is legal");
+  assert!(
+    WorktreeName::freeform(&format!("{}b", edge)).is_err(),
+    "256 bytes is not"
+  );
+}
+
+/// The other five bytes. Git writes `refs/heads/<name>.lock` *before* the
+/// ref itself, so the ref's final path component carries a suffix the
+/// directory name never sees — and `Branch::name_is_valid` only checks
+/// syntax, never length. Measured against the branch binary: a 250-byte
+/// final segment creates, 251 fails, and it fails after `pre_create` hooks
+/// have already run (Codex review on PR #474).
+///
+/// Only the final segment: an earlier one gets no suffix, so it may use the
+/// full directory budget. Capping every segment would refuse names git and
+/// the filesystem both accept.
+#[test]
+fn the_final_segment_leaves_room_for_git_s_lock_file() {
+  assert!(
+    WorktreeName::freeform(&"a".repeat(250)).is_ok(),
+    "250 + `.lock` is exactly 255 — legal"
+  );
+  assert!(
+    WorktreeName::freeform(&"a".repeat(251)).is_err(),
+    "251 + `.lock` overflows the component git has to create first"
+  );
+  let front_heavy = format!("{}/{}", "a".repeat(251), "b".repeat(3));
+  assert!(
+    WorktreeName::freeform(&front_heavy).is_ok(),
+    "a 251-byte segment is fine when it is not the one carrying `.lock`"
+  );
 }
 
 /// A free-form name has to survive three consumers, and the rules are

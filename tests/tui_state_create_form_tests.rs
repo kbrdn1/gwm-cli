@@ -258,8 +258,22 @@ fn the_freeform_name_cap_is_the_validator_s_own_limit_so_nothing_legal_is_trunca
     f.push_char('x');
   }
   assert_eq!(f.name.len(), MAX_NAME_LEN);
+
+  // And a name that uses the whole budget legally must survive the round
+  // trip — the form's job is not to truncate it. (A single 255-byte segment
+  // is refused by the `.lock` rule, which is a *ref* limit, not the
+  // directory one this cap enforces; split it so the final segment is short.)
+  let mut g = CreateForm::new();
+  g.toggle_mode();
+  for _ in 0..251 {
+    g.push_char('x');
+  }
+  for c in "/yyy".chars() {
+    g.push_char(c);
+  }
+  assert_eq!(g.name.len(), MAX_NAME_LEN);
   assert!(
-    gwm::naming::WorktreeName::freeform(&f.name).is_ok(),
+    gwm::naming::WorktreeName::freeform(&g.name).is_ok(),
     "whatever the form let through must still validate"
   );
 }

@@ -185,6 +185,11 @@ impl BranchSpec {
 /// one that was typed.
 pub const MAX_DIR_COMPONENT_BYTES: usize = 255;
 
+/// Bytes git tacks onto the ref's **final** component while creating it:
+/// `refs/heads/<name>.lock` has to exist before `refs/heads/<name>` does.
+/// Earlier components are plain directories and carry no suffix.
+const GIT_REF_LOCK_SUFFIX_BYTES: usize = ".lock".len();
+
 /// The `base` placeholders only the structured triple can supply. A
 /// free-form name has no value for any of them, and `expand_placeholders`
 /// leaves an unfed placeholder literal, so a `base` written with one of
@@ -282,6 +287,20 @@ impl WorktreeName {
         "{} bytes long — a worktree directory is a single path component, capped at {}",
         name.len(),
         MAX_DIR_COMPONENT_BYTES
+      ));
+    }
+    // The ref side of the same limit, five bytes tighter on the final
+    // component only: git creates `refs/heads/<name>.lock` first, and
+    // `Branch::name_is_valid` checks syntax, never length. Measured: a
+    // 250-byte final segment creates, 251 fails — after `pre_create` hooks
+    // have run. Earlier segments are plain directories, so they keep the
+    // full budget; capping them too would refuse names git accepts.
+    let last = name.rsplit('/').next().unwrap_or(name);
+    if last.len() + GIT_REF_LOCK_SUFFIX_BYTES > MAX_DIR_COMPONENT_BYTES {
+      return reject(&format!(
+        "its last segment is {} bytes — git writes `refs/heads/<name>.lock` first, leaving {} for it",
+        last.len(),
+        MAX_DIR_COMPONENT_BYTES - GIT_REF_LOCK_SUFFIX_BYTES
       ));
     }
 
