@@ -19,10 +19,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   positionals, so a partial triple is still the typo it always was; the mode
   is chosen explicitly, never inferred from how many arguments arrived.
 
-  The name becomes the branch verbatim. `branch_pattern` / `path_pattern` do
-  not apply — they are written in terms of `{type}` / `{issue}` / `{desc}`,
+  The name becomes the branch verbatim, and is validated verbatim: `--name
+  " spike"` is refused rather than trimmed into `spike`, which would be a
+  different branch from the one asked for. `branch_pattern` / `path_pattern`
+  do not apply — they are written in terms of `{type}` / `{issue}` / `{desc}`,
   and a free-form name has none of them — while `[worktree].base` still does,
-  so free-form worktrees land beside the structured ones.
+  so free-form worktrees land beside the structured ones. `base` is only
+  expanded with the placeholders it documents, though: the structured path
+  feeds `{type}` / `{issue}` / `{desc}` through `base` too, and since an
+  unfed placeholder is left *literal*, a base written with one of them is
+  refused here rather than turned into a directory called `{type}`.
 
   What a free-form worktree gives up is stated rather than discovered: issue
   auto-linking goes inactive (`gwm link` remains), `gwm commit-prefix` errors
@@ -32,9 +38,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   treats the branch as user-managed and never flags it.
 
   Names are validated against libgit2's own branch-name rules rather than a
-  hand-written list, plus two rules of our own: no `.` / `..` path component
-  (a worktree directory named `..` would escape the base) and no leading `-`
-  (git accepts it; `gwm remove` and `git branch -d` would not).
+  hand-written list, plus three rules of our own: no `.` / `..` path component
+  (a worktree directory named `..` would escape the base), no leading `-`
+  (git accepts it; `gwm remove` and `git branch -d` would not), and a 255-byte
+  cap — a branch name is a *path* of components while the worktree directory
+  is a single one, so `a×130/b×130` is a legal ref and an illegal directory
+  name, and without the cap the branch is created before the directory fails,
+  leaving it orphaned.
   No `SCHEMA_VERSION` bump — `JsonWorktree` carries no `type` / `desc`, so
   the wire format is unchanged.
   ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))
