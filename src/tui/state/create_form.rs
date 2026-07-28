@@ -18,26 +18,51 @@ pub const MAX_ISSUE_LEN: usize = 7;
 /// limit even with the longest configured branch type (#217).
 pub const MAX_DESC_LEN: usize = 200;
 
+/// Max characters accepted in the free-form name field (issue #416).
+/// Same bound as the slug: git's ref limit is 255 bytes and the name IS
+/// the branch, so 200 leaves room for multi-byte characters — free-form
+/// names are not restricted to ASCII.
+pub const MAX_NAME_LEN: usize = 200;
+
+/// Which naming shape the form is collecting (issue #416). Toggled with
+/// the `toggle_mode` verb; `Structured` is the default so the canonical
+/// triple stays the path of least resistance.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
+pub enum Mode {
+  #[default]
+  Structured,
+  Freeform,
+}
+
 /// Which input is currently focused inside the create overlay. Selected
 /// via Tab / Shift-Tab; the Type field is special — it's cycled via
-/// `next_type` / `prev_type` rather than typed into.
+/// `next_type` / `prev_type` rather than typed into. `Name` is the sole
+/// field of [`Mode::Freeform`] and is never reachable from the structured
+/// rotation.
 #[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Field {
   #[default]
   Type,
   Issue,
   Desc,
+  Name,
 }
 
 /// Input state for the create-worktree overlay. `Default` opens the form
-/// in the initial state (Type field focused, first type selected, both
-/// string fields empty).
+/// in the initial state (structured mode, Type field focused, first type
+/// selected, every string field empty).
+///
+/// Both modes' buffers are kept side by side rather than sharing one:
+/// toggling is exploratory, and a user flipping across to look at the
+/// other form must not lose what they already typed.
 #[derive(Debug, Default)]
 pub struct CreateForm {
+  pub mode: Mode,
   pub field: Field,
   pub type_index: usize,
   pub issue: String,
   pub desc: String,
+  pub name: String,
 }
 
 impl CreateForm {
@@ -48,26 +73,53 @@ impl CreateForm {
   /// Return to the freshly-opened state. Called by the orchestrator when
   /// the form opens or cancels.
   pub fn reset(&mut self) {
+    self.mode = Mode::Structured;
     self.field = Field::Type;
     self.type_index = 0;
     self.issue.clear();
     self.desc.clear();
+    self.name.clear();
   }
 
-  /// Rotate field focus forward (Type → Issue → Desc → Type).
+  /// Flip between the structured triple and a free-form name (issue #416),
+  /// landing focus on the target mode's entry field: `Name` is free-form's
+  /// only field, `Issue` is where `enter_create` opens the structured form.
+  /// Typed values on both sides survive, so a round trip loses nothing.
+  pub fn toggle_mode(&mut self) {
+    match self.mode {
+      Mode::Structured => {
+        self.mode = Mode::Freeform;
+        self.field = Field::Name;
+      }
+      Mode::Freeform => {
+        self.mode = Mode::Structured;
+        self.field = Field::Issue;
+      }
+    }
+  }
+
+  /// Rotate field focus forward (Type → Issue → Desc → Type). Free-form
+  /// mode has a single field, so rotation stays put rather than walking
+  /// focus onto inputs that mode does not present.
   pub fn next_field(&mut self) {
+    if self.mode == Mode::Freeform {
+      return;
+    }
     self.field = match self.field {
       Field::Type => Field::Issue,
       Field::Issue => Field::Desc,
-      Field::Desc => Field::Type,
+      Field::Desc | Field::Name => Field::Type,
     };
   }
 
   /// Rotate field focus backward (Type → Desc → Issue → Type).
   pub fn prev_field(&mut self) {
+    if self.mode == Mode::Freeform {
+      return;
+    }
     self.field = match self.field {
       Field::Type => Field::Desc,
-      Field::Issue => Field::Type,
+      Field::Issue | Field::Name => Field::Type,
       Field::Desc => Field::Issue,
     };
   }
@@ -99,10 +151,14 @@ impl CreateForm {
   /// drops non-digits to match the `<type>/#<digits>-<slug>` branch
   /// convention; Desc accepts any character (slug normalisation happens
   /// downstream in `BranchSpec`). Type is no-op (cycled, not typed).
+  /// Name accepts anything printable: git-ref and path legality are
+  /// checked once on submit by `WorktreeName::freeform`, not per keystroke,
+  /// so the user can type through an intermediate state (issue #416).
   pub fn push_char(&mut self, c: char) {
     match self.field {
       Field::Issue if c.is_ascii_digit() && self.issue.chars().count() < MAX_ISSUE_LEN => self.issue.push(c),
       Field::Desc if self.desc.chars().count() < MAX_DESC_LEN => self.desc.push(c),
+      Field::Name if self.name.chars().count() < MAX_NAME_LEN => self.name.push(c),
       _ => {}
     }
   }
@@ -116,6 +172,9 @@ impl CreateForm {
       }
       Field::Desc => {
         self.desc.pop();
+      }
+      Field::Name => {
+        self.name.pop();
       }
       _ => {}
     }

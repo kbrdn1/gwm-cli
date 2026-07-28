@@ -244,6 +244,10 @@ define_modal_actions! {
     CreateSubmit    => "submit"     [ "Enter" ],
     CreatePrevType  => "prev_type"  [ "Up", "Left", "h" ],
     CreateNextType  => "next_type"  [ "Down", "Right", "l" ],
+    // Issue #416. Ctrl-modified on purpose: the create overlay reserves
+    // unmodified printable keys for the text fields, so a bare letter here
+    // would be swallowed while typing a description.
+    CreateToggleMode => "toggle_mode" [ "Ctrl+t" ],
   }
   Confirm {
     ConfirmConfirm      => "confirm"       [ "y" ],

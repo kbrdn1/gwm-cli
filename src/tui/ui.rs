@@ -4,7 +4,7 @@ use super::modal_keymap::{KeyContext, ModalAction, ModalKeymap};
 use super::state::async_task::TaskKind;
 use super::state::config_panel::{FieldKind, SettingField, SettingsTab};
 use super::state::confirm::ConfirmButton;
-use super::state::create_form::Field;
+use super::state::create_form::{Field, Mode};
 use super::state::pty_overlay::PtyKind;
 use super::state::sidebar::SidebarMode;
 use super::state::spinner::DOT_FRAMES;
@@ -2953,10 +2953,11 @@ pub fn help_rows(km: &super::keymap::Keymap, modal: &ModalKeymap, ctx: HintConte
       modal_entry(ModalAction::CreateNextType, "next branch type"),
       modal_entry(ModalAction::CreateNextField, "next field"),
       modal_entry(ModalAction::CreatePrevField, "previous field"),
-      modal_entry(ModalAction::CreateSubmit, "submit (on description) / next field"),
+      modal_entry(ModalAction::CreateSubmit, "submit (on description / name) / next field"),
+      modal_entry(ModalAction::CreateToggleMode, "toggle type/issue/desc ↔ free-form name"),
       modal_entry(ModalAction::CreateCancel, "cancel"),
       fixed("0-9", "type into the issue field (digits only)"),
-      fixed("any char", "type into the description field"),
+      fixed("any char", "type into the description / name field"),
       fixed("Backspace", "delete the last character"),
       HelpRow::Blank,
       HelpRow::Section("Delete Worktree".to_string()),
@@ -3746,28 +3747,43 @@ fn draw_create(f: &mut Frame, app: &App) {
   let value_w = inner_w.saturating_sub(gutter);
 
   let label = |s: &str| format!("{:<label_w$}", s);
-  let branch = ellipsize_middle(
-    &format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Branch : ".len()),
-  );
-  let dirname = ellipsize_middle(
-    &format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
-    inner_w.saturating_sub("  Dir    : ".len()),
-  );
+  let freeform = app.create_form.mode == Mode::Freeform;
+  // Issue #416: a free-form name IS the branch, and the directory is that
+  // name with `/` flattened — mirroring `WorktreeName::worktree_dirname`.
+  let (branch_raw, dir_raw) = if freeform {
+    (app.create_form.name.clone(), app.create_form.name.replace('/', "-"))
+  } else {
+    (
+      format!("{}/#{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+      format!("{}-{}-{}", type_str, app.create_form.issue, app.create_form.desc),
+    )
+  };
+  let branch = ellipsize_middle(&branch_raw, inner_w.saturating_sub("  Branch : ".len()));
+  let dirname = ellipsize_middle(&dir_raw, inner_w.saturating_sub("  Dir    : ".len()));
 
-  let mut lines = overlay_title_lines("New Worktree", clean);
+  let mut lines = overlay_title_lines(
+    if freeform {
+      "New Worktree — free-form"
+    } else {
+      "New Worktree"
+    },
+    clean,
+  );
   // Type selector first, then the live preview, then the editable fields —
   // the preview sits above the inputs so the resulting names stay in view
-  // while typing (issue #217 follow-up).
-  lines.push(type_selector_line(
-    &label("Type"),
-    type_str,
-    type_desc,
-    app.create_form.field == Field::Type,
-    accent,
-    muted,
-  ));
-  lines.push(Line::from(String::new()));
+  // while typing (issue #217 follow-up). Free-form mode has no branch type,
+  // so the selector is absent rather than shown inert.
+  if !freeform {
+    lines.push(type_selector_line(
+      &label("Type"),
+      type_str,
+      type_desc,
+      app.create_form.field == Field::Type,
+      accent,
+      muted,
+    ));
+    lines.push(Line::from(String::new()));
+  }
   lines.push(Line::from(vec![
     Span::raw("  Branch : "),
     Span::styled(branch, Style::default().fg(app.theme.branch)),
@@ -3777,25 +3793,37 @@ fn draw_create(f: &mut Frame, app: &App) {
     Span::styled(dirname, Style::default().fg(app.theme.dirty)),
   ]));
   lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Issue"),
-    &app.create_form.issue,
-    app.create_form.field == Field::Issue,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
-  lines.push(Line::from(String::new()));
-  lines.push(field_input_line(
-    &label("Desc"),
-    &app.create_form.desc,
-    app.create_form.field == Field::Desc,
-    value_w,
-    accent,
-    muted,
-    surface,
-  ));
+  if freeform {
+    lines.push(field_input_line(
+      &label("Name"),
+      &app.create_form.name,
+      app.create_form.field == Field::Name,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  } else {
+    lines.push(field_input_line(
+      &label("Issue"),
+      &app.create_form.issue,
+      app.create_form.field == Field::Issue,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+    lines.push(Line::from(String::new()));
+    lines.push(field_input_line(
+      &label("Desc"),
+      &app.create_form.desc,
+      app.create_form.field == Field::Desc,
+      value_w,
+      accent,
+      muted,
+      surface,
+    ));
+  }
 
   let height = lines.len() as u16 + 4 + 2 /* border */ + 2 /* vertical padding */;
   let area = centered_box(70, 72, height, term);

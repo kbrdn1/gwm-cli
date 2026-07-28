@@ -7,7 +7,7 @@
 //! into `BranchSpec` and dispatches `worktree::add` + `bootstrap::run` on
 //! the async task spine.
 
-use gwm::tui::state::create_form::{CreateForm, Field, MAX_DESC_LEN, MAX_ISSUE_LEN};
+use gwm::tui::state::create_form::{CreateForm, Field, Mode, MAX_DESC_LEN, MAX_ISSUE_LEN, MAX_NAME_LEN};
 
 #[test]
 fn reset_returns_form_to_initial_state() {
@@ -169,4 +169,94 @@ fn push_char_caps_the_desc_field_length() {
     MAX_DESC_LEN,
     "desc must not grow past the cap"
   );
+}
+
+// --- free-form mode (issue #416) ----------------------------------------
+
+#[test]
+fn the_form_opens_in_structured_mode() {
+  let f = CreateForm::new();
+  assert_eq!(f.mode, Mode::Structured);
+}
+
+#[test]
+fn toggling_switches_mode_and_focuses_the_only_field_of_the_target_mode() {
+  let mut f = CreateForm::new();
+  f.toggle_mode();
+  assert_eq!(f.mode, Mode::Freeform);
+  assert_eq!(f.field, Field::Name, "free-form has a single field, focus it");
+
+  f.toggle_mode();
+  assert_eq!(f.mode, Mode::Structured);
+  assert_eq!(f.field, Field::Issue, "back to the field `enter_create` opens on");
+}
+
+/// Toggling is exploratory — a user flipping modes to see the other form
+/// must not lose what they already typed.
+#[test]
+fn toggling_preserves_what_was_already_typed_on_both_sides() {
+  let mut f = CreateForm::new();
+  f.field = Field::Desc;
+  for c in "tui-search".chars() {
+    f.push_char(c);
+  }
+  f.toggle_mode();
+  for c in "spike-redis".chars() {
+    f.push_char(c);
+  }
+  assert_eq!(f.name, "spike-redis");
+
+  f.toggle_mode();
+  assert_eq!(f.desc, "tui-search", "the structured slug survived the round trip");
+  f.toggle_mode();
+  assert_eq!(f.name, "spike-redis", "and so did the free-form name");
+}
+
+/// One field means field rotation has nowhere to go — Tab must not walk
+/// focus onto Type or Issue, which free-form mode does not present.
+#[test]
+fn field_rotation_is_a_no_op_in_freeform_mode() {
+  let mut f = CreateForm::new();
+  f.toggle_mode();
+  f.next_field();
+  assert_eq!(f.field, Field::Name);
+  f.prev_field();
+  assert_eq!(f.field, Field::Name);
+}
+
+#[test]
+fn freeform_accepts_characters_the_slug_field_would_also_take() {
+  let mut f = CreateForm::new();
+  f.toggle_mode();
+  for c in "Spike_Redis 2".chars() {
+    f.push_char(c);
+  }
+  assert_eq!(
+    f.name, "Spike_Redis 2",
+    "validation happens on submit, not per keystroke"
+  );
+  f.pop_char();
+  assert_eq!(f.name, "Spike_Redis ");
+}
+
+#[test]
+fn the_freeform_name_is_length_capped_like_the_other_text_fields() {
+  let mut f = CreateForm::new();
+  f.toggle_mode();
+  for _ in 0..(MAX_NAME_LEN + 10) {
+    f.push_char('x');
+  }
+  assert_eq!(f.name.chars().count(), MAX_NAME_LEN);
+}
+
+#[test]
+fn reset_returns_to_structured_mode_and_clears_the_name() {
+  let mut f = CreateForm::new();
+  f.toggle_mode();
+  for c in "spike".chars() {
+    f.push_char(c);
+  }
+  f.reset();
+  assert_eq!(f.mode, Mode::Structured);
+  assert!(f.name.is_empty());
 }

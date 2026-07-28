@@ -694,3 +694,30 @@ fn settings_tui_tab_keeps_the_selected_field_visible_on_a_short_terminal() {
     );
   }
 }
+
+/// Issue #416: free-form mode presents a single `Name` field and drops the
+/// inputs it has no notion of — the branch type selector and the issue
+/// number. Showing them inert would suggest they still apply.
+#[test]
+fn create_modal_in_freeform_mode_shows_only_the_name_field() {
+  let (_dir, mut app) = make_app();
+  app.enter_create();
+  app.create_form.toggle_mode();
+  let buf = render(&mut app);
+
+  assert_present(&buf, "free-form", "the title states the active mode");
+  assert_present(&buf, "Name", "the free-form name field");
+  // The preview rows survive — they are what makes the resolved branch and
+  // directory legible while typing.
+  assert_present(&buf, "Branch", "branch preview label");
+  assert_present(&buf, "Dir", "dir preview label");
+
+  for absent in ["Issue", "Type"] {
+    assert!(
+      !buffer_contains(&buf, absent),
+      "`{}` has no meaning in free-form mode and must not be rendered — buffer rows:\n{}",
+      absent,
+      row_strings(&buf).join("\n")
+    );
+  }
+}

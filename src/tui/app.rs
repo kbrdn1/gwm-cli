@@ -6,7 +6,7 @@ use super::state::clean_overlay::CleanOverlay;
 use super::state::command_logs::CommandLogs;
 use super::state::config_panel::{ConfigPanel, FieldKind, KeyTarget, SettingField, SettingsLayer};
 use super::state::confirm::{ConfirmKeyAction, ConfirmModal, CountdownTickOutcome};
-use super::state::create_form::{CreateForm, Field};
+use super::state::create_form::{CreateForm, Field, Mode};
 use super::state::exec_picker::ExecPicker;
 use super::state::filter::{fuzzy_match_indices, FilterState};
 use super::state::github_fetch::{FetchKey, GitHubFetch};
@@ -21,7 +21,7 @@ use crate::config::{CleanConfig, Config, ExecConfig, TuiOpenConfig, TuiOpenMode}
 use crate::error::{GwmError, Result};
 use crate::github::{self, BranchLink, IssueState, IssueStatus, PrStatus};
 use crate::launcher::{self, ExpandedCommand, LauncherContext};
-use crate::naming::BranchSpec;
+use crate::naming::{BranchSpec, WorktreeName};
 use crate::worktree::{self, WorktreeInfo};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use git2::Repository;
@@ -4133,8 +4133,19 @@ impl App {
       Some(ModalAction::CreateCancel) => return CreateKey::Cancel,
       Some(ModalAction::CreateNextField) => self.create_next_field(),
       Some(ModalAction::CreatePrevField) => self.create_prev_field(),
+      Some(ModalAction::CreateToggleMode) => {
+        self.create_form.toggle_mode();
+        self.status = match self.create_form.mode {
+          Mode::Freeform => {
+            "free-form: name the worktree anything git accepts — ctrl-t: back to type/issue/desc".into()
+          }
+          Mode::Structured => "tab/shift-tab: switch field — enter on desc: submit — ctrl-t: free-form".into(),
+        };
+      }
       Some(ModalAction::CreateSubmit) => {
-        if self.create_form.field == Field::Desc {
+        // The submit field is the last one of the active mode: `Desc` in
+        // the structured triple, `Name` in free-form (its only field).
+        if matches!(self.create_form.field, Field::Desc | Field::Name) {
           return CreateKey::Submit;
         }
         self.create_next_field();
@@ -4154,20 +4165,36 @@ impl App {
   }
 
   pub fn submit_create(&mut self) -> Result<()> {
-    let type_ = self
-      .branch_types
-      .get(self.create_form.type_index)
-      .map(|t| t.name.clone())
-      .unwrap_or_default();
-    let spec = BranchSpec::new_with_types(
-      type_,
-      self.create_form.issue.clone(),
-      self.create_form.desc.clone(),
-      &self.branch_types,
-    )?;
-    let branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
-    let dirname = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
-    let target = spec.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
+    // Issue #416: free-form validation lands here rather than per keystroke,
+    // so the user can type through an intermediate state. A rejected name
+    // keeps the form open with the reason in the status bar — same shape as
+    // the trust refusal below, and for the same reason (an `Err` would tear
+    // down the alternate screen).
+    let wt_name = match self.create_form.mode {
+      Mode::Freeform => match WorktreeName::freeform(&self.create_form.name) {
+        Ok(n) => n,
+        Err(e) => {
+          self.status = format!("{}", e);
+          return Ok(());
+        }
+      },
+      Mode::Structured => {
+        let type_ = self
+          .branch_types
+          .get(self.create_form.type_index)
+          .map(|t| t.name.clone())
+          .unwrap_or_default();
+        WorktreeName::Structured(BranchSpec::new_with_types(
+          type_,
+          self.create_form.issue.clone(),
+          self.create_form.desc.clone(),
+          &self.branch_types,
+        )?)
+      }
+    };
+    let branch = wt_name.branch_name(&self.config.worktree, &self.repo_name)?;
+    let dirname = wt_name.worktree_dirname(&self.config.worktree, &self.repo_name)?;
+    let target = wt_name.worktree_path(&self.config.worktree, &self.repo_name, &self.workdir)?;
 
     // Gate the bootstrap RCE primitive on the TOFU ledger BEFORE
     // creating the worktree on disk (issue #95). A refusal here
