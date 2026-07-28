@@ -83,9 +83,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `!` check, so that command exits `1` like any other Warning). The
   config-supplied pattern is neutralised for control characters before it is
   echoed — neither command goes through the trust gate, so an unvetted
-  `.gwm.toml` must not get a terminal escape channel out of a health check. This states the limitation, it
-  does not remove it — deriving the parser from the pattern is tracked by #417.
+  `.gwm.toml` must not get a terminal escape channel out of a health check.
+  This states the limitation; the entry below removes its cause, so the set of
+  patterns it has anything to say about is much smaller than it was.
   ([#415](https://github.com/kbrdn1/gwm-cli/issues/415))
+
+- `worktree.branch_pattern` is now read back by a parser compiled from that
+  same pattern, so customising it no longer disables the features that re-read
+  a branch name. The pattern drove how a branch was *written* while a hardcoded
+  `^([a-z]+)/#(\d+)-([a-z0-9-]+)$` decided how one was *read*, so a repo that
+  set `branch_pattern = "{type}-{issue}-{desc}"` created `feat-41-foo` and then
+  failed to recognise the branch it had just created: no issue auto-linking, no
+  gitmoji, `gwm commit-prefix` erroring, empty hook placeholders on the
+  remove / bootstrap paths, a rename modal that refused to open, and a `doctor`
+  orphan check that skipped every branch as user-managed. One source of truth
+  now, so the conventions people actually use keep all of it: `{type}-{issue}-{desc}`,
+  `{type}_{issue}_{desc}`, `{type}/{issue}-{desc}`, `wt/{type}/#{issue}-{desc}`,
+  `{desc}/#{issue}-{type}` and a literal wedged anywhere all round-trip.
+
+  Two patterns are refused rather than compiled into a parser that reads back
+  the wrong thing: two placeholders written back to back (`{issue}{desc}` reads
+  `42123-x` as `4212` + `3-x`; `{desc}{issue}` is ambiguous outright, since
+  `a12` is what both `a` + `12` and `a1` + `2` produce), and the same
+  placeholder twice. Note that adjacency is the whole rule: a separator drawn
+  from the left placeholder's own charset is fine, so `{desc}-{issue}` works,
+  because an issue number cannot contain the `-` and there is therefore exactly
+  one valid split. `gwm doctor` and `gwm config validate` report the refusal
+  with the fix in it.
+
+  Two narrowings ship with this, both deliberate and both reported rather than
+  silent. `{type}` compiles to an alternation of the repo's configured branch
+  types instead of `[a-z]+`, so a branch carrying a type the repo does not
+  declare is no longer claimed as gwm's: `doctor` leaves it alone and the TUI
+  rename refuses it, which is what that modal already did one step later. And a
+  literal in the type's position is text rather than a type, so
+  `feat/#{issue}-{desc}` no longer yields a branch type even when `feat` is the
+  only configured one; inferring intent from literal text is guesswork on any
+  repo where a type name is also an ordinary word. `gwm doctor` names the
+  missing placeholder and how to get it back.
+  ([#417](https://github.com/kbrdn1/gwm-cli/issues/417))
 
 ### Docs
 
