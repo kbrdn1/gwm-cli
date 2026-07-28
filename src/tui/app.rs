@@ -4133,6 +4133,15 @@ impl App {
       Some(ModalAction::CreateCancel) => return CreateKey::Cancel,
       Some(ModalAction::CreateNextField) => self.create_next_field(),
       Some(ModalAction::CreatePrevField) => self.create_prev_field(),
+      // Scoped to the create modal: `View::Edit` (rename, #290) routes its
+      // keys through this same handler, but it renders and submits the
+      // structured triple only — a free-form toggle there would send
+      // keystrokes into an invisible buffer and make Enter submit the
+      // untouched values (Codex review on PR #474).
+      // Swallowed outside the create modal — an explicit empty arm, not a
+      // guard on the arm below, because a failing guard would fall through
+      // to the literal-input fallback and type `t` into the description.
+      Some(ModalAction::CreateToggleMode) if self.view != View::Create => {}
       Some(ModalAction::CreateToggleMode) => {
         self.create_form.toggle_mode();
         self.status = match self.create_form.mode {
