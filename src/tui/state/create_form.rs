@@ -18,11 +18,16 @@ pub const MAX_ISSUE_LEN: usize = 7;
 /// limit even with the longest configured branch type (#217).
 pub const MAX_DESC_LEN: usize = 200;
 
-/// Max characters accepted in the free-form name field (issue #416).
-/// Same bound as the slug: git's ref limit is 255 bytes and the name IS
-/// the branch, so 200 leaves room for multi-byte characters — free-form
-/// names are not restricted to ASCII.
-pub const MAX_NAME_LEN: usize = 200;
+/// Max **bytes** accepted in the free-form name field (issue #416).
+///
+/// Deliberately the validator's own limit rather than a form-local number:
+/// the name IS the branch, so a form that stopped short of what
+/// `WorktreeName::freeform` accepts would silently truncate a legal name
+/// and submit a different branch than the one typed (Codex review on
+/// PR #474). Counted in bytes for the same reason the validator does —
+/// free-form names are not restricted to ASCII, and it is the worktree
+/// directory's byte length that has to fit.
+pub const MAX_NAME_LEN: usize = crate::naming::MAX_DIR_COMPONENT_BYTES;
 
 /// Which naming shape the form is collecting (issue #416). Toggled with
 /// the `toggle_mode` verb; `Structured` is the default so the canonical
@@ -158,7 +163,7 @@ impl CreateForm {
     match self.field {
       Field::Issue if c.is_ascii_digit() && self.issue.chars().count() < MAX_ISSUE_LEN => self.issue.push(c),
       Field::Desc if self.desc.chars().count() < MAX_DESC_LEN => self.desc.push(c),
-      Field::Name if self.name.chars().count() < MAX_NAME_LEN => self.name.push(c),
+      Field::Name if self.name.len() + c.len_utf8() <= MAX_NAME_LEN => self.name.push(c),
       _ => {}
     }
   }

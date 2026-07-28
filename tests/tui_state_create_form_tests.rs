@@ -240,13 +240,44 @@ fn freeform_accepts_characters_the_slug_field_would_also_take() {
 }
 
 #[test]
-fn the_freeform_name_is_length_capped_like_the_other_text_fields() {
+fn the_freeform_name_cap_is_the_validator_s_own_limit_so_nothing_legal_is_truncated() {
+  // The form's cap and `WorktreeName::freeform`'s must be the same number:
+  // when the form stopped at 200 characters and the validator accepted 255
+  // bytes, a 201-character name was silently truncated and submitted as a
+  // *different* branch — the one thing "the name becomes the branch verbatim"
+  // rules out (Codex review on PR #474). Counted in bytes, like the
+  // validator, not in characters.
+  assert_eq!(
+    MAX_NAME_LEN,
+    gwm::naming::MAX_DIR_COMPONENT_BYTES,
+    "the form must not stop short of what the validator accepts"
+  );
   let mut f = CreateForm::new();
   f.toggle_mode();
   for _ in 0..(MAX_NAME_LEN + 10) {
     f.push_char('x');
   }
-  assert_eq!(f.name.chars().count(), MAX_NAME_LEN);
+  assert_eq!(f.name.len(), MAX_NAME_LEN);
+  assert!(
+    gwm::naming::WorktreeName::freeform(&f.name).is_ok(),
+    "whatever the form let through must still validate"
+  );
+}
+
+#[test]
+fn a_multibyte_name_is_capped_on_bytes_not_characters() {
+  // `é` is two bytes: counting characters would let the buffer grow past the
+  // 255-byte path component the directory actually has to fit in.
+  let mut f = CreateForm::new();
+  f.toggle_mode();
+  for _ in 0..MAX_NAME_LEN {
+    f.push_char('é');
+  }
+  assert!(
+    f.name.len() <= MAX_NAME_LEN,
+    "byte length must stay within the cap, got {}",
+    f.name.len()
+  );
 }
 
 #[test]

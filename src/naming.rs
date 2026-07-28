@@ -178,7 +178,12 @@ impl BranchSpec {
 /// Max bytes in a single path component. `NAME_MAX` is 255 on every
 /// filesystem gwm targets; git's own ref check is silent about length,
 /// so the worktree directory is the binding constraint.
-const MAX_DIR_COMPONENT_BYTES: usize = 255;
+///
+/// Public because the TUI create form has to stop typing at exactly this
+/// number: a form that stopped short would silently truncate a name the
+/// validator would have accepted, and submit a different branch than the
+/// one that was typed.
+pub const MAX_DIR_COMPONENT_BYTES: usize = 255;
 
 /// The `base` placeholders only the structured triple can supply. A
 /// free-form name has no value for any of them, and `expand_placeholders`
