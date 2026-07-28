@@ -380,6 +380,10 @@ impl ModalAction {
         | ModalAction::CreateCancel
         | ModalAction::CreateNextField
         | ModalAction::CreatePrevField
+        // #416: free-form mode has `Name` as its only field, so a bare
+        // printable bound here would be swallowed as typing with no way
+        // back to the structured form.
+        | ModalAction::CreateToggleMode
     ) && !stroke.modifiers.intersects(KM::CONTROL | KM::ALT)
       && matches!(stroke.code, KC::Char(_) | KC::Backspace)
   }
