@@ -3861,7 +3861,11 @@ impl App {
     };
     // Issue #417: the form rebuilds the triple this repo's own
     // `worktree.branch_pattern` writes, so the branch is read back with it.
-    let parser = crate::naming::BranchParser::from_config(&self.config, &crate::worktree::repo_name(&self.repo));
+    // `self.repo_name`, not the workdir basename: in a workspace, two repos
+    // sharing a basename are disambiguated for display (#304) and every
+    // formatter call in this flow expands `{repo}` with that name. Parser and
+    // formatter agreeing is the whole of #417, so they read the same name.
+    let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
     let Some(spec) = parser.parse(&branch) else {
       // Issue #416: a free-form worktree lands here by design, not by
       // mistake. The edit form rebuilds a `<type>/#<issue>-<desc>` triple,

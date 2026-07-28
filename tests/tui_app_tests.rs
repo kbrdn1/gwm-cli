@@ -10698,6 +10698,40 @@ fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
 }
 
 #[test]
+fn the_rename_form_reads_a_branch_with_the_same_repo_name_it_writes_one_with() {
+  // Codex review on PR #476, eighth pass. In a workspace, two repos whose
+  // directories share a basename are disambiguated for display — the second
+  // becomes `api-2` (#304) — and `App::repo_name` holds that name. Every
+  // formatter call in the rename flow already expands `{repo}` with it, so the
+  // parser has to be compiled with it too; deriving it from the *real*
+  // basename instead meant a `{repo}` pattern read a branch this repo could
+  // never have written, and the form refused to open on a worktree it owns.
+  //
+  // Which name is right for `{repo}` is a separate question, and an older one:
+  // `spec.branch_name(..., &self.repo_name)` predates #417. What matters here
+  // is that one name is used, since parser and formatter agreeing is the whole
+  // point of the issue.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{repo}/{type}/#{issue}-{desc}".into();
+  app.repo_name = "api-2".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("api-2/feat/#42-my-desc".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(
+    app.view,
+    View::Edit,
+    "the form must open on a branch this repo writes: {}",
+    app.status
+  );
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "my-desc");
+}
+
+#[test]
 fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
   // Codex review on PR #476, seventh pass. A frozen description does not have
   // to be canonical: `DESC_RE` accepts `fixed-`, and since the previous pass
