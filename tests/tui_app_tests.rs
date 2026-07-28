@@ -10696,3 +10696,54 @@ fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
     "editing a segment the pattern writes is not a frozen-segment change"
   );
 }
+
+#[test]
+fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
+  // Codex review on PR #476, seventh pass. A frozen description does not have
+  // to be canonical: `DESC_RE` accepts `fixed-`, and since the previous pass
+  // the recovery reads it whole rather than trimming the trailing dash — which
+  // is what 1.5.0 did. But the form's value goes through
+  // `BranchSpec::new_with_types`, and `kebab` strips that dash, so comparing
+  // the *spec* against the constant found a difference on every submit and the
+  // form could never be submitted at all.
+  //
+  // The guard is about what the user typed, so it compares what the user
+  // typed.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "{type}/#{issue}-fixed-".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-fixed-".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(
+    app.view,
+    View::Edit,
+    "the frozen description is supplied, so the form opens"
+  );
+  assert_eq!(
+    app.create_form.desc, "fixed-",
+    "the constant is read whole, trailing dash and all"
+  );
+
+  // Change only the issue — the frozen description is untouched.
+  app.create_form.issue = "43".into();
+  app.submit_edit_worktree().expect("submits");
+  assert_eq!(
+    app.edit_failure, None,
+    "an untouched frozen description must not read as a change"
+  );
+
+  // …and the guard still fires when the frozen description really is edited.
+  app.enter_edit_worktree();
+  app.create_form.desc = "something-else".into();
+  app
+    .submit_edit_worktree()
+    .expect("the refusal is a form failure, not an error");
+  assert!(
+    app.edit_failure.as_deref().is_some_and(|e| e.contains("{desc}")),
+    "editing the frozen description must still be refused: {:?}",
+    app.edit_failure
+  );
+}

@@ -3943,6 +3943,33 @@ impl App {
       .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
+    // Issue #417 / Codex review on PR #476: a segment the pattern *freezes* as
+    // a literal is not editable. `branch_name` has no placeholder to write it
+    // into, so changing it leaves the branch alone while `path_pattern` still
+    // moves the directory — a rename that renames nothing. Scoped to a frozen
+    // segment the user actually changed, so `feat/#{issue}-{desc}`, whose
+    // rename worked before #417, keeps renaming its issue and description.
+    //
+    // Compared against the *form's* values, not the `BranchSpec`'s: a frozen
+    // description need not be canonical (`DESC_RE` accepts `fixed-`), and
+    // `kebab` would strip that trailing dash on the way into the spec, making
+    // every submit look like a change and locking the form shut.
+    let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
+    if let Some((segment, frozen)) = parser.constants().iter().find(|(segment, frozen)| {
+      let submitted = match *segment {
+        "type" => type_.as_str(),
+        "issue" => self.create_form.issue.as_str(),
+        _ => self.create_form.desc.as_str(),
+      };
+      submitted != frozen.as_str()
+    }) {
+      self.edit_failure = Some(format!(
+        "worktree.branch_pattern freezes {{{}}} to '{}', so this form cannot change it",
+        segment, frozen
+      ));
+      return Ok(());
+    }
+
     let spec = match BranchSpec::new_with_types(
       type_,
       self.create_form.issue.clone(),
@@ -3955,27 +3982,6 @@ impl App {
         return Ok(());
       }
     };
-    // Issue #417 / Codex review on PR #476: a segment the pattern *freezes* as
-    // a literal is not editable. `branch_name` has no placeholder to write it
-    // into, so changing it leaves the branch alone while `path_pattern` still
-    // moves the directory — a rename that renames nothing. Scoped to a frozen
-    // segment the user actually changed, so `feat/#{issue}-{desc}`, whose
-    // rename worked before #417, keeps renaming its issue and description.
-    let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
-    if let Some((segment, frozen)) = parser.constants().iter().find(|(segment, frozen)| {
-      let submitted = match *segment {
-        "type" => &spec.type_,
-        "issue" => &spec.issue,
-        _ => &spec.desc,
-      };
-      submitted != frozen
-    }) {
-      self.edit_failure = Some(format!(
-        "worktree.branch_pattern freezes {{{}}} to '{}', so this form cannot change it",
-        segment, frozen
-      ));
-      return Ok(());
-    }
 
     let new_branch = spec.branch_name(&self.config.worktree, &self.repo_name)?;
     let new_name = spec.worktree_dirname(&self.config.worktree, &self.repo_name)?;
