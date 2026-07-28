@@ -66,12 +66,28 @@ const TOKENS: [Token; 5] = [
 /// goes to the one that can be sure about it.
 const SEGMENTS: [&str; 3] = ["type", "issue", "desc"];
 
-/// Marks where a placeholder stood in the literal text [`literal_constants`]
-/// reads. The two literals in `1{type}2-{desc}` are not one token: fused into
-/// `12`, the recovery froze an issue number that no branch the pattern writes
-/// ever contains, and auto-linking then pointed at #12. Any character outside
-/// `[a-z0-9-]` would do; NUL is the one no branch name can carry.
-const SEGMENT_BREAK: char = '\0';
+/// Where a placeholder stood, in the literal text [`literal_constants`] reads.
+///
+/// Two jobs. It **separates**: the literals in `1{type}2-{desc}` are not one
+/// token, and fusing them made the recovery freeze the issue number `12`, which
+/// no branch the pattern writes contains. And it **positions**: a literal
+/// before `{issue}` can only be the type, one after it only the description,
+/// which is how `feat/#{issue}-fix` recovers both even though `feat` and `fix`
+/// are each a configured branch type.
+///
+/// Every marker is outside all three charsets, so no candidate spans one.
+fn segment_marker(segment: &str) -> char {
+  match segment {
+    "type" => '\u{1}',
+    "issue" => '\u{2}',
+    _ => '\u{3}',
+  }
+}
+
+/// Where `{repo}` / `{home}` stood. Their expansion is real text in the branch
+/// name but nobody authored it, so it separates the literals around it without
+/// positioning anything.
+const OPAQUE_MARKER: char = '\u{4}';
 
 /// Built-in branch types — the fallback when `.gwm.toml` carries no
 /// `[[branch_types]]` block. Kept as a `&[(&str, &str)]` const so the
@@ -566,7 +582,7 @@ impl BranchParser {
           }
           seen.push(name);
           re.push_str(group);
-          authored.push(SEGMENT_BREAK);
+          authored.push(segment_marker(name));
           pending = Some((name, String::new()));
         }
         // `{repo}` / `{home}`: resolved by the formatter, so fixed text by the
@@ -585,7 +601,7 @@ impl BranchParser {
           } else {
             repo.to_string()
           };
-          authored.push(SEGMENT_BREAK);
+          authored.push(OPAQUE_MARKER);
           push_literal(&mut re, &text, &mut pending);
         }
       }
@@ -862,123 +878,140 @@ fn segment_accepts(segment: &str, c: char) -> bool {
 /// would take gitmoji, `[pr_template.by_type]` and `gwm commit-prefix` away
 /// from a repo where they work today, so the literal is recovered on purpose.
 ///
-/// `authored` is the literal text **the user wrote in the pattern**, never the
-/// expansion of `{repo}` / `{home}`: nobody picked the repo's name for this,
-/// and a repo that happens to be called `docs` must not turn
+/// `authored` is the literal text **the user wrote in the pattern**, with a
+/// marker where each placeholder and each `{repo}` / `{home}` stood. The
+/// expansions themselves are never in it: nobody picked the repo's name for
+/// this, and a repo that happens to be called `docs` must not turn
 /// `{repo}/{issue}-{desc}` into a docs-typed branch.
 ///
-/// Each segment gets its own oracle, applied strictest first so a token that
-/// could serve two goes to the one that can be sure of it:
+/// Recovery is **positional first, then oracle**, in that order — the reverse
+/// lost both segments of `feat/#{issue}-fix`, where `feat` and `fix` are each
+/// a configured branch type and neither is globally unique:
 ///
-/// - **`type`** — an exact match against a configured branch type. Finite
-///   list, so `feature/{issue}-{desc}` recovers nothing (the pattern names a
-///   namespace, not a type) while `feat/#{issue}-{desc}` recovers `feat`.
-/// - **`issue`** — an all-digits token, which nothing else in a branch name
-///   is in isolation.
-/// - **`desc`** — anything `DESC_RE` accepts, which is a superset of both
-///   above, so it runs last on what they left.
+/// 1. A segment can only be recovered from the stretch of `authored` between
+///    the placeholders it sits between. `{type}` before `{issue}`, `{desc}`
+///    after it — so in `feat/#{issue}-fix` the type can only come from
+///    `feat/#` and the description only from `-fix`.
+/// 2. Within that stretch, candidates are the maximal runs of the segment's
+///    own charset, and each is put to its own oracle: a branch type is an
+///    exact match against the repo's configured list, an issue number is all
+///    digits, a description is whatever `DESC_RE` accepts.
+/// 3. A segment is only recovered when **exactly one** candidate survives.
+///    Two mean the pattern is genuinely ambiguous about which literal is the
+///    value — `feat/fix-{issue}-{desc}` names two configured types before the
+///    issue — and inventing one would be worse than reporting none.
 ///
-/// A segment is only recovered when **exactly one** candidate survives. Two
-/// candidates mean the pattern is genuinely ambiguous about which literal is
-/// the value, and inventing one would be worse than reporting none.
-///
-/// The `desc` oracle is the weak one, and knowingly so: `wt/{type}/#{issue}`
-/// has no description, yet `wt` is the one `DESC_RE`-shaped token in it and is
-/// recovered as one. That is why every constant is disclosed by `gwm doctor`
-/// rather than applied silently.
+/// Segments are resolved in `type`, `issue`, `desc` order and each claim
+/// advances a cursor, so `feat/#1-fixed`, which freezes all three in one
+/// stretch, hands `feat` to the type, `1` to the issue and `fixed` to the
+/// description rather than letting the loose `desc` oracle take the lot.
 fn literal_constants(authored: &str, captured: &[&str], types: &[BranchType]) -> Vec<(&'static str, String)> {
-  let tokens = literal_tokens(authored);
-  let mut claimed: Vec<usize> = Vec::new();
-  let mut out: Vec<(&'static str, String)> = Vec::new();
+  let missing: Vec<(usize, &'static str)> = SEGMENTS
+    .iter()
+    .enumerate()
+    .filter(|(_, segment)| !captured.contains(segment))
+    .map(|(rank, segment)| (rank, *segment))
+    .collect();
 
-  for segment in SEGMENTS {
-    if captured.contains(&segment) {
-      continue;
-    }
-    // `desc` is the only segment whose charset spans the `-`, so it is the
-    // only one that looks at dash-joined runs; `type` and `issue` see single
-    // tokens. Running it last means those runs are built from what the
-    // stricter oracles left, which is what keeps `feat/#1-fixed` from reading
-    // its description as `1-fixed`.
-    let candidates: Vec<(Vec<usize>, String)> = if segment == "desc" {
-      dash_joined_runs(&tokens, &claimed)
-    } else {
-      tokens
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| !claimed.contains(index))
-        .map(|(index, (text, _))| (vec![index], (*text).to_string()))
-        .collect()
-    };
-
-    let mut hits = candidates.into_iter().filter(|(_, value)| match segment {
-      "type" => types.iter().any(|t| t.name == *value),
-      "issue" => ISSUE_RE.is_match(value),
-      _ => DESC_RE.is_match(value),
-    });
-    let (Some((indices, value)), None) = (hits.next(), hits.next()) else {
-      continue;
-    };
-    claimed.extend(indices);
-    out.push((segment, value));
+  let all = assignments(authored, &missing, types, 0);
+  let best = all.iter().map(Vec::len).max().unwrap_or(0);
+  let mut top = all.into_iter().filter(|a| a.len() == best);
+  match (top.next(), top.next()) {
+    (Some(only), None) => only,
+    _ => Vec::new(),
   }
-  out
 }
 
-/// Maximal `[a-z0-9]` runs in the literal text, each paired with whether a
-/// single `-` joins it to the run that follows. Everything else in the pattern
-/// is a separator.
-fn literal_tokens(text: &str) -> Vec<(&str, bool)> {
-  let mut out: Vec<(&str, bool)> = Vec::new();
-  let mut chars = text.char_indices().peekable();
-  while let Some((start, c)) = chars.next() {
-    if !(c.is_ascii_lowercase() || c.is_ascii_digit()) {
-      continue;
-    }
-    let mut end = start + c.len_utf8();
-    while let Some((index, next)) = chars.peek().copied() {
-      if next.is_ascii_lowercase() || next.is_ascii_digit() {
-        end = index + next.len_utf8();
-        chars.next();
-      } else {
-        break;
+/// Every way the missing segments could be read out of `authored`, in order.
+///
+/// Each segment may take a candidate from its own stretch or be skipped, and a
+/// taken candidate moves the cursor so the next segment reads what is left.
+/// Enumerating rather than deciding greedily is what separates the two cases
+/// that look alike from the outside: `feat/#1-fix` freezes all three segments
+/// and `fix` is a configured branch type, but only one reading assigns all
+/// three (`fix` as the type leaves no digits for the issue), while
+/// `feat/fix-{issue}-{desc}` has two readings of equal size and is therefore
+/// genuinely ambiguous.
+fn assignments(
+  authored: &str,
+  missing: &[(usize, &'static str)],
+  types: &[BranchType],
+  cursor: usize,
+) -> Vec<Vec<(&'static str, String)>> {
+  let Some(((rank, segment), rest)) = missing.split_first().map(|(head, tail)| (*head, tail)) else {
+    return vec![Vec::new()];
+  };
+  // Skipping is always allowed: `feat/#{desc}` freezes a type and no issue
+  // number, and losing the type because the issue has nowhere to come from
+  // would be the regression this whole function exists to prevent.
+  let mut out = assignments(authored, rest, types, cursor);
+
+  let (lower, upper) = segment_region(authored, rank);
+  let lower = lower.max(cursor);
+  if lower < upper {
+    for (end, value) in charset_runs(&authored[lower..upper], segment) {
+      let plausible = match segment {
+        "type" => types.iter().any(|t| t.name == value),
+        "issue" => ISSUE_RE.is_match(&value),
+        _ => DESC_RE.is_match(&value),
+      };
+      if !plausible {
+        continue;
+      }
+      for tail in assignments(authored, rest, types, lower + end) {
+        let mut whole = vec![(segment, value.clone())];
+        whole.extend(tail);
+        out.push(whole);
       }
     }
-    // A trailing `-`, or a doubled one, does not join anything: it has to be
-    // followed by another token for the two to be one value.
-    let joined = text[end..].starts_with('-')
-      && text[end + 1..]
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-    out.push((&text[start..end], joined));
   }
   out
 }
 
-/// Every maximal run of consecutive unclaimed tokens joined by a single `-`,
-/// as `(indices, joined value)`. `feat/#1-fixed` with `feat` and `1` already
-/// claimed yields just `fixed`; `{type}/#{issue}-my-fix` yields `my-fix`.
-fn dash_joined_runs(tokens: &[(&str, bool)], claimed: &[usize]) -> Vec<(Vec<usize>, String)> {
-  let mut runs: Vec<(Vec<usize>, String)> = Vec::new();
-  let mut index = 0;
-  while index < tokens.len() {
-    if claimed.contains(&index) {
-      index += 1;
+/// The stretch of `authored` a segment could have been written into: after
+/// every placeholder that canonically precedes it, before the first that
+/// follows. A placeholder the pattern does not carry leaves no marker, so it
+/// bounds nothing.
+fn segment_region(authored: &str, rank: usize) -> (usize, usize) {
+  let lower = SEGMENTS[..rank]
+    .iter()
+    .filter_map(|earlier| {
+      let marker = segment_marker(earlier);
+      authored.find(marker).map(|at| at + marker.len_utf8())
+    })
+    .max()
+    .unwrap_or(0);
+  let upper = SEGMENTS[rank + 1..]
+    .iter()
+    .filter_map(|later| authored.find(segment_marker(later)))
+    .min()
+    .unwrap_or(authored.len());
+  (lower, upper)
+}
+
+/// Every maximal run of `segment`'s charset in `text`, as `(end offset, value)`.
+///
+/// A description's charset spans the `-` its first character cannot be, so a
+/// run is trimmed of leading dashes rather than split on them: `-fixed--desc`
+/// is one description, and so is `-fixed-`, both of which `DESC_RE` and the
+/// 1.5.0 parser accept. Splitting on the dash dropped the first and truncated
+/// the second.
+fn charset_runs(text: &str, segment: &str) -> Vec<(usize, String)> {
+  let mut out: Vec<(usize, String)> = Vec::new();
+  let mut run: Option<usize> = None;
+  for (at, c) in text.char_indices().chain(std::iter::once((text.len(), '\0'))) {
+    if at < text.len() && segment_accepts(segment, c) {
+      run.get_or_insert(at);
       continue;
     }
-    let mut indices = vec![index];
-    let mut value = tokens[index].0.to_string();
-    while tokens[index].1 && index + 1 < tokens.len() && !claimed.contains(&(index + 1)) {
-      index += 1;
-      value.push('-');
-      value.push_str(tokens[index].0);
-      indices.push(index);
+    if let Some(start) = run.take() {
+      let value = text[start..at].trim_start_matches('-');
+      if !value.is_empty() {
+        out.push((at, value.to_string()));
+      }
     }
-    runs.push((indices, value));
-    index += 1;
   }
-  runs
+  out
 }
 
 /// What each branch segment feeds, shared by both shapes of the warning.

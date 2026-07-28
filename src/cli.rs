@@ -3601,7 +3601,10 @@ fn cmd_commit_prefix(branch_override: Option<String>, unicode: bool) -> Result<(
   // not land here: the literal is recovered, so the prefix is right.
   if spec.type_.is_empty() || spec.issue.is_empty() {
     let want = match (spec.type_.is_empty(), spec.issue.is_empty()) {
-      (true, true) => "`{type}` or `{issue}`",
+      // `and`, not `or`: a prefix needs both, so adding one placeholder on the
+      // strength of this message would leave the command failing (Codex review
+      // on PR #476).
+      (true, true) => "`{type}` and `{issue}`",
       (true, false) => "`{type}`",
       _ => "`{issue}`",
     };

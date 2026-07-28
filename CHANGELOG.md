@@ -143,10 +143,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happened to have a group where the literal sits; the derived parser recovers
   the literal on purpose, so gitmoji, `gwm commit-prefix` and auto-linking
   still work on those repos. The recovery is an exact match rather than a
-  guess: a branch type is looked up in the repo's configured list (so
-  `feature/{issue}-{desc}` recovers nothing, since `feature` names a namespace),
-  an issue number has to be all digits, and a description is whatever `DESC_RE`
-  accepts. `{repo}` is deliberately not a source, so a repo called `docs` does
+  guess: it is positional first — a literal is only read as a segment if it
+  sits where that segment goes, before `{issue}` for a type and after it for a
+  description — and then an exact match, a branch type being looked up in the
+  repo's configured list (so `feature/#{issue}-{desc}` recovers nothing, since
+  `feature` names a namespace), an issue number being all digits, and a
+  description being whatever `DESC_RE` accepts. Position has to come first:
+  `feat/#{issue}-fix` freezes both, and `feat` and `fix` are each a configured
+  branch type, so an oracle asked to pick a globally unique candidate found two
+  and dropped the pair. The whole obligation is enumerated rather than sampled —
+  1.5.0 read a branch iff it matched one hardcoded regex, so a test runs that
+  regex over every pattern in the family it accepts and requires the same triple
+  back. `{repo}` is deliberately not a source, so a repo called `docs` does
   not type its own branches. What such a pattern costs is reported separately
   and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
   writes a `feat/` branch, so the type you asked for is not the one anyone

@@ -1060,6 +1060,78 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
   }
 }
 
+/// The complete no-regression obligation for constant recovery, enumerated
+/// instead of sampled.
+///
+/// 1.5.0 read a branch **iff** it matched a single hardcoded regex, so the set
+/// of patterns that owe anything to the previous release is exactly the family
+/// that regex accepts: `A/#B-C`, where each of the three positions is either a
+/// placeholder or a literal fitting the charset of the group that stood there.
+/// That is 16 patterns, and the release itself is the oracle — the same regex,
+/// run over what each pattern writes.
+///
+/// The recovery was checked against a hand-picked list before this, and two
+/// separate review findings landed in the gap: `feat/#{issue}-fix` (`feat` and
+/// `fix` are both configured branch types, so a globally-unique candidate does
+/// not exist and *both* segments were dropped) and `-fixed--desc` / `-fixed-`
+/// (a doubled dash split the value, a trailing one was trimmed off it). Both
+/// live inside this family and both were read correctly by 1.5.0.
+#[test]
+fn every_pattern_1_5_0_read_is_read_the_same_way() {
+  // The 1.5.0 parser, verbatim from `git show v1.5.0:src/naming.rs`.
+  let oracle = regex::Regex::new(r"^([a-z]+)/#(\d+)-([a-z0-9-]+)$").expect("the 1.5.0 regex compiles");
+  let types = default_branch_types();
+  // Deliberately none of the literals below, so a frozen segment and a written
+  // one can never be confused for each other.
+  const PROBE: (&str, &str, &str) = ("chore", "42", "x");
+
+  let mut checked = 0usize;
+  let mut broken: Vec<String> = Vec::new();
+  for a in ["{type}", "feat"] {
+    for b in ["{issue}", "1"] {
+      for c in ["{desc}", "fix", "fixed--desc", "fixed-"] {
+        let pattern = format!("{}/#{}-{}", a, b, c);
+        let cfg = WorktreeConfig {
+          branch_pattern: pattern.clone(),
+          ..WorktreeConfig::default()
+        };
+        let spec = BranchSpec::new_with_types(PROBE.0, PROBE.1, PROBE.2, &types).expect("a valid triple");
+        let name = spec.branch_name(&cfg, "gwm-cli").expect("the formatter writes it");
+        // Outside the family 1.5.0 could read, there is nothing to preserve.
+        let Some(old) = oracle.captures(&name) else { continue };
+
+        let parser =
+          BranchParser::compile(&pattern, "gwm-cli", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
+        let read = parser
+          .parse(&name)
+          .unwrap_or_else(|| panic!("`{}` wrote `{}`, which 1.5.0 read and this does not", pattern, name));
+        let now = (read.type_.clone(), read.issue.clone(), read.desc.clone());
+        let then = (
+          old.get(1).unwrap().as_str().to_string(),
+          old.get(2).unwrap().as_str().to_string(),
+          old.get(3).unwrap().as_str().to_string(),
+        );
+        if now != then {
+          broken.push(format!(
+            "`{}` wrote `{}`: 1.5.0 read {:?}, this reads {:?}",
+            pattern, name, then, now
+          ));
+        }
+        checked += 1;
+      }
+    }
+  }
+  assert_eq!(
+    checked, 16,
+    "every pattern in the family must be inside what 1.5.0 could read"
+  );
+  assert!(
+    broken.is_empty(),
+    "patterns 1.5.0 read that this reads differently:\n  {}",
+    broken.join("\n  ")
+  );
+}
+
 /// Codex review on PR #476, fourth and fifth passes — and the reason the
 /// mirror is now *checked* rather than argued.
 ///
@@ -1613,16 +1685,46 @@ static DESC_SHAPE: std::sync::LazyLock<regex::Regex> =
 ///
 /// `{repo}` and `{home}` break the run for the same reason: they are real text
 /// in the branch name, so the literals they sit between are not adjacent.
+///
+/// The assertion is the invariant rather than one outcome, and it is *not* the
+/// "recovers nothing" this test first pinned. Positional recovery reads the
+/// `2` of `1{type}2-{desc}` as the issue number, and it is right to: the `2`
+/// sits between the type and the description, which is where an issue number
+/// goes, and `{type}/#1-{desc}` freezes `1` from the same position with the
+/// same reasoning. What the finding was about is a value assembled *across* a
+/// placeholder — `12` is in no branch the pattern writes, and no run of the
+/// literals it wrote — so that is what is pinned, once as the general rule and
+/// once by name.
 #[test]
 fn a_placeholder_between_two_literals_does_not_fuse_them() {
   let types = default_branch_types();
   for pattern in ["1{type}2-{desc}", "1{repo}2/{type}-{desc}", "1{home}2/{type}-{desc}"] {
     let parser = BranchParser::compile(pattern, "x", &types).unwrap_or_else(|e| panic!("`{}`: {}", pattern, e));
-    assert!(
-      !parser.reads_segment("issue"),
-      "`{}` froze an issue number out of literals a placeholder separates: {:?}",
-      pattern,
-      parser.constants()
-    );
+    let cfg = WorktreeConfig {
+      branch_pattern: pattern.into(),
+      ..WorktreeConfig::default()
+    };
+    let name = BranchSpec::new_with_types("feat", "42", "foo", &types)
+      .expect("a valid triple")
+      .branch_name(&cfg, "x")
+      .expect("the formatter writes it");
+    for (segment, value) in parser.constants() {
+      assert!(
+        name.contains(value.as_str()),
+        "`{}` froze {} as `{}`, which no branch it writes contains — `{}` does not",
+        pattern,
+        segment,
+        value,
+        name
+      );
+    }
   }
+
+  // The finding itself, by name: `12` is what the two literals fused into.
+  let parser = BranchParser::compile("1{type}2-{desc}", "x", &types).expect("compiles");
+  assert_eq!(
+    parser.constants().iter().find(|(segment, _)| *segment == "issue"),
+    Some(&("issue", "2".to_string())),
+    "the issue must be the `2` the pattern actually writes, never the fused `12`"
+  );
 }
