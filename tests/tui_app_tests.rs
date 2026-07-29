@@ -10632,19 +10632,24 @@ fn enter_edit_worktree_opens_when_the_pattern_freezes_a_segment() {
 }
 
 #[test]
-fn submit_edit_worktree_refuses_to_change_a_segment_the_pattern_freezes() {
-  // Codex review on PR #476, fourth pass. `{type}-1-{desc}` freezes the issue
-  // number, and #417 recovers it, so the form opens with `1` in the issue
-  // field. Editing it to `2` writes the *same* branch — `branch_name` has no
-  // `{issue}` to substitute — while `path_pattern` still has one, so the only
-  // effect is moving the directory. A rename form that renames nothing and
-  // moves the worktree instead is worse than one that says no.
+fn submit_edit_worktree_refuses_to_change_a_segment_no_pattern_writes() {
+  // Codex review on PR #476, fourth pass, narrowed by Kylian afterwards. The
+  // refusal is about there being **nowhere to put the new value**, so it asks
+  // both patterns, not just `branch_pattern`: a segment the branch freezes but
+  // the *path* still writes has a real destination, and changing it genuinely
+  // renames the directory (see the test below).
+  //
+  // Here neither writes the issue: `{type}-1-{desc}` on both sides. Editing
+  // `1` to `2` would produce the same branch and the same directory, so the
+  // submit would close the form having changed nothing at all. Saying no is
+  // better than a silent no-op.
   //
   // The refusal is scoped to a frozen segment the user actually changed:
   // `feat/#{issue}-{desc}` freezes the type and its rename worked in 1.5.0, so
   // editing the issue or the description there must stay possible.
   let (_dir, mut app) = make_app();
   app.config.worktree.branch_pattern = "{type}-1-{desc}".into();
+  app.config.worktree.path_pattern = "{type}-1-{desc}".into();
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("feat-1-my-desc".into());
   wt.path = app.workdir.join("feat-1-my-desc");
@@ -10706,6 +10711,57 @@ fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
 }
 
 #[test]
+fn submit_edit_worktree_lets_the_directory_carry_what_the_branch_cannot() {
+  // Kylian's call, validating by hand on #476. `feat/#{issue}-{desc}` freezes
+  // the type, so the branch will say `feat` whatever the form holds — but
+  // `path_pattern` writes `{type}`, so the directory is where the type of this
+  // worktree actually lives. Refusing to edit it meant a worktree created as
+  // `fix` could never become `docs`, under a config that puts the type in the
+  // path on purpose.
+  //
+  // What made the refusal look right was a preview that lied: it showed
+  // `docs/#42-…` for a submit that writes `feat/#42-…`. With the preview
+  // expanding the real patterns, the modal states plainly that the branch is
+  // unchanged and the directory moves, so there is nothing left to protect the
+  // user from. `rename_worktree` already handles this exact shape as a
+  // path-only edit: same branch, so it skips every ref mutation, local and
+  // remote alike.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{type}-{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-login".into());
+  wt.path = app.workdir.join("fix-42-login");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+  assert_eq!(
+    app.create_form.type_index,
+    app
+      .branch_types
+      .iter()
+      .position(|t| t.name == "fix")
+      .expect("`fix` is a built-in branch type"),
+    "issue #478: the type comes from the directory, the only place it exists"
+  );
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("`docs` is a built-in branch type");
+  app.submit_edit_worktree().expect("submits");
+
+  assert_eq!(
+    app.edit_failure, None,
+    "`path_pattern` writes {{type}}, so there is somewhere to put `docs`: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
 fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
   // Issue #478. `branch_pattern` freezes the type, `path_pattern` still writes
   // it, so `gwm create fix 42 x` produces the branch `feat/#42-x` and the
@@ -10743,12 +10799,16 @@ fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
 }
 
 #[test]
-fn the_rename_form_still_refuses_to_change_what_the_branch_cannot_write() {
-  // The other side of #478: reading the type from the directory does not make
-  // it editable. `branch_pattern` has no `{type}` to write a new one into, so
-  // changing it would move the directory and leave the branch alone.
+fn the_rename_form_still_refuses_to_change_what_neither_pattern_writes() {
+  // The other side of #478: reading the type from the directory does not by
+  // itself make it editable. Here the *path* freezes it too — `fix-` is a
+  // literal, not `{type}` — so the type is a constant on both sides and there
+  // is nowhere to write `docs`. Contrast with
+  // `submit_edit_worktree_lets_the_directory_carry_what_the_branch_cannot`,
+  // where `path_pattern` writes `{type}` and the edit goes through.
   let (_dir, mut app) = make_app();
   app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "fix-{issue}-{desc}".into();
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("feat/#42-x".into());
   wt.path = std::path::PathBuf::from("/tmp/gwm-test/fix-42-x");
@@ -10819,8 +10879,13 @@ fn submit_edit_worktree_compares_a_frozen_segment_before_kebab_normalises_it() {
   //
   // The guard is about what the user typed, so it compares what the user
   // typed.
+  //
+  // Both patterns freeze the description, so the guard is the one that fires
+  // here: with only `branch_pattern` freezing it, `path_pattern` would give the
+  // new value a destination and the edit would be allowed.
   let (_dir, mut app) = make_app();
   app.config.worktree.branch_pattern = "{type}/#{issue}-fixed-".into();
+  app.config.worktree.path_pattern = "{type}-{issue}-fixed-".into();
   let mut wt = worktree_fixture("foo");
   wt.branch = Some("feat/#42-fixed-".into());
   app.worktrees = vec![wt];

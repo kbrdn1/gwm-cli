@@ -832,8 +832,12 @@ fn the_rename_preview_expands_this_repo_s_own_patterns() {
 /// reason and no value.
 #[test]
 fn the_rename_refusal_fits_in_the_modal() {
+  // Both patterns freeze the type, which is what the refusal is now about: a
+  // `path_pattern` that writes `{type}` gives the new value a destination and
+  // the edit is allowed instead.
   let (_dir, mut app) = make_app();
   app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "fix-{issue}-{desc}".into();
   let mut wt = deletable_worktree("login");
   wt.branch = Some("feat/#42-login".into());
   app.worktrees = vec![wt];

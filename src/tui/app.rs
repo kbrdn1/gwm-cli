@@ -3957,12 +3957,22 @@ impl App {
       .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
-    // Issue #417 / Codex review on PR #476: a segment `branch_pattern` does not
-    // *write* is not editable here. It has no placeholder to put a new value
-    // into, so changing it would leave the branch alone while `path_pattern`
-    // moved the directory — a rename that renames nothing. Scoped to a segment
-    // the user actually changed, so `feat/#{issue}-{desc}`, whose rename worked
-    // before #417, keeps renaming its issue and description.
+    // Issue #417 / Codex review on PR #476: a segment **neither pattern writes**
+    // is not editable here, because there is nowhere to put the new value. The
+    // submit would rebuild the same branch and the same directory and close the
+    // form having changed nothing, so say no instead.
+    //
+    // Both patterns are asked, not just `branch_pattern` (Kylian, validating by
+    // hand). A segment the branch freezes but `path_pattern` still writes has a
+    // real destination: `feat/#{issue}-{desc}` will say `feat` whatever the form
+    // holds, so under that config the *directory* is where this worktree's type
+    // lives, and refusing to edit it means a worktree created as `fix` can never
+    // become `docs`. `rename_worktree` handles that shape as a path-only edit,
+    // skipping every ref mutation, and the preview now states it on screen
+    // rather than showing a branch the submit will not write.
+    //
+    // Scoped to a segment the user actually changed, so `feat/#{issue}-{desc}`,
+    // whose rename worked before #417, keeps renaming its issue and description.
     //
     // Compared against what the form was **opened with**, not against the
     // pattern's literal (#478): that value may have come from the worktree's
@@ -3972,6 +3982,12 @@ impl App {
     // trailing dash on the way into the spec, making every submit look like a
     // change and locking the form shut.
     let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
+    let path_parser = crate::naming::BranchParser::compile(
+      &self.config.worktree.path_pattern,
+      &self.repo_name,
+      &self.config.resolved_branch_types().types,
+    )
+    .ok();
     let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
       crate::naming::worktree_spec(
         &self.config,
@@ -3987,6 +4003,11 @@ impl App {
     if let Some(opened_with) = opened_with.as_ref() {
       for segment in ["type", "issue", "desc"] {
         if parser.captures_segment(segment) {
+          continue;
+        }
+        // The directory is a destination too: the submit moves the worktree and
+        // leaves the branch alone, which is a rename, not a no-op.
+        if path_parser.as_ref().is_some_and(|p| p.captures_segment(segment)) {
           continue;
         }
         let (submitted, was) = match segment {

@@ -168,11 +168,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not type its own branches. What such a pattern costs is reported separately
   and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
   writes a `feat/` branch, so the type you asked for is not the one anyone
-  reads back. The TUI rename form shows a frozen segment but refuses to change
-  it, since the pattern has no placeholder to write a new value into, so the branch
-  would stay put while only the directory moved. Segments the pattern does
-  write stay editable, so the rename that worked on `feat/#{issue}-{desc}`
-  before #417 still works.
+  reads back. The TUI rename form shows a frozen segment, and whether it can
+  be changed depends on where the new value could go. `path_pattern` is asked
+  too: when it writes the segment, editing it renames the worktree directory
+  and leaves the branch alone, which is a real rename and is allowed, and the
+  preview says so by showing the branch unchanged. Only when neither pattern
+  writes the segment is the edit refused, since the submit would rebuild the
+  same branch and the same directory. Segments `branch_pattern` writes are
+  always editable, so the rename that worked on `feat/#{issue}-{desc}` before
+  #417 still works.
 
   Both live previews expand this repo's own patterns too. They hardcoded
   `<type>/#<issue>-<desc>` and `<type>-<issue>-<desc>`, so under a custom
