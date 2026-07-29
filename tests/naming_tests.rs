@@ -483,6 +483,102 @@ fn the_documented_pattern_table_matches_reality() {
   assert!(w.contains("match nothing at all"), "got: {}", w);
 }
 
+/// Issue #482. Reordered layouts and frozen segments are each documented as
+/// supported; the two **together** are claimed by no line, and the recovery
+/// bounds every literal by the canonical `type, issue, desc` rank, so a
+/// reordered pattern can leave a segment's region empty and the literal
+/// unread. `{desc}/feat/#{issue}` writes `x/feat/#42` and recovers no type.
+///
+/// Recovering it is not deliverable without a special case, and this is the
+/// measurement that settles it rather than an opinion: `feat/#{issue}-{desc}`
+/// and `wt/{type}/#{issue}` both put a literal before every placeholder, and in
+/// one it is the branch type while in the other it must stay the namespace it
+/// looks like. No rule phrased on position alone separates them, so the
+/// canonical order is doing load-bearing work that a reordered pattern removes.
+/// Keying on "the literal matches a configured branch type" would separate
+/// them, and would be a special case in the one function where three of those
+/// have already been wrong.
+///
+/// So the obligation is not "recover it" but "never be wrong or quiet about
+/// it", and that is enumerated here rather than sampled: every ordering of the
+/// three segments, each of them frozen in turn, across four separators.
+#[test]
+fn a_reordered_pattern_with_a_frozen_segment_is_never_wrong_and_never_quiet() {
+  let types = default_branch_types();
+  let slots = [("{type}", "feat"), ("{issue}", "42"), ("{desc}", "login")];
+  let orders = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];
+  let separators = ["/", "-", "/#", "_"];
+
+  let mut wrong: Vec<String> = Vec::new();
+  let mut unstated: Vec<String> = Vec::new();
+  let mut checked = 0;
+
+  for order in orders {
+    for frozen in 0..3 {
+      for separator in separators {
+        let pattern = order
+          .iter()
+          .map(|&i| {
+            if i == frozen {
+              slots[i].1.to_string()
+            } else {
+              slots[i].0.to_string()
+            }
+          })
+          .collect::<Vec<_>>()
+          .join(separator);
+        // A layout the compiler refuses is refused with a reason of its own,
+        // which the ambiguity enumeration already covers.
+        let Ok(parser) = BranchParser::compile(&pattern, "gwm-cli", &types) else {
+          continue;
+        };
+        checked += 1;
+        let segment = ["type", "issue", "desc"][frozen];
+        let expected = slots[frozen].1;
+        let recovered = parser
+          .constants()
+          .iter()
+          .find(|(s, _)| *s == segment)
+          .map(|(_, v)| v.clone());
+
+        match recovered {
+          // Never wrong: a value read back must be the one the pattern writes.
+          Some(value) if value != expected => wrong.push(format!(
+            "`{}` read {} as `{}`, not `{}`",
+            pattern, segment, value, expected
+          )),
+          // Never quiet: a value not read back has to be named by the warning,
+          // which is what turns `commit-prefix` returning nothing into
+          // something the user can act on.
+          None => {
+            let warning = branch_pattern_warning(&pattern, "gwm-cli", &types);
+            let names_it = warning.as_deref().is_some_and(|w| {
+              w.contains(&format!("`{{{}}}`", segment)) || w.contains(&format!("read back `{}`", segment))
+            });
+            if !names_it {
+              unstated.push(format!("`{}` loses {} silently: {:?}", pattern, segment, warning));
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+  }
+
+  assert!(checked >= 60, "the family should be large, got {}", checked);
+  assert!(
+    wrong.is_empty(),
+    "a reordered pattern must never read a frozen segment back as the wrong value:\n{}",
+    wrong.join("\n")
+  );
+  assert!(
+    unstated.is_empty(),
+    "a frozen segment a reordered pattern cannot recover must be named by `branch_pattern_warning`, \
+     since that is the whole of what the user gets:\n{}",
+    unstated.join("\n")
+  );
+}
+
 /// Ambiguity is about the *value*, not about how many places it could have
 /// come from. `feat/feat/#{issue}-{desc}` offers the type two candidates, and
 /// refusing on that count alone reported no type at all for a pattern whose
