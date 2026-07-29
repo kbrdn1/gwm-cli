@@ -154,7 +154,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and dropped the pair. The whole obligation is enumerated rather than sampled —
   1.5.0 read a branch iff it matched one hardcoded regex, so a test runs that
   regex over every pattern in the family it accepts and requires the same triple
-  back. `{repo}` is deliberately not a source, so a repo called `docs` does
+  back. One divergence in that family is deliberate: 1.5.0's description group
+  was `[a-z0-9-]+`, looser than `DESC_RE`, so `{type}/#{issue}---fix` handed
+  back `--fix` — a description its own `BranchSpec::validate` rejects, which the
+  rename form could not submit and `gwm create` could never have produced. The
+  leading dashes are dropped, and a leading `-` is in any case what #416 banned
+  from a name, since `gwm remove` and `git branch -d` read it as a flag. `{repo}` is deliberately not a source, so a repo called `docs` does
   not type its own branches. What such a pattern costs is reported separately
   and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
   writes a `feat/` branch, so the type you asked for is not the one anyone

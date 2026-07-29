@@ -1152,7 +1152,12 @@ fn every_pattern_1_5_0_read_is_read_the_same_way() {
   let mut broken: Vec<String> = Vec::new();
   for a in ["{type}", "feat"] {
     for b in ["{issue}", "1"] {
-      for c in ["{desc}", "fix", "fixed--desc", "fixed-"] {
+      // 1.5.0's third group is `[a-z0-9-]+`, which is *looser* than `DESC_RE`:
+      // it accepts a description opening with `-`. The family is defined by
+      // that charset, not by the one gwm validates against today, so those
+      // literals are in scope too — leaving them out was what made the first
+      // version of this test claim more parity than it had.
+      for c in ["{desc}", "fix", "fixed--desc", "fixed-", "--fix", "-"] {
         let pattern = format!("{}/#{}-{}", a, b, c);
         let cfg = WorktreeConfig {
           branch_pattern: pattern.clone(),
@@ -1174,6 +1179,25 @@ fn every_pattern_1_5_0_read_is_read_the_same_way() {
           old.get(2).unwrap().as_str().to_string(),
           old.get(3).unwrap().as_str().to_string(),
         );
+        if then.2.starts_with('-') {
+          // The one deliberate divergence, and it is a bug 1.5.0 had rather
+          // than a contract it kept: `--fix` fails `DESC_RE`, so
+          // `BranchSpec::validate` rejects the very description that parser
+          // handed back — the rename form could not submit it and `gwm create`
+          // could never have produced it. A leading `-` is also exactly what
+          // #416 banned from a name, since `gwm remove` and `git branch -d`
+          // read it as a flag. Hooks, `[pr_template]` and the rename prefill
+          // get the value without it.
+          assert_eq!(
+            now.2,
+            then.2.trim_start_matches('-'),
+            "`{}` wrote `{}`: a leading dash is dropped from the description, not the description",
+            pattern,
+            name
+          );
+          checked += 1;
+          continue;
+        }
         if now != then {
           broken.push(format!(
             "`{}` wrote `{}`: 1.5.0 read {:?}, this reads {:?}",
@@ -1185,7 +1209,7 @@ fn every_pattern_1_5_0_read_is_read_the_same_way() {
     }
   }
   assert_eq!(
-    checked, 16,
+    checked, 24,
     "every pattern in the family must be inside what 1.5.0 could read"
   );
   assert!(
