@@ -483,6 +483,54 @@ fn the_documented_pattern_table_matches_reality() {
   assert!(w.contains("match nothing at all"), "got: {}", w);
 }
 
+/// Ambiguity is about the *value*, not about how many places it could have
+/// come from. `feat/feat/#{issue}-{desc}` offers the type two candidates, and
+/// refusing on that count alone reported no type at all for a pattern whose
+/// every reading says `feat` — so `commit-prefix`, the templates and the TUI
+/// saw a branch with no type where the pattern names one unambiguously.
+#[test]
+fn two_ways_to_read_the_same_value_are_not_an_ambiguity() {
+  for (pattern, segment, frozen) in [
+    ("feat/feat/#{issue}-{desc}", "type", "feat"),
+    ("{type}/#1/1-{desc}", "issue", "1"),
+    // `/` and not `-` between them: a dash is inside `{desc}`'s own charset,
+    // so `-fixed-fixed` is one run reading `fixed-fixed`, not two reading
+    // `fixed`, and it would test the single-candidate path instead.
+    ("{type}/#{issue}-fixed/fixed", "desc", "fixed"),
+  ] {
+    let parser = BranchParser::compile(pattern, "gwm-cli", &default_branch_types()).expect("compiles");
+    assert_eq!(
+      parser.constants(),
+      &[(segment, frozen.to_string())][..],
+      "`{}` reads {} as `{}` whichever candidate is taken, so it is frozen, not ambiguous",
+      pattern,
+      segment,
+      frozen
+    );
+  }
+
+  // The counterpart the rule still has to refuse: two candidates that would
+  // read *different* values really are a coin toss, and inventing one is
+  // worse than reporting none.
+  let parser = BranchParser::compile("feat/fix/#{issue}-{desc}", "gwm-cli", &default_branch_types()).expect("compiles");
+  assert!(
+    parser.constants().is_empty(),
+    "`feat/fix/#{{issue}}-{{desc}}` names two different configured types, which is a real ambiguity"
+  );
+
+  // And the reason the rule is stated per *segment* and not per reading:
+  // `feat/#{issue}-fix/done` is read two ways, and they disagree about the
+  // description. That says nothing about the type, which both of them read as
+  // `feat` — so one genuinely ambiguous segment must not take an unanimous
+  // one down with it.
+  let parser = BranchParser::compile("feat/#{issue}-fix/done", "gwm-cli", &default_branch_types()).expect("compiles");
+  assert_eq!(
+    parser.constants(),
+    &[("type", "feat".to_string())][..],
+    "the type is unanimous across both readings of `feat/#{{issue}}-fix/done`; only the description is ambiguous"
+  );
+}
+
 /// Issue #415 (Codex review): `Config::merge_layered` deserialises
 /// `[[branch_types]]` without running `validate_branch_types`, so the
 /// effective list can carry a name `gwm create` would refuse. Probing it

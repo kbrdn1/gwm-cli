@@ -967,10 +967,16 @@ fn segment_accepts(segment: &str, c: char) -> bool {
 ///    own charset, and each is put to its own oracle: a branch type is an
 ///    exact match against the repo's configured list, an issue number is all
 ///    digits, a description is whatever `DESC_RE` accepts.
-/// 3. A segment is only recovered when **exactly one** candidate survives.
-///    Two mean the pattern is genuinely ambiguous about which literal is the
-///    value — `feat/fix-{issue}-{desc}` names two configured types before the
-///    issue — and inventing one would be worse than reporting none.
+/// 3. A segment is recovered iff **every** maximal reading of the pattern
+///    names it with the **same value**. Readings that disagree are a genuine
+///    ambiguity — `feat/fix-{issue}-{desc}` names two configured types before
+///    the issue — and inventing one would be worse than reporting none.
+///
+/// Rule 3 is stated per segment on purpose, and counting readings instead was
+/// wrong twice. `feat/feat/#{issue}-{desc}` has two readings that both say
+/// `feat`, which is one answer and not a coin toss; `feat/#{issue}-fix/done`
+/// has two that disagree about the description while agreeing about the type,
+/// and one ambiguous segment must not take an unanimous one down with it.
 ///
 /// Segments are resolved in `type`, `issue`, `desc` order and each claim
 /// advances a cursor, so `feat/#1-fixed`, which freezes all three in one
@@ -986,11 +992,25 @@ fn literal_constants(authored: &str, captured: &[&str], types: &[BranchType]) ->
 
   let all = assignments(authored, &missing, types, 0);
   let best = all.iter().map(Vec::len).max().unwrap_or(0);
-  let mut top = all.into_iter().filter(|a| a.len() == best);
-  match (top.next(), top.next()) {
-    (Some(only), None) => only,
-    _ => Vec::new(),
-  }
+  let top: Vec<Vec<(&'static str, String)>> = all.into_iter().filter(|a| a.len() == best).collect();
+
+  // Unanimity, segment by segment. Keeping the first reading and dropping
+  // whatever the others contradict is the whole rule: a segment survives when
+  // every reading names it the same way, so the readings can disagree about
+  // one segment without costing the others. `first` is already in `type`,
+  // `issue`, `desc` order, which is the order callers expect back.
+  let Some((first, rest)) = top.split_first() else {
+    return Vec::new();
+  };
+  first
+    .iter()
+    .filter(|(segment, value)| {
+      rest
+        .iter()
+        .all(|reading| reading.iter().any(|(s, v)| s == segment && v == value))
+    })
+    .cloned()
+    .collect()
 }
 
 /// Every way the missing segments could be read out of `authored`, in order.
