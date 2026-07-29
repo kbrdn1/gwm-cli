@@ -12,6 +12,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The TUI rename modal says when submitting would close an open pull request.
+  The remote half of a rename is `git push --atomic origin :<old> <new>:<new>`,
+  a delete followed by a create, and GitHub closes a pull request whose head
+  branch is renamed. There is no clean fix, only a warning: GitHub's own rename
+  endpoint retargets a pull request whose *base* is the renamed branch and
+  closes one whose *head* it is, and a worktree branch is always the head of its
+  own pull request, so both paths end in the same place; GitLab has no rename
+  operation at all, only create-then-delete. The line is live, appearing the
+  moment the form would write a different branch and going away when the user
+  reverts, and `Esc` is the cancel. It is keyed on the branch rather than on the
+  rename, since an edit that only moves the directory returns before touching a
+  single ref, and it stays quiet on a merged or closed pull request. No extra
+  forge call: the link was already resolved at list time, it is what draws the
+  pastille. ([#481](https://github.com/kbrdn1/gwm-cli/issues/481))
+
 - Free-form worktree naming. `gwm create --name spike-redis` skips the
   `<type> <issue> <desc>` triple entirely — not every worktree corresponds to
   an issue. In the TUI, `Ctrl-T` toggles the create form between the
@@ -62,6 +77,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#416](https://github.com/kbrdn1/gwm-cli/issues/416))
 
 ### Fixed
+
+- The TUI names a workspace repo by its directory, not by its display label.
+  `workspace::discover` suffixes a repo whose basename collides with a sibling,
+  so a second `api` shows as `api-2`, and activating it put that label into the
+  field every formatter call expands `{repo}` with. The parser side reads the
+  directory basename and so does every `gwm create` from the CLI, so in a
+  workspace with such a collision a `{repo}` pattern wrote `api-2/...` that
+  neither could read back: no issue auto-linking, no gitmoji, `commit-prefix`
+  erroring on a branch gwm had just created. The label is a property of the
+  workspace's current membership rather than of the repo, so it changes when a
+  sibling moves while branches already written do not, and a name persisted in
+  git must not depend on what else sits next to it on disk. Naming uses the
+  basename everywhere now; the label stays what it was built for, the header and
+  the `REPO` column. Two repos sharing a basename consequently share a `{repo}`
+  base directory, which is what the CLI has always done, and a collision there
+  is a loud `target path already exists` rather than a silent one.
+  ([#480](https://github.com/kbrdn1/gwm-cli/issues/480))
 
 - `gwm doctor` and `gwm config validate` now warn when
   `worktree.branch_pattern` does not survive a format-then-parse round-trip.
