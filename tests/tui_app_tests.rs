@@ -10870,6 +10870,61 @@ fn the_rename_form_still_refuses_to_change_what_neither_pattern_writes() {
 }
 
 #[test]
+fn activating_a_workspace_repo_names_it_by_its_directory_not_its_display_label() {
+  // Issue #480. `workspace::discover` suffixes a repo whose basename collides
+  // with a sibling, so the second `api` is displayed as `api-2` (#304), and
+  // activating it used to put that label straight into `App::repo_name` — the
+  // field every formatter call expands `{repo}` with. The parser side
+  // (`BranchParser::for_repo`, `github::read_link`, `lifecycle`) reads the
+  // *directory* basename, and so does every `gwm create` from the CLI, so a
+  // `{repo}` pattern wrote `api-2/…` that nothing could read back.
+  //
+  // The label is a property of the workspace's current membership, not of the
+  // repo: move the sibling out and this repo becomes `api` again while its
+  // branches still say `api-2`. A name persisted in git cannot depend on what
+  // else sits next to it on disk, so naming uses the basename and the label
+  // stays what it was built for, which is display.
+  let (dir, mut app) = make_app();
+  let sibling = dir.path().join("api");
+  std::fs::create_dir_all(&sibling).unwrap();
+  git2::Repository::init(&sibling).unwrap();
+
+  app.workspace = Some(gwm::tui::WorkspaceState {
+    root: dir.path().to_path_buf(),
+    repos: vec![
+      gwm::tui::RepoMeta {
+        name: app.repo_name.clone(),
+        workdir: app.workdir.clone(),
+        config: app.config.clone(),
+      },
+      gwm::tui::RepoMeta {
+        // The display label, deliberately different from the basename `api`.
+        name: "api-2".into(),
+        workdir: sibling.clone(),
+        config: app.config.clone(),
+      },
+    ],
+    row_repo: vec![0, 1],
+    active: 0,
+  });
+  let mut wt = worktree_fixture("other");
+  wt.branch = Some("api/feat/#42-x".into());
+  app.worktrees = vec![worktree_fixture("own"), wt];
+  app.list_state.select(Some(1));
+
+  app.sync_active_repo();
+
+  assert_eq!(
+    app.repo_name, "api",
+    "`{{repo}}` is expanded with the directory basename, the same name the CLI and the parser use"
+  );
+  assert_eq!(
+    app.display_repo_name, "api-2",
+    "the disambiguated label survives, for the header and the REPO column"
+  );
+}
+
+#[test]
 fn the_rename_form_reads_a_branch_with_the_same_repo_name_it_writes_one_with() {
   // Codex review on PR #476, eighth pass. In a workspace, two repos whose
   // directories share a basename are disambiguated for display — the second

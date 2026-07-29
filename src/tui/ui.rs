@@ -351,7 +351,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   // line renders flush, mirroring the footer. No `Wrap` — `header_line`
   // guarantees one visual line clipped to `width`.
   let line = header_line(
-    &app.repo_name,
+    // The workspace label, which is what the user is looking at; `repo_name` is
+    // the naming name and can be the same string in a workspace of one (#480).
+    &app.display_repo_name,
     &workdir,
     app.picker_mode,
     area.width as usize,

@@ -256,7 +256,23 @@ pub struct WorkspaceState {
 
 pub struct App {
   pub repo: Repository,
+  /// The name `{repo}` expands to, in `branch_pattern`, `path_pattern` and
+  /// `[worktree].base` alike: the repo directory's basename
+  /// ([`worktree::repo_name`]), which is also the name every `gwm create` from
+  /// the CLI uses and the one the parser side reads back
+  /// ([`crate::naming::BranchParser::for_repo`], `github::read_link`,
+  /// `lifecycle`).
+  ///
+  /// Issue #480: deliberately **not** the workspace display label. That label
+  /// is derived from the workspace's current membership (a second `api` becomes
+  /// `api-2`, #304), so it changes when a sibling repo moves while the branches
+  /// already written keep saying `api-2`. A name persisted in git cannot depend
+  /// on what else happens to sit next to it on disk.
   pub repo_name: String,
+  /// The name shown to the user for the active repo: the workspace display
+  /// label when there is one, otherwise identical to [`Self::repo_name`]. Only
+  /// the header reads it; nothing that writes a branch or a path does.
+  pub display_repo_name: String,
   pub workdir: PathBuf,
   pub config: Config,
   /// Workspace-mode state (issue #36); `None` in single-repo mode.
@@ -616,6 +632,7 @@ impl App {
     let (task_tx, task_rx) = mpsc::channel();
     let mut out = Self {
       repo,
+      display_repo_name: repo_name.clone(),
       repo_name,
       workdir,
       config,
@@ -845,8 +862,11 @@ impl App {
     };
     match Repository::open(&meta.workdir) {
       Ok(repo) => {
+        // Issue #480: the naming name comes from the freshly-opened repo's own
+        // directory, never from the workspace label — see `App::repo_name`.
+        self.repo_name = worktree::repo_name(&repo);
         self.repo = repo;
-        self.repo_name = meta.name;
+        self.display_repo_name = meta.name;
         self.workdir = meta.workdir;
         self.config = meta.config;
         self.workspace_active_stale = false;
