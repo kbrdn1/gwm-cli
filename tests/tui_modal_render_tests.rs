@@ -121,6 +121,14 @@ fn assert_present(buf: &Buffer, needle: &str, what: &str) {
   );
 }
 
+fn assert_absent(buf: &Buffer, needle: &str, what: &str) {
+  assert!(
+    !buffer_contains(buf, needle),
+    "{what}: expected {needle:?} NOT to be rendered — buffer rows:\n{}",
+    row_strings(buf).join("\n")
+  );
+}
+
 #[test]
 fn worktrees_table_header_labels_the_issue_pr_badge_column() {
   // The worktree table's badge column (the `●/●` issue/PR pastilles) now
@@ -855,4 +863,82 @@ fn the_rename_refusal_fits_in_the_modal() {
 
   let buf = render(&mut app);
   assert_present(&buf, &failure, "the whole refusal, not the part that fits");
+}
+
+/// Issue #481. The remote half of a rename is `git push --atomic origin :<old>
+/// <new>:<new>`, a delete plus a create, and GitHub closes a pull request whose
+/// head branch is renamed. That is not something gwm can route around: GitHub's
+/// own rename endpoint retargets a PR whose *base* is the renamed branch and
+/// closes one whose head it is, and a worktree branch is always the head of its
+/// own PR. So the only honest protection is to say so before the push.
+///
+/// Live rather than one-shot, so it appears the moment the form would write a
+/// different branch and goes away when the user reverts.
+#[test]
+fn the_rename_modal_warns_before_a_branch_change_closes_an_open_pr() {
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  wt.link.pr = Some(476);
+  wt.pr_state = Some(gwm::github::PrState::Open);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  // Untouched: the submit would rewrite the same branch, so nothing is at risk.
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR #476", "an unchanged branch renames nothing");
+
+  app.create_form.desc = "login-v2".into();
+  let buf = render(&mut app);
+  assert_present(
+    &buf,
+    "closes PR #476",
+    "a branch change deletes the remote branch, which closes the PR",
+  );
+}
+
+/// The counterpart, and the reason the warning is tied to the *branch* rather
+/// than to the rename: an edit that only moves the directory returns from
+/// `rename_worktree` before it touches a single ref, local or remote, so the
+/// PR is never in danger and saying otherwise would train the user to ignore
+/// the line.
+#[test]
+fn the_rename_modal_stays_quiet_when_only_the_directory_moves() {
+  let (_dir, mut app) = make_app();
+  // Freezes every branch segment, so the branch cannot change; `path_pattern`
+  // still writes the description, so the directory can.
+  app.config.worktree.branch_pattern = "feat/#42-login".into();
+  app.config.worktree.path_pattern = "{type}-{issue}-{desc}".into();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  wt.link.pr = Some(476);
+  wt.pr_state = Some(gwm::github::PrState::Open);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  app.create_form.desc = "login-v2".into();
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR", "a path-only edit never touches a ref");
+}
+
+/// A merged or closed PR has nothing left to lose, so warning about it would be
+/// noise on the common case of renaming a branch after its PR landed.
+#[test]
+fn the_rename_modal_stays_quiet_about_a_pr_that_is_already_closed() {
+  let (_dir, mut app) = make_app();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  wt.link.pr = Some(476);
+  wt.pr_state = Some(gwm::github::PrState::Merged);
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+
+  app.create_form.desc = "login-v2".into();
+  let buf = render(&mut app);
+  assert_absent(&buf, "closes PR", "a merged PR cannot be closed by a rename");
 }

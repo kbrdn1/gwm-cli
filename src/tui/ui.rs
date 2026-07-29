@@ -351,7 +351,9 @@ fn draw_header(f: &mut Frame, area: Rect, app: &App) {
   // line renders flush, mirroring the footer. No `Wrap` — `header_line`
   // guarantees one visual line clipped to `width`.
   let line = header_line(
-    &app.repo_name,
+    // The workspace label, which is what the user is looking at; `repo_name` is
+    // the naming name and can be the same string in a workspace of one (#480).
+    &app.display_repo_name,
     &workdir,
     app.picker_mode,
     area.width as usize,
@@ -3754,6 +3756,41 @@ fn draw_config_panel(f: &mut Frame, app: &mut App) {
 /// so this never validates and never refuses: an empty issue expands to
 /// nothing, which is what a preview should show. An expansion that cannot be
 /// resolved at all yields an empty string rather than a stale or invented one.
+/// Issue #481. Whether submitting this rename would close an open pull request,
+/// as a message ready to render, or `None` when nothing is at risk.
+///
+/// The remote half of a rename is `git push --atomic origin :<old> <new>:<new>`,
+/// a delete followed by a create, and GitHub closes a pull request whose head
+/// branch is renamed. gwm cannot route around that. GitHub's own rename
+/// endpoint retargets a pull request whose *base* is the renamed branch and
+/// closes one whose *head* it is, and a worktree branch is always the head of
+/// its own pull request, so both paths end in the same place. GitLab has no
+/// rename operation at all, only create-then-delete. Saying so before the push
+/// is the whole of what is available.
+///
+/// Keyed on the **branch** rather than on the rename: an edit that only moves
+/// the directory returns from `worktree::rename_worktree` before touching a
+/// single ref, so it is never at risk, and warning there would train the user
+/// to ignore the line. Recomputed per frame, so it appears the moment the form
+/// would write a different branch and goes away when the user reverts.
+///
+/// A merged or closed pull request has nothing left to lose, and an unfetched
+/// state says nothing either way: this reports what gwm knows, and claims
+/// nothing about what it has not looked up.
+fn rename_pr_warning(app: &App, new_branch: &str, old_branch: &str) -> Option<String> {
+  if new_branch == old_branch {
+    return None;
+  }
+  let w = app.selected()?;
+  if !matches!(w.pr_state.or(w.link.pr_state)?, PrState::Open | PrState::Draft) {
+    return None;
+  }
+  Some(match w.link.pr {
+    Some(number) => format!("⚠ renaming the branch closes PR #{}", number),
+    None => "⚠ renaming the branch closes its open pull request".into(),
+  })
+}
+
 fn pattern_preview(app: &App, type_str: &str) -> (String, String) {
   let expand = |pattern: &str| {
     crate::config::expand_placeholders(
@@ -5251,6 +5288,15 @@ fn draw_edit_worktree(f: &mut Frame, app: &App) {
     Span::raw("  Dir    : "),
     Span::styled(dirname, Style::default().fg(app.theme.dirty)),
   ]));
+  if let Some(warning) = rename_pr_warning(app, &branch_raw, old_branch) {
+    lines.push(Line::from(vec![
+      Span::raw("  "),
+      Span::styled(
+        ellipsize_middle(&warning, inner_w.saturating_sub(2)),
+        Style::default().fg(app.theme.prunable),
+      ),
+    ]));
+  }
   lines.push(Line::from(String::new()));
   lines.push(field_input_line(
     &label("Issue"),
