@@ -151,7 +151,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   description being whatever `DESC_RE` accepts. Position has to come first:
   `feat/#{issue}-fix` freezes both, and `feat` and `fix` are each a configured
   branch type, so an oracle asked to pick a globally unique candidate found two
-  and dropped the pair. The whole obligation is enumerated rather than sampled:
+  and dropped the pair. What is left over after position is decided per
+  segment: a segment is recovered when every reading of the pattern names it
+  with the same value, so `feat/feat/#{issue}-{desc}` freezes the type its two
+  readings agree on, and `feat/#{issue}-fix/done` freezes the type while
+  leaving the description its readings disagree about alone.
+  The whole obligation is enumerated rather than sampled:
   1.5.0 read a branch iff it matched one hardcoded regex, so a test runs that
   regex over every pattern in the family it accepts and requires the same triple
   back. One divergence in that family is deliberate: 1.5.0's description group
