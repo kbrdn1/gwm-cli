@@ -3957,19 +3957,31 @@ impl App {
       .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
-    // Issue #417 / Codex review on PR #476: a segment **neither pattern writes**
-    // is not editable here, because there is nowhere to put the new value. The
-    // submit would rebuild the same branch and the same directory and close the
-    // form having changed nothing, so say no instead.
+    // Issue #417 / Codex review on PR #476: a segment **nothing writes** is not
+    // editable here, because there is nowhere to put the new value. The submit
+    // would rebuild the same branch at the same path and close the form having
+    // changed nothing, so say no instead.
     //
-    // Both patterns are asked, not just `branch_pattern` (Kylian, validating by
-    // hand). A segment the branch freezes but `path_pattern` still writes has a
-    // real destination: `feat/#{issue}-{desc}` will say `feat` whatever the form
-    // holds, so under that config the *directory* is where this worktree's type
-    // lives, and refusing to edit it means a worktree created as `fix` can never
-    // become `docs`. `rename_worktree` handles that shape as a path-only edit,
-    // skipping every ref mutation, and the preview now states it on screen
-    // rather than showing a branch the submit will not write.
+    // The question is the *formatter's*, not the parser's — asking the parser
+    // is what made the first two versions of this guard wrong. It is not "can a
+    // new value be read back", it is "will a new value be written anywhere", and
+    // `expand_placeholders` writes a token wherever it appears. So the test is
+    // whether any of the three patterns it expands carries that token:
+    //
+    // - `branch_pattern`, the obvious one;
+    // - `path_pattern` (Kylian, validating by hand): `feat/#{issue}-{desc}` will
+    //   say `feat` whatever the form holds, so under that config the *directory*
+    //   is where this worktree's type lives, and refusing meant a worktree
+    //   created as `fix` could never become `docs`;
+    // - `[worktree].base` (Codex review, tenth pass): `worktree_path` feeds it
+    //   the triple too, so a `base` of `.../{type}` sorts worktrees into
+    //   per-type directories and changing the type moves the worktree between
+    //   them.
+    //
+    // In the last two cases the branch does not change at all, which
+    // `rename_worktree` handles as a path-only edit — it skips every ref
+    // mutation, local and remote — and the preview states it on screen by
+    // showing the branch unchanged.
     //
     // Scoped to a segment the user actually changed, so `feat/#{issue}-{desc}`,
     // whose rename worked before #417, keeps renaming its issue and description.
@@ -3981,13 +3993,11 @@ impl App {
     // canonical — `DESC_RE` accepts `fixed-`, and `kebab` would strip that
     // trailing dash on the way into the spec, making every submit look like a
     // change and locking the form shut.
-    let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
-    let path_parser = crate::naming::BranchParser::compile(
-      &self.config.worktree.path_pattern,
-      &self.repo_name,
-      &self.config.resolved_branch_types().types,
-    )
-    .ok();
+    let writes = |segment: &str| {
+      let token = format!("{{{}}}", segment);
+      let wt = &self.config.worktree;
+      wt.branch_pattern.contains(&token) || wt.path_pattern.contains(&token) || wt.base.contains(&token)
+    };
     let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
       crate::naming::worktree_spec(
         &self.config,
@@ -4002,12 +4012,7 @@ impl App {
     });
     if let Some(opened_with) = opened_with.as_ref() {
       for segment in ["type", "issue", "desc"] {
-        if parser.captures_segment(segment) {
-          continue;
-        }
-        // The directory is a destination too: the submit moves the worktree and
-        // leaves the branch alone, which is a rename, not a no-op.
-        if path_parser.as_ref().is_some_and(|p| p.captures_segment(segment)) {
+        if writes(segment) {
           continue;
         }
         let (submitted, was) = match segment {

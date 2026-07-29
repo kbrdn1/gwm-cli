@@ -169,14 +169,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
   writes a `feat/` branch, so the type you asked for is not the one anyone
   reads back. The TUI rename form shows a frozen segment, and whether it can
-  be changed depends on where the new value could go. `path_pattern` is asked
-  too: when it writes the segment, editing it renames the worktree directory
-  and leaves the branch alone, which is a real rename and is allowed, and the
-  preview says so by showing the branch unchanged. Only when neither pattern
+  be changed depends on where the new value could go. That is the formatter's
+  question, so all three patterns it expands are asked: `branch_pattern`,
+  `path_pattern` and `[worktree].base`. The path pattern writing the segment
+  means editing it renames the directory; `base` writing it means the worktree
+  moves between base directories, which is what a `base` of `.../{type}` is
+  for. Either way the branch is left alone, which is a real rename, and the
+  preview says so by showing the branch unchanged. Only when none of the three
   writes the segment is the edit refused, since the submit would rebuild the
-  same branch and the same directory. Segments `branch_pattern` writes are
-  always editable, so the rename that worked on `feat/#{issue}-{desc}` before
-  #417 still works.
+  same branch at the same path. Segments `branch_pattern` writes are always
+  editable, so the rename that worked on `feat/#{issue}-{desc}` before #417
+  still works.
 
   Both live previews expand this repo's own patterns too. They hardcoded
   `<type>/#<issue>-<desc>` and `<type>-<issue>-<desc>`, so under a custom

@@ -10799,6 +10799,42 @@ fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
 }
 
 #[test]
+fn submit_edit_worktree_counts_worktree_base_as_a_destination() {
+  // Codex review on PR #476, tenth pass. `[worktree].base` is expanded with the
+  // triple too — `BranchSpec::worktree_path` feeds it `{type}` / `{issue}` /
+  // `{desc}` before joining the dirname — so a `base` of `.../{type}` sorts
+  // worktrees into per-type directories and changing the type moves the
+  // worktree between them. That is a real rename, so the guard has to look
+  // there as well: asking only `branch_pattern` and `path_pattern` refused an
+  // edit that had a perfectly good destination one level up the path.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}-{desc}".into();
+  app.config.worktree.base = format!("{}/{{type}}", app.workdir.display());
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-login".into());
+  wt.path = app.workdir.join("fix").join("42-login");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("`docs` is a built-in branch type");
+  app.submit_edit_worktree().expect("submits");
+
+  assert_eq!(
+    app.edit_failure, None,
+    "`base` writes {{type}}, so the worktree moves from `fix/` to `docs/`: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
 fn the_rename_form_still_refuses_to_change_what_neither_pattern_writes() {
   // The other side of #478: reading the type from the directory does not by
   // itself make it editable. Here the *path* freezes it too — `fix-` is a
