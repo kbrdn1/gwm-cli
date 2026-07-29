@@ -10666,8 +10666,16 @@ fn submit_edit_worktree_refuses_to_change_a_segment_the_pattern_freezes() {
     .clone()
     .expect("the refusal must be reported in the form");
   assert!(
-    failure.contains("{issue}") && failure.contains('1'),
-    "the message must name the frozen placeholder and its value: {}",
+    failure.contains("{issue}"),
+    "the message must name the placeholder the pattern cannot write: {}",
+    failure
+  );
+  // Deliberately value-free: `LoaderWidget` renders one unwrapped line, so a
+  // message whose length follows user input clips at an arbitrary point. The
+  // value is on screen anyway, in the modal's `From :` row.
+  assert!(
+    !failure.contains('1'),
+    "the frozen value belongs on screen, not in a message of variable length: {}",
     failure
   );
 }

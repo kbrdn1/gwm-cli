@@ -169,6 +169,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write stay editable, so the rename that worked on `feat/#{issue}-{desc}`
   before #417 still works.
 
+  Both live previews expand this repo's own patterns too. They hardcoded
+  `<type>/#<issue>-<desc>` and `<type>-<issue>-<desc>`, so under a custom
+  pattern they promised names the repo would never create: with
+  `feat/#{issue}-{desc}`, picking `docs` in the rename type selector previewed
+  `docs/#42-x` while submitting wrote `feat/#42-x`. A preview that disagrees
+  with what submitting does is worse than no preview at all.
+
   The value that form shows comes from the worktree's **directory** when
   `path_pattern` carries the segment and `branch_pattern` does not. The two
   patterns need not carry the same segments, and when they do not, neither

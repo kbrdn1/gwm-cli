@@ -3995,10 +3995,14 @@ impl App {
           _ => (self.create_form.desc.as_str(), opened_with.desc.as_str()),
         };
         if submitted != was {
-          self.edit_failure = Some(format!(
-            "worktree.branch_pattern has no {{{}}} to write, so this form cannot change it from '{}'",
-            segment, was
-          ));
+          // No value in the message, on purpose: `LoaderWidget` renders one
+          // unwrapped line, so a message whose length follows a user-supplied
+          // value clips at an arbitrary point. This one is a fixed 36
+          // characters whatever the branch holds, and the value it would have
+          // quoted is on screen anyway, in the `From :` row above (found
+          // validating by hand).
+          let _ = was;
+          self.edit_failure = Some(format!("branch_pattern has no {{{}}} to write", segment));
           return Ok(());
         }
       }

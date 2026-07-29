@@ -762,3 +762,93 @@ fn create_modal_in_freeform_mode_shows_only_the_name_field() {
     );
   }
 }
+
+/// Issue #417, found by validating the branch by hand. Both live previews
+/// hardcoded `<type>/#<issue>-<desc>` and `<type>-<issue>-<desc>` instead of
+/// expanding the repo's own `branch_pattern` / `path_pattern`, so under a
+/// custom pattern they promised names the repo would never create.
+///
+/// The rename case was the loud one: with `branch_pattern = "feat/#{issue}-{desc}"`,
+/// picking `docs` in the type selector previewed `docs/#42-x` while submit
+/// would have written `feat/#42-x`, since the pattern has no `{type}` to write
+/// into. A preview that disagrees with what submitting does is worse than no
+/// preview at all.
+#[test]
+fn the_create_preview_expands_this_repo_s_own_patterns() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "wt/{type}-{issue}-{desc}".into();
+  app.config.worktree.path_pattern = "{issue}_{desc}".into();
+  app.enter_create();
+  app.create_form.issue = "42".into();
+  app.create_form.desc = "cache".into();
+  let type_str = app.branch_types[app.create_form.type_index].name.clone();
+
+  let buf = render(&mut app);
+
+  assert_present(
+    &buf,
+    &format!("wt/{}-42-cache", type_str),
+    "the branch preview must come from branch_pattern",
+  );
+  assert_present(&buf, "42_cache", "the dir preview must come from path_pattern");
+}
+
+#[test]
+fn the_rename_preview_expands_this_repo_s_own_patterns() {
+  let (_dir, mut app) = make_app();
+  // Freezes the type: whatever the selector says, the branch stays `feat/`.
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  // Move the type selector somewhere the pattern cannot write.
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("docs is configured");
+
+  let buf = render(&mut app);
+
+  assert_present(
+    &buf,
+    "feat/#42-login",
+    "the branch preview must be what branch_pattern would write",
+  );
+  assert!(
+    !buffer_contains(&buf, "docs/#42-login"),
+    "the preview must not offer a branch the pattern cannot write — buffer rows:\n{}",
+    row_strings(&buf).join("\n")
+  );
+}
+
+/// The refusal has to fit. `TestBackend` hard-clips, so asserting the whole
+/// sentence is the clip guard: the first version ran to 87 characters and the
+/// modal cut it at "has no {type} to write," leaving the user with half a
+/// reason and no value.
+#[test]
+fn the_rename_refusal_fits_in_the_modal() {
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = deletable_worktree("login");
+  wt.branch = Some("feat/#42-login".into());
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("docs is configured");
+  app.submit_edit_worktree().expect("the refusal is a form failure");
+  let failure = app.edit_failure.clone().expect("refused");
+
+  let buf = render(&mut app);
+  assert_present(&buf, &failure, "the whole refusal, not the part that fits");
+}
