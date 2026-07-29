@@ -106,7 +106,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "can the boundary between two placeholders land in more than one place":
   `{issue}{desc}` reads `42123-x` as `4212` + `3-x`, `{desc}{issue}` is
   ambiguous outright since `a12` is what both `a` + `12` and `a1` + `2`
-  produce, and a non-empty separator guarantees nothing either —
+  produce, and a non-empty separator guarantees nothing either:
   `{type}-{issue}9{desc}` writes `feat-42919x` from issue `42` and desc `19x`,
   and the greedy `\d+` slides right across the `9` to read issue `4291`.
 
@@ -127,14 +127,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   substituted again by the formatter, so a repo directory named `{type}` (or
   named `type` under a `{{repo}}` pattern) made every read-back feature go
   quiet with nothing saying why; the check closes that class rather than its
-  two known instances. A `~` prefix stays out of it — `shellexpand::tilde` is a
+  two known instances. A `~` prefix stays out of it, because `shellexpand::tilde` is a
   divergence no parser can undo, and `gwm doctor` already names every feature
   it takes down.
 
   The rule is pinned by enumeration rather than by examples: a test generates
   every pattern over the three placeholders and a set of separators, decides
   independently whether each one round-trips, and requires the compiler to
-  accept exactly those — so neither a silent mis-split nor an over-strict
+  accept exactly those, so neither a silent mis-split nor an over-strict
   refusal can survive.
 
   A pattern that **freezes** a segment as a literal instead of writing it from
@@ -143,20 +143,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   happened to have a group where the literal sits; the derived parser recovers
   the literal on purpose, so gitmoji, `gwm commit-prefix` and auto-linking
   still work on those repos. The recovery is an exact match rather than a
-  guess: it is positional first — a literal is only read as a segment if it
+  guess. It is positional first, in that a literal is only read as a segment if it
   sits where that segment goes, before `{issue}` for a type and after it for a
-  description — and then an exact match, a branch type being looked up in the
+  description, and then an exact match, a branch type being looked up in the
   repo's configured list (so `feature/#{issue}-{desc}` recovers nothing, since
   `feature` names a namespace), an issue number being all digits, and a
   description being whatever `DESC_RE` accepts. Position has to come first:
   `feat/#{issue}-fix` freezes both, and `feat` and `fix` are each a configured
   branch type, so an oracle asked to pick a globally unique candidate found two
-  and dropped the pair. The whole obligation is enumerated rather than sampled —
+  and dropped the pair. The whole obligation is enumerated rather than sampled:
   1.5.0 read a branch iff it matched one hardcoded regex, so a test runs that
   regex over every pattern in the family it accepts and requires the same triple
   back. One divergence in that family is deliberate: 1.5.0's description group
   was `[a-z0-9-]+`, looser than `DESC_RE`, so `{type}/#{issue}---fix` handed
-  back `--fix` — a description its own `BranchSpec::validate` rejects, which the
+  back `--fix`, a description its own `BranchSpec::validate` rejects, which the
   rename form could not submit and `gwm create` could never have produced. The
   leading dashes are dropped, and a leading `-` is in any case what #416 banned
   from a name, since `gwm remove` and `git branch -d` read it as a flag. `{repo}` is deliberately not a source, so a repo called `docs` does
@@ -164,7 +164,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and unchanged from #415: `gwm create fix 42 x` under `feat/#{issue}-{desc}`
   writes a `feat/` branch, so the type you asked for is not the one anyone
   reads back. The TUI rename form shows a frozen segment but refuses to change
-  it — the pattern has no placeholder to write a new value into, so the branch
+  it, since the pattern has no placeholder to write a new value into, so the branch
   would stay put while only the directory moved. Segments the pattern does
   write stay editable, so the rename that worked on `feat/#{issue}-{desc}`
   before #417 still works.
@@ -177,7 +177,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   directory `fix-42-x`, and `fix` exists nowhere else. Rebuilding from the
   branch alone read the type as `feat`, so renaming the description also moved
   the directory to `feat-42-…` and dropped what the worktree was created with.
-  The branch still wins for every segment it writes itself — it is the
+  The branch still wins for every segment it writes itself, being the
   worktree's identity, and a directory renamed by hand must not rewrite it.
   ([#478](https://github.com/kbrdn1/gwm-cli/issues/478))
 
