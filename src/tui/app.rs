@@ -3865,8 +3865,17 @@ impl App {
     // sharing a basename are disambiguated for display (#304) and every
     // formatter call in this flow expands `{repo}` with that name. Parser and
     // formatter agreeing is the whole of #417, so they read the same name.
-    let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
-    let Some(spec) = parser.parse(&branch) else {
+    //
+    // Issue #478: the directory is read too. A segment `branch_pattern`
+    // freezes is not in the branch, and `path_pattern` may still carry what
+    // `gwm create` was given — rebuilding from the branch alone renamed the
+    // directory's own components on every edit.
+    let Some(spec) = crate::naming::worktree_spec(
+      &self.config,
+      &self.repo_name,
+      &branch,
+      path.file_name().and_then(|name| name.to_str()),
+    ) else {
       // Issue #416: a free-form worktree lands here by design, not by
       // mistake. The edit form rebuilds a `<type>/#<issue>-<desc>` triple,
       // which a name the user chose on purpose has none of — so state that
@@ -3893,8 +3902,9 @@ impl App {
       _ => spec.desc.is_empty(),
     }) {
       self.status = format!(
-        "branch pattern '{}' carries no {{{}}}, so this form cannot rebuild '{}' — add it to worktree.branch_pattern, or rename with git",
+        "neither branch pattern '{}' nor path pattern '{}' carries {{{}}}, so this form cannot rebuild '{}' — add it to worktree.branch_pattern, or rename with git",
         crate::naming::sanitise_for_terminal(&self.config.worktree.branch_pattern),
+        crate::naming::sanitise_for_terminal(&self.config.worktree.path_pattern),
         missing,
         branch
       );
@@ -3947,31 +3957,51 @@ impl App {
       .get(self.create_form.type_index)
       .map(|t| t.name.clone())
       .unwrap_or_default();
-    // Issue #417 / Codex review on PR #476: a segment the pattern *freezes* as
-    // a literal is not editable. `branch_name` has no placeholder to write it
-    // into, so changing it leaves the branch alone while `path_pattern` still
-    // moves the directory — a rename that renames nothing. Scoped to a frozen
-    // segment the user actually changed, so `feat/#{issue}-{desc}`, whose
-    // rename worked before #417, keeps renaming its issue and description.
+    // Issue #417 / Codex review on PR #476: a segment `branch_pattern` does not
+    // *write* is not editable here. It has no placeholder to put a new value
+    // into, so changing it would leave the branch alone while `path_pattern`
+    // moved the directory — a rename that renames nothing. Scoped to a segment
+    // the user actually changed, so `feat/#{issue}-{desc}`, whose rename worked
+    // before #417, keeps renaming its issue and description.
     //
-    // Compared against the *form's* values, not the `BranchSpec`'s: a frozen
-    // description need not be canonical (`DESC_RE` accepts `fixed-`), and
-    // `kebab` would strip that trailing dash on the way into the spec, making
-    // every submit look like a change and locking the form shut.
+    // Compared against what the form was **opened with**, not against the
+    // pattern's literal (#478): that value may have come from the worktree's
+    // directory rather than from the pattern. And against the *form's* fields
+    // rather than the `BranchSpec`, because a frozen description need not be
+    // canonical — `DESC_RE` accepts `fixed-`, and `kebab` would strip that
+    // trailing dash on the way into the spec, making every submit look like a
+    // change and locking the form shut.
     let parser = crate::naming::BranchParser::from_config(&self.config, &self.repo_name);
-    if let Some((segment, frozen)) = parser.constants().iter().find(|(segment, frozen)| {
-      let submitted = match *segment {
-        "type" => type_.as_str(),
-        "issue" => self.create_form.issue.as_str(),
-        _ => self.create_form.desc.as_str(),
-      };
-      submitted != frozen.as_str()
-    }) {
-      self.edit_failure = Some(format!(
-        "worktree.branch_pattern freezes {{{}}} to '{}', so this form cannot change it",
-        segment, frozen
-      ));
-      return Ok(());
+    let opened_with = self.edit_original_branch.as_deref().and_then(|branch| {
+      crate::naming::worktree_spec(
+        &self.config,
+        &self.repo_name,
+        branch,
+        self
+          .edit_original_path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .and_then(|name| name.to_str()),
+      )
+    });
+    if let Some(opened_with) = opened_with.as_ref() {
+      for segment in ["type", "issue", "desc"] {
+        if parser.captures_segment(segment) {
+          continue;
+        }
+        let (submitted, was) = match segment {
+          "type" => (type_.as_str(), opened_with.type_.as_str()),
+          "issue" => (self.create_form.issue.as_str(), opened_with.issue.as_str()),
+          _ => (self.create_form.desc.as_str(), opened_with.desc.as_str()),
+        };
+        if submitted != was {
+          self.edit_failure = Some(format!(
+            "worktree.branch_pattern has no {{{}}} to write, so this form cannot change it from '{}'",
+            segment, was
+          ));
+          return Ok(());
+        }
+      }
     }
 
     let spec = match BranchSpec::new_with_types(

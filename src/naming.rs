@@ -727,8 +727,17 @@ impl BranchParser {
   /// literal. False means no branch name the pattern produces can carry it: a
   /// permanent absence rather than a parse that goes wrong.
   pub fn reads_segment(&self, segment: &str) -> bool {
+    self.captures_segment(segment) || self.constants.iter().any(|(name, _)| *name == segment)
+  }
+
+  /// Does the pattern **write** `segment` from a placeholder, as opposed to
+  /// freezing it as literal text or omitting it?
+  ///
+  /// The distinction is what makes a value authoritative: a captured segment
+  /// carries whatever `gwm create` was given, a frozen one carries what the
+  /// pattern's author wrote whatever anyone asked for. See [`worktree_spec`].
+  pub fn captures_segment(&self, segment: &str) -> bool {
     self.re.capture_names().flatten().any(|name| name == segment)
-      || self.constants.iter().any(|(name, _)| *name == segment)
   }
 
   /// The segments this pattern freezes as literal text, `(segment, value)`.
@@ -779,6 +788,68 @@ impl BranchParser {
       desc: seg("desc"),
     })
   }
+}
+
+/// Read the triple a worktree carries, from its branch **and** its directory
+/// name (issue #478).
+///
+/// `worktree.branch_pattern` and `worktree.path_pattern` need not carry the
+/// same segments, and when they do not, neither name holds the whole triple.
+/// Under `branch_pattern = "feat/#{issue}-{desc}"` with the default
+/// `path_pattern`, `gwm create fix 42 x` writes the branch `feat/#42-x` and
+/// the directory `fix-42-x`: the branch has no `{type}` to put `fix` into, so
+/// the directory is the only place that value still exists.
+///
+/// The branch wins for every segment it **writes from a placeholder** — it is
+/// the worktree's identity, and a directory renamed by hand or created under
+/// an older `path_pattern` must not rewrite it. The directory is consulted
+/// only for the rest: a segment the branch freezes as a literal, or omits.
+///
+/// `dirname` is the worktree's directory name, not its full path — the same
+/// thing [`BranchSpec::worktree_dirname`] produces. `None`, an empty name, a
+/// name `path_pattern` does not match, or a `path_pattern` that cannot be
+/// compiled all leave the branch's own reading untouched; a broken
+/// `path_pattern` has its own diagnostic and must not take the rename away.
+///
+/// `None` only when the branch itself does not parse — a free-form worktree
+/// (#416), which no triple describes.
+pub fn worktree_spec(
+  config: &crate::config::Config,
+  repo: &str,
+  branch: &str,
+  dirname: Option<&str>,
+) -> Option<BranchSpec> {
+  let branch_parser = BranchParser::from_config(config, repo);
+  let mut spec = branch_parser.parse(branch)?;
+
+  let types = config.resolved_branch_types().types;
+  let from_path = dirname
+    .filter(|name| !name.is_empty())
+    .zip(BranchParser::compile(&config.worktree.path_pattern, repo, &types).ok())
+    .and_then(|(name, parser)| parser.parse(name).map(|read| (parser, read)));
+  let Some((path_parser, read)) = from_path else {
+    return Some(spec);
+  };
+
+  for segment in SEGMENTS {
+    if branch_parser.captures_segment(segment) || !path_parser.captures_segment(segment) {
+      continue;
+    }
+    let value = match segment {
+      "type" => &read.type_,
+      "issue" => &read.issue,
+      _ => &read.desc,
+    };
+    if value.is_empty() {
+      continue;
+    }
+    match segment {
+      "type" => spec.type_ = value.clone(),
+      "issue" => spec.issue = value.clone(),
+      _ => spec.desc = value.clone(),
+    }
+  }
+  Some(spec)
 }
 
 /// Append fixed text to the regex under construction, escaping it, and record

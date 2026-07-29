@@ -1,6 +1,7 @@
-use gwm::config::{BranchType, WorktreeConfig};
+use gwm::config::{BranchType, Config, WorktreeConfig};
 use gwm::naming::{
-  branch_pattern_warning, default_branch_types, kebab, BranchParser, BranchSpec, WorktreeName, BRANCH_TYPES,
+  branch_pattern_warning, default_branch_types, kebab, worktree_spec, BranchParser, BranchSpec, WorktreeName,
+  BRANCH_TYPES,
 };
 
 #[test]
@@ -1058,6 +1059,68 @@ fn the_compiler_handles_every_token_the_formatter_substitutes() {
       token
     );
   }
+}
+
+/// Issue #478. A worktree carries its triple in two places, and neither is
+/// complete on its own.
+///
+/// `branch_pattern` is authoritative for every segment it writes from a
+/// placeholder. For one it *freezes* — or does not carry at all — the branch
+/// cannot say what `gwm create` was given, and the directory can: under
+/// `branch_pattern = "feat/#{issue}-{desc}"` with the default `path_pattern`,
+/// `gwm create fix 42 x` writes the branch `feat/#42-x` and the directory
+/// `fix-42-x`, and `fix` survives only in the second. Rebuilding the triple
+/// from the branch alone dropped it, so a rename that touched only the
+/// description also renamed the directory's type component.
+#[test]
+fn a_worktree_spec_takes_from_the_path_what_the_branch_cannot_carry() {
+  let mut config = Config::default();
+  config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some("fix-42-x")).expect("reads the worktree");
+  assert_eq!(
+    (spec.type_.as_str(), spec.issue.as_str(), spec.desc.as_str()),
+    ("fix", "42", "x"),
+    "the type the worktree was created with survives in its directory"
+  );
+
+  // Without a directory to read, the frozen literal is still the best answer.
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", None).expect("reads the branch");
+  assert_eq!(spec.type_, "feat");
+}
+
+#[test]
+fn a_segment_the_branch_writes_is_never_overridden_by_the_path() {
+  // The branch is the identity. A directory that disagrees — renamed by hand,
+  // created under a different `path_pattern` — must not rewrite a segment the
+  // branch states outright, or a rename would silently adopt whatever the
+  // directory happened to say.
+  let config = Config::default(); // `{type}/#{issue}-{desc}` + `{type}-{issue}-{desc}`
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some("chore-9-something-else")).expect("reads");
+  assert_eq!(
+    (spec.type_.as_str(), spec.issue.as_str(), spec.desc.as_str()),
+    ("feat", "42", "x")
+  );
+}
+
+#[test]
+fn a_path_pattern_that_says_nothing_leaves_the_branch_reading_alone() {
+  let mut config = Config::default();
+  config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+
+  for dirname in [
+    "not-shaped-like-the-pattern-at-all/x", // does not match `path_pattern`
+    "",                                     // no directory name at all
+  ] {
+    let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some(dirname)).expect("reads the branch");
+    assert_eq!(spec.type_, "feat", "`{}` must not disturb the reading", dirname);
+  }
+
+  // A `path_pattern` that cannot be compiled into a parser is not an error
+  // here either — it has its own diagnostic, and the branch still reads.
+  config.worktree.path_pattern = "{issue}{desc}".into(); // refused: the split can move
+  let spec = worktree_spec(&config, "gwm-cli", "feat/#42-x", Some("fix-42-x")).expect("reads the branch");
+  assert_eq!(spec.type_, "feat");
 }
 
 /// The complete no-regression obligation for constant recovery, enumerated

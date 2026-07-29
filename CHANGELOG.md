@@ -164,6 +164,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write stay editable, so the rename that worked on `feat/#{issue}-{desc}`
   before #417 still works.
 
+  The value that form shows comes from the worktree's **directory** when
+  `path_pattern` carries the segment and `branch_pattern` does not. The two
+  patterns need not carry the same segments, and when they do not, neither
+  name holds the whole triple: under `feat/#{issue}-{desc}` with the default
+  `path_pattern`, `gwm create fix 42 x` writes the branch `feat/#42-x` and the
+  directory `fix-42-x`, and `fix` exists nowhere else. Rebuilding from the
+  branch alone read the type as `feat`, so renaming the description also moved
+  the directory to `feat-42-…` and dropped what the worktree was created with.
+  The branch still wins for every segment it writes itself — it is the
+  worktree's identity, and a directory renamed by hand must not rewrite it.
+  ([#478](https://github.com/kbrdn1/gwm-cli/issues/478))
+
   `{type}` matches `[a-z]+`, not an alternation of the configured branch types,
   which is what the issue proposed. The alternation would have stopped
   recognising a branch created before a type was retired from `.gwm.toml`,

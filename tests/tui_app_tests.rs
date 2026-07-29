@@ -10698,6 +10698,74 @@ fn submit_edit_worktree_still_changes_a_segment_the_pattern_writes() {
 }
 
 #[test]
+fn the_rename_form_keeps_what_only_the_worktree_directory_carries() {
+  // Issue #478. `branch_pattern` freezes the type, `path_pattern` still writes
+  // it, so `gwm create fix 42 x` produces the branch `feat/#42-x` and the
+  // directory `fix-42-x` — and `fix` exists nowhere else. Rebuilding the
+  // triple from the branch alone read the type as `feat`, so renaming the
+  // description also moved the directory to `feat-42-…` and dropped what the
+  // worktree was created with.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-x".into());
+  wt.path = std::path::PathBuf::from("/tmp/gwm-test/fix-42-x");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+
+  assert_eq!(app.view, View::Edit, "the form must open: {}", app.status);
+  assert_eq!(
+    app.branch_types[app.create_form.type_index].name, "fix",
+    "the form must show the type the worktree was created with, not the frozen literal"
+  );
+  assert_eq!(app.create_form.issue, "42");
+  assert_eq!(app.create_form.desc, "x");
+
+  // Renaming the description leaves the type where the directory had it, so
+  // the rename renames only what was edited.
+  app.create_form.desc = "other".into();
+  app.submit_edit_worktree().expect("submits");
+  assert_eq!(
+    app.edit_failure, None,
+    "an untouched type read from the directory is not a change: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
+fn the_rename_form_still_refuses_to_change_what_the_branch_cannot_write() {
+  // The other side of #478: reading the type from the directory does not make
+  // it editable. `branch_pattern` has no `{type}` to write a new one into, so
+  // changing it would move the directory and leave the branch alone.
+  let (_dir, mut app) = make_app();
+  app.config.worktree.branch_pattern = "feat/#{issue}-{desc}".into();
+  let mut wt = worktree_fixture("foo");
+  wt.branch = Some("feat/#42-x".into());
+  wt.path = std::path::PathBuf::from("/tmp/gwm-test/fix-42-x");
+  app.worktrees = vec![wt];
+  app.list_state.select(Some(0));
+
+  app.enter_edit_worktree();
+  assert_eq!(app.view, View::Edit);
+
+  app.create_form.type_index = app
+    .branch_types
+    .iter()
+    .position(|t| t.name == "docs")
+    .expect("docs is configured");
+  app
+    .submit_edit_worktree()
+    .expect("the refusal is a form failure, not an error");
+  assert!(
+    app.edit_failure.as_deref().is_some_and(|e| e.contains("{type}")),
+    "changing a type the branch pattern cannot write must be refused: {:?}",
+    app.edit_failure
+  );
+}
+
+#[test]
 fn the_rename_form_reads_a_branch_with_the_same_repo_name_it_writes_one_with() {
   // Codex review on PR #476, eighth pass. In a workspace, two repos whose
   // directories share a basename are disambiguated for display — the second
